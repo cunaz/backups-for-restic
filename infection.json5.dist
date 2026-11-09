@@ -9,10 +9,15 @@
             "src/Engine/Forget"
         ]
     },
+    // The source files end the request unless ABSPATH is defined; without this bootstrap,
+    // Infection's own process exits silently with status 0 as soon as it reflects on a class.
+    "bootstrap": "tests/bootstrap.php",
     "phpUnit": {
         "configDir": "."
     },
-    "testFrameworkOptions": "--testsuite=unit",
+    // The tests of the mutated code; restic's real scrypt cost (the slow group) is checked by
+    // the conformance suite instead of once per mutant.
+    "testFrameworkOptions": "--testsuite=mutation --exclude-group=slow",
     "timeout": 60,
     "tmpDir": ".tools/infection-tmp",
     "logs": {
