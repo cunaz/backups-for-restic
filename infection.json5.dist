@@ -15,7 +15,9 @@
     "phpUnit": {
         "configDir": "."
     },
-    "testFrameworkOptions": "--testsuite=unit",
+    // The tests of the mutated code; restic's real scrypt cost (the slow group) is checked by
+    // the conformance suite instead of once per mutant.
+    "testFrameworkOptions": "--testsuite=mutation --exclude-group=slow",
     "timeout": 60,
     "tmpDir": ".tools/infection-tmp",
     "logs": {
