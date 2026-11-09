@@ -46,6 +46,22 @@ final class ThrottledRunsTest extends TestCase {
 		);
 	}
 
+	public function test_a_large_file_rests_between_its_chunks(): void {
+		$this->cleanup[] = $site = TempDir::create( 'large' );
+		file_put_contents( $site . '/large.bin', random_bytes( 12 * 1048576 ) );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$identity        = new Identity( 'example.com', 'www-data' );
+		$repository      = Repository::initialize( new InMemoryBackend(), 'throttle password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+
+		$backup = BackupRun::start( $repository, new BackupPlan( [ $site ], [ 'backups-for-restic' ] ), $work . '/backup', $identity, new SystemClock() );
+		while ( ! $backup->advance( INF, $this->throttle() ) ) {
+			continue;
+		}
+		self::assertNotNull( $backup->snapshot_id() );
+		// About twelve chunks of about 1 MiB; the few units of work around them add a few rests.
+		self::assertGreaterThanOrEqual( 10, $this->rests, 'Rests between the chunks of one file, not only between files.' );
+	}
+
 	public function test_backup_and_check_rest_between_units_and_finish(): void {
 		$this->cleanup[] = $site = TempDir::create( 'site' );
 		TempDir::fixture( $site, 1048576 );

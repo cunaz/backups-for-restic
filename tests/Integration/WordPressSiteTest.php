@@ -175,6 +175,8 @@ final class WordPressSiteTest extends TestCase {
 		[ $status, $created, $raw ] = self::api( 'POST', '/repository/create' );
 		self::assertSame( 201, $status, $raw );
 		self::assertMatchesRegularExpression( "/RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/", $created['recovery_kit'] );
+		self::assertStringContainsString( '--cacert ca.pem', $created['recovery_kit'], 'restic needs the self-signed CA too.' );
+		self::assertStringContainsString( '-----BEGIN CERTIFICATE-----', $created['recovery_kit'] );
 		preg_match( "/RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/", $created['recovery_kit'], $match );
 		self::$repository_password = $match[1];
 		[ $status ]                = self::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );

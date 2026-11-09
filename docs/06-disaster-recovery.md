@@ -24,6 +24,10 @@ Restore recipe: export the four variables above, then
   restic restore latest --target /tmp/restore
 ```
 
+For a rest-server with its own certificate authority, the kit also contains the CA
+certificate: save it as `ca.pem` and add `--cacert ca.pem` to every restic command, as the
+kit's recipe does.
+
 | Lost item | Recoverable? | How |
 | --- | --- | --- |
 | REST username/password | yes | regenerate in the BorgBase control panel, or add a new `.htpasswd` entry on your rest-server |
@@ -179,19 +183,25 @@ The dashboard, Site Health and an e-mail report that the repository check found 
 snapshots may then not restore completely. **Do not delete anything and do not prune** until
 the cause is clear.
 
-1. On any computer with restic and the recovery kit, check everything:
+1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
+   snapshots** to *Another computer*, so that this site runs no forget or prune, and pause
+   maintenance jobs on any other computer that uses the repository. Backups may go on.
+2. On any computer with restic and the recovery kit, check everything:
 
    ```bash
    restic check --read-data
    ```
 
-2. Follow restic's [troubleshooting guide](https://restic.readthedocs.io/en/stable/077_troubleshooting.html).
+3. Follow restic's [troubleshooting guide](https://restic.readthedocs.io/en/stable/077_troubleshooting.html).
    In short: `restic repair index` rebuilds index files that are damaged or miss packs;
    `restic repair snapshots --forget` replaces snapshots that refer to lost data with copies
    without the damaged files. Repairs delete files, so on an append-only server they need
    deletions allowed, as in Scenario G.
-3. Start **Back up now**: the next backup uploads any data that went missing again.
-4. Start **Check now** on the dashboard. The warning disappears when a check finds no errors.
+4. Start **Back up now**: the next backup uploads any data that went missing again.
+5. Run `restic check --read-data` again. Only when it finds no errors is the repository
+   healthy; the plugin's check reads a sample of the data (2 % by default) and cannot prove
+   that. Then start **Check now** on the dashboard to clear the warning, and set retention
+   back to *This site* if the server allows deletions.
 
 ## Restore drills
 

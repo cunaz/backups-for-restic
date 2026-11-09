@@ -21,15 +21,25 @@ use BackupsForRestic\Tests\Support\TempDir;
 
 /**
  * Milestone 2 acceptance: seven simulated days of scheduled backups, each followed by forget
- * as the heartbeat runs it, and the weekly prune leave exactly the snapshots that restic's
- * forget keeps with the same policy, and a repository that restic checks without errors and
- * in which it finds no unused pack.
+ * as the heartbeat runs it, and the weekly prune. Before every forget, restic's forget is asked
+ * (dry run, same policy) which snapshots it would keep; the plugin must keep exactly those. At
+ * the end restic checks the repository without errors and finds no unused pack.
  */
 final class RetentionSimulationTest extends TestCase {
 
 	private const string PASSWORD = 'retention password';
 
 	private const string TAG = 'backups-for-restic';
+
+	private const string HOST = 'example.com';
+
+	/** The policy, used for the plugin and for restic's flags alike. */
+	private const array POLICY = [
+		'last'   => 2,
+		'daily'  => 3,
+		'weekly' => 1,
+		'within' => '1d',
+	];
 
 	private ?RestServer $server = null;
 
@@ -55,15 +65,56 @@ final class RetentionSimulationTest extends TestCase {
 		return $path . '/run';
 	}
 
+	private static function policy(): RetentionPolicy {
+		return new RetentionPolicy( self::POLICY['last'], 0, self::POLICY['daily'], self::POLICY['weekly'], 0, 0, Duration::parse( self::POLICY['within'] ) );
+	}
+
+	/**
+	 * The snapshots that restic's forget would keep, with the same scope and policy.
+	 *
+	 * @return list<string> Snapshot IDs, sorted.
+	 */
+	private static function restic_keeps( ResticCli $cli ): array {
+		$groups = json_decode(
+			$cli->must(
+				[
+					'forget',
+					'--dry-run',
+					'--json',
+					'--host',
+					self::HOST,
+					'--tag',
+					self::TAG,
+					'--group-by',
+					'host,tags',
+					'--keep-last',
+					(string) self::POLICY['last'],
+					'--keep-daily',
+					(string) self::POLICY['daily'],
+					'--keep-weekly',
+					(string) self::POLICY['weekly'],
+					'--keep-within',
+					self::POLICY['within'],
+				]
+			),
+			true
+		);
+		self::assertIsArray( $groups );
+		self::assertCount( 1, $groups );
+		$keep = array_map( static fn ( array $snapshot ): string => (string) $snapshot['id'], $groups[0]['keep'] ?? [] );
+		sort( $keep );
+		return $keep;
+	}
+
 	public function test_seven_days_of_scheduled_runs_keep_what_restic_keeps(): void {
 		self::assertNotNull( $this->server );
 		$this->cleanup[] = $site = TempDir::create( 'week-site' );
 		TempDir::fixture( $site, 1048576 );
-		$identity   = new Identity( 'example.com', 'www-data' );
+		$identity   = new Identity( self::HOST, 'www-data' );
 		$random     = new SystemRandom();
 		$repository = Repository::initialize( $this->server->backend( 'week' ), self::PASSWORD, $identity, $random, new ScryptParameters( 1024, 8, 1 ) );
 		$cli        = new ResticCli( $this->server, 'week', self::PASSWORD );
-		$policy     = new RetentionPolicy( 2, 0, 3, 1, 0, 0, Duration::parse( '1d' ) );
+		$policy     = self::policy();
 		$clock      = new FrozenClock( (int) strtotime( '2026-11-02 03:17:00 UTC' ) );
 		$removed    = 0;
 
@@ -75,11 +126,15 @@ final class RetentionSimulationTest extends TestCase {
 				continue;
 			}
 			$clock->advance( 600 );
-			$forget = ForgetRun::start( $repository, $this->work_dir(), $identity, $clock, $random, $policy, [ self::TAG ] );
+			$expected = self::restic_keeps( $cli );
+			$forget   = ForgetRun::start( $repository, $this->work_dir(), $identity, $clock, $random, $policy, [ self::TAG ] );
 			while ( ! $forget->advance( INF ) ) {
 				continue;
 			}
 			$removed += $forget->result()['removed'];
+			$kept     = array_keys( $repository->snapshots() );
+			sort( $kept );
+			self::assertSame( $expected, $kept, 'Run ' . $run . ': the plugin keeps what restic keeps.' );
 			$clock->advance( 12 * 3600 - 600 );
 		}
 		self::assertGreaterThan( 0, $removed, 'The week was long enough for the policy to remove snapshots.' );
@@ -92,16 +147,7 @@ final class RetentionSimulationTest extends TestCase {
 
 		$ours = array_keys( $repository->snapshots() );
 		sort( $ours );
-		$groups = json_decode(
-			$cli->must( [ 'forget', '--dry-run', '--json', '--host', 'example.com', '--tag', self::TAG, '--group-by', 'host,tags', '--keep-last', '2', '--keep-daily', '3', '--keep-weekly', '1', '--keep-within', '1d' ] ),
-			true
-		);
-		self::assertIsArray( $groups );
-		self::assertCount( 1, $groups );
-		$keep = array_map( static fn ( array $snapshot ): string => (string) $snapshot['id'], $groups[0]['keep'] ?? [] );
-		sort( $keep );
-		self::assertSame( $ours, $keep, 'restic keeps exactly the snapshots the plugin kept.' );
-		self::assertEmpty( $groups[0]['remove'] ?? [], 'restic would remove nothing more.' );
+		self::assertSame( $ours, self::restic_keeps( $cli ), 'After the prune, restic would remove nothing more.' );
 
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
 		self::assertMatchesRegularExpression( '/^unused packs:\s+0$/m', $cli->must( [ 'prune', '--dry-run', '--max-unused', 'unlimited', '-v' ] ) );

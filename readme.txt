@@ -22,16 +22,18 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * **Deduplicated.** Only changed data is uploaded. Daily backups of a site whose media rarely change take seconds to minutes.
 * **Files and database.** The database is streamed table by table into the snapshot as plain SQL that imports with the `mysql` or `mariadb` client.
 * **Built for shared hosting.** Every job runs in short, resumable slices that fit PHP time and memory limits. A request that is killed loses at most one slice.
-* **Retention and maintenance.** Old snapshots are removed by a restic-compatible policy, unused data is deleted weekly, and a monthly check downloads and verifies a share of the stored data.
+* **Retention and maintenance.** Old snapshots are removed by a restic-compatible policy, data that no snapshot uses any more is deleted weekly, and a monthly check downloads and verifies a share of the stored data. Data in packs that still hold used data stays until a full `restic prune` from another computer; the dashboard shows how much that is.
 * **Append-only aware.** If your server is append-only, nobody who takes over the website can delete your backups. The plugin notices it, stops deleting, and tells you how to clean up from another computer.
 * **E-mail notifications** when a backup fails, when no backup succeeded for too long, when it works again, and when a check finds damage.
-* **Recovery kit.** One page with everything needed to restore without the website: repository address, password and the exact restic commands.
+* **Recovery kit.** One page with everything needed to restore without the website: repository address, passwords, the CA certificate of a server with its own certificate authority, and the exact restic commands.
 * **WP-CLI** commands for every task, and Site Health checks.
 
 = Requirements =
 
-* PHP 8.3 or newer with the OpenSSL, JSON and mbstring extensions (standard on hosting).
+* PHP 8.3 or newer with the OpenSSL, JSON and mbstring extensions (standard on hosting), and a PHP memory limit of at least 96 MB.
+* At least 128 MB of free disk space for the plugin's working files.
 * Outbound HTTPS to the repository server.
+* For an existing repository in restic's format 2 with compressed data, the zstd PHP extension. Repositories that the plugin creates do not need it.
 * A restic REST server: your own [rest-server](https://github.com/restic/rest-server), or a hosted one.
 * Multisite networks are not supported yet.
 
@@ -82,7 +84,7 @@ Set **Settings > Advanced > Processor use** to "Gentle". Jobs then work in short
 
 = Where are the passwords stored? =
 
-Encrypted in the database with a key derived from the security keys in `wp-config.php`, or, if you prefer, as constants in `wp-config.php`. They never appear in logs, URLs or REST responses; the recovery kit is shown only after you re-enter your WordPress password.
+Encrypted in the database with a key derived from the security keys in `wp-config.php`, or, if you prefer, as constants in `wp-config.php`. They never appear in logs or URLs. The setup wizard shows the recovery kit once, right after it creates or connects the repository; later it is shown only after you re-enter your WordPress password.
 
 = What happens to my backups when I uninstall the plugin? =
 

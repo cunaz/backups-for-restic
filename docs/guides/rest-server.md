@@ -15,16 +15,20 @@ repository, and its append-only mode keeps backups safe from anyone who takes ov
 
 ## Users
 
-Each site gets its own user. rest-server reads the users from `.htpasswd` in its data
-directory; create one with `htpasswd` (package `apache2-utils` on Debian and Ubuntu):
+rest-server runs as its own system user, which owns the data directory. Each site gets its
+own login; rest-server reads them from `.htpasswd` in the data directory. Create both with
+`htpasswd` (package `apache2-utils` on Debian and Ubuntu):
 
 ```bash
+sudo useradd --system --home-dir /srv/restic --shell /usr/sbin/nologin restic
 sudo mkdir -p /srv/restic
 sudo htpasswd -B -c /srv/restic/.htpasswd mysite
+sudo chown -R restic:restic /srv/restic
+sudo chmod 600 /srv/restic/.htpasswd
 ```
 
-Leave out `-c` when you add more users later. The data directory belongs to the user that
-runs rest-server, never to root.
+Leave out `-c` when you add more logins later, and run the `chown` again afterwards. Start
+rest-server as the user `restic`, never as root.
 
 ## Start the server
 

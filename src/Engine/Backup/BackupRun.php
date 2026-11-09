@@ -111,6 +111,13 @@ final class BackupRun {
 	private float $deadline = INF;
 
 	/**
+	 * Pauses for the gentle CPU mode during the current slice, if any.
+	 *
+	 * @var Throttle|null
+	 */
+	private ?Throttle $throttle = null;
+
+	/**
 	 * Index shared with the blob store, which adds uploaded packs to it.
 	 *
 	 * @var IndexSet
@@ -263,6 +270,7 @@ final class BackupRun {
 			return true;
 		}
 		$this->deadline = $deadline;
+		$this->throttle = $throttle;
 		$this->keep_lock();
 
 		// At least one step per slice, so that progress is guaranteed even on a slow host.
@@ -440,6 +448,7 @@ final class BackupRun {
 		for ( $chunk = $reader->next(); null !== $chunk; $chunk = $reader->next() ) {
 			$content[] = $this->store->save( BlobType::Data, $chunk )->hex();
 			$offset   += strlen( $chunk );
+			$this->throttle?->pause();
 			if ( microtime( true ) >= $this->deadline ) {
 				fclose( $handle );
 				$file['offset']  = $offset;
@@ -492,6 +501,7 @@ final class BackupRun {
 		for ( $chunk = $reader->next(); null !== $chunk; $chunk = $reader->next() ) {
 			$content[] = $this->store->save( BlobType::Data, $chunk )->hex();
 			$size     += strlen( $chunk );
+			$this->throttle?->pause();
 			if ( ! $stopping && $source instanceof ResumableByteSource && microtime( true ) >= $this->deadline ) {
 				$source->stop_at_boundary();
 				$stopping = true;

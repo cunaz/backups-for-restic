@@ -36,11 +36,16 @@ final class CacheDirectory {
 			return 0;
 		}
 		$bytes = 0;
-		$files = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $this->path, \FilesystemIterator::SKIP_DOTS ) );
-		foreach ( $files as $file ) {
-			if ( $file instanceof \SplFileInfo && $file->isFile() ) {
-				$bytes += (int) $file->getSize();
+		try {
+			$files = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $this->path, \FilesystemIterator::SKIP_DOTS ) );
+			foreach ( $files as $file ) {
+				if ( $file instanceof \SplFileInfo && $file->isFile() ) {
+					$bytes += (int) $file->getSize();
+				}
 			}
+		} catch ( \UnexpectedValueException | \RuntimeException ) {
+			// A job removed part of the cache while it was measured: the size is only a hint.
+			return $bytes;
 		}
 		return $bytes;
 	}

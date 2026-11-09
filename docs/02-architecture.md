@@ -462,7 +462,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   automatically; the guide points to `restic repair`.
 - **Cache hygiene**: the merged index is cached per repository, encrypted, and only while it
   fits `advanced.cache_limit_mib` (default 256 MiB); a larger index is read from the
-  repository in every tick instead. Caches of other repositories are removed after each job.
+  repository in every tick instead, and a cache written under a higher limit is removed
+  when it is read under a lower one. Caches of other repositories are removed after each job.
   Settings and Site Health show the size, and the cache can be cleared while no job runs
   (`DELETE /cache`). Prune and check read trees on demand and keep no tree cache.
 - **Locks**: stale locks (older than 30 minutes) from this site are removed automatically
@@ -743,9 +744,11 @@ Derived from those numbers, not yet measured end to end in WordPress:
 | Daily backup, 200 MB changed | 1–3 ticks |
 
 `cpu_throttle: gentle` halves the tick budget and rests 0.1 s after every 0.25 s of work in
-backups, forget, prune and check (`Support\Throttle`), so a tick keeps a core busy about
-70 % of the time, for hosts with CPU-second quotas; the one-time key derivation is not
-throttled. Uploads are sequential in 1.0; parallel uploads via the bundled Requests
+backups (also between the chunks of one file), forget, prune and check (`Support\Throttle`),
+for hosts with CPU-second quotas. The rests come between units of work, so it is a pacing,
+not a hard limit: a tick keeps a core busy about 70 % of the time when the units are short,
+and one long unit, such as reading a large pack in a check, runs without a rest. The
+one-time key derivation is not throttled. Uploads are sequential in 1.0; parallel uploads via the bundled Requests
 library's `request_multiple` are a backlog item.
 
 ## 17. Internationalisation and accessibility

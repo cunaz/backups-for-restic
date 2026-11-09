@@ -37,7 +37,11 @@ final class RecoveryKit {
 		$url      = $settings->string( 'repository.url' );
 		$username = $settings->string( 'repository.rest_username' );
 		$hostname = $container->site()->hostname();
-		$lines    = [
+		// A self-signed server needs its CA certificate for restic too; it is public, not a secret.
+		$ca_file = $container->private_dir()->path . '/ca.pem';
+		$ca      = 'uploaded' === $settings->string( 'repository.ca_certificate' ) && is_readable( $ca_file ) ? trim( (string) file_get_contents( $ca_file ) ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A local file in the private directory.
+		$cacert  = '' === $ca ? '' : ' --cacert ca.pem';
+		$lines   = [
 			__( 'Backup recovery kit', 'backups-for-restic' ),
 			str_repeat( '=', 40 ),
 			/* translators: %s: site address. */
@@ -63,12 +67,17 @@ final class RecoveryKit {
 			"  export RESTIC_REST_USERNAME='" . $username . "'",
 			"  export RESTIC_REST_PASSWORD='" . $rest . "'",
 			"  export RESTIC_PASSWORD='" . $password . "'",
-			'  restic snapshots --host ' . $hostname,
-			'  restic restore latest --host ' . $hostname . ' --target ./restore',
+			'  restic snapshots --host ' . $hostname . $cacert,
+			'  restic restore latest --host ' . $hostname . $cacert . ' --target ./restore',
 			'',
 			__( 'The database is in the snapshot under the plugin\'s spool/database folder. Import its .sql files in name order, for example: cat *.sql | mariadb <database>', 'backups-for-restic' ),
 			__( 'Keep this kit away from the website, for example in a password manager.', 'backups-for-restic' ),
 		];
+		if ( '' !== $ca ) {
+			$lines[] = '';
+			$lines[] = __( 'The server uses its own certificate authority. Save the certificate below as ca.pem in the folder where you run restic:', 'backups-for-restic' );
+			$lines[] = $ca;
+		}
 		return implode( "\n", $lines ) . "\n";
 	}
 }

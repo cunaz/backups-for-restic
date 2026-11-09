@@ -150,13 +150,14 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		$roomy = new IndexCache( $directory, 1048576 );
 		$roomy->load( $repository );
 		self::assertFileExists( $directory . '/index.bin' );
-		$small->load( $repository );
-		self::assertFileExists( $directory . '/index.bin', 'Nothing new to write: the cache stays as it is.' );
+		self::assertSame( $full->to_binary(), $small->load( $repository )->to_binary() );
+		self::assertFileDoesNotExist( $directory . '/index.bin', 'A cache written under a higher limit goes when read under a lower one.' );
 
+		$roomy->load( $repository );
 		file_put_contents( $site . '/new.txt', 'new content' );
 		$this->back_up( $repository, $site );
-		self::assertSame( $repository->load_index()->to_binary(), $small->load( $repository )->to_binary() );
-		self::assertFileDoesNotExist( $directory . '/index.bin', 'A cache over the limit is removed when it would grow.' );
+		self::assertSame( $repository->load_index()->to_binary(), $roomy->load( $repository )->to_binary() );
+		self::assertFileExists( $directory . '/index.bin', 'Within the limit, the cache grows with the repository.' );
 	}
 
 	private function back_up( Repository $repository, string $site ): void {

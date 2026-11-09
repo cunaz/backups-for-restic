@@ -82,7 +82,13 @@ final class IndexCache {
 	 * @return array{IndexSet, list<string>}|null Index and covered index file names, or null.
 	 */
 	private function read( Repository $repository ): ?array {
-		$sealed = is_file( $this->directory . '/index.bin' ) ? file_get_contents( $this->directory . '/index.bin' ) : false;
+		$file = $this->directory . '/index.bin';
+		if ( is_file( $file ) && (int) filesize( $file ) > $this->limit ) {
+			// Written under a higher limit than the one set now.
+			$this->clear();
+			return null;
+		}
+		$sealed = is_file( $file ) ? file_get_contents( $file ) : false;
 		if ( false === $sealed ) {
 			return null;
 		}

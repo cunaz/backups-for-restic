@@ -62,8 +62,14 @@ own requests to `wp-cron.php` keep working. **Backups → Environment** then rep
 
 ## Check that it works
 
-After ten minutes, **Backups → Dashboard** should show the next scheduled backup at the
-expected time, and a backup started with **Back up now** keeps running after you close the
-tab. If a job stays at the same step for longer than five minutes, the cron job is not
-reaching the site: run the command once by hand in a terminal or with the panel's
-*Run Now* button and look at the answer.
+The proof is a scheduled backup that ran without anyone visiting the site. The dashboard's
+"Next backup" time is computed and says nothing about whether WP-Cron runs, and a backup
+started with **Back up now** also advances while the dashboard tab is open.
+
+1. Set `DISABLE_WP_CRON` as described above, so that only the cron job can start backups.
+2. Do not open the site or its admin area around the scheduled time.
+3. Afterwards, open **Backups → Logs**: a backup should have started within a few minutes
+   of the scheduled time and finished.
+
+If it did not, the cron job does not reach the site: run the command once by hand in a
+terminal, or with the panel's *Run Now* button, and look at the answer.
