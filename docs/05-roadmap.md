@@ -131,9 +131,9 @@ in the engine ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against
 append-only re-detection by jobs and a daily probe ([ADR 0010](adr/0010-retention-and-append-only.md)),
 REST and WP-CLI parity; e-mail notifications; the dashboard for maintenance and alerts with
 the space only a full prune reclaims; the gentle CPU mode; cache limits; `readme.txt` and
-guides for cron jobs and rest-server. Open: the seven-day schedule simulation of the
-acceptance criteria, the mutation score gate, and the German translation once the plugin is
-listed on translate.wordpress.org.**
+guides for cron jobs and rest-server; the seven-day simulation of the first acceptance
+criterion (`RetentionSimulationTest`). Open: the mutation score gate, and the German
+translation once the plugin is listed on translate.wordpress.org.**
 
 Scope
 - Schedules, retention (forget parity), prune-lite, check with sampled data, retention modes
