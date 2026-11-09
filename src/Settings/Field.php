@@ -142,7 +142,10 @@ final readonly class Field {
 	 */
 	private function duration_value( mixed $value ): string {
 		$value = trim( $this->line( $value ) );
-		if ( 1 !== preg_match( '/\A(?:\d{1,6}[ymdh])+\z/', $value ) || 1 !== preg_match( '/[1-9]/', $value ) ) {
+		preg_match_all( '/[ymdh]/', $value, $units );
+		// Each unit at most once: restic's parser keeps only the last value of a repeated unit,
+		// so "5d0d" would mean zero days.
+		if ( 1 !== preg_match( '/\A(?:\d{1,6}[ymdh])+\z/', $value ) || 1 !== preg_match( '/[1-9]/', $value ) || count( $units[0] ) !== count( array_unique( $units[0] ) ) ) {
 			InvalidArgument::raise( 'Value is not a duration such as 2d.', [ 'code' => 'invalid_duration' ] );
 		}
 		return $value;

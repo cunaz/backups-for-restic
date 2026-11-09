@@ -72,6 +72,7 @@ final class SettingsTest extends TestCase {
 		yield 'zero duration' => [ 'retention.keep.within', '0d0h', 'invalid_duration' ];
 		yield 'duration in weeks' => [ 'retention.keep.within', '2w', 'invalid_duration' ];
 		yield 'empty duration' => [ 'retention.keep.within', '', 'invalid_duration' ];
+		yield 'repeated unit' => [ 'retention.keep.within', '5d0d', 'invalid_duration' ];
 		yield 'not an e-mail address' => [ 'notifications.email.recipients', "admin@example.com\nadmin", 'invalid_email' ];
 	}
 

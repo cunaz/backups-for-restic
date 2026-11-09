@@ -19,6 +19,7 @@ use BackupsForRestic\Engine\Forget\RetentionPolicy;
 use BackupsForRestic\Engine\Prune\PruneRun;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
@@ -180,17 +181,26 @@ final class MaintenanceSteps implements StepProvider {
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool True when done.
+	 * @throws BackendException If the server cannot be reached; the job tries again.
 	 */
 	public function check( Job $job, EventLog $log, float $deadline ): bool {
 		$services   = $this->services->common;
 		$repository = $this->repository();
 		$work       = $this->services->work_dir( $job );
-		$index      = $this->index( $repository );
-		$percent    = Decoded::int( $job->data['read_data_subset_percent'] ?? null, $services->settings->int( 'schedule.check.read_data_subset_percent' ) );
-		$run        = is_file( $work . '/state.json' )
+		try {
+			$index = $this->index( $repository );
+		} catch ( BackendException $exception ) {
+			throw $exception;
+		} catch ( PluginException ) {
+			// A damaged index file must not stop the check that is to find it: the check then
+			// builds its index from the files it can read and reports the others.
+			$index = null;
+		}
+		$percent = Decoded::int( $job->data['read_data_subset_percent'] ?? null, $services->settings->int( 'schedule.check.read_data_subset_percent' ) );
+		$run     = is_file( $work . '/state.json' )
 			? CheckRun::resume( $repository, $work, $services->identity, $services->clock, $index )
 			: CheckRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $percent, $index );
-		$done       = $run->advance( $deadline, $services->throttle() );
+		$done    = $run->advance( $deadline, $services->throttle() );
 
 		$job->progress = $run->progress();
 		$result        = $run->result();

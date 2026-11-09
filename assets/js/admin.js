@@ -340,7 +340,13 @@
 		}
 
 		let pruneLast = __( 'Not run yet.', DOMAIN );
-		if ( prune.finished && 'number' === typeof prune.bytes_deleted ) {
+		if ( prune.finished && 'append_only' === prune.skipped ) {
+			/* translators: %s: date and time. */
+			pruneLast = sprintf( __( 'Last run on %s: the server refused deletions.', DOMAIN ), formatTime( prune.finished ) );
+		} else if ( prune.finished && 'retention_external' === prune.skipped ) {
+			/* translators: %s: date and time. */
+			pruneLast = sprintf( __( 'Last run on %s: nothing deleted, old data is removed from another computer.', DOMAIN ), formatTime( prune.finished ) );
+		} else if ( prune.finished && 'number' === typeof prune.bytes_deleted ) {
 			/* translators: 1: date and time, 2: amount of data such as 15 MB. */
 			pruneLast = sprintf( __( 'Last run on %1$s: %2$s deleted.', DOMAIN ), formatTime( prune.finished ), formatBytes( prune.bytes_deleted ) );
 		}

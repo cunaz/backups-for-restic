@@ -67,7 +67,7 @@ final class Notifier {
 	 * @param int $now Unix time.
 	 */
 	public function job_finished( Job $job, int $now ): void {
-		if ( ! in_array( $job->type, self::REPORTED, true ) ) {
+		if ( ! in_array( $job->type, self::REPORTED, true ) || ! in_array( $job->state, [ JobState::Failed, JobState::Succeeded ], true ) ) {
 			return;
 		}
 		$data       = $this->load();
