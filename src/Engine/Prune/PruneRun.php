@@ -17,9 +17,11 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -59,6 +61,9 @@ final class PruneRun {
 
 	/** At most this many IDs of missing blobs are kept for the error report. */
 	private const int MISSING_EXAMPLES = 5;
+
+	/** The phases in their order. */
+	private const array PHASES = [ 'mark', 'plan', 'rewrite', 'delete_indexes', 'delete_packs', 'done' ];
 
 	/**
 	 * Lock handling.
@@ -115,6 +120,27 @@ final class PruneRun {
 	 * @var array<string, true>
 	 */
 	private array $live;
+
+	/**
+	 * Hex IDs of the packs that the index files read while planning list.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $listed;
+
+	/**
+	 * Whether marking already ran again because the index was out of date.
+	 *
+	 * @var bool
+	 */
+	private bool $remarked;
+
+	/**
+	 * The unused packs in deletion order, built once per request.
+	 *
+	 * @var list<string>|null
+	 */
+	private ?array $deletion_order = null;
 
 	/**
 	 * Number of used blobs that are missing from the index.
@@ -211,14 +237,19 @@ final class PruneRun {
 		private readonly Clock $clock,
 		array $state
 	) {
-		$this->pid                 = Decoded::int( $state['pid'] ?? null, random_int( 100000, 2147483647 ) );
-		$this->locking             = new Locking( $repository, $identity, $clock, $this->pid );
-		$this->lock                = Decoded::string( $state['lock'] ?? null );
-		$this->locked_at           = Decoded::int( $state['locked_at'] ?? null );
-		$this->phase               = Decoded::string( $state['phase'] ?? null, 'mark' );
+		$this->pid       = Decoded::int( $state['pid'] ?? null, random_int( 100000, 2147483647 ) );
+		$this->locking   = new Locking( $repository, $identity, $clock, $this->pid );
+		$this->lock      = Decoded::string( $state['lock'] ?? null );
+		$this->locked_at = Decoded::int( $state['locked_at'] ?? null );
+		$this->phase     = Decoded::string( $state['phase'] ?? null, 'mark' );
+		if ( ! in_array( $this->phase, self::PHASES, true ) ) {
+			FormatException::raise( 'The prune checkpoint names an unknown phase.', [ 'phase' => $this->phase ] );
+		}
 		$this->frontier            = Decoded::strings( $state['frontier'] ?? [] );
 		$this->seen                = array_fill_keys( Decoded::strings( $state['seen'] ?? [] ), true );
 		$this->live                = array_fill_keys( Decoded::strings( $state['live'] ?? [] ), true );
+		$this->listed              = array_fill_keys( Decoded::strings( $state['listed'] ?? [] ), true );
+		$this->remarked            = true === ( $state['remarked'] ?? null );
 		$this->missing             = Decoded::count( $state['missing'] ?? null );
 		$this->missing_examples    = Decoded::strings( $state['missing_examples'] ?? [] );
 		$this->snapshots           = Decoded::count( $state['snapshots'] ?? null );
@@ -248,6 +279,7 @@ final class PruneRun {
 	 * @return self Run.
 	 * @throws InvalidArgument If the directory already holds a run or the repository has no snapshots.
 	 * @throws AppendOnlyRefused If the server refuses deletions.
+	 * @throws BackendException If it cannot be told whether the server allows deletions.
 	 */
 	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, ?IndexSet $index = null ): self {
 		if ( ! is_dir( $work_dir ) && ! mkdir( $work_dir, 0700, true ) && ! is_dir( $work_dir ) ) {
@@ -256,8 +288,14 @@ final class PruneRun {
 		if ( is_file( $work_dir . '/state.json' ) ) {
 			InvalidArgument::raise( 'The working directory already holds a prune.' );
 		}
-		if ( AppendOnlyStatus::AppendOnly === AppendOnlyProbe::detect( $repository->backend(), $random ) ) {
+		$status = AppendOnlyProbe::detect( $repository->backend(), $random );
+		if ( AppendOnlyStatus::AppendOnly === $status ) {
 			AppendOnlyRefused::raise( 'The repository is append-only; prune runs on another computer.' );
+		}
+		if ( AppendOnlyStatus::Unknown === $status ) {
+			// Fail closed: on an append-only server the index rewrite would succeed and the
+			// deletions fail, leaving duplicate index files behind.
+			BackendException::raise( 'Whether the server allows deletions could not be determined; prune tries again later.' );
 		}
 		$run = new self( $repository, $index, $work_dir, $identity, $clock, [] );
 		$run->begin();
@@ -354,23 +392,37 @@ final class PruneRun {
 	}
 
 	/**
-	 * Takes the exclusive lock and starts marking from the trees of all snapshots.
+	 * Takes the exclusive lock and starts marking from the trees of all snapshots. If marking
+	 * cannot start, the lock is released again before the error is passed on.
 	 *
 	 * @throws InvalidArgument If the repository has no snapshots.
+	 * @throws \Throwable Whatever listing or reading the snapshots throws, after the release.
 	 */
 	private function begin(): void {
 		$this->locking->remove_own_stale();
 		$this->lock      = $this->locking->acquire( true )->hex();
 		$this->locked_at = $this->clock->now()[0];
+		$this->remarked  = false;
+		try {
+			$this->start_marking();
+		} catch ( \Throwable $failure ) {
+			$this->release_lock();
+			throw $failure;
+		}
+	}
 
+	/**
+	 * Resets every phase and queues the root trees of all snapshots for marking.
+	 *
+	 * @throws InvalidArgument If the repository has no snapshots.
+	 */
+	private function start_marking(): void {
 		$roots = [];
 		foreach ( $this->repository->snapshots() as $snapshot ) {
 			$roots[ $snapshot->tree->hex() ] = true;
 		}
 		if ( [] === $roots ) {
 			// An empty listing would make every pack unused; never delete everything.
-			$this->locking->release( Id::from_hex( $this->lock ) );
-			$this->lock = '';
 			InvalidArgument::raise( 'The repository has no snapshots; prune would delete everything.', [ 'code' => 'no_snapshots' ] );
 		}
 
@@ -379,13 +431,31 @@ final class PruneRun {
 		$this->frontier            = array_keys( $roots );
 		$this->seen                = [];
 		$this->live                = [];
+		$this->listed              = [];
 		$this->missing             = 0;
 		$this->missing_examples    = [];
 		$this->index_files         = [];
 		$this->position            = 0;
 		$this->unused              = [];
 		$this->affected            = [];
+		$this->deletion_order      = null;
 		$this->index_files_written = 0;
+	}
+
+	/**
+	 * Releases the held lock. A lock that cannot be deleted now is stale after 30 minutes.
+	 */
+	private function release_lock(): void {
+		if ( '' === $this->lock ) {
+			return;
+		}
+		try {
+			$this->locking->release( Id::from_hex( $this->lock ) );
+		} catch ( PluginException ) {
+			$this->lock = '';
+			return; // Stale for every client after 30 minutes.
+		}
+		$this->lock = '';
 	}
 
 	/**
@@ -435,14 +505,14 @@ final class PruneRun {
 		$hex = array_pop( $this->frontier );
 		if ( null === $hex ) {
 			if ( $this->missing > 0 ) {
-				FormatException::raise(
+				$this->mark_again(
 					'Snapshots use blobs that are missing from the index; prune stopped without deleting anything.',
 					[
-						'code'     => 'repository_damaged',
 						'missing'  => $this->missing,
 						'examples' => implode( ' ', $this->missing_examples ),
 					]
 				);
+				return;
 			}
 			$this->phase       = 'plan';
 			$this->index_files = array_keys( $this->repository->backend()->list( ObjectType::Index ) );
@@ -463,13 +533,8 @@ final class PruneRun {
 		try {
 			$nodes = $this->repository->load_tree( $index, $tree );
 		} catch ( NotFound ) {
-			FormatException::raise(
-				'A tree is missing on the server; prune stopped without deleting anything. Run a check.',
-				[
-					'code' => 'repository_damaged',
-					'tree' => $hex,
-				]
-			);
+			$this->mark_again( 'A tree is missing on the server; prune stopped without deleting anything. Run a check.', [ 'tree' => $hex ] );
+			return;
 		}
 		foreach ( $nodes as $node ) {
 			if ( null !== $node->subtree && ! isset( $this->seen[ $node->subtree->hex() ] ) ) {
@@ -513,6 +578,7 @@ final class PruneRun {
 		}
 		$affected = false;
 		foreach ( array_keys( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) ) as $pack ) {
+			$this->listed[ $pack ] = true;
 			if ( isset( $this->live[ $pack ] ) ) {
 				continue;
 			}
@@ -526,9 +592,18 @@ final class PruneRun {
 	}
 
 	/**
-	 * Looks up the sizes of the unused packs and moves on to rewriting, or finishes.
+	 * Looks up the sizes of the unused packs and moves on to rewriting, or finishes. Every pack
+	 * that marking found in use must appear in the index files just read; otherwise the index
+	 * used for marking was out of date, and planning would take a used pack for an unused one.
+	 *
+	 * @throws FormatException If the index files still miss used packs after marking again.
 	 */
 	private function finish_plan(): void {
+		$unlisted = array_diff_key( $this->live, $this->listed );
+		if ( [] !== $unlisted ) {
+			$this->mark_again( 'Snapshots use packs that no index file lists; prune stopped without deleting anything.', [ 'packs' => count( $unlisted ) ] );
+			return;
+		}
 		if ( [] === $this->unused ) {
 			$this->finish();
 			return;
@@ -539,6 +614,27 @@ final class PruneRun {
 		}
 		$this->phase    = 'rewrite';
 		$this->position = 0;
+	}
+
+	/**
+	 * Marks again with the index as the server has it now, after marking found a used blob or
+	 * tree that the index does not lead to. The index may have been read before another client
+	 * changed the repository and before this run took its lock: a backup added blobs, or a
+	 * prune repacked data into new packs. If the fresh index does not help either, the
+	 * repository is damaged and nothing is deleted.
+	 *
+	 * @param string                     $message Explanation if it happens again.
+	 * @param array<string, scalar|null> $context Details if it happens again.
+	 * @throws FormatException If marking already ran again.
+	 */
+	private function mark_again( string $message, array $context ): void {
+		if ( $this->remarked ) {
+			FormatException::raise( $message, [ 'code' => 'repository_damaged' ] + $context );
+		}
+		$this->remarked = true;
+		$this->index    = $this->repository->load_index();
+		++$this->restarts;
+		$this->start_marking();
 	}
 
 	/**
@@ -582,8 +678,8 @@ final class PruneRun {
 	 * Deletes one unused pack.
 	 */
 	private function delete_pack_one(): void {
-		$packs = array_keys( $this->unused );
-		$pack  = $packs[ $this->position ] ?? null;
+		$this->deletion_order ??= array_map( 'strval', array_keys( $this->unused ) );
+		$pack                   = $this->deletion_order[ $this->position ] ?? null;
 		if ( null === $pack ) {
 			$this->finish();
 			return;
@@ -633,6 +729,8 @@ final class PruneRun {
 					'frontier'            => $this->frontier,
 					'seen'                => array_keys( $this->seen ),
 					'live'                => array_keys( $this->live ),
+					'listed'              => array_keys( $this->listed ),
+					'remarked'            => $this->remarked,
 					'missing'             => $this->missing,
 					'missing_examples'    => $this->missing_examples,
 					'snapshots'           => $this->snapshots,

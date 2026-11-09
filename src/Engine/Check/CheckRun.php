@@ -54,6 +54,9 @@ final class CheckRun {
 
 	public const int STATE_VERSION = 1;
 
+	/** The phases in their order. */
+	private const array PHASES = [ 'index', 'packs', 'snapshots', 'trees', 'read', 'done' ];
+
 	/** At most this many findings are kept with details; all are counted. */
 	public const int MAX_FINDINGS = 50;
 
@@ -71,7 +74,7 @@ final class CheckRun {
 	/**
 	 * Checkpoint fields; see persist() for the shape.
 	 *
-	 * @var array{pid: int, lock: string, locked_at: int, phase: string, position: int, percent: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
+	 * @var array{pid: int, lock: string, locked_at: int, phase: string, position: int, percent: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
 	 */
 	private array $state;
 
@@ -107,23 +110,29 @@ final class CheckRun {
 				'message'  => Decoded::string( $finding['message'] ?? null ),
 			];
 		}
-		$this->state   = [
-			'pid'         => Decoded::int( $fields['pid'] ?? null, random_int( 100000, 2147483647 ) ),
-			'lock'        => Decoded::string( $fields['lock'] ?? null ),
-			'locked_at'   => Decoded::int( $fields['locked_at'] ?? null ),
-			'phase'       => Decoded::string( $fields['phase'] ?? null, 'index' ),
-			'position'    => Decoded::count( $fields['position'] ?? null ),
-			'percent'     => Decoded::count( $fields['percent'] ?? null ),
-			'seed'        => Decoded::string( $fields['seed'] ?? null ),
-			'index_files' => Decoded::strings( $fields['index_files'] ?? [] ),
-			'packs'       => $packs,
-			'frontier'    => Decoded::strings( $fields['frontier'] ?? [] ),
-			'seen'        => array_fill_keys( Decoded::strings( $fields['seen'] ?? [] ), true ),
-			'sample'      => Decoded::strings( $fields['sample'] ?? [] ),
-			'findings'    => $findings,
-			'counts'      => self::int_map( $fields['counts'] ?? [] ),
-			'stats'       => self::int_map( $fields['stats'] ?? [] ),
+		$this->state = [
+			'pid'            => Decoded::int( $fields['pid'] ?? null, random_int( 100000, 2147483647 ) ),
+			'lock'           => Decoded::string( $fields['lock'] ?? null ),
+			'locked_at'      => Decoded::int( $fields['locked_at'] ?? null ),
+			'phase'          => Decoded::string( $fields['phase'] ?? null, 'index' ),
+			'position'       => Decoded::count( $fields['position'] ?? null ),
+			'percent'        => Decoded::count( $fields['percent'] ?? null ),
+			'seed'           => Decoded::string( $fields['seed'] ?? null ),
+			'index_files'    => Decoded::strings( $fields['index_files'] ?? [] ),
+			'packs'          => $packs,
+			'missing'        => array_fill_keys( Decoded::strings( $fields['missing'] ?? [] ), true ),
+			'snapshot_names' => Decoded::strings( $fields['snapshot_names'] ?? [] ),
+			'roots'          => array_fill_keys( Decoded::strings( $fields['roots'] ?? [] ), true ),
+			'frontier'       => Decoded::strings( $fields['frontier'] ?? [] ),
+			'seen'           => array_fill_keys( Decoded::strings( $fields['seen'] ?? [] ), true ),
+			'sample'         => Decoded::strings( $fields['sample'] ?? [] ),
+			'findings'       => $findings,
+			'counts'         => self::int_map( $fields['counts'] ?? [] ),
+			'stats'          => self::int_map( $fields['stats'] ?? [] ),
 		];
+		if ( ! in_array( $this->state['phase'], self::PHASES, true ) ) {
+			FormatException::raise( 'The check checkpoint names an unknown phase.', [ 'phase' => $this->state['phase'] ] );
+		}
 		$this->locking = new Locking( $repository, $identity, $clock, $this->state['pid'] );
 	}
 
@@ -280,11 +289,12 @@ final class CheckRun {
 	 */
 	private function step(): void {
 		match ( $this->state['phase'] ) {
-			'index'  => $this->check_index_file(),
-			'packs'  => $this->check_packs(),
-			'trees'  => $this->check_tree(),
-			'read'   => $this->read_pack(),
-			default  => $this->finish(),
+			'index'     => $this->check_index_file(),
+			'packs'     => $this->check_packs(),
+			'snapshots' => $this->check_snapshot(),
+			'trees'     => $this->check_tree(),
+			'read'      => $this->read_pack(),
+			default     => $this->finish(),
 		};
 	}
 
@@ -327,7 +337,7 @@ final class CheckRun {
 	}
 
 	/**
-	 * Compares the indexed packs with the server's listing and collects the snapshot trees.
+	 * Compares the indexed packs with the server's listing and lists the snapshots to read.
 	 *
 	 * @throws BackendException If the server cannot be reached.
 	 */
@@ -335,6 +345,7 @@ final class CheckRun {
 		$listed = $this->repository->backend()->list( ObjectType::Data );
 		foreach ( $this->state['packs'] as $pack => [ $size ] ) {
 			if ( ! isset( $listed[ $pack ] ) ) {
+				$this->state['missing'][ $pack ] = true;
 				$this->find( 'error', 'pack_missing', $pack, 'An indexed pack is missing on the server.' );
 			} elseif ( -1 !== $listed[ $pack ] && $listed[ $pack ] !== $size ) {
 				$this->find( 'error', 'pack_size', $pack, sprintf( 'The pack has %d bytes; the index describes %d.', $listed[ $pack ], $size ) );
@@ -347,21 +358,39 @@ final class CheckRun {
 		}
 		$this->stat( 'packs', count( $this->state['packs'] ) );
 
-		$roots = [];
-		foreach ( array_keys( $this->repository->backend()->list( ObjectType::Snapshots ) ) as $name ) {
-			$this->count( 'snapshots' );
-			try {
-				$roots[ Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) )->tree->hex() ] = true;
-			} catch ( NotFound ) {
-				$this->find( 'error', 'snapshot_unreadable', $name, 'The snapshot disappeared from the server.' );
-			} catch ( BackendException $exception ) {
-				throw $exception;
-			} catch ( PluginException $exception ) {
-				$this->find( 'error', 'snapshot_unreadable', $name, $exception->getMessage() );
-			}
+		$names = array_map( 'strval', array_keys( $this->repository->backend()->list( ObjectType::Snapshots ) ) );
+		sort( $names );
+		$this->state['snapshot_names'] = $names;
+		$this->state['roots']          = [];
+		$this->state['position']       = 0;
+		$this->state['phase']          = 'snapshots';
+	}
+
+	/**
+	 * Reads one snapshot and queues its tree; one snapshot per unit of work, so that a site with
+	 * hundreds of snapshots still advances in short ticks.
+	 *
+	 * @throws BackendException If the server cannot be reached.
+	 */
+	private function check_snapshot(): void {
+		$name = $this->state['snapshot_names'][ $this->state['position'] ] ?? null;
+		if ( null === $name ) {
+			$this->state['frontier'] = array_map( 'strval', array_keys( $this->state['roots'] ) );
+			$this->state['position'] = 0;
+			$this->state['phase']    = 'trees';
+			return;
 		}
-		$this->state['frontier'] = array_keys( $roots );
-		$this->state['phase']    = 'trees';
+		++$this->state['position'];
+		$this->count( 'snapshots' );
+		try {
+			$this->state['roots'][ Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) )->tree->hex() ] = true;
+		} catch ( NotFound ) {
+			$this->find( 'error', 'snapshot_unreadable', $name, 'The snapshot disappeared from the server.' );
+		} catch ( BackendException $exception ) {
+			throw $exception;
+		} catch ( PluginException $exception ) {
+			$this->find( 'error', 'snapshot_unreadable', $name, $exception->getMessage() );
+		}
 	}
 
 	/**
@@ -416,13 +445,8 @@ final class CheckRun {
 	 * hash, so the choice is random but stable across ticks.
 	 */
 	private function choose_sample(): void {
-		$missing = [];
-		foreach ( $this->state['findings'] as $finding ) {
-			if ( 'pack_missing' === $finding['code'] ) {
-				$missing[ $finding['object'] ] = true;
-			}
-		}
-		$candidates = array_values( array_filter( array_keys( $this->state['packs'] ), static fn ( string $pack ): bool => ! isset( $missing[ $pack ] ) ) );
+		$missing    = $this->state['missing'];
+		$candidates = array_values( array_filter( array_map( 'strval', array_keys( $this->state['packs'] ) ), static fn ( string $pack ): bool => ! isset( $missing[ $pack ] ) ) );
 		$wanted     = (int) ceil( count( $candidates ) * $this->state['percent'] / 100 );
 		$seed       = $this->state['seed'];
 		usort( $candidates, static fn ( string $a, string $b ): int => hash( 'sha256', $seed . $a ) <=> hash( 'sha256', $seed . $b ) );
@@ -444,6 +468,7 @@ final class CheckRun {
 		try {
 			$content = $this->repository->backend()->load( ObjectType::Data, $pack );
 		} catch ( NotFound ) {
+			$this->state['missing'][ $pack ] = true;
 			$this->find( 'error', 'pack_missing', $pack, 'An indexed pack is missing on the server.' );
 			return;
 		}
@@ -554,15 +579,41 @@ final class CheckRun {
 	}
 
 	/**
-	 * Returns the index, loading it from the server if none was given.
+	 * Returns the index; without one given, builds it from the index files that can be read.
 	 *
 	 * @return IndexSet Index.
 	 */
 	private function index(): IndexSet {
 		if ( null === $this->index ) {
-			$this->index = $this->repository->load_index();
+			$this->index = $this->readable_index();
 		}
 		return $this->index;
+	}
+
+	/**
+	 * The index from every index file that can be read. A damaged index file is a finding of
+	 * the index phase; it must not stop the rest of the check.
+	 *
+	 * @return IndexSet Index.
+	 * @throws BackendException If the server cannot be reached.
+	 */
+	private function readable_index(): IndexSet {
+		$index = new IndexSet();
+		foreach ( array_keys( $this->repository->backend()->list( ObjectType::Index ) ) as $name ) {
+			try {
+				$packs = IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) );
+			} catch ( NotFound ) {
+				continue;
+			} catch ( BackendException $exception ) {
+				throw $exception;
+			} catch ( PluginException ) {
+				continue;
+			}
+			foreach ( $packs as $pack => $entries ) {
+				$index->add_pack( Id::from_hex( $pack ), $entries );
+			}
+		}
+		return $index;
 	}
 
 	/**
@@ -583,8 +634,10 @@ final class CheckRun {
 	 * Writes the checkpoint atomically.
 	 */
 	private function persist(): void {
-		$state         = $this->state;
-		$state['seen'] = array_keys( $state['seen'] );
+		$state            = $this->state;
+		$state['seen']    = array_keys( $state['seen'] );
+		$state['roots']   = array_keys( $state['roots'] );
+		$state['missing'] = array_keys( $state['missing'] );
 		Files::write_atomic( $this->work_dir . '/state.json', json_encode( [ 'version' => self::STATE_VERSION ] + $state, JSON_THROW_ON_ERROR ) );
 	}
 }

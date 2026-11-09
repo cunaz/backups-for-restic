@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
@@ -15,12 +16,14 @@ use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Prune\PruneRun;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
+use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
@@ -249,7 +252,7 @@ final class PruneTest extends TestCase {
 
 		self::assertSame( 0, $result['packs_deleted'] );
 		self::assertSame( 0, $result['index_files_written'] );
-		self::assertSame( array_keys( $objects ), array_keys( $this->backend->objects ), 'Nothing was written or deleted.' );
+		self::assertSame( $objects, $this->backend->objects, 'Nothing was written or deleted.' );
 	}
 
 	public function test_refuses_without_deleting_when_a_used_blob_is_missing_from_the_index(): void {
@@ -303,14 +306,131 @@ final class PruneTest extends TestCase {
 	public function test_refuses_an_append_only_repository_before_writing_anything(): void {
 		$this->history_with_a_forgotten_snapshot();
 		$this->backend->append_only = true;
-		$objects                    = array_keys( $this->backend->objects );
+		$objects                    = $this->backend->objects;
 
 		$this->expectException( AppendOnlyRefused::class );
 		try {
 			$this->prune();
 		} finally {
-			self::assertSame( $objects, array_keys( $this->backend->objects ) );
+			self::assertSame( $objects, $this->backend->objects, 'Not even a lock was written.' );
 		}
+	}
+
+	public function test_refuses_when_it_cannot_tell_whether_deletions_are_allowed(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$objects    = $this->backend->objects;
+		$inner      = $this->backend;
+		$unreliable = new class( $inner ) implements Backend {
+			public function __construct( private readonly Backend $inner ) {
+			}
+
+			public function create(): void {
+				$this->inner->create();
+			}
+
+			public function size( ObjectType $type, string $name ): ?int {
+				return $this->inner->size( $type, $name );
+			}
+
+			public function load( ObjectType $type, string $name, int $offset = 0, ?int $length = null ): string {
+				return $this->inner->load( $type, $name, $offset, $length );
+			}
+
+			public function save( ObjectType $type, string $name, string $body ): void {
+				$this->inner->save( $type, $name, $body );
+			}
+
+			public function delete( ObjectType $type, string $name ): void {
+				throw new BackendException( 'The server answered 503.' );
+			}
+
+			public function list( ObjectType $type ): array {
+				return $this->inner->list( $type );
+			}
+		};
+		$repository = Repository::open( $unreliable, $this->repository->master_key(), new SystemRandom() );
+
+		try {
+			PruneRun::start( $repository, $this->work_dir(), $this->identity, new FrozenClock( time() ), new SystemRandom() );
+			self::fail( 'Prune must not start.' );
+		} catch ( BackendException $exception ) {
+			self::assertStringContainsString( 'could not be determined', $exception->getMessage() );
+		}
+		self::assertSame( $objects, $this->backend->objects, 'Nothing was written, not even a lock.' );
+	}
+
+	public function test_releases_its_lock_when_the_snapshots_cannot_be_read(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$garbage = 'not an encrypted snapshot';
+		$this->backend->save( ObjectType::Snapshots, hash( 'sha256', $garbage ), $garbage );
+
+		try {
+			$this->prune();
+			self::fail( 'Prune must stop.' );
+		} catch ( \BackupsForRestic\Exception\PluginException ) {
+			self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The exclusive lock was released.' );
+		}
+	}
+
+	public function test_a_checkpoint_with_an_unknown_phase_is_refused(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$work = $this->work_dir();
+		$run  = PruneRun::start( $this->repository, $work, $this->identity, new FrozenClock( time() ), new SystemRandom() );
+		$run->advance( 0.0 );
+		$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true );
+		self::assertIsArray( $state );
+		$state['phase'] = 'repack';
+		file_put_contents( $work . '/state.json', json_encode( $state ) );
+
+		$this->expectException( FormatException::class );
+		PruneRun::resume( $this->repository, $work, $this->identity, new FrozenClock( time() ) );
+	}
+
+	public function test_an_out_of_date_index_makes_it_mark_again_instead_of_deleting_used_data(): void {
+		$this->history_with_a_forgotten_snapshot();
+		// Another client repacked a used pack after this run read its index: the index it got
+		// names a pack that no index file lists any more.
+		$victim = array_key_first( $this->used_packs() );
+		self::assertIsString( $victim );
+		$stale = new IndexSet();
+		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+			foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+				$stale->add_pack( Id::from_hex( $pack === $victim ? str_repeat( 'f', 64 ) : (string) $pack ), $entries );
+			}
+		}
+
+		$run = PruneRun::start( $this->repository, $this->work_dir(), $this->identity, new FrozenClock( time() ), new SystemRandom(), $stale );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertArrayHasKey( $victim, $this->backend->list( ObjectType::Data ), 'The used pack is still there.' );
+		self::assertSame( 1, $run->result()['restarts'] );
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'], 'Unused packs were still deleted.' );
+		$this->read_everything();
+	}
+
+	public function test_starts_over_when_another_client_removed_its_lock(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		$run   = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( 'mark' === $run->progress()['phase'] ) {
+			$run->advance( 0.0 );
+		}
+		self::assertSame( 'plan', $run->progress()['phase'] );
+		foreach ( array_keys( $this->backend->list( ObjectType::Locks ) ) as $lock ) {
+			$this->backend->delete( ObjectType::Locks, $lock );
+		}
+
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 1, $run->result()['restarts'] );
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$this->read_everything();
 	}
 
 	public function test_refuses_a_repository_without_snapshots(): void {
