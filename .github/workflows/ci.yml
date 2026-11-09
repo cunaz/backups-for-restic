@@ -112,3 +112,15 @@ jobs:
       # Infection mutates covered lines only (the default since 0.31); the gate (covered MSI of
       # at least 90 %) lives in infection.json5.dist.
       - run: .tools/bin/infection --threads=max --no-progress
+      # A gate that measured nothing must not pass: show the counts and require mutants.
+      - name: Mutation summary
+        if: always()
+        run: |
+          cat .tools/infection/summary.log
+          grep -Eq '^Total: [1-9]' .tools/infection/summary.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutation-logs
+          path: .tools/infection/
+          retention-days: 14
