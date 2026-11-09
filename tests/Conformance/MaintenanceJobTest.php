@@ -212,7 +212,7 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'Every job released its lock.' );
 	}
 
-	public function test_a_cancelled_forget_releases_its_lock_after_the_retention_settings_became_unusable(): void {
+	public function test_a_cancelled_forget_releases_its_lock_after_the_retention_settings_changed(): void {
 		self::assertNotNull( self::$server );
 		$site       = $this->site();
 		$repository = Repository::initialize( self::$server->backend( 'cancelled-forget' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
@@ -226,9 +226,9 @@ final class MaintenanceJobTest extends TestCase {
 		}
 		self::assertCount( 1, $locks, 'The forget run holds its lock.' );
 
-		// The administrator clears keep-within, which the policy needs, and cancels the job; the
-		// next request builds everything again from the changed settings.
-		[ $runner, $store ] = $this->components( self::$server, 'cancelled-forget', $site, [ 'retention.keep.within' => '' ], $this->options );
+		// The administrator changes the retention and cancels the job; the next request builds
+		// everything again from the changed settings. Releasing the lock asks for no policy.
+		[ $runner, $store ] = $this->components( self::$server, 'cancelled-forget', $site, [ 'retention.keep.within' => '1y' ], $this->options );
 		$running            = $store->get( $job->id );
 		self::assertNotNull( $running );
 		$running->cancel_requested = true;
