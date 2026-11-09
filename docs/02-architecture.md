@@ -437,29 +437,32 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   of a random, non-existent snapshot name changes nothing on any server. rest-server answers
   403 in append-only mode before it touches the filesystem and 200 otherwise; other servers
   may answer 404. The wizard probes once, the heartbeat daily (hourly while the last answer
-  was inconclusive), and every forget or prune job before it starts. Detecting append-only switches retention to `external` immediately;
-  detecting that deletions became possible only proposes the switch back to `plugin`, which
-  needs an administrator's click.
+  was inconclusive), and every forget or prune job before it starts. Detecting append-only
+  switches retention to `external` immediately; detecting that deletions became possible
+  only proposes the switch back to `plugin`, which needs an administrator's click.
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
-  all snapshots (tree walk through the cached tree packs), delete packs with **no**
+  all snapshots (a walk of every snapshot's trees), delete packs with **no**
   referenced blob, rewrite index files without them (new index files first, then delete the
   old ones). Partially used packs are not repacked; the dashboard shows the space they
   waste, which only a full `restic prune` from any computer reclaims, and the
   disaster-recovery guide explains it. The estimate counts trees exactly and data blobs once
   through a Bloom filter of about two bytes per indexed blob, so it fits small memory limits
   and can only be slightly high; the conformance suite compares it with restic's count of
-  unused bytes. Prune takes an exclusive lock and runs weekly by default. It fails closed: an
-  inconclusive append-only probe stops it before the lock; if marking meets a used blob or
-  tree that the index does not lead to, or planning finds a used pack that no index file
-  lists, it marks again once with the index as the server has it under the lock (another
-  client may have changed the repository in between), and a second mismatch stops it
-  without deleting.
+  unused bytes. Prune takes an exclusive lock, and the maintenance jobs run it weekly by
+  default (`schedule.prune.*`). It fails closed: an inconclusive append-only probe stops it
+  before the lock; if marking meets a used blob or tree that the index does not lead to, or
+  planning finds a used pack that no index file lists, it marks again once with the index as
+  the server has it under the lock (another client may have changed the repository in
+  between), and a second mismatch stops it without deleting.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),
-  verify header, blob tags and SHA-256 ids. Monthly by default; findings raise a persistent
-  critical notice and are reported in Site Health. Repairs are never attempted
-  automatically; the guide points to `restic repair`.
+  verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
+  never split a blob, so memory does not grow with the pack size; a pack whose reading ends
+  the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
+  default; errors raise a persistent critical notice and are reported in Site Health,
+  warnings only appear with the result (ADR 0022).
+  Repairs are never attempted automatically; the guide points to `restic repair`.
 - **Cache hygiene**: tree-pack cache and index cache size-capped (default 256 MiB), oldest
   first.
 - **Locks**: stale locks (older than 30 minutes) from this site are removed automatically
