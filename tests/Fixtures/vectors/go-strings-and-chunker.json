@@ -1,0 +1,288 @@
+{
+  "chunker": {
+    "chunks": [
+      {
+        "start": 0,
+        "length": 958117,
+        "cut": "000b0b670f700000",
+        "sha256": "ba39346d327c30d0c910be6080120fc2492266353062b3bd676d6f817d602910"
+      },
+      {
+        "start": 958117,
+        "length": 3060893,
+        "cut": "00085ac021400000",
+        "sha256": "3b818795d48a4d2e3f83705242a92c20c090d366e299dbd1d97b42092687da5e"
+      },
+      {
+        "start": 4019010,
+        "length": 4173111,
+        "cut": "000439782c000000",
+        "sha256": "d86c1b862fe0bd3fcb72eda1d27dc1977bcd0b6e74b6f97fecd0e3f4a6c3f36c"
+      },
+      {
+        "start": 8192121,
+        "length": 549542,
+        "cut": "000dc2b2b7500000",
+        "sha256": "6c0db2a0db471657d3dd3a814b7e9491a785f91b71c5c6b7e37b57123f1855a9"
+      },
+      {
+        "start": 8741663,
+        "length": 526262,
+        "cut": "000578dba9d00000",
+        "sha256": "5eddfb7682077ce95f71e3363540d34fdee77d525ac22678e4d646099a815ad0"
+      },
+      {
+        "start": 9267925,
+        "length": 2164949,
+        "cut": "000fc450ab700000",
+        "sha256": "a3c40831e63aa47bf8c45f7f9401125c56e13990de3d243f53b0a5251df13e1f"
+      },
+      {
+        "start": 11432874,
+        "length": 705735,
+        "cut": "00039e1b1b500000",
+        "sha256": "51c3668b22874c44bfe34cc81f029b02838ca309b22426f677138dfdf8333d54"
+      },
+      {
+        "start": 12138609,
+        "length": 692782,
+        "cut": "00134c0564400000",
+        "sha256": "287047644c522ba9fc334c4c0f4a22fe37789e4c6a3d9c313bfd6d219d6c2814"
+      },
+      {
+        "start": 12831391,
+        "length": 1809278,
+        "cut": "001d8e5e9ad00000",
+        "sha256": "8483edfa2b08f98d24fe48872680842ce5dbafc2dbd7002638e58a537c849161"
+      },
+      {
+        "start": 14640669,
+        "length": 817525,
+        "cut": "0007a92d5d400000",
+        "sha256": "1b0319958cd87afe6ee5de528833d342150f9353c8245a400ae2cdb392ee10e9"
+      },
+      {
+        "start": 15458194,
+        "length": 1710618,
+        "cut": "000de8eaa8800000",
+        "sha256": "f89f83097b6e55d0cbed842ac5ed396cef09e157629ba262e3df7e1d1e90d9a7"
+      },
+      {
+        "start": 17168812,
+        "length": 2621745,
+        "cut": "001cfe3f41a00000",
+        "sha256": "ba398639d6e3fb10ed8b2c3f837b946ac1de13020a2e18b5e5712d3db0b5e701"
+      },
+      {
+        "start": 19790557,
+        "length": 1357301,
+        "cut": "000bf73b6f400000",
+        "sha256": "725653203ca2d8d8e99e17e4a4dee805b440f36e24bab3f4c6187e95f3278fe6"
+      },
+      {
+        "start": 21147858,
+        "length": 2010085,
+        "cut": "000d594901600000",
+        "sha256": "39b42cdf9492ec82d11017b0a5f779714890485614bd30c55acae224c4145f70"
+      },
+      {
+        "start": 23157943,
+        "length": 553454,
+        "cut": "001c5e0d48100000",
+        "sha256": "7fa2125ed961d715128d9565b41259220e7518c02ee3fe800e0482df6487fbc2"
+      },
+      {
+        "start": 23711397,
+        "length": 1053679,
+        "cut": "0014c5f871800000",
+        "sha256": "26799f87fd47a3cb139ffc7e2b0a9735b62bfe18e59826999077be5dd0587d7c"
+      },
+      {
+        "start": 24765076,
+        "length": 400748,
+        "cut": "0000000000000001",
+        "sha256": "b70044712c253f2704490a677a0cd1c6bf50d38405001fc569d5e608d78482c3"
+      }
+    ],
+    "length": 25165824,
+    "polynomial": "3da3358b4dc173",
+    "seed": "restic-chunker-vector"
+  },
+  "derived_polynomials": [
+    {
+      "polynomial": "32ff8f08b5f4f3",
+      "seed": "polynomial-0"
+    },
+    {
+      "polynomial": "2b54561f89ca33",
+      "seed": "polynomial-1"
+    },
+    {
+      "polynomial": "3e6039be3e6721",
+      "seed": "polynomial-2"
+    },
+    {
+      "polynomial": "21a0009e66ebf3",
+      "seed": "polynomial-3"
+    },
+    {
+      "polynomial": "30353bebc52ffd",
+      "seed": "polynomial-4"
+    }
+  ],
+  "irreducible": {
+    "20000000000001": false,
+    "2c8f9a3b5a3e35": false,
+    "38f1e565e288df": false,
+    "3da3358b4dc172": false,
+    "3da3358b4dc173": true,
+    "3f2a7e9d4c1b11": false
+  },
+  "strings": [
+    {
+      "input_hex": "",
+      "quoted": "",
+      "json": "\"\""
+    },
+    {
+      "input_hex": "706c61696e2e747874",
+      "quoted": "plain.txt",
+      "json": "\"plain.txt\""
+    },
+    {
+      "input_hex": "77697468207370616365",
+      "quoted": "with space",
+      "json": "\"with space\""
+    },
+    {
+      "input_hex": "71756f746522696e73696465",
+      "quoted": "quote\\\"inside",
+      "json": "\"quote\\\"inside\""
+    },
+    {
+      "input_hex": "6261636b5c736c617368",
+      "quoted": "back\\\\slash",
+      "json": "\"back\\\\slash\""
+    },
+    {
+      "input_hex": "746162096e65776c696e650a",
+      "quoted": "tab\\tnewline\\n",
+      "json": "\"tab\\tnewline\\n\""
+    },
+    {
+      "input_hex": "62656c6c07080c0b0d",
+      "quoted": "bell\\a\\b\\f\\v\\r",
+      "json": "\"bell\\u0007\\b\\f\\u000b\\r\""
+    },
+    {
+      "input_hex": "00011f7f",
+      "quoted": "\\x00\\x01\\x1f\\x7f",
+      "json": "\"\\u0000\\u0001\\u001f\""
+    },
+    {
+      "input_hex": "3c7363726970743e26616d703b3c2f7363726970743e",
+      "quoted": "<script>&amp;</script>",
+      "json": "\"\\u003cscript\\u003e\\u0026amp;\\u003c/script\\u003e\""
+    },
+    {
+      "input_hex": "c3bc6d6c6175742dc3a4c3b6c3bc2dc39f",
+      "quoted": "ümlaut-äöü-ß",
+      "json": "\"ümlaut-äöü-ß\""
+    },
+    {
+      "input_hex": "e697a5e69cace8aa9ee38395e382a1e382a4e383ab",
+      "quoted": "日本語ファイル",
+      "json": "\"日本語ファイル\""
+    },
+    {
+      "input_hex": "656d6f6a692df09f98802df09f9988",
+      "quoted": "emoji-😀-🙈",
+      "json": "\"emoji-😀-🙈\""
+    },
+    {
+      "input_hex": "6e627370c2a0736f6674c2ad68797068656e",
+      "quoted": "nbsp\\u00a0soft\\u00adhyphen",
+      "json": "\"nbsp soft­hyphen\""
+    },
+    {
+      "input_hex": "6c696e65e280a870617261e280a9",
+      "quoted": "line\\u2028para\\u2029",
+      "json": "\"line\\u2028para\\u2029\""
+    },
+    {
+      "input_hex": "7a65726fe2808b7769647468",
+      "quoted": "zero\\u200bwidth",
+      "json": "\"zero​width\""
+    },
+    {
+      "input_hex": "fffe61c3",
+      "quoted": "\\xff\\xfea\\xc3",
+      "json": "\"\\ufffd\\ufffda\\ufffd\""
+    },
+    {
+      "input_hex": "eda080",
+      "quoted": "\\xed\\xa0\\x80",
+      "json": "\"\\ufffd\\ufffd\\ufffd\""
+    },
+    {
+      "input_hex": "e282",
+      "quoted": "\\xe2\\x82",
+      "json": "\"\\ufffd\\ufffd\""
+    },
+    {
+      "input_hex": "efbfbd2d7265706c6163656d656e74",
+      "quoted": "�-replacement",
+      "json": "\"�-replacement\""
+    },
+    {
+      "input_hex": "70726976617465ee8080757365",
+      "quoted": "private\\ue000use",
+      "json": "\"privateuse\""
+    },
+    {
+      "input_hex": "636f6d62696e696e672d65cc81",
+      "quoted": "combining-é",
+      "json": "\"combining-é\""
+    },
+    {
+      "input_hex": "72746c2de280ae2d6f76657272696465",
+      "quoted": "rtl-\\u202e-override",
+      "json": "\"rtl-‮-override\""
+    },
+    {
+      "input_hex": "64656c7f62797465",
+      "quoted": "del\\x7fbyte",
+      "json": "\"delbyte\""
+    },
+    {
+      "input_hex": "6c6174696e312dc2a1c2bfc3bf",
+      "quoted": "latin1-¡¿ÿ",
+      "json": "\"latin1-¡¿ÿ\""
+    },
+    {
+      "input_hex": "63312dc285c29f",
+      "quoted": "c1-\\u0085\\u009f",
+      "json": "\"c1-\""
+    },
+    {
+      "input_hex": "6964656f67726170686963e380807370616365",
+      "quoted": "ideographic\\u3000space",
+      "json": "\"ideographic　space\""
+    },
+    {
+      "input_hex": "737570706c656d656e746172792df09f9880f3a08081",
+      "quoted": "supplementary-😀\\U000e0001",
+      "json": "\"supplementary-😀󠀁\""
+    },
+    {
+      "input_hex": "2f736c6173682f616e643a636f6c6f6e",
+      "quoted": "/slash/and:colon",
+      "json": "\"/slash/and:colon\""
+    },
+    {
+      "input_hex": "70657263656e74253235",
+      "quoted": "percent%25",
+      "json": "\"percent%25\""
+    }
+  ]
+}

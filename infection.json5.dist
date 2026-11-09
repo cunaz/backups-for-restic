@@ -1,0 +1,27 @@
+// Mutation testing (ADR 0024): the gate for the code whose bugs would damage repositories.
+// Run with: composer mutation (needs pcov or Xdebug, and bin/install-test-tools.sh infection).
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": [
+            "src/Crypto",
+            "src/Format",
+            "src/Engine/Forget"
+        ]
+    },
+    "phpUnit": {
+        "configDir": "."
+    },
+    "testFrameworkOptions": "--testsuite=unit",
+    "timeout": 60,
+    "tmpDir": ".tools/infection-tmp",
+    "logs": {
+        "text": ".tools/infection/infection.log",
+        "summary": ".tools/infection/summary.log",
+        "github": true
+    },
+    "minCoveredMsi": 90,
+    "mutators": {
+        "@default": true
+    }
+}

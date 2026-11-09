@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         cacheDirectory=".phpunit.cache"
+         colors="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         beStrictAboutOutputDuringTests="true">
+    <php>
+        <!-- The engine must stream: a test that buffers a large file fails here (docs/02 §16). -->
+        <ini name="memory_limit" value="128M"/>
+    </php>
+    <testsuites>
+        <!-- Pure PHP, no WordPress, no network: runs everywhere in seconds. -->
+        <testsuite name="unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <!-- Needs a MySQL or MariaDB server: root over the local socket, or BFR_TEST_MYSQL_*. -->
+        <testsuite name="database">
+            <directory>tests/Database</directory>
+        </testsuite>
+        <!-- Needs the restic CLI and rest-server from bin/install-test-tools.sh (ADR 0023). -->
+        <testsuite name="conformance">
+            <directory>tests/Conformance</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

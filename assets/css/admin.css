@@ -1,0 +1,96 @@
+/* Backups admin page. Core admin classes do most of the work; this only arranges the parts. */
+
+.backups-for-restic .bfr-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+	gap: 1rem;
+	margin: 1rem 0;
+}
+
+.backups-for-restic .bfr-card {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-radius: 4px;
+	padding: 0.5rem 1rem 1rem;
+}
+
+.backups-for-restic .bfr-card:empty {
+	display: none;
+}
+
+.backups-for-restic .bfr-big {
+	font-size: 1.3em;
+	margin: 0.5em 0;
+}
+
+.backups-for-restic .bfr-current {
+	color: #50575e;
+	font-family: monospace;
+	overflow-wrap: anywhere;
+}
+
+.backups-for-restic progress {
+	width: 100%;
+	max-width: 30rem;
+}
+
+.backups-for-restic .bfr-steps {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.5rem;
+	margin: 1rem 0 1.5rem 1.5rem;
+}
+
+.backups-for-restic .bfr-steps .bfr-current-step {
+	font-weight: 600;
+}
+
+.backups-for-restic .bfr-field label {
+	display: block;
+	font-weight: 600;
+	margin-bottom: 0.25rem;
+}
+
+.backups-for-restic .bfr-field .description {
+	display: block;
+}
+
+.backups-for-restic .bfr-error {
+	color: #d63638;
+	display: block;
+}
+
+.backups-for-restic .bfr-group {
+	border: 1px solid #c3c4c7;
+	margin: 1rem 0;
+	padding: 0 1rem;
+}
+
+.backups-for-restic .bfr-group legend {
+	font-weight: 600;
+	padding: 0 0.25rem;
+}
+
+.backups-for-restic .bfr-checks {
+	list-style: none;
+	margin: 1rem 0;
+	padding: 0;
+}
+
+.backups-for-restic .bfr-check {
+	border-left: 4px solid #00a32a;
+	margin: 0.5rem 0;
+	padding: 0.25rem 0.75rem;
+}
+
+.backups-for-restic .bfr-recommended {
+	border-left-color: #dba617;
+}
+
+.backups-for-restic .bfr-critical {
+	border-left-color: #d63638;
+}
+
+.backups-for-restic .bfr-log td:first-child {
+	white-space: nowrap;
+}

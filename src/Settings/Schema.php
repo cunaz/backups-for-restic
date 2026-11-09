@@ -1,0 +1,82 @@
+<?php
+/**
+ * The settings model.
+ *
+ * @package BackupsForRestic
+ */
+
+declare( strict_types=1 );
+
+namespace BackupsForRestic\Settings;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * Every setting with its type, default and constraints, declared once
+ * (docs/02-architecture.md §11). Secrets are not settings; they live in the SecretStore.
+ */
+final class Schema {
+
+	/**
+	 * Settings that a wp-config.php constant can override, by dotted path.
+	 */
+	public const array CONSTANTS = [
+		'repository.url'           => 'BACKUPS_FOR_RESTIC_REPOSITORY_URL',
+		'repository.rest_username' => 'BACKUPS_FOR_RESTIC_REST_USERNAME',
+	];
+
+	/**
+	 * All fields by dotted path.
+	 *
+	 * @return array<string, Field> Fields.
+	 */
+	public static function fields(): array {
+		return [
+			'repository.server'                       => Field::choice( 'borgbase', [ 'borgbase', 'rest-server' ] ),
+			'repository.url'                          => Field::text(),
+			'repository.rest_username'                => Field::text( '', 255 ),
+			'repository.ca_certificate'               => Field::choice( 'none', [ 'none', 'uploaded' ] ),
+			'repository.append_only'                  => Field::choice( 'unknown', [ 'yes', 'no', 'unknown' ] ),
+			'repository.format_version'               => Field::integer( 1, 1, 2 ),
+			'repository.id'                           => Field::text( '', 64 ),
+			'schedule.backup.frequency'               => Field::choice( 'daily', [ 'manual', 'twice_daily', 'daily', 'weekly' ] ),
+			'schedule.backup.weekday'                 => Field::integer( 0, 0, 6 ),
+			'schedule.backup.hour'                    => Field::integer( 3, 0, 23 ),
+			'schedule.backup.minute'                  => Field::integer( 17, 0, 59 ),
+			'schedule.prune.frequency'                => Field::choice( 'weekly', [ 'manual', 'weekly', 'monthly' ] ),
+			'schedule.prune.weekday'                  => Field::integer( 0, 0, 6 ),
+			'schedule.prune.hour'                     => Field::integer( 4, 0, 23 ),
+			'schedule.check.frequency'                => Field::choice( 'monthly', [ 'manual', 'weekly', 'monthly' ] ),
+			'schedule.check.day'                      => Field::integer( 1, 1, 28 ),
+			'schedule.check.hour'                     => Field::integer( 5, 0, 23 ),
+			'schedule.check.read_data_subset_percent' => Field::integer( 2, 0, 100 ),
+			'retention.mode'                          => Field::choice( 'plugin', [ 'plugin', 'external' ] ),
+			'retention.keep.last'                     => Field::integer( 2, 0, 10000 ),
+			'retention.keep.daily'                    => Field::integer( 7, 0, 10000 ),
+			'retention.keep.weekly'                   => Field::integer( 4, 0, 10000 ),
+			'retention.keep.monthly'                  => Field::integer( 6, 0, 10000 ),
+			'retention.keep.yearly'                   => Field::integer( 0, 0, 10000 ),
+			'retention.keep.within'                   => Field::text( '2d', 32 ),
+			'retention.run_forget_after_backup'       => Field::boolean( true ),
+			'backup.extra_roots'                      => Field::list(),
+			'backup.excludes'                         => Field::list(),
+			'backup.exclude_caches'                   => Field::boolean( true ),
+			'backup.database.enabled'                 => Field::boolean( true ),
+			'backup.database.table_scope'             => Field::choice( 'prefix', [ 'prefix', 'all' ] ),
+			'backup.database.exclude_tables'          => Field::list( 64 ),
+			'notifications.email.on_failure'          => Field::boolean( true ),
+			'notifications.email.on_stale'            => Field::boolean( true ),
+			'notifications.email.stale_after_hours'   => Field::integer( 36, 1, 720 ),
+			'notifications.email.recipients'          => Field::list( 254 ),
+			'advanced.tick_budget_seconds'            => Field::integer( 20, 5, 300 ),
+			'advanced.pack_size_mib'                  => Field::integer( 16, 4, 64 ),
+			'advanced.upload_timeout_seconds'         => Field::integer( 60, 10, 600 ),
+			'advanced.cache_limit_mib'                => Field::integer( 256, 16, 4096 ),
+			'advanced.cpu_throttle'                   => Field::choice( 'normal', [ 'normal', 'gentle' ] ),
+			'advanced.loopback_chaining'              => Field::choice( 'auto', [ 'auto', 'off' ] ),
+			'advanced.keep_jobs'                      => Field::integer( 30, 5, 500 ),
+			'setup.completed'                         => Field::boolean( false ),
+			'setup.recovery_kit_acknowledged_at'      => Field::text( '', 64 ),
+		];
+	}
+}

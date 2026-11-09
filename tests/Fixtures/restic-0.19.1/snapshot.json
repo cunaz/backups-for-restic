@@ -1,0 +1,29 @@
+{
+  "time": "2026-11-09T15:27:35.267971432Z",
+  "tree": "4153c531d54db3fed43bbd9e98093493addc5cfc807b4a93097cfc6f56596076",
+  "paths": [
+    "/tmp/tmp.oS63dxvZ7x/src"
+  ],
+  "hostname": "vectors",
+  "username": "root",
+  "tags": [
+    "vectors"
+  ],
+  "program_version": "restic 0.19.1",
+  "summary": {
+    "backup_start": "2026-11-09T15:27:35.267971432Z",
+    "backup_end": "2026-11-09T15:27:36.018902629Z",
+    "files_new": 5,
+    "files_changed": 0,
+    "files_unmodified": 0,
+    "dirs_new": 3,
+    "dirs_changed": 0,
+    "dirs_unmodified": 0,
+    "data_blobs": 4,
+    "tree_blobs": 4,
+    "data_added": 111978,
+    "data_added_packed": 112530,
+    "total_files_processed": 5,
+    "total_bytes_processed": 108931
+  }
+}

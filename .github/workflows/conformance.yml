@@ -1,0 +1,92 @@
+# The restic CLI as oracle (ADR 0023), the zstd path for format 2, and the benchmark gates.
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'bin/install-test-tools.sh'
+      - 'bin/bench.php'
+      - 'composer.lock'
+      - '.github/workflows/conformance.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'bin/install-test-tools.sh'
+      - 'bin/bench.php'
+      - 'composer.lock'
+      - '.github/workflows/conformance.yml'
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restic:
+    name: restic ${{ matrix.zstd && 'with zstd' || 'oracle' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Without zstd the full suite runs; with zstd only the format 2 tests change.
+        zstd: [false, true]
+    env:
+      BFR_TEST_MYSQL_HOST: 127.0.0.1
+      BFR_TEST_MYSQL_USER: root
+      BFR_TEST_MYSQL_PASSWORD: root
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: ${{ matrix.zstd && 'mbstring, openssl, mysqli, zstd' || 'mbstring, openssl, mysqli' }}
+          ini-values: opcache.enable_cli=0
+          coverage: none
+          tools: composer:v2
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
+      - name: Start MySQL
+        run: sudo systemctl start mysql.service
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: bin/install-test-tools.sh restic rest-server
+      - name: Conformance suite
+        env:
+          FILTER: ${{ matrix.zstd && 'format_2' || '' }}
+        run: vendor/bin/phpunit --testsuite conformance ${FILTER:+--filter "$FILTER"}
+
+  benchmarks:
+    name: Benchmarks with gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: php -d opcache.enable_cli=0 bin/bench.php --slow | tee bench.txt
+        shell: bash
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: benchmarks
+          path: bench.txt
+          retention-days: 90

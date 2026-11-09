@@ -1,0 +1,131 @@
+<?xml version="1.0"?>
+<ruleset name="Plugin coding standard">
+	<description>WordPress Coding Standards with the deviations documented in docs/04-development-and-quality.md §3.</description>
+
+	<file>backups-for-restic.php</file>
+	<file>uninstall.php</file>
+	<file>src</file>
+	<file>tests</file>
+	<file>bin</file>
+
+	<exclude-pattern>/vendor/*</exclude-pattern>
+	<exclude-pattern>/.tools/*</exclude-pattern>
+	<exclude-pattern>/tests/Fixtures/*</exclude-pattern>
+
+	<arg name="extensions" value="php"/>
+	<arg name="parallel" value="8"/>
+	<arg value="sp"/>
+
+	<config name="minimum_wp_version" value="6.7"/>
+
+	<rule ref="WordPress-Extra">
+		<!-- PSR-4 file names (src/Format/Pack/PackWriter.php) instead of class-pack-writer.php. -->
+		<exclude name="WordPress.Files.FileName"/>
+		<!-- Strict comparisons plus static analysis make Yoda conditions unnecessary. -->
+		<exclude name="WordPress.PHP.YodaConditions"/>
+		<!-- Short array syntax throughout. -->
+		<exclude name="Universal.Arrays.DisallowShortArraySyntax"/>
+	</rule>
+
+	<rule ref="WordPress-Docs">
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<!-- Does not understand generic types such as list<Node>; PHPStan checks types at level max. -->
+		<exclude name="Squiz.Commenting.FunctionComment.IncorrectTypeHint"/>
+		<!-- Cannot see exceptions thrown through PluginException::raise(); PHPStan checks @throws. -->
+		<exclude name="Squiz.Commenting.FunctionCommentThrowTag.WrongNumber"/>
+	</rule>
+
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="backups_for_restic"/>
+				<element value="BackupsForRestic"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!--
+	Tests and development scripts never run inside WordPress: they have no WordPress globals to
+	collide with, they drive restic and rest-server as processes, the fuzzer turns PHP warnings
+	into exceptions, test doubles ignore parameters of the interfaces they implement, and tests
+	register temporary directories for cleanup in the statement that creates them.
+	-->
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+	<rule ref="WordPress.WP.GlobalVariablesOverride">
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+	<rule ref="WordPress.PHP.DiscouragedPHPFunctions">
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+	<rule ref="WordPress.PHP.DevelopmentFunctions">
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+	<rule ref="WordPress.PHP.NoSilencedErrors">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+	<rule ref="Generic.CodeAnalysis.UnusedFunctionParameter">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+	<rule ref="Squiz.PHP.DisallowMultipleAssignments">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+	<!-- The database tests talk to MySQL directly; there is no $wpdb outside WordPress. -->
+	<rule ref="WordPress.DB.RestrictedClasses">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+	<rule ref="WordPress.DB.RestrictedFunctions">
+		<exclude-pattern>/tests/*</exclude-pattern>
+	</rule>
+
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="backups-for-restic"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!--
+	The WordPress-free core (everything in src/ except WordPress/ and Plugin.php) works on the
+	private directory and the site's files with native functions, and must not call WordPress
+	functions such as wp_json_encode() at all (tests/PHPStan/WordPressFreeCoreRule.php).
+	-->
+	<rule ref="WordPress.WP.AlternativeFunctions">
+		<exclude-pattern>/src/(Backup|Backend|Connection|Crypto|Database|Engine|Exception|Format|Jobs|Secrets|Settings|Storage|Support)/*</exclude-pattern>
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+
+	<!-- Development scripts and tests print to the console. -->
+	<rule ref="WordPress.Security.EscapeOutput">
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+
+	<!-- Functions that never belong in this plugin (docs/03 §6). -->
+	<rule ref="Generic.PHP.ForbiddenFunctions">
+		<properties>
+			<property name="forbiddenFunctions" type="array">
+				<element key="exec" value="null"/>
+				<element key="shell_exec" value="null"/>
+				<element key="system" value="null"/>
+				<element key="passthru" value="null"/>
+				<element key="popen" value="null"/>
+				<element key="proc_open" value="null"/>
+				<element key="unserialize" value="null"/>
+				<element key="extract" value="null"/>
+				<element key="create_function" value="null"/>
+			</property>
+		</properties>
+		<exclude-pattern>/tests/*</exclude-pattern>
+		<exclude-pattern>/bin/*</exclude-pattern>
+	</rule>
+	<rule ref="Squiz.PHP.Eval"/>
+	<rule ref="Generic.PHP.BacktickOperator"/>
+</ruleset>

@@ -1,0 +1,96 @@
+// Generates test vectors for the PHP implementation from the Go originals.
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+
+	"github.com/restic/chunker"
+)
+
+// stream returns n deterministic bytes: SHA-256(seed || counter) blocks.
+func stream(seed string, n int) []byte {
+	var buf bytes.Buffer
+	for i := uint64(0); buf.Len() < n; i++ {
+		var c [8]byte
+		binary.LittleEndian.PutUint64(c[:], i)
+		h := sha256.Sum256(append([]byte(seed), c[:]...))
+		buf.Write(h[:])
+	}
+	return buf.Bytes()[:n]
+}
+
+type stringVector struct {
+	Input  string `json:"input_hex"`
+	Quoted string `json:"quoted"`
+	JSON   string `json:"json"`
+}
+
+type chunkVector struct {
+	Start  uint   `json:"start"`
+	Length uint   `json:"length"`
+	Cut    string `json:"cut"`
+	SHA256 string `json:"sha256"`
+}
+
+func main() {
+	inputs := [][]byte{
+		[]byte(""), []byte("plain.txt"), []byte("with space"), []byte(`quote"inside`), []byte(`back\slash`),
+		[]byte("tab\tnewline\n"), []byte("bell\a\b\f\v\r"), []byte{0x00, 0x01, 0x1f, 0x7f},
+		[]byte("<script>&amp;</script>"), []byte("ümlaut-äöü-ß"), []byte("日本語ファイル"), []byte("emoji-😀-🙈"),
+		[]byte("nbsp soft­hyphen"), []byte("line para "), []byte("zero​width"),
+		[]byte{0xff, 0xfe, 'a', 0xc3}, []byte{0xed, 0xa0, 0x80}, []byte{0xe2, 0x82}, []byte("�-replacement"),
+		[]byte("privateuse"), []byte("combining-é"), []byte("rtl-‮-override"), []byte("del\x7fbyte"),
+		[]byte("latin1-¡¿ÿ"), []byte("c1-\u0085\u009f"), []byte("ideographic　space"),
+		[]byte("supplementary-\U0001F600\U000E0001"), []byte("/slash/and:colon"), []byte("percent%25"),
+	}
+	var strs []stringVector
+	for _, in := range inputs {
+		q := strconv.Quote(string(in))
+		j, _ := json.Marshal(string(in))
+		strs = append(strs, stringVector{hex.EncodeToString(in), q[1 : len(q)-1], string(j)})
+	}
+
+	pol := chunker.Pol(0x3DA3358B4DC173)
+	data := stream("restic-chunker-vector", 24<<20)
+	ch := chunker.New(bytes.NewReader(data), pol)
+	buf := make([]byte, chunker.MaxSize)
+	var chunks []chunkVector
+	for {
+		c, err := ch.Next(buf)
+		if err != nil {
+			break
+		}
+		sum := sha256.Sum256(c.Data)
+		chunks = append(chunks, chunkVector{c.Start, c.Length, fmt.Sprintf("%016x", c.Cut), hex.EncodeToString(sum[:])})
+	}
+
+	// Polynomial derivation from deterministic random input (8-byte little-endian words).
+	var derived []map[string]string
+	for i := 0; i < 5; i++ {
+		src := stream(fmt.Sprintf("polynomial-%d", i), 8*1000000)
+		p, err := chunker.DerivePolynomial(bytes.NewReader(src))
+		if err != nil {
+			panic(err)
+		}
+		derived = append(derived, map[string]string{"seed": fmt.Sprintf("polynomial-%d", i), "polynomial": strconv.FormatUint(uint64(p), 16)})
+	}
+	irreducible := map[string]bool{}
+	for _, p := range []chunker.Pol{0x3DA3358B4DC173, 0x3DA3358B4DC172, 0x38F1E565E288DF, 0x2C8F9A3B5A3E35, 0x3F2A7E9D4C1B11, 0x20000000000001} {
+		irreducible[strconv.FormatUint(uint64(p), 16)] = p.Irreducible()
+	}
+
+	out := map[string]any{"strings": strs, "chunker": map[string]any{
+		"polynomial": strconv.FormatUint(uint64(pol), 16), "seed": "restic-chunker-vector", "length": len(data), "chunks": chunks,
+	}, "derived_polynomials": derived, "irreducible": irreducible}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(out)
+}

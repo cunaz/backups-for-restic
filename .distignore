@@ -1,0 +1,24 @@
+# Files that never ship in the WordPress.org package (used by bin/build-package.sh).
+/.git
+/.github
+/.tools
+/.wordpress-org
+/bin
+/build
+/docs
+/node_modules
+/tests
+/vendor
+/.distignore
+/.editorconfig
+/.gitattributes
+/.gitignore
+/composer.json
+/composer.lock
+/infection.json5.dist
+/phpcs.xml.dist
+/phpstan.neon.dist
+/phpunit.xml.dist
+/phpunit-integration.xml.dist
+/CONTRIBUTING.md
+/README.md

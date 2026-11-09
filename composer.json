@@ -1,0 +1,81 @@
+{
+    "name": "cunaz/backups-for-restic",
+    "description": "WordPress backups in the restic repository format, written in pure PHP.",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=8.3",
+        "ext-hash": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-pcre": "*"
+    },
+    "require-dev": {
+        "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+        "phpstan/phpstan": "^2",
+        "phpstan/phpstan-strict-rules": "^2",
+        "phpunit/phpunit": "^12",
+        "szepeviktor/phpstan-wordpress": "^2",
+        "wp-coding-standards/wpcs": "^3.1"
+    },
+    "suggest": {
+        "ext-zstd": "Reads format 2 repositories created by restic, which always compresses their index and snapshot files.",
+        "ext-curl": "Used by the WordPress HTTP API and by the development tools."
+    },
+    "repositories": [
+        {
+            "type": "package",
+            "package": {
+                "name": "phpstan/phpstan",
+                "version": "2.3.5",
+                "description": "PHPStan from its release PHAR: GitHub source archives are not reachable from every CI and sandbox network.",
+                "dist": {
+                    "type": "file",
+                    "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar"
+                },
+                "bin": [
+                    "phpstan.phar"
+                ]
+            }
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "BackupsForRestic\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "BackupsForRestic\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    },
+    "scripts": {
+        "lint": "phpcs",
+        "fix": "phpcbf",
+        "analyse": "phpstan.phar analyse --memory-limit=1G",
+        "test:unit": "phpunit --testsuite unit",
+        "test:database": "phpunit --testsuite database",
+        "test:conformance": "phpunit --testsuite conformance",
+        "test:integration": "phpunit -c phpunit-integration.xml.dist",
+        "test": [
+            "@test:unit",
+            "@test:database",
+            "@test:conformance"
+        ],
+        "check": [
+            "@lint",
+            "@analyse",
+            "@test:unit"
+        ],
+        "mutation": ".tools/bin/infection --threads=max --only-covered",
+        "fuzz": "php bin/fuzz.php --seconds=10",
+        "bench": "php -d opcache.enable_cli=0 bin/bench.php"
+    }
+}

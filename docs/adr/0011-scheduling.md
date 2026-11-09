@@ -1,0 +1,32 @@
+# 0011 · Scheduling and progress on shared hosting: WP-Cron, loopback chaining, external ping
+Status: accepted (revised for 0018)
+Date: 2026-11-09
+
+## Context
+Shared hosting offers no system cron for WP-CLI; at best a control-panel cron that can fetch
+a URL. WP-Cron runs inside web requests and only when the site has visitors. Some hosts block
+loopback requests. The native engine needs many short slices of work (ticks) per backup.
+
+## Decision
+- The runner advances jobs in bounded ticks (default 20 s, capped by `max_execution_time`).
+- **Loopback chaining**: while work remains, the runner schedules `backups_for_restic_tick` for
+  now and calls `spawn_cron()`, so the next tick starts within a second. WordPress' own
+  `doing_cron` lock and the plugin's `flock` prevent overlap. Chaining can be disabled.
+- **External cron ping**: the documentation and the Doctor recommend a control-panel or
+  external cron fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, optionally with
+  `DISABLE_WP_CRON`. No plugin-specific URL or token exists.
+- **Admin polling** performs short ticks while an administrator watches a job.
+- A recurring heartbeat (5 minutes) creates due jobs, detects expired leases, refreshes
+  repository locks and sends stale notifications.
+- WP-CLI (`tick`, `backup --wait`) is supported where available but never required.
+
+## Consequences
+- Works everywhere WordPress works; fastest with chaining or a cron ping.
+- No new public surface: `wp-cron.php` is WordPress' own.
+- Long first backups are expected and explained in the wizard.
+
+## Alternatives considered
+- **Secret trigger URL**: a long-lived bearer secret in URLs for little benefit over
+  `wp-cron.php`.
+- **Requiring system cron and WP-CLI**: excludes the target audience.
+- **Action Scheduler**: see ADR 0002.

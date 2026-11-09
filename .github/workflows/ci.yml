@@ -1,0 +1,113 @@
+# Fast checks on every push and pull request (docs/04-development-and-quality.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Coding standards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: vendor/bin/phpcs
+      - name: JavaScript syntax
+        run: node --check assets/js/admin.js
+
+  analyse:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: vendor/bin/phpstan.phar analyse --no-progress --memory-limit=1G
+
+  unit:
+    name: Unit tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, openssl
+          # Shared hosting rarely runs OPcache or JIT for CLI; test the slow path.
+          ini-values: opcache.enable_cli=0
+          coverage: none
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: vendor/bin/phpunit --testsuite unit
+
+  database:
+    name: Database dump against MySQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BFR_TEST_MYSQL_HOST: 127.0.0.1
+      BFR_TEST_MYSQL_USER: root
+      BFR_TEST_MYSQL_PASSWORD: root
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, mysqli
+          coverage: none
+          tools: composer:v2
+      - name: Start MySQL
+        run: sudo systemctl start mysql.service
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: vendor/bin/phpunit --testsuite database
+
+  mutation:
+    name: Mutation testing (Crypto, Format, Forget)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: pcov
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: bin/install-test-tools.sh infection
+      # The gate (covered MSI of at least 90 %) lives in infection.json5.dist.
+      - run: .tools/bin/infection --threads=max --only-covered --no-progress

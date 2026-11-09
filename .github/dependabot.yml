@@ -1,0 +1,13 @@
+# Keeps the SHA-pinned actions and the development dependencies current through reviewed
+# pull requests. The plugin itself has no runtime dependencies.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only

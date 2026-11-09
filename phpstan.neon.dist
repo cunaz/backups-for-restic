@@ -1,0 +1,27 @@
+includes:
+    - vendor/phpstan/phpstan-strict-rules/rules.neon
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+    level: max
+    phpVersion: 80300
+    paths:
+        - src
+        - backups-for-restic.php
+        - uninstall.php
+    scanFiles:
+        - tests/PHPStan/wp-cli-stubs.php
+    treatPhpDocTypesAsCertain: true
+    reportUnmatchedIgnoredErrors: true
+
+rules:
+    # docs/02-architecture.md §3: Support, Crypto, Format, Backend, Engine call no WordPress code.
+    - BackupsForRestic\Tests\PHPStan\WordPressFreeCoreRule
+    # docs/03-security-and-threat-model.md §5.3: Secret::reveal() only at reviewed places.
+    - BackupsForRestic\Tests\PHPStan\SecretRevealRule
+
+services:
+    -
+        class: BackupsForRestic\Tests\PHPStan\UnpackReturnTypeExtension
+        tags:
+            - phpstan.broker.dynamicFunctionReturnTypeExtension
