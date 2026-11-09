@@ -9,6 +9,9 @@
             "src/Engine/Forget"
         ]
     },
+    // The source files end the request unless ABSPATH is defined; without this bootstrap,
+    // Infection's own process exits silently with status 0 as soon as it reflects on a class.
+    "bootstrap": "tests/bootstrap.php",
     "phpUnit": {
         "configDir": "."
     },
