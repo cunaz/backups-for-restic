@@ -125,9 +125,9 @@ Acceptance
 
 ## Milestone 2 — Operations (0.2.0, public beta)
 
-**Status (2026-11-09): in progress. Done: prune without repacking in the engine
-([ADR 0022](adr/0022-maintenance-scope.md)), verified against restic 0.19.1. Open: the space
-held by partly used packs for the dashboard, and everything below.**
+**Status (2026-11-09): in progress. Done in the engine: prune without repacking and the
+repository check ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic
+0.19.1. Open: the space held by partly used packs for the dashboard, and everything below.**
 
 Scope
 - Schedules, retention (forget parity), prune-lite, check with sampled data, retention modes

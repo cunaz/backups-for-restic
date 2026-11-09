@@ -28,7 +28,12 @@ a state every restic tool understands.
 - **Check**: structural (index ↔ listed packs with sizes, snapshot tree walks resolve, no
   duplicate ids) plus a random sample of packs (`read_data_subset_percent`, default 2)
   downloaded and fully verified (header, blob tags, blob ids). Findings raise a persistent
-  critical notice; repairs are never automatic.
+  critical notice; repairs are never automatic. The check holds a shared lock, as restic's
+  does, so backups may run meanwhile. Damage becomes a finding and the check goes on;
+  transport errors end the tick and the job retries. Errors are what restic check reports as
+  errors; warnings are its hints, such as packs no index lists. Verified against restic
+  0.19.1: on a repository with one damaged and one deleted pack, both report the same packs
+  (`Engine\Check\CheckRun`).
 - All three are resumable steps under the tick model and respect append-only mode (403 →
   `repository_append_only`; lock handling unaffected).
 

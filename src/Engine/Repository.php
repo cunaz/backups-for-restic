@@ -17,6 +17,7 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\Scrypt;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Exception\AlreadyExists;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\WrongPassword;
@@ -199,6 +200,7 @@ final class Repository {
 	 * @param Id         $id   Name.
 	 * @return string JSON.
 	 * @throws NotFound If the file does not exist.
+	 * @throws BackendException If the request fails.
 	 * @throws FormatException If the content does not match its name.
 	 */
 	public function load_unpacked( ObjectType $type, Id $id ): string {
