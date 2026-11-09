@@ -74,7 +74,7 @@
             "@analyse",
             "@test:unit"
         ],
-        "mutation": ".tools/bin/infection --threads=max --only-covered",
+        "mutation": ".tools/bin/infection --threads=max",
         "fuzz": "php bin/fuzz.php --seconds=10",
         "bench": "php -d opcache.enable_cli=0 bin/bench.php"
     }

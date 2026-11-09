@@ -109,5 +109,6 @@ jobs:
           tools: composer:v2
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh infection
-      # The gate (covered MSI of at least 90 %) lives in infection.json5.dist.
-      - run: .tools/bin/infection --threads=max --only-covered --no-progress
+      # Infection mutates covered lines only (the default since 0.31); the gate (covered MSI of
+      # at least 90 %) lives in infection.json5.dist.
+      - run: .tools/bin/infection --threads=max --no-progress

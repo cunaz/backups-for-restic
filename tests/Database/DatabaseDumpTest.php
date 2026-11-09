@@ -64,6 +64,7 @@ final class DatabaseDumpTest extends TestCase {
 	 * backslashes, emoji, NULLs, a generated column and a view.
 	 */
 	private static function fill( MysqliConnection $db ): void {
+		// The generated column uses price: MySQL rejects generated columns over an AUTO_INCREMENT column.
 		$db->execute(
 			'CREATE TABLE bfr_posts (
 				id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -74,7 +75,7 @@ final class DatabaseDumpTest extends TestCase {
 				data LONGBLOB NULL,
 				flag BIT(1) NOT NULL DEFAULT b\'0\',
 				latin TEXT CHARACTER SET latin1,
-				doubled BIGINT AS (id * 2) VIRTUAL,
+				doubled DECIMAL(12,2) AS (price * 2) VIRTUAL,
 				COMMENT_FIELD VARCHAR(20) COMMENT \'with a ; and a\nline break\'
 			) ENGINE=InnoDB'
 		);
@@ -138,7 +139,7 @@ final class DatabaseDumpTest extends TestCase {
 		}
 		self::assertSame( $source->rows( 'SELECT * FROM bfr_titles ORDER BY id' ), $target->rows( 'SELECT * FROM bfr_titles ORDER BY id' ) );
 		self::assertSame( [], $target->rows( "SHOW TABLES LIKE 'other_table'" ) );
-		self::assertSame( '6000', $target->rows( 'SELECT doubled FROM bfr_posts WHERE id = 3000' )[0]['doubled'], 'Generated columns are computed again.' );
+		self::assertSame( '6000.00', $target->rows( 'SELECT doubled FROM bfr_posts WHERE id = 3000' )[0]['doubled'], 'Generated columns are computed again.' );
 	}
 
 	public function test_resumed_and_uninterrupted_dumps_are_identical(): void {
