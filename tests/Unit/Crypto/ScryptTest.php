@@ -64,6 +64,7 @@ final class ScryptTest extends TestCase {
 		yield 'N too small' => [ 1, 8, 1 ];
 		yield 'N beyond the cap' => [ 1 << 21, 8, 1 ];
 		yield 'r zero' => [ 1024, 0, 1 ];
+		yield 'p zero' => [ 1024, 8, 0 ];
 		yield 'p beyond the cap' => [ 1024, 8, 64 ];
 	}
 
@@ -71,6 +72,47 @@ final class ScryptTest extends TestCase {
 	public function test_rejects_invalid_or_too_expensive_parameters( int $n, int $r, int $p ): void {
 		$this->expectException( UnsupportedRepository::class );
 		new ScryptParameters( $n, $r, $p );
+	}
+
+	/**
+	 * Go's scrypt (used by restic) refuses r * p >= 2^30; the plugin's own caps come after.
+	 *
+	 * @return iterable<string, array{int, int, int, string}>
+	 */
+	public static function refused_parameters(): iterable {
+		yield 'r * p reaches 2^30' => [ 1024, 1 << 15, 1 << 15, 'Key file has invalid scrypt parameters.' ];
+		yield 'r * p below 2^30, r beyond the cap' => [ 1024, 1 << 14, 1 << 15, 'Key file uses scrypt parameters beyond what this plugin supports.' ];
+		yield 'N beyond the cap with a small table' => [ 1 << 21, 1, 1, 'Key file uses scrypt parameters beyond what this plugin supports.' ];
+		yield 'table beyond 1 GiB' => [ 1 << 20, 16, 1, 'Key file uses scrypt parameters beyond what this plugin supports.' ];
+	}
+
+	#[DataProvider( 'refused_parameters' )]
+	public function test_refusals_name_the_rule_and_the_parameters( int $n, int $r, int $p, string $message ): void {
+		try {
+			new ScryptParameters( $n, $r, $p );
+			self::fail( 'The parameters were accepted.' );
+		} catch ( UnsupportedRepository $exception ) {
+			self::assertSame( $message, $exception->getMessage() );
+			self::assertSame(
+				[
+					'n' => $n,
+					'r' => $r,
+					'p' => $p,
+				],
+				$exception->context()
+			);
+		}
+	}
+
+	public function test_parameters_at_the_caps_are_accepted(): void {
+		$largest = new ScryptParameters( ScryptParameters::MAX_N, 8, ScryptParameters::MAX_P );
+		self::assertSame( ScryptParameters::MAX_TABLE_BYTES, $largest->table_bytes() );
+		self::assertSame( ScryptParameters::MAX_R, ( new ScryptParameters( 1024, ScryptParameters::MAX_R, 1 ) )->r );
+	}
+
+	public function test_new_keys_use_restics_default_cost(): void {
+		$parameters = ScryptParameters::for_new_keys();
+		self::assertSame( [ 16384, 8, 1 ], [ $parameters->n, $parameters->r, $parameters->p ] );
 	}
 
 	/**
