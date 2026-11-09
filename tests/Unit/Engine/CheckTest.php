@@ -21,6 +21,7 @@ use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Support\SystemClock;
+use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -316,6 +317,119 @@ final class CheckTest extends TestCase {
 		self::assertSame( [], $result['findings'] );
 		self::assertSame( count( $this->backend->list( ObjectType::Data ) ), $result['stats']['packs_read'] ?? 0 );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_start_releases_its_lock_when_the_index_files_cannot_be_listed(): void {
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ): void {
+				if ( 'list' === $method && ObjectType::Index === $type ) {
+					throw new BackendException( 'The server answered 503.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+
+		try {
+			CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 100 );
+			self::fail( 'The check must not start.' );
+		} catch ( BackendException ) {
+			self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'No checkpoint exists, so the lock is released at once.' );
+		}
+	}
+
+	public function test_reads_packs_in_small_pieces_with_the_same_result(): void {
+		$whole   = $this->check();
+		$longest = 0;
+		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+			foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $entries ) {
+				foreach ( $entries as $entry ) {
+					$longest = max( $longest, $entry->length );
+				}
+			}
+		}
+		$largest = 0;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type, string $name, int $offset = 0, ?int $length = null ) use ( &$largest ): void {
+				if ( 'load' === $method && ObjectType::Data === $type ) {
+					self::assertNotNull( $length, 'Packs are only read in ranges.' );
+					$largest = max( $largest, $length );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 100, null, 4096 );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertSame( $whole['counts'], $run->result()['counts'] );
+		self::assertSame( $whole['stats'], $run->result()['stats'] );
+		self::assertLessThanOrEqual( max( 4096, $longest ), $largest );
+		self::assertGreaterThan( 4096, $longest, 'The fixture has blobs larger than a piece.' );
+	}
+
+	public function test_a_pack_whose_reads_keep_ending_the_request_becomes_a_warning(): void {
+		$work = $this->work_dir();
+		$run  = CheckRun::start( $this->repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 100 );
+		while ( 'read' !== $run->progress()['phase'] ) {
+			$run->advance( 0.0 );
+		}
+		$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true );
+		self::assertIsArray( $state );
+		self::assertIsArray( $state['sample'] );
+		$pack = $state['sample'][0];
+		self::assertIsString( $pack );
+		// Requests that the host killed while they read this pack left only the marker behind.
+		file_put_contents(
+			$work . '/reading.json',
+			json_encode(
+				[
+					'pack'     => $pack,
+					'attempts' => CheckRun::READ_ATTEMPTS,
+				]
+			)
+		);
+
+		$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		$result = $run->result();
+		self::assertSame( [ 'warning:pack_unverified' ], self::codes( $result ) );
+		self::assertSame( $pack, $result['findings'][0]['object'] );
+		self::assertSame( count( $this->backend->list( ObjectType::Data ) ) - 1, $result['stats']['packs_read'] ?? 0 );
+		self::assertFileDoesNotExist( $work . '/reading.json' );
+	}
+
+	public function test_transport_errors_while_reading_a_pack_do_not_count_as_attempts(): void {
+		$failures = CheckRun::READ_ATTEMPTS + 2;
+		$backend  = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type, string $name, int $offset = 0, ?int $length = null ) use ( &$failures ): void {
+				// The first request for a pack header: only the read phase asks for four bytes.
+				if ( 'load' === $method && ObjectType::Data === $type && 4 === $length && $failures-- > 0 ) {
+					throw new BackendException( 'Connection reset by peer.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$work       = $this->work_dir();
+		$run        = CheckRun::start( $repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 100 );
+		$done       = false;
+		for ( $tick = 0; $tick < 20 && ! $done; ++$tick ) {
+			try {
+				$done = $run->advance( INF );
+			} catch ( BackendException ) {
+				$run = CheckRun::resume( $repository, $work, $this->identity, new SystemClock() );
+			}
+		}
+
+		self::assertTrue( $done );
+		self::assertSame( [], $run->result()['findings'] );
+		self::assertSame( count( $this->backend->list( ObjectType::Data ) ), $run->result()['stats']['packs_read'] ?? 0 );
 	}
 
 	public function test_backups_may_run_while_a_check_holds_its_shared_lock(): void {

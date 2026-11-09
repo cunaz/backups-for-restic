@@ -342,6 +342,10 @@ final class PruneRun {
 		$this->keep_lock();
 		do {
 			$this->step();
+			// A long call, such as one without a deadline, must not outlive its lock.
+			if ( 'done' !== $this->phase && $this->locking->due( $this->locked_at ) ) {
+				$this->keep_lock();
+			}
 		} while ( 'done' !== $this->phase && microtime( true ) < $deadline );
 		$this->persist();
 		return 'done' === $this->phase;
@@ -500,6 +504,7 @@ final class PruneRun {
 	 * Walks one tree: marks its pack and the packs of its file contents, and queues subtrees.
 	 *
 	 * @throws FormatException If marking ends with blobs that are missing from the index.
+	 * @throws \Throwable Whatever reading the index or the tree throws; the tree stays queued.
 	 */
 	private function mark_one(): void {
 		$hex = array_pop( $this->frontier );
@@ -523,19 +528,24 @@ final class PruneRun {
 		if ( isset( $this->seen[ $hex ] ) ) {
 			return;
 		}
-		$this->seen[ $hex ] = true;
-
-		$index = $this->index();
-		$tree  = Id::from_hex( $hex );
-		if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
-			return;
-		}
 		try {
+			$index = $this->index();
+			$tree  = Id::from_hex( $hex );
+			if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
+				$this->seen[ $hex ] = true;
+				return;
+			}
 			$nodes = $this->repository->load_tree( $index, $tree );
 		} catch ( NotFound ) {
 			$this->mark_again( 'A tree is missing on the server; prune stopped without deleting anything. Run a check.', [ 'tree' => $hex ] );
 			return;
+		} catch ( \Throwable $failure ) {
+			// The tree stays queued: if the caller tries again on this run, the tree is still
+			// walked, and the packs of its blobs are not taken for unused ones.
+			$this->frontier[] = $hex;
+			throw $failure;
 		}
+		$this->seen[ $hex ] = true;
 		foreach ( $nodes as $node ) {
 			if ( null !== $node->subtree && ! isset( $this->seen[ $node->subtree->hex() ] ) ) {
 				$this->frontier[] = $node->subtree->hex();

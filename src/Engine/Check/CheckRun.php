@@ -25,6 +25,7 @@ use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
+use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Format\Pack\PackReader;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Storage\Files;
@@ -43,7 +44,8 @@ defined( 'ABSPATH' ) || exit;
  *    indexed; every tree decrypts and parses.
  * 4. read: a random sample of packs is downloaded and verified completely: the file name is
  *    the hash of the content, the header matches the index, and every blob decrypts to the
- *    content its ID names.
+ *    content its ID names. A pack streams in pieces of READ_PIECE bytes (a blob is never
+ *    split), so memory stays bounded by the piece and the largest blob, not by the pack.
  *
  * Damage becomes a finding and the check goes on; nothing is ever repaired. Errors are what
  * restic check reports as errors; warnings are its hints, such as packs that no index lists.
@@ -64,6 +66,16 @@ final class CheckRun {
 	private const int ENTRY_SIZE            = 37;
 	private const int COMPRESSED_ENTRY_SIZE = 41;
 
+	/** Bytes read from a pack at once by default; a piece holds whole blobs, so one large blob may exceed it. */
+	public const int READ_PIECE = 8388608;
+
+	/**
+	 * Requests that may end while reading the same pack before the check reports the pack as
+	 * unverified and goes on. A request that hits the host's time limit cannot record anything,
+	 * so only a marker written before the read tells the next request what happened.
+	 */
+	public const int READ_ATTEMPTS = 3;
+
 	/**
 	 * Lock handling.
 	 *
@@ -74,7 +86,7 @@ final class CheckRun {
 	/**
 	 * Checkpoint fields; see persist() for the shape.
 	 *
-	 * @var array{pid: int, lock: string, locked_at: int, phase: string, position: int, percent: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
+	 * @var array{pid: int, lock: string, locked_at: int, phase: string, position: int, percent: int, piece: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
 	 */
 	private array $state;
 
@@ -117,6 +129,7 @@ final class CheckRun {
 			'phase'          => Decoded::string( $fields['phase'] ?? null, 'index' ),
 			'position'       => Decoded::count( $fields['position'] ?? null ),
 			'percent'        => Decoded::count( $fields['percent'] ?? null ),
+			'piece'          => max( 1, Decoded::int( $fields['piece'] ?? null, self::READ_PIECE ) ),
 			'seed'           => Decoded::string( $fields['seed'] ?? null ),
 			'index_files'    => Decoded::strings( $fields['index_files'] ?? [] ),
 			'packs'          => $packs,
@@ -146,12 +159,17 @@ final class CheckRun {
 	 * @param RandomSource  $random                  Chooses the packs to read.
 	 * @param int           $read_data_subset_percent Share of packs to download and verify, 0 to 100.
 	 * @param IndexSet|null $index                   Current index, for example from the IndexCache.
+	 * @param int           $read_piece              Bytes to read from a pack at once (blobs are never split).
 	 * @return self Run.
-	 * @throws InvalidArgument If the directory already holds a check or the share is out of range.
+	 * @throws InvalidArgument If the directory already holds a check, the share is out of range or the piece is empty.
+	 * @throws \Throwable Whatever listing the index files or writing the checkpoint throws, after the release.
 	 */
-	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, int $read_data_subset_percent, ?IndexSet $index = null ): self {
+	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, int $read_data_subset_percent, ?IndexSet $index = null, int $read_piece = self::READ_PIECE ): self {
 		if ( $read_data_subset_percent < 0 || $read_data_subset_percent > 100 ) {
 			InvalidArgument::raise( 'The share of packs to read must be between 0 and 100.' );
+		}
+		if ( $read_piece < 1 ) {
+			InvalidArgument::raise( 'The pieces to read must hold at least one byte.' );
 		}
 		if ( ! is_dir( $work_dir ) && ! mkdir( $work_dir, 0700, true ) && ! is_dir( $work_dir ) ) {
 			InvalidArgument::raise( 'The working directory cannot be created.' );
@@ -168,14 +186,21 @@ final class CheckRun {
 			[
 				'percent' => $read_data_subset_percent,
 				'seed'    => bin2hex( $random->bytes( 16 ) ),
+				'piece'   => $read_piece,
 			]
 		);
 		$run->locking->remove_own_stale();
-		$run->state['lock']        = $run->locking->acquire( false )->hex();
-		$run->state['locked_at']   = $clock->now()[0];
-		$run->state['index_files'] = array_keys( $repository->backend()->list( ObjectType::Index ) );
-		sort( $run->state['index_files'] );
-		$run->persist();
+		$run->state['lock']      = $run->locking->acquire( false )->hex();
+		$run->state['locked_at'] = $clock->now()[0];
+		try {
+			$run->state['index_files'] = array_keys( $repository->backend()->list( ObjectType::Index ) );
+			sort( $run->state['index_files'] );
+			$run->persist();
+		} catch ( \Throwable $failure ) {
+			// Without a checkpoint no later request would release the lock.
+			$run->locking->release( Id::from_hex( $run->state['lock'] ) );
+			throw $failure;
+		}
 		return $run;
 	}
 
@@ -217,6 +242,10 @@ final class CheckRun {
 		$this->keep_lock();
 		do {
 			$this->step();
+			// A long call, such as one without a deadline, must not outlive its lock.
+			if ( 'done' !== $this->state['phase'] && $this->locking->due( $this->state['locked_at'] ) ) {
+				$this->keep_lock();
+			}
 		} while ( 'done' !== $this->state['phase'] && microtime( true ) < $deadline );
 		$this->persist();
 		return 'done' === $this->state['phase'];
@@ -456,7 +485,11 @@ final class CheckRun {
 	}
 
 	/**
-	 * Downloads one pack of the sample and verifies it completely.
+	 * Downloads one pack of the sample and verifies it completely. A marker written before the
+	 * read counts the requests that ended during it; after READ_ATTEMPTS the pack becomes a
+	 * warning instead of stopping the check for good.
+	 *
+	 * @throws \Throwable Whatever reading the pack throws; the next request tries it again.
 	 */
 	private function read_pack(): void {
 		$pack = $this->state['sample'][ $this->state['position'] ] ?? null;
@@ -464,50 +497,190 @@ final class CheckRun {
 			$this->finish();
 			return;
 		}
+		$marker   = $this->work_dir . '/reading.json';
+		$previous = is_file( $marker ) ? json_decode( (string) file_get_contents( $marker ), true ) : null;
+		$attempts = 1 + ( is_array( $previous ) && $pack === ( $previous['pack'] ?? null ) ? Decoded::count( $previous['attempts'] ?? null ) : 0 );
+		if ( $attempts > self::READ_ATTEMPTS ) {
+			$this->find( 'warning', 'pack_unverified', $pack, 'Reading the pack did not finish within a request; run restic check --read-data from another computer to verify it.' );
+		} else {
+			Files::write_atomic(
+				$marker,
+				json_encode(
+					[
+						'pack'     => $pack,
+						'attempts' => $attempts,
+					],
+					JSON_THROW_ON_ERROR
+				)
+			);
+			try {
+				$this->verify_pack( $pack );
+			} catch ( \Throwable $failure ) {
+				// An error, unlike a request that was killed, does not count as an attempt.
+				Files::remove_tree( $marker );
+				throw $failure;
+			}
+		}
+		Files::remove_tree( $marker );
 		++$this->state['position'];
+	}
+
+	/**
+	 * Streams a pack in pieces and verifies it: the hash of all its bytes, its header against
+	 * the index, and every blob. Findings follow restic: a pack whose content does not match its
+	 * name is reported as that alone.
+	 *
+	 * @param string $pack Pack ID (hex).
+	 * @throws BackendException If the server cannot be reached.
+	 */
+	private function verify_pack( string $pack ): void {
+		$backend = $this->repository->backend();
+		$size    = $backend->size( ObjectType::Data, $pack );
+		if ( null === $size ) {
+			$this->pack_missing( $pack );
+			return;
+		}
 		try {
-			$content = $this->repository->backend()->load( ObjectType::Data, $pack );
+			[ $entries, $header_error ] = $this->pack_header( $pack, $size );
+			$index                      = $this->index();
+			$statuses                   = [];
+			foreach ( $entries as $position => $entry ) {
+				$statuses[ $position ] = $this->entry_status( $index, $pack, $entry );
+			}
+			$context  = hash_init( 'sha256' );
+			$failed   = [];
+			$verified = 0;
+			$offset   = 0;
+			$next     = 0;
+			while ( $offset < $size ) {
+				[ $end, $last ] = self::piece( $entries, $next, $offset, $size, $this->state['piece'] );
+				$bytes          = $backend->load( ObjectType::Data, $pack, $offset, $end - $offset );
+				hash_update( $context, $bytes );
+				if ( strlen( $bytes ) !== $end - $offset ) {
+					break; // The pack changed while it was read; its hash cannot match.
+				}
+				for ( $position = $next; $position < $last; $position++ ) {
+					if ( 'verify' !== $statuses[ $position ] ) {
+						continue;
+					}
+					$entry = $entries[ $position ];
+					try {
+						PackReader::open_blob( $this->repository->cipher(), $entry, substr( $bytes, $entry->offset - $offset, $entry->length ) );
+						++$verified;
+					} catch ( PluginException $exception ) {
+						$failed[ $position ] = $exception->getMessage();
+					}
+				}
+				$offset = $end;
+				$next   = $last;
+			}
 		} catch ( NotFound ) {
-			$this->state['missing'][ $pack ] = true;
-			$this->find( 'error', 'pack_missing', $pack, 'An indexed pack is missing on the server.' );
+			$this->pack_missing( $pack );
 			return;
 		}
 		$this->count( 'packs_read' );
-		$this->count( 'bytes_read', strlen( $content ) );
-		if ( ! Id::of( $content )->equals( Id::from_hex( $pack ) ) ) {
+		$this->count( 'bytes_read', $size );
+		if ( hash_final( $context ) !== $pack ) {
 			$this->find( 'error', 'pack_hash', $pack, 'The pack content does not match its name.' );
 			return;
 		}
-		$cipher = $this->repository->cipher();
-		try {
-			$size    = strlen( $content );
-			$length  = PackReader::header_length( substr( $content, -4 ), $size );
-			$entries = PackReader::read_header( $cipher, substr( $content, $size - 4 - $length, $length ), $size );
-		} catch ( PluginException $exception ) {
-			$this->find( 'error', 'pack_header', $pack, $exception->getMessage() );
+		if ( '' !== $header_error ) {
+			$this->find( 'error', 'pack_header', $pack, $header_error );
 			return;
 		}
 		if ( count( $entries ) !== ( $this->state['packs'][ $pack ][1] ?? -1 ) ) {
 			$this->find( 'error', 'pack_header', $pack, 'The pack header and the index list different blobs.' );
 		}
-		$index = $this->index();
-		foreach ( $entries as $entry ) {
-			$location = $index->find( $entry->id, $entry->type );
-			if ( null === $location || ( $location->pack->hex() === $pack && ( $location->entry->offset !== $entry->offset || $location->entry->length !== $entry->length ) ) ) {
+		foreach ( $entries as $position => $entry ) {
+			if ( 'misplaced' === $statuses[ $position ] ) {
 				$this->find( 'error', 'pack_header', $pack, 'A blob in the pack header is not indexed at this place: ' . $entry->id->hex() );
-				continue;
-			}
-			if ( $entry->uncompressed_length > 0 && ! Compression::available() ) {
+			} elseif ( 'compressed' === $statuses[ $position ] ) {
 				$this->find( 'warning', 'compressed_unverified', $pack, 'Compressed blobs cannot be verified without the zstd extension.' );
-				continue;
-			}
-			try {
-				PackReader::open_blob( $cipher, $entry, substr( $content, $entry->offset, $entry->length ) );
-				$this->count( 'blobs_verified' );
-			} catch ( PluginException $exception ) {
-				$this->find( 'error', 'blob_corrupt', $entry->id->hex(), $exception->getMessage() );
+			} elseif ( isset( $failed[ $position ] ) ) {
+				$this->find( 'error', 'blob_corrupt', $entry->id->hex(), $failed[ $position ] );
 			}
 		}
+		$this->count( 'blobs_verified', $verified );
+	}
+
+	/**
+	 * Records a sampled pack that is gone from the server.
+	 *
+	 * @param string $pack Pack ID (hex).
+	 */
+	private function pack_missing( string $pack ): void {
+		$this->state['missing'][ $pack ] = true;
+		$this->find( 'error', 'pack_missing', $pack, 'An indexed pack is missing on the server.' );
+	}
+
+	/**
+	 * Reads and decodes the header of a pack with two ranged requests.
+	 *
+	 * @param string $pack Pack ID (hex).
+	 * @param int    $size Size of the pack on the server.
+	 * @return array{list<PackEntry>, string} Entries, and why the header is unusable (empty if it is fine).
+	 * @throws BackendException If the server cannot be reached or the pack is gone.
+	 */
+	private function pack_header( string $pack, int $size ): array {
+		if ( $size < 4 ) {
+			return [ [], 'The pack is too small for a header.' ];
+		}
+		$backend = $this->repository->backend();
+		try {
+			$length  = PackReader::header_length( $backend->load( ObjectType::Data, $pack, $size - 4, 4 ), $size );
+			$entries = PackReader::read_header( $this->repository->cipher(), $backend->load( ObjectType::Data, $pack, $size - 4 - $length, $length ), $size );
+		} catch ( BackendException $exception ) {
+			throw $exception;
+		} catch ( PluginException $exception ) {
+			return [ [], $exception->getMessage() ];
+		}
+		return [ $entries, '' ];
+	}
+
+	/**
+	 * Decides what reading a header entry can tell: misplaced (the index does not lead to it),
+	 * compressed (zstd is missing), or verify.
+	 *
+	 * @param IndexSet  $index Index.
+	 * @param string    $pack  Pack ID (hex).
+	 * @param PackEntry $entry Header entry.
+	 * @return string misplaced, compressed or verify.
+	 */
+	private function entry_status( IndexSet $index, string $pack, PackEntry $entry ): string {
+		$location = $index->find( $entry->id, $entry->type );
+		if ( null === $location || ( $location->pack->hex() === $pack && ( $location->entry->offset !== $entry->offset || $location->entry->length !== $entry->length ) ) ) {
+			return 'misplaced';
+		}
+		if ( $entry->uncompressed_length > 0 && ! Compression::available() ) {
+			return 'compressed';
+		}
+		return 'verify';
+	}
+
+	/**
+	 * The next piece to read: whole blobs from the next entry on, together at most $limit bytes
+	 * unless a single blob is larger; after the last blob, the rest of the pack (any unlisted
+	 * bytes, the header and its length) in pieces of $limit bytes. The header lists its blobs
+	 * back to back from offset 0, so the pieces cover the pack exactly once.
+	 *
+	 * @param list<PackEntry> $entries Header entries in pack order.
+	 * @param int             $next    First entry not read yet.
+	 * @param int             $offset  First byte not read yet.
+	 * @param int             $size    Size of the pack.
+	 * @param int             $limit   Bytes to read at once.
+	 * @return array{int, int} End of the piece (exclusive) and the first entry after it.
+	 */
+	private static function piece( array $entries, int $next, int $offset, int $size, int $limit ): array {
+		$end  = $offset;
+		$last = $next;
+		while ( isset( $entries[ $last ] ) && ( $last === $next || $entries[ $last ]->offset + $entries[ $last ]->length - $offset <= $limit ) ) {
+			$end = $entries[ $last ]->offset + $entries[ $last ]->length;
+			++$last;
+		}
+		if ( $last === $next ) {
+			$end = min( $size, $offset + $limit );
+		}
+		return [ $end, $last ];
 	}
 
 	/**
