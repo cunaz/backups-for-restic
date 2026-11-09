@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Format;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\BlobType;
@@ -119,5 +120,14 @@ final class PackReaderTest extends TestCase {
 		} catch ( FormatException $exception ) {
 			self::assertSame( [ 'id' => $entry->id->hex() ], $exception->context() );
 		}
+	}
+
+	public function test_a_header_may_reach_restics_limit_but_not_pass_it(): void {
+		// restic's MaxHeaderSize counts the four length bytes; the header itself gets the rest.
+		$limit = PackWriter::MAX_HEADER_SIZE - 4;
+		self::assertSame( $limit, PackReader::header_length( Bytes::uint32_le( $limit ), $limit + 4 ) );
+
+		$this->expectException( FormatException::class );
+		PackReader::header_length( Bytes::uint32_le( $limit + 1 ), $limit + 5 );
 	}
 }
