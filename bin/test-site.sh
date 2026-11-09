@@ -130,14 +130,30 @@ start_server() {
 		echo "Already running on $URL"
 		return
 	fi
-	PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup php \
+	local trace=()
+	if [ -n "${BFR_SITE_TRACE:-}" ] && command -v strace > /dev/null; then
+		# Diagnostics: every signal and exit of the server and its workers, with the time.
+		trace=(strace -f -tt -A -o "$TOOLS/strace.log" --seccomp-bpf -e trace=exit_group)
+	fi
+	# The log is appended, so that a restart keeps what happened before it.
+	PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup "${trace[@]}" php \
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \
 		-d log_errors=1 \
 		-d error_log="$TOOLS/php-errors.log" \
-		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" > "$TOOLS/site-server.log" 2>&1 &
-	echo $! > "$PID_FILE"
+		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" >> "$TOOLS/site-server.log" 2>&1 &
+	local pid=$!
+	if [ ${#trace[@]} -gt 0 ]; then
+		# Stop the server itself, not strace: strace ends when the server's processes end.
+		for _ in $(seq 1 50); do
+			child="$(pgrep -P "$pid" -x php | head -n 1 || true)"
+			[ -n "$child" ] && break
+			sleep 0.1
+		done
+		pid="${child:-$pid}"
+	fi
+	echo "$pid" > "$PID_FILE"
 	for _ in $(seq 1 50); do
 		if curl -fsS -o /dev/null "$URL/wp-login.php"; then
 			echo "Serving $URL (log: .tools/site-server.log)"

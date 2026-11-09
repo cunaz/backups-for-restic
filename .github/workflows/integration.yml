@@ -35,6 +35,8 @@ jobs:
       BFR_TEST_MYSQL_HOST: 127.0.0.1
       BFR_TEST_MYSQL_USER: root
       BFR_TEST_MYSQL_PASSWORD: root
+      # Records signals and exits of the PHP server's workers in .tools/strace.log.
+      BFR_SITE_TRACE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,6 +50,8 @@ jobs:
           tools: composer:v2
       - name: Start MySQL
         run: sudo systemctl start mysql.service
+      - name: Install strace
+        run: command -v strace || sudo apt-get install -y --no-install-recommends strace
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tools/bin
@@ -69,6 +73,9 @@ jobs:
           cp .tools/php-errors.log logs/ 2>/dev/null || true
           cp .tools/site/wp-content/debug.log logs/ 2>/dev/null || true
           cp .tools/site/wp-content/requests.log logs/ 2>/dev/null || true
+          cp .tools/strace.log logs/ 2>/dev/null || true
+          # Workers that died by a signal or exited with an error, if any.
+          grep -E 'killed by|exited with [1-9]|--- SIG' .tools/strace.log 2>/dev/null | grep -v 'SIGCHLD' | head -n 50 || true
           cp -r .tools/site/wp-content/backups-for-restic/jobs logs/jobs 2>/dev/null || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
