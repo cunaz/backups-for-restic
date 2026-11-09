@@ -18,13 +18,17 @@ a state every restic tool understands.
   that list an unused pack again without it, delete the superseded index files, and delete
   the unused packs last, so that every state in between is a repository restic accepts.
   Packs with a mix of used and unused blobs are left alone; the dashboard reports the space
-  they hold and the guide explains `restic prune` from any computer. The run holds an exclusive lock from the first tree it reads to the last
-  pack it deletes; if the lock disappeared or was not refreshed within 25 minutes, other
-  clients may have written snapshots in the meantime, so marking starts again. Prune refuses
-  without deleting anything when a used blob is missing from the index, when the repository
-  lists no snapshots, and when the server is append-only. Verified against restic 0.19.1:
-  it deletes exactly the packs that `restic prune -v` counts as unused, and `restic check
-  --read-data` passes afterwards (`Engine\Prune\PruneRun`).
+  they hold and the guide explains `restic prune` from any computer. The run holds an
+  exclusive lock from the first tree it reads to the last pack it deletes; if the lock
+  disappeared or was not refreshed within 25 minutes, other clients may have written
+  snapshots in the meantime, so marking starts again. If marking meets a used blob or tree
+  that the index does not lead to, or planning finds a used pack that no index file lists,
+  the index was read before another client changed the repository: marking runs again once
+  with the index as it is under the lock. Prune refuses without deleting anything when that
+  does not help, when the repository lists no snapshots, and when the server is append-only
+  or the probe cannot tell. Verified against restic 0.19.1: it deletes exactly the packs that
+  `restic prune -v` counts as unused, and `restic check --read-data` passes afterwards
+  (`Engine\Prune\PruneRun`).
 - **Check**: structural (index ↔ listed packs with sizes, snapshot tree walks resolve, no
   duplicate ids) plus a random sample of packs (`read_data_subset_percent`, default 2)
   downloaded and fully verified (header, blob tags, blob ids). Findings raise a persistent
