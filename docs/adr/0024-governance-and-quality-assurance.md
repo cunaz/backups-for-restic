@@ -1,5 +1,6 @@
 # 0024 · Governance: solo maintainer, free plugin, internal quality assurance
-Status: accepted (owner decisions 2026-11-09; fuzzing tool revised by 0028)
+Status: accepted (owner decisions 2026-11-09; fuzzing tool revised by 0028; automated review
+added 2026-11-09)
 Date: 2026-11-09
 
 ## Context
@@ -33,8 +34,14 @@ can operate.
   5. A written self-review checklist for security-relevant changes and a 24-hour cooling-off
      period before merging changes to `Crypto`, `Format` or `Engine`.
   6. All changes, the maintainer's own included, go through pull requests with required
-     checks; no direct pushes to `main`.
-  7. Safety nets in production: a monthly check with sampled data verification, and restore
+     checks; no direct pushes to `main`. The repository's initial import was the only
+     direct push.
+  7. An automated review of every pull request by CodeRabbit, free for public repositories
+     and configured in `.coderabbit.yaml`: project-specific review instructions per path,
+     secret and PII scanners, workflow linters, and a blocking check against personal data
+     and chat transcripts. Its findings are advice that must be answered or resolved before
+     merging; it does not replace the checks above or an independent human review.
+  8. Safety nets in production: a monthly check with sampled data verification, and restore
      with the plain restic CLI, independent of plugin code.
 - **Accepted residual risks**, recorded in the threat model: bus factor 1 for releases and
   security fixes; no independent review of the format implementation before 1.0; design and
@@ -56,4 +63,7 @@ can operate.
 - **External audit before 1.0**: declined by the owner.
 - **A community review programme**: declined as a plan; contributions remain welcome.
 - **A second committer**: declined for now.
+- **No automated review**: rejected once the repository was public; an AI reviewer costs
+  nothing for public repositories and catches a different class of mistakes than tests,
+  such as missing capability checks or inconsistent documentation.
 - **Pro add-on or paid services**: declined.

@@ -80,3 +80,9 @@ All changes, including the maintainer's own, go through pull requests with the r
 checks. Sign off your commits (`git commit -s`) to confirm the Developer Certificate of
 Origin. Describe what changed, why, and the security impact: does the change touch secrets,
 cryptography, filesystem writes, HTTP requests or capability checks?
+
+[CodeRabbit](https://www.coderabbit.ai) reviews every pull request automatically with the
+project's instructions in [`.coderabbit.yaml`](.coderabbit.yaml). Answer or resolve its
+comments before merging; where it is wrong, say why in the thread. Its review is advice,
+the CI checks are the gate. Never put personal data, private e-mail addresses or chat
+transcripts into code, commits or pull requests.
