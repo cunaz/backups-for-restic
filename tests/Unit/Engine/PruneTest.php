@@ -272,6 +272,23 @@ final class PruneTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $work );
 	}
 
+	public function test_refuses_without_deleting_when_a_tree_is_missing_on_the_server(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$root = array_values( $this->repository->snapshots() )[0]->tree;
+		$pack = $this->repository->load_index()->find( $root, BlobType::Tree )?->pack->hex();
+		self::assertNotNull( $pack );
+		$this->backend->delete( ObjectType::Data, $pack );
+		$data = array_keys( $this->backend->list( ObjectType::Data ) );
+
+		try {
+			$this->prune();
+			self::fail( 'Prune must stop.' );
+		} catch ( FormatException $exception ) {
+			self::assertSame( 'repository_damaged', $exception->context()['code'] ?? null );
+		}
+		self::assertSame( $data, array_keys( $this->backend->list( ObjectType::Data ) ), 'No pack was deleted.' );
+	}
+
 	public function test_refuses_an_append_only_repository_before_writing_anything(): void {
 		$this->history_with_a_forgotten_snapshot();
 		$this->backend->append_only = true;

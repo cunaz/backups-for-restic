@@ -19,6 +19,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -459,7 +460,18 @@ final class PruneRun {
 		if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
 			return;
 		}
-		foreach ( $this->repository->load_tree( $index, $tree ) as $node ) {
+		try {
+			$nodes = $this->repository->load_tree( $index, $tree );
+		} catch ( NotFound ) {
+			FormatException::raise(
+				'A tree is missing on the server; prune stopped without deleting anything. Run a check.',
+				[
+					'code' => 'repository_damaged',
+					'tree' => $hex,
+				]
+			);
+		}
+		foreach ( $nodes as $node ) {
 			if ( null !== $node->subtree && ! isset( $this->seen[ $node->subtree->hex() ] ) ) {
 				$this->frontier[] = $node->subtree->hex();
 			}
