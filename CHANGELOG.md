@@ -7,6 +7,19 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- E-mail notifications: the first failure of a backup, forget, prune or check, once when
+  backups become stale (36 hours by default, at least one and a half backup intervals), once
+  when they work again, every check that finds damage, and an automatic switch to retention
+  mode external. Unsent notices are retried.
+- Dashboard cards for old snapshots, unused data and the repository check, with buttons;
+  notices for check findings, the switch to external retention and the proposal to switch
+  back. A check with findings is also shown on every admin screen and in Site Health.
+- Prune estimates the space that only a full `restic prune` from another computer reclaims.
+- A daily append-only probe by the heartbeat, so a switch back is proposed even when no
+  forget or prune job runs.
+- Settings for old snapshots, maintenance and notifications; a gentle CPU mode for hosts
+  with CPU limits; a cache size limit, a cache size display and a button to clear the cache.
+- `readme.txt` for WordPress.org and guides for cron jobs and for an own rest-server.
 - Maintenance jobs: forget after every successful backup, prune and check on their schedules,
   and on demand from the REST API and WP-CLI (`forget`, `prune`, `check`). Forget and prune
   detect append-only servers first and then switch retention to external without deleting
@@ -43,3 +56,9 @@ All notable changes are documented here. The format follows
 - Built-in structure-aware fuzzer for every parser that reads server data.
 - Benchmarks with the Milestone 0 gates, mutation testing configuration, a PHPStan rule
   that keeps the engine core free of WordPress, and CI workflows.
+
+### Fixed
+- A request that died while refreshing a repository lock no longer leaves the new lock
+  behind; leftovers of the same run are removed and never block it.
+- A `keep-within` value that is not a non-zero duration, and notification recipients that are
+  not e-mail addresses, are rejected when the settings are saved instead of failing later.

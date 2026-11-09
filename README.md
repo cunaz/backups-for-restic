@@ -1,13 +1,13 @@
 # Backups for restic
 
-> **Project status: Milestone 1, the first backup in WordPress, is implemented.** The
-> restic format engine in pure PHP is verified against the restic CLI. On top of it come the
-> setup wizard, scheduled and resumable backup jobs on WP-Cron, the streamed database dump,
-> the dashboard, Site Health and WP-CLI. The backup job is verified end to end against a TLS
-> rest-server and MariaDB; the WordPress part waits for its first run in CI. Nothing is
-> released yet. Open: live checks against a hosted server and the first mutation-testing run
-> ([roadmap](docs/05-roadmap.md)). The design documents explain *why* things are built the
-> way they are.
+> **Project status: Milestone 2, operations, is nearly complete.** The restic format engine
+> in pure PHP is verified against the restic CLI. On top of it come the setup wizard,
+> scheduled and resumable backup jobs on WP-Cron, the streamed database dump, and now
+> maintenance: retention with restic's semantics, prune without repacking, a repository check
+> that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
+> mode. Nothing is released yet. Open: live checks against a hosted server and the mutation
+> score gate ([roadmap](docs/05-roadmap.md)). The design documents explain *why* things are
+> built the way they are.
 >
 > **Distribution:** the plugin will be published in the
 > [WordPress.org plugin directory](https://wordpress.org/plugins/), which is the only
@@ -70,6 +70,8 @@ other hand, assume a server you control. This plugin closes the gap:
 | [docs/04-development-and-quality.md](docs/04-development-and-quality.md) | Repository layout, standards, tooling, tests incl. the restic conformance oracle, CI, WordPress.org releases |
 | [docs/05-roadmap.md](docs/05-roadmap.md) | Milestones, acceptance criteria, open questions, risks |
 | [docs/06-disaster-recovery.md](docs/06-disaster-recovery.md) | How to get a site back with or without the plugin |
+| [docs/guides/cron.md](docs/guides/cron.md) | Running backups with a real cron job of the hosting panel |
+| [docs/guides/rest-server.md](docs/guides/rest-server.md) | Running your own restic REST server, append-only, and cleaning up from the server |
 | [docs/appendix-a-binary-engine.md](docs/appendix-a-binary-engine.md) | Design of an optional restic-binary engine for VPS users (future option) |
 | [docs/adr/](docs/adr/) | Architecture Decision Records: the reasoning behind every non-obvious choice |
 | [docs/benchmarks/](docs/benchmarks/) | Measured throughput, unlock time and memory, with the gates they must pass |

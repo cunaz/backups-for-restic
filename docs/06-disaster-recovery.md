@@ -173,6 +173,26 @@ fastest with a control-panel cron that fetches `wp-cron.php` every minute. The d
 shows the measured rate and an estimate. Later backups touch only changed files and finish in
 minutes.
 
+## Scenario I — the check found damage
+
+The dashboard, Site Health and an e-mail report that the repository check found errors. Some
+snapshots may then not restore completely. **Do not delete anything and do not prune** until
+the cause is clear.
+
+1. On any computer with restic and the recovery kit, check everything:
+
+   ```bash
+   restic check --read-data
+   ```
+
+2. Follow restic's [troubleshooting guide](https://restic.readthedocs.io/en/stable/077_troubleshooting.html).
+   In short: `restic repair index` rebuilds index files that are damaged or miss packs;
+   `restic repair snapshots --forget` replaces snapshots that refer to lost data with copies
+   without the damaged files. Repairs delete files, so on an append-only server they need
+   deletions allowed, as in Scenario G.
+3. Start **Back up now**: the next backup uploads any data that went missing again.
+4. Start **Check now** on the dashboard. The warning disappears when a check finds no errors.
+
 ## Restore drills
 
 Quarterly, restore the latest snapshot to a scratch directory on any computer and open the

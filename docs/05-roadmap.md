@@ -128,9 +128,12 @@ Acceptance
 **Status (2026-11-09): in progress. Done: prune without repacking and the repository check
 in the engine ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic
 0.19.1; forget, prune and check as jobs with their schedules, the retention modes with
-append-only re-detection ([ADR 0010](adr/0010-retention-and-append-only.md)), REST and WP-CLI
-parity. Open: notifications, the dashboard for maintenance and alerts, the space held by
-partly used packs, `cpu_throttle`, cache management, `readme.txt` and the user guides.**
+append-only re-detection by jobs and a daily probe ([ADR 0010](adr/0010-retention-and-append-only.md)),
+REST and WP-CLI parity; e-mail notifications; the dashboard for maintenance and alerts with
+the space only a full prune reclaims; the gentle CPU mode; cache limits; `readme.txt` and
+guides for cron jobs and rest-server. Open: the seven-day schedule simulation of the
+acceptance criteria, the mutation score gate, and the German translation once the plugin is
+listed on translate.wordpress.org.**
 
 Scope
 - Schedules, retention (forget parity), prune-lite, check with sampled data, retention modes
