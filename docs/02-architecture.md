@@ -436,11 +436,12 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   detecting that deletions became possible only proposes the switch back to `plugin`, which
   needs an administrator's click.
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
-  all snapshots (tree walk through the cached tree packs), delete packs with **no**
+  all snapshots (a walk of every snapshot's trees), delete packs with **no**
   referenced blob, rewrite index files without them (new index files first, then delete the
   old ones). Partially used packs are not repacked; the dashboard shows "reclaimable by a
   full prune" and the disaster-recovery guide explains `restic prune` from any computer.
-  Prune takes an exclusive lock and runs weekly by default. It fails closed: an inconclusive
+  Prune takes an exclusive lock; the maintenance jobs that run it weekly by default are
+  planned next in Milestone 2. It fails closed: an inconclusive
   append-only probe stops it before the lock; if marking meets a used blob or tree that the
   index does not lead to, or planning finds a used pack that no index file lists, it marks
   again once with the index as the server has it under the lock (another client may have
