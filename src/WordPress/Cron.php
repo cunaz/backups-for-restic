@@ -137,21 +137,32 @@ final class Cron {
 	 */
 	public static function heartbeat( Container $container ): void {
 		if ( $container->settings()->bool( 'setup.completed' ) ) {
-			self::probe_append_only( $container, time() );
+			self::exclusively( $container, static fn () => self::probe_append_only( $container, time() ) );
 			self::start_due( $container, time() );
 		}
 		if ( null !== $container->jobs()->active() ) {
 			self::tick( $container );
 		}
-		// Under the runner lock, so that a tick reporting a finished job cannot send the same
-		// notice at the same moment; when a tick holds the lock, the next heartbeat sends it.
+		self::exclusively( $container, static fn () => $container->notifier()->heartbeat( time() ) );
+	}
+
+	/**
+	 * Runs work under the runner lock: the probe and the notifier write the same state as a
+	 * tick that reports a finished job, and must not race with it. When a tick holds the lock,
+	 * the work waits for the next heartbeat.
+	 *
+	 * @param Container $container Services.
+	 * @param \Closure  $work      Work.
+	 */
+	private static function exclusively( Container $container, \Closure $work ): void {
 		$lock = $container->runner_lock();
-		if ( $lock->acquire() ) {
-			try {
-				$container->notifier()->heartbeat( time() );
-			} finally {
-				$lock->release();
-			}
+		if ( ! $lock->acquire() ) {
+			return;
+		}
+		try {
+			$work();
+		} finally {
+			$lock->release();
 		}
 	}
 

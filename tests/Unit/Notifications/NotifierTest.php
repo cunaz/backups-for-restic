@@ -224,6 +224,7 @@ final class NotifierTest extends TestCase {
 		$notifier->job_finished( $this->job( JobType::Backup, JobState::Running, self::SETUP + 30 ), self::SETUP + 30 );
 		self::assertSame( [], $this->mailer->kinds() );
 		self::assertSame( 0, $notifier->pending() );
+		self::assertArrayNotHasKey( Notifier::OPTION, $this->options->values, 'Nothing was even written.' );
 	}
 
 	public function test_refused_notices_are_retried_five_times(): void {

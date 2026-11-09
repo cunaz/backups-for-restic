@@ -267,7 +267,12 @@ final class RestRoutes {
 		}
 		$jobs->save( $job );
 		if ( $dequeued ) {
-			( new JobEvents( $this->container ) )->state_changed( $job, JobState::Queued );
+			try {
+				( new JobEvents( $this->container ) )->state_changed( $job, JobState::Queued );
+			} catch ( \Throwable $exception ) {
+				// The job is cancelled either way; a failing hook must not turn that into an error.
+				$jobs->log( $job )->write( 'warning', 'Reporting the state change failed.', [ 'code' => JobError::from_throwable( $exception )->code ] );
+			}
 		}
 		$jobs->log( $job )->write( 'info', 'Cancellation requested.', [ 'user' => get_current_user_id() ] );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ] );

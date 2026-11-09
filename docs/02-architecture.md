@@ -199,7 +199,7 @@ from the checkpoint in the next tick.
 | **WP-Cron on traffic** | Due events run at the end of ordinary page loads. | Baseline; speed depends on visitors |
 | **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; documented with screenshots |
 | **Admin polling** | While the dashboard shows a running job it polls every 3 s; each poll performs a short tick (5 s budget, rate-limited to one per 5 s). "Keep this tab open to speed up the first backup." | Always available |
-| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes: probes for append-only mode once a day, creates due jobs from the schedule, detects expired leases, refreshes repository locks, rotates logs, sends the stale notification and retries unsent ones. | Needs any of the above to fire |
+| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes: probes for append-only mode once a day (hourly while the last answer was inconclusive), creates due jobs from the schedule, detects expired leases, refreshes repository locks, rotates logs, sends the stale notification and retries unsent ones. | Needs any of the above to fire |
 | **WP-CLI** (`wp backups-for-restic tick`, `backup --wait`) | Runs ticks in a loop until the job ends; `--wait` uses an unbounded budget. | Where the host offers WP-CLI |
 
 Only one runner may advance a job at a time: `flock()` on `<private>/runner.lock`
@@ -436,8 +436,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
   of a random, non-existent snapshot name changes nothing on any server. rest-server answers
   403 in append-only mode before it touches the filesystem and 200 otherwise; other servers
-  may answer 404. The wizard probes once, the heartbeat daily, and every forget or prune job
-  before it starts. Detecting append-only switches retention to `external` immediately;
+  may answer 404. The wizard probes once, the heartbeat daily (hourly while the last answer
+  was inconclusive), and every forget or prune job before it starts. Detecting append-only switches retention to `external` immediately;
   detecting that deletions became possible only proposes the switch back to `plugin`, which
   needs an administrator's click.
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
@@ -660,7 +660,7 @@ last jobs.
 
 Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous )`,
 `backups_for_restic_backup_succeeded( $job_id, $snapshot_id )`,
-`backups_for_restic_backup_failed( $job_id, $error_code )`, (M3)
+`backups_for_restic_backup_failed( $job_id, $error_code )` and, from Milestone 3,
 `backups_for_restic_restore_applied`; filters `backups_for_restic_capability`,
 `backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
 `backups_for_restic_database_tables_excluded`,
