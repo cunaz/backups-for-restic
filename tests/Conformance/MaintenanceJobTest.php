@@ -227,6 +227,25 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertNotSame( [], $alert['findings'] );
 	}
 
+	public function test_a_damaged_index_file_does_not_stop_the_check_that_finds_it(): void {
+		self::assertNotNull( self::$server );
+		$site       = $this->site();
+		$repository = Repository::initialize( self::$server->backend( 'damaged-index' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$this->history( $repository, $site );
+		$indexes = glob( self::$server->directory . '/data/damaged-index/index/*' );
+		self::assertIsArray( $indexes );
+		self::assertNotSame( [], $indexes );
+		file_put_contents( $indexes[0], 'not an encrypted index file' );
+		[ $runner, $store ] = $this->components( self::$server, 'damaged-index', $site, [] );
+
+		$check = $this->run_job( $runner, $store, JobType::Check );
+
+		self::assertSame( JobState::Succeeded, $check->state, (string) json_encode( $check->error ) );
+		self::assertGreaterThan( 0, $check->result['errors'] ?? 0 );
+		$codes = array_column( $this->state->get( 'check_alert' )['findings'] ?? [], 'code' );
+		self::assertContains( 'index_unreadable', $codes );
+	}
+
 	public function test_an_append_only_server_switches_retention_to_external_without_deleting(): void {
 		self::assertNotNull( self::$append_only );
 		$site       = $this->site();

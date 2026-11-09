@@ -448,7 +448,12 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   disaster-recovery guide explains it. The estimate counts trees exactly and data blobs once
   through a Bloom filter of about two bytes per indexed blob, so it fits small memory limits
   and can only be slightly high; the conformance suite compares it with restic's count of
-  unused bytes. Prune takes an exclusive lock and runs weekly by default.
+  unused bytes. Prune takes an exclusive lock and runs weekly by default. It fails closed: an
+  inconclusive append-only probe stops it before the lock; if marking meets a used blob or
+  tree that the index does not lead to, or planning finds a used pack that no index file
+  lists, it marks again once with the index as the server has it under the lock (another
+  client may have changed the repository in between), and a second mismatch stops it
+  without deleting.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),

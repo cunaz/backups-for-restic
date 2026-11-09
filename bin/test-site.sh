@@ -13,7 +13,7 @@
 #            enforces "deny all" .htaccess files as Apache does, so the plugin's private
 #            directory is protected as on typical shared hosting. PHP errors go to
 #            .tools/php-errors.log; bin/test-site-diagnostics.php logs every request's start and
-#            end to wp-content/requests.log.
+#            end to .tools/requests.log.
 #   stop     stops the web server.
 #   reset    stops the server and deletes the site and its database.
 #
@@ -136,7 +136,7 @@ start_server() {
 		trace=(strace -f -tt -A -o "$TOOLS/strace.log" --seccomp-bpf -e trace=exit_group)
 	fi
 	# The log is appended, so that a restart keeps what happened before it.
-	PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup "${trace[@]}" php \
+	BFR_SITE_REQUEST_LOG="$TOOLS/requests.log" PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup "${trace[@]}" php \
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \

@@ -25,7 +25,10 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   `keep-within` (default 2 days), never with `unsafe-allow-remove-all`.
 - **Retention mode `external`** (append-only): the plugin never deletes data, index or
   snapshot files; it still releases its own locks. The dashboard shows repository growth and
-  the disaster-recovery guide explains pruning from another computer.
+  the disaster-recovery guide explains pruning from another computer. In this mode the
+  heartbeat schedules no forget or prune, and REST and WP-CLI refuse to start them; the
+  daily probe is what notices that deletions work again. A forget or prune job that was
+  already queued detects it as well and only records the proposal.
 - **Asymmetric switching**: detecting append-only switches to `external` at once and
   notifies the administrator. Detecting that deletions became possible only *proposes* the
   switch back to `plugin`; nothing is deleted until an administrator confirms.

@@ -72,7 +72,7 @@ jobs:
           cp .tools/site-server.log logs/ 2>/dev/null || true
           cp .tools/php-errors.log logs/ 2>/dev/null || true
           cp .tools/site/wp-content/debug.log logs/ 2>/dev/null || true
-          cp .tools/site/wp-content/requests.log logs/ 2>/dev/null || true
+          cp .tools/requests.log logs/ 2>/dev/null || true
           cp .tools/strace.log logs/ 2>/dev/null || true
           # Workers that died by a signal or exited with an error, if any.
           grep -E 'killed by|exited with [1-9]|--- SIG' .tools/strace.log 2>/dev/null | grep -v 'SIGCHLD' | head -n 50 || true
