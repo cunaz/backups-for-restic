@@ -38,7 +38,7 @@ final class PackReader {
 	 */
 	public static function header_length( string $last_four_bytes, int $pack_size ): int {
 		$length = Bytes::read_uint32_le( $last_four_bytes );
-		if ( $length < Cipher::OVERHEAD || $length + 4 > $pack_size || $length > PackWriter::MAX_HEADER_SIZE ) {
+		if ( $length < Cipher::OVERHEAD || $length + 4 > $pack_size || $length + 4 > PackWriter::MAX_HEADER_SIZE ) {
 			FormatException::raise( 'Pack header length is invalid.', [ 'length' => $length ] );
 		}
 		return $length;
