@@ -9,7 +9,9 @@
 #            user to .tools/site-app-password for the integration tests.
 #   start    starts PHP's built-in web server with several workers and the limits of the
 #            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
-#            set_time_limit() disabled, as on many shared hosts.
+#            set_time_limit() disabled, as on many shared hosts. bin/test-site-router.php
+#            enforces "deny all" .htaccess files as Apache does, so the plugin's private
+#            directory is protected as on typical shared hosting.
 #   stop     stops the web server.
 #   reset    stops the server and deletes the site and its database.
 #
@@ -77,6 +79,7 @@ install_site() {
 			$config
 		);
 		$config = preg_replace_callback( "/put your unique phrase here/", static fn (): string => bin2hex( random_bytes( 32 ) ), $config );
+		$config = str_replace( "define( \x27WP_DEBUG\x27, false );", "", $config );
 		$extra = "define( \x27WP_HOME\x27, " . var_export( $url, true ) . " );\n"
 			. "define( \x27WP_SITEURL\x27, " . var_export( $url, true ) . " );\n"
 			. "define( \x27WP_ENVIRONMENT_TYPE\x27, \x27local\x27 );\n"
@@ -127,7 +130,7 @@ start_server() {
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \
-		-S "127.0.0.1:$PORT" -t "$SITE" > "$TOOLS/site-server.log" 2>&1 &
+		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" > "$TOOLS/site-server.log" 2>&1 &
 	echo $! > "$PID_FILE"
 	for _ in $(seq 1 50); do
 		if curl -fsS -o /dev/null "$URL/wp-login.php"; then
