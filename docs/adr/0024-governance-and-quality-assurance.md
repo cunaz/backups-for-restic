@@ -38,7 +38,7 @@ can operate.
      direct push.
   7. An automated review of every pull request by CodeRabbit, free for public repositories
      and configured in `.coderabbit.yaml`: project-specific review instructions per path,
-     secret and PII scanners, workflow linters, and a blocking check against personal data
+     secret and PII scanners, workflow linters, and a pre-merge check that fails on personal data
      and chat transcripts. Its findings are advice that must be answered or resolved before
      merging; it does not replace the checks above or an independent human review.
   8. Safety nets in production: a monthly check with sampled data verification, and restore
