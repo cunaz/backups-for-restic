@@ -301,6 +301,10 @@ final class PruneTest extends TestCase {
 
 	public function test_an_interrupted_prune_estimates_the_same_space(): void {
 		$this->history_with_a_forgotten_snapshot();
+		// Both files are new in the same backup, so their blobs share one data pack. Only the
+		// kept file stays used, which leaves unused data in a used pack whatever the clock does:
+		// tree packs mix used and unused trees only when timestamps differ between backups.
+		file_put_contents( $this->site . '/kept.bin', Vectors::hash_stream( 'kept', 200000 ) );
 		file_put_contents( $this->site . '/gone.bin', Vectors::hash_stream( 'gone', 300000 ) );
 		$this->back_up();
 		unlink( $this->site . '/gone.bin' );
