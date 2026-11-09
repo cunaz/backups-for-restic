@@ -23,6 +23,9 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # Stacked pull requests target the branch below them; review those as well.
+    base_branches:
+      - '.*'
   path_filters:
     # Recorded restic repositories and test vectors: data, not code.
     - '!tests/Fixtures/**'

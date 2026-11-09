@@ -84,8 +84,9 @@ cryptography, filesystem writes, HTTP requests or capability checks?
 [CodeRabbit](https://www.coderabbit.ai) reviews every pull request automatically with the
 project's instructions in [`.coderabbit.yaml`](.coderabbit.yaml). Answer or resolve its
 comments before merging; where it is wrong, say why in the thread. Its review is advice,
-the CI checks are the gate. CodeRabbit reviews pull requests against `main` by itself; for
-one based on another branch, or if it skipped one, comment `@coderabbitai review`. Never put personal data, private e-mail addresses or chat
+the CI checks are the gate. CodeRabbit also reviews stacked pull requests, which target the
+branch below them, and pauses after several reviewed pushes; comment `@coderabbitai review`
+when it skipped or paused one. Never put personal data, private e-mail addresses or chat
 transcripts into code, commits or pull requests. Commits use a noreply address: GitHub's
 `…@users.noreply.github.com`; AI-assisted commits may name the tool's noreply address in a
 `Co-Authored-By` trailer.
