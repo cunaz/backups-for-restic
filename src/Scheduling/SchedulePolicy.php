@@ -21,6 +21,27 @@ defined( 'ABSPATH' ) || exit;
 final class SchedulePolicy {
 
 	/**
+	 * After how long without a successful backup the backups count as stale: the configured
+	 * hours, but at least one and a half backup intervals, so that a weekly schedule does not
+	 * raise an alarm between two regular runs.
+	 *
+	 * @param Settings $settings Settings.
+	 * @return int|null Seconds, or null when backups run only manually.
+	 */
+	public static function stale_after( Settings $settings ): ?int {
+		$interval = match ( $settings->string( 'schedule.backup.frequency' ) ) {
+			'twice_daily' => 43200,
+			'daily'       => 86400,
+			'weekly'      => 604800,
+			default       => null,
+		};
+		if ( null === $interval ) {
+			return null;
+		}
+		return max( $settings->int( 'notifications.email.stale_after_hours' ) * 3600, intdiv( 3 * $interval, 2 ) );
+	}
+
+	/**
 	 * The most recent backup slot at or before now.
 	 *
 	 * @param Settings      $settings Settings.

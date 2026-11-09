@@ -118,6 +118,8 @@ src/
 │   ├── RestRoutes.php             REST API backups-for-restic/v1 (§13.2)
 │   ├── AdminPage.php              menu and page frame; assets/js/admin.js fills it
 │   ├── SiteHealth.php, CliCommand.php, RecoveryKit.php, Messages.php (translated texts for core codes)
+│   ├── JobEvents.php              the plugin's actions on job state changes; hands finished jobs to the notifier
+│   ├── WpMailer.php               notification e-mails: translated plain text through wp_mail()
 ├── Support/                       GoJson (Go-compatible JSON), GoQuote, Rfc3339, Bytes (strict base64, base64url, integers), Decoded, RawJson, ByteSource (+ Stream, String, Resumable), Clock (+ SystemClock), Redactor
 ├── Exception/                     PluginException and one subclass per failure the UI explains
 ├── Settings/                      Schema (every field once), Field, Settings (immutable), SettingsStore (option + wp-config.php overrides)
@@ -145,15 +147,17 @@ src/
 │   ├── Backup/                    BackupPlan, BackupRun (resumable, also inside virtual files), NodeFactory, VirtualFile
 │   ├── Restore/                   RestoreRun (resumable, refuses paths that leave the target)
 │   ├── Forget/                    Forget, RetentionPolicy, Duration: restic's ApplyPolicy semantics
-│   └── Prune.php, Check.php       (M2) prune-lite and structural check with sampled data
-├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, Step, StepProvider, TickReport
-│   └── Backup/                    BackupSteps (preflight, unlocking, backing_up, recording, releasing, cleaning_up), BackupServices
+│   ├── Prune/                     PruneRun: prune-lite, resumable, under an exclusive lock
+│   └── Check/                     CheckRun: structural check plus a sampled share of packs read
+├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, JobObserver, Step, StepProvider, TickReport
+│   ├── Backup/                    BackupSteps (preflight, unlocking, backing_up, recording, releasing, cleaning_up), BackupServices
+│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), RetentionGuard (ADR 0010)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
 ├── Restore/                       (M3) Staging, Selection, Apply, database Importer
-└── Notifications/                 (M2) Mailer
+└── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, Mailer port
 ```
 
 Entries marked (M2) or (M3) arrive with that milestone. Dependency rules:
@@ -195,7 +199,7 @@ from the checkpoint in the next tick.
 | **WP-Cron on traffic** | Due events run at the end of ordinary page loads. | Baseline; speed depends on visitors |
 | **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; documented with screenshots |
 | **Admin polling** | While the dashboard shows a running job it polls every 3 s; each poll performs a short tick (5 s budget, rate-limited to one per 5 s). "Keep this tab open to speed up the first backup." | Always available |
-| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes: creates due jobs from the schedule, detects expired leases, refreshes repository locks, rotates logs, sends stale notifications. | Needs any of the above to fire |
+| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes: probes for append-only mode once a day, creates due jobs from the schedule, detects expired leases, refreshes repository locks, rotates logs, sends the stale notification and retries unsent ones. | Needs any of the above to fire |
 | **WP-CLI** (`wp backups-for-restic tick`, `backup --wait`) | Runs ticks in a loop until the job ends; `--wait` uses an unbounded budget. | Where the host offers WP-CLI |
 
 Only one runner may advance a job at a time: `flock()` on `<private>/runner.lock`
@@ -641,10 +645,13 @@ last jobs.
 
 ### 13.5 Hooks
 
-Actions `backups_for_restic_job_state_changed`, `backups_for_restic_backup_succeeded`,
-`backups_for_restic_backup_failed`, `backups_for_restic_restore_applied`; filters
-`backups_for_restic_capability`, `backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
-`backups_for_restic_database_tables`, `backups_for_restic_notification_recipients`,
+Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous )`,
+`backups_for_restic_backup_succeeded( $job_id, $snapshot_id )`,
+`backups_for_restic_backup_failed( $job_id, $error_code )`, (M3)
+`backups_for_restic_restore_applied`; filters `backups_for_restic_capability`,
+`backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
+`backups_for_restic_database_tables_excluded`,
+`backups_for_restic_notification_recipients( $recipients, $kind )`,
 `backups_for_restic_private_dir`. No hook exposes secrets or raw repository data.
 
 ## 14. Errors, logging and observability
@@ -662,8 +669,22 @@ status, duration — never headers or bodies), both redacted and capped. Progres
 `files_done/total`, `bytes_done/total`, current directory, packs uploaded, estimated
 remaining time from the moving average of the last ticks.
 
-Notifications as before: e-mail on first failure, on stale, once on recovery; no secrets,
-no paths from log bodies.
+Notifications (`Notifications\Notifier`, FR-09) go by e-mail to the configured recipients, or
+to the site's administration address, through the `backups_for_restic_notification_recipients`
+filter:
+
+| Notice | When | Setting |
+| --- | --- | --- |
+| Failure | the first failed backup, forget, prune or check job of a streak, per job type | `on_failure` |
+| Stale | once, when no backup succeeded for `stale_after_hours` (default 36), but at least one and a half backup intervals; never with manual backups only | `on_stale` |
+| Recovery | once, when that job type succeeds again after a failure or stale notice | follows the notice it answers |
+| Check findings | every check that finds errors | `on_failure` |
+| Retention external | when a refused deletion switches retention to `external` (ADR 0010) | `on_failure` |
+
+An e-mail is built from codes, times and counts only, never from log lines, paths or
+settings, so it cannot carry a secret. Notices wait in an outbox (`backups_for_restic_notifications`)
+until `wp_mail()` accepts them, at most five attempts in two days. The actions of §13.5 fire
+on the same state changes, after the job document is saved.
 
 ## 15. Multisite and unusual layouts
 

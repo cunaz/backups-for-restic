@@ -27,10 +27,12 @@ use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
+use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
+use BackupsForRestic\Notifications\Notifier;
 use BackupsForRestic\Plugin;
 use BackupsForRestic\Secrets\ConstantOverrideStore;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
@@ -376,17 +378,46 @@ final class Container {
 			$this->exposure()
 		);
 		$backup      = new BackupSteps( $services );
-		$maintenance = new MaintenanceSteps(
-			new MaintenanceServices(
-				$services,
-				function ( string $mode ): void {
-					$this->settings_store()->update( [ 'retention.mode' => $mode ] );
-					$this->refresh();
-				}
-			),
-			$backup
-		);
-		return new Runner( $jobs, new RunnerLock( $this->private_dir()->path . '/runner.lock' ), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random() );
+		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ) ), $backup );
+		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random(), new JobEvents( $this ) );
+	}
+
+	/**
+	 * The lock that keeps runners, and the heartbeat's notifications, apart.
+	 *
+	 * @return RunnerLock Lock.
+	 */
+	public function runner_lock(): RunnerLock {
+		$this->private_dir()->ensure();
+		return new RunnerLock( $this->private_dir()->path . '/runner.lock' );
+	}
+
+	/**
+	 * Saves the retention mode after an automatic switch (ADR 0010).
+	 *
+	 * @param string $mode plugin or external.
+	 */
+	public function switch_retention( string $mode ): void {
+		$this->settings_store()->update( [ 'retention.mode' => $mode ] );
+		$this->refresh();
+	}
+
+	/**
+	 * The retention modes, for the heartbeat's probe.
+	 *
+	 * @return RetentionGuard Guard.
+	 */
+	public function retention_guard(): RetentionGuard {
+		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock() );
+	}
+
+	/**
+	 * E-mail notifications.
+	 *
+	 * @return Notifier Notifier.
+	 */
+	public function notifier(): Notifier {
+		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ) );
 	}
 
 	/**

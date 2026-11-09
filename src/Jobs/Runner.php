@@ -34,18 +34,20 @@ final class Runner {
 	/**
 	 * Creates the runner.
 	 *
-	 * @param JobStore     $store  Jobs.
-	 * @param RunnerLock   $lock   Process-level lock.
-	 * @param StepProvider $steps  Step implementations.
-	 * @param Clock        $clock  Time source.
-	 * @param RandomSource $random Randomness for lease owners.
+	 * @param JobStore         $store    Jobs.
+	 * @param RunnerLock       $lock     Process-level lock.
+	 * @param StepProvider     $steps    Step implementations.
+	 * @param Clock            $clock    Time source.
+	 * @param RandomSource     $random   Randomness for lease owners.
+	 * @param JobObserver|null $observer Told when a job starts and ends.
 	 */
 	public function __construct(
 		private readonly JobStore $store,
 		private readonly RunnerLock $lock,
 		private readonly StepProvider $steps,
 		private readonly Clock $clock,
-		private readonly RandomSource $random
+		private readonly RandomSource $random,
+		private readonly ?JobObserver $observer = null
 	) {
 	}
 
@@ -90,13 +92,17 @@ final class Runner {
 		$job->lease_owner      = bin2hex( $this->random->bytes( 8 ) );
 		$job->lease_expires_at = $now + (int) ceil( $budget ) + self::LEASE_SLACK_SECONDS;
 		$log                   = $this->store->log( $job );
-		if ( JobState::Queued === $job->state ) {
+		$started               = JobState::Queued === $job->state;
+		if ( $started ) {
 			$job->state      = JobState::Running;
 			$job->started_at = $now;
 			$job->step       = $job->type->steps()[0];
 			$log->write( 'info', 'Job started.' );
 		}
 		$this->store->save( $job );
+		if ( $started ) {
+			$this->notify( $job, JobState::Queued, $log );
+		}
 
 		try {
 			$this->run_steps( $job, $log, $deadline );
@@ -108,7 +114,29 @@ final class Runner {
 			$job->lease_expires_at = 0;
 			$this->store->save( $job );
 		}
+		if ( $job->state->is_terminal() ) {
+			$this->notify( $job, JobState::Running, $log );
+		}
 		return new TickReport( 'advanced', $job );
+	}
+
+	/**
+	 * Tells the observer about a state change. Its failure is logged and does not change the
+	 * job: a notification that cannot be sent must not turn a backup into a failure.
+	 *
+	 * @param Job      $job      Job.
+	 * @param JobState $previous State before.
+	 * @param EventLog $log      Log.
+	 */
+	private function notify( Job $job, JobState $previous, EventLog $log ): void {
+		if ( null === $this->observer ) {
+			return;
+		}
+		try {
+			$this->observer->state_changed( $job, $previous );
+		} catch ( \Throwable $exception ) {
+			$log->write( 'warning', 'Reporting the state change failed.', [ 'code' => JobError::from_throwable( $exception )->code ] );
+		}
 	}
 
 	/**

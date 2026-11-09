@@ -17,7 +17,14 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The backup services plus what only maintenance needs.
  */
-final readonly class MaintenanceServices {
+final class MaintenanceServices {
+
+	/**
+	 * Applies the retention modes; one per request, so that it remembers its own switch.
+	 *
+	 * @var RetentionGuard|null
+	 */
+	private ?RetentionGuard $guard = null;
 
 	/**
 	 * Creates the services.
@@ -25,7 +32,16 @@ final readonly class MaintenanceServices {
 	 * @param BackupServices         $common           Shared services.
 	 * @param \Closure(string): void $switch_retention Saves the retention mode (plugin or external).
 	 */
-	public function __construct( public BackupServices $common, public \Closure $switch_retention ) {
+	public function __construct( public readonly BackupServices $common, private readonly \Closure $switch_retention ) {
+	}
+
+	/**
+	 * The retention guard.
+	 *
+	 * @return RetentionGuard Guard.
+	 */
+	public function guard(): RetentionGuard {
+		return $this->guard ??= new RetentionGuard( $this->common->state, $this->common->settings->string( 'retention.mode' ), $this->switch_retention, $this->common->clock );
 	}
 
 	/**

@@ -200,13 +200,17 @@ final class RestRoutes {
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
 		}
-		if ( JobState::Queued === $job->state ) {
+		$dequeued = JobState::Queued === $job->state;
+		if ( $dequeued ) {
 			$job->state       = JobState::Cancelled;
 			$job->finished_at = time();
 		} elseif ( ! $job->state->is_terminal() ) {
 			$job->cancel_requested = true;
 		}
 		$jobs->save( $job );
+		if ( $dequeued ) {
+			( new JobEvents( $this->container ) )->state_changed( $job, JobState::Queued );
+		}
 		$jobs->log( $job )->write( 'info', 'Cancellation requested.', [ 'user' => get_current_user_id() ] );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ] );
 	}
@@ -316,10 +320,16 @@ final class RestRoutes {
 			}
 			$changes[ $path ] = $value;
 		}
+		$mode = $this->container->settings()->string( 'retention.mode' );
 		try {
-			$this->container->settings_store()->update( $changes );
+			$saved = $this->container->settings_store()->update( $changes );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
+		}
+		if ( $saved->string( 'retention.mode' ) !== $mode ) {
+			// An administrator chose the mode: that answers the proposal and the switch notice.
+			$this->container->state()->set( 'retention_proposal', [] );
+			$this->container->state()->set( 'retention_switch', [] );
 		}
 		$this->container->refresh();
 		return $this->settings();

@@ -10,6 +10,8 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Doctor\Check;
+use BackupsForRestic\Scheduling\SchedulePolicy;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -37,6 +39,10 @@ final class SiteHealth {
 					'label' => __( 'Backup environment', 'backups-for-restic' ),
 					'test'  => static fn (): array => self::environment( $container ),
 				];
+				$direct['backups_for_restic_check']       = [
+					'label' => __( 'Backup repository check', 'backups-for-restic' ),
+					'test'  => static fn (): array => self::repository_check( $container ),
+				];
 				$tests['direct']                          = $direct;
 				return $tests;
 			}
@@ -57,11 +63,12 @@ final class SiteHealth {
 		$settings = $container->settings();
 		$last     = $container->state()->get( 'last_backup' );
 		$finished = is_int( $last['finished'] ?? null ) ? $last['finished'] : 0;
-		$limit    = $settings->int( 'notifications.email.stale_after_hours' ) * HOUR_IN_SECONDS;
+		$limit    = SchedulePolicy::stale_after( $settings );
+		$since    = 0 === $finished ? (int) strtotime( $settings->string( 'setup.recovery_kit_acknowledged_at' ) ) : $finished;
 		if ( ! $settings->bool( 'setup.completed' ) ) {
 			return self::result( 'backups_for_restic_backup', 'recommended', __( 'Backups are not set up', 'backups-for-restic' ), __( 'Finish the setup wizard to back up files and database.', 'backups-for-restic' ) );
 		}
-		if ( 'manual' !== $settings->string( 'schedule.backup.frequency' ) && $finished < time() - $limit ) {
+		if ( null !== $limit && $since < time() - $limit ) {
 			return self::result(
 				'backups_for_restic_backup',
 				'critical',
@@ -80,6 +87,41 @@ final class SiteHealth {
 				? ''
 				/* translators: %s: human-readable time difference such as "5 hours". */
 				: sprintf( __( 'The last backup finished %s ago.', 'backups-for-restic' ), human_time_diff( $finished ) )
+		);
+	}
+
+	/**
+	 * The result of the last repository check (ADR 0022).
+	 *
+	 * @param Container $container Services.
+	 * @return array<string, mixed> Site Health result.
+	 */
+	private static function repository_check( Container $container ): array {
+		$state = $container->state();
+		$alert = $state->get( 'check_alert' );
+		if ( [] !== $alert ) {
+			$errors = Decoded::int( $alert['errors'] ?? null );
+			return self::result(
+				'backups_for_restic_check',
+				'critical',
+				__( 'The backup repository is damaged', 'backups-for-restic' ),
+				sprintf(
+					/* translators: 1: number of errors, 2: human-readable time difference such as "3 days". */
+					_n( 'The repository check %2$s ago found %1$d error. Some snapshots may not restore completely; the backup dashboard lists the findings.', 'The repository check %2$s ago found %1$d errors. Some snapshots may not restore completely; the backup dashboard lists the findings.', $errors, 'backups-for-restic' ),
+					$errors,
+					human_time_diff( Decoded::int( $alert['at'] ?? null ) )
+				)
+			);
+		}
+		$finished = Decoded::int( $state->get( 'last_check' )['finished'] ?? null );
+		return self::result(
+			'backups_for_restic_check',
+			'good',
+			__( 'The backup repository passed its last check', 'backups-for-restic' ),
+			0 === $finished
+				? __( 'No check has run yet. The schedule checks the repository once a month by default.', 'backups-for-restic' )
+				/* translators: %s: human-readable time difference such as "5 days". */
+				: sprintf( __( 'The last check finished %s ago without errors.', 'backups-for-restic' ), human_time_diff( $finished ) )
 		);
 	}
 
