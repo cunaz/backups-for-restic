@@ -19,7 +19,13 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   403 or 405 → append-only; 401 → credentials invalid; anything else → unknown, and the
   wizard asks. BorgBase's answers are verified by the live smoke tests (ADR 0025).
 - **When**: in the wizard, daily by the heartbeat, and at the start of every forget or
-  prune job. A 403 during forget or prune counts as a detection.
+  prune job. A 403 during forget or prune counts as a detection. After an inconclusive
+  answer (a timeout, a 5xx, an unexpected status), the heartbeat probes again hourly
+  instead of daily until it gets a definite answer. An unknown status changes neither the
+  retention mode nor the proposal, and the dashboard shows it as unknown; retrying hourly
+  ends that state soon after a passing outage, at the cost of one small request an hour.
+  Forget and prune do not depend on it: each job probes for itself, and prune refuses to
+  start on an inconclusive answer.
 - **Retention mode `plugin`** (deletions allowed): forget after each successful backup and
   prune-lite weekly, scoped by host and tag, always with a non-empty policy that includes
   `keep-within` (default 2 days), never with `unsafe-allow-remove-all`.
