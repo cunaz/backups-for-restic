@@ -52,6 +52,9 @@ jobs:
         run: sudo systemctl start mysql.service
       - name: Install strace
         run: command -v strace || sudo apt-get install -y --no-install-recommends strace
+      - name: Keep core dumps of crashed PHP processes
+        # The test server's PHP processes have died by SIGSEGV; a core dump shows where.
+        run: sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/core.%e.%p"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tools/bin
@@ -59,16 +62,32 @@ jobs:
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh restic rest-server
       - run: bin/test-site.sh install
-      - run: bin/test-site.sh start
+      - run: ulimit -c "$(ulimit -Hc)" && bin/test-site.sh start
       - name: Integration tests
         env:
           BFR_SITE_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
           BFR_DB_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
-        run: vendor/bin/phpunit -c phpunit-integration.xml.dist
+        # The killed-tick test restarts the server from PHPUnit, which passes the limit on.
+        run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist
       - name: How the server's workers ended
         if: always()
         # Signals and exits other than the clean ones, from strace (BFR_SITE_TRACE).
         run: grep -E 'killed by|exited with [1-9]|--- SIG' .tools/strace.log 2>/dev/null | grep -v -E 'SIGCHLD|SIGTERM' | head -n 50 || true
+      - name: Backtraces of crashed PHP processes
+        if: always()
+        run: |
+          shopt -s nullglob
+          cores=( "$RUNNER_TEMP"/core.* )
+          if [ ${#cores[@]} -eq 0 ]; then
+            echo 'No PHP process left a core dump.'
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends gdb > /dev/null
+          for core in "${cores[@]}"; do
+            echo "::group::$core"
+            gdb -batch -nx -ex 'bt 60' -ex 'info sharedlibrary' "$(command -v php)" "$core" 2>&1 | grep -v -E '^\[(New|Thread) ' | head -n 200
+            echo '::endgroup::'
+          done
       - name: Collect logs
         if: failure()
         run: |

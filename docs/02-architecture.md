@@ -430,7 +430,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   `last`, `hourly` (year-month-day-hour), `daily`, `weekly` (ISO year-week), `monthly`,
   `yearly`, each keeping the first snapshot of a new bucket value while counts remain and
   always the oldest snapshot while a bucket has counts left; `--keep-within` relative to the
-  latest snapshot; `--keep-tag`. Scoped to the plugin's host and tags; a dry run is shown in
+  newest snapshot that is not in the future, so that one snapshot from a wrong clock does
+  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. Scoped to the plugin's host and tags; a dry run is shown in
   the UI before the first automatic run. Deletion is `DELETE snapshots/<id>`; HTTP 403 →
   `repository_append_only` ([ADR 0010](adr/0010-retention-and-append-only.md)).
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
