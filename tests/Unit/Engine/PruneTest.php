@@ -20,6 +20,7 @@ use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
+use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
@@ -253,9 +254,19 @@ final class PruneTest extends TestCase {
 
 	public function test_refuses_without_deleting_when_a_used_blob_is_missing_from_the_index(): void {
 		$this->history_with_a_forgotten_snapshot();
-		$this->back_up();
-		$indexes = array_keys( $this->backend->list( ObjectType::Index ) );
-		$this->backend->delete( ObjectType::Index, end( $indexes ) );
+		// Remove every index file that lists the root tree of a remaining snapshot.
+		$root = array_values( $this->repository->snapshots() )[0]->tree;
+		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+			foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $entries ) {
+				foreach ( $entries as $entry ) {
+					if ( $entry->id->equals( $root ) ) {
+						$this->backend->delete( ObjectType::Index, $name );
+						continue 3;
+					}
+				}
+			}
+		}
+		self::assertFalse( $this->repository->load_index()->has( $root, BlobType::Tree ) );
 		$data = array_keys( $this->backend->list( ObjectType::Data ) );
 
 		$work = $this->work_dir();
