@@ -216,7 +216,7 @@ final class BackupJobTest extends TestCase {
 	private function import( array $files ): void {
 		self::$admin?->execute( 'CREATE DATABASE `' . self::$database . '_restored` CHARACTER SET utf8mb4' );
 		sort( $files );
-		$process = proc_open( [ is_executable( '/usr/bin/mariadb' ) ? '/usr/bin/mariadb' : '/usr/bin/mysql', '-u', 'root', self::$database . '_restored' ], [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
+		$process = proc_open( MysqliConnection::client( self::$database . '_restored' ), [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
 		self::assertIsResource( $process );
 		foreach ( $files as $file ) {
 			fwrite( $pipes[0], (string) file_get_contents( $file ) );

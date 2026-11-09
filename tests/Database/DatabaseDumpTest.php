@@ -210,16 +210,7 @@ final class DatabaseDumpTest extends TestCase {
 	 */
 	private function import( array $files ): void {
 		sort( $files );
-		$client = is_executable( '/usr/bin/mariadb' ) ? '/usr/bin/mariadb' : '/usr/bin/mysql';
-		$args   = [ $client, '-u', MysqliConnection::environment( 'BFR_TEST_MYSQL_USER', 'root' ) ];
-		if ( '' !== (string) getenv( 'BFR_TEST_MYSQL_PASSWORD' ) ) {
-			$args[] = '-p' . getenv( 'BFR_TEST_MYSQL_PASSWORD' );
-		}
-		if ( '' !== (string) getenv( 'BFR_TEST_MYSQL_HOST' ) && 'localhost' !== getenv( 'BFR_TEST_MYSQL_HOST' ) ) {
-			array_push( $args, '-h', (string) getenv( 'BFR_TEST_MYSQL_HOST' ) );
-		}
-		$args[]  = self::$target;
-		$process = proc_open( $args, [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
+		$process = proc_open( MysqliConnection::client( self::$target ), [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
 		self::assertIsResource( $process );
 		foreach ( $files as $file ) {
 			fwrite( $pipes[0], (string) file_get_contents( $file ) );
