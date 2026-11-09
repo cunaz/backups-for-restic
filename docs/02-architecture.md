@@ -449,9 +449,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),
-  verify header, blob tags and SHA-256 ids. Monthly by default; findings raise a persistent
-  critical notice and are reported in Site Health. Repairs are never attempted
-  automatically; the guide points to `restic repair`.
+  verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
+  never split a blob, so memory does not grow with the pack size; a pack whose reading ends
+  the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
+  default; findings raise a persistent critical notice and are reported in Site Health.
+  Repairs are never attempted automatically; the guide points to `restic repair`.
 - **Cache hygiene**: tree-pack cache and index cache size-capped (default 256 MiB), oldest
   first.
 - **Locks**: stale locks (older than 30 minutes) from this site are removed automatically
