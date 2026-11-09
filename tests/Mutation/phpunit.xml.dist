@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Configuration for mutation testing only (infection.json5.dist): the tests of the mutated
+    code, so that each mutant runs in seconds. Engine-level tests that also reach this code,
+    and the slow group with restic's real scrypt cost, stay with the main configuration. Kept
+    apart from phpunit.xml.dist because PHPUnit refuses a file in two suites of one file.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="../../vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="../bootstrap.php"
+         cacheDirectory="../../.phpunit.cache/mutation"
+         colors="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         beStrictAboutOutputDuringTests="true">
+    <php>
+        <ini name="memory_limit" value="128M"/>
+    </php>
+    <testsuites>
+        <testsuite name="mutation">
+            <directory>../Unit/Crypto</directory>
+            <directory>../Unit/Format</directory>
+            <directory>../Unit/Support</directory>
+            <directory>../Unit/Fuzz</directory>
+            <file>../Unit/Engine/ForgetTest.php</file>
+            <file>../Unit/Engine/ForgetRunTest.php</file>
+        </testsuite>
+    </testsuites>
+    <groups>
+        <exclude>
+            <group>slow</group>
+        </exclude>
+    </groups>
+    <source>
+        <include>
+            <directory>../../src</directory>
+        </include>
+    </source>
+</phpunit>

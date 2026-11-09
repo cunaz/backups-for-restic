@@ -24,16 +24,6 @@
         <testsuite name="conformance">
             <directory>tests/Conformance</directory>
         </testsuite>
-        <!-- Mutation testing (infection.json5.dist): the tests of the mutated code, so that each
-             mutant runs in seconds; engine-level tests that also reach this code stay out. -->
-        <testsuite name="mutation">
-            <directory>tests/Unit/Crypto</directory>
-            <directory>tests/Unit/Format</directory>
-            <directory>tests/Unit/Support</directory>
-            <directory>tests/Unit/Fuzz</directory>
-            <file>tests/Unit/Engine/ForgetTest.php</file>
-            <file>tests/Unit/Engine/ForgetRunTest.php</file>
-        </testsuite>
     </testsuites>
     <source>
         <include>
