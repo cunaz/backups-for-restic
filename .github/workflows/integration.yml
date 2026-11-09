@@ -65,6 +65,10 @@ jobs:
           BFR_SITE_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
           BFR_DB_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
         run: vendor/bin/phpunit -c phpunit-integration.xml.dist
+      - name: How the server's workers ended
+        if: always()
+        # Signals and exits other than the clean ones, from strace (BFR_SITE_TRACE).
+        run: grep -E 'killed by|exited with [1-9]|--- SIG' .tools/strace.log 2>/dev/null | grep -v -E 'SIGCHLD|SIGTERM' | head -n 50 || true
       - name: Collect logs
         if: failure()
         run: |

@@ -12,6 +12,15 @@ loopback requests. The native engine needs many short slices of work (ticks) per
 - **Loopback chaining**: while work remains, the runner schedules `backups_for_restic_tick` for
   now and calls `spawn_cron()`, so the next tick starts within a second. WordPress' own
   `doing_cron` lock and the plugin's `flock` prevent overlap. Chaining can be disabled.
+  Only a tick that advanced a job which still has work chains (`TickReport::should_chain`).
+  A tick that found the runner busy, or a job waiting out its back-off after a retryable
+  error (30 s, doubling up to five failures), does not chain: otherwise every request would
+  start the next one until the lease or the back-off ends, which a host can count as a
+  request flood.
+- **Resuming**: a job that no request carries on is never lost. Its state is saved after
+  every tick, and a tick holds the job's lease for its budget plus 60 s. When a chain breaks
+  (a killed request, a blocked loopback, a back-off), the next heartbeat, admin poll or cron
+  ping takes the job up again once the lease has expired or the back-off has passed.
 - **External cron ping**: the documentation and the Doctor recommend a control-panel or
   external cron fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, optionally with
   `DISABLE_WP_CRON`. No plugin-specific URL or token exists.
