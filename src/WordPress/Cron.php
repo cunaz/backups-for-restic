@@ -97,7 +97,7 @@ final class Cron {
 			set_time_limit( (int) ceil( $budget ) + 30 );
 		}
 		$report = $container->runner()->tick( $budget );
-		if ( $chain && $report->has_more_work() && 'off' !== $container->settings()->string( 'advanced.loopback_chaining' ) ) {
+		if ( $chain && $report->should_chain() && 'off' !== $container->settings()->string( 'advanced.loopback_chaining' ) ) {
 			self::chain();
 		}
 		return $report;

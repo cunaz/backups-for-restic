@@ -33,4 +33,15 @@ final readonly class TickReport {
 	public function has_more_work(): bool {
 		return null !== $this->job && ! $this->job->state->is_terminal();
 	}
+
+	/**
+	 * Whether this process should start the next tick right away: it advanced the job and work
+	 * remains. A busy or waiting report must not chain, or every request would start the next
+	 * one until the other tick's lease or the back-off ends.
+	 *
+	 * @return bool True after a tick that did work on an unfinished job.
+	 */
+	public function should_chain(): bool {
+		return 'advanced' === $this->status && $this->has_more_work();
+	}
 }

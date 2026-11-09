@@ -65,8 +65,16 @@ final class MysqliConnection implements Connection {
 		$command  = [ is_executable( '/usr/bin/mariadb' ) ? '/usr/bin/mariadb' : '/usr/bin/mysql', '-u', self::environment( 'BFR_TEST_MYSQL_USER', 'root' ) ];
 		$host     = self::environment( 'BFR_TEST_MYSQL_HOST', 'localhost' );
 		$password = self::environment( 'BFR_TEST_MYSQL_PASSWORD', '' );
-		if ( 'localhost' !== $host ) {
+		// mysqli accepts host:port; the client needs the port on its own, and TCP for localhost.
+		$port = null;
+		if ( 1 === preg_match( '/^([^:]+):(\d+)$/', $host, $match ) ) {
+			[ , $host, $port ] = $match;
+		}
+		if ( 'localhost' !== $host || null !== $port ) {
 			array_push( $command, '-h', $host );
+		}
+		if ( null !== $port ) {
+			array_push( $command, '-P', $port, '--protocol=TCP' );
 		}
 		if ( '' !== $password ) {
 			$command[] = '-p' . $password;

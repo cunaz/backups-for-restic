@@ -11,7 +11,9 @@
 #            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
 #            set_time_limit() disabled, as on many shared hosts. bin/test-site-router.php
 #            enforces "deny all" .htaccess files as Apache does, so the plugin's private
-#            directory is protected as on typical shared hosting.
+#            directory is protected as on typical shared hosting. PHP errors go to
+#            .tools/php-errors.log; bin/test-site-diagnostics.php logs every request's start and
+#            end to wp-content/requests.log.
 #   stop     stops the web server.
 #   reset    stops the server and deletes the site and its database.
 #
@@ -92,6 +94,8 @@ install_site() {
 	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"
 
 	ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
+	mkdir -p "$SITE/wp-content/mu-plugins"
+	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
 
 	php -r '
 		define( "WP_INSTALLING", true );
@@ -130,6 +134,8 @@ start_server() {
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \
+		-d log_errors=1 \
+		-d error_log="$TOOLS/php-errors.log" \
 		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" >> "$TOOLS/site-server.log" 2>&1 &
 	echo $! > "$PID_FILE"
 	for _ in $(seq 1 50); do

@@ -36,8 +36,8 @@ reviews:
         instructions: >-
           Fail if the pull request adds personal data or conversation content to a file,
           a commit message or the description: names of private persons; e-mail addresses
-          other than noreply addresses (ending in @users.noreply.github.com, or
-          noreply@anthropic.com in a Co-Authored-By trailer) and addresses at example.com,
+          other than noreply addresses (ending in @users.noreply.github.com, or the noreply
+          address of a tool in a Co-Authored-By trailer) and addresses at example.com,
           example.net or example.org; home-directory paths; pasted chat transcripts; or
           links to a recorded conversation, which contain a session, chat, share or
           conversation path (for example claude.ai/code/session_..., claude.ai/chat/...,
