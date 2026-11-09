@@ -440,7 +440,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   referenced blob, rewrite index files without them (new index files first, then delete the
   old ones). Partially used packs are not repacked; the dashboard shows "reclaimable by a
   full prune" and the disaster-recovery guide explains `restic prune` from any computer.
-  Prune takes an exclusive lock and runs weekly by default.
+  Prune takes an exclusive lock and runs weekly by default. It fails closed: an inconclusive
+  append-only probe stops it before the lock; if marking meets a used blob or tree that the
+  index does not lead to, or planning finds a used pack that no index file lists, it marks
+  again once with the index as the server has it under the lock (another client may have
+  changed the repository in between), and a second mismatch stops it without deleting.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),
