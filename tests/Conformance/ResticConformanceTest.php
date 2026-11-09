@@ -17,6 +17,7 @@ use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Backup\VirtualFile;
 use BackupsForRestic\Engine\Forget\Forget;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\Prune\PruneRun;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Exception\AlreadyExists;
@@ -142,6 +143,54 @@ final class ResticConformanceTest extends TestCase {
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
 		$diff = $cli->must( [ 'diff', $first->hex(), $second->hex() ] );
 		self::assertMatchesRegularExpression( '#^M\s+' . preg_quote( $site, '#' ) . '/index\.php$#m', $diff );
+	}
+
+	/**
+	 * Packs as restic's prune classifies them (restic prune --dry-run --max-unused unlimited -v).
+	 *
+	 * @param ResticCli $cli restic.
+	 * @return array<string, int> Counts of totally used, partly used and unused packs.
+	 */
+	private function prune_statistics( ResticCli $cli ): array {
+		$output = $cli->must( [ 'prune', '--dry-run', '--max-unused', 'unlimited', '-v' ] );
+		preg_match_all( '/^(totally used packs|partly used packs|unused packs):\s+(\d+)$/m', $output, $matches, PREG_SET_ORDER );
+		$statistics = [];
+		foreach ( $matches as $match ) {
+			$statistics[ $match[1] ] = (int) $match[2];
+		}
+		self::assertCount( 3, $statistics, $output );
+		return $statistics;
+	}
+
+	public function test_prune_deletes_what_restic_calls_unused_and_restic_accepts_the_result(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site-prune' );
+		TempDir::fixture( $site, 2 * 1048576 );
+		$repository = Repository::initialize( $this->server()->backend( 'prune' ), self::PASSWORD, $this->identity(), new SystemRandom() );
+		$cli        = new ResticCli( $this->server(), 'prune', self::PASSWORD );
+
+		$this->backup( $repository, $site );
+		file_put_contents( $site . '/unique.bin', random_bytes( 12 * 1048576 ) );
+		$middle = $this->backup( $repository, $site );
+		unlink( $site . '/unique.bin' );
+		$latest = $this->backup( $repository, $site );
+		$cli->must( [ 'forget', $middle->hex() ] );
+		$before = $this->prune_statistics( $cli );
+		self::assertGreaterThan( 0, $before['unused packs'] );
+
+		$this->cleanup[] = $work = TempDir::create( 'prune' );
+		$run             = PruneRun::start( $repository, $work . '/run', $this->identity(), new SystemClock(), new SystemRandom() );
+		while ( ! $run->advance( microtime( true ) + 20 ) ) {
+			continue;
+		}
+
+		self::assertSame( $before['unused packs'], $run->result()['packs_deleted'], 'The plugin deletes exactly the packs restic calls unused.' );
+		self::assertSame( $before['totally used packs'] + $before['partly used packs'], $run->result()['packs_kept'] );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
+		self::assertSame( 0, $this->prune_statistics( $cli )['unused packs'] );
+
+		$this->cleanup[] = $target = TempDir::create( 'restic-restore' );
+		$cli->must( [ 'restore', $latest->hex(), '--target', $target ] );
+		self::assertSame( TempDir::describe( $site ), TempDir::describe( $target . $site ) );
 	}
 
 	/**
