@@ -60,5 +60,14 @@ All notable changes are documented here. The format follows
 ### Fixed
 - A request that died while refreshing a repository lock no longer leaves the new lock
   behind; leftovers of the same run are removed and never block it.
+- Forget counts `keep-within` back from the newest snapshot that is not in the future, as
+  restic does; a snapshot from a wrong clock no longer makes it remove snapshots that
+  restic keeps.
+- Timestamps before the year 100, such as Go's zero time, are read exactly instead of as
+  two-digit years, and dates that do not exist are refused.
+- Pack headers longer than restic allows are refused.
+- A prune that is retried after a failed read keeps every pack that a snapshot uses, and
+  a long prune or check refreshes its lock while it works.
+- Cancelling a forget releases its lock even when the retention settings became unusable.
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
