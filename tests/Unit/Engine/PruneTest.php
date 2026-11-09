@@ -104,6 +104,26 @@ final class PruneTest extends TestCase {
 	}
 
 	/**
+	 * The forgotten history, then two files that are new in the same backup and so share one
+	 * data pack; only the kept one is in the snapshot that is left. That leaves unused data in
+	 * a used pack whatever the clock does: tree packs mix used and unused trees only when
+	 * timestamps differ between backups.
+	 */
+	private function history_with_waste_in_a_used_pack(): void {
+		$this->history_with_a_forgotten_snapshot();
+		file_put_contents( $this->site . '/kept.bin', Vectors::hash_stream( 'kept', 200000 ) );
+		file_put_contents( $this->site . '/gone.bin', Vectors::hash_stream( 'gone', 300000 ) );
+		$this->back_up();
+		unlink( $this->site . '/gone.bin' );
+		$latest = $this->back_up();
+		foreach ( array_keys( $this->repository->snapshots() ) as $hex ) {
+			if ( $hex !== $latest->hex() ) {
+				Forget::delete( $this->repository, [ (string) $hex ] );
+			}
+		}
+	}
+
+	/**
 	 * Data blobs of a file in the site directory of a snapshot.
 	 *
 	 * @param Id     $snapshot Snapshot.
@@ -301,20 +321,7 @@ final class PruneTest extends TestCase {
 	}
 
 	public function test_an_interrupted_prune_estimates_the_same_space(): void {
-		$this->history_with_a_forgotten_snapshot();
-		// Both files are new in the same backup, so their blobs share one data pack. Only the
-		// kept file stays used, which leaves unused data in a used pack whatever the clock does:
-		// tree packs mix used and unused trees only when timestamps differ between backups.
-		file_put_contents( $this->site . '/kept.bin', Vectors::hash_stream( 'kept', 200000 ) );
-		file_put_contents( $this->site . '/gone.bin', Vectors::hash_stream( 'gone', 300000 ) );
-		$this->back_up();
-		unlink( $this->site . '/gone.bin' );
-		$latest = $this->back_up();
-		foreach ( $this->repository->snapshots() as $hex => $snapshot ) {
-			if ( $hex !== $latest->hex() ) {
-				Forget::delete( $this->repository, [ $hex ] );
-			}
-		}
+		$this->history_with_waste_in_a_used_pack();
 		$expected = $this->unused_bytes_in_used_packs();
 		self::assertGreaterThan( 0, $expected );
 		self::assertSame( $expected, $this->prune( null, true )->result()['reclaimable_bytes'] );
@@ -501,8 +508,9 @@ final class PruneTest extends TestCase {
 	}
 
 	public function test_a_tree_that_failed_to_load_is_walked_when_the_same_run_tries_again(): void {
-		$this->history_with_a_forgotten_snapshot();
+		$this->history_with_waste_in_a_used_pack();
 		$used       = array_keys( $this->used_packs() );
+		$wasted     = $this->unused_bytes_in_used_packs();
 		$failures   = 2;
 		$backend    = new HookedBackend(
 			$this->backend,
@@ -529,6 +537,8 @@ final class PruneTest extends TestCase {
 		sort( $actual );
 		sort( $used );
 		self::assertSame( $used, $actual, 'Every used pack is still there.' );
+		self::assertGreaterThan( 0, $wasted );
+		self::assertSame( $wasted, $run->result()['reclaimable_bytes'], 'A tree tried again counts once in the estimate.' );
 	}
 
 	public function test_releases_its_lock_when_the_snapshots_cannot_be_read(): void {

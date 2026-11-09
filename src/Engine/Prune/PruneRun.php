@@ -587,21 +587,22 @@ final class PruneRun {
 		try {
 			$index = $this->index();
 			$tree  = Id::from_hex( $hex );
-			if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
-				$this->seen[ $hex ] = true;
-				return;
-			}
-			$nodes = $this->repository->load_tree( $index, $tree );
+			// A tree the index does not know is counted as missing by mark() below.
+			$nodes = null === $index->find( $tree, BlobType::Tree ) ? [] : $this->repository->load_tree( $index, $tree );
 		} catch ( NotFound ) {
 			$this->mark_again( 'A tree is missing on the server; prune stopped without deleting anything. Run a check.', [ 'tree' => $hex ] );
 			return;
 		} catch ( \Throwable $failure ) {
-			// The tree stays queued: if the caller tries again on this run, the tree is still
-			// walked, and the packs of its blobs are not taken for unused ones.
+			// The tree stays queued and unmarked: if the caller tries again on this run, the
+			// tree is still walked, its packs are not taken for unused ones, and the estimate
+			// counts it once.
 			$this->frontier[] = $hex;
 			throw $failure;
 		}
 		$this->seen[ $hex ] = true;
+		if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
+			return;
+		}
 		foreach ( $nodes as $node ) {
 			if ( null !== $node->subtree && ! isset( $this->seen[ $node->subtree->hex() ] ) ) {
 				$this->frontier[] = $node->subtree->hex();
