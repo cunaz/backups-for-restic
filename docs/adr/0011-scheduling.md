@@ -19,6 +19,12 @@ loopback requests. The native engine needs many short slices of work (ticks) per
 - A recurring heartbeat (5 minutes) creates due jobs, detects expired leases, refreshes
   repository locks and sends stale notifications.
 - WP-CLI (`tick`, `backup --wait`) is supported where available but never required.
+- **Gentle CPU mode** (`advanced.cpu_throttle = gentle`, for hosts that limit CPU time per
+  request or per minute): each tick gets half the budget, and the engine rests a tenth of a
+  second after every quarter second of work, between units of work and inside the long
+  ones (the chunks of a large file, the pieces of a large pack). Rests lower the average
+  load; they cap no single stretch of work, so a host's per-request limits still apply.
+  Jobs take longer and resume as above.
 
 ## Consequences
 - Works everywhere WordPress works; fastest with chaining or a cron ping.

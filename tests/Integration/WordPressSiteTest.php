@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Integration;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\RestServer;
 use BackupsForRestic\Tests\Support\ResticCli;
@@ -321,5 +322,23 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 'Check', $dashboard['recent_jobs'][0]['type_label'] ?? null, $raw );
 		$cli = new ResticCli( self::$server, 'site', self::$repository_password );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
+
+		// While a tick holds the runner lock, the cache is not deleted under it.
+		$lock = fopen( self::$site . '/wp-content/' . PrivateDirectory::NAME . '/runner.lock', 'c' );
+		self::assertNotFalse( $lock );
+		self::assertTrue( flock( $lock, LOCK_EX | LOCK_NB ) );
+		[ $status, , $raw ] = self::api( 'DELETE', '/cache' );
+		flock( $lock, LOCK_UN );
+		fclose( $lock );
+		self::assertSame( 409, $status, $raw );
+		for ( $attempt = 0; $attempt < 10; $attempt++ ) {
+			[ $status, $cleared, $raw ] = self::api( 'DELETE', '/cache' );
+			if ( 409 !== $status ) {
+				break;
+			}
+			sleep( 1 ); // A heartbeat may hold the lock for a moment.
+		}
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
 }

@@ -44,8 +44,11 @@ Where the panel can only run PHP files, run WordPress' cron script directly, wit
 your WordPress installation:
 
 ```bash
-php /home/USER/public_html/wp-cron.php
+php <wordpress-path>/wp-cron.php
 ```
+
+Replace `<wordpress-path>` with the folder that holds `wp-config.php`; the file manager of
+your hosting panel shows it.
 
 ## Optional: turn off WP-Cron on visits
 

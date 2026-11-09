@@ -401,15 +401,25 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Deletes the local cache; the next job rebuilds it from the repository.
+	 * Deletes the local cache; the next job rebuilds it from the repository. The runner lock is
+	 * held from the check for jobs to the end of the deletion, so no tick can start in between
+	 * and write to the cache while it is removed.
 	 *
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function clear_cache(): \WP_REST_Response|\WP_Error {
-		if ( null !== $this->container->jobs()->active() ) {
+		$lock = $this->container->runner_lock();
+		if ( ! $lock->acquire() ) {
 			return $this->error( 'job_conflict', 409 );
 		}
-		$this->container->cache()->clear();
+		try {
+			if ( null !== $this->container->jobs()->active() ) {
+				return $this->error( 'job_conflict', 409 );
+			}
+			$this->container->cache()->clear();
+		} finally {
+			$lock->release();
+		}
 		return $this->respond( [ 'cache_bytes' => $this->container->cache()->size() ] );
 	}
 
