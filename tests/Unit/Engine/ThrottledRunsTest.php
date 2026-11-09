@@ -62,6 +62,30 @@ final class ThrottledRunsTest extends TestCase {
 		self::assertGreaterThanOrEqual( 10, $this->rests, 'Rests between the chunks of one file, not only between files.' );
 	}
 
+	public function test_a_large_pack_rests_between_its_pieces_when_it_is_checked(): void {
+		$this->cleanup[] = $site = TempDir::create( 'large' );
+		file_put_contents( $site . '/large.bin', random_bytes( 12 * 1048576 ) );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$identity        = new Identity( 'example.com', 'www-data' );
+		$repository      = Repository::initialize( new InMemoryBackend(), 'throttle password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$backup          = BackupRun::start( $repository, new BackupPlan( [ $site ], [ 'backups-for-restic' ] ), $work . '/backup', $identity, new SystemClock() );
+		while ( ! $backup->advance( INF ) ) {
+			continue;
+		}
+
+		$check = CheckRun::start( $repository, $work . '/check', $identity, new SystemClock(), new SystemRandom(), 100, null, 1048576 );
+		while ( 'read' !== $check->progress()['phase'] ) {
+			$check->advance( 0.0 );
+		}
+		while ( ! $check->advance( INF, $this->throttle() ) ) {
+			continue;
+		}
+
+		self::assertSame( 0, $check->result()['errors'] );
+		// One data pack of about 12 MiB read in pieces of 1 MiB, and a small tree pack.
+		self::assertGreaterThanOrEqual( 10, $this->rests, 'Rests between the pieces of one pack, not only between packs.' );
+	}
+
 	public function test_backup_and_check_rest_between_units_and_finish(): void {
 		$this->cleanup[] = $site = TempDir::create( 'site' );
 		TempDir::fixture( $site, 1048576 );

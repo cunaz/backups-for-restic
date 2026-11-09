@@ -85,6 +85,13 @@ final class CheckRun {
 	private Locking $locking;
 
 	/**
+	 * Pauses for the gentle CPU mode during the current call, if any.
+	 *
+	 * @var Throttle|null
+	 */
+	private ?Throttle $throttle = null;
+
+	/**
 	 * Checkpoint fields; see persist() for the shape.
 	 *
 	 * @var array{pid: int, lock: string, locked_at: int, phase: string, position: int, percent: int, piece: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
@@ -241,6 +248,7 @@ final class CheckRun {
 		if ( 'done' === $this->state['phase'] ) {
 			return true;
 		}
+		$this->throttle = $throttle;
 		$this->keep_lock();
 		do {
 			$this->step();
@@ -576,6 +584,7 @@ final class CheckRun {
 				}
 				$offset = $end;
 				$next   = $last;
+				$this->throttle?->pause(); // A large pack is a long unit of work.
 			}
 		} catch ( NotFound ) {
 			$this->pack_missing( $pack );
