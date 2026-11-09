@@ -177,7 +177,7 @@ final class SiteHealth {
 			],
 			'append_only' => [
 				'label' => __( 'Append-only', 'backups-for-restic' ),
-				'value' => $settings->string( 'repository.append_only' ),
+				'value' => $container->append_only(),
 			],
 			'private_dir' => [
 				'label'   => __( 'Working directory', 'backups-for-restic' ),

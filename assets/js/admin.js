@@ -8,7 +8,7 @@
 ( function () {
 	'use strict';
 
-	const { __, sprintf } = wp.i18n;
+	const { __, _n, sprintf } = wp.i18n;
 	const config = window.backupsForRestic || {};
 	const DOMAIN = 'backups-for-restic';
 	const POLL_MS = 3000;
@@ -122,6 +122,24 @@
 				] )
 			);
 		}
+		if ( 'number' === typeof progress.packs_to_read && progress.packs_to_read > 0 ) {
+			lines.push( el( 'progress', { max: progress.packs_to_read, value: progress.packs_read || 0 } ) );
+		} else if ( 'number' === typeof progress.trees && progress.trees > 0 ) {
+			lines.push(
+				el( 'p', {}, [
+					/* translators: %d: number of directory listings. */
+					sprintf( __( '%d directory listings read', DOMAIN ), progress.trees ),
+				] )
+			);
+		}
+		if ( 'number' === typeof progress.bytes_deleted && progress.bytes_deleted > 0 ) {
+			lines.push(
+				el( 'p', {}, [
+					/* translators: %s: amount of data such as 15 MB. */
+					sprintf( __( '%s deleted', DOMAIN ), formatBytes( progress.bytes_deleted ) ),
+				] )
+			);
+		}
 		if ( progress.current ) {
 			lines.push( el( 'p', { className: 'bfr-current' }, [ progress.current ] ) );
 		}
@@ -129,8 +147,27 @@
 	}
 
 	function jobOutcome( job ) {
+		const result = job.result || {};
 		if ( 'failed' === job.state && job.error ) {
 			return notice( 'error', job.error.message + ' ' + job.error.hint );
+		}
+		if ( 'succeeded' === job.state && 'append_only' === result.skipped ) {
+			return notice( 'warning', __( 'The server is append-only, so nothing was deleted. This site no longer removes old snapshots; remove them from another computer.', DOMAIN ) );
+		}
+		if ( 'succeeded' === job.state && 'retention_external' === result.skipped ) {
+			return notice( 'info', __( 'Old snapshots are removed from another computer, so nothing was deleted.', DOMAIN ) );
+		}
+		if ( 'succeeded' === job.state && 'check' === job.type && result.errors > 0 ) {
+			/* translators: %d: number of errors. */
+			return notice( 'error', sprintf( _n( 'The check found %d error.', 'The check found %d errors.', result.errors, DOMAIN ), result.errors ) );
+		}
+		if ( 'succeeded' === job.state && 'prune' === job.type ) {
+			/* translators: %s: amount of data such as 15 MB. */
+			return notice( 'success', sprintf( __( 'Deleted %s of data that no snapshot uses.', DOMAIN ), formatBytes( result.bytes_deleted || 0 ) ) );
+		}
+		if ( 'succeeded' === job.state && 'forget' === job.type ) {
+			/* translators: %d: number of snapshots. */
+			return notice( 'success', sprintf( _n( 'Removed %d old snapshot.', 'Removed %d old snapshots.', result.removed || 0, DOMAIN ), result.removed || 0 ) );
 		}
 		if ( 'succeeded' === job.state ) {
 			const warnings = ( job.warnings || [] ).length;
@@ -187,7 +224,7 @@
 			: formatTime( job.created_at );
 		return el( 'tr', {}, [
 			el( 'td', {}, [ name ] ),
-			el( 'td', {}, [ job.type ] ),
+			el( 'td', {}, [ job.type_label ] ),
 			el( 'td', {}, [ job.state_label ] ),
 			el( 'td', {}, [ job.error ? job.error.message : '' ] ),
 		] );
@@ -209,28 +246,195 @@
 
 	/* ------------------------------------------------------------- Dashboard */
 
+	/**
+	 * Notices that stay until their cause is gone: check findings and retention changes.
+	 *
+	 * @param {Object}   status Dashboard data.
+	 * @param {Function} reload Shows the dashboard again.
+	 * @return {Array} Nodes.
+	 */
+	function alerts( status, reload ) {
+		const nodes = [];
+		const alert = status.check_alert;
+		if ( alert ) {
+			nodes.push(
+				el( 'div', { className: 'notice notice-error inline bfr-alert' }, [
+					el( 'p', {}, [
+						el( 'strong', {}, [
+							sprintf(
+								/* translators: 1: number of errors, 2: date and time. */
+								_n( 'The repository check on %2$s found %1$d error.', 'The repository check on %2$s found %1$d errors.', alert.errors, DOMAIN ),
+								alert.errors,
+								formatTime( alert.at )
+							),
+						] ),
+					] ),
+					el( 'p', {}, [ __( 'Some snapshots may not restore completely. Do not delete anything. Run "restic check" from another computer; the disaster-recovery guide explains how to repair the repository. This warning stays until a check finds no errors.', DOMAIN ) ] ),
+					el(
+						'ul',
+						{ className: 'bfr-findings' },
+						alert.findings.map( function ( finding ) {
+							return el( 'li', {}, [ finding.label, ' ', el( 'code', {}, [ finding.object ] ) ] );
+						} )
+					),
+				] )
+			);
+		}
+		const retention = status.retention;
+		if ( 'external' === retention.mode && retention.proposed_since ) {
+			const message = el( 'div' );
+			const switchBack = button( __( 'Let this site remove old snapshots again', DOMAIN ), function () {
+				switchBack.disabled = true;
+				api( '/settings', { method: 'PUT', data: { values: { 'retention.mode': 'plugin' } } } )
+					.then( reload )
+					.catch( function ( error ) {
+						switchBack.disabled = false;
+						replace( message, [ notice( 'error', errorText( error ) ) ] );
+					} );
+			}, true );
+			nodes.push(
+				el( 'div', { className: 'notice notice-info inline' }, [
+					el( 'p', {}, [
+						/* translators: %s: date and time. */
+						sprintf( __( 'Since %s the server allows deletions again. Until you switch back, old snapshots must still be removed from another computer.', DOMAIN ), formatTime( retention.proposed_since ) ),
+					] ),
+					el( 'p', {}, [ switchBack ] ),
+					message,
+				] )
+			);
+		} else if ( 'external' === retention.mode && retention.switched_at ) {
+			nodes.push(
+				notice(
+					'warning',
+					/* translators: %s: date and time. */
+					sprintf( __( 'On %s the server refused to delete data: it is append-only, which protects your backups. This site no longer removes old snapshots; remove them from another computer with "restic forget" and "restic prune".', DOMAIN ), formatTime( retention.switched_at ) )
+				)
+			);
+		}
+		return nodes;
+	}
+
+	/**
+	 * The three maintenance cards: old snapshots, unused data, repository check.
+	 *
+	 * @param {Object}   status Dashboard data.
+	 * @param {Function} action Creates a button that starts a job of a type.
+	 * @return {Element} Cards.
+	 */
+	function maintenanceCards( status, action ) {
+		const plugin = 'plugin' === status.retention.mode;
+		const forget = status.maintenance.forget;
+		const prune = status.maintenance.prune;
+		const check = status.maintenance.check;
+		const description = function ( text ) {
+			return el( 'p', { className: 'description' }, [ text ] );
+		};
+
+		let forgetLast = __( 'Not run yet.', DOMAIN );
+		if ( forget.finished && 'append_only' === forget.skipped ) {
+			/* translators: %s: date and time. */
+			forgetLast = sprintf( __( 'Last run on %s: the server refused deletions.', DOMAIN ), formatTime( forget.finished ) );
+		} else if ( forget.finished && 'number' === typeof forget.removed ) {
+			/* translators: 1: date and time, 2: snapshots removed, 3: snapshots kept. */
+			forgetLast = sprintf( __( 'Last run on %1$s: %2$d removed, %3$d kept.', DOMAIN ), formatTime( forget.finished ), forget.removed, forget.keep || 0 );
+		}
+
+		let pruneLast = __( 'Not run yet.', DOMAIN );
+		if ( prune.finished && 'number' === typeof prune.bytes_deleted ) {
+			/* translators: 1: date and time, 2: amount of data such as 15 MB. */
+			pruneLast = sprintf( __( 'Last run on %1$s: %2$s deleted.', DOMAIN ), formatTime( prune.finished ), formatBytes( prune.bytes_deleted ) );
+		}
+
+		let checkLast = __( 'Not checked yet.', DOMAIN );
+		if ( check.finished && check.errors > 0 ) {
+			/* translators: 1: number of errors, 2: date and time. */
+			checkLast = sprintf( _n( 'Last check on %2$s: %1$d error.', 'Last check on %2$s: %1$d errors.', check.errors, DOMAIN ), check.errors, formatTime( check.finished ) );
+		} else if ( check.finished ) {
+			/* translators: %s: date and time. */
+			checkLast = sprintf( __( 'Last check on %s: no errors.', DOMAIN ), formatTime( check.finished ) );
+		}
+
+		return el( 'div', { className: 'bfr-cards' }, [
+			el( 'div', { className: 'bfr-card' }, [
+				el( 'h3', {}, [ __( 'Old snapshots', DOMAIN ) ] ),
+				el( 'p', {}, [
+					plugin
+						? ( status.retention.after_backup ? __( 'This site removes them after each backup, following the retention settings.', DOMAIN ) : __( 'This site removes them when you start it here.', DOMAIN ) )
+						: __( 'They are removed from another computer, because the server was append-only.', DOMAIN ),
+				] ),
+				description( forgetLast ),
+				plugin ? action( 'forget', __( 'Remove old snapshots now', DOMAIN ) ) : null,
+			] ),
+			el( 'div', { className: 'bfr-card' }, [
+				el( 'h3', {}, [ __( 'Unused data', DOMAIN ) ] ),
+				el( 'p', {}, [
+					plugin
+						/* translators: %s: date and time. */
+						? ( prune.next ? sprintf( __( 'Data that no snapshot uses is deleted next on %s.', DOMAIN ), formatTime( prune.next ) ) : __( 'Data that no snapshot uses is deleted when you start it here.', DOMAIN ) )
+						: __( 'It is deleted from another computer with "restic prune".', DOMAIN ),
+				] ),
+				description( pruneLast ),
+				prune.reclaimable_bytes > 0
+					? description(
+						/* translators: %s: amount of data such as 15 MB. */
+						sprintf( __( 'About %s more lies unused in partly used packs. Only "restic prune" on another computer can free it.', DOMAIN ), formatBytes( prune.reclaimable_bytes ) )
+					)
+					: null,
+				plugin ? action( 'prune', __( 'Prune now', DOMAIN ) ) : null,
+			] ),
+			el( 'div', { className: 'bfr-card' }, [
+				el( 'h3', {}, [ __( 'Repository check', DOMAIN ) ] ),
+				el( 'p', {}, [
+					/* translators: %s: date and time. */
+					check.next ? sprintf( __( 'The next check runs on %s.', DOMAIN ), formatTime( check.next ) ) : __( 'The check runs when you start it here.', DOMAIN ),
+				] ),
+				description( checkLast ),
+				check.finished && 'number' === typeof check.packs_read
+					? description(
+						/* translators: 1: number of packs, 2: amount of data such as 15 MB. */
+						sprintf( __( '%1$d packs with %2$s were downloaded and verified.', DOMAIN ), check.packs_read, formatBytes( check.bytes_read ) )
+					)
+					: null,
+				action( 'check', __( 'Check now', DOMAIN ) ),
+			] ),
+		] );
+	}
+
 	function dashboard( root ) {
 		api( '/status' )
 			.then( function ( status ) {
 				const last = status.last_backup || {};
 				const running = el( 'div', { className: 'bfr-card bfr-running' } );
-				const start = button( __( 'Back up now', DOMAIN ), function () {
-					start.disabled = true;
-					api( '/jobs', { method: 'POST' } )
-						.then( function ( response ) {
-							follow( response.job.id, running, function () { dashboard( root ); } );
-						} )
-						.catch( function ( error ) {
-							start.disabled = false;
-							replace( running, [ notice( 'error', errorText( error ) ) ] );
+				const reload = function () {
+					dashboard( root );
+				};
+				const buttons = [];
+				const action = function ( type, label, primary ) {
+					const control = button( label, function () {
+						buttons.forEach( function ( other ) {
+							other.disabled = true;
 						} );
-				}, true );
+						api( '/jobs', { method: 'POST', data: { type } } )
+							.then( function ( response ) {
+								follow( response.job.id, running, reload );
+							} )
+							.catch( function ( error ) {
+								buttons.forEach( function ( other ) {
+									other.disabled = false;
+								} );
+								replace( running, [ notice( 'error', errorText( error ) ) ] );
+							} );
+					}, primary );
+					buttons.push( control );
+					return control;
+				};
 				const appendOnly = {
 					yes: __( 'Append-only: the site cannot delete backups.', DOMAIN ),
 					no: __( 'Deletions allowed. Recommended: turn on append-only on your server, so that nobody who takes over this site can delete your backups.', DOMAIN ),
 					unknown: __( 'Append-only status unknown.', DOMAIN ),
 				};
 				replace( root, [
+					...alerts( status, reload ),
 					el( 'div', { className: 'bfr-cards' }, [
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Last backup', DOMAIN ) ] ),
@@ -240,7 +444,7 @@
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Next backup', DOMAIN ) ] ),
 							el( 'p', { className: 'bfr-big' }, [ status.next_backup ? formatTime( status.next_backup ) : __( 'Manual only', DOMAIN ) ] ),
-							start,
+							action( 'backup', __( 'Back up now', DOMAIN ), true ),
 						] ),
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Repository', DOMAIN ) ] ),
@@ -249,12 +453,16 @@
 						] ),
 					] ),
 					running,
+					el( 'h2', {}, [ __( 'Maintenance', DOMAIN ) ] ),
+					maintenanceCards( status, action ),
 					el( 'h2', {}, [ __( 'Recent jobs', DOMAIN ) ] ),
 					jobTable( status.recent_jobs ),
 				] );
 				if ( status.active_job ) {
-					start.disabled = true;
-					follow( status.active_job.id, running, function () { dashboard( root ); } );
+					buttons.forEach( function ( control ) {
+						control.disabled = true;
+					} );
+					follow( status.active_job.id, running, reload );
 				}
 			} )
 			.catch( function ( error ) {
@@ -319,6 +527,40 @@
 			],
 		},
 		{
+			title: __( 'Old snapshots', DOMAIN ),
+			fields: [
+				[ 'retention.mode', __( 'Who removes old snapshots', DOMAIN ), 'choice', { plugin: __( 'This site', DOMAIN ), external: __( 'Another computer (for append-only servers)', DOMAIN ) }, __( 'The plugin switches to "another computer" by itself when the server refuses deletions.', DOMAIN ) ],
+				[ 'retention.run_forget_after_backup', __( 'Remove old snapshots after each backup', DOMAIN ), 'boolean' ],
+				[ 'retention.keep.within', __( 'Keep every snapshot of the last', DOMAIN ), 'text', null, __( 'A duration such as 2d (two days), 12h or 1y6m. Required, so that recent snapshots are never removed.', DOMAIN ) ],
+				[ 'retention.keep.last', __( 'Always keep the newest snapshots, this many', DOMAIN ), 'number' ],
+				[ 'retention.keep.daily', __( 'Keep one snapshot per day, for this many days', DOMAIN ), 'number' ],
+				[ 'retention.keep.weekly', __( 'Keep one snapshot per week, for this many weeks', DOMAIN ), 'number' ],
+				[ 'retention.keep.monthly', __( 'Keep one snapshot per month, for this many months', DOMAIN ), 'number' ],
+				[ 'retention.keep.yearly', __( 'Keep one snapshot per year, for this many years', DOMAIN ), 'number' ],
+			],
+		},
+		{
+			title: __( 'Maintenance', DOMAIN ),
+			fields: [
+				[ 'schedule.prune.frequency', __( 'Delete unused data', DOMAIN ), 'choice', { manual: __( 'Only manually', DOMAIN ), weekly: __( 'Weekly', DOMAIN ), monthly: __( 'Monthly', DOMAIN ) } ],
+				[ 'schedule.prune.weekday', __( 'Weekday for maintenance (0 = Sunday)', DOMAIN ), 'number', null, __( 'Monthly pruning runs on the first such weekday of the month; weekly checks run on it as well.', DOMAIN ) ],
+				[ 'schedule.prune.hour', __( 'Hour for deleting unused data', DOMAIN ), 'number' ],
+				[ 'schedule.check.frequency', __( 'Check the repository', DOMAIN ), 'choice', { manual: __( 'Only manually', DOMAIN ), weekly: __( 'Weekly', DOMAIN ), monthly: __( 'Monthly', DOMAIN ) } ],
+				[ 'schedule.check.day', __( 'Day of the month for monthly checks', DOMAIN ), 'number' ],
+				[ 'schedule.check.hour', __( 'Hour for checks', DOMAIN ), 'number' ],
+				[ 'schedule.check.read_data_subset_percent', __( 'Share of the data each check downloads and verifies, in percent', DOMAIN ), 'number', null, __( 'Each check picks other packs, so the whole repository is read over time.', DOMAIN ) ],
+			],
+		},
+		{
+			title: __( 'Notifications', DOMAIN ),
+			fields: [
+				[ 'notifications.email.on_failure', __( 'E-mail when a job fails, a check finds damage or the server becomes append-only', DOMAIN ), 'boolean' ],
+				[ 'notifications.email.on_stale', __( 'E-mail when no backup succeeded for too long', DOMAIN ), 'boolean' ],
+				[ 'notifications.email.stale_after_hours', __( 'Hours without a successful backup before that e-mail', DOMAIN ), 'number', null, __( 'At least one and a half backup intervals are waited in any case.', DOMAIN ) ],
+				[ 'notifications.email.recipients', __( 'Recipients, one e-mail address per line', DOMAIN ), 'list', null, __( 'Empty: the administration e-mail address of this site.', DOMAIN ) ],
+			],
+		},
+		{
 			title: __( 'What to back up', DOMAIN ),
 			fields: [
 				[ 'backup.database.enabled', __( 'Back up the database', DOMAIN ), 'boolean' ],
@@ -335,6 +577,8 @@
 				[ 'advanced.tick_budget_seconds', __( 'Seconds per work step', DOMAIN ), 'number' ],
 				[ 'advanced.pack_size_mib', __( 'Pack size in MiB', DOMAIN ), 'number' ],
 				[ 'advanced.upload_timeout_seconds', __( 'Upload timeout in seconds', DOMAIN ), 'number' ],
+				[ 'advanced.cpu_throttle', __( 'Processor use', DOMAIN ), 'choice', { normal: __( 'Normal', DOMAIN ), gentle: __( 'Gentle: short pauses and smaller steps, for hosts that limit CPU time', DOMAIN ) } ],
+				[ 'advanced.cache_limit_mib', __( 'Size limit of the local cache in MiB', DOMAIN ), 'number' ],
 				[ 'advanced.loopback_chaining', __( 'Continue jobs with loopback requests', DOMAIN ), 'choice', { auto: __( 'Yes', DOMAIN ), off: __( 'No', DOMAIN ) } ],
 				[ 'advanced.keep_jobs', __( 'Jobs to keep in the log', DOMAIN ), 'number' ],
 			],
@@ -357,7 +601,14 @@
 		if ( 'list' === kind ) {
 			return el( 'textarea', { rows: 3, className: 'large-text code', value: ( value || [] ).join( '\n' ) } );
 		}
+		if ( 'text' === kind ) {
+			return el( 'input', { type: 'text', className: 'regular-text', value: String( value ) } );
+		}
 		return el( 'input', { type: 'number', className: 'small-text', value: String( value ) } );
+	}
+
+	function formValue( entry ) {
+		return 'boolean' === entry.kind ? entry.node.checked : entry.node.value;
 	}
 
 	function settings( root ) {
@@ -368,24 +619,32 @@
 				const groups = SETTING_GROUPS.map( function ( group ) {
 					return el( 'fieldset', { className: 'bfr-group' }, [
 						el( 'legend', {}, [ group.title ] ),
-						...group.fields.map( function ( [ path, label, kind, choices ] ) {
+						...group.fields.map( function ( [ path, label, kind, choices, help ] ) {
 							inputs[ path ] = { kind, node: input( kind, response.values[ path ], choices ) };
 							inputs[ path ].error = el( 'span', { className: 'bfr-error' } );
-							const row = field( label, inputs[ path ].node );
+							inputs[ path ].initial = formValue( inputs[ path ] );
+							const row = field( label, inputs[ path ].node, help );
 							row.append( inputs[ path ].error );
 							return row;
 						} ),
 					] );
 				} );
 				const save = button( __( 'Save settings', DOMAIN ), function () {
+					// Only what the administrator changed, so that a page opened before an
+					// automatic change, such as the switch to external retention, cannot undo it.
 					const values = {};
 					Object.entries( inputs ).forEach( function ( [ path, entry ] ) {
 						entry.error.textContent = '';
-						values[ path ] = 'boolean' === entry.kind ? entry.node.checked : entry.node.value;
+						if ( formValue( entry ) !== entry.initial ) {
+							values[ path ] = formValue( entry );
+						}
 					} );
 					save.disabled = true;
 					api( '/settings', { method: 'PUT', data: { values } } )
 						.then( function () {
+							Object.values( inputs ).forEach( function ( entry ) {
+								entry.initial = formValue( entry );
+							} );
 							replace( message, [ notice( 'success', __( 'Settings saved.', DOMAIN ) ) ] );
 						} )
 						.catch( function ( error ) {

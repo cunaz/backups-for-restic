@@ -244,6 +244,30 @@ final class Messages {
 	}
 
 	/**
+	 * What a finding of the repository check means (ADR 0022).
+	 *
+	 * @param string $code Finding code.
+	 * @return string Description.
+	 */
+	public static function check_finding( string $code ): string {
+		return match ( $code ) {
+			'index_unreadable'        => __( 'An index file cannot be read.', 'backups-for-restic' ),
+			'pack_in_several_indexes' => __( 'A pack is listed in more than one index file.', 'backups-for-restic' ),
+			'pack_missing'            => __( 'A pack that the index lists is missing on the server.', 'backups-for-restic' ),
+			'pack_size'               => __( 'A pack has a different size than the index says.', 'backups-for-restic' ),
+			'pack_unindexed'          => __( 'No index file lists a pack; "restic prune" removes it.', 'backups-for-restic' ),
+			'snapshot_unreadable'     => __( 'A snapshot cannot be read.', 'backups-for-restic' ),
+			'blob_missing'            => __( 'A snapshot uses data that is missing from the index.', 'backups-for-restic' ),
+			'tree_unreadable'         => __( 'A directory listing of a snapshot cannot be read.', 'backups-for-restic' ),
+			'pack_hash'               => __( 'The content of a pack does not match its name.', 'backups-for-restic' ),
+			'pack_header'             => __( 'The header of a pack does not match the index.', 'backups-for-restic' ),
+			'blob_corrupt'            => __( 'Stored data failed its integrity check.', 'backups-for-restic' ),
+			'compressed_unverified'   => __( 'Compressed data could not be verified without the zstd PHP extension.', 'backups-for-restic' ),
+			default                   => __( 'The check found a problem.', 'backups-for-restic' ),
+		};
+	}
+
+	/**
 	 * Name of a job type.
 	 *
 	 * @param string $type Type.

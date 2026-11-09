@@ -135,6 +135,28 @@ final class SchedulePolicy {
 	}
 
 	/**
+	 * The next slot of a maintenance task after now.
+	 *
+	 * @param Settings      $settings Settings.
+	 * @param \DateTimeZone $zone     Site time zone.
+	 * @param int           $now      Unix time.
+	 * @param string        $task     prune or check.
+	 * @return int|null Unix time of the slot, or null if the task runs only on demand.
+	 */
+	public static function next_maintenance_slot( Settings $settings, \DateTimeZone $zone, int $now, string $task ): ?int {
+		$last = self::last_maintenance_slot( $settings, $zone, $now, $task );
+		if ( null === $last ) {
+			return null;
+		}
+		$local = ( new \DateTimeImmutable( '@' . $last ) )->setTimezone( $zone );
+		if ( 'weekly' === $settings->string( 'schedule.' . $task . '.frequency' ) ) {
+			return $local->modify( '+7 days' )->getTimestamp();
+		}
+		$month = $local->modify( 'first day of next month' )->setTime( $settings->int( 'schedule.' . $task . '.hour' ), 0 );
+		return self::monthly( $month, $task, $settings->int( 'schedule.prune.weekday' ), $settings )->getTimestamp();
+	}
+
+	/**
 	 * The slot of a maintenance task within one month.
 	 *
 	 * @param \DateTimeImmutable $first    First day of the month at the task's hour.

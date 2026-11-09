@@ -412,6 +412,19 @@ final class Container {
 	}
 
 	/**
+	 * Whether the server is append-only: the latest conclusive probe, else the wizard's answer.
+	 *
+	 * @return string yes, no or unknown.
+	 */
+	public function append_only(): string {
+		return match ( $this->state()->get( 'append_only' )['status'] ?? null ) {
+			'append_only'       => 'yes',
+			'deletions_allowed' => 'no',
+			default             => $this->settings()->string( 'repository.append_only' ),
+		};
+	}
+
+	/**
 	 * E-mail notifications.
 	 *
 	 * @return Notifier Notifier.

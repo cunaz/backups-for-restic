@@ -280,4 +280,44 @@ final class WordPressSiteTest extends TestCase {
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock remains.' );
 	}
+
+	/**
+	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
+	 */
+	public function test_maintenance_jobs_and_the_dashboard(): void {
+		self::assertNotNull( self::$server );
+		self::idle( 600 );
+		[ $status, $error, $raw ] = self::api(
+			'PUT',
+			'/settings',
+			[
+				'values' => [
+					'retention.keep.within'          => '0d',
+					'notifications.email.recipients' => 'nobody',
+				],
+			]
+		);
+		self::assertSame( 400, $status, $raw );
+		self::assertArrayHasKey( 'retention.keep.within', $error['data']['fields'] ?? [], $raw );
+		self::assertArrayHasKey( 'notifications.email.recipients', $error['data']['fields'] ?? [], $raw );
+
+		foreach ( [ 'prune', 'check' ] as $type ) {
+			[ $status, $started, $raw ] = self::api( 'POST', '/jobs', [ 'type' => $type ] );
+			self::assertSame( 201, $status, $raw );
+			$job = self::wait_for( $started['job']['id'], 1800 );
+			self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
+			self::idle( 600 );
+		}
+
+		[ $status, $dashboard, $raw ] = self::api( 'GET', '/status' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'plugin', $dashboard['retention']['mode'] ?? null, $raw );
+		self::assertGreaterThan( 0, $dashboard['maintenance']['prune']['finished'] ?? 0, $raw );
+		self::assertIsInt( $dashboard['maintenance']['prune']['reclaimable_bytes'] ?? null, $raw );
+		self::assertSame( 0, $dashboard['maintenance']['check']['errors'] ?? null, $raw );
+		self::assertNull( $dashboard['check_alert'] ?? null, $raw );
+		self::assertSame( 'Check', $dashboard['recent_jobs'][0]['type_label'] ?? null, $raw );
+		$cli = new ResticCli( self::$server, 'site', self::$repository_password );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
+	}
 }

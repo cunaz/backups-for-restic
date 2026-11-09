@@ -443,9 +443,12 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
   all snapshots (tree walk through the cached tree packs), delete packs with **no**
   referenced blob, rewrite index files without them (new index files first, then delete the
-  old ones). Partially used packs are not repacked; the dashboard shows "reclaimable by a
-  full prune" and the disaster-recovery guide explains `restic prune` from any computer.
-  Prune takes an exclusive lock and runs weekly by default.
+  old ones). Partially used packs are not repacked; the dashboard shows the space they
+  waste, which only a full `restic prune` from any computer reclaims, and the
+  disaster-recovery guide explains it. The estimate counts trees exactly and data blobs once
+  through a Bloom filter of about two bytes per indexed blob, so it fits small memory limits
+  and can only be slightly high; the conformance suite compares it with restic's count of
+  unused bytes. Prune takes an exclusive lock and runs weekly by default.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),
@@ -594,8 +597,13 @@ restic CLI are used in integration and conformance tests.
 
 Menu "Backups" (`manage_options`; multisite is refused in 1.0). Pages: Dashboard
 (freshness, repository usage from the index set, running job with progress and a "keep this
-tab open" hint, recent jobs, Back up now), Snapshots, Restore, Settings (Repository,
-Schedule, Retention, What to back up, Notifications, Advanced), Logs, Setup wizard
+tab open" hint, recent jobs, Back up now; maintenance cards for old snapshots, unused data
+with the space only a full prune reclaims, and the repository check, each with its last
+result, next run and a button; notices that stay until their cause is gone: check findings,
+a switch to retention mode `external`, and the proposal to switch back), Snapshots,
+Restore, Settings (Repository, Schedule, Old snapshots, Maintenance, What to back up,
+Notifications, Advanced; saving sends only changed fields, so an open page cannot undo an
+automatic switch), Logs, Setup wizard
 (Environment → Repository server → Password → Unlock progress → Recovery kit → Schedule →
 First backup). The repository step offers BorgBase or an own rest-server, takes the
 credentials and an optional CA certificate, tests Range reads and listing, and detects
@@ -611,9 +619,9 @@ for the measured site size.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host |
+| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts |
-| `GET /jobs`, `POST /jobs` | recent jobs; start a backup (409 while another job runs) |
+| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job (409 while another job runs, or for forget and prune in retention mode `external`) |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | cancel; redacted events |
 | `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
