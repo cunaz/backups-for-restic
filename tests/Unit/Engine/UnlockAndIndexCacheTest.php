@@ -134,6 +134,31 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		self::assertSame( $repository->load_index()->to_binary(), $cache->load( $repository )->to_binary(), 'A removed index file forces a rebuild.' );
 	}
 
+	public function test_an_index_larger_than_the_cache_limit_is_not_kept(): void {
+		$backend    = new CountingBackend();
+		$repository = Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$site       = $this->cleanup[] = TempDir::create( 'limit-site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->back_up( $repository, $site );
+		$directory = $this->directory() . '/limited';
+		$full      = $repository->load_index();
+
+		$small = new IndexCache( $directory, 64 );
+		self::assertSame( $full->to_binary(), $small->load( $repository )->to_binary(), 'The index is still complete.' );
+		self::assertFileDoesNotExist( $directory . '/index.bin' );
+
+		$roomy = new IndexCache( $directory, 1048576 );
+		$roomy->load( $repository );
+		self::assertFileExists( $directory . '/index.bin' );
+		$small->load( $repository );
+		self::assertFileExists( $directory . '/index.bin', 'Nothing new to write: the cache stays as it is.' );
+
+		file_put_contents( $site . '/new.txt', 'new content' );
+		$this->back_up( $repository, $site );
+		self::assertSame( $repository->load_index()->to_binary(), $small->load( $repository )->to_binary() );
+		self::assertFileDoesNotExist( $directory . '/index.bin', 'A cache over the limit is removed when it would grow.' );
+	}
+
 	private function back_up( Repository $repository, string $site ): void {
 		$work = $this->cleanup[] = TempDir::create( 'work' );
 		$run  = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $work, new Identity( 'example.com' ), new SystemClock(), null, 1048576 );

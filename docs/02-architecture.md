@@ -120,11 +120,11 @@ src/
 │   ├── SiteHealth.php, CliCommand.php, RecoveryKit.php, Messages.php (translated texts for core codes)
 │   ├── JobEvents.php              the plugin's actions on job state changes; hands finished jobs to the notifier
 │   ├── WpMailer.php               notification e-mails: translated plain text through wp_mail()
-├── Support/                       GoJson (Go-compatible JSON), GoQuote, Rfc3339, Bytes (strict base64, base64url, integers), Decoded, RawJson, ByteSource (+ Stream, String, Resumable), Clock (+ SystemClock), Redactor
+├── Support/                       GoJson (Go-compatible JSON), GoQuote, Rfc3339, Bytes (strict base64, base64url, integers), Decoded, RawJson, ByteSource (+ Stream, String, Resumable), Clock (+ SystemClock), Redactor, Throttle (gentle CPU mode)
 ├── Exception/                     PluginException and one subclass per failure the UI explains
 ├── Settings/                      Schema (every field once), Field, Settings (immutable), SettingsStore (option + wp-config.php overrides)
 ├── Secrets/                       Secret (value hidden in a closure), SecretName, SecretStore, EncryptedOptionStore (HKDF over the salts + secretbox), ConstantOverrideStore
-├── Storage/                       Options port, PrivateDirectory, SiteState, Files, ExposureCheck port
+├── Storage/                       Options port, PrivateDirectory, SiteState, Files, CacheDirectory, ExposureCheck port
 ├── Crypto/                        restic primitives
 │   ├── Cipher.php                 seal()/open(): nonce ‖ AES-256-CTR ‖ Poly1305-AES tag
 │   ├── Poly1305.php               pure-PHP Poly1305 (ADR 0027)
@@ -455,8 +455,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   verify header, blob tags and SHA-256 ids. Monthly by default; findings raise a persistent
   critical notice and are reported in Site Health. Repairs are never attempted
   automatically; the guide points to `restic repair`.
-- **Cache hygiene**: tree-pack cache and index cache size-capped (default 256 MiB), oldest
-  first.
+- **Cache hygiene**: the merged index is cached per repository, encrypted, and only while it
+  fits `advanced.cache_limit_mib` (default 256 MiB); a larger index is read from the
+  repository in every tick instead. Caches of other repositories are removed after each job.
+  Settings and Site Health show the size, and the cache can be cleared while no job runs
+  (`DELETE /cache`). Prune and check read trees on demand and keep no tree cache.
 - **Locks**: stale locks (older than 30 minutes) from this site are removed automatically
   before a job starts, as restic does; foreign stale locks are reported and removable by an
   explicit admin action with a warning.
@@ -528,7 +531,7 @@ advanced:
   pack_size_mib: 16                      # 4–64
   upload_timeout_seconds: 60
   cache_limit_mib: 256
-  cpu_throttle: normal                   # normal | gentle (sleep between files, smaller batches) for CPU-quota hosts
+  cpu_throttle: normal                   # normal | gentle (half the tick budget, short rests while working) for CPU-quota hosts
   loopback_chaining: auto                # auto | off
   keep_jobs: 30
 setup:
@@ -625,7 +628,8 @@ for the measured site size.
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | cancel; redacted events |
 | `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
-| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields |
+| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
+| `DELETE /cache` | clears the local cache (409 while a job runs) |
 | `POST /repository/test`, `POST /repository/save` | wizard: connection test; test and save |
 | `POST /repository/create`, `POST /repository/connect` | wizard: new repository, or the password of an existing one plus an unlock job; both return the recovery kit once |
 | `POST`/`DELETE /repository/ca-certificate` | CA certificate of a self-hosted server |
@@ -733,8 +737,10 @@ Derived from those numbers, not yet measured end to end in WordPress:
 | First backup of 5 GB | about 7 CPU minutes; wall time is set by upload bandwidth and tick cadence: under an hour with loopback chaining, around two hours with a 5-minute cron |
 | Daily backup, 200 MB changed | 1–3 ticks |
 
-`cpu_throttle: gentle` adds short sleeps between files and halves batch sizes for hosts with
-CPU-second quotas. Uploads are sequential in 1.0; parallel uploads via the bundled Requests
+`cpu_throttle: gentle` halves the tick budget and rests 0.1 s after every 0.25 s of work in
+backups, forget, prune and check (`Support\Throttle`), so a tick keeps a core busy about
+70 % of the time, for hosts with CPU-second quotas; the one-time key derivation is not
+throttled. Uploads are sequential in 1.0; parallel uploads via the bundled Requests
 library's `request_multiple` are a backlog item.
 
 ## 17. Internationalisation and accessibility

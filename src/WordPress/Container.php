@@ -42,6 +42,7 @@ use BackupsForRestic\Secrets\SecretStore;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\CacheDirectory;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
@@ -240,6 +241,15 @@ final class Container {
 	public function jobs(): JobStore {
 		$this->private_dir()->ensure();
 		return new JobStore( $this->private_dir()->subdirectory( 'jobs' ), $this->redactor(), $this->random() );
+	}
+
+	/**
+	 * The cache directory.
+	 *
+	 * @return CacheDirectory Cache.
+	 */
+	public function cache(): CacheDirectory {
+		return new CacheDirectory( $this->private_dir()->subdirectory( 'cache' ) );
 	}
 
 	/**
@@ -443,14 +453,18 @@ final class Container {
 	}
 
 	/**
-	 * Seconds one tick may spend: the setting, capped ten seconds below max_execution_time.
+	 * Seconds one tick may spend: the setting, capped ten seconds below max_execution_time,
+	 * and halved in the gentle CPU mode.
 	 *
 	 * @param float|null $requested Shorter budget, for example for admin polling.
 	 * @return float Seconds.
 	 */
 	public function tick_budget( ?float $requested = null ): float {
 		$budget = (float) $this->settings()->int( 'advanced.tick_budget_seconds' );
-		$limit  = (int) ini_get( 'max_execution_time' );
+		if ( 'gentle' === $this->settings()->string( 'advanced.cpu_throttle' ) ) {
+			$budget /= 2;
+		}
+		$limit = (int) ini_get( 'max_execution_time' );
 		if ( $limit > 0 ) {
 			$budget = min( $budget, max( 5.0, $limit - 10.0 ) );
 		}

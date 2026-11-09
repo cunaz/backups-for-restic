@@ -16,7 +16,6 @@ use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Engine\Forget\ForgetRun;
 use BackupsForRestic\Engine\Forget\RetentionPolicy;
-use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Prune\PruneRun;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
@@ -127,7 +126,7 @@ final class MaintenanceSteps implements StepProvider {
 			$run  = is_file( $work . '/state.json' )
 				? ForgetRun::resume( $repository, $work, $services->identity, $services->clock, $policy, [ PlanFactory::TAG ] )
 				: ForgetRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $policy, [ PlanFactory::TAG ] );
-			$done = $run->advance( $deadline );
+			$done = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
 			$this->abandon( $job );
 			$this->switch_to_external( $job, $log );
@@ -160,7 +159,7 @@ final class MaintenanceSteps implements StepProvider {
 			$run  = is_file( $work . '/state.json' )
 				? PruneRun::resume( $repository, $work, $services->identity, $services->clock, $index )
 				: PruneRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $index );
-			$done = $run->advance( $deadline );
+			$done = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
 			$this->abandon( $job );
 			$this->switch_to_external( $job, $log );
@@ -191,7 +190,7 @@ final class MaintenanceSteps implements StepProvider {
 		$run        = is_file( $work . '/state.json' )
 			? CheckRun::resume( $repository, $work, $services->identity, $services->clock, $index )
 			: CheckRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $percent, $index );
-		$done       = $run->advance( $deadline );
+		$done       = $run->advance( $deadline, $services->throttle() );
 
 		$job->progress = $run->progress();
 		$result        = $run->result();
@@ -400,6 +399,6 @@ final class MaintenanceSteps implements StepProvider {
 	 * @return \BackupsForRestic\Format\Index\IndexSet Index.
 	 */
 	private function index( Repository $repository ): \BackupsForRestic\Format\Index\IndexSet {
-		return ( new IndexCache( $this->services->common->private_dir->subdirectory( 'cache' ) . '/' . $repository->config()->id ) )->load( $repository );
+		return $this->services->common->index_cache( $repository )->load( $repository );
 	}
 }

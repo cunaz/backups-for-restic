@@ -30,6 +30,7 @@ use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Decoded;
+use BackupsForRestic\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -198,16 +199,18 @@ final class CheckRun {
 	 * Works until the check is finished or the deadline has passed. Each call does at least one
 	 * unit of work, so a slow host still makes progress.
 	 *
-	 * @param float $deadline Unix time (microtime(true)) at which to stop.
+	 * @param float         $deadline Unix time (microtime(true)) at which to stop.
+	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when finished and the lock is released.
 	 */
-	public function advance( float $deadline ): bool {
+	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( 'done' === $this->state['phase'] ) {
 			return true;
 		}
 		$this->keep_lock();
 		do {
 			$this->step();
+			$throttle?->pause();
 		} while ( 'done' !== $this->state['phase'] && microtime( true ) < $deadline );
 		$this->persist();
 		return 'done' === $this->state['phase'];

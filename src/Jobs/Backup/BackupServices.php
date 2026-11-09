@@ -13,13 +13,17 @@ use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
+use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Settings\Settings;
+use BackupsForRestic\Storage\CacheDirectory;
 use BackupsForRestic\Storage\ExposureCheck;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
+use BackupsForRestic\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -83,5 +87,33 @@ final readonly class BackupServices {
 	 */
 	public function pack_size(): int {
 		return $this->settings->int( 'advanced.pack_size_mib' ) * 1048576;
+	}
+
+	/**
+	 * The cache directory in the private directory.
+	 *
+	 * @return CacheDirectory Cache.
+	 */
+	public function cache(): CacheDirectory {
+		return new CacheDirectory( $this->private_dir->subdirectory( 'cache' ) );
+	}
+
+	/**
+	 * The index cache of a repository, within the cache limit.
+	 *
+	 * @param Repository $repository Open repository.
+	 * @return IndexCache Cache.
+	 */
+	public function index_cache( Repository $repository ): IndexCache {
+		return new IndexCache( $this->cache()->path . '/' . $repository->config()->id, $this->settings->int( 'advanced.cache_limit_mib' ) * 1048576 );
+	}
+
+	/**
+	 * Pauses for the gentle CPU mode, or none.
+	 *
+	 * @return Throttle|null Throttle for one tick.
+	 */
+	public function throttle(): ?Throttle {
+		return 'gentle' === $this->settings->string( 'advanced.cpu_throttle' ) ? Throttle::gentle() : null;
 	}
 }

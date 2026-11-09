@@ -35,6 +35,7 @@ use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\ResumableByteSource;
 use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Support\StreamByteSource;
+use BackupsForRestic\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -253,10 +254,11 @@ final class BackupRun {
 	/**
 	 * Works until the backup is finished or the deadline has passed.
 	 *
-	 * @param float $deadline Unix time (microtime(true)) at which to stop.
+	 * @param float         $deadline Unix time (microtime(true)) at which to stop.
+	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when the snapshot has been written.
 	 */
-	public function advance( float $deadline ): bool {
+	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( null !== $this->state['snapshot'] ) {
 			return true;
 		}
@@ -267,6 +269,7 @@ final class BackupRun {
 		if ( [] !== $this->frames() ) {
 			do {
 				$this->step();
+				$throttle?->pause();
 			} while ( [] !== $this->frames() && microtime( true ) < $deadline );
 		}
 

@@ -26,7 +26,9 @@ defined( 'ABSPATH' ) || exit;
  * index files and downloads only new ones instead of all of them.
  *
  * If an index file disappeared from the server (restic prune or rebuild-index ran elsewhere),
- * the cache cannot tell which entries became stale, so it is rebuilt from scratch.
+ * the cache cannot tell which entries became stale, so it is rebuilt from scratch. An index
+ * larger than the cache limit (advanced.cache_limit_mib) is not kept: every tick then reads
+ * the index files again, which is slower but never fills the disk.
  */
 final class IndexCache {
 
@@ -34,8 +36,9 @@ final class IndexCache {
 	 * Uses a cache directory.
 	 *
 	 * @param string $directory cache/<repository-id> in the private directory.
+	 * @param int    $limit     Largest cache file to keep, in bytes.
 	 */
-	public function __construct( private readonly string $directory ) {
+	public function __construct( private readonly string $directory, private readonly int $limit = PHP_INT_MAX ) {
 	}
 
 	/**
@@ -105,13 +108,18 @@ final class IndexCache {
 	 * @param list<string> $names      Index files it covers.
 	 */
 	private function write( Repository $repository, IndexSet $index, array $names ): void {
-		if ( ! is_dir( $this->directory ) ) {
-			mkdir( $this->directory, 0700, true );
-		}
 		$plain = pack( 'V', count( $names ) );
 		foreach ( $names as $name ) {
 			$plain .= Id::from_hex( $name )->bytes();
 		}
-		Files::write_atomic( $this->directory . '/index.bin', $repository->cipher()->seal( $plain . $index->to_binary() ) );
+		$sealed = $repository->cipher()->seal( $plain . $index->to_binary() );
+		if ( strlen( $sealed ) > $this->limit ) {
+			$this->clear();
+			return;
+		}
+		if ( ! is_dir( $this->directory ) ) {
+			mkdir( $this->directory, 0700, true );
+		}
+		Files::write_atomic( $this->directory . '/index.bin', $sealed );
 	}
 }

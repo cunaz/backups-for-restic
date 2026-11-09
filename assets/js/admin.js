@@ -668,6 +668,7 @@
 							/* translators: %s: directory path. */
 							sprintf( __( 'Working directory: %s', DOMAIN ), response.private_dir ),
 						] ),
+						cacheControl( response.cache_bytes ),
 						recoveryKitForm(),
 					] ),
 					message,
@@ -677,6 +678,33 @@
 			.catch( function ( error ) {
 				replace( root, [ notice( 'error', errorText( error ) ) ] );
 			} );
+	}
+
+	function cacheControl( bytes ) {
+		const box = el( 'div' );
+		function render( size, message ) {
+			const clear = button( __( 'Clear cache', DOMAIN ), function () {
+				clear.disabled = true;
+				api( '/cache', { method: 'DELETE' } )
+					.then( function ( response ) {
+						render( response.cache_bytes, notice( 'success', __( 'The cache was cleared. The next job reads the index from the repository again.', DOMAIN ) ) );
+					} )
+					.catch( function ( error ) {
+						render( size, notice( 'error', errorText( error ) ) );
+					} );
+			} );
+			replace( box, [
+				el( 'p', { className: 'description' }, [
+					/* translators: %s: amount of data such as 15 MB. */
+					sprintf( __( 'Local cache: %s. It only speeds up jobs and is rebuilt when needed.', DOMAIN ), formatBytes( size ) ),
+					' ',
+					clear,
+				] ),
+				message,
+			] );
+		}
+		render( bytes, null );
+		return box;
 	}
 
 	function kitView( kit ) {

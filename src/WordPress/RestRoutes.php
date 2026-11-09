@@ -58,6 +58,7 @@ final class RestRoutes {
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/log' => [ 'GET', 'job_log' ],
 			'/snapshots'                                 => [ 'GET', 'snapshots' ],
 			'/settings'                                  => [ 'GET', 'settings', 'PUT', 'update_settings' ],
+			'/cache'                                     => [ 'DELETE', 'clear_cache' ],
 			'/repository/test'                           => [ 'POST', 'test_repository' ],
 			'/repository/save'                           => [ 'POST', 'save_repository' ],
 			'/repository/create'                         => [ 'POST', 'create_repository' ],
@@ -354,6 +355,7 @@ final class RestRoutes {
 				'overridden'  => $settings->overridden,
 				'secrets'     => $secrets,
 				'private_dir' => $this->container->private_dir()->path,
+				'cache_bytes' => $this->container->cache()->size(),
 			]
 		);
 	}
@@ -391,6 +393,19 @@ final class RestRoutes {
 		}
 		$this->container->refresh();
 		return $this->settings();
+	}
+
+	/**
+	 * Deletes the local cache; the next job rebuilds it from the repository.
+	 *
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	public function clear_cache(): \WP_REST_Response|\WP_Error {
+		if ( null !== $this->container->jobs()->active() ) {
+			return $this->error( 'job_conflict', 409 );
+		}
+		$this->container->cache()->clear();
+		return $this->respond( [ 'cache_bytes' => $this->container->cache()->size() ] );
 	}
 
 	/**
