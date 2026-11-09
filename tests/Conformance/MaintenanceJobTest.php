@@ -60,6 +60,9 @@ final class MaintenanceJobTest extends TestCase {
 
 	private SiteState $state;
 
+	/** Options of the last components, where settings, secrets and the key cache live. */
+	private InMemoryOptions $options;
+
 	public static function setUpBeforeClass(): void {
 		if ( ! RestServer::available() ) {
 			self::markTestSkipped( 'Run bin/install-test-tools.sh to install restic and rest-server.' );
@@ -83,12 +86,13 @@ final class MaintenanceJobTest extends TestCase {
 	 * Builds the runner as the plugin does, with the given settings.
 	 *
 	 * @param array<string, mixed> $settings Setting changes.
+	 * @param InMemoryOptions|null $options  Options of an earlier request of the same site, or null for a new site.
 	 * @return array{Runner, JobStore}
 	 */
-	private function components( RestServer $server, string $repository, string $site, array $settings ): array {
-		$options = new InMemoryOptions();
-		$random  = new SystemRandom();
-		$secrets = new EncryptedOptionStore( $options, new Secret( 'salts' ), $random );
+	private function components( RestServer $server, string $repository, string $site, array $settings, ?InMemoryOptions $options = null ): array {
+		$this->options = $options ??= new InMemoryOptions();
+		$random        = new SystemRandom();
+		$secrets       = new EncryptedOptionStore( $options, new Secret( 'salts' ), $random );
 		$secrets->set( SecretName::RepositoryPassword, new Secret( self::REPOSITORY_PASSWORD ) );
 		$secrets->set( SecretName::RestPassword, new Secret( RestServer::PASSWORD ) );
 		$loaded = ( new SettingsStore( $options ) )->update(
@@ -206,6 +210,36 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertIsArray( $snapshots );
 		self::assertCount( 1, $snapshots );
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'Every job released its lock.' );
+	}
+
+	public function test_a_cancelled_forget_releases_its_lock_after_the_retention_settings_became_unusable(): void {
+		self::assertNotNull( self::$server );
+		$site       = $this->site();
+		$repository = Repository::initialize( self::$server->backend( 'cancelled-forget' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$this->history( $repository, $site );
+		[ $runner, $store ] = $this->components( self::$server, 'cancelled-forget', $site, [ 'retention.keep.last' => 1 ] );
+		$job                = $store->create( JobType::Forget, 'manual', time() );
+		$locks              = [];
+		for ( $tick = 0; $tick < 200 && [] === $locks; $tick++ ) {
+			$runner->tick( 0.0 );
+			$locks = $repository->backend()->list( ObjectType::Locks );
+		}
+		self::assertCount( 1, $locks, 'The forget run holds its lock.' );
+
+		// The administrator clears keep-within, which the policy needs, and cancels the job; the
+		// next request builds everything again from the changed settings.
+		[ $runner, $store ] = $this->components( self::$server, 'cancelled-forget', $site, [ 'retention.keep.within' => '' ], $this->options );
+		$running            = $store->get( $job->id );
+		self::assertNotNull( $running );
+		$running->cancel_requested = true;
+		$store->save( $running );
+		$more = true;
+		for ( $tick = 0; $tick < 50 && $more; $tick++ ) {
+			$more = $runner->tick( 0.3 )->has_more_work();
+		}
+
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+		self::assertSame( [], $repository->backend()->list( ObjectType::Locks ), 'The lock was released, not left to go stale.' );
 	}
 
 	public function test_a_check_with_damage_raises_the_alert(): void {

@@ -441,8 +441,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   referenced blob, rewrite index files without them (new index files first, then delete the
   old ones). Partially used packs are not repacked; the dashboard shows "reclaimable by a
   full prune" and the disaster-recovery guide explains `restic prune` from any computer.
-  Prune takes an exclusive lock; the maintenance jobs that run it weekly by default are
-  planned next in Milestone 2. It fails closed: an inconclusive
+  Prune takes an exclusive lock, and the maintenance jobs run it weekly by default
+  (`schedule.prune.*`). It fails closed: an inconclusive
   append-only probe stops it before the lock; if marking meets a used blob or tree that the
   index does not lead to, or planning finds a used pack that no index file lists, it marks
   again once with the index as the server has it under the lock (another client may have
@@ -453,7 +453,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
   never split a blob, so memory does not grow with the pack size; a pack whose reading ends
   the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
-  default; findings raise a persistent critical notice and are reported in Site Health.
+  default; errors raise a persistent critical notice and are reported in Site Health,
+  warnings only appear with the result (ADR 0022).
   Repairs are never attempted automatically; the guide points to `restic repair`.
 - **Cache hygiene**: tree-pack cache and index cache size-capped (default 256 MiB), oldest
   first.
