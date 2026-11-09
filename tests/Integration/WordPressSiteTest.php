@@ -81,7 +81,11 @@ final class WordPressSiteTest extends TestCase {
 			$options[ CURLOPT_POSTFIELDS ] = (string) json_encode( $data );
 		}
 		curl_setopt_array( $handle, $options );
-		$body    = (string) curl_exec( $handle );
+		$body = curl_exec( $handle );
+		if ( ! is_string( $body ) ) {
+			// No HTTP response at all: report why, so a failing assertion shows the cause.
+			return [ 0, [], $method . ' ' . $route . ': ' . curl_error( $handle ) ];
+		}
 		$decoded = json_decode( $body, true );
 		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), is_array( $decoded ) ? $decoded : [], $body ];
 	}
@@ -129,8 +133,9 @@ final class WordPressSiteTest extends TestCase {
 		$deadline = time() + $timeout;
 		do {
 			self::cron();
-			[ , $list ] = self::api( 'GET', '/jobs' );
-			$active     = array_filter( $list['jobs'] ?? [], static fn ( mixed $job ): bool => is_array( $job ) && in_array( $job['state'] ?? '', [ 'queued', 'running' ], true ) );
+			[ $status, $list, $raw ] = self::api( 'GET', '/jobs' );
+			self::assertSame( 200, $status, $raw );
+			$active = array_filter( $list['jobs'] ?? [], static fn ( mixed $job ): bool => is_array( $job ) && in_array( $job['state'] ?? '', [ 'queued', 'running' ], true ) );
 			if ( [] === $active ) {
 				return;
 			}
@@ -195,8 +200,8 @@ final class WordPressSiteTest extends TestCase {
 		}
 
 		self::idle( 600 );
-		[ $status, $started ] = self::api( 'POST', '/jobs' );
-		self::assertSame( 201, $status );
+		[ $status, $started, $raw ] = self::api( 'POST', '/jobs' );
+		self::assertSame( 201, $status, $raw );
 		$job = self::wait_for( $started['job']['id'], 3600 );
 		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
 		self::idle( 600 );
@@ -251,8 +256,9 @@ final class WordPressSiteTest extends TestCase {
 		self::assertNotNull( self::$server );
 		file_put_contents( self::$site . '/wp-content/uploads/fixture/changed.bin', Vectors::hash_stream( 'changed', 64 * 1048576 ) );
 		self::idle( 600 );
-		[ , $started ] = self::api( 'POST', '/jobs' );
-		$id            = $started['job']['id'];
+		[ $status, $started, $raw ] = self::api( 'POST', '/jobs' );
+		self::assertSame( 201, $status, $raw );
+		$id = $started['job']['id'];
 
 		$handle = curl_init( self::URL . '/wp-cron.php?doing_wp_cron' );
 		curl_setopt_array(

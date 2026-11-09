@@ -130,7 +130,7 @@ start_server() {
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \
-		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" > "$TOOLS/site-server.log" 2>&1 &
+		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" >> "$TOOLS/site-server.log" 2>&1 &
 	echo $! > "$PID_FILE"
 	for _ in $(seq 1 50); do
 		if curl -fsS -o /dev/null "$URL/wp-login.php"; then
