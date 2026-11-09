@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
@@ -13,6 +14,7 @@ use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
@@ -220,6 +222,100 @@ final class CheckTest extends TestCase {
 
 		self::assertCount( CheckRun::MAX_FINDINGS, $result['findings'] );
 		self::assertSame( CheckRun::MAX_FINDINGS + 10, $result['warnings'] );
+	}
+
+	public function test_a_damaged_index_file_is_a_finding_and_the_check_goes_on(): void {
+		$name                                     = array_key_first( $this->backend->list( ObjectType::Index ) );
+		$this->backend->objects['index'][ $name ] = 'not an encrypted index file';
+
+		$result = $this->check();
+
+		self::assertContains( 'error:index_unreadable', self::codes( $result ) );
+		self::assertSame( 1, $result['counts']['error:index_unreadable'] );
+		self::assertGreaterThan( 0, $result['stats']['packs_read'] ?? 0, 'The packs listed in readable index files were still read.' );
+	}
+
+	public function test_reads_one_snapshot_per_unit_of_work(): void {
+		$this->back_up();
+		$this->back_up();
+		$snapshots = count( $this->backend->list( ObjectType::Snapshots ) );
+		self::assertSame( 4, $snapshots );
+
+		$run  = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		$read = 0;
+		while ( ! $run->advance( 0.0 ) ) {
+			$now = $run->result()['stats']['snapshots'] ?? 0;
+			self::assertLessThanOrEqual( $read + 1, $now, 'At most one snapshot per unit of work.' );
+			$read = $now;
+		}
+		self::assertSame( $snapshots, $run->result()['stats']['snapshots'] ?? 0 );
+	}
+
+	public function test_a_missing_pack_is_not_read_again_when_the_findings_list_is_full(): void {
+		for ( $i = 0; $i <= CheckRun::MAX_FINDINGS; $i++ ) {
+			$this->backend->objects['index'][ hash( 'sha256', 'damaged ' . $i ) ] = 'damaged ' . $i;
+		}
+		$this->backend->delete( ObjectType::Data, $this->any_pack() );
+
+		$result = $this->check();
+
+		self::assertSame( CheckRun::MAX_FINDINGS + 1, $result['counts']['error:index_unreadable'] );
+		self::assertSame( 1, $result['counts']['error:pack_missing'], 'Counted once, not again when the sample is read.' );
+	}
+
+	public function test_a_transport_error_ends_the_tick_and_the_check_resumes(): void {
+		$flaky = new class( $this->backend ) implements Backend {
+			private bool $failed = false;
+
+			public function __construct( private readonly Backend $inner ) {
+			}
+
+			public function create(): void {
+				$this->inner->create();
+			}
+
+			public function size( ObjectType $type, string $name ): ?int {
+				return $this->inner->size( $type, $name );
+			}
+
+			public function load( ObjectType $type, string $name, int $offset = 0, ?int $length = null ): string {
+				if ( ObjectType::Data === $type && ! $this->failed ) {
+					$this->failed = true;
+					throw new BackendException( 'Connection reset by peer.' );
+				}
+				return $this->inner->load( $type, $name, $offset, $length );
+			}
+
+			public function save( ObjectType $type, string $name, string $body ): void {
+				$this->inner->save( $type, $name, $body );
+			}
+
+			public function delete( ObjectType $type, string $name ): void {
+				$this->inner->delete( $type, $name );
+			}
+
+			public function list( ObjectType $type ): array {
+				return $this->inner->list( $type );
+			}
+		};
+		$work  = $this->work_dir();
+		$run   = CheckRun::start( Repository::open( $flaky, $this->repository->master_key(), new SystemRandom() ), $work, $this->identity, new SystemClock(), new SystemRandom(), 100 );
+		try {
+			$run->advance( INF );
+			self::fail( 'The transport error ends the tick.' );
+		} catch ( BackendException ) {
+			self::assertCount( 1, $this->backend->list( ObjectType::Locks ), 'The lock stays for the next tick.' );
+		}
+
+		$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		$result = $run->result();
+		self::assertSame( 0, $result['errors'] );
+		self::assertSame( [], $result['findings'] );
+		self::assertSame( count( $this->backend->list( ObjectType::Data ) ), $result['stats']['packs_read'] ?? 0 );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
 	public function test_backups_may_run_while_a_check_holds_its_shared_lock(): void {
