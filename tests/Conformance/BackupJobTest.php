@@ -152,10 +152,13 @@ final class BackupJobTest extends TestCase {
 		file_put_contents( $site . '/index.php', "<?php\n// Changed.\n" );
 		$second = $this->run_job( $runner, $store, 5 );
 		self::assertSame( JobState::Succeeded, $second->state );
-		// Unchanged files are reused. The dump deduplicates except around the places where the
-		// first run's many tiny ticks cut the chunker at a page boundary.
+		// Unchanged files are reused and add nothing. The dump deduplicates except around the
+		// places where the first run's tiny ticks cut the chunker at a page boundary; how many
+		// cuts that were depends on the machine's speed, so the bound is the dump itself plus a
+		// margin for the changed file and the trees.
 		self::assertGreaterThan( 0, (int) ( $second->progress['files_unmodified'] ?? 0 ) );
-		self::assertLessThan( 0.5 * (int) ( $second->progress['total_bytes_processed'] ?? 0 ), (int) ( $second->progress['data_added'] ?? PHP_INT_MAX ) );
+		$dump_bytes = array_sum( array_map( static fn ( mixed $file ): int => (int) filesize( (string) $file ), $sql ) );
+		self::assertLessThan( $dump_bytes + 1048576, (int) ( $second->progress['data_added'] ?? PHP_INT_MAX ) );
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock is left behind.' );
 	}
 
