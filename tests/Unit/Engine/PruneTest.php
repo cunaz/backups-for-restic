@@ -158,6 +158,59 @@ final class PruneTest extends TestCase {
 	}
 
 	/**
+	 * The unused bytes in packs that keep a used blob, computed independently of PruneRun from
+	 * a walk of all snapshots and the index files: what only a full prune would reclaim.
+	 *
+	 * @return int Bytes.
+	 */
+	private function unused_bytes_in_used_packs(): int {
+		$index = $this->repository->load_index();
+		$used  = [];
+		$trees = [];
+		foreach ( $this->repository->snapshots() as $snapshot ) {
+			$trees[] = $snapshot->tree;
+		}
+		while ( [] !== $trees ) {
+			$tree = array_pop( $trees );
+			if ( isset( $used[ 'tree:' . $tree->hex() ] ) ) {
+				continue;
+			}
+			$used[ 'tree:' . $tree->hex() ] = true;
+			foreach ( $this->repository->load_tree( $index, $tree ) as $node ) {
+				if ( null !== $node->subtree ) {
+					$trees[] = $node->subtree;
+				}
+				foreach ( $node->content ?? [] as $blob ) {
+					$used[ 'data:' . $blob->hex() ] = true;
+				}
+			}
+		}
+		$packs = [];
+		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+			foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+				$packs[ $pack ] = $entries;
+			}
+		}
+		$unused = 0;
+		foreach ( $packs as $entries ) {
+			$counted = [];
+			$wasted  = 0;
+			$keeps   = false;
+			foreach ( $entries as $entry ) {
+				$key = ( BlobType::Tree === $entry->type ? 'tree:' : 'data:' ) . $entry->id->hex();
+				if ( isset( $used[ $key ] ) && ! isset( $counted[ $key ] ) ) {
+					$counted[ $key ] = true;
+					$keeps           = true;
+				} else {
+					$wasted += $entry->length;
+				}
+			}
+			$unused += $keeps ? $wasted : 0;
+		}
+		return $unused;
+	}
+
+	/**
 	 * Loads every blob of every snapshot, as restic check --read-data would.
 	 *
 	 * @return int Number of data blobs read.
@@ -223,6 +276,58 @@ final class PruneTest extends TestCase {
 		}
 		self::assertSame( $before, $this->read_everything(), 'Every remaining snapshot reads completely.' );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock is released.' );
+	}
+
+	public function test_estimates_the_space_only_a_full_prune_reclaims(): void {
+		// Files that share packs with files that stay: their packs become partly used.
+		foreach ( [ 'gone-1', 'gone-2', 'gone-3' ] as $name ) {
+			file_put_contents( $this->site . '/' . $name . '.bin', Vectors::hash_stream( $name, 200000 ) );
+		}
+		$first = $this->back_up();
+		foreach ( [ 'gone-1', 'gone-2', 'gone-3' ] as $name ) {
+			unlink( $this->site . '/' . $name . '.bin' );
+		}
+		$this->back_up();
+		Forget::delete( $this->repository, [ $first->hex() ] );
+		$expected = $this->unused_bytes_in_used_packs();
+		self::assertGreaterThan( 600000, $expected, 'The removed files stay in partly used packs.' );
+
+		self::assertSame( $expected, $this->prune()->result()['reclaimable_bytes'] );
+		self::assertSame( $expected, $this->prune()->result()['reclaimable_bytes'], 'A second prune deletes nothing and finds the same.' );
+	}
+
+	public function test_an_interrupted_prune_estimates_the_same_space(): void {
+		$this->history_with_a_forgotten_snapshot();
+		file_put_contents( $this->site . '/gone.bin', Vectors::hash_stream( 'gone', 300000 ) );
+		$this->back_up();
+		unlink( $this->site . '/gone.bin' );
+		$latest = $this->back_up();
+		foreach ( $this->repository->snapshots() as $hex => $snapshot ) {
+			if ( $hex !== $latest->hex() ) {
+				Forget::delete( $this->repository, [ $hex ] );
+			}
+		}
+		$expected = $this->unused_bytes_in_used_packs();
+		self::assertGreaterThan( 0, $expected );
+		self::assertSame( $expected, $this->prune( null, true )->result()['reclaimable_bytes'] );
+	}
+
+	public function test_a_checkpoint_without_the_filter_finishes_without_an_estimate(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$work = $this->work_dir();
+		$run  = PruneRun::start( $this->repository, $work, $this->identity, new FrozenClock( time() ), new SystemRandom() );
+		$run->advance( 0.0 );
+		$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true );
+		self::assertIsArray( $state );
+		unset( $state['filter'] );
+		file_put_contents( $work . '/state.json', json_encode( $state ) );
+
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, new FrozenClock( time() ) );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( -1, $run->result()['reclaimable_bytes'] );
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'], 'The prune itself is unaffected.' );
 	}
 
 	public function test_an_interrupted_prune_after_every_tick_ends_in_the_same_state(): void {

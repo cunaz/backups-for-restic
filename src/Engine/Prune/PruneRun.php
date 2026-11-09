@@ -26,6 +26,7 @@ use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
+use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
@@ -49,6 +50,13 @@ defined( 'ABSPATH' ) || exit;
  * it reads to the last pack it deletes. If the lock disappeared or was not refreshed in time,
  * another client may have added snapshots that use an unused pack, so the run starts again with
  * marking; until then it had deleted only packs that no snapshot could use.
+ *
+ * Packs that hold used and unused blobs stay. The run estimates the space they waste, which
+ * only a full `restic prune` from another computer reclaims: the bytes of all blobs in kept
+ * packs minus the bytes of the used blobs. Trees are counted exactly; data blobs are counted
+ * once with the help of a Bloom filter of about two bytes per indexed blob, because an exact
+ * set of every used blob would not fit the memory of small hosts. A false positive of the
+ * filter leaves a used blob uncounted, so the estimate can only be slightly too high.
  */
 final class PruneRun {
 
@@ -59,6 +67,11 @@ final class PruneRun {
 
 	/** At most this many IDs of missing blobs are kept for the error report. */
 	private const int MISSING_EXAMPLES = 5;
+
+	/** Smallest and largest Bloom filter, in bits: 8 KiB and 8 MiB. */
+	private const int FILTER_MIN_BITS = 65536;
+
+	private const int FILTER_MAX_BITS = 67108864;
 
 	/**
 	 * Lock handling.
@@ -115,6 +128,34 @@ final class PruneRun {
 	 * @var array<string, true>
 	 */
 	private array $live;
+
+	/**
+	 * Bloom filter of the data blobs counted in used_bytes; empty if the estimate is unavailable.
+	 *
+	 * @var string
+	 */
+	private string $filter;
+
+	/**
+	 * Bytes of the used blobs, each counted once.
+	 *
+	 * @var int
+	 */
+	private int $used_bytes;
+
+	/**
+	 * Bytes of all blobs in kept packs, from the index files.
+	 *
+	 * @var int
+	 */
+	private int $kept_bytes;
+
+	/**
+	 * Hex IDs of kept packs already counted in kept_bytes.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $counted;
 
 	/**
 	 * Number of used blobs that are missing from the index.
@@ -211,14 +252,23 @@ final class PruneRun {
 		private readonly Clock $clock,
 		array $state
 	) {
-		$this->pid                 = Decoded::int( $state['pid'] ?? null, random_int( 100000, 2147483647 ) );
-		$this->locking             = new Locking( $repository, $identity, $clock, $this->pid );
-		$this->lock                = Decoded::string( $state['lock'] ?? null );
-		$this->locked_at           = Decoded::int( $state['locked_at'] ?? null );
-		$this->phase               = Decoded::string( $state['phase'] ?? null, 'mark' );
-		$this->frontier            = Decoded::strings( $state['frontier'] ?? [] );
-		$this->seen                = array_fill_keys( Decoded::strings( $state['seen'] ?? [] ), true );
-		$this->live                = array_fill_keys( Decoded::strings( $state['live'] ?? [] ), true );
+		$this->pid       = Decoded::int( $state['pid'] ?? null, random_int( 100000, 2147483647 ) );
+		$this->locking   = new Locking( $repository, $identity, $clock, $this->pid );
+		$this->lock      = Decoded::string( $state['lock'] ?? null );
+		$this->locked_at = Decoded::int( $state['locked_at'] ?? null );
+		$this->phase     = Decoded::string( $state['phase'] ?? null, 'mark' );
+		$this->frontier  = Decoded::strings( $state['frontier'] ?? [] );
+		$this->seen      = array_fill_keys( Decoded::strings( $state['seen'] ?? [] ), true );
+		$this->live      = array_fill_keys( Decoded::strings( $state['live'] ?? [] ), true );
+		try {
+			$this->filter = Bytes::base64_decode( Decoded::string( $state['filter'] ?? null ) );
+		} catch ( FormatException ) {
+			// A checkpoint from before the estimate: the run continues without one.
+			$this->filter = '';
+		}
+		$this->used_bytes          = Decoded::count( $state['used_bytes'] ?? null );
+		$this->kept_bytes          = Decoded::count( $state['kept_bytes'] ?? null );
+		$this->counted             = array_fill_keys( Decoded::strings( $state['counted'] ?? [] ), true );
 		$this->missing             = Decoded::count( $state['missing'] ?? null );
 		$this->missing_examples    = Decoded::strings( $state['missing_examples'] ?? [] );
 		$this->snapshots           = Decoded::count( $state['snapshots'] ?? null );
@@ -339,15 +389,17 @@ final class PruneRun {
 	}
 
 	/**
-	 * Outcome once finished.
+	 * Outcome once finished. reclaimable_bytes estimates the unused space in kept packs that
+	 * only a full prune with repacking frees; -1 if unknown.
 	 *
-	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, index_files_written: int, restarts: int} Result.
+	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, reclaimable_bytes: int, index_files_written: int, restarts: int} Result.
 	 */
 	public function result(): array {
 		return [
 			'packs_deleted'       => $this->packs_deleted,
 			'bytes_deleted'       => $this->bytes_deleted,
 			'packs_kept'          => count( $this->live ),
+			'reclaimable_bytes'   => '' === $this->filter ? -1 : max( 0, $this->kept_bytes - $this->used_bytes ),
 			'index_files_written' => $this->index_files_written,
 			'restarts'            => $this->restarts,
 		];
@@ -379,6 +431,10 @@ final class PruneRun {
 		$this->frontier            = array_keys( $roots );
 		$this->seen                = [];
 		$this->live                = [];
+		$this->filter              = str_repeat( "\0", intdiv( self::filter_bits( $this->index()->count() ), 8 ) );
+		$this->used_bytes          = 0;
+		$this->kept_bytes          = 0;
+		$this->counted             = [];
 		$this->missing             = 0;
 		$this->missing_examples    = [];
 		$this->index_files         = [];
@@ -499,7 +555,52 @@ final class PruneRun {
 			return false;
 		}
 		$this->live[ $location->pack->hex() ] = true;
+		// Trees reach here once each; data blobs that several files share are counted once.
+		if ( BlobType::Tree === $type || $this->first_use( $blob ) ) {
+			$this->used_bytes += $location->entry->length;
+		}
 		return true;
+	}
+
+	/**
+	 * Enters a data blob into the Bloom filter.
+	 *
+	 * @param Id $blob Blob ID, a SHA-256 hash whose words serve as the three hash values.
+	 * @return bool True if the blob was not in the filter yet; false if it was, or probably was.
+	 */
+	private function first_use( Id $blob ): bool {
+		if ( '' === $this->filter ) {
+			return false;
+		}
+		$mask  = strlen( $this->filter ) * 8 - 1;
+		$words = unpack( 'V3', $blob->bytes() );
+		$new   = false;
+		foreach ( false === $words ? [] : $words as $word ) {
+			$bit  = $word & $mask;
+			$byte = $bit >> 3;
+			$old  = ord( $this->filter[ $byte ] );
+			$flag = 1 << ( $bit & 7 );
+			if ( 0 === ( $old & $flag ) ) {
+				$this->filter[ $byte ] = chr( $old | $flag );
+				$new                   = true;
+			}
+		}
+		return $new;
+	}
+
+	/**
+	 * Size of the Bloom filter for an index: a power of two with about 16 bits per blob, for
+	 * a false-positive rate below one percent with three hash values.
+	 *
+	 * @param int $blobs Blobs in the index.
+	 * @return int Bits.
+	 */
+	private static function filter_bits( int $blobs ): int {
+		$bits = self::FILTER_MIN_BITS;
+		while ( $bits < 16 * $blobs && $bits < self::FILTER_MAX_BITS ) {
+			$bits *= 2;
+		}
+		return $bits;
 	}
 
 	/**
@@ -512,8 +613,14 @@ final class PruneRun {
 			return;
 		}
 		$affected = false;
-		foreach ( array_keys( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) ) as $pack ) {
+		foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 			if ( isset( $this->live[ $pack ] ) ) {
+				if ( ! isset( $this->counted[ $pack ] ) ) {
+					$this->counted[ $pack ] = true;
+					foreach ( $entries as $entry ) {
+						$this->kept_bytes += $entry->length;
+					}
+				}
 				continue;
 			}
 			$this->unused[ $pack ] = -1;
@@ -633,6 +740,10 @@ final class PruneRun {
 					'frontier'            => $this->frontier,
 					'seen'                => array_keys( $this->seen ),
 					'live'                => array_keys( $this->live ),
+					'filter'              => Bytes::base64_encode( $this->filter ),
+					'used_bytes'          => $this->used_bytes,
+					'kept_bytes'          => $this->kept_bytes,
+					'counted'             => array_keys( $this->counted ),
 					'missing'             => $this->missing,
 					'missing_examples'    => $this->missing_examples,
 					'snapshots'           => $this->snapshots,
