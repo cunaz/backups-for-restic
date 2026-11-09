@@ -66,6 +66,29 @@ final class CipherTest extends TestCase {
 		}
 	}
 
+	public function test_rejections_name_the_reason(): void {
+		$cases = [
+			'Encrypted object is too short.'          => str_repeat( 'x', Cipher::OVERHEAD - 1 ),
+			'Encrypted object has an invalid nonce.'  => str_repeat( "\0", Cipher::NONCE_LENGTH ) . str_repeat( 'x', Cipher::TAG_LENGTH ),
+			'Encrypted object failed authentication.' => str_repeat( 'x', Cipher::OVERHEAD ),
+		];
+		foreach ( $cases as $message => $data ) {
+			try {
+				Vectors::cipher()->open( $data );
+				self::fail( 'Invalid input was accepted: ' . $message );
+			} catch ( AuthenticationFailed $exception ) {
+				self::assertSame( $message, $exception->getMessage() );
+			}
+		}
+	}
+
+	public function test_system_random_returns_exactly_the_requested_length(): void {
+		$random = new SystemRandom();
+		foreach ( [ 1, 2, 16, 64 ] as $length ) {
+			self::assertSame( $length, strlen( $random->bytes( $length ) ) );
+		}
+	}
+
 	public function test_seal_never_emits_an_all_zero_nonce(): void {
 		$random = new FixedRandom( 'zero-nonce', str_repeat( "\0", 16 ) );
 		$cipher = new Cipher( MasterKey::generate( new SystemRandom() ), $random );
