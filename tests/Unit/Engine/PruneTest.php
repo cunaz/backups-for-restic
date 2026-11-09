@@ -27,6 +27,7 @@ use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
+use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\Vectors;
@@ -357,6 +358,68 @@ final class PruneTest extends TestCase {
 			self::assertStringContainsString( 'could not be determined', $exception->getMessage() );
 		}
 		self::assertSame( $objects, $this->backend->objects, 'Nothing was written, not even a lock.' );
+	}
+
+	public function test_a_long_call_refreshes_its_lock_while_it_works(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$used       = array_keys( $this->used_packs() );
+		$clock      = new FrozenClock( time() );
+		$locks      = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( $clock, &$locks ): void {
+				if ( 'load' === $method && ObjectType::Data === $type ) {
+					$clock->advance( 200 ); // Every tree takes a while, as on a slow server.
+				}
+				if ( 'save' === $method && ObjectType::Locks === $type ) {
+					++$locks;
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = PruneRun::start( $repository, $this->work_dir(), $this->identity, $clock, new SystemRandom() );
+		self::assertSame( 1, $locks );
+
+		self::assertTrue( $run->advance( INF ), 'One call without a deadline finishes the prune.' );
+
+		self::assertGreaterThan( 1, $locks, 'The lock was refreshed during the call.' );
+		self::assertSame( 0, $run->result()['restarts'], 'The lock never went stale, so marking did not start over.' );
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_tree_that_failed_to_load_is_walked_when_the_same_run_tries_again(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$used       = array_keys( $this->used_packs() );
+		$failures   = 2;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$failures ): void {
+				if ( 'load' === $method && ObjectType::Data === $type && $failures-- > 0 ) {
+					throw new BackendException( 'The connection was reset.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = PruneRun::start( $repository, $this->work_dir(), $this->identity, new FrozenClock( time() ), new SystemRandom() );
+
+		$done = false;
+		for ( $attempt = 0; $attempt < 5 && ! $done; ++$attempt ) {
+			try {
+				$done = $run->advance( INF );
+			} catch ( BackendException ) {
+				continue; // The caller tries again on the same run, without a checkpoint in between.
+			}
+		}
+
+		self::assertTrue( $done );
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual, 'Every used pack is still there.' );
 	}
 
 	public function test_releases_its_lock_when_the_snapshots_cannot_be_read(): void {
