@@ -23,7 +23,7 @@ final readonly class Field {
 	/**
 	 * Describes a field; use the named constructors.
 	 *
-	 * @param string       $kind     choice, integer, boolean, text or list.
+	 * @param string       $kind     choice, integer, boolean, text, duration, list or emails.
 	 * @param mixed        $fallback Default value.
 	 * @param list<string> $choices  Allowed values of a choice.
 	 * @param int          $min      Minimum of an integer.
@@ -85,6 +85,17 @@ final readonly class Field {
 	}
 
 	/**
+	 * A restic duration such as 2d or 1y6m, which must not be zero: restic's keep-within
+	 * grammar of years, months, days and hours.
+	 *
+	 * @param string $fallback Default.
+	 * @return self Field.
+	 */
+	public static function duration( string $fallback ): self {
+		return new self( 'duration', $fallback, [], 0, 0, 32 );
+	}
+
+	/**
 	 * A list of single-line strings, without duplicates or empty entries.
 	 *
 	 * @param int $length Maximum length of each entry in bytes.
@@ -92,6 +103,15 @@ final readonly class Field {
 	 */
 	public static function list( int $length = 4096 ): self {
 		return new self( 'list', [], [], 0, 500, $length );
+	}
+
+	/**
+	 * A list of e-mail addresses.
+	 *
+	 * @return self Field.
+	 */
+	public static function emails(): self {
+		return new self( 'emails', [], [], 0, 20, 254 );
 	}
 
 	/**
@@ -103,12 +123,46 @@ final readonly class Field {
 	 */
 	public function normalize( mixed $value ): mixed {
 		return match ( $this->kind ) {
-			'choice'  => $this->choice_value( $value ),
-			'integer' => $this->integer_value( $value ),
-			'boolean' => $this->boolean_value( $value ),
-			'text'    => $this->line( $value ),
-			default   => $this->list_value( $value ),
+			'choice'   => $this->choice_value( $value ),
+			'integer'  => $this->integer_value( $value ),
+			'boolean'  => $this->boolean_value( $value ),
+			'text'     => $this->line( $value ),
+			'duration' => $this->duration_value( $value ),
+			'emails'   => $this->emails_value( $value ),
+			default    => $this->list_value( $value ),
 		};
+	}
+
+	/**
+	 * Validates a duration.
+	 *
+	 * @param mixed $value Input.
+	 * @return string Duration as entered, without surrounding blanks.
+	 * @throws InvalidArgument If the value is not a duration or is zero.
+	 */
+	private function duration_value( mixed $value ): string {
+		$value = trim( $this->line( $value ) );
+		if ( 1 !== preg_match( '/\A(?:\d{1,6}[ymdh])+\z/', $value ) || 1 !== preg_match( '/[1-9]/', $value ) ) {
+			InvalidArgument::raise( 'Value is not a duration such as 2d.', [ 'code' => 'invalid_duration' ] );
+		}
+		return $value;
+	}
+
+	/**
+	 * Validates a list of e-mail addresses.
+	 *
+	 * @param mixed $value Input.
+	 * @return list<string> Addresses.
+	 * @throws InvalidArgument If an entry is not an e-mail address.
+	 */
+	private function emails_value( mixed $value ): array {
+		$addresses = $this->list_value( $value );
+		foreach ( $addresses as $address ) {
+			if ( false === filter_var( $address, FILTER_VALIDATE_EMAIL ) ) {
+				InvalidArgument::raise( 'Value is not an e-mail address.', [ 'code' => 'invalid_email' ] );
+			}
+		}
+		return $addresses;
 	}
 
 	/**

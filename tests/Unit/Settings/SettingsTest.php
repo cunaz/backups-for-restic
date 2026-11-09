@@ -46,6 +46,18 @@ final class SettingsTest extends TestCase {
 		self::assertEquals( $saved, $store->load() );
 	}
 
+	public function test_durations_and_e_mail_addresses_are_normalized(): void {
+		$saved = ( new SettingsStore( new InMemoryOptions() ) )->update(
+			[
+				'retention.keep.within'          => ' 1y6m ',
+				'notifications.email.recipients' => "ops@example.com\r\n\r\nops@example.com\nbackup+site@example.org",
+			]
+		);
+		self::assertSame( '1y6m', $saved->string( 'retention.keep.within' ) );
+		self::assertSame( [ 'ops@example.com', 'backup+site@example.org' ], $saved->list( 'notifications.email.recipients' ) );
+		self::assertSame( '0d12h', $saved->with( [ 'retention.keep.within' => '0d12h' ] )->string( 'retention.keep.within' ) );
+	}
+
 	/**
 	 * @return iterable<string, array{string, mixed, string}>
 	 */
@@ -57,6 +69,10 @@ final class SettingsTest extends TestCase {
 		yield 'control characters' => [ 'repository.url', "https://a.example/\n", 'invalid_characters' ];
 		yield 'invalid UTF-8' => [ 'repository.rest_username', "\xff", 'invalid_characters' ];
 		yield 'unknown setting' => [ 'repository.secret', 'x', 'unknown_setting' ];
+		yield 'zero duration' => [ 'retention.keep.within', '0d0h', 'invalid_duration' ];
+		yield 'duration in weeks' => [ 'retention.keep.within', '2w', 'invalid_duration' ];
+		yield 'empty duration' => [ 'retention.keep.within', '', 'invalid_duration' ];
+		yield 'not an e-mail address' => [ 'notifications.email.recipients', "admin@example.com\nadmin", 'invalid_email' ];
 	}
 
 	#[DataProvider( 'invalid_input' )]
