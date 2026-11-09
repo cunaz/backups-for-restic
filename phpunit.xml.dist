@@ -32,6 +32,7 @@
             <directory>tests/Unit/Support</directory>
             <directory>tests/Unit/Fuzz</directory>
             <file>tests/Unit/Engine/ForgetTest.php</file>
+            <file>tests/Unit/Engine/ForgetRunTest.php</file>
         </testsuite>
     </testsuites>
     <source>
