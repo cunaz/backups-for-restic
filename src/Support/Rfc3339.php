@@ -50,18 +50,60 @@ final class Rfc3339 {
 			throw new FormatException( 'Timestamp is not in RFC 3339 format.' );
 		}
 
-		$offset = 0;
-		if ( 'Z' !== $parts[8] ) {
-			$sign   = '-' === $parts[8][0] ? -1 : 1;
-			$offset = $sign * ( (int) substr( $parts[8], 1, 2 ) * 3600 + (int) substr( $parts[8], 4, 2 ) * 60 );
-		}
-
-		$seconds = gmmktime( (int) $parts[4], (int) $parts[5], (int) $parts[6], (int) $parts[2], (int) $parts[3], (int) $parts[1] );
-		if ( false === $seconds ) {
+		$year   = (int) $parts[1];
+		$month  = (int) $parts[2];
+		$day    = (int) $parts[3];
+		$hour   = (int) $parts[4];
+		$minute = (int) $parts[5];
+		$second = (int) $parts[6];
+		if ( $month < 1 || $month > 12 || $day < 1 || $day > self::days_in_month( $year, $month ) || $hour > 23 || $minute > 59 || $second > 59 ) {
 			throw new FormatException( 'Timestamp is out of range.' );
 		}
 
+		$offset = 0;
+		if ( 'Z' !== $parts[8] ) {
+			$hours   = (int) substr( $parts[8], 1, 2 );
+			$minutes = (int) substr( $parts[8], 4, 2 );
+			if ( $hours > 23 || $minutes > 59 ) {
+				throw new FormatException( 'Timestamp is out of range.' );
+			}
+			$offset = ( '-' === $parts[8][0] ? -1 : 1 ) * ( $hours * 3600 + $minutes * 60 );
+		}
+
+		$seconds  = self::days_from_civil( $year, $month, $day ) * 86400 + $hour * 3600 + $minute * 60 + $second;
 		$fraction = '' === $parts[7] ? 0 : (int) str_pad( $parts[7], 9, '0' );
 		return [ $seconds - $offset, $fraction ];
+	}
+
+	/**
+	 * Days since 1970-01-01 in the proleptic Gregorian calendar, for every year from 0 to 9999.
+	 * gmmktime() cannot serve: it reads the years 0 to 100 as two-digit years, so Go's zero
+	 * time 0001-01-01 became 2001-01-01.
+	 *
+	 * @param int $year  Year.
+	 * @param int $month Month, 1-12.
+	 * @param int $day   Day of the month.
+	 * @return int Days; negative before 1970.
+	 */
+	private static function days_from_civil( int $year, int $month, int $day ): int {
+		$year -= $month <= 2 ? 1 : 0;
+		$era   = intdiv( $year >= 0 ? $year : $year - 399, 400 );
+		$years = $year - $era * 400;
+		$days  = intdiv( 153 * ( $month > 2 ? $month - 3 : $month + 9 ) + 2, 5 ) + $day - 1;
+		return $era * 146097 + $years * 365 + intdiv( $years, 4 ) - intdiv( $years, 100 ) + $days - 719468;
+	}
+
+	/**
+	 * Number of days in a month of the proleptic Gregorian calendar.
+	 *
+	 * @param int $year  Year.
+	 * @param int $month Month, 1-12.
+	 * @return int Days.
+	 */
+	private static function days_in_month( int $year, int $month ): int {
+		if ( 2 === $month ) {
+			return ( 0 === $year % 4 && 0 !== $year % 100 ) || 0 === $year % 400 ? 29 : 28;
+		}
+		return in_array( $month, [ 4, 6, 9, 11 ], true ) ? 30 : 31;
 	}
 }

@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Engine\Forget\Forget;
 use BackupsForRestic\Engine\Forget\RetentionPolicy;
@@ -355,5 +356,40 @@ final class ForgetTest extends TestCase {
 	public function test_malformed_durations_are_rejected( string $text ): void {
 		$this->expectException( InvalidArgument::class );
 		Duration::parse( $text );
+	}
+
+	public function test_a_snapshot_from_the_future_does_not_move_the_within_window(): void {
+		// restic 0.19.1, forget --keep-within 2d --dry-run at 2026-11-09T23:19:30Z: it counts
+		// back from the newest snapshot that is not in the future (findLatestTimestamp).
+		$times  = [ '2026-11-01T10:00:00Z', '2026-11-05T10:00:00Z', '2026-11-08T10:00:00Z', '2030-01-01T10:00:00Z' ];
+		$result = Forget::apply( self::at( array_combine( $times, $times ) ), new RetentionPolicy( within: Duration::parse( '2d' ) ), Rfc3339::parse( '2026-11-09T23:19:30Z' ) );
+
+		self::assertSame( [ '2030-01-01T10:00:00Z', '2026-11-08T10:00:00Z' ], $result['keep'] );
+		self::assertSame( [ '2026-11-05T10:00:00Z', '2026-11-01T10:00:00Z' ], $result['remove'] );
+	}
+
+	public function test_within_keeps_everything_when_every_snapshot_is_in_the_future(): void {
+		// No snapshot before now: restic counts back from Go's zero time, so all are within.
+		$times  = [ '2030-01-01T10:00:00Z', '2031-06-01T10:00:00Z' ];
+		$result = Forget::apply( self::at( array_combine( $times, $times ) ), new RetentionPolicy( within: Duration::parse( '2d' ) ), Rfc3339::parse( '2026-11-09T23:19:30Z' ) );
+
+		self::assertSame( [], $result['remove'] );
+	}
+
+	public function test_a_negative_duration_part_moves_the_threshold_forward(): void {
+		// A Duration built in code can hold negative parts; "-1 days" back is one day forward.
+		$times  = [ '2026-11-09T10:00:00Z', '2026-11-08T10:00:00Z' ];
+		$result = Forget::apply( self::at( array_combine( $times, $times ) ), new RetentionPolicy( last: 1, within: new Duration( 0, 0, -1, 0 ) ), Rfc3339::parse( '2026-11-09T23:19:30Z' ) );
+
+		self::assertSame( [ '2026-11-09T10:00:00Z' ], $result['keep'] );
+		self::assertSame( [ 'last snapshot' ], $result['reasons']['2026-11-09T10:00:00Z'] );
+	}
+
+	public function test_a_snapshot_taken_this_very_moment_counts_as_the_future(): void {
+		// findLatestTimestamp takes a snapshot only if it lies strictly before now.
+		$times  = [ '2026-11-09T23:19:30Z', '2026-11-06T23:19:30Z' ];
+		$result = Forget::apply( self::at( array_combine( $times, $times ) ), new RetentionPolicy( within: Duration::parse( '2d' ) ), Rfc3339::parse( '2026-11-09T23:19:30Z' ) );
+
+		self::assertSame( $times, $result['keep'], 'Counting back from the older one keeps both.' );
 	}
 }
