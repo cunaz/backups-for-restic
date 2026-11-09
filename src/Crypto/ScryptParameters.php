@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final readonly class ScryptParameters {
 
-	/** Largest cost the plugin accepts (2^20, 128 MiB table with r = 8). */
+	/** Largest cost the plugin accepts (2^20, a 1 GiB table with r = 8, see MAX_TABLE_BYTES). */
 	public const int MAX_N = 1048576;
 	public const int MAX_R = 32;
 	public const int MAX_P = 16;

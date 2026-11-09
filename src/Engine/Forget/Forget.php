@@ -14,6 +14,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\Rfc3339;
+use BackupsForRestic\Support\SystemClock;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -36,15 +37,19 @@ final class Forget {
 		'yearly'  => 'yearly snapshot',
 	];
 
+	/** Go's zero time, 0001-01-01T00:00:00Z, in Unix seconds. */
+	private const int ZERO_TIME_SECONDS = -62135596800;
+
 	/**
 	 * Applies a policy to one group of snapshots.
 	 *
-	 * @param array<string, Snapshot> $snapshots Snapshots by hex ID.
-	 * @param RetentionPolicy         $policy    Policy.
+	 * @param array<string, Snapshot>    $snapshots Snapshots by hex ID.
+	 * @param RetentionPolicy            $policy    Policy.
+	 * @param array{0: int, 1: int}|null $now       Current time as Clock::now() gives it; null for the system clock.
 	 * @return array{keep: list<string>, remove: list<string>, reasons: array<string, list<string>>} Decision.
 	 * @throws InvalidArgument If the policy is empty.
 	 */
-	public static function apply( array $snapshots, RetentionPolicy $policy ): array {
+	public static function apply( array $snapshots, RetentionPolicy $policy, ?array $now = null ): array {
 		if ( $policy->is_empty() ) {
 			throw new InvalidArgument( 'An empty retention policy would remove every snapshot.' );
 		}
@@ -64,7 +69,7 @@ final class Forget {
 			return compact( 'keep', 'remove', 'reasons' );
 		}
 
-		$latest  = $list[0];
+		$latest  = self::latest( $list, $now ?? ( new SystemClock() )->now() );
 		$counts  = [
 			'last'    => $policy->last,
 			'hourly'  => $policy->hourly,
@@ -206,18 +211,37 @@ final class Forget {
 	}
 
 	/**
+	 * The time the within rules count back from, like restic's findLatestTimestamp: the newest
+	 * snapshot that is not in the future, so that one snapshot from a wrong clock does not
+	 * move the window past all others. If every snapshot is in the future, Go's zero time.
+	 *
+	 * @param list<array{0: string, 1: Snapshot, 2: int, 3: int, 4: int}> $snapshots Snapshots, newest first.
+	 * @param array{0: int, 1: int}                                       $now       Current time.
+	 * @return array{0: int, 1: int, 2: int} Seconds, nanoseconds and time zone offset.
+	 */
+	private static function latest( array $snapshots, array $now ): array {
+		foreach ( $snapshots as [ , , $seconds, $nanoseconds, $offset ] ) {
+			if ( [ $seconds, $nanoseconds ] < $now ) {
+				return [ $seconds, $nanoseconds, $offset ];
+			}
+		}
+		return [ self::ZERO_TIME_SECONDS, 0, 0 ];
+	}
+
+	/**
 	 * Computes latest.AddDate(-years, -months, -days).Add(-hours) like Go.
 	 *
-	 * @param array{0: string, 1: Snapshot, 2: int, 3: int, 4: int} $latest   Newest snapshot.
-	 * @param Duration                                              $duration Duration.
+	 * @param array{0: int, 1: int, 2: int} $latest   Seconds, nanoseconds and time zone offset.
+	 * @param Duration                      $duration Duration.
 	 * @return array{0: int, 1: int} Seconds and nanoseconds.
 	 */
 	private static function threshold( array $latest, Duration $duration ): array {
-		$offset   = $latest[4];
-		$timezone = new \DateTimeZone( sprintf( '%s%02d:%02d', $offset < 0 ? '-' : '+', intdiv( abs( $offset ), 3600 ), intdiv( abs( $offset ) % 3600, 60 ) ) );
-		$date     = ( new \DateTimeImmutable( '@' . $latest[2] ) )->setTimezone( $timezone );
-		$date     = $date->modify( sprintf( '-%d years -%d months -%d days', $duration->years, $duration->months, $duration->days ) );
-		return [ $date->getTimestamp() - $duration->hours * 3600, $latest[3] ];
+		[ $seconds, $nanoseconds, $offset ] = $latest;
+		$timezone                           = new \DateTimeZone( sprintf( '%s%02d:%02d', $offset < 0 ? '-' : '+', intdiv( abs( $offset ), 3600 ), intdiv( abs( $offset ) % 3600, 60 ) ) );
+		$date                               = ( new \DateTimeImmutable( '@' . $seconds ) )->setTimezone( $timezone );
+		// Explicit signs: a part that is negative must not turn into "--1 days".
+		$date = $date->modify( sprintf( '%+d years %+d months %+d days', -$duration->years, -$duration->months, -$duration->days ) );
+		return [ $date->getTimestamp() - $duration->hours * 3600, $nanoseconds ];
 	}
 
 	/**
