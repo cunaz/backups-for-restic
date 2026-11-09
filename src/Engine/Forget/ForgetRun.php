@@ -255,7 +255,7 @@ final class ForgetRun {
 		$snapshots = array_map( Snapshot::from_json( ... ), $this->state['snapshots'] );
 		$remove    = [];
 		foreach ( Forget::group( $snapshots ) as $group ) {
-			array_push( $remove, ...Forget::apply( $group, $this->policy )['remove'] );
+			array_push( $remove, ...Forget::apply( $group, $this->policy, $this->clock->now() )['remove'] );
 		}
 		sort( $remove );
 		$this->state['remove']   = $remove;

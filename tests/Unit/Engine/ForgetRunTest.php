@@ -21,6 +21,7 @@ use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Support\SystemClock;
+use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -93,6 +94,26 @@ final class ForgetRunTest extends TestCase {
 			'ours'    => $ours,
 			'foreign' => $foreign,
 		];
+	}
+
+	public function test_keep_within_counts_back_from_the_newest_snapshot_before_the_runs_clock(): void {
+		$oldest = $this->snapshot( 3 );
+		$middle = $this->snapshot( 1 );
+		$newest = $this->snapshot( 0 );
+		// For the run's clock, a minute after the middle snapshot, the newest one lies in the
+		// future: restic counts the day back from the middle one and keeps both of them.
+		$clock = new FrozenClock( 1767225600 - 86400 + 3600 + 60 );
+		$run   = ForgetRun::start( $this->repository, $this->work_dir(), $this->identity, $clock, new SystemRandom(), new RetentionPolicy( within: Duration::parse( '1d' ) ), self::TAGS );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		$left = array_keys( $this->repository->snapshots() );
+		sort( $left );
+		$kept = [ $middle, $newest ];
+		sort( $kept );
+		self::assertSame( $kept, $left );
+		self::assertNotContains( $oldest, $left );
 	}
 
 	public function test_removes_exactly_what_the_policy_decides_for_this_site(): void {
