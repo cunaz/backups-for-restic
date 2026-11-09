@@ -64,6 +64,21 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $directory );
 	}
 
+	public function test_progress_at_a_whole_number_survives_the_saved_state(): void {
+		$backend = new InMemoryBackend();
+		Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$directory = $this->directory() . '/unlock';
+		self::assertNull( ( new KeyUnlock( $backend, new Secret( self::PASSWORD ), $directory, new SystemRandom() ) )->run( 0.0 ) );
+
+		// A pause at the end of a phase saves exactly 1.0, which PHP's JSON encoder writes as 1.
+		$state = json_decode( (string) file_get_contents( $directory . '/state.json' ), true );
+		self::assertIsArray( $state );
+		$state['progress'] = 1.0;
+		file_put_contents( $directory . '/state.json', (string) json_encode( $state ) );
+
+		self::assertSame( 1.0, ( new KeyUnlock( $backend, new Secret( self::PASSWORD ), $directory, new SystemRandom() ) )->progress() );
+	}
+
 	public function test_wrong_password_tries_every_key_then_fails(): void {
 		$backend = new InMemoryBackend();
 		Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );

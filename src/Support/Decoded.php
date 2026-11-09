@@ -29,6 +29,18 @@ final class Decoded {
 	}
 
 	/**
+	 * Returns a number as a float, or the fallback. JSON has one number type, and PHP encodes a
+	 * float with a whole value such as 1.0 as 1, which decodes to an integer.
+	 *
+	 * @param mixed $value    Decoded value.
+	 * @param float $fallback Default.
+	 * @return float Number.
+	 */
+	public static function number( mixed $value, float $fallback = 0.0 ): float {
+		return is_int( $value ) || is_float( $value ) ? (float) $value : $fallback;
+	}
+
+	/**
 	 * Returns a non-negative integer, or zero.
 	 *
 	 * @param mixed $value Decoded value.
