@@ -38,7 +38,7 @@ final class Messages {
 			],
 			'repository_damaged'             => [
 				'message' => __( 'The repository contains data the plugin cannot read.', 'backups-for-restic' ),
-				'hint'    => __( 'Run a check under Maintenance, or "restic check" from another computer, to find out more.', 'backups-for-restic' ),
+				'hint'    => __( 'Start a repository check (on the dashboard, or with "wp backups-for-restic check"), or run "restic check" from another computer, to find out more.', 'backups-for-restic' ),
 			],
 			'no_snapshots'                   => [
 				'message' => __( 'The repository lists no snapshots, so prune did not delete anything.', 'backups-for-restic' ),
