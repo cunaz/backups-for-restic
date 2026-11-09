@@ -27,6 +27,7 @@ use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
+use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\Vectors;
@@ -100,6 +101,26 @@ final class PruneTest extends TestCase {
 		$this->forgotten = $this->repository->load_unpacked( ObjectType::Snapshots, $middle );
 		Forget::delete( $this->repository, [ $middle->hex() ] );
 		return $unique;
+	}
+
+	/**
+	 * The forgotten history, then two files that are new in the same backup and so share one
+	 * data pack; only the kept one is in the snapshot that is left. That leaves unused data in
+	 * a used pack whatever the clock does: tree packs mix used and unused trees only when
+	 * timestamps differ between backups.
+	 */
+	private function history_with_waste_in_a_used_pack(): void {
+		$this->history_with_a_forgotten_snapshot();
+		file_put_contents( $this->site . '/kept.bin', Vectors::hash_stream( 'kept', 200000 ) );
+		file_put_contents( $this->site . '/gone.bin', Vectors::hash_stream( 'gone', 300000 ) );
+		$this->back_up();
+		unlink( $this->site . '/gone.bin' );
+		$latest = $this->back_up();
+		foreach ( array_keys( $this->repository->snapshots() ) as $hex ) {
+			if ( $hex !== $latest->hex() ) {
+				Forget::delete( $this->repository, [ (string) $hex ] );
+			}
+		}
 	}
 
 	/**
@@ -300,16 +321,7 @@ final class PruneTest extends TestCase {
 	}
 
 	public function test_an_interrupted_prune_estimates_the_same_space(): void {
-		$this->history_with_a_forgotten_snapshot();
-		file_put_contents( $this->site . '/gone.bin', Vectors::hash_stream( 'gone', 300000 ) );
-		$this->back_up();
-		unlink( $this->site . '/gone.bin' );
-		$latest = $this->back_up();
-		foreach ( $this->repository->snapshots() as $hex => $snapshot ) {
-			if ( $hex !== $latest->hex() ) {
-				Forget::delete( $this->repository, [ $hex ] );
-			}
-		}
+		$this->history_with_waste_in_a_used_pack();
 		$expected = $this->unused_bytes_in_used_packs();
 		self::assertGreaterThan( 0, $expected );
 		self::assertSame( $expected, $this->prune( null, true )->result()['reclaimable_bytes'] );
@@ -462,6 +474,71 @@ final class PruneTest extends TestCase {
 			self::assertStringContainsString( 'could not be determined', $exception->getMessage() );
 		}
 		self::assertSame( $objects, $this->backend->objects, 'Nothing was written, not even a lock.' );
+	}
+
+	public function test_a_long_call_refreshes_its_lock_while_it_works(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$used       = array_keys( $this->used_packs() );
+		$clock      = new FrozenClock( time() );
+		$locks      = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( $clock, &$locks ): void {
+				if ( 'load' === $method && ObjectType::Data === $type ) {
+					$clock->advance( 200 ); // Every tree takes a while, as on a slow server.
+				}
+				if ( 'save' === $method && ObjectType::Locks === $type ) {
+					++$locks;
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = PruneRun::start( $repository, $this->work_dir(), $this->identity, $clock, new SystemRandom() );
+		self::assertSame( 1, $locks );
+
+		self::assertTrue( $run->advance( INF ), 'One call without a deadline finishes the prune.' );
+
+		self::assertGreaterThan( 1, $locks, 'The lock was refreshed during the call.' );
+		self::assertSame( 0, $run->result()['restarts'], 'The lock never went stale, so marking did not start over.' );
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_tree_that_failed_to_load_is_walked_when_the_same_run_tries_again(): void {
+		$this->history_with_waste_in_a_used_pack();
+		$used       = array_keys( $this->used_packs() );
+		$wasted     = $this->unused_bytes_in_used_packs();
+		$failures   = 2;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$failures ): void {
+				if ( 'load' === $method && ObjectType::Data === $type && $failures-- > 0 ) {
+					throw new BackendException( 'The connection was reset.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = PruneRun::start( $repository, $this->work_dir(), $this->identity, new FrozenClock( time() ), new SystemRandom() );
+
+		$done = false;
+		for ( $attempt = 0; $attempt < 5 && ! $done; ++$attempt ) {
+			try {
+				$done = $run->advance( INF );
+			} catch ( BackendException ) {
+				continue; // The caller tries again on the same run, without a checkpoint in between.
+			}
+		}
+
+		self::assertTrue( $done );
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual, 'Every used pack is still there.' );
+		self::assertGreaterThan( 0, $wasted );
+		self::assertSame( $wasted, $run->result()['reclaimable_bytes'], 'A tree tried again counts once in the estimate.' );
 	}
 
 	public function test_releases_its_lock_when_the_snapshots_cannot_be_read(): void {

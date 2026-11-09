@@ -330,7 +330,7 @@ final class MaintenanceSteps implements StepProvider {
 		}
 		try {
 			match ( $job->type ) {
-				JobType::Forget => ForgetRun::resume( $repository, $work, $services->identity, $services->clock, $this->policy(), [ PlanFactory::TAG ] )->abort(),
+				JobType::Forget => ForgetRun::resume( $repository, $work, $services->identity, $services->clock, new RetentionPolicy(), [ PlanFactory::TAG ] )->abort(), // Aborting needs no policy, and the settings may no longer give one.
 				JobType::Prune  => PruneRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
 				default         => CheckRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
 			};
