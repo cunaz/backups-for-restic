@@ -13,6 +13,7 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\TickReport;
 use BackupsForRestic\Scheduling\SchedulePolicy;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -126,21 +127,13 @@ final class Cron {
 	}
 
 	/**
-	 * Starts scheduled backups and advances jobs whose chain broke.
+	 * Starts scheduled jobs and advances jobs whose chain broke.
 	 *
 	 * @param Container $container Services.
 	 */
 	public static function heartbeat( Container $container ): void {
-		$settings = $container->settings();
-		if ( $settings->bool( 'setup.completed' ) ) {
-			$now      = time();
-			$slot     = SchedulePolicy::last_backup_slot( $settings, wp_timezone(), $now );
-			$schedule = $container->state()->get( 'schedule' );
-			$handled  = is_int( $schedule['backup_slot'] ?? null ) ? $schedule['backup_slot'] : 0;
-			// The first slot after setup is only recorded: the wizard ran the first backup.
-			if ( null !== $slot && $slot > $handled && ( 0 === $handled || self::start_backup( $container, $now ) ) ) {
-				$container->state()->set( 'schedule', [ 'backup_slot' => $slot ] );
-			}
+		if ( $container->settings()->bool( 'setup.completed' ) ) {
+			self::start_due( $container, time() );
 		}
 		if ( null !== $container->jobs()->active() ) {
 			self::tick( $container );
@@ -148,15 +141,70 @@ final class Cron {
 	}
 
 	/**
-	 * Starts a scheduled backup unless another job is active.
+	 * Starts the job that is due, if any: a scheduled backup first, then forget after a
+	 * successful backup, then prune and check. One job at a time; whatever cannot start now
+	 * starts at a later heartbeat. The first slot of each schedule after setup is only recorded.
 	 *
 	 * @param Container $container Services.
 	 * @param int       $now       Unix time.
+	 */
+	private static function start_due( Container $container, int $now ): void {
+		$settings = $container->settings();
+		$state    = $container->state();
+		$schedule = $state->get( 'schedule' );
+		$zone     = wp_timezone();
+		$plugin   = 'plugin' === $settings->string( 'retention.mode' );
+
+		$slot    = SchedulePolicy::last_backup_slot( $settings, $zone, $now );
+		$handled = Decoded::int( $schedule['backup_slot'] ?? null );
+		if ( null !== $slot && $slot > $handled ) {
+			// The first slot after setup is only recorded: the wizard ran the first backup.
+			if ( 0 === $handled || self::start( $container, JobType::Backup, 'schedule', $now ) ) {
+				$schedule['backup_slot'] = $slot;
+				$state->set( 'schedule', $schedule );
+			}
+			return;
+		}
+
+		$last_backup = Decoded::string( $state->get( 'last_backup' )['job'] ?? null );
+		if ( $plugin && $settings->bool( 'retention.run_forget_after_backup' ) && '' !== $last_backup && Decoded::string( $schedule['forget_for'] ?? null ) !== $last_backup ) {
+			if ( self::start( $container, JobType::Forget, 'after_backup', $now ) ) {
+				$schedule['forget_for'] = $last_backup;
+				$state->set( 'schedule', $schedule );
+			}
+			return;
+		}
+
+		foreach ( [ JobType::Prune, JobType::Check ] as $type ) {
+			if ( JobType::Prune === $type && ! $plugin ) {
+				continue;
+			}
+			$key     = $type->value . '_slot';
+			$slot    = SchedulePolicy::last_maintenance_slot( $settings, $zone, $now, $type->value );
+			$handled = Decoded::int( $schedule[ $key ] ?? null );
+			if ( null === $slot || $slot <= $handled ) {
+				continue;
+			}
+			if ( 0 === $handled || self::start( $container, $type, 'schedule', $now ) ) {
+				$schedule[ $key ] = $slot;
+				$state->set( 'schedule', $schedule );
+			}
+			return;
+		}
+	}
+
+	/**
+	 * Creates a job unless another one is active.
+	 *
+	 * @param Container $container Services.
+	 * @param JobType   $type      Job type.
+	 * @param string    $trigger   Why the job starts.
+	 * @param int       $now       Unix time.
 	 * @return bool True if the job was created; false means the next heartbeat tries again.
 	 */
-	private static function start_backup( Container $container, int $now ): bool {
+	private static function start( Container $container, JobType $type, string $trigger, int $now ): bool {
 		try {
-			$container->jobs()->create( JobType::Backup, 'schedule', $now );
+			$container->jobs()->create( $type, $trigger, $now );
 			return true;
 		} catch ( JobConflict ) {
 			return false;

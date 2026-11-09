@@ -77,4 +77,55 @@ final class SchedulePolicy {
 		};
 		return ( new \DateTimeImmutable( '@' . $last ) )->setTimezone( $zone )->modify( $step )->getTimestamp();
 	}
+
+	/**
+	 * The most recent slot of a maintenance task at or before now.
+	 *
+	 * Prune runs weekly on its weekday or monthly on the first such weekday of the month. The
+	 * check runs monthly on its day of the month, or weekly on the prune weekday, so that all
+	 * maintenance shares one quiet day.
+	 *
+	 * @param Settings      $settings Settings.
+	 * @param \DateTimeZone $zone     Site time zone.
+	 * @param int           $now      Unix time.
+	 * @param string        $task     prune or check.
+	 * @return int|null Unix time of the slot, or null if the task runs only on demand.
+	 */
+	public static function last_maintenance_slot( Settings $settings, \DateTimeZone $zone, int $now, string $task ): ?int {
+		$frequency = $settings->string( 'schedule.' . $task . '.frequency' );
+		$hour      = $settings->int( 'schedule.' . $task . '.hour' );
+		$weekday   = $settings->int( 'schedule.prune.weekday' );
+		$local     = ( new \DateTimeImmutable( '@' . $now ) )->setTimezone( $zone );
+
+		if ( 'weekly' === $frequency ) {
+			$days = ( (int) $local->format( 'w' ) - $weekday + 7 ) % 7;
+			$slot = $local->setTime( $hour, 0 )->modify( '-' . $days . ' days' );
+			return ( $slot <= $local ? $slot : $slot->modify( '-7 days' ) )->getTimestamp();
+		}
+		if ( 'monthly' !== $frequency ) {
+			return null;
+		}
+		$month = $local->modify( 'first day of this month' )->setTime( $hour, 0 );
+		$slot  = self::monthly( $month, $task, $weekday, $settings );
+		if ( $slot > $local ) {
+			$slot = self::monthly( $month->modify( 'first day of previous month' ), $task, $weekday, $settings );
+		}
+		return $slot->getTimestamp();
+	}
+
+	/**
+	 * The slot of a maintenance task within one month.
+	 *
+	 * @param \DateTimeImmutable $first    First day of the month at the task's hour.
+	 * @param string             $task     prune or check.
+	 * @param int                $weekday  Prune weekday, 0 for Sunday.
+	 * @param Settings           $settings Settings.
+	 * @return \DateTimeImmutable Slot.
+	 */
+	private static function monthly( \DateTimeImmutable $first, string $task, int $weekday, Settings $settings ): \DateTimeImmutable {
+		if ( 'check' === $task ) {
+			return $first->modify( '+' . ( $settings->int( 'schedule.check.day' ) - 1 ) . ' days' );
+		}
+		return $first->modify( '+' . ( ( $weekday - (int) $first->format( 'w' ) + 7 ) % 7 ) . ' days' );
+	}
 }

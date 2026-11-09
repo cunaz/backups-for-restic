@@ -12,8 +12,7 @@ namespace BackupsForRestic\Jobs;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Job types and their step lists. Forget, prune, check and restore join in later milestones
- * with their own lists (docs/05-roadmap.md).
+ * Job types and their step lists. Restore joins in Milestone 3 (docs/05-roadmap.md).
  */
 enum JobType: string {
 
@@ -21,6 +20,15 @@ enum JobType: string {
 
 	/** Derives and caches the master key, for the setup wizard. */
 	case Unlock = 'unlock';
+
+	/** Removes this site's snapshots that the retention policy no longer keeps (ADR 0010). */
+	case Forget = 'forget';
+
+	/** Deletes packs that no snapshot uses (ADR 0022). */
+	case Prune = 'prune';
+
+	/** Verifies the repository with a random share of packs read (ADR 0022). */
+	case Check = 'check';
 
 	/**
 	 * Steps of the regular path, in order.
@@ -31,6 +39,9 @@ enum JobType: string {
 		return match ( $this ) {
 			self::Backup => [ 'preflight', 'unlocking', 'backing_up', 'recording' ],
 			self::Unlock => [ 'unlocking' ],
+			self::Forget => [ 'preflight', 'unlocking', 'detecting', 'forgetting', 'recording' ],
+			self::Prune  => [ 'preflight', 'unlocking', 'detecting', 'pruning', 'recording' ],
+			self::Check  => [ 'preflight', 'unlocking', 'checking', 'recording' ],
 		};
 	}
 
@@ -41,9 +52,18 @@ enum JobType: string {
 	 */
 	public function cleanup_steps(): array {
 		return match ( $this ) {
-			self::Backup => [ 'releasing', 'cleaning_up' ],
 			self::Unlock => [ 'cleaning_up' ],
+			default      => [ 'releasing', 'cleaning_up' ],
 		};
+	}
+
+	/**
+	 * Whether the job maintains the repository rather than writing a snapshot.
+	 *
+	 * @return bool True for forget, prune and check.
+	 */
+	public function is_maintenance(): bool {
+		return in_array( $this, [ self::Forget, self::Prune, self::Check ], true );
 	}
 
 	/**

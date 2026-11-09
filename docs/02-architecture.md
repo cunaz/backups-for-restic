@@ -326,12 +326,13 @@ Snapshot: `{"time","parent","tree","paths","hostname","username","uid","gid","ex
 with `hostname` set to the site host, tags `backups-for-restic`, `site:<12 hex>`,
 `run:<job-id>`, and `program_version` `backups-for-restic/<version>`.
 
-Lock: `{"time","exclusive","hostname","username","pid","uid","gid"}`. Backup takes a
-non-exclusive lock; forget, prune and check take an exclusive lock (as restic does). A lock
+Lock: `{"time","exclusive","hostname","username","pid","uid","gid"}`. Backup and check take
+a non-exclusive lock; forget and prune take an exclusive lock (as restic does). A lock
 older than 30 minutes is stale for every restic client, so the heartbeat and every tick
 **refresh** the lock (write new, delete old) when it is older than 5 minutes. If no tick ran
-for more than 30 minutes the job re-acquires its lock before continuing. Locks are deletable
-even in append-only mode.
+for more than 30 minutes the job re-acquires its lock before continuing; prune instead starts
+its marking again, because another client may have written snapshots in the meantime
+([ADR 0022](adr/0022-maintenance-scope.md)). Locks are deletable even in append-only mode.
 
 ### 5.10 REST protocol
 
