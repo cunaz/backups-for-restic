@@ -130,7 +130,7 @@ final class DatabaseDumpTest extends TestCase {
 				file_put_contents( $this->directory . '/' . $name, $content );
 			}
 		}
-		$this->import( (array) glob( $this->directory . '/*.sql' ) );
+		MysqliConnection::import( self::$target, array_map( 'strval', (array) glob( $this->directory . '/*.sql' ) ) );
 
 		$source = self::database( self::$source );
 		$target = self::database( self::$target );
@@ -201,24 +201,5 @@ final class DatabaseDumpTest extends TestCase {
 		$create_source = $source->rows( 'SHOW CREATE TABLE ' . $table )[0]['Create Table'] ?? '';
 		$create_target = $target->rows( 'SHOW CREATE TABLE ' . $table )[0]['Create Table'] ?? '';
 		return $create_source === $create_target ? 'rows are equal' : "structure differs:\n" . $create_source . "\n" . $create_target;
-	}
-
-	/**
-	 * Imports files in name order with the command-line client.
-	 *
-	 * @param list<string> $files SQL files.
-	 */
-	private function import( array $files ): void {
-		sort( $files );
-		$process = proc_open( MysqliConnection::client( self::$target ), [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
-		self::assertIsResource( $process );
-		foreach ( $files as $file ) {
-			fwrite( $pipes[0], (string) file_get_contents( $file ) );
-		}
-		fclose( $pipes[0] );
-		$output = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
-		self::assertSame( 0, proc_close( $process ), 'Import failed: ' . $output );
 	}
 }

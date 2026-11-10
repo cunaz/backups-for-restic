@@ -8,3 +8,6 @@
 /.phpunit.cache/
 /.phpunit.result.cache
 .DS_Store
+# Claude Code: worktrees of helper agents and personal settings; .claude/settings.json is shared.
+/.claude/worktrees/
+/.claude/settings.local.json
