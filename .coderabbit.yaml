@@ -126,6 +126,8 @@ reviews:
       enabled: false
     phpcs:
       enabled: false
+    eslint:
+      enabled: false
     # PHPMD's naming rules contradict the WordPress conventions (snake_case).
     phpmd:
       enabled: false

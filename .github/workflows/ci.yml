@@ -32,6 +32,21 @@ jobs:
       - name: JavaScript syntax
         run: node --check assets/js/admin.js
 
+  eslint:
+    name: JavaScript (ESLint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      # Exactly the packages of package-lock.json; none of them may run an install script.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run lint:js
+
   analyse:
     name: Static analysis
     runs-on: ubuntu-24.04
@@ -47,6 +62,122 @@ jobs:
           tools: composer:v2
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpstan.phar analyse --no-progress --memory-limit=1G
+
+  plugin-check:
+    name: Plugin Check on the package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The scanner of the WordPress.org review team sees what would ship, not the repository.
+      - run: bin/build-package.sh
+      # Errors fail the job; warnings are listed as annotations and in the log.
+      - uses: WordPress/plugin-check-action@10857da14b6c2246d15402b3e69f777edcf8c12e # v1.1.9
+        with:
+          build-dir: build/backups-for-restic
+          # The action would use a token only to comment on the pull request, which the
+          # read-only token of this workflow cannot do.
+          repo-token: ''
+          # Native file functions and parse_url() in the WordPress-free core. The core must
+          # not call WordPress (ADR 0029), and it streams and renames files in ways that
+          # WP_Filesystem does not offer. The project's own PHPCS run keeps this sniff on for
+          # src/WordPress and src/Plugin.php (phpcs.xml.dist).
+          ignore-codes: |-
+            WordPress.WP.AlternativeFunctions.file_system_operations_chmod
+            WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+            WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+            WordPress.WP.AlternativeFunctions.file_system_operations_fread
+            WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+            WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
+            WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+            WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+            WordPress.WP.AlternativeFunctions.file_system_operations_touch
+            WordPress.WP.AlternativeFunctions.parse_url_parse_url
+            WordPress.WP.AlternativeFunctions.rename_rename
+            WordPress.WP.AlternativeFunctions.unlink_unlink
+          # mb_chr() and mb_ord() in this file are PHP's own, from the mbstring extension that
+          # the plugin requires (readme.txt, Doctor). The check reports them as WordPress
+          # functions that need WordPress 7.1. The file is plain PHP without WordPress calls,
+          # so the check has nothing else to find in it.
+          exclude-files: src/Support/GoQuote.php
+
+  pot:
+    name: Translation template (POT)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - run: bin/install-test-tools.sh wp-cli
+      # Builds the package and extracts the strings of its PHP and JavaScript files. WP-CLI
+      # only warns about a string it finds fault with, for example one with two different
+      # translator comments; here a warning fails the job.
+      - name: Build the template
+        shell: bash
+        run: |
+          composer pot 2>&1 | tee "$RUNNER_TEMP/make-pot.log"
+          if grep -q '^Warning:' "$RUNNER_TEMP/make-pot.log"; then
+            echo '::error::wp i18n make-pot warns about translatable strings; see the log of this step.'
+            exit 1
+          fi
+      # make-pot leaves out a file it cannot parse without failing. So look for a string
+      # that only the admin script has, for one that only src/ has, and for a translator
+      # comment that comes from JavaScript.
+      - name: Strings of admin.js and src/ are in the template
+        run: |
+          pot=languages/backups-for-restic.pot
+          echo "$(grep -c '^msgid ' "$pot") entries; $(grep -c 'assets/js/admin.js:' "$pot") lines refer to the admin script."
+          grep -F 'msgid "Keep this tab open to speed up the backup on slow hosts."' "$pot"
+          grep -F 'msgid "Plugin activation refused"' "$pot"
+          grep -B 3 -F 'msgid "Data that no snapshot uses is deleted next on %s."' "$pot" | grep -F '#. translators: %s: date and time.'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: translation-template
+          path: languages/backups-for-restic.pot
+          retention-days: 14
+
+  sign-off:
+    name: Commits are signed off
+    # Dependabot cannot sign off. Its pull requests are known by the account that opened them,
+    # which GitHub sets and no contributor can take on, not by a name written into a commit.
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history: the commits of the pull request are compared with its base.
+          fetch-depth: 0
+      # Developer Certificate of Origin (CONTRIBUTING.md): every commit of the pull request,
+      # merge commits included, carries a Signed-off-by trailer.
+      - name: Every commit has a Signed-off-by trailer
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          commits="$(git rev-list "$BASE_SHA..$HEAD_SHA")"
+          missing=0
+          for commit in $commits; do
+            if [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit")" ]; then
+              git show -s --format='%h %s' "$commit"
+              missing=$((missing + 1))
+            fi
+          done
+          echo "Commits in the pull request: $(echo "$commits" | grep -c .); without a Signed-off-by trailer: $missing."
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::Commits without a Signed-off-by trailer: $missing, listed in the log. Sign off with: git commit -s (CONTRIBUTING.md)."
+            exit 1
+          fi
 
   unit:
     name: Unit tests (PHP ${{ matrix.php }})
@@ -102,24 +233,52 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # A pull request is checked out as its merge into the base branch. With the two
+          # parents of that commit the next step can list the files the pull request changes.
+          fetch-depth: 2
+      # The run takes about 40 minutes, so a pull request that cannot change its result skips
+      # it and the job ends green. Such a pull request touches neither the mutated code
+      # (src/Crypto, src/Format, src/Engine/Forget), nor the code it calls, nor the tests, the
+      # tools or this workflow. The list is wider than needed on purpose. A push to main always
+      # runs in full, and so does a pull request whose files cannot be listed.
+      - name: Can this change alter the result?
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WATCHED: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
+        run: |
+          run=true
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null || ! git diff --name-only --no-renames -z 'HEAD^1' HEAD > "$RUNNER_TEMP/changed-files"; then
+              echo 'The files of the pull request could not be listed: running in full.'
+            elif ! tr '\0' '\n' < "$RUNNER_TEMP/changed-files" | grep -Eq "$WATCHED"; then
+              run=false
+              echo '::notice::Mutation testing skipped: this pull request changes none of the files the run depends on (src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml). A push to main always runs it.'
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        if: steps.changes.outputs.run == 'true'
         with:
           php-version: '8.3'
           coverage: pcov
           tools: composer:v2
       - run: composer install --no-interaction --no-progress --prefer-dist
+        if: steps.changes.outputs.run == 'true'
       - run: bin/install-test-tools.sh infection
+        if: steps.changes.outputs.run == 'true'
       # Infection mutates covered lines only (the default since 0.31); the gate (covered MSI of
       # at least 90 %) lives in infection.json5.dist.
       - run: .tools/bin/infection --threads=max --no-progress
+        if: steps.changes.outputs.run == 'true'
       # A gate that measured nothing must not pass: show the counts and require mutants.
       - name: Mutation summary
-        if: always()
+        if: always() && steps.changes.outputs.run == 'true'
         run: |
           cat .tools/infection/summary.log
           grep -Eq '^Total: [1-9]' .tools/infection/summary.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.changes.outputs.run == 'true'
         with:
           name: mutation-logs
           path: .tools/infection/

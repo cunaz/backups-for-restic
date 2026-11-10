@@ -184,8 +184,18 @@ The entry marked (M3) arrives with that milestone. Dependency rules:
 - `Engine` depends on `Format`, `Crypto`, `Backend`, `Support` and `Exception`, and on two
   helpers outside them: `Storage\Files` for atomic writes and `Secrets\Secret` for the
   password in `KeyUnlock`. It never depends on `Jobs` or any adapter. `Jobs\Backup` and
-  `Jobs\Maintenance` orchestrate `Engine` operations in bounded slices. No tool enforces
-  this rule; it holds in the code today.
+  `Jobs\Maintenance` orchestrate `Engine` operations in bounded slices.
+- The layers below the engine depend in the same direction: `Exception` uses no other part
+  of the plugin, `Support` uses `Exception`, `Crypto` uses those two, `Format` uses those
+  three, and `Backend` may use those four. Two of them use the helper `Secrets\Secret` as
+  well: `Support\Redactor`, which removes secrets from texts, and `Backend\RestBackend`,
+  which builds the basic auth header. A helper is allowed for the whole layer, not only
+  for the class that uses it today. The two helper classes are bound as well, so that
+  nothing reaches the stack through them: `Secrets\Secret` uses nothing of the plugin and
+  `Storage\Files` only `Exception`.
+  `tests/PHPStan/EngineDependencyRule.php` enforces this and the rule above in CI. It reads
+  the `use` statements and the names in the code of every file in these namespaces; a new
+  dependency needs a change of its list.
 - `Secret::reveal()` is allowed only in the classes listed in
   `tests/PHPStan/SecretRevealRule.php`.
 
@@ -1112,7 +1122,11 @@ packs from translate.wordpress.org. The PHP texts, all e-mails included, and the
 `assets/js/admin.js` pass through the gettext functions, and `wp_set_script_translations()`
 loads the script's translations. Three things are shown in English as the core produces
 them: the messages and context of the job log, the job warnings, and the byte units. The
-repository has no POT file yet; it comes with the release tooling in Milestone 3.
+repository holds no POT file, and the package ships none: translate.wordpress.org reads
+the strings from the released code. CI builds a template from the package with
+`wp i18n make-pot` on every pull request, to show that the strings of the PHP files and of
+the script can be extracted, and ESLint checks the translation calls of the script
+([development guide](04-development-and-quality.md) §3 and §5.8).
 
 The admin page uses core admin classes for buttons, notices, tabs and tables plus a small
 scoped stylesheet, labels on every field, an `aria-live` region for the views and their

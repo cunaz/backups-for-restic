@@ -4,7 +4,7 @@ Tags: backup, restic, encryption, database backup, restore
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: trunk
+Stable tag: 0.1.0-dev
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 

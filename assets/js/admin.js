@@ -4,7 +4,6 @@
  * Plain JavaScript on core's wp-api-fetch and wp-i18n (ADR 0012). Server data is always
  * inserted as text, never as HTML.
  */
-/* global wp */
 ( function () {
 	'use strict';
 
@@ -83,12 +82,12 @@
 		return el( 'button', { type: 'button', className: 'button' + ( primary ? ' button-primary' : '' ), onClick }, [ label ] );
 	}
 
-	function field( label, input, help ) {
+	function field( label, control, help ) {
 		const id = 'bfr-' + Math.random().toString( 36 ).slice( 2 );
-		input.id = id;
+		control.id = id;
 		return el( 'p', { className: 'bfr-field' }, [
 			el( 'label', { htmlFor: id }, [ label ] ),
-			input,
+			control,
 			help ? el( 'span', { className: 'description' }, [ help ] ) : null,
 		] );
 	}
@@ -108,9 +107,9 @@
 						/* translators: 1: number of files, 2: amount of data such as 1.2 GB. */
 						__( '%1$d files, %2$s processed', 'backups-for-restic' ),
 						progress.total_files_processed,
-						formatBytes( progress.total_bytes_processed )
+						formatBytes( progress.total_bytes_processed ),
 					),
-				] )
+				] ),
 			);
 		}
 		if ( 'number' === typeof progress.data_added ) {
@@ -118,7 +117,7 @@
 				el( 'p', {}, [
 					/* translators: %s: amount of data such as 15 MB. */
 					sprintf( __( '%s of new data uploaded', 'backups-for-restic' ), formatBytes( progress.data_added ) ),
-				] )
+				] ),
 			);
 		}
 		if ( 'number' === typeof progress.packs_to_read && progress.packs_to_read > 0 ) {
@@ -128,7 +127,7 @@
 				el( 'p', {}, [
 					/* translators: %d: number of directory listings. */
 					sprintf( __( '%d directory listings read', 'backups-for-restic' ), progress.trees ),
-				] )
+				] ),
 			);
 		}
 		if ( 'number' === typeof progress.bytes_deleted && progress.bytes_deleted > 0 ) {
@@ -136,7 +135,7 @@
 				el( 'p', {}, [
 					/* translators: %s: amount of data such as 15 MB. */
 					sprintf( __( '%s deleted', 'backups-for-restic' ), formatBytes( progress.bytes_deleted ) ),
-				] )
+				] ),
 			);
 		}
 		if ( progress.current ) {
@@ -174,7 +173,7 @@
 				warnings ? 'warning' : 'success',
 				warnings
 					? /* translators: %d: number of warnings. */ sprintf( __( 'Finished with %d warnings; see the log.', 'backups-for-restic' ), warnings )
-					: __( 'Finished successfully.', 'backups-for-restic' )
+					: __( 'Finished successfully.', 'backups-for-restic' ),
 			);
 		}
 		return notice( 'info', job.state_label );
@@ -184,9 +183,9 @@
 	 * Follows a job until it ends. Each request also advances the job a little, so an open tab
 	 * speeds up slow hosts.
 	 *
-	 * @param {string}   id       Job ID.
-	 * @param {Element}  target   Where to show progress.
-	 * @param {Function} finished Called with the final job.
+	 * @param {string}                id       Job ID.
+	 * @param {Element}               target   Where to show progress.
+	 * @param {(job: Object) => void} finished Called with the final job.
 	 */
 	function follow( id, target, finished ) {
 		const cancel = button( __( 'Cancel', 'backups-for-restic' ), function () {
@@ -218,8 +217,12 @@
 	}
 
 	function jobRow( job, onSelect ) {
+		const select = function ( event ) {
+			event.preventDefault();
+			onSelect( job );
+		};
 		const name = onSelect
-			? el( 'a', { href: '#', onClick: function ( event ) { event.preventDefault(); onSelect( job ); } }, [ formatTime( job.created_at ) ] )
+			? el( 'a', { href: '#', onClick: select }, [ formatTime( job.created_at ) ] )
 			: formatTime( job.created_at );
 		return el( 'tr', {}, [
 			el( 'td', {}, [ name ] ),
@@ -239,7 +242,9 @@
 					el( 'th', {}, [ __( 'Message', 'backups-for-restic' ) ] ),
 				] ),
 			] ),
-			el( 'tbody', {}, jobs.map( function ( job ) { return jobRow( job, onSelect ); } ) ),
+			el( 'tbody', {}, jobs.map( function ( job ) {
+				return jobRow( job, onSelect );
+			} ) ),
 		] );
 	}
 
@@ -248,8 +253,8 @@
 	/**
 	 * Notices that stay until their cause is gone: check findings and retention changes.
 	 *
-	 * @param {Object}   status Dashboard data.
-	 * @param {Function} reload Shows the dashboard again.
+	 * @param {Object}     status Dashboard data.
+	 * @param {() => void} reload Shows the dashboard again.
 	 * @return {Array} Nodes.
 	 */
 	function alerts( status, reload ) {
@@ -264,7 +269,7 @@
 								/* translators: 1: number of errors, 2: date and time. */
 								_n( 'The repository check on %2$s found %1$d error.', 'The repository check on %2$s found %1$d errors.', alert.errors, 'backups-for-restic' ),
 								alert.errors,
-								formatTime( alert.at )
+								formatTime( alert.at ),
 							),
 						] ),
 					] ),
@@ -274,9 +279,9 @@
 						{ className: 'bfr-findings' },
 						alert.findings.map( function ( finding ) {
 							return el( 'li', {}, [ finding.label, ' ', el( 'code', {}, [ finding.object ] ) ] );
-						} )
+						} ),
 					),
-				] )
+				] ),
 			);
 		}
 		const retention = status.retention;
@@ -299,15 +304,15 @@
 					] ),
 					el( 'p', {}, [ switchBack ] ),
 					message,
-				] )
+				] ),
 			);
 		} else if ( 'external' === retention.mode && retention.switched_at ) {
 			nodes.push(
 				notice(
 					'warning',
 					/* translators: %s: date and time. */
-					sprintf( __( 'On %s the server refused to delete data: it is append-only, which protects your backups. This site no longer removes old snapshots; remove them from another computer with "restic forget" and "restic prune".', 'backups-for-restic' ), formatTime( retention.switched_at ) )
-				)
+					sprintf( __( 'On %s the server refused to delete data: it is append-only, which protects your backups. This site no longer removes old snapshots; remove them from another computer with "restic forget" and "restic prune".', 'backups-for-restic' ), formatTime( retention.switched_at ) ),
+				),
 			);
 		}
 		return nodes;
@@ -316,8 +321,8 @@
 	/**
 	 * The three maintenance cards: old snapshots, unused data, repository check.
 	 *
-	 * @param {Object}   status Dashboard data.
-	 * @param {Function} action Creates a button that starts a job of a type.
+	 * @param {Object}                                       status Dashboard data.
+	 * @param {(type: string, label: string) => HTMLElement} action Creates a button that starts a job of a type.
 	 * @return {Element} Cards.
 	 */
 	function maintenanceCards( status, action ) {
@@ -329,6 +334,13 @@
 			return el( 'p', { className: 'description' }, [ text ] );
 		};
 
+		let forgetWhen = __( 'They are removed from another computer, because the server was append-only.', 'backups-for-restic' );
+		if ( plugin && status.retention.after_backup ) {
+			forgetWhen = __( 'This site removes them after each backup, following the retention settings.', 'backups-for-restic' );
+		} else if ( plugin ) {
+			forgetWhen = __( 'This site removes them when you start it here.', 'backups-for-restic' );
+		}
+
 		let forgetLast = __( 'Not run yet.', 'backups-for-restic' );
 		if ( forget.finished && 'append_only' === forget.skipped ) {
 			/* translators: %s: date and time. */
@@ -336,6 +348,14 @@
 		} else if ( forget.finished && 'number' === typeof forget.removed ) {
 			/* translators: 1: date and time, 2: snapshots removed, 3: snapshots kept. */
 			forgetLast = sprintf( __( 'Last run on %1$s: %2$d removed, %3$d kept.', 'backups-for-restic' ), formatTime( forget.finished ), forget.removed, forget.keep || 0 );
+		}
+
+		let pruneWhen = __( 'It is deleted from another computer with "restic prune".', 'backups-for-restic' );
+		if ( plugin && prune.next ) {
+			/* translators: %s: date and time. */
+			pruneWhen = sprintf( __( 'Data that no snapshot uses is deleted next on %s.', 'backups-for-restic' ), formatTime( prune.next ) );
+		} else if ( plugin ) {
+			pruneWhen = __( 'Data that no snapshot uses is deleted when you start it here.', 'backups-for-restic' );
 		}
 
 		let pruneLast = __( 'Not run yet.', 'backups-for-restic' );
@@ -362,27 +382,18 @@
 		return el( 'div', { className: 'bfr-cards' }, [
 			el( 'div', { className: 'bfr-card' }, [
 				el( 'h3', {}, [ __( 'Old snapshots', 'backups-for-restic' ) ] ),
-				el( 'p', {}, [
-					plugin
-						? ( status.retention.after_backup ? __( 'This site removes them after each backup, following the retention settings.', 'backups-for-restic' ) : __( 'This site removes them when you start it here.', 'backups-for-restic' ) )
-						: __( 'They are removed from another computer, because the server was append-only.', 'backups-for-restic' ),
-				] ),
+				el( 'p', {}, [ forgetWhen ] ),
 				description( forgetLast ),
 				plugin ? action( 'forget', __( 'Remove old snapshots now', 'backups-for-restic' ) ) : null,
 			] ),
 			el( 'div', { className: 'bfr-card' }, [
 				el( 'h3', {}, [ __( 'Unused data', 'backups-for-restic' ) ] ),
-				el( 'p', {}, [
-					plugin
-						/* translators: %s: date and time. */
-						? ( prune.next ? sprintf( __( 'Data that no snapshot uses is deleted next on %s.', 'backups-for-restic' ), formatTime( prune.next ) ) : __( 'Data that no snapshot uses is deleted when you start it here.', 'backups-for-restic' ) )
-						: __( 'It is deleted from another computer with "restic prune".', 'backups-for-restic' ),
-				] ),
+				el( 'p', {}, [ pruneWhen ] ),
 				description( pruneLast ),
 				prune.reclaimable_bytes > 0
 					? description(
 						/* translators: %s: amount of data such as 15 MB. */
-						sprintf( __( 'About %s more lies unused in partly used packs. Only "restic prune" on another computer can free it.', 'backups-for-restic' ), formatBytes( prune.reclaimable_bytes ) )
+						sprintf( __( 'About %s more lies unused in partly used packs. Only "restic prune" on another computer can free it.', 'backups-for-restic' ), formatBytes( prune.reclaimable_bytes ) ),
 					)
 					: null,
 				plugin ? action( 'prune', __( 'Prune now', 'backups-for-restic' ) ) : null,
@@ -397,7 +408,7 @@
 				check.finished && 'number' === typeof check.packs_read
 					? description(
 						/* translators: 1: number of packs, 2: amount of data such as 15 MB. */
-						sprintf( __( '%1$d packs with %2$s were downloaded and verified.', 'backups-for-restic' ), check.packs_read, formatBytes( check.bytes_read ) )
+						sprintf( __( '%1$d packs with %2$s were downloaded and verified.', 'backups-for-restic' ), check.packs_read, formatBytes( check.bytes_read ) ),
 					)
 					: null,
 				action( 'check', __( 'Check now', 'backups-for-restic' ) ),
@@ -508,7 +519,7 @@
 									el( 'td', {}, [ formatBytes( snapshot.bytes ) ] ),
 									el( 'td', {}, [ formatBytes( snapshot.data_added ) ] ),
 								] );
-							} )
+							} ),
 						),
 					] ),
 					el( 'p', { className: 'description' }, [ __( 'Restoring from the admin area arrives in a later version. Until then, the recovery kit explains how to restore with the restic command line.', 'backups-for-restic' ) ] ),
@@ -600,7 +611,7 @@
 				{},
 				Object.entries( choices ).map( function ( [ key, label ] ) {
 					return el( 'option', { value: key, selected: key === value }, [ label ] );
-				} )
+				} ),
 			);
 		}
 		if ( 'list' === kind ) {
@@ -759,14 +770,19 @@
 					el( 'strong', {}, [ check.label ] ),
 					check.description ? el( 'span', {}, [ ' ', check.description ] ) : null,
 				] );
-			} )
+			} ),
 		);
 	}
 
 	function environment( root ) {
 		api( '/environment?fresh=1' )
 			.then( function ( response ) {
-				replace( root, [ checkList( response.checks ), button( __( 'Check again', 'backups-for-restic' ), function () { environment( root ); } ) ] );
+				replace( root, [
+					checkList( response.checks ),
+					button( __( 'Check again', 'backups-for-restic' ), function () {
+						environment( root );
+					} ),
+				] );
 			} )
 			.catch( function ( error ) {
 				replace( root, [ notice( 'error', errorText( error ) ) ] );
@@ -793,9 +809,13 @@
 											el( 'td', {}, [ entry.level ] ),
 											el( 'td', {}, [ entry.message, entry.context && Object.keys( entry.context ).length ? ' ' + JSON.stringify( entry.context ) : '' ] ),
 										] );
-									} )
+									} ),
 								),
-								( log.job.warnings || [] ).length ? el( 'ul', {}, log.job.warnings.map( function ( warning ) { return el( 'li', {}, [ warning ] ); } ) ) : null,
+								( log.job.warnings || [] ).length
+									? el( 'ul', {}, log.job.warnings.map( function ( warning ) {
+										return el( 'li', {}, [ warning ] );
+									} ) )
+									: null,
 							] );
 						} );
 					} ),
@@ -826,7 +846,9 @@
 			show( 0, [ el( 'p', {}, [ __( 'Checking this server…', 'backups-for-restic' ) ] ) ] );
 			api( '/environment?fresh=1' )
 				.then( function ( response ) {
-					const blocked = response.checks.some( function ( check ) { return 'critical' === check.status; } );
+					const blocked = response.checks.some( function ( check ) {
+						return 'critical' === check.status;
+					} );
 					show( 0, [
 						checkList( response.checks ),
 						blocked
@@ -865,7 +887,9 @@
 				save.disabled = true;
 				const upload = own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
 				upload
-					.then( function () { return api( '/repository/save', { method: 'POST', data: data() } ); } )
+					.then( function () {
+						return api( '/repository/save', { method: 'POST', data: data() } );
+					} )
 					.then( function ( response ) {
 						state.report = response.report;
 						stepPassword();
