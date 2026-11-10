@@ -55,6 +55,34 @@ final class MysqliConnection implements Connection {
 		return $rows;
 	}
 
+	/**
+	 * The command line of the mysql or mariadb client for the same server and account as
+	 * connect(): root over the local socket, or BFR_TEST_MYSQL_*.
+	 *
+	 * @return list<string> Command and arguments.
+	 */
+	public static function client( string $database ): array {
+		$command  = [ is_executable( '/usr/bin/mariadb' ) ? '/usr/bin/mariadb' : '/usr/bin/mysql', '-u', self::environment( 'BFR_TEST_MYSQL_USER', 'root' ) ];
+		$host     = self::environment( 'BFR_TEST_MYSQL_HOST', 'localhost' );
+		$password = self::environment( 'BFR_TEST_MYSQL_PASSWORD', '' );
+		// mysqli accepts host:port; the client needs the port on its own, and TCP for localhost.
+		$port = null;
+		if ( 1 === preg_match( '/^([^:]+):(\d+)$/', $host, $match ) ) {
+			[ , $host, $port ] = $match;
+		}
+		if ( 'localhost' !== $host || null !== $port ) {
+			array_push( $command, '-h', $host );
+		}
+		if ( null !== $port ) {
+			array_push( $command, '-P', $port, '--protocol=TCP' );
+		}
+		if ( '' !== $password ) {
+			$command[] = '-p' . $password;
+		}
+		$command[] = $database;
+		return $command;
+	}
+
 	public static function environment( string $name, string $fallback ): string {
 		$value = getenv( $name );
 		return false === $value || '' === $value ? $fallback : $value;

@@ -230,7 +230,7 @@ final class Job {
 		$job->lease_owner          = Decoded::string( $fields['lease_owner'] ?? '' );
 		$job->lease_expires_at     = Decoded::int( $fields['lease_expires_at'] ?? 0 );
 		$job->ticks                = Decoded::int( $fields['ticks'] ?? 0 );
-		$job->seconds              = is_float( $fields['seconds'] ?? null ) || is_int( $fields['seconds'] ?? null ) ? (float) $fields['seconds'] : 0.0;
+		$job->seconds              = Decoded::number( $fields['seconds'] ?? null );
 		$job->consecutive_failures = Decoded::int( $fields['consecutive_failures'] ?? 0 );
 		$job->not_before           = Decoded::int( $fields['not_before'] ?? 0 );
 		$job->outcome              = is_string( $fields['outcome'] ?? null ) ? JobState::tryFrom( $fields['outcome'] ) : null;

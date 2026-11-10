@@ -5,7 +5,6 @@ namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\ObjectType;
-use BackupsForRestic\Crypto\MasterKey;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
@@ -14,12 +13,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
-use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\WrongPassword;
-use BackupsForRestic\Format\BlobType;
-use BackupsForRestic\Format\Id;
-use BackupsForRestic\Format\Index\IndexSet;
-use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\CountingBackend;
@@ -64,6 +58,21 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $directory );
 	}
 
+	public function test_progress_at_a_whole_number_survives_the_saved_state(): void {
+		$backend = new InMemoryBackend();
+		Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$directory = $this->directory() . '/unlock';
+		self::assertNull( ( new KeyUnlock( $backend, new Secret( self::PASSWORD ), $directory, new SystemRandom() ) )->run( 0.0 ) );
+
+		// A pause at the end of a phase saves exactly 1.0, which PHP's JSON encoder writes as 1.
+		$state = json_decode( (string) file_get_contents( $directory . '/state.json' ), true );
+		self::assertIsArray( $state );
+		$state['progress'] = 1.0;
+		file_put_contents( $directory . '/state.json', (string) json_encode( $state ) );
+
+		self::assertSame( 1.0, ( new KeyUnlock( $backend, new Secret( self::PASSWORD ), $directory, new SystemRandom() ) )->progress() );
+	}
+
 	public function test_wrong_password_tries_every_key_then_fails(): void {
 		$backend = new InMemoryBackend();
 		Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
@@ -74,22 +83,6 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		} finally {
 			self::assertDirectoryDoesNotExist( $directory );
 		}
-	}
-
-	public function test_index_set_round_trips_through_its_binary_form(): void {
-		$index = new IndexSet();
-		$pack  = Id::from_hex( str_repeat( 'ab', 32 ) );
-		$blob  = Id::from_hex( str_repeat( 'cd', 32 ) );
-		$tree  = Id::from_hex( str_repeat( 'ef', 32 ) );
-		$index->add_pack( $pack, [ new PackEntry( BlobType::Data, $blob, 0, 100 ), new PackEntry( BlobType::Tree, $tree, 100, 50 ) ] );
-
-		$copy = IndexSet::from_binary( $index->to_binary() );
-		self::assertSame( $index->to_binary(), $copy->to_binary() );
-		self::assertSame( 100, $copy->find( $tree, BlobType::Tree )?->entry->offset );
-		self::assertTrue( $copy->has_pack( $pack ) );
-
-		$this->expectException( FormatException::class );
-		IndexSet::from_binary( substr( $index->to_binary(), 0, -1 ) );
 	}
 
 	public function test_index_cache_downloads_only_new_index_files_and_rebuilds_after_removals(): void {

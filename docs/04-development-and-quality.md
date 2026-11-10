@@ -257,7 +257,9 @@ approval. Pre-release builds are never published; testers build from source with
 tests, docs, security impact and, for `Crypto`/`Format`/`Engine`, a conformance run link.
 Issue templates include Doctor output. DCO sign-off. Definition of done: code + tests + docs
 + changelog + green CI. The maintainer works through pull requests and the same checks as
-everyone else; nobody pushes to `main` directly.
+everyone else; nobody pushes to `main` directly. CodeRabbit reviews every pull request with
+the instructions in `.coderabbit.yaml`; its comments are answered or resolved before merging
+([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
 
 ## 10. Licensing and attribution
 

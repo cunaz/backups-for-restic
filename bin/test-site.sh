@@ -9,7 +9,14 @@
 #            user to .tools/site-app-password for the integration tests.
 #   start    starts PHP's built-in web server with several workers and the limits of the
 #            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
-#            set_time_limit() disabled, as on many shared hosts.
+#            set_time_limit() disabled, as on many shared hosts. The JIT compiler is off, as
+#            it is by default in PHP 8.3: with PHP's tracing JIT (which setup-php switches on
+#            in CI) the server's processes died by SIGSEGV in backup ticks, on PHP 8.3.6 and
+#            8.3.36. bin/test-site-router.php
+#            enforces "deny all" .htaccess files as Apache does, so the plugin's private
+#            directory is protected as on typical shared hosting. PHP errors go to
+#            .tools/php-errors.log; bin/test-site-diagnostics.php logs every request's start and
+#            end to .tools/requests.log.
 #   stop     stops the web server.
 #   reset    stops the server and deletes the site and its database.
 #
@@ -77,18 +84,23 @@ install_site() {
 			$config
 		);
 		$config = preg_replace_callback( "/put your unique phrase here/", static fn (): string => bin2hex( random_bytes( 32 ) ), $config );
+		$config = str_replace( "define( \x27WP_DEBUG\x27, false );", "", $config );
 		$extra = "define( \x27WP_HOME\x27, " . var_export( $url, true ) . " );\n"
 			. "define( \x27WP_SITEURL\x27, " . var_export( $url, true ) . " );\n"
 			. "define( \x27WP_ENVIRONMENT_TYPE\x27, \x27local\x27 );\n"
 			. "define( \x27WP_DEBUG\x27, true );\n"
 			. "define( \x27WP_DEBUG_LOG\x27, true );\n"
 			. "define( \x27WP_DEBUG_DISPLAY\x27, false );\n"
-			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n";
+			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n"
+			// Ticks call wp_raise_memory_limit(); without this they would run with 256M.
+			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, \x27128M\x27 );\n";
 		$config = str_replace( "/* That\x27s all, stop editing!", $extra . "\n/* That\x27s all, stop editing!", $config );
 		file_put_contents( $site . "/wp-config.php", $config );
 	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"
 
 	ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
+	mkdir -p "$SITE/wp-content/mu-plugins"
+	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
 
 	php -r '
 		define( "WP_INSTALLING", true );
@@ -123,12 +135,31 @@ start_server() {
 		echo "Already running on $URL"
 		return
 	fi
-	PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup php \
+	local trace=()
+	if [ -n "${BFR_SITE_TRACE:-}" ] && command -v strace > /dev/null; then
+		# Diagnostics: every signal and exit of the server and its workers, with the time.
+		trace=(strace -f -tt -A -o "$TOOLS/strace.log" --seccomp-bpf -e trace=exit_group)
+	fi
+	# The log is appended, so that a restart keeps what happened before it.
+	BFR_SITE_REQUEST_LOG="$TOOLS/requests.log" PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup "${trace[@]}" php \
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \
-		-S "127.0.0.1:$PORT" -t "$SITE" > "$TOOLS/site-server.log" 2>&1 &
-	echo $! > "$PID_FILE"
+		-d opcache.jit=disable \
+		-d log_errors=1 \
+		-d error_log="$TOOLS/php-errors.log" \
+		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" >> "$TOOLS/site-server.log" 2>&1 &
+	local pid=$!
+	if [ ${#trace[@]} -gt 0 ]; then
+		# Stop the server itself, not strace: strace ends when the server's processes end.
+		for _ in $(seq 1 50); do
+			child="$(pgrep -P "$pid" -x php | head -n 1 || true)"
+			[ -n "$child" ] && break
+			sleep 0.1
+		done
+		pid="${child:-$pid}"
+	fi
+	echo "$pid" > "$PID_FILE"
 	for _ in $(seq 1 50); do
 		if curl -fsS -o /dev/null "$URL/wp-login.php"; then
 			echo "Serving $URL (log: .tools/site-server.log)"

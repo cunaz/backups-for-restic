@@ -1,0 +1,168 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reviews every pull request; it is free for public repositories. Its findings
+# are advice: the gates stay in CI (PHPStan at level max, the WordPress Coding Standards,
+# the unit and database suites, mutation testing and the restic CLI as conformance oracle).
+# See docs/adr/0024-governance-and-quality-assurance.md.
+
+language: en-US
+tone_instructions: >-
+  Be brief and concrete: name the file, the line and the input or state that fails. No
+  praise, no summaries of unchanged code.
+early_access: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  suggested_reviewers: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    # Stacked pull requests target the branch below them; review those as well.
+    base_branches:
+      - '.*'
+  path_filters:
+    # Recorded restic repositories and test vectors: data, not code.
+    - '!tests/Fixtures/**'
+  pre_merge_checks:
+    # PHPCS enforces the documentation the project wants; a coverage percentage adds noise.
+    docstrings:
+      mode: 'off'
+    custom_checks:
+      - name: No personal data or chat transcripts
+        mode: error
+        instructions: >-
+          Fail if the pull request adds personal data or conversation content to a file,
+          a commit message or the description: names of private persons; e-mail addresses
+          other than noreply addresses (ending in @users.noreply.github.com, or the noreply
+          address of a tool in a Co-Authored-By trailer) and addresses at example.com,
+          example.net or example.org; home-directory paths; pasted chat transcripts; or
+          links to a recorded conversation, which contain a session, chat, share or
+          conversation path (for example claude.ai/code/session_..., claude.ai/chat/...,
+          chatgpt.com/share/...). A link to a product's home page, such as
+          https://claude.com/claude-code in a "Generated with" line, is not a conversation.
+          Author metadata of third-party packages in composer.lock does not count.
+          Pass otherwise.
+      - name: Decisions stay documented
+        mode: warning
+        instructions: >-
+          Warn if the pull request changes behaviour that an architecture decision record
+          in docs/adr/ describes (repository format, cryptography, secrets, scheduling,
+          restore safety, supported servers, distribution, naming) without updating that
+          record or adding a new one. Pass otherwise.
+  path_instructions:
+    - path: 'src/**'
+      instructions: >-
+        Only src/WordPress/ and src/Plugin.php may call WordPress functions; the rest is
+        plain PHP 8.3 (ADR 0029, enforced by a PHPStan rule). Secrets are
+        BackupsForRestic\Secrets\Secret values, and reveal() is allowed only in the classes
+        listed in tests/PHPStan/SecretRevealRule.php. Secrets must never reach logs,
+        exception messages, URLs, job files or transients. Work runs in bounded,
+        resumable ticks: flag unbounded loops, reading whole files or tables into memory,
+        and state that cannot continue after the request is killed. No proc_open, exec,
+        shell access or downloads of executables (ADR 0016, ADR 0018).
+    - path: 'src/Crypto/**'
+      instructions: >-
+        This is restic's cryptography, tested against libsodium and RFC vectors.
+        AES-256-CTR with a random 16-byte nonce encrypts; Poly1305-AES authenticates, and
+        AES-128-ECB applied to the nonce derives the one-time Poly1305 key exactly as
+        restic and the Poly1305-AES paper specify, so ECB here is not a finding. Flag
+        nonces that do not come from random_bytes(), tag comparisons without
+        hash_equals(), any use of plaintext before the tag is verified, key material in
+        exceptions or logs, and branches or table lookups on secret data where a
+        constant-time form is practical. No algorithms beyond restic's design
+        (ADR 0020, ADR 0027).
+    - path: 'src/Format/**'
+      instructions: >-
+        Byte-exact compatibility with restic's repository format (version 1, and version 2
+        with ext-zstd) is the contract, and the restic CLI is the oracle
+        (tests/Conformance). JSON must match Go's encoding/json (Support\GoJson). Every
+        parser of server data must be bounded (lengths, counts, nesting) and covered by
+        the fuzzer in bin/fuzz.php: flag unchecked lengths, integer overflow, and offsets
+        or sizes taken from the server without validation.
+    - path: 'src/WordPress/**'
+      instructions: >-
+        WordPress adapter. Every REST route and admin action needs a capability check
+        and, for cookie-authenticated requests, a nonce. Escape all output, sanitize and
+        validate all input, and use $wpdb->prepare() for queries. Prefix every option,
+        transient, hook and cron event with backups_for_restic_ and constants with
+        BACKUPS_FOR_RESTIC_; the text domain is backups-for-restic. WordPress.org
+        guidelines apply: no remote code, no tracking, and no requests except to the
+        repository server the site owner configured.
+    - path: 'assets/js/**'
+      instructions: >-
+        Vanilla JavaScript without a build step (ADR 0012). Never pass server data to
+        innerHTML or insertAdjacentHTML; build nodes and set textContent. User-facing
+        strings go through wp.i18n with the text domain backups-for-restic. The REST API
+        is the only data channel.
+    - path: 'tests/**'
+      instructions: >-
+        Tests read like specifications: one behaviour per test, named after it. Format and
+        crypto behaviour is checked against the restic CLI or published vectors, not only
+        against our own code. Tests use local servers (rest-server, MySQL or MariaDB) and
+        temporary directories only, and fixtures contain no personal data.
+    - path: '.github/workflows/**'
+      instructions: >-
+        Pin every action to a full commit SHA with a version comment, keep permissions
+        minimal, check out with persist-credentials: false, and never expose secrets to
+        pull requests from forks.
+    - path: 'bin/**'
+      instructions: >-
+        Bash with set -euo pipefail and quoted expansions; no curl piped into a shell;
+        downloaded tools are verified against pinned SHA-256 checksums before use.
+    - path: '**/*.md'
+      instructions: >-
+        English. Documents describe the current state and ADRs record why. When behaviour
+        changes, the matching ADR and the user-facing documents (README.md,
+        docs/06-disaster-recovery.md) change in the same pull request.
+  tools:
+    # CI runs these with the project's configuration, custom rules and dependencies.
+    phpstan:
+      enabled: false
+    phpcs:
+      enabled: false
+    # PHPMD's naming rules contradict the WordPress conventions (snake_case).
+    phpmd:
+      enabled: false
+    # The documents follow their own style guide (docs/04 §8); prose linters add noise.
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+    yamllint:
+      enabled: false
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    presidio:
+      enabled: true
+    osvScanner:
+      enabled: true
+    github-checks:
+      enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - CONTRIBUTING.md
+      - docs/03-security-and-threat-model.md
+      - docs/04-development-and-quality.md
+  learnings:
+    scope: local
+
+chat:
+  art: false
+  auto_reply: true

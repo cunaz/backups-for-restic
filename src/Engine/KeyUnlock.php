@@ -125,7 +125,7 @@ final class KeyUnlock {
 			'keys'       => Decoded::strings( $fields['keys'] ?? [] ),
 			'index'      => Decoded::int( $fields['index'] ?? 0 ),
 			'checkpoint' => $checkpoint,
-			'progress'   => is_float( $fields['progress'] ?? null ) ? $fields['progress'] : 0.0,
+			'progress'   => Decoded::number( $fields['progress'] ?? null ),
 		];
 	}
 
