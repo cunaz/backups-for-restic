@@ -95,7 +95,7 @@ Encrypted in the database with a key derived from the security keys in `wp-confi
 
 = What happens to my backups when I uninstall the plugin? =
 
-Nothing. Uninstalling removes the plugin's settings, passwords and working files from the website. The repository on the server is never touched and stays restorable with the recovery kit.
+Nothing. Uninstalling removes the plugin's settings, passwords and working files from the website, also from a working directory that was chosen with the `BACKUPS_FOR_RESTIC_PRIVATE_DIR` constant or the `backups_for_restic_private_dir` filter. The repository on the server is never touched and stays restorable with the recovery kit.
 
 = Is multisite supported? =
 

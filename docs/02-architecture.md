@@ -236,17 +236,18 @@ directly and keep the limit of the CLI process.
 
 | Driver | Behaviour | Typical on shared hosting |
 | --- | --- | --- |
-| **Loopback chain** | At the end of a tick that advanced a job which still has work (`TickReport::should_chain()`), `Cron::chain()` schedules `backups_for_restic_tick` for *now*, writes WordPress' `doing_cron` transient itself and sends a non-blocking request to `wp-cron.php`. It does not call `spawn_cron()`, which does nothing inside a `wp-cron.php` request and spawns at most once a minute. The next tick starts within a second. The chain stops when the job finishes, when a tick finds the runner busy, and while a job waits out a back-off ([ADR 0011](adr/0011-scheduling.md)). | Works on most hosts; some block loopback (Doctor detects it, like Site Health does) |
+| **Loopback chain** | At the end of a tick that advanced a job which still has work (`TickReport::should_chain()`), `Cron::chain()` schedules `backups_for_restic_tick` for *now*, writes WordPress' `doing_cron` transient itself and sends a non-blocking request to `wp-cron.php`. It does not call `spawn_cron()`, which does nothing inside a `wp-cron.php` request and spawns at most once a minute. The next tick starts within a second. The chain stops when the job finishes, when a tick finds the runner busy, and while a job waits out a back-off ([ADR 0011](adr/0011-scheduling.md)). A new job is started the same way: `POST /jobs`, `POST /repository/connect` and the WP-CLI commands without `--wait` call `Cron::chain()` after they created it. With `advanced.loopback_chaining: off`, `Cron::chain()` does nothing in either place: no tick event is scheduled and `wp-cron.php` is not requested. A job then gets one tick per heartbeat, every five minutes, plus the ticks of an open admin page. | Works on most hosts; some block loopback (Doctor detects it, like Site Health does) |
 | **WP-Cron on traffic** | Due events run at the end of ordinary page loads. | Baseline; speed depends on visitors |
 | **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; see [`guides/cron.md`](guides/cron.md) |
 | **Admin polling** | While the admin page follows a running job it requests `GET /jobs/{id}` every 3 s; such a request runs a tick of at most 5 s, at most once per 5 s, and does not chain. "Keep this tab open to speed up the backup on slow hosts." | Always available |
-| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Last it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
+| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive, and at once when the repository of the settings has no probe result yet, for example after another server was saved) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Last it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
 | **WP-CLI** (`wp backups-for-restic …`) | `tick` runs one tick with the budget of §4.2; `tick --until-idle` repeats such ticks until no job is left. `backup`, `forget`, `prune` and `check` with `--wait` run the job in the same process in ticks of 300 s each, which do not pass through `Container::tick_budget()`: neither `max_execution_time` nor the gentle mode shortens them. Without `--wait` these commands create the job and return; the other drivers advance it. | Where the host offers WP-CLI |
 
 Only one runner may advance a job at a time: `flock()` on `<private>/runner.lock`
 (non-blocking) plus a **lease** in the job document (`lease_owner`, `lease_expires_at`),
 which a tick holds for its budget plus 60 s. WordPress' own `doing_cron` lock additionally
-serialises WP-Cron requests.
+serialises WP-Cron requests. After a job is created, only the holder of `runner.lock` writes
+its `job.json`; a request that wants a running job to stop writes a file of its own (§4.4).
 
 ### 4.4 Job state machine
 
@@ -283,6 +284,20 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 - Restore jobs join in Milestone 3 with their own step list.
 - Exactly one job is active at a time; creating another is rejected (HTTP 409), cancel is
   always possible.
+- **Creating a job** (`JobStore::create()`): the check for an active job and the write of
+  the new `job.json` happen under an exclusive `flock()` on `<private>/jobs/create.lock`, so
+  two requests at the same moment cannot both find no job and create one each. What a job
+  needs from its caller, such as the share of packs that `check --read-data-subset` asks
+  for, is passed to `create()` and is part of the first document; the caller does not write
+  the job a second time.
+- **Cancelling** (`Runner::cancel()`) never changes the document of a running job. It writes
+  the marker `<private>/jobs/<id>/cancel-requested`. `JobStore::get()` reports the marker
+  with the job, and a tick looks for it before every step: the job then leaves the regular
+  steps and goes through its cleanup steps to `cancelled`, also while it waits out a
+  back-off. A request that arrives during a tick can therefore neither be lost nor overwrite
+  what the tick saves. A job that is still `queued` is cancelled at once and without cleanup
+  steps, because nothing ran: by `cancel()` itself if it gets the runner lock, otherwise by
+  the next tick.
 
 ### 4.5 Checkpoints
 
@@ -556,6 +571,12 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   was inconclusive), and every forget or prune job before it starts. Detecting append-only
   switches retention to `external` immediately; detecting that deletions became possible
   only proposes the switch back to `plugin`, which needs an administrator's click.
+  `RetentionGuard` stores each result with a fingerprint of the repository's address and
+  REST user name. A result for another repository counts as none: it is not shown, and the
+  heartbeat probes at its next run after the repository changed. The dashboard's append-only
+  line shows the latest probe of the current repository that had an answer; an inconclusive
+  probe does not replace it. Until such a probe exists, the line shows what the wizard's
+  connection test found (`repository.append_only`).
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
   all snapshots (a walk of every snapshot's trees), then write the index files that list a
   pack with **no** referenced blob again without those packs, delete the old index files,
@@ -593,12 +614,18 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   never split a blob, so memory does not grow with the pack size; a pack whose reading ends
   the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
   default; errors raise a persistent critical notice and are reported in Site Health,
-  warnings only appear with the result (ADR 0022). Repairs are never attempted
-  automatically; the guide points to `restic repair`.
+  warnings only appear with the result (ADR 0022). The check counts every finding and keeps
+  the details of at most 50; when that list is full, an error takes the place of the newest
+  warning. The alert and the record of the last check list up to ten findings, errors
+  before warnings, each kind in the order found, so that warnings of an early phase cannot
+  push an error off the list. Repairs are never attempted automatically; the guide points to
+  `restic repair`.
 - **Cache hygiene**: the merged index is cached per repository, encrypted, and only while it
   fits `advanced.cache_limit_mib` (default 256 MiB); a larger index is read from the
   repository in every tick instead, and a cache written under a higher limit is removed
-  when it is read under a lower one. Caches of other repositories are removed after each job.
+  when it is read under a lower one. After each job the `cleaning_up` step removes the
+  caches of every repository except the one whose master key is cached
+  (`RepositoryAccess::cached_repository_id()`); without a cached key it removes nothing.
   Settings and Site Health show the size, and the cache can be cleared while no job runs
   (`DELETE /cache`). Prune and check read trees on demand and keep no tree cache.
 - **Locks**: stale locks (older than 30 minutes) from this site are removed automatically
@@ -636,7 +663,8 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
-├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
+├── jobs/create.lock                       flock target while a job is created (§4.4)
+├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
 └── restores/<job-id>/                     (M3) staging, expires after 24 h; the directory exists empty today
@@ -657,16 +685,16 @@ nothing writes or reads it, and uninstall deletes it (§18).
 
 Declared once in `Settings\Schema` and stored flat by dotted path (`schedule.backup.hour`) in
 one option; secrets live in the `SecretStore`. The block shows the defaults, except
-`repository.server`, `url` and `rest_username`, which show an example and are set by the
+`repository.url` and `repository.rest_username`, which show an example and are set by the
 wizard.
 
 ```yaml
 repository:
-  server: rest-server                    # rest-server | borgbase (ADR 0025)
+  server: rest-server                    # rest-server (default) | borgbase (ADR 0025)
   url: "https://backup.example.net:8000/mysite/wordpress/"   # https only; rest-server: any host, port, path; borgbase: *.repo.borgbase.com
   rest_username: "mysite"                # optional for rest-server without authentication
   ca_certificate: none                   # none | uploaded: whether ca.pem in the private directory is trusted for this server (self-signed TLS)
-  append_only: unknown                   # what the wizard's connection test found: yes | no | unknown (ADR 0010)
+  append_only: unknown                   # what the wizard's connection test found: yes | no | unknown; the dashboard prefers the latest conclusive probe (§8, ADR 0010)
   format_version: 1                      # written when the plugin creates the repository; not updated when the wizard connects an existing one
   id: ""                                 # repository id (64 hex), written when the plugin creates the repository
 schedule:
@@ -834,10 +862,11 @@ its events and warnings on the page; there is no download). Until setup is compl
 page shows the setup wizard instead
 (Environment → Repository server → Password, with the unlock progress when an existing
 repository is connected → Recovery kit → Schedule → First backup). The repository step
-offers an own restic REST server or the BorgBase preset, takes the credentials and, for an
-own server, an optional CA certificate, tests authentication, listing and a ranged read, and
-detects append-only ([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows
-no repository usage or growth yet; that is planned for Milestone 3.
+offers an own restic REST server, which is preselected, and the BorgBase preset as the
+second option, takes the credentials and, for an own server, an optional CA certificate,
+tests authentication, listing and a ranged read, and detects append-only
+([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows no repository
+usage or growth yet; that is planned for Milestone 3.
 
 The whole UI is one classic script, `assets/js/admin.js`, on core's `wp-api-fetch`,
 `wp-i18n` and `wp-dom-ready`. The server renders only the frame of the page, and every view
@@ -858,22 +887,32 @@ first backup; time estimates are planned for Milestone 3.
 | --- | --- |
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts |
-| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job (409 while another job runs, or for forget and prune in retention mode `external`) |
+| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
-| `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | cancel; redacted events |
+| `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
 | `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
-| `POST /repository/test`, `POST /repository/save` | wizard: connection test; test and save |
-| `POST /repository/create`, `POST /repository/connect` | wizard: new repository, or the password of an existing one plus an unlock job; both return the recovery kit once |
+| `POST /repository/test`, `POST /repository/save` | connection test; test and save. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent |
+| `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; `connect` stores nothing while another job is active (409 `job_conflict`). Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
 | `POST`/`DELETE /repository/ca-certificate` | CA certificate of a self-hosted server |
 | `POST /setup/complete` | finish the wizard after the recovery kit is acknowledged |
-| `POST /recovery-kit` | the recovery kit, after the administrator re-enters the WordPress password |
+| `POST /recovery-kit` | the recovery kit, only with the administrator's WordPress password as `user_password` (403 `wrong_user_password`); 409 `ca_certificate_missing` as above |
 
 All routes: capability check in `permission_callback` (`backups_for_restic_capability`,
 `manage_options` by default); cookie + nonce or Application Passwords; no secrets in
 responses except the recovery kit, which is sent with `Cache-Control: no-store`. Restore
 routes arrive with Milestone 3.
+
+The recovery kit is in the answer of three routes. During the setup `create` and `connect`
+return it freely, which is how the wizard shows it once; from then on all three ask for the
+WordPress password of the current user in every request (`wp_check_password`). The stored
+REST password leaves the site only for the server it was saved for
+(`Connection\Setup::rest_password()`): the same host, compared without regard to case, the
+same port and the same user name. A request that tests or saves another server or user name
+has to carry the password. A REST password defined in `wp-config.php` goes to another
+server only if the request carries that same password, and saving a server without a user
+name deletes a stored REST password.
 
 `GET /snapshots` and the WP-CLI command `snapshots` list every snapshot in the repository,
 also those of other hosts that share it. A list limited to this site is planned for
@@ -884,8 +923,10 @@ Milestone 3. Errors of the routes carry the codes of §14 with the prefix
 
 Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
 `forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
-`tick [--until-idle]`, `status` and `snapshots`. `forget` and `prune` are refused in
-retention mode `external`. `status` prints the last backup and the active job only.
+`tick [--until-idle]`, `status` and `snapshots`. The four commands that start a job end
+with an error under the same conditions as `POST /jobs` (§13.2): before the setup is
+completed, without a repository address, and `forget` and `prune` in retention mode
+`external`. `status` prints the last backup and the active job only.
 
 Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
 cancelling a job, job logs, `settings get|set` and `recovery-kit` (parity with the admin
@@ -938,10 +979,11 @@ translated message and a hint. The codes:
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
 | `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |
 | `quota_exceeded`, `upload_rejected` | HTTP 507; HTTP 400 (hash mismatch) |
-| `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change |
+| `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change; or a secret that was just stored does not read back unchanged (`EncryptedOptionStore::set()`) |
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
 | `database_dump_failed` | a query of the dump failed |
-| `configuration` | setup incomplete or a setting not usable |
+| `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
+| `setup_incomplete` | a backup, forget, prune or check was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |
@@ -953,9 +995,17 @@ that runs out of time simply continues in the next one. Codes for restore
 
 The REST API has codes of its own for requests it refuses: `not_found` (unknown job),
 `not_editable` (a setting that `PUT /settings` does not accept), `invalid_job_type`,
-`invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password`,
-`invalid_settings` (with one message per field) and `invalid_url` for the connection test,
-which also covers a server without ranged reads (`server_incompatible`).
+`invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password` (the recovery
+kit was asked for without the right WordPress password), `password_required` (a request
+names a server or user name that the stored REST password is not for and carries no
+password), `password_too_short` (a chosen repository password of fewer than 12 characters),
+`ca_certificate_missing` (the settings name an uploaded CA certificate that is not there, so
+a recovery kit would be incomplete), `invalid_settings` (with one message per field) and
+`invalid_url` for the connection test, which also covers a server without ranged reads
+(`server_incompatible`). The messages of `invalid_settings` come from the validation codes
+of the settings (`Settings::with()`), among them `retention_floor`: `retention.keep.within`
+must be at least one day, or `retention.keep.last` at least 1. The rule is checked when one
+of the two fields changes.
 
 Logs per job: `events.log`, one JSON line per event with time, level, message and context,
 redacted and capped at 1 MiB; once it is full a last line says so and later entries are
@@ -980,12 +1030,14 @@ filter:
 | Stale | once, when no backup succeeded for `stale_after_hours` (default 36), but at least one and a half backup intervals; never with manual backups only | `on_stale` |
 | Recovery | once, when that job type succeeds again after a failure or stale notice; a check that finishes with errors sends the check-findings notice instead | follows the notice it answers |
 | Check findings | every check that finds errors | `on_failure` |
-| Retention external | when a refused deletion switches retention to `external` (ADR 0010) | `on_failure` |
+| Retention external | when retention switches to `external`: the probe of a forget or prune job or of the heartbeat found the server append-only, or the server refused a deletion (ADR 0010) | `on_failure` |
 
 An e-mail is built from codes, times and counts only, never from log lines, paths or
 settings, so it cannot carry a secret. Notices wait in an outbox (`backups_for_restic_notifications`)
-until `wp_mail()` accepts them, at most five attempts in two days. The actions of §13.5 fire
-on the same state changes, after the job document is saved.
+until `wp_mail()` accepts them. A notice that is refused is tried again after 15 minutes,
+1 hour, 6 hours and 24 hours, each time at the first finished job or heartbeat after the
+pause: five attempts in all. It is dropped after the fifth refusal, or when it is two days
+old. The actions of §13.5 fire on the same state changes, after the job document is saved.
 
 ## 15. Multisite and unusual layouts
 
@@ -1069,8 +1121,12 @@ and schedules are slots in the site's time zone.
   on deactivation is planned for Milestone 3. All data is kept.
 - Uninstall (`uninstall.php`) deletes the plugin's options, its three transients, both cron
   events and what the plugin put into the private directory; it touches known names only, so
-  a directory that also holds other files keeps them. The plugin asks for no confirmation of
-  its own. The repository on the server is untouched.
+  a directory that also holds other files keeps them. The directory is found as at run time:
+  the value of the constant `BACKUPS_FOR_RESTIC_PRIVATE_DIR`, which the filter
+  `backups_for_restic_private_dir` may replace, and without either the default location.
+  The location that applies without the filter is cleaned as well, in case the filter was
+  added after the plugin had worked there. The plugin asks for no confirmation of its own.
+  The repository on the server is untouched.
 - Plugin headers and `readme.txt` (`Requires at least: 6.7`, `Requires PHP: 8.3`,
   `Tested up to`, `Stable tag`) are WordPress.org metadata kept in sync by the release
   checklist.
