@@ -79,8 +79,9 @@ can operate.
   the checklist and needs the owner's confirmation.
 - Commits are signed off under the Developer Certificate of Origin. Since 2026-11-10 a CI
   job checks the commits of a pull request for the trailer, merge commits included. It
-  passes over commits whose author name is `dependabot[bot]`. The name is not proof of the
-  author, so the exemption rests on the review of the pull request, like the rest.
+  does not run on pull requests that Dependabot opened, because Dependabot cannot sign off.
+  The exemption follows the account that opened the pull request, which GitHub sets, and
+  not the author name of a commit, which anybody can write.
 - The mutation run does not start for every change any more. It runs on every push to
   `main` and on every pull request that changes a file its result can depend on; any other
   pull request skips the run and the job ends green

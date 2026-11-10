@@ -146,7 +146,8 @@ transcripts into code, commits or pull requests. Commits use a noreply address: 
 sense. [`.claude/settings.json`](.claude/settings.json) asks Claude Code not to add its
 session link to commits and pull request descriptions. That is not a guarantee: a cloud
 session with several repositories does not read the file, and a pull request opened from
-a cloud session has still received the link in its description. Look at your commits and at
-the description after opening a pull request, remove such a link, and delete the first
-revision from the description's edit history, where it otherwise stays. CodeRabbit's
+a cloud session has still received the link in its description. Look at your commits
+before you push them, because a pushed commit stays in the history. After opening a pull
+request, look at its description, remove such a link, and delete every revision that
+contains it from the description's edit history, where it otherwise stays. CodeRabbit's
 pre-merge check fails a pull request whose description contains one.

@@ -347,8 +347,8 @@ or remote code; assets enqueued only on the plugin's screen; no third-party asse
 - **Repository hygiene**: branch protection with required status checks and no direct
   pushes, signed commits, `SECURITY.md`. The checks that exist are PHPCS, ESLint for the
   admin script, PHPStan, Plugin Check on the built package, the build of the translation
-  template, the check that the commits of a pull request are signed off (it passes over
-  commits whose author name is `dependabot[bot]`), the unit, database, conformance and
+  template, the check that the commits of a pull request are signed off (it does not run
+  on pull requests that Dependabot opened), the unit, database, conformance and
   integration suites and mutation testing
   ([`04-development-and-quality.md`](04-development-and-quality.md) §6). CodeQL for
   JavaScript is not set up yet and is planned for Milestone 3.

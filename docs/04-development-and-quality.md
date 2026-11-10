@@ -386,9 +386,10 @@ template has no subject, because the template is not committed.
 
 The job "Commits are signed off" runs on pull requests. It fails when a commit between the
 base and the head of the pull request, merge commits included, has no `Signed-off-by`
-trailer with a value. Commits whose author name is `dependabot[bot]` are exempt. Git lets
-anybody write that name, so the job proves nothing about such a commit; whoever merges
-sees its author.
+trailer with a value. Dependabot cannot sign off, so the job does not run on a pull request
+that the account `dependabot[bot]` opened. GitHub sets that account; a name in a commit,
+which anybody can write, exempts nothing. A commit that someone else pushes onto such a
+pull request is not checked either; whoever merges sees it.
 
 ## 7. Release process (WordPress.org)
 

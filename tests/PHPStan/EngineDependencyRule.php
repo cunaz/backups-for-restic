@@ -29,7 +29,8 @@ use PHPStan\Rules\RuleErrorBuilder;
  * the same rule, so that nothing else reaches the stack through them.
  *
  * The rule reads the use statements of a file and every name in its code. A name that
- * stands only in a comment is seen through the use statement it needs, not otherwise.
+ * stands only in a comment is seen through the use statement it needs, not otherwise. A
+ * file without a namespace statement is not looked at; src/ has none.
  *
  * @implements Rule<Namespace_>
  */
