@@ -7,11 +7,10 @@
 > that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
 > mode. The plugin cannot restore yet: that is Milestone 3, and until then every backup is
 > restored with the restic command line ([guide](docs/06-disaster-recovery.md)). Also open
-> and planned for Milestone 3: browser tests and tests of the WordPress layer, the checks
-> Plugin Check and ESLint, a preview of what retention would remove, the size of the
-> repository on the dashboard, and measurements against a hosted server, which has not been
-> tested yet ([roadmap](docs/05-roadmap.md)). The design documents explain *why* things are
-> built the way they are.
+> and planned for Milestone 3: browser tests and tests of the WordPress layer, a preview of
+> what retention would remove, the size of the repository on the dashboard, and measurements
+> against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
+> The design documents explain *why* things are built the way they are.
 >
 > **Distribution:** the plugin will be published in the
 > [WordPress.org plugin directory](https://wordpress.org/plugins/), which is the only
@@ -124,10 +123,10 @@ Install from the WordPress.org plugin directory (Plugins → Add New). No server
 needed; the setup wizard checks PHP extensions, memory and time limits, the hosting's cron
 options and the protection of the plugin's working directory, then guides you through
 connecting a repository on your own restic REST server or a hosted one. Packages are not
-distributed through GitHub. To test unreleased code, link or copy a checkout of this
-repository into `wp-content/plugins/`: the plugin needs no build step. A script that builds
-the release package is planned for Milestone 3
-([development guide](docs/04-development-and-quality.md), §7).
+distributed through GitHub. To test unreleased code, run `bin/build-package.sh` and copy
+`build/backups-for-restic/` into `wp-content/plugins/`, or link a checkout of this
+repository there: the plugin needs no build step
+([development guide](docs/04-development-and-quality.md), §5.8).
 
 ## License
 

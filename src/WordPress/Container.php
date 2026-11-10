@@ -9,6 +9,10 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\WordPress;
 
+// Before the imports, unlike in the other files: Plugin Check looks for this line only near
+// the top of a file, and this file imports more classes than fit there.
+defined( 'ABSPATH' ) || exit;
+
 use BackupsForRestic\Backend\Http\HttpClient;
 use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Backup\SitePaths;
@@ -48,8 +52,6 @@ use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Support\SystemClock;
-
-defined( 'ABSPATH' ) || exit;
 
 /**
  * Builds every service from WordPress' constants, options and filters, once per request.

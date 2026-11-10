@@ -140,7 +140,8 @@ final class BackupJobTest extends TestCase {
 
 		$sql = (array) glob( $target . $private . '/spool/database/*.sql' );
 		self::assertCount( 4, $sql, 'Header, two tables, views; other_plugin_table lacks the prefix.' );
-		$this->import( $sql );
+		self::$admin?->execute( 'CREATE DATABASE `' . self::$database . '_restored` CHARACTER SET utf8mb4' );
+		MysqliConnection::import( self::$database . '_restored', array_map( 'strval', $sql ) );
 		$source   = MysqliConnection::connect( self::$database );
 		$restored = MysqliConnection::connect( self::$database . '_restored' );
 		self::assertNotNull( $source );
@@ -286,23 +287,5 @@ final class BackupJobTest extends TestCase {
 		$finished = $store->get( $job->id );
 		self::assertNotNull( $finished );
 		return $finished;
-	}
-
-	/**
-	 * @param list<string> $files
-	 */
-	private function import( array $files ): void {
-		self::$admin?->execute( 'CREATE DATABASE `' . self::$database . '_restored` CHARACTER SET utf8mb4' );
-		sort( $files );
-		$process = proc_open( MysqliConnection::client( self::$database . '_restored' ), [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
-		self::assertIsResource( $process );
-		foreach ( $files as $file ) {
-			fwrite( $pipes[0], (string) file_get_contents( $file ) );
-		}
-		fclose( $pipes[0] );
-		$output = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
-		self::assertSame( 0, proc_close( $process ), 'Import failed: ' . $output );
 	}
 }
