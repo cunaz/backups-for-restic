@@ -378,4 +378,30 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 200, $status, $raw );
 		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
+
+	/**
+	 * docs/02-architecture.md §18: options that a newer version of the plugin wrote keep this
+	 * version inert, because it could misread them.
+	 */
+	public function test_options_of_a_newer_version_keep_the_plugin_inert(): void {
+		self::idle( 600 );
+		$db     = self::site_database();
+		$select = "SELECT option_value FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'";
+		$stored = $db->rows( $select )[0]['option_value'] ?? null;
+		self::assertSame( '1', $stored, 'The plugin recorded the layout of its options on its first request.' );
+
+		try {
+			$db->execute( "UPDATE wp_options SET option_value = '2' WHERE option_name = 'backups_for_restic_schema_version'" );
+			[ $status, $answer, $raw ] = self::api( 'GET', '/status' );
+			self::assertSame( 404, $status, $raw );
+			self::assertSame( 'rest_no_route', $answer['code'] ?? null, 'No route of the plugin is registered: ' . $raw );
+			self::cron();
+			self::assertSame( '2', $db->rows( $select )[0]['option_value'] ?? null, 'An older version never lowers the number.' );
+		} finally {
+			$db->execute( "UPDATE wp_options SET option_value = '1' WHERE option_name = 'backups_for_restic_schema_version'" );
+		}
+
+		[ $status, , $raw ] = self::api( 'GET', '/status' );
+		self::assertSame( 200, $status, 'With its own layout number the plugin works again: ' . $raw );
+	}
 }
