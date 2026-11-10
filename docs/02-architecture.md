@@ -418,11 +418,21 @@ with `hostname` set to the site host, tags `backups-for-restic`, `site:<12 hex>`
 
 Lock: `{"time","exclusive","hostname","username","pid","uid","gid"}`. Backup and check take
 a non-exclusive lock; forget and prune take an exclusive lock (as restic does). A lock
-older than 30 minutes is stale for every restic client, so the heartbeat and every tick
-**refresh** the lock (write new, delete old) when it is older than 5 minutes. If no tick ran
-for more than 30 minutes the job re-acquires its lock before continuing; prune instead starts
-its marking again, because another client may have written snapshots in the meantime
-([ADR 0022](adr/0022-maintenance-scope.md)). Locks are deletable even in append-only mode.
+older than 30 minutes is stale for every restic client, so every tick of the job that holds
+a lock **refreshes** it (write new, delete old) when it is older than 5 minutes; nothing
+refreshes the lock of a job between its ticks. A backup, check or forget that finds its
+lock older than 30 minutes, or gone, takes it again (`Locking::acquire()`), which fails
+with `repository_locked` while another client holds a conflicting lock. What another
+client did during such a pause is not examined: a `restic prune` that ran entirely within
+it can have removed data the paused backup refers to, which the next check reports;
+verifying this before a snapshot is written is planned for Milestone 3. Prune is stricter:
+if its lock was lost or not refreshed for 25 minutes it starts its marking again, because
+another client may have written snapshots in the meantime
+([ADR 0022](adr/0022-maintenance-scope.md)). Every lock carries the number of the run that
+wrote it, so a lock left by a request that died is recognised and removed by that run. Only
+a request that dies between taking the lock and writing the first checkpoint of a backup,
+check or forget leaves a lock nothing recognises; it is stale after 30 minutes. Locks are
+deletable even in append-only mode.
 
 ### 5.10 REST protocol
 
@@ -592,8 +602,9 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   Settings and Site Health show the size, and the cache can be cleared while no job runs
   (`DELETE /cache`). Prune and check read trees on demand and keep no tree cache.
 - **Locks**: stale locks (older than 30 minutes) from this site are removed automatically
-  before a job starts, as restic does; foreign stale locks are reported and removable by an
-  explicit admin action with a warning.
+  before a job starts, as restic does. A stale lock of another host is ignored when the
+  plugin looks for conflicts; it is neither reported nor removed, and `restic unlock` from
+  any computer removes it.
 
 ## 9. Restore
 
