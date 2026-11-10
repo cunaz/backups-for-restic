@@ -24,9 +24,10 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * **Built for shared hosting.** Every job runs in short, resumable slices that fit PHP time and memory limits. A request that is killed loses at most one slice.
 * **Retention and maintenance.** Old snapshots are removed by a restic-compatible policy, data that no snapshot uses any more is deleted weekly, and a monthly check downloads and verifies a share of the stored data. Data in packs that still hold used data stays until a full `restic prune` from another computer; the dashboard shows how much that is.
 * **Append-only aware.** If your server is append-only, nobody who takes over the website can delete your backups. The plugin notices it, stops deleting, and tells you how to clean up from another computer.
-* **E-mail notifications** when a backup fails, when no backup succeeded for too long, when it works again, and when a check finds damage.
+* **E-mail notifications** when a backup or a maintenance job (removing old snapshots, deleting unused data, the check) fails, when no backup succeeded for too long, when it works again, when a check finds damage, and when the plugin stops removing old snapshots because the server became append-only.
 * **Recovery kit.** One page with everything needed to restore without the website: repository address, passwords, the CA certificate of a server with its own certificate authority, and the exact restic commands.
-* **WP-CLI** commands for every task, and Site Health checks.
+* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`). Setup and settings are done in the admin area.
+* **Site Health** checks and debug information.
 
 = Requirements =
 
@@ -41,11 +42,13 @@ What it writes is a normal restic repository. You can list, check and restore ev
 
 The plugin talks only to the repository server you configure. It has no account system, no telemetry and no service of its own.
 
+The project is independent and not affiliated with restic or BorgBase. Both names are marks of their respective owners and are used here only to say what the plugin works with.
+
 == Installation ==
 
 1. Install and activate the plugin.
 2. Open **Backups** in the admin menu. The setup wizard checks the server environment first.
-3. Choose your repository server: a hosted BorgBase repository, or your own restic REST server. Enter the repository address and credentials, and for a server with a self-signed certificate its CA certificate. The wizard tests the connection and whether the server is append-only.
+3. Choose your repository server: your own restic REST server, or a hosted service such as BorgBase, for which the wizard has a preset. Enter the repository address and credentials, and for a server with a self-signed certificate its CA certificate. The wizard tests the connection and whether the server is append-only.
 4. Create a new repository (the plugin generates a strong password) or connect to an existing one with its password.
 5. Store the recovery kit outside the website, for example in a password manager.
 6. Choose the schedule and run the first backup.
@@ -60,7 +63,11 @@ No. The plugin implements restic's repository format in PHP. You need the restic
 
 = Can I restore without WordPress and without this plugin? =
 
-Yes. Every backup is a normal restic repository. The recovery kit lists the commands, and the [disaster-recovery guide](https://github.com/cunaz/backups-for-restic/blob/main/docs/06-disaster-recovery.md) walks through each case.
+Yes. Every backup is a normal restic repository. The recovery kit lists the commands, and the [disaster-recovery guide](https://github.com/cunaz/backups-for-restic/blob/main/docs/06-disaster-recovery.md) walks through each case. You need restic 0.16.1 or newer for them.
+
+= Can I restore from the WordPress admin area? =
+
+Not yet. This version lists your snapshots under **Backups > Snapshots**; restoring is done with the restic command line and the recovery kit, on any computer. Restore from the admin area is planned for a later version.
 
 = Why does this plugin contain encryption code? =
 
@@ -93,6 +100,18 @@ Nothing. Uninstalling removes the plugin's settings, passwords and working files
 = Is multisite supported? =
 
 Not yet. Network support is planned for version 1.1.
+
+= My hosting runs an older PHP version. How do I switch? =
+
+The plugin needs PHP 8.3 or newer, and WordPress does not install it on older versions. Most hosts let you choose the PHP version per site in the control panel: in cPanel under **MultiPHP Manager** or **Select PHP Version**, in Plesk under **PHP Settings** of the domain. Other panels have a similar page, and your host's support can switch it for you. **Tools > Site Health > Info > Server** shows the version your site runs now.
+
+= Where do I get help, and where do I report a bug? =
+
+Ask questions about using the plugin in its support forum on WordPress.org. Report bugs and propose changes on [GitHub](https://github.com/cunaz/backups-for-restic/issues). Please add the list from **Backups > Environment** to a bug report, and never post your recovery kit or a password.
+
+= How do I report a security problem? =
+
+Privately, as the [security policy](https://github.com/cunaz/backups-for-restic/blob/main/SECURITY.md) describes: with **Report a vulnerability** on the Security tab of the GitHub repository. Please do not use the support forum or a public issue for it.
 
 == External services ==
 
