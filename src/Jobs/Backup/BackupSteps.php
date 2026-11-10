@@ -15,6 +15,7 @@ use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
@@ -25,6 +26,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Storage\Files;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -39,6 +41,9 @@ final class BackupSteps implements StepProvider {
 
 	/** Smallest memory_limit accepted for a backup. */
 	private const int MIN_MEMORY_BYTES = 100663296;
+
+	/** How often a backup may start over because the repository changed while it was paused. */
+	public const int MAX_RESTARTS = 3;
 
 	/**
 	 * Creates the steps.
@@ -134,24 +139,30 @@ final class BackupSteps implements StepProvider {
 	/**
 	 * Runs the engine's resumable backup.
 	 *
+	 * A run that was paused for longer than its lock lasts, and then finds that another
+	 * client removed what it relied on, is given up by the engine (ADR 0030). The step then
+	 * starts a new run with the next tick; what was uploaded and is still there is found again
+	 * and not sent twice. After MAX_RESTARTS such runs the job fails rather than go on for ever.
+	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool True once the snapshot is written.
 	 * @throws InvalidArgument If the master key is missing.
+	 * @throws RepositoryChanged If the backup had to start over too often.
 	 */
 	public function back_up( Job $job, EventLog $log, float $deadline ): bool {
 		$services   = $this->services;
 		$repository = $this->repository();
-		$index      = $services->index_cache( $repository )->load( $repository );
+		$cache      = $services->index_cache( $repository );
 		$plan       = ( $services->plan )( $job );
 		$work       = $services->work_dir( $job );
 
 		if ( is_file( $work . '/state.json' ) ) {
-			$run = BackupRun::resume( $repository, $plan, $work, $services->identity, $services->clock, $services->pack_size(), $index );
+			$run = BackupRun::resume( $repository, $plan, $work, $services->identity, $services->clock, $services->pack_size(), $cache );
 		} else {
 			$parent = $this->parent( $repository, $plan->paths );
-			$run    = BackupRun::start( $repository, $plan, $work, $services->identity, $services->clock, $parent, $services->pack_size(), $index );
+			$run    = BackupRun::start( $repository, $plan, $work, $services->identity, $services->clock, $parent, $services->pack_size(), $cache );
 			$log->write(
 				'info',
 				'Backup started.',
@@ -162,7 +173,24 @@ final class BackupSteps implements StepProvider {
 			);
 		}
 
-		$done          = $run->advance( $deadline, $services->throttle() );
+		try {
+			$done = $run->advance( $deadline, $services->throttle() );
+		} catch ( RepositoryChanged $changed ) {
+			$restarts = Decoded::int( $job->data['restarts'] ?? 0 ) + 1;
+			if ( $restarts > self::MAX_RESTARTS ) {
+				throw $changed;
+			}
+			$job->data['restarts'] = $restarts;
+			$job->progress         = [];
+			$job->warnings         = [];
+			// The new run lists the tables again; the old list may be as outdated as the rest.
+			$dump = BackupServices::dump_state( $services->jobs, $job );
+			if ( is_file( $dump ) ) {
+				unlink( $dump );
+			}
+			$log->write( 'warning', 'The repository changed while the backup was paused; the backup starts over.', [ 'restart' => $restarts ] + $changed->context() );
+			return false;
+		}
 		$job->progress = $run->progress();
 		foreach ( array_slice( $run->warnings(), count( $job->warnings ) ) as $warning ) {
 			$job->warn( $warning );
