@@ -455,7 +455,9 @@ holds a conflicting lock. Then it looks at what other clients did in the meantim
   or forget removed. It looks once more before it ends.
 - A **forget** needs no comparison: what others wrote in the meantime can only make its
   policy remove more.
-- **Prune** starts its marking again, because another client may have written snapshots
+- **Prune** compares the snapshots and the index files with those it marked and read. If
+  they are the same it goes on; otherwise it starts its marking again, at most three times,
+  because another client may have written snapshots or repacked
   ([ADR 0022](adr/0022-maintenance-scope.md)).
 
 Every lock carries the number of the run that wrote it, and every run writes its checkpoint
@@ -610,18 +612,24 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   leaves a tree unwalked. The checkpoint is written before the lock is taken, at every
   change of phase and at the end of every tick: a request that ends while it deletes is
   continued in that phase, and a lock it left behind is recognised by the run's number.
-  That holds while the lock is continuous. If the lock was lost, or not refreshed for 25
-  minutes, while prune was deleting, marking starts over, and the packs whose index entries
-  were already removed are no longer found by any plan: they stay on the server as packs
-  that no index lists. The check reports such packs as a warning, a full `restic prune`
-  removes them, and so will prune itself once it deletes unlisted packs (Milestone 3).
+  Prune also deletes the packs on the server that no index file lists, which an
+  interrupted backup leaves behind, as restic's prune does. No snapshot can use such a
+  pack: marking ends with an error when a snapshot uses a blob the index does not lead to,
+  and every used pack must be among the listed ones before anything is deleted.
+  If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares
+  the snapshots with those it marked and the index files with those it read, apart from
+  the ones it has written or deleted itself. If they are the same, nothing it found has
+  changed and it goes on where it was, so a site whose ticks are far apart still finishes.
+  Otherwise marking starts over, at most three times, then the job fails with
+  `repository_changed`. Packs whose index entries a first plan had already removed are
+  found by the next plan as packs that no index file lists, so none is left behind.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, every index file can be read). A blob id
   that occurs twice is no finding: duplicates are legal in a restic repository, and the
   index keeps the first location; a whole pack listed in two index files is the warning
   `pack_in_several_indexes`. A pack that no index file lists, as a cancelled or failed
-  backup leaves it behind, is the warning `pack_unindexed`; prune-lite does not delete such
-  packs yet, which is planned for Milestone 3. Then comes **sampled data verification**:
+  backup leaves it behind, is the warning `pack_unindexed`; the next prune deletes such
+  packs. Then comes **sampled data verification**:
   download `schedule.check.read_data_subset_percent` percent of the packs (default 2 %),
   drawn at random anew for every check without regard to earlier checks, and
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that

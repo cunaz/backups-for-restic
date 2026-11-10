@@ -170,8 +170,8 @@ the check alert.
 WordPress wiring of the second and third acceptance criterion (the daily probe, the stored
 switch to `external`, the administrator's click back, the heartbeat's stale notice), which
 are proven below that layer only; browser tests; a preview of what retention would remove;
-repository usage on the dashboard; packs that no index lists, which aborted backups leave
-and prune does not remove yet; the POT file. The German translation follows once the
+repository usage on the dashboard; the POT file. Packs that no index lists, which aborted
+backups leave, were on this list: prune removes them since 2026-11-10. The German translation follows once the
 plugin is listed on translate.wordpress.org.
 
 Scope

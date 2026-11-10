@@ -68,6 +68,9 @@ All notable changes are documented here. The format follows
   after two days.
 - With `advanced.loopback_chaining` off, creating a job no longer requests `wp-cron.php`;
   the heartbeat and an open admin page advance the job.
+- Prune also deletes the data that a cancelled or failed backup left on the server without
+  ever listing it, as `restic prune` does. Until now only a prune from another computer
+  removed it.
 
 ### Security
 - After the setup, `POST /repository/connect` and `POST /repository/create` answer with the
@@ -97,6 +100,12 @@ All notable changes are documented here. The format follows
 - A request that ended at the very start of a backup, check or forget could leave a
   repository lock that blocked other programs for 30 minutes. Every run now records its
   number first and removes such a lock itself.
+- On a site whose scheduled requests were more than 25 minutes apart, a prune that needed
+  more than one request started from the beginning every time and never finished. It now
+  goes on where it was unless another program changed the repository in the meantime, and
+  gives up with `repository_changed` after starting over three times.
+- A prune that had to start over while it was deleting left data behind that nothing
+  removed later. The next pass now finds and deletes it.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
   job. A cancel request is now a marker file that the runner reads before every step, and

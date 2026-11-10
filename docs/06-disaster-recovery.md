@@ -211,7 +211,8 @@ progress ([ADR 0030](adr/0030-lock-continuity.md)).
 ## Scenario G — reclaiming space (full prune)
 
 The plugin deletes snapshots according to the retention policy and removes packs that no
-snapshot references. Packs that still contain some live data are not repacked by the plugin.
+snapshot references, and packs that an interrupted backup left behind. Packs that still
+contain some live data are not repacked by the plugin.
 Run a full prune from any computer when the dashboard shows a large reclaimable amount:
 
 ```bash

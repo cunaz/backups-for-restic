@@ -21,7 +21,8 @@ a state every restic tool understands.
   they hold and the guide explains `restic prune` from any computer. The run holds an
   exclusive lock from the first tree it reads to the last pack it deletes; if the lock
   disappeared or was not refreshed within 25 minutes, other clients may have written
-  snapshots in the meantime, so marking starts again. If marking meets a used blob or tree
+  in the meantime, so the run looks whether the repository changed and starts marking again
+  if it did (see "As built"). If marking meets a used blob or tree
   that the index does not lead to, or planning finds a used pack that no index file lists,
   the index was read before another client changed the repository: marking runs again once
   with the index as it is under the lock. Prune refuses without deleting anything when that
@@ -65,8 +66,25 @@ a state every restic tool understands.
 - The check has no finding for a blob id that occurs twice. Duplicates are legal in a restic
   repository, and the index keeps the first location. What the check reports is a whole
   pack that more than one index file lists, as the warning `pack_in_several_indexes`.
-- A pack that no index file lists is the warning `pack_unindexed`. Prune-lite does not
-  delete such packs: it takes its candidates from the index files only, so what a cancelled
-  or failed backup left behind stays until a `restic prune` from another computer. Deleting
-  these packs under the exclusive lock is planned for Milestone 3.
+- A pack that no index file lists is the warning `pack_unindexed`. Until 2026-11 prune-lite
+  did not delete such packs, because it took its candidates from the index files only; what
+  a cancelled or failed backup left behind stayed until a `restic prune` from another
+  computer. Since then the plan phase lists the packs on the server and adds those that no
+  index file lists to the packs to delete, as restic's prune does. That is safe for the
+  same reasons as the rest: marking ends with an error when a snapshot uses a blob the
+  index does not lead to, every used pack must be among the listed ones before anything is
+  deleted, and under the exclusive lock no client uploads packs. A backup of this plugin
+  that was paused for longer than its lock lasts loses its unindexed packs to such a prune,
+  notices it and starts over ([ADR 0030](0030-lock-continuity.md)). Verified against restic
+  0.19.1: `restic check` counts the same packs as additional files before, and none after.
+- After a time without a valid lock, prune no longer starts marking again in every case. It
+  takes the lock again and compares the snapshots with those it marked, and the index files
+  with those it read apart from the ones it has written or deleted itself. If both are the
+  same, no client added a snapshot, repacked or pruned, so what the run found still holds
+  and it goes on where it was. Before, a site whose ticks were more than 25 minutes apart
+  marked again at every tick and never finished a prune that needed more than one. If
+  something changed, marking starts over, at most three times; then the job fails with
+  `repository_changed`. A restart while deleting used to leave behind the packs whose index
+  entries were already removed; the next plan now finds them as packs that no index file
+  lists.
 - The setting for the sample is `schedule.check.read_data_subset_percent`.

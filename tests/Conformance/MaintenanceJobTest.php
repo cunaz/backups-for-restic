@@ -220,6 +220,48 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'Every job released its lock.' );
 	}
 
+	public function test_prune_removes_the_packs_that_restic_counts_as_additional_files(): void {
+		self::assertNotNull( self::$server );
+		$site       = $this->site();
+		$identity   = new Identity( 'example.com', 'www-data' );
+		$repository = Repository::initialize( self::$server->backend( 'unindexed' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$this->history( $repository, $site );
+
+		// A backup that uploads packs and is given up before it writes an index file.
+		file_put_contents( $site . '/abandoned.bin', random_bytes( 9 * 1048576 ) );
+		$before          = $repository->names( ObjectType::Data );
+		$this->cleanup[] = $work = TempDir::create( 'abandoned' );
+		$run             = BackupRun::start( $repository, new BackupPlan( [ $site ], [ PlanFactory::TAG ] ), $work, $identity, new SystemClock(), null, 4 * 1048576 );
+		$calls           = 0;
+		do {
+			self::assertFalse( $run->advance( 0.0 ) );
+			$left   = array_values( array_diff( $repository->names( ObjectType::Data ), $before ) );
+			$enough = count( $left ) >= 2;
+			self::assertLessThan( 1000, ++$calls );
+		} while ( ! $enough );
+		$run->abort();
+		unlink( $site . '/abandoned.bin' );
+
+		// restic counts them, as a hint and without an error.
+		$cli                          = new ResticCli( self::$server, 'unindexed', self::REPOSITORY_PASSWORD );
+		[ $status, $stdout, $stderr ] = $cli->run( [ 'check' ] );
+		self::assertSame( 0, $status, $stdout . $stderr );
+		self::assertStringContainsString( count( $left ) . ' additional files were found in the repo', $stdout . $stderr );
+
+		[ $runner, $store ] = $this->components( self::$server, 'unindexed', $site, [] );
+		$prune              = $this->run_job( $runner, $store, JobType::Prune );
+		self::assertSame( count( $left ), $prune->result['unindexed_packs'] ?? null );
+		self::assertSame( [], array_values( array_intersect( $left, $repository->names( ObjectType::Data ) ) ) );
+
+		[ $status, $stdout, $stderr ] = $cli->run( [ 'check', '--read-data' ] );
+		self::assertSame( 0, $status, $stdout . $stderr );
+		self::assertStringContainsString( 'no errors were found', $stdout );
+		self::assertStringNotContainsString( 'additional files', $stdout . $stderr, 'restic finds no pack that no index lists.' );
+		$snapshots = json_decode( $cli->must( [ 'snapshots', '--json' ] ), true );
+		self::assertIsArray( $snapshots );
+		self::assertCount( 3, $snapshots, 'Every snapshot is still there.' );
+	}
+
 	public function test_a_cancelled_forget_releases_its_lock_after_the_retention_settings_changed(): void {
 		self::assertNotNull( self::$server );
 		$site       = $this->site();
