@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Exception\AuthenticationFailed;
 use BackupsForRestic\Exception\CryptoException;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
@@ -112,6 +113,7 @@ final class IndexCache {
 	 * @param Repository   $repository Repository whose key encrypts the cache.
 	 * @param IndexSet     $index      Index.
 	 * @param list<string> $names      Index files it covers.
+	 * @throws StorageFailed If the cache directory cannot be created or the file not written.
 	 */
 	private function write( Repository $repository, IndexSet $index, array $names ): void {
 		$plain = pack( 'V', count( $names ) );
@@ -123,8 +125,8 @@ final class IndexCache {
 			$this->clear();
 			return;
 		}
-		if ( ! is_dir( $this->directory ) ) {
-			mkdir( $this->directory, 0700, true );
+		if ( ! is_dir( $this->directory ) && ! mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) {
+			StorageFailed::raise( 'The cache directory could not be created.' );
 		}
 		Files::write_atomic( $this->directory . '/index.bin', $sealed );
 	}
