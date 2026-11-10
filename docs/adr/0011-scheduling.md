@@ -52,6 +52,11 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   non-blocking request to `wp-cron.php`. Unlike `spawn_cron()`, that also works from inside
   a `wp-cron.php` request and more than once a minute; the running cron request sees the new
   lock holder and stops after its current event.
+- Disabling chaining (`advanced.loopback_chaining: off`) turns `Cron::chain()` off in every
+  place: after a tick, and after a job was created through REST or WP-CLI. No tick event is
+  scheduled then and `wp-cron.php` is not requested. A job advances with one tick per
+  heartbeat, every five minutes, and with the ticks of an open admin page; an external cron
+  ping makes the heartbeat fire on time but starts no tick of its own.
 - The heartbeat runs the append-only probe when it is due, starts the jobs that are due,
   runs one tick when a job is active and hands waiting notices to the mailer. It refreshes
   no repository lock.

@@ -81,6 +81,16 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   repositories that restic cannot decrypt; rejected.
 
 ## As built (2026-11)
+- The wizard does not ask after an inconclusive probe. Its connection test then says nothing
+  about append-only, the wizard saves `repository.append_only: unknown`, and retention stays
+  in mode `plugin`. The heartbeat probes at its first run after the setup and hourly until
+  it has an answer, and every forget and prune job probes for itself.
+- After an inconclusive probe the dashboard does not fall back to "unknown". It shows the
+  latest probe of the current repository that had an answer, and until there is one, what
+  the wizard's connection test found. Each result is stored with a fingerprint of the
+  repository's address and REST user name (`RetentionGuard::repository()`). A result for
+  another repository is ignored, and the heartbeat then probes at its next run instead of
+  waiting a day.
 - The dashboard shows neither the size of the repository nor its growth. In mode `external`
   it says that old snapshots are removed from another computer; size and growth are planned
   for Milestone 3.
