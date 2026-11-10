@@ -571,7 +571,9 @@ final class CheckTest extends TestCase {
 	public function test_refreshes_its_lock_during_a_long_check(): void {
 		$clock = new FrozenClock( time() );
 		$run   = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, $clock, new SystemRandom(), 0 );
+		$run->advance( 0.0 );
 		$first = array_keys( $this->backend->list( ObjectType::Locks ) );
+		self::assertCount( 1, $first, 'The first call took the lock.' );
 
 		$clock->advance( Locking::REFRESH_AFTER_SECONDS );
 		$run->advance( 0.0 );

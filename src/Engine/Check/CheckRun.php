@@ -60,6 +60,7 @@ defined( 'ABSPATH' ) || exit;
  * whether the index files and snapshots it listed are all still there. If one is gone,
  * another client pruned or forgot in the meantime, and what the check had found may describe
  * a repository that no longer exists: it starts over, at most MAX_RESTARTS times (ADR 0030).
+ * It looks once more before it ends, so that a lock lost in the last call is noticed too.
  * As in a backup, the lock comes before the index in every call, and start() only writes the
  * checkpoint with the run's number.
  */
@@ -67,7 +68,7 @@ final class CheckRun {
 
 	public const int STATE_VERSION = 2;
 
-	/** How often the check starts over because the repository changed while it was paused. */
+	/** How often the check starts over because the repository changed while its lock did not hold. */
 	public const int MAX_RESTARTS = 3;
 
 	/** The phases in their order. */
@@ -372,7 +373,7 @@ final class CheckRun {
 			return;
 		}
 		if ( $this->state['restarts'] >= self::MAX_RESTARTS ) {
-			RepositoryChanged::raise( 'Other clients changed the repository again and again while the check was paused; the check gave up.', [ 'restarts' => $this->state['restarts'] ] );
+			RepositoryChanged::raise( 'Other clients changed the repository again and again while the check ran; the check gave up.', [ 'restarts' => $this->state['restarts'] ] );
 		}
 		++$this->state['restarts'];
 		$this->begin();
@@ -384,10 +385,8 @@ final class CheckRun {
 	 * found is dropped.
 	 */
 	private function begin(): void {
-		$index_files = array_map( 'strval', array_keys( $this->repository->backend()->list( ObjectType::Index ) ) );
-		sort( $index_files );
 		$this->index                   = null;
-		$this->state['index_files']    = $index_files;
+		$this->state['index_files']    = $this->repository->names( ObjectType::Index );
 		$this->state['phase']          = 'index';
 		$this->state['position']       = 0;
 		$this->state['packs']          = [];
@@ -787,9 +786,18 @@ final class CheckRun {
 	}
 
 	/**
-	 * Releases the lock.
+	 * Makes sure that the lock held to the end, then releases it. What was found while another
+	 * client could remove data may describe damage that is none: if the lock was lost in this
+	 * very call and something the check listed is gone, the check starts over instead of ending.
+	 *
+	 * @throws RepositoryChanged If the check already started over MAX_RESTARTS times.
 	 */
 	private function finish(): void {
+		$restarts = $this->state['restarts'];
+		$this->keep_lock();
+		if ( $restarts !== $this->state['restarts'] ) {
+			return;
+		}
 		if ( '' !== $this->state['lock'] ) {
 			$this->locking->release( Id::from_hex( $this->state['lock'] ) );
 			$this->state['lock'] = '';

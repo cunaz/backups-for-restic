@@ -14,6 +14,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Prune\PruneRun;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Lock;
@@ -156,6 +157,55 @@ final class ContinuityTest extends TestCase {
 		$this->backend->delete( ObjectType::Index, $name );
 	}
 
+	/**
+	 * Removes every lock, as `restic unlock --remove-all` on another computer does.
+	 */
+	private function remove_all_locks(): void {
+		foreach ( array_keys( $this->backend->list( ObjectType::Locks ) ) as $lock ) {
+			$this->backend->delete( ObjectType::Locks, (string) $lock );
+		}
+	}
+
+	/**
+	 * A repository whose backend lets something happen right before the run uploads a pack:
+	 * what another client does while the run is in the middle of a call.
+	 *
+	 * @param int                   $upload   Number of the pack upload before which it happens, from 1.
+	 * @param \Closure(string): void $meanwhile Gets the name of the pack about to be uploaded.
+	 */
+	private function interrupted_at_upload( int $upload, \Closure $meanwhile ): Repository {
+		$uploads = 0;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type, string $name ) use ( $upload, $meanwhile, &$uploads ): void {
+				if ( 'save' === $method && ObjectType::Data === $type && ++$uploads === $upload ) {
+					$meanwhile( $name );
+				}
+			}
+		);
+		return Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+	}
+
+	/**
+	 * The names of the files of a type on the server.
+	 *
+	 * @return list<string>
+	 */
+	private function names( ObjectType $type ): array {
+		return $this->repository->names( $type );
+	}
+
+	/**
+	 * The names of the packs that the index files list, in order.
+	 *
+	 * @return list<string>
+	 */
+	private function indexed_packs(): array {
+		$packs = array_map( static fn ( Id $id ): string => $id->hex(), $this->repository->load_index()->pack_ids() );
+		sort( $packs, SORT_STRING );
+		return $packs;
+	}
+
 	public function test_a_backup_goes_on_after_a_gap_in_which_nothing_it_relies_on_was_removed(): void {
 		$work = $this->unfinished_backup();
 		$lock = self::state( $work )['lock'];
@@ -247,16 +297,191 @@ final class ContinuityTest extends TestCase {
 		$this->resume( $work )->advance( 0.0 );
 	}
 
-	public function test_a_refresh_within_the_trusted_time_checks_nothing(): void {
-		$work  = $this->unfinished_backup();
-		$state = self::state( $work );
-		// Deleted behind the run's back while its lock holds: no client does that, and the run
-		// does not look for it. This only shows that a refresh does not start the comparison.
-		$this->rewrite_index_file( (string) ( (array) $state['index_files'] )[0] );
+	public function test_a_refresh_within_the_trusted_time_does_not_list_the_packs(): void {
+		$lists      = [];
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$lists ): void {
+				if ( 'list' === $method ) {
+					$lists[] = $type->value ?? '';
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$work       = $this->unfinished_backup();
+		$state      = self::state( $work );
 
 		$this->clock->advance( Locking::REFRESH_AFTER_SECONDS );
-		self::assertFalse( $this->resume( $work )->advance( 0.0 ) );
+		$lists = [];
+		self::assertFalse( $this->resume( $work, $repository )->advance( 0.0 ) );
 		self::assertNotSame( $state['lock'], self::state( $work )['lock'], 'The lock was refreshed.' );
+		self::assertNotContains( 'data', $lists, 'Only after a gap does the run ask whether its packs are still there.' );
+		self::assertSame( [ 'index' ], array_values( array_unique( array_diff( $lists, [ 'locks' ] ) ) ), 'The index files are listed once, to read the index from them.' );
+		self::assertSame( 1, array_count_values( $lists )['index'] );
+	}
+
+	public function test_an_index_file_that_went_while_the_lock_held_is_noticed_by_the_next_call(): void {
+		$work  = $this->unfinished_backup();
+		$state = self::state( $work );
+		// No client that honours locks does this. One that does not has removed data all the
+		// same, and the listing the next call reads the index from shows it.
+		$this->rewrite_index_file( (string) ( (array) $state['index_files'] )[0] );
+
+		try {
+			$this->resume( $work )->advance( 0.0 );
+			self::fail( 'An index file the run relied on is gone.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame(
+				[
+					'index_files' => 1,
+					'packs'       => 0,
+				],
+				$changed->context()
+			);
+		}
+		self::assertFileDoesNotExist( $work . '/state.json' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_the_record_of_index_files_only_grows_and_holds_those_the_run_wrote(): void {
+		$before = $this->names( ObjectType::Index );
+		$work   = $this->unfinished_backup( true );
+		$first  = (array) self::state( $work )['index_files'];
+		$own    = array_values( array_diff( $this->names( ObjectType::Index ), $before ) );
+		self::assertNotSame( [], $own );
+		self::assertSame( $this->names( ObjectType::Index ), $first, 'What the index was read from and what the run wrote, in order.' );
+		self::assertSame( [], (array) self::state( $work )['unindexed'], 'The packs are listed by an index file now.' );
+
+		// Another computer backs up meanwhile: one more index file.
+		$this->cleanup[] = $other_site = TempDir::create( 'other-site' );
+		file_put_contents( $other_site . '/notes.txt', random_bytes( 50000 ) );
+		$this->finish( BackupRun::start( $this->repository, new BackupPlan( [ $other_site ] ), $this->work_dir(), new Identity( 'laptop', 'admin' ), $this->clock, null, self::PACK_SIZE ) );
+
+		self::assertFalse( $this->resume( $work )->advance( 0.0 ) );
+		$second = (array) self::state( $work )['index_files'];
+		self::assertSame( [], array_diff( $first, $second ), 'Nothing the run relied on before is dropped.' );
+		self::assertSame( $this->names( ObjectType::Index ), $second );
+		self::assertGreaterThan( count( $first ), count( $second ) );
+	}
+
+	public function test_a_lock_lost_in_the_middle_of_the_first_call_is_noticed_before_the_snapshot(): void {
+		$read       = $this->names( ObjectType::Index );
+		$repository = $this->interrupted_at_upload(
+			2,
+			function (): void {
+				// `restic unlock --remove-all` and a prune on another computer, while this call
+				// runs: the prune writes the index files anew.
+				$this->remove_all_locks();
+				$this->rewrite_index_file( $this->names( ObjectType::Index )[0] );
+			}
+		);
+		$work       = $this->work_dir();
+		$run        = $this->start( $work, $repository );
+
+		try {
+			$run->advance( INF );
+			self::fail( 'The index the run works with was read from a file that is gone.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame(
+				[
+					'index_files' => 1,
+					'packs'       => 0,
+				],
+				$changed->context(),
+				'The first call has no checkpoint to compare with: it compares with what it read the index from.'
+			);
+		}
+		self::assertCount( 1, $this->backend->list( ObjectType::Snapshots ), 'No snapshot was written.' );
+		self::assertCount( count( $read ), $this->backend->list( ObjectType::Index ), 'No index file was written either.' );
+		self::assertFileDoesNotExist( $work . '/state.json' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_lock_lost_in_the_middle_of_a_call_is_noticed_before_an_index_file_lists_packs_that_are_gone(): void {
+		$uploaded   = [];
+		$repository = $this->interrupted_at_upload(
+			3,
+			function () use ( &$uploaded ): void {
+				// Ten minutes into the call, the lock is removed and a prune deletes the packs
+				// that no index file lists: those this run has uploaded so far.
+				$this->clock->advance( 601 );
+				$this->remove_all_locks();
+				$uploaded = array_values( array_diff( $this->names( ObjectType::Data ), $this->indexed_packs() ) );
+				$this->backend->delete( ObjectType::Data, $uploaded[0] );
+			}
+		);
+		$before     = $this->names( ObjectType::Index );
+		$work       = $this->work_dir();
+		$run        = $this->start( $work, $repository );
+
+		try {
+			$run->advance( INF );
+			self::fail( 'A pack the run uploaded is gone.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame(
+				[
+					'index_files' => 0,
+					'packs'       => 1,
+				],
+				$changed->context()
+			);
+		}
+		self::assertCount( 2, $uploaded, 'Two packs were uploaded before the third.' );
+		self::assertSame( $before, $this->names( ObjectType::Index ), 'The index file that was due was not written: it would list a pack that is gone.' );
+		self::assertCount( 1, $this->backend->list( ObjectType::Snapshots ) );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$result = $this->check();
+		self::assertSame( 0, $result['errors'], (string) json_encode( $result['findings'] ) );
+	}
+
+	public function test_a_lock_lost_in_the_middle_of_a_call_is_taken_again_when_nothing_was_removed(): void {
+		$repository = $this->interrupted_at_upload( 2, fn () => $this->remove_all_locks() );
+		$run        = $this->start( null, $repository );
+
+		self::assertTrue( $run->advance( INF ), 'Nothing the run relies on is gone: it finishes.' );
+		self::assertCount( 2, $this->backend->list( ObjectType::Snapshots ) );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock it took again is released.' );
+		$result = $this->check();
+		self::assertSame( 0, $result['errors'], (string) json_encode( $result['findings'] ) );
+	}
+
+	public function test_a_call_that_cannot_take_its_lock_again_keeps_what_it_uploaded(): void {
+		$other      = new Locking( $this->repository, new Identity( 'other.example', 'www-data' ), $this->clock, 4711 );
+		$exclusive  = null;
+		$repository = $this->interrupted_at_upload(
+			1,
+			function () use ( $other, &$exclusive ): void {
+				// The lock is removed and another site starts to prune.
+				$this->remove_all_locks();
+				$exclusive = $other->acquire( true );
+			}
+		);
+		$work       = $this->work_dir();
+		$run        = $this->start( $work, $repository );
+
+		// Short calls until one uploads the first pack; its checkpoint then finds the lock gone.
+		$refused = false;
+		for ( $calls = 0; $calls < 1000 && ! $refused; $calls++ ) {
+			try {
+				self::assertFalse( $run->advance( 0.0 ) );
+			} catch ( LockConflict ) {
+				$refused = true;
+			}
+		}
+		self::assertTrue( $refused, 'Another client holds an exclusive lock.' );
+		self::assertInstanceOf( Id::class, $exclusive );
+		$state = self::state( $work );
+		self::assertSame( array_values( array_diff( $this->names( ObjectType::Data ), $this->indexed_packs() ) ), array_map( 'strval', array_keys( (array) $state['unindexed'] ) ), 'The pack that was uploaded is on record.' );
+		self::assertCount( 1, (array) $state['unindexed'] );
+		self::assertNotSame( [], (array) $state['stack'], 'So is how far the run came.' );
+
+		// The other site is done and has removed nothing of this run's.
+		$other->release( $exclusive );
+		$this->finish( $this->resume( $work ) );
+		self::assertSame( $this->names( ObjectType::Data ), $this->indexed_packs(), 'No pack was left behind without an index entry: the run went on where it was.' );
+		$result = $this->check();
+		self::assertSame( 0, $result['errors'], (string) json_encode( $result['findings'] ) );
+		self::assertSame( 0, $result['warnings'], (string) json_encode( $result['findings'] ) );
 	}
 
 	public function test_every_call_deals_with_the_lock_before_it_reads_the_index(): void {
@@ -380,6 +605,30 @@ final class ContinuityTest extends TestCase {
 		self::assertSame( 1, $run->result()['restarts'] );
 		self::assertSame( [], $run->result()['findings'], 'The index file that went away is not reported as damage: the check read the new one.' );
 		self::assertSame( count( $this->backend->list( ObjectType::Index ) ), $run->result()['stats']['index_files'] ?? 0 );
+	}
+
+	public function test_a_check_that_loses_its_lock_in_its_only_call_starts_over_instead_of_ending(): void {
+		$done       = false;
+		$backend    = new HookedBackend(
+			$this->backend,
+			function ( string $method, ?ObjectType $type ) use ( &$done ): void {
+				if ( ! $done && 'load' === $method && ObjectType::Snapshots === $type ) {
+					// While the check runs: the lock is removed and a prune writes an index file anew.
+					$done = true;
+					$this->remove_all_locks();
+					$this->rewrite_index_file( $this->names( ObjectType::Index )[0] );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = CheckRun::start( $repository, $this->work_dir(), $this->identity, $this->clock, new SystemRandom(), 100 );
+
+		self::assertTrue( $run->advance( INF ) );
+		self::assertTrue( $done );
+		self::assertSame( 1, $run->result()['restarts'], 'The clock did not move, so nothing refreshed the lock: only the look before the end noticed.' );
+		self::assertSame( [], $run->result()['findings'] );
+		self::assertSame( count( $this->backend->list( ObjectType::Index ) ), $run->result()['stats']['index_files'] ?? 0 );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
 	public function test_a_check_starts_over_when_a_snapshot_it_listed_is_gone(): void {
