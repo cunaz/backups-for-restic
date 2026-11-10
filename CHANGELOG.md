@@ -58,6 +58,27 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Fixed
+- Retention removes old snapshots again. Forget grouped snapshots by all their tags, and
+  every snapshot carries the tag of the job that wrote it, so each was the newest of a group
+  of its own and none was ever removed. Forget now selects this site's snapshots by host
+  name, the plugin's tag and the site's tag and applies the policy to them as one group
+  (`restic forget --host <host> --tag backups-for-restic,site:<hash> --group-by host`).
+- Prune stays safe when requests fail or end at the wrong moment: a tree that was missing
+  once is still walked when marking could not start over, so its packs are not taken for
+  unused ones; a request that ends while prune deletes is continued in that phase, and the
+  packs it had planned are deleted; a start that was interrupted no longer leaves an
+  exclusive lock that blocks every client for 30 minutes.
+- A check keeps what it has checked when a request fails (it writes its checkpoint at every
+  change of phase and every five seconds), and a repository that this PHP cannot read
+  (format 2 with compression, no zstd extension) is reported as that, not as damaged.
+- A backup, check or forget that no request advanced for more than 30 minutes takes its
+  repository lock again instead of refreshing a lock other clients no longer honour, and
+  waits for a client that holds a conflicting lock by then.
+- A backup or forget whose start fails after it took its lock releases the lock.
+- The key derivation table is created with mode 0600.
+- The test site of the integration suite runs without PHP's JIT, with which PHP 8.3
+  crashed in backup ticks, and with WordPress's memory ceiling at the 128M of the
+  acceptance criteria.
 - A request that died while refreshing a repository lock no longer leaves the new lock
   behind; leftovers of the same run are removed and never block it.
 - Forget counts `keep-within` back from the newest snapshot that is not in the future, as
