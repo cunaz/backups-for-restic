@@ -179,15 +179,15 @@ final class Cron {
 	 * The daily append-only probe of ADR 0010. Forget and prune jobs probe as well, so this
 	 * matters when neither runs: weekly backups, or retention mode external, where only the
 	 * probe can notice that deletions became possible again. After an inconclusive answer it
-	 * probes again an hour later.
+	 * probes again an hour later, and after the repository changed at the next heartbeat; the
+	 * retention guard knows when.
 	 *
 	 * @param Container $container Services.
 	 * @param int       $now       Unix time.
 	 */
 	private static function probe_append_only( Container $container, int $now ): void {
-		$last     = $container->state()->get( 'append_only' );
-		$interval = AppendOnlyStatus::Unknown->value === ( $last['status'] ?? null ) ? HOUR_IN_SECONDS : DAY_IN_SECONDS;
-		if ( $now - Decoded::int( $last['checked_at'] ?? null ) < $interval ) {
+		$guard = $container->retention_guard();
+		if ( ! $guard->probe_due() ) {
 			return;
 		}
 		try {
@@ -196,7 +196,7 @@ final class Cron {
 			// Wrong credentials or no repository: the next job reports that with a hint.
 			$status = AppendOnlyStatus::Unknown;
 		}
-		if ( $container->retention_guard()->detected( $status ) ) {
+		if ( $guard->detected( $status ) ) {
 			$container->notifier()->retention_switched( $now );
 		}
 	}

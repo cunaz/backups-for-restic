@@ -423,11 +423,12 @@ final class Container {
 	 * @return RetentionGuard Guard.
 	 */
 	public function retention_guard(): RetentionGuard {
-		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock() );
+		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock(), RetentionGuard::repository( $this->settings() ) );
 	}
 
 	/**
-	 * Whether the server is append-only: the latest conclusive probe, else the wizard's answer.
+	 * Whether the server is append-only: the latest conclusive probe of this repository, else
+	 * the wizard's answer.
 	 *
 	 * @return string yes, no or unknown.
 	 */
