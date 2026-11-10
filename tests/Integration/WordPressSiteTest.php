@@ -301,12 +301,7 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock remains.' );
 	}
 
-	/**
-	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
-	 */
-	public function test_maintenance_jobs_and_the_dashboard(): void {
-		self::assertNotNull( self::$server );
-		self::idle( 600 );
+	public function test_invalid_settings_are_refused_with_an_error_for_each_field(): void {
 		[ $status, $error, $raw ] = self::api(
 			'PUT',
 			'/settings',
@@ -320,11 +315,20 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 400, $status, $raw );
 		self::assertArrayHasKey( 'retention.keep.within', $error['data']['fields'] ?? [], $raw );
 		self::assertArrayHasKey( 'notifications.email.recipients', $error['data']['fields'] ?? [], $raw );
+	}
 
+	/**
+	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
+	 */
+	public function test_maintenance_jobs_and_the_dashboard(): void {
+		self::assertNotNull( self::$server );
+		self::idle( 600 );
+		$ids = [];
 		foreach ( [ 'prune', 'check' ] as $type ) {
 			[ $status, $started, $raw ] = self::api( 'POST', '/jobs', [ 'type' => $type ] );
 			self::assertSame( 201, $status, $raw );
-			$job = self::wait_for( $started['job']['id'], 1800 );
+			$ids[ $type ] = $started['job']['id'];
+			$job          = self::wait_for( $ids[ $type ], 1800 );
 			self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
 			self::idle( 600 );
 		}
@@ -336,7 +340,10 @@ final class WordPressSiteTest extends TestCase {
 		self::assertIsInt( $dashboard['maintenance']['prune']['reclaimable_bytes'] ?? null, $raw );
 		self::assertSame( 0, $dashboard['maintenance']['check']['errors'] ?? null, $raw );
 		self::assertNull( $dashboard['check_alert'] ?? null, $raw );
-		self::assertSame( 'Check', $dashboard['recent_jobs'][0]['type_label'] ?? null, $raw );
+		// By its ID, not by its place: IDs begin with the second of creation, and two jobs of the
+		// same second sort by their random ends.
+		$recent = array_column( $dashboard['recent_jobs'] ?? [], 'type_label', 'id' );
+		self::assertSame( 'Check', $recent[ $ids['check'] ] ?? null, $raw );
 		$cli = new ResticCli( self::$server, 'site', self::$repository_password );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
 
