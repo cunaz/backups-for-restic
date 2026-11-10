@@ -613,8 +613,8 @@ final class PruneRun {
 	 * marking begins here.
 	 *
 	 * @throws RepositoryChanged If marking already started over MAX_RESTARTS times.
-	 * @throws \Throwable Whatever taking the lock or reading the snapshots throws; if marking
-	 *                    cannot start over, the lock is released before the error is passed on.
+	 * @throws \Throwable Whatever taking the lock, listing or reading the snapshots throws; the
+	 *                    lock is released before the error is passed on.
 	 */
 	private function keep_lock(): void {
 		$now  = $this->clock->now()[0];
@@ -637,23 +637,30 @@ final class PruneRun {
 			return;
 		}
 		$this->locking->remove_own_stale();
-		$this->lock      = $this->locking->acquire( true )->hex();
-		$this->locked_at = $this->clock->now()[0];
-		$this->persist();
-		if ( $this->untouched() ) {
-			return;
-		}
-		if ( $this->restarts >= self::MAX_RESTARTS ) {
-			RepositoryChanged::raise( 'Other clients changed the repository again and again while prune ran; prune gave up.', [ 'restarts' => $this->restarts ] );
-		}
-		$this->remarked = false;
+		$fresh = $this->locking->acquire( true );
+		$taken = $this->clock->now()[0];
+		// The run holds the new lock from here on, but its checkpoint names it only once the
+		// run has looked or marking has started over. A request that ends before that leaves
+		// a checkpoint without a lock, so the next one takes the lock again and looks again:
+		// a lock written a moment ago says nothing about the time before it. The lock written
+		// here is then a leftover of the run, which taking the lock removes.
 		try {
-			$this->start_marking();
+			$untouched = $this->untouched();
+			if ( ! $untouched ) {
+				if ( $this->restarts >= self::MAX_RESTARTS ) {
+					RepositoryChanged::raise( 'Other clients changed the repository again and again while prune ran; prune gave up.', [ 'restarts' => $this->restarts ] );
+				}
+				$this->remarked = false;
+				$this->start_marking();
+				++$this->restarts;
+			}
 		} catch ( \Throwable $failure ) {
-			$this->release_lock();
+			$this->locking->release( $fresh );
 			throw $failure;
 		}
-		++$this->restarts;
+		$this->lock      = $fresh->hex();
+		$this->locked_at = $taken;
+		$this->persist();
 	}
 
 	/**

@@ -701,6 +701,58 @@ final class PruneTest extends TestCase {
 		$this->read_everything();
 	}
 
+	public function test_a_request_that_ends_before_it_has_looked_does_not_spare_the_next_one_the_look(): void {
+		$unique = $this->history_with_a_forgotten_snapshot();
+		$work   = $this->work_dir();
+		$clock  = new FrozenClock( time() );
+		$run    = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( in_array( $run->progress()['phase'], [ 'mark', 'plan' ], true ) ) {
+			$run->advance( 0.0 );
+		}
+		self::assertGreaterThan( 0, $run->progress()['unused_packs'], 'The plan found the unique file unused.' );
+
+		// A long pause in which the forgotten snapshot comes back, as another client could write
+		// one that uses what the plan takes for unused.
+		$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+		$this->repository->save_unpacked( ObjectType::Snapshots, $this->forgotten );
+		$used = array_keys( $this->used_packs() );
+
+		// The first request after the pause takes the lock again and ends at the listing it
+		// compares with.
+		$ended      = false;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$ended ): void {
+				if ( ! $ended && 'list' === $method && ObjectType::Snapshots === $type ) {
+					$ended = true;
+					throw new \RuntimeException( 'The request ended.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		try {
+			PruneRun::resume( $repository, $work, $this->identity, $clock )->advance( INF );
+			self::fail( 'The request must end while the run compares.' );
+		} catch ( \RuntimeException $failure ) {
+			self::assertSame( 'The request ended.', $failure->getMessage() );
+		}
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock it had taken again is released.' );
+
+		// A lock written a moment ago proves nothing about the time before it.
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 1, $run->result()['restarts'], 'The next request looked, found the new snapshot and marked again.' );
+		sort( $used );
+		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'The packs of the new snapshot are kept.' );
+		$index = $this->repository->load_index();
+		foreach ( $unique as $blob ) {
+			self::assertTrue( $index->has( $blob, BlobType::Data ) );
+		}
+		$this->read_everything();
+	}
+
 	public function test_gives_up_when_the_repository_changes_during_every_pause(): void {
 		$this->history_with_a_forgotten_snapshot();
 		$packs = $this->backend->list( ObjectType::Data );
