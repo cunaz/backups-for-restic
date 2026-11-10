@@ -6,17 +6,20 @@ restic CLI and against real servers.
 
 ## Milestone 0 — Engine core and conformance
 
-**Status (2026-11-09): implemented and verified locally, except the BorgBase measurements,
-which need the owner's two free-tier repositories, and the mutation score, which the CI job
-measures on its first run.**
+**Status (2026-11-10): implemented and verified, except the BorgBase measurements, which
+need the owner's two free-tier repositories. An audit of the code against this plan
+(2026-11-10) found two deviations in the engine, both fixed: a paused run refreshed a lock
+other clients no longer honoured instead of taking it again, and the key derivation table
+was not created with mode 0600. What the audit could not close is carried into
+Milestone 3.**
 
 | Acceptance criterion | Result |
 | --- | --- |
 | Plugin-written repository passes `restic check --read-data`, restore byte for byte | Met: a 20 MB fixture tree, checked by restic 0.19.1, 0.18.1 and 0.14.0, and a 300 MB streamed database dump, checked and restored by restic 0.19.1; incremental backups diff correctly in restic |
 | Restic-written repositories restore identically in PHP | Met for format 1 (restic 0.19.1 and 0.14.0), with zero new data when the plugin backs up the same files. Format 2 needs `ext-zstd` (see below); CI covers it in a second job |
-| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results; append-only behaviour green on rest-server. BorgBase pending |
-| Mutation score of `Crypto` and `Format` ≥ 90 %; fuzzing without open findings | Fuzzing met: 54 million inputs across 17 parsers in a 30-second-per-parser campaign, no findings. Mutation score not yet measured |
-| Benchmark gates on PHP 8.3 without JIT | Met with wide margins: chunker 24 MB/s, scrypt 1.4 s, backup 1.3 CPU minutes per GB ([benchmarks](benchmarks/2026-11-milestone-0.md)) |
+| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 25 MB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Append-only behaviour green on rest-server. BorgBase pending |
+| Mutation score of `Crypto` and `Format` ≥ 90 %; fuzzing without open findings | Met. Mutation: 97 % of 2627 mutants in `Crypto`, `Format` and `Engine\Forget` killed or timed out, 70 escaped, none uncovered (CI, 2026-11-09). Fuzzing: 54 million inputs across 17 parsers in a 30-second-per-parser campaign, no findings |
+| Benchmark gates on PHP 8.3 without JIT | Met with wide margins for what was measured: chunker 24 MB/s, scrypt 1.4 s in memory, backup 1.3 CPU minutes per GB, extrapolated from 256 MB written to an in-memory backend by one process ([benchmarks](benchmarks/2026-11-milestone-0.md)). CPU time across ticks to a real server, and the file-backed key derivation that the plugin uses, are not measured yet |
 
 Findings that changed the design:
 - PHP does not expose Poly1305; the engine computes it in pure PHP and needs nothing from
@@ -125,15 +128,31 @@ Acceptance
 
 ## Milestone 2 — Operations (0.2.0, public beta)
 
-**Status (2026-11-09): in progress. Done: prune without repacking and the repository check
-in the engine ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic
-0.19.1; forget, prune and check as jobs with their schedules, the retention modes with
-append-only re-detection by jobs and a daily probe ([ADR 0010](adr/0010-retention-and-append-only.md)),
-REST and WP-CLI parity; e-mail notifications; the dashboard for maintenance and alerts with
-the space only a full prune reclaims; the gentle CPU mode; cache limits; `readme.txt` and
-guides for cron jobs and rest-server; the seven-day simulation of the first acceptance
-criterion (`RetentionSimulationTest`). Open: the mutation score gate, and the German
-translation once the plugin is listed on translate.wordpress.org.**
+**Status (2026-11-10): implemented, in review (six stacked pull requests). Done: prune
+without repacking and the repository check in the engine
+([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic 0.19.1; forget,
+prune and check as jobs with their schedules, the retention modes with append-only
+re-detection by jobs and a daily probe ([ADR 0010](adr/0010-retention-and-append-only.md));
+starting the three jobs from REST and WP-CLI; e-mail notifications; the dashboard for
+maintenance and alerts with the space only a full prune reclaims; the gentle CPU mode;
+cache limits; `readme.txt` and guides for cron jobs and rest-server; the seven-day
+simulation of the first acceptance criterion (`RetentionSimulationTest`).**
+
+**Found by the audit of 2026-11-10 and fixed:** retention never removed a snapshot of a
+real backup job, because every snapshot carries its job's tag and forget grouped by all
+tags; the simulation had used snapshots with one shared tag and now uses the real ones.
+Prune could delete used packs when a run was tried again after a failed request, could not
+continue after a request ended while it deleted, and could leave its exclusive lock behind.
+A check lost its progress with a failed request and called a repository it could not read
+damaged.
+
+**Open, and carried into Milestone 3:** tests for the
+WordPress wiring of the second and third acceptance criterion (the daily probe, the stored
+switch to `external`, the administrator's click back, the heartbeat's stale notice), which
+are proven below that layer only; browser tests; a preview of what retention would remove;
+repository usage on the dashboard; packs that no index lists, which aborted backups leave
+and prune does not remove yet; the POT file. The German translation follows once the
+plugin is listed on translate.wordpress.org.
 
 Scope
 - Schedules, retention (forget parity), prune-lite, check with sampled data, retention modes
@@ -154,6 +173,9 @@ Acceptance
 - The stale notification fires once at 36 h without a success and not again until recovery.
 
 ## Milestone 3 — Restore (0.3.0)
+
+**Status (2026-11-10): planned. "Connect to an existing repository" below already exists
+since Milestone 1.**
 
 Scope
 - Snapshot browser (tree walk per directory), manifest view.
@@ -236,14 +258,15 @@ Architecture decisions taken during Milestone 0:
 
 | Risk | Likelihood | Impact | Mitigation |
 | --- | --- | --- | --- |
-| PHP throughput too low on cheap hosting (chunker, Poly1305, scrypt) | low | medium | Measured in Milestone 0 with wide margins (chunker 24 MB/s, Poly1305 62 MB/s without JIT); fallback chunking rule kept in reserve; file-backed resumable scrypt; cron-ping guidance; expectations set in the wizard |
+| PHP throughput too low on cheap hosting (chunker, Poly1305, scrypt) | low | medium | Measured in Milestone 0 with wide margins (chunker 24 MB/s, Poly1305 62 MB/s without JIT); file-backed resumable scrypt; cron-ping guidance. A fallback chunking rule was considered and never built |
+| PHP's JIT compiler crashes PHP in the plugin's loops | low (the JIT is off by default) | medium | Seen in CI on PHP 8.3.36 and once locally on 8.3.6 with the tracing JIT: a segmentation fault in a backup tick. The job layer recovers (the lease expires and the heartbeat resumes the job). Tests run without the JIT; a Doctor hint and a report to PHP are planned for Milestone 3 |
 | A format bug damages repositories | low | critical | No home-made cryptography; textbook primitives tested against reference implementations; differential tests on every change; mutation and fuzzing gates; monthly checks; the CLI recovery path does not depend on plugin code. No independent review before 1.0 (accepted) |
 | The single maintainer is unavailable when a security fix is needed | medium | high | Accepted ([ADR 0024](adr/0024-governance-and-quality-assurance.md)); public source, documented pipeline and `SECURITY.md`; a second committer can be added at any time |
 | BorgBase changes behaviour without notice | low | medium | Weekly live smoke tests; generic rest-server compatibility; no BorgBase-specific code paths beyond the preset |
 | The PHP 8.3 floor excludes many sites at launch (45 % reach in November 2026) | high | medium | Reach grows until 1.0 in 2027; WordPress blocks installation on older PHP gracefully; `readme.txt` explains how to switch PHP |
 | Hosts block loopback requests or outbound HTTPS | medium | medium / high | Doctor detects both; cron-ping documentation; outbound HTTPS is a stated requirement |
 | Self-hosted servers vary in setup quality (TLS, versions, proxies) | medium | low | Connection test checks Range reads, listing and append-only first; clear errors; rest-server documentation |
-| restic changes its format | low | medium | Format 1 is frozen; the conformance matrix picks up new restic releases nightly |
+| restic changes its format | low | medium | Format 1 is frozen; the conformance suite runs nightly against pinned restic releases (0.19.1, 0.18.1, 0.14.0), and a new release is added by a reviewed pull request. Automatic notice of new releases is planned |
 | First backups take many hours on large sites | high | low | Documented; incremental runs are fast; chaining and cron ping |
 | Operators lose the repository password | medium | critical | Mandatory recovery kit acknowledgement; re-display after re-authentication; constants option; DR guide |
 | WordPress.org review questions the cryptographic code or filesystem access | medium | medium | FAQ answers prepared; readable, documented code; Plugin Check clean; screenshots of graceful failures |
