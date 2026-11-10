@@ -80,7 +80,8 @@ server that is stopped in the middle of a tick. Until 2026-11-10 the suite faile
 the CI setup switches on PHP's tracing JIT for the built-in web server and PHP 8.3 then
 crashed in backup ticks; the test server now runs without the JIT, as PHP does by default.
 The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
-which GitHub starts from `main` only, so not before the pull requests are merged.**
+which GitHub starts from `main` only: for the first time in the night after the merge of
+2026-11-10. Its result is not recorded here yet.**
 
 **Found by the audit of 2026-11-10 and fixed:** a cancel request was lost when it arrived
 while a tick ran; after the setup the recovery kit could be had without the WordPress
@@ -145,7 +146,7 @@ Acceptance
 
 ## Milestone 2 — Operations (0.2.0, public beta)
 
-**Status (2026-11-10): implemented, in review (six stacked pull requests). Done: prune
+**Status (2026-11-10): implemented and merged into `main`. Done: prune
 without repacking and the repository check in the engine
 ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic 0.19.1; forget,
 prune and check as jobs with their schedules, the retention modes with append-only

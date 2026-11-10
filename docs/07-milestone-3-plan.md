@@ -7,7 +7,7 @@ in which order it is built and tested, and what must be settled first.
 
 ## 1. Where the project stands
 
-Milestones 0 to 2 are implemented in six stacked pull requests on top of `main`. An audit
+Milestones 0 to 2 are merged into `main` (six pull requests, 2026-11-10). An audit
 of all code and documents against the plan (2026-11-10) found the engine and the job layer
 in line with the architecture and the decision records, and it found defects that the tests
 had not shown. They were fixed before this plan was written:
@@ -30,8 +30,11 @@ had not shown. They were fixed before this plan was written:
   crashes PHP 8.3 in backup ticks. The test server now runs without the JIT.
 
 What the audit found missing, and what is not a defect but was promised for an earlier
-milestone, is carried into this milestone as phase 0. Nothing in phases 1 to 5 starts before
-the pull requests of Milestones 0 to 2 are merged.
+milestone, is carried into this milestone as phase 0. The pull requests were merged on the
+owner's instruction on the day of the last engine fixes, so without the 24 hours of
+[ADR 0024](adr/0024-governance-and-quality-assurance.md) between the last change to the
+engine and the merge; every one of those fixes has a test that fails without it, and the
+conformance, integration and mutation runs were green on each pull request.
 
 ## 2. What exists for restore, and what does not
 
@@ -71,7 +74,7 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 0.1 | Merge pull requests 1 to 6 | owner | See decision D1. |
+| 0.1 | Merge pull requests 1 to 6 | done | Merged on 2026-11-10 on the owner's instruction. |
 | 0.2 | Schema numbers | S | `JobStore::create()` takes the job's data since the audit fixes, which restore jobs depend on. Open: a schema number in `job.json` and in the settings, so that a later version can tell what it reads. |
 | 0.3 | Backups after a stale lock | M | A backup that was paused for more than 30 minutes records which index files and unindexed packs it relies on, and after taking its lock again checks that they still exist; if not, the job starts over. A check starts over after such a pause. Without this, a `restic prune` on another computer during the pause can remove data a later snapshot refers to. Backup, check and forget also write their run number before they take the lock, as prune does, so that no request can die with a lock nothing recognises. Needs a decision record. |
 | 0.4 | Prune removes packs that no index lists | M | Aborted backups leave such packs; the check reports them, nothing removes them. Under the exclusive lock they are deleted like unused packs, compared with restic's count of unreferenced packs. Depends on 0.3. |
@@ -172,7 +175,7 @@ For the owner:
 
 | # | Question | Proposed answer |
 |---|---|---|
-| D1 | May pull requests be merged by the assistant once CI is green and review findings are addressed, with the cooling-off period for engine changes? Should `main` get a ruleset with required checks? | Yes to both; until then nothing is merged. |
+| D1 | May pull requests be merged by the assistant once CI is green and review findings are addressed, with the cooling-off period for engine changes? Should `main` get a ruleset with required checks? | Answered for pull requests 1 to 6, which the owner had merged on 2026-11-10. Open: whether that holds for every later pull request, and the ruleset. Proposal: yes to both. |
 | D2 | After a database import, should the administrator who started it keep the current account and stay able to log in? | Yes, as a preselected option. |
 | D3 | A snapshot from a site with another table prefix: refuse, or rename tables and the known prefixed keys? | Refuse in 0.3.0 and say which prefix is needed; a renamer afterwards. |
 | D4 | A snapshot from another site address: offer to keep this site's address, without rewriting addresses inside the content? | Yes; rewriting content is out of scope and said so in the report. |
