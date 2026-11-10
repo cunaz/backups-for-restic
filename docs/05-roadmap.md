@@ -10,8 +10,8 @@ restic CLI and against real servers.
 need the owner's two free-tier repositories. An audit of the code against this plan
 (2026-11-10) found two deviations in the engine, both fixed: a paused run refreshed a lock
 other clients no longer honoured instead of taking it again, and the key derivation table
-was not created with mode 0600. What the audit could not close is carried into
-Milestone 3.**
+was not created with mode 0600. What the audit could not close is phase 0 of the
+[plan for Milestone 3](07-milestone-3-plan.md).**
 
 | Acceptance criterion | Result |
 | --- | --- |
@@ -80,7 +80,8 @@ server that is stopped in the middle of a tick. Until 2026-11-10 the suite faile
 the CI setup switches on PHP's tracing JIT for the built-in web server and PHP 8.3 then
 crashed in backup ticks; the test server now runs without the JIT, as PHP does by default.
 The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
-which GitHub starts from `main` only, so not before the pull requests are merged.**
+which GitHub starts from `main` only: for the first time in the night after the merge of
+2026-11-10. Its result is not recorded here yet.**
 
 **Found by the audit of 2026-11-10 and fixed:** a cancel request was lost when it arrived
 while a tick ran; after the setup the recovery kit could be had without the WordPress
@@ -145,7 +146,7 @@ Acceptance
 
 ## Milestone 2 — Operations (0.2.0, public beta)
 
-**Status (2026-11-10): implemented, in review (six stacked pull requests). Done: prune
+**Status (2026-11-10): implemented and merged into `main`. Done: prune
 without repacking and the repository check in the engine
 ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic 0.19.1; forget,
 prune and check as jobs with their schedules, the retention modes with append-only
@@ -165,7 +166,7 @@ damaged, and could hang on a pack the host cannot read within one request. Notic
 given up after 20 minutes instead of two days, and many warnings could push the errors off
 the check alert.
 
-**Open, and carried into Milestone 3:** tests for the
+**Open, and phase 0 of the [plan for Milestone 3](07-milestone-3-plan.md):** tests for the
 WordPress wiring of the second and third acceptance criterion (the daily probe, the stored
 switch to `external`, the administrator's click back, the heartbeat's stale notice), which
 are proven below that layer only; browser tests; a preview of what retention would remove;
@@ -193,8 +194,9 @@ Acceptance
 
 ## Milestone 3 — Restore (0.3.0)
 
-**Status (2026-11-10): planned. "Connect to an existing repository" below already exists
-since Milestone 1.**
+**Status (2026-11-10): planned. Work packages, order, tests and the owner's decisions are in
+the [plan for Milestone 3](07-milestone-3-plan.md); its phase 0 closes what Milestones 0 to
+2 left open. "Connect to an existing repository" below already exists since Milestone 1.**
 
 Scope
 - Snapshot browser (tree walk per directory), manifest view.
