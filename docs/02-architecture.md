@@ -95,11 +95,14 @@ Participants:
    packs are built in memory up to the pack size (16 MiB by default) and uploaded with one
    request each, index files follow restic's limit of 50 000 blobs. A file or a database
    table of any size therefore costs the same memory. What does grow is the index: every run
-   holds the merged index of the whole repository in one PHP array, about 100 bytes per blob
-   (`Format\Index\IndexSet`). By that figure the 64 MB of NFR-03 are reached at roughly
-   640 000 blobs; this is derived, not measured. The plugin does not limit or estimate it
-   yet: measurements with large blob counts and a bound or a preflight estimate are planned
-   for Milestone 3.
+   holds the merged index of the whole repository, as records of 48 bytes in buckets, 60 to
+   80 bytes per blob with the buckets' own cost (`Format\Index\IndexSet`,
+   [ADR 0031](adr/0031-compact-index-and-memory-budget.md)): 33 MB for half a million
+   blobs, 61 MB for a million. A job knows PHP's memory limit (`Engine\MemoryBudget`). The
+   index stops loading with the error `index_too_large` when a backup with the smallest
+   packs would no longer fit beside it, and a backup makes its packs smaller than
+   configured, down to 4 MiB, when three of them do not fit. Under 128 MB that carries
+   roughly a million blobs.
 4. **Ticks, not long processes.** All work happens in bounded slices (default 20 s) driven
    by WP-Cron, loopback chaining, admin polling or WP-CLI. Every slice ends with a durable
    checkpoint; a killed request loses at most one slice of work.
@@ -146,7 +149,7 @@ src/
 ├── Format/                        restic on-disk/wire structures
 │   ├── Config.php, KeyFile.php, Id.php, BlobType.php, Snapshot.php, SnapshotSummary.php, Lock.php
 │   ├── Pack/                      PackWriter, PackReader, PackEntry, FinishedPack
-│   ├── Index/                     IndexFile (JSON ⇄ entries), IndexSet (lookup, compact binary export), BlobLocation
+│   ├── Index/                     IndexFile (JSON ⇄ entries, decoded pack by pack), IndexSet (lookup in buckets of binary records, export in pieces), BlobLocation
 │   ├── Tree/                      Node, NodeType, FileMode, TreeCodec (ordering, Go quoting, mode bits)
 │   ├── Unpacked.php               non-pack files: plain JSON, or zstd through Compression.php when `ext-zstd` is present
 │   └── Chunker/                   Polynomial (GF(2) ops, irreducibility test), RabinChunker (restic-identical), ChunkReader
@@ -155,7 +158,8 @@ src/
 ├── Engine/                        the restic logic
 │   ├── Repository.php, BlobStore.php, Locking.php, Identity.php
 │   ├── KeyUnlock.php              resumable unlock across key files
-│   ├── IndexCache.php             merged index cached locally, encrypted; fetches only new index files
+│   ├── IndexCache.php             merged index cached locally in sealed pieces; fetches only new index files
+│   ├── MemoryBudget.php           PHP's memory limit: how large the index may be, how large packs are (ADR 0031)
 │   ├── Backup/                    BackupPlan, BackupRun (resumable, also inside virtual files), NodeFactory, VirtualFile
 │   ├── Restore/                   RestoreRun (resumable, refuses paths that leave the target)
 │   ├── Forget/                    Forget, RetentionPolicy, Duration: restic's ApplyPolicy semantics; ForgetRun: the resumable run
@@ -399,8 +403,12 @@ A backup does not write an index file in every tick. At the end of a tick it wri
 index file, and it writes the rest when it finishes (`BackupRun::INDEX_INTERVAL_SECONDS`,
 `IndexFile::MAX_BLOBS`); like restic it starts a new file after 50 000 blobs. Until then
 an uploaded pack is recorded only in the job's checkpoint. Reading merges all index files into an
-`IndexSet`; a per-repository **index cache** in the private directory stores the merged set
-(encrypted with the master key) so later runs load one file instead of all index files.
+`IndexSet`, pack by pack, so that an index file of 50 000 blobs is never decoded as a whole
+(`IndexFile::packs()`); a per-repository **index cache** in the private directory stores the
+merged set so later runs load one file instead of all index files. The cache file is a row
+of pieces of about one megabyte, each sealed with the master key and carrying a mark of its
+file and its number; reading and writing need one piece in memory besides the index, and a
+file whose pieces do not belong together is discarded.
 Prune-lite rewrites index files without the deleted packs.
 
 ### 5.8 Trees and nodes
@@ -661,7 +669,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── probe/<random>.txt                     HTTP exposure check, deleted after the request
 ├── runner.lock                            flock target
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
-├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
+├── cache/<repo-id>/index.bin              merged index in pieces, each sealed with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created (§4.4)
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
@@ -975,6 +983,7 @@ translated message and a hint. The codes:
 | `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
 | `repository_locked` | a conflicting lock of another client; retryable |
 | `repository_append_only` | the server refused a deletion |
+| `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
 | `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |

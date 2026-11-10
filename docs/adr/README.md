@@ -49,3 +49,4 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0027](0027-poly1305-in-pure-php.md) | Poly1305 in pure PHP; the engine needs no sodium |
 | [0028](0028-built-in-fuzzer.md) | A built-in, structure-aware fuzzer instead of php-fuzzer |
 | [0029](0029-wordpress-free-core.md) | A WordPress-free core behind adapters in one namespace |
+| [0031](0031-compact-index-and-memory-budget.md) | A compact index and a memory budget |
