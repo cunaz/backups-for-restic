@@ -26,6 +26,17 @@ composer test:conformance
 `composer test:conformance` checks the restic format implementation against the real restic
 CLI and rest-server installed by `bin/install-test-tools.sh` (Linux x86-64).
 
+The admin script has its own linter, ESLint with the WordPress rulesets. It needs Node.js
+22.13 or newer (CI uses 22) and the packages that `package-lock.json` names:
+
+```bash
+npm ci
+```
+
+```bash
+npm run lint:js
+```
+
 The database suite needs a MySQL or MariaDB server (root over the local socket, or
 `BFR_TEST_MYSQL_HOST`, `BFR_TEST_MYSQL_USER` and `BFR_TEST_MYSQL_PASSWORD`):
 
@@ -61,7 +72,29 @@ composer mutation
 `.tools/fuzz-findings/` with the command that replays it; after the fix, copy the input to
 `tests/Fixtures/fuzz/<target>/` so the unit suite replays it forever. `composer mutation`
 needs pcov or Xdebug and checks that the tests of `Crypto`, `Format` and `Engine\Forget`
-kill at least 90 % of the covered mutants.
+kill at least 90 % of the covered mutants. In CI it runs on `main` and on pull requests
+that change the engine, the code below it, the tests or the tools
+([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
+
+The package that would ship, and the translation template built from it:
+
+```bash
+bin/build-package.sh
+```
+
+```bash
+bin/install-test-tools.sh wp-cli
+```
+
+```bash
+composer pot
+```
+
+`bin/build-package.sh` copies the files that Git tracks, without the paths in `.distignore`,
+into `build/backups-for-restic/` (needs Git and rsync). CI runs Plugin Check, the scanner
+of the WordPress.org review team, on that directory. `composer pot` builds the package and
+writes `languages/backups-for-restic.pot` with WP-CLI; CI fails when WP-CLI warns about a
+string. The template is not committed.
 
 ## Rules of the road
 
@@ -70,6 +103,13 @@ kill at least 90 % of the covered mutants.
 - Only `src/WordPress` and `src/Plugin.php` may call WordPress functions or use WordPress
   classes; a PHPStan rule checks it
   ([ADR 0029](docs/adr/0029-wordpress-free-core.md)).
+- `Engine` and the layers below it (`Backend`, `Format`, `Crypto`, `Support`, `Exception`)
+  use only each other, each one only the layers below it. A second PHPStan rule checks it;
+  a new dependency needs a change of its list
+  ([docs/02 §3](docs/02-architecture.md#3-module-map-and-dependency-rules)).
+- JavaScript in `assets/js` is a classic script in ES2020 without a build step. Every
+  translation call names the text domain `backups-for-restic` as a literal, and a string
+  with a placeholder has a translator comment directly before the call. ESLint checks both.
 - Every change comes with tests. Changes to `Crypto`, `Format`, `Backend` or `Engine` also
   need a green conformance run. Changes to `Crypto`, `Format` or `Engine\Forget` must keep
   the covered mutation score at or above 90 %.
@@ -83,7 +123,8 @@ kill at least 90 % of the covered mutants.
 
 All changes, including the maintainer's own, go through pull requests with the required
 checks. Sign off your commits (`git commit -s`) to confirm the Developer Certificate of
-Origin. Describe what changed, why, and the security impact: does the change touch secrets,
+Origin; a CI job fails when a commit of the pull request lacks the `Signed-off-by` line.
+Describe what changed, why, and the security impact: does the change touch secrets,
 cryptography, filesystem writes, HTTP requests or capability checks? If it does, go through
 the [self-review checklist](docs/04-development-and-quality.md#91-self-review-checklist-for-security-relevant-changes)
 and write its result under "Security impact". The pull request template lists the same
@@ -105,7 +146,8 @@ transcripts into code, commits or pull requests. Commits use a noreply address: 
 sense. [`.claude/settings.json`](.claude/settings.json) asks Claude Code not to add its
 session link to commits and pull request descriptions. That is not a guarantee: a cloud
 session with several repositories does not read the file, and a pull request opened from
-a cloud session has still received the link in its description. Look at your commits and at
-the description after opening a pull request, remove such a link, and delete the first
-revision from the description's edit history, where it otherwise stays. CodeRabbit's
+a cloud session has still received the link in its description. Look at your commits
+before you push them, because a pushed commit stays in the history. After opening a pull
+request, look at its description, remove such a link, and delete every revision that
+contains it from the description's edit history, where it otherwise stays. CodeRabbit's
 pre-merge check fails a pull request whose description contains one.

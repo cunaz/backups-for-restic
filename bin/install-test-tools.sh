@@ -3,13 +3,17 @@
 #   restic       restic CLI 0.19.1, 0.18.1 and 0.14.0, the conformance oracle (ADR 0023)
 #   rest-server  restic's REST server, the local repository server for the conformance suite
 #   infection    Infection, for mutation testing (ADR 0024)
+#   wp-cli       WP-CLI as .tools/bin/wp, for "wp i18n make-pot" (composer pot); it needs no
+#                WordPress for that
 #
-# Usage: bin/install-test-tools.sh [restic] [rest-server] [infection]   (default: all)
+# Usage: bin/install-test-tools.sh [restic] [rest-server] [infection] [wp-cli]
+#        (default: restic, rest-server and infection, the tools of the test suites)
 #
 # Development tooling only: the plugin never downloads, bundles or runs these programs
 # (ADR 0016). restic and rest-server checksums are copied from the SHA256SUMS file of each
-# upstream release. Infection publishes a GPG signature instead of a checksum file; its
-# checksum was recorded after verifying infection.phar.asc against the Infection signing key
+# upstream release, the WP-CLI checksum from the .sha256 file next to its PHAR. Infection
+# publishes a GPG signature instead of a checksum file; its checksum was recorded after
+# verifying infection.phar.asc against the Infection signing key
 # C6D76C329EBADE2FB9C458CFC5095986493B4AA0. A version bump updates them in a reviewed pull
 # request.
 set -euo pipefail
@@ -27,6 +31,7 @@ RESTIC_RELEASES=(
 )
 REST_SERVER="0.14.0|rest-server_0.14.0_linux_amd64.tar.gz|4c9c95bc079a0334e81fad379b19dc5c3353c71c2c88d652cafce2081c2b1c66"
 INFECTION="0.35.10|infection.phar|aa8ac8aeb3d7b96d4e66119908c1654c6bbf29472ef8bf1d1e84900fd01d6b31"
+WP_CLI="2.12.0|wp-cli-2.12.0.phar|ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d85c"
 
 # Downloads into a fresh directory, verifies the checksum, then moves the file into place.
 download() {
@@ -77,6 +82,17 @@ install_infection() {
 	"$BIN/infection" --version
 }
 
+install_wp_cli() {
+	local version asset sum
+	IFS='|' read -r version asset sum <<<"$WP_CLI"
+	if [ ! -x "$BIN/wp-cli-$version" ]; then
+		download "https://github.com/wp-cli/wp-cli/releases/download/v$version/$asset" "$sum" "$BIN/wp-cli-$version"
+		chmod 0755 "$BIN/wp-cli-$version"
+	fi
+	ln -sf "wp-cli-$version" "$BIN/wp"
+	"$BIN/wp" --version
+}
+
 if [ "$#" -eq 0 ]; then
 	set -- restic rest-server infection
 fi
@@ -85,6 +101,7 @@ for tool in "$@"; do
 		restic) install_restic ;;
 		rest-server) install_rest_server ;;
 		infection) install_infection ;;
-		*) echo "Unknown tool: $tool (restic, rest-server, infection)" >&2; exit 2 ;;
+		wp-cli) install_wp_cli ;;
+		*) echo "Unknown tool: $tool (restic, rest-server, infection, wp-cli)" >&2; exit 2 ;;
 	esac
 done

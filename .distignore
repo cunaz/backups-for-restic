@@ -7,6 +7,7 @@
 /bin
 /build
 /docs
+/languages/*.pot
 /node_modules
 /tests
 /vendor
@@ -17,7 +18,10 @@
 /.gitignore
 /composer.json
 /composer.lock
+/eslint.config.mjs
 /infection.json5.dist
+/package.json
+/package-lock.json
 /phpcs.xml.dist
 /phpstan.neon.dist
 /phpunit.xml.dist
