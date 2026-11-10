@@ -13,6 +13,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Tests\Support\FrozenClock;
@@ -123,5 +124,65 @@ final class LockingTest extends TestCase {
 		self::assertNotNull( $run->snapshot_id() );
 		self::assertNotContains( $orphan->hex(), $this->locks() );
 		self::assertSame( [], $this->locks(), 'No lock outlives the backup.' );
+	}
+
+	public function test_a_lock_counts_as_lapsed_once_other_clients_treat_it_as_stale(): void {
+		$locking   = $this->locking();
+		$locked_at = $this->clock->now()[0];
+
+		$this->clock->advance( Lock::STALE_AFTER_SECONDS );
+		self::assertFalse( $locking->lapsed( $locked_at ), 'Exactly 30 minutes old is not stale yet.' );
+		$this->clock->advance( 1 );
+		self::assertTrue( $locking->lapsed( $locked_at ) );
+	}
+
+	public function test_a_backup_start_that_fails_after_locking_leaves_no_lock(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$plan            = new BackupPlan( [ $site ], [ 'backups-for-restic' ] );
+		$missing_parent  = Id::from_hex( str_repeat( 'a', 64 ) );
+
+		try {
+			BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, $missing_parent, 262144 );
+			self::fail( 'The parent snapshot does not exist.' );
+		} catch ( NotFound ) {
+			self::assertSame( [], $this->locks(), 'The lock taken before the failure is released.' );
+		}
+		self::assertFileDoesNotExist( $work . '/run/state.json' );
+	}
+
+	public function test_a_backup_paused_for_too_long_takes_its_lock_again_and_notices_a_conflict(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$plan            = new BackupPlan( [ $site ], [ 'backups-for-restic' ] );
+		$run             = BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, null, 262144 );
+		$run->advance( 0.0 );
+		$first = $this->locks();
+
+		// No request for more than 30 minutes: the lock is stale, and another client, which
+		// ignores it, starts maintenance with an exclusive lock.
+		$this->clock->advance( Lock::STALE_AFTER_SECONDS + 1 );
+		$other     = $this->locking( 4711, new Identity( 'laptop', 'admin' ) );
+		$exclusive = $other->acquire( true );
+
+		try {
+			BackupRun::resume( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, 262144 )->advance( 0.0 );
+			self::fail( 'The backup must wait for the exclusive lock.' );
+		} catch ( LockConflict ) {
+			self::assertSame( [ $exclusive->hex() ], $this->locks(), 'Only the other client holds a lock.' );
+		}
+
+		$other->release( $exclusive );
+		$run = BackupRun::resume( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, 262144 );
+		$run->advance( 0.0 );
+		self::assertCount( 1, $this->locks() );
+		self::assertNotSame( $first, $this->locks(), 'A new lock replaced the stale one.' );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertNotNull( $run->snapshot_id() );
+		self::assertSame( [], $this->locks() );
 	}
 }

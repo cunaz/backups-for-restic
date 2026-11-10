@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Unit\Engine;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
@@ -20,6 +21,7 @@ use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -570,5 +572,166 @@ final class PruneTest extends TestCase {
 		self::assertCount( 1, $second );
 		self::assertNotSame( $first, $second, 'A fresh lock replaced the old one.' );
 		self::assertSame( 0, $run->result()['restarts'] );
+	}
+
+	/**
+	 * @return array<string, array{ObjectType}> The listing that fails when marking starts over.
+	 */
+	public static function listings_needed_to_start_over(): array {
+		return [
+			'the index files' => [ ObjectType::Index ],
+			'the snapshots'   => [ ObjectType::Snapshots ],
+		];
+	}
+
+	#[DataProvider( 'listings_needed_to_start_over' )]
+	public function test_a_tree_that_was_missing_once_is_still_walked_when_marking_could_not_start_over( ObjectType $failing ): void {
+		$this->history_with_a_forgotten_snapshot();
+		// A newer snapshot with a file of its own: its packs are reached through its trees only.
+		file_put_contents( $this->site . '/late.bin', Vectors::hash_stream( 'only in the newest snapshot', 2621440 ) );
+		$newest = $this->back_up();
+		$late   = $this->content_of( $newest, 'late.bin' );
+		$root   = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, $newest ) )->tree;
+		$pack   = $this->repository->load_index()->find( $root, BlobType::Tree )?->pack->hex();
+		self::assertNotNull( $pack );
+		$used = array_keys( $this->used_packs() );
+
+		// The pack of the newest root tree answers "not found" once; prune then wants to mark
+		// again with a fresh index, and the listing it needs for that fails once as well.
+		$stage      = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type, string $name ) use ( &$stage, $pack, $failing ): void {
+				if ( 0 === $stage && 'load' === $method && ObjectType::Data === $type && $name === $pack ) {
+					$stage = 1;
+					throw new NotFound( 'The pack was not found.' );
+				}
+				if ( 1 === $stage && 'list' === $method && $failing === $type ) {
+					$stage = 2;
+					throw new BackendException( 'The connection was reset.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = PruneRun::start( $repository, $this->work_dir(), $this->identity, new FrozenClock( time() ), new SystemRandom() );
+
+		$done = false;
+		for ( $attempt = 0; $attempt < 5 && ! $done; ++$attempt ) {
+			try {
+				$done = $run->advance( INF );
+			} catch ( BackendException ) {
+				continue; // The caller tries again on the same run, without a checkpoint in between.
+			}
+		}
+
+		self::assertTrue( $done );
+		self::assertSame( 2, $stage, 'Both failures happened.' );
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual, 'Every used pack is still there.' );
+		$index = $this->repository->load_index();
+		foreach ( $late as $blob ) {
+			self::assertTrue( $index->has( $blob, BlobType::Data ), 'The file of the newest snapshot is still indexed.' );
+		}
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'], 'Unused packs were still deleted.' );
+		$this->read_everything();
+	}
+
+	/**
+	 * A start whose request ended with the exclusive lock on the server: the snapshots could
+	 * not be read, and the lock could not be deleted either.
+	 *
+	 * @return string Working directory of the run.
+	 */
+	private function start_that_dies_with_its_lock(): string {
+		$this->history_with_a_forgotten_snapshot();
+		$work       = $this->work_dir();
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ): void {
+				if ( ( 'load' === $method && ObjectType::Snapshots === $type ) || ( 'delete' === $method && ObjectType::Locks === $type ) ) {
+					throw new BackendException( 'The connection was reset.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		try {
+			PruneRun::start( $repository, $work, $this->identity, new FrozenClock( time() ), new SystemRandom() );
+			self::fail( 'The start must fail.' );
+		} catch ( BackendException ) {
+			self::assertCount( 1, $this->backend->list( ObjectType::Locks ), 'The exclusive lock is still on the server.' );
+		}
+		return $work;
+	}
+
+	public function test_a_start_that_ended_with_its_lock_is_continued_without_waiting_for_that_lock(): void {
+		$work = $this->start_that_dies_with_its_lock();
+		$used = array_keys( $this->used_packs() );
+
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, new FrozenClock( time() ) );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertSame( 0, $run->result()['restarts'], 'Beginning for the first time is not starting over.' );
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock of the failed start is gone too.' );
+	}
+
+	public function test_abandoning_a_start_that_ended_with_its_lock_removes_that_lock(): void {
+		$work = $this->start_that_dies_with_its_lock();
+
+		PruneRun::resume( $this->repository, $work, $this->identity, new FrozenClock( time() ) )->abort();
+
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		self::assertDirectoryDoesNotExist( $work );
+	}
+
+	public function test_a_request_that_ends_while_deleting_is_continued_in_that_phase(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$used  = array_keys( $this->used_packs() );
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		// The request is killed at its first pack deletion, after it wrote the new index files
+		// and deleted the old ones. Nothing of the object in memory survives.
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ): void {
+				if ( 'delete' === $method && ObjectType::Data === $type ) {
+					throw new \RuntimeException( 'The request was killed.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = PruneRun::start( $repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( 'mark' === $run->progress()['phase'] ) {
+			$run->advance( 0.0 );
+		}
+		self::assertSame( 'plan', $run->progress()['phase'] );
+		try {
+			$run->advance( INF );
+			self::fail( 'The request must end at the first pack deletion.' );
+		} catch ( \RuntimeException $killed ) {
+			self::assertSame( 'The request was killed.', $killed->getMessage() );
+		}
+
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		self::assertSame( 'delete_packs', $run->progress()['phase'], 'The checkpoint is from the phase that was reached.' );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
+		sort( $actual );
+		sort( $used );
+		self::assertSame( $used, $actual, 'The packs planned before the request ended are deleted, and no other.' );
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$this->read_everything();
 	}
 }
