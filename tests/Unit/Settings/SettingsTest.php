@@ -15,7 +15,7 @@ final class SettingsTest extends TestCase {
 
 	public function test_defaults_match_the_documented_model(): void {
 		$settings = ( new SettingsStore( new InMemoryOptions() ) )->load();
-		self::assertSame( 'borgbase', $settings->string( 'repository.server' ) );
+		self::assertSame( 'rest-server', $settings->string( 'repository.server' ), 'An own server is the first choice; BorgBase is a preset.' );
 		self::assertSame( 'daily', $settings->string( 'schedule.backup.frequency' ) );
 		self::assertSame( 3, $settings->int( 'schedule.backup.hour' ) );
 		self::assertSame( 17, $settings->int( 'schedule.backup.minute' ) );
@@ -36,7 +36,7 @@ final class SettingsTest extends TestCase {
 				'advanced.tick_budget_seconds' => '25',
 				'backup.excludes'              => "*.log\n\n/tmp/cache\n*.log",
 				'backup.exclude_caches'        => 'off',
-				'repository.server'            => 'rest-server',
+				'repository.server'            => 'borgbase',
 			]
 		);
 		self::assertSame( 25, $saved->int( 'advanced.tick_budget_seconds' ) );
@@ -158,7 +158,7 @@ final class SettingsTest extends TestCase {
 			]
 		);
 		self::assertSame( 20, $settings->int( 'advanced.tick_budget_seconds' ) );
-		self::assertSame( 'borgbase', $settings->string( 'repository.server' ) );
+		self::assertSame( 'rest-server', $settings->string( 'repository.server' ) );
 		self::assertSame( 5, $settings->int( 'schedule.backup.hour' ) );
 	}
 

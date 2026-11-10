@@ -810,7 +810,7 @@
 	/* ---------------------------------------------------------------- Wizard */
 
 	function setup( root ) {
-		const state = { server: 'borgbase', report: null };
+		const state = { server: 'rest-server', report: null };
 		const steps = el( 'ol', { className: 'bfr-steps' } );
 		const content = el( 'div', { className: 'bfr-step-content' } );
 		const titles = [ __( 'Environment', 'backups-for-restic' ), __( 'Repository server', 'backups-for-restic' ), __( 'Password', 'backups-for-restic' ), __( 'Recovery kit', 'backups-for-restic' ), __( 'Schedule', 'backups-for-restic' ), __( 'First backup', 'backups-for-restic' ) ];
@@ -842,9 +842,9 @@
 		}
 
 		function stepServer() {
-			const borgbase = el( 'input', { type: 'radio', name: 'bfr-server', value: 'borgbase', checked: 'borgbase' === state.server } );
 			const own = el( 'input', { type: 'radio', name: 'bfr-server', value: 'rest-server', checked: 'rest-server' === state.server } );
-			const url = el( 'input', { type: 'url', className: 'regular-text', placeholder: 'https://xxxxxxxx.repo.borgbase.com' } );
+			const borgbase = el( 'input', { type: 'radio', name: 'bfr-server', value: 'borgbase', checked: 'borgbase' === state.server } );
+			const url = el( 'input', { type: 'url', className: 'regular-text', placeholder: 'https://backup.example.net:8000/site/' } );
 			const username = el( 'input', { type: 'text', className: 'regular-text', autocomplete: 'off' } );
 			const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'new-password' } );
 			const ca = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----' } );
@@ -898,9 +898,9 @@
 			show( 1, [
 				el( 'fieldset', {}, [
 					el( 'legend', { className: 'screen-reader-text' }, [ __( 'Server', 'backups-for-restic' ) ] ),
-					el( 'label', {}, [ borgbase, ' ', __( 'BorgBase', 'backups-for-restic' ) ] ),
-					el( 'br' ),
 					el( 'label', {}, [ own, ' ', __( 'Own restic REST server', 'backups-for-restic' ) ] ),
+					el( 'br' ),
+					el( 'label', {}, [ borgbase, ' ', __( 'BorgBase', 'backups-for-restic' ) ] ),
 				] ),
 				field( __( 'Repository URL', 'backups-for-restic' ), url ),
 				field( __( 'REST username', 'backups-for-restic' ), username ),

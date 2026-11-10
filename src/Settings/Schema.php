@@ -55,7 +55,7 @@ final class Schema {
 	 */
 	public static function fields(): array {
 		return [
-			'repository.server'                       => Field::choice( 'borgbase', [ 'borgbase', 'rest-server' ] ),
+			'repository.server'                       => Field::choice( 'rest-server', [ 'rest-server', 'borgbase' ] ),
 			'repository.url'                          => Field::text(),
 			'repository.rest_username'                => Field::text( '', 255 ),
 			'repository.ca_certificate'               => Field::choice( 'none', [ 'none', 'uploaded' ] ),
