@@ -277,10 +277,14 @@ final class Scrypt {
 	 * @throws CryptoException If the file cannot be opened.
 	 */
 	private function open_table(): void {
+		// The table is computed from the password: only the owner may read it, from the first byte.
+		$umask  = umask( 0077 );
 		$handle = fopen( (string) $this->table_file, 'c+b' );
+		umask( $umask );
 		if ( false === $handle ) {
 			throw new CryptoException( 'Key derivation table cannot be opened.' );
 		}
+		chmod( (string) $this->table_file, 0600 );
 		$this->handle = $handle;
 
 		if ( self::PHASE_FILL === $this->phase ) {
