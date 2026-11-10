@@ -7,6 +7,8 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Prune without repacking: deletes the packs no snapshot uses, resumable in short ticks under
+  an exclusive lock, verified against `restic prune` and `restic check --read-data`.
 - First backup in WordPress (Milestone 1): setup wizard for an own restic REST server or a
   hosted one such as BorgBase, with connection test, append-only detection and an optional CA certificate; a new
   repository with a generated password or an existing one unlocked in the background; a

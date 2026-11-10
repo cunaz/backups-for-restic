@@ -114,10 +114,13 @@ final class Locking {
 	/**
 	 * Deletes a held lock and every leftover of this run.
 	 *
-	 * @param Id $id Lock to delete.
+	 * @param Id|null $id Lock to delete; null if the run recorded none, for example because its
+	 *                    request ended between writing the lock and recording it.
 	 */
-	public function release( Id $id ): void {
-		$this->delete( $id->hex() );
+	public function release( ?Id $id ): void {
+		if ( null !== $id ) {
+			$this->delete( $id->hex() );
+		}
 		$this->remove_leftovers( null );
 	}
 
