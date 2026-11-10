@@ -40,6 +40,29 @@ final class CacheDirectoryTest extends TestCase {
 		self::assertDirectoryExists( $this->root . '/cache/current' );
 	}
 
+	public function test_a_cache_that_could_not_be_removed_is_not_counted(): void {
+		if ( ! function_exists( 'posix_mkfifo' ) ) {
+			self::markTestSkipped( 'Needs the posix extension for a named pipe.' );
+		}
+		// A named pipe is neither a file nor a directory: removing the tree leaves it behind.
+		$stuck = $this->root . '/cache/old-repository/stuck';
+		self::assertTrue( posix_mkfifo( $stuck, 0600 ) );
+		$cache = new CacheDirectory( $this->root . '/cache' );
+
+		// rmdir() warns about the directory that is not empty.
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$removed = $cache->remove_others( 'current' );
+		} finally {
+			restore_error_handler();
+			unlink( $stuck );
+		}
+
+		self::assertSame( 1, $removed, 'Only the cache that is gone counts.' );
+		self::assertDirectoryExists( $this->root . '/cache/old-repository' );
+		self::assertDirectoryDoesNotExist( $this->root . '/cache/older-repository' );
+	}
+
 	public function test_clears_everything(): void {
 		$cache = new CacheDirectory( $this->root . '/cache' );
 		$cache->clear();

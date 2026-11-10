@@ -55,7 +55,7 @@ final class CacheDirectory {
 	 * site was connected to a new repository.
 	 *
 	 * @param string $current ID of the current repository; with an empty ID nothing is deleted.
-	 * @return int Number of caches deleted.
+	 * @return int Number of caches that are gone now; one that could not be removed does not count.
 	 */
 	public function remove_others( string $current ): int {
 		if ( '' === $current || ! is_dir( $this->path ) ) {
@@ -67,7 +67,10 @@ final class CacheDirectory {
 				continue;
 			}
 			Files::remove_tree( $this->path . '/' . $name );
-			++$removed;
+			clearstatcache( true, $this->path . '/' . $name );
+			if ( ! is_dir( $this->path . '/' . $name ) ) {
+				++$removed;
+			}
 		}
 		return $removed;
 	}
