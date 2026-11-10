@@ -19,7 +19,8 @@ use BackupsForRestic\WordPress\SiteHealth;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Wires the plugin into WordPress. Multisite is refused until 1.1 (ADR 0026).
+ * Wires the plugin into WordPress. Multisite is refused until 1.1 (ADR 0026). Options that a
+ * newer version of the plugin wrote keep this version inert (docs/02-architecture.md §18).
  */
 final class Plugin {
 
@@ -42,6 +43,14 @@ final class Plugin {
 		}
 
 		$container = new Container( $plugin_file );
+		$schema    = $container->schema_version();
+		if ( $schema->is_newer() ) {
+			// Installed over a newer version: no hook that reads or acts on the settings.
+			add_action( 'admin_notices', [ self::class, 'render_newer_data_notice' ] );
+			return;
+		}
+		$schema->upgrade();
+
 		Cron::register( $container );
 		add_action(
 			'rest_api_init',
@@ -81,6 +90,21 @@ final class Plugin {
 			esc_html__( 'This plugin does not support multisite networks yet. Network support is planned for version 1.1.', 'backups-for-restic' ),
 			esc_html__( 'Plugin activation refused', 'backups-for-restic' ),
 			[ 'back_link' => true ]
+		);
+	}
+
+	/**
+	 * Tells administrators that the plugin is inert because a newer version wrote its options.
+	 * This version could misread them, and retention deletes snapshots by what it reads.
+	 */
+	public static function render_newer_data_notice(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		printf(
+			'<div class="notice notice-error"><p>%s</p></div>',
+			esc_html__( 'The backup plugin is inactive because its settings were written by a newer version of the plugin. Please update the plugin; no backups run until then.', 'backups-for-restic' )
 		);
 	}
 
