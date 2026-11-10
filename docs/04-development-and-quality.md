@@ -11,31 +11,35 @@ CLI and rest-server, which `bin/install-test-tools.sh` downloads and verifies; n
 backups-for-restic/
 ├── backups-for-restic.php   plugin header, constants, autoloader include, Plugin::boot()
 ├── uninstall.php
-├── readme.txt                       (M1) WordPress.org readme: the listing's source of truth (description, installation, FAQ, external services, changelog)
+├── readme.txt                       WordPress.org readme: the listing's source of truth (description, installation, FAQ, external services, changelog)
 ├── README.md, CHANGELOG.md, LICENSE, SECURITY.md, CONTRIBUTING.md
 ├── composer.json / composer.lock    dev tooling only; PSR-4 for tests
-├── phpcs.xml.dist, phpstan.neon.dist, phpunit.xml.dist, phpunit-integration.xml.dist, infection.json5.dist, .editorconfig, .gitattributes, .distignore
-├── .wordpress-org/                  (M1) listing assets synced to SVN `assets/`: banners, icon, screenshots
+├── phpcs.xml.dist, phpstan.neon.dist, phpunit.xml.dist, phpunit-integration.xml.dist, infection.json5.dist, .editorconfig, .gitattributes, .distignore, .coderabbit.yaml
+├── .wordpress-org/                  (M3) listing assets synced to SVN `assets/`: banners, icon, screenshots
 ├── src/                             production code (see 02-architecture §3); src/WordPress/ is the only WordPress-facing part
 │   └── autoload.php                 ~20-line PSR-4 autoloader for the BackupsForRestic\ namespace
 ├── assets/js/, assets/css/          admin.js (classic script on wp-api-fetch, no bundler) and a scoped stylesheet
-├── languages/                       (M1) backups-for-restic.pot only; language packs come from translate.wordpress.org
+├── languages/                       (M3) backups-for-restic.pot only; language packs come from translate.wordpress.org
 ├── tests/
 │   ├── Unit/                        PHPUnit, no WordPress, no database, no network
-│   ├── Conformance/                 PHPUnit + restic CLI + rest-server: format parity, server behaviour
+│   ├── Conformance/                 PHPUnit + restic CLI + rest-server: format parity, server behaviour, whole jobs without WordPress
 │   ├── Fuzz/                        built-in fuzzer and its targets, one per parser (ADR 0028)
+│   ├── Mutation/                    PHPUnit configuration of the mutation run
 │   ├── Support/                     test doubles, the restic and rest-server harness, fixture generators
 │   ├── PHPStan/                     PHPStan extensions for the analysis of src/
 │   ├── Database/                    the dump against a real MySQL or MariaDB, imported with the mariadb client
 │   ├── Integration/                 a real WordPress from bin/test-site.sh: wizard over REST, backups through wp-cron.php, a killed tick
-│   ├── E2E/                         (M2) Playwright against wp-env
+│   ├── E2E/                         (M3) browser tests with Playwright
 │   └── Fixtures/                    restic vectors per version, Go and libsodium vectors, fuzz regressions
-├── bin/                             install-test-tools.sh, test-site.sh, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php; (release) build-package.sh
-├── docs/                            design documents, ADRs, benchmarks/
-└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; later live-servers.yml, e2e.yml, deploy-wordpress-org.yml, codeql.yml
+├── bin/                             install-test-tools.sh, test-site.sh with its router and diagnostics, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php; (M3) build-package.sh
+├── docs/                            design documents, ADRs, guides/, benchmarks/
+└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; (M3) live-servers.yml, e2e.yml, codeql.yml; (release) deploy-wordpress-org.yml
 ```
 
-Entries marked (M1) or (M2) arrive with that milestone ([roadmap](05-roadmap.md)).
+Entries marked (M3) are not in the repository yet; they are planned for Milestone 3
+([roadmap](05-roadmap.md)): `.wordpress-org/`, `languages/`, `tests/E2E/`,
+`bin/build-package.sh` and the workflows `live-servers.yml`, `e2e.yml` and `codeql.yml`.
+`deploy-wordpress-org.yml` comes with the first release.
 
 ## 2. Toolchain (development only)
 
@@ -44,15 +48,18 @@ Entries marked (M1) or (M2) arrive with that milestone ([roadmap](05-roadmap.md)
 | PHP 8.3–8.5, 8.6 once released (CI matrix; 8.3 without JIT is the performance baseline) | runtime floor 8.3 ([ADR 0003](adr/0003-version-floors.md)) |
 | Composer 2 | dev dependencies and scripts; no `vendor/` in the release |
 | `wp-coding-standards/wpcs` 3, PHP_CodeSniffer | WordPress Coding Standards |
-| `phpstan/phpstan` 2 + `szepeviktor/phpstan-wordpress` + strict rules | static analysis at level `max`, architecture rules, `reveal()` allow-list |
-| `phpunit/phpunit` | unit, conformance and integration tests |
+| `phpstan/phpstan` 2 + `szepeviktor/phpstan-wordpress` + strict rules | static analysis at level `max`, with two rules of the project: the WordPress-free core and the `reveal()` allow-list (§4) |
+| `phpunit/phpunit` 12 | unit, database, conformance and integration tests |
+| Node.js | `node --check assets/js/admin.js`, the only check of the JavaScript today |
 | Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format` and `Engine\Forget`; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
 | Built-in fuzzer (`bin/fuzz.php`, `tests/Fuzz/`) | structure-aware fuzzing of every parser that reads server data ([ADR 0028](adr/0028-built-in-fuzzer.md)) |
 | **restic CLI** 0.19.1, 0.18.1 and 0.14.0 (upstream releases, checksum-verified by `bin/install-test-tools.sh`) | conformance oracle ([ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md)); never shipped |
 | **rest-server** 0.14.0 (upstream release, checksum-verified), with TLS, normal, `--append-only` and `--max-size` | local repository server for conformance and integration tests |
-| (M1) `yoast/phpunit-polyfills`, `wp-phpunit/wp-phpunit`, `brain/monkey` | WordPress test library and function mocking |
-| (M1) `@wordpress/env`, (M2) `@playwright/test` | Docker WordPress, browser tests |
-| (M1) Plugin Check (`wp plugin check`) 2.x | the WordPress.org review team's scanner; required check |
+| WordPress 7.1.4 (pinned and checksum-verified by `bin/test-site.sh`) | the real WordPress of the integration suite, served by PHP's built-in server. The project uses no WordPress test library, no function mocking and no `@wordpress/env`: the adapters are tested against a running WordPress or not at all ([ADR 0029](adr/0029-wordpress-free-core.md)) |
+| (M3) `@playwright/test` | browser tests; not set up yet |
+| (M3) ESLint with `@wordpress/eslint-plugin` | JavaScript linting; not set up yet |
+| (M3) Plugin Check (`wp plugin check`) 2.x | the WordPress.org review team's scanner; not set up yet, to become a required check |
+| (M3) CodeQL | JavaScript analysis; not set up yet |
 | (release) `10up/action-wordpress-plugin-deploy` (pinned SHA) | SVN deployment of tagged releases |
 
 Composer scripts: `lint`, `fix`, `analyse`, `test:unit`, `test:database`,
@@ -63,34 +70,54 @@ for coverage and mutation runs.
 
 ## 3. Coding standards
 
-- **WordPress Coding Standards** for everything WordPress-facing, with documented
-  deviations in `phpcs.xml.dist`: PSR-4 file and class naming under `src/`, short arrays,
-  `declare(strict_types=1)`, native filesystem functions inside the private directory (each
-  call site commented).
-- **Tab indentation** as WordPress prescribes (`.editorconfig` enforces it); line length 100.
+- **WordPress Coding Standards** (`WordPress-Extra` and `WordPress-Docs`) for `src/`,
+  `tests/` and `bin/`, with documented deviations in `phpcs.xml.dist`: PSR-4 file and class
+  naming, short arrays, no Yoda conditions, `declare(strict_types=1)`, and native filesystem
+  functions: the WordPress-free namespaces are exempt from the `AlternativeFunctions` sniff,
+  and the few call sites in `src/WordPress` carry a comment.
+- **Tab indentation** as WordPress prescribes (`.editorconfig` sets it, PHPCS checks it).
+  No line length is enforced: neither `phpcs.xml.dist` nor `.editorconfig` has a limit, and
+  564 of the 20 461 lines in `src/` are longer than 100 characters. Whether to enforce one
+  is not decided. Markdown is wrapped by hand at about 100 characters.
 - **Naming** as WordPress prescribes: `snake_case` for functions, methods, variables and
   properties, `PascalCase` for classes and enums, `UPPER_CASE` for constants. Parameter names
   avoid reserved words (`$parent_id`, not `$parent`).
-- **Banned functions** (custom sniff): `exec`, `shell_exec`, `system`, `passthru`, `popen`,
-  `proc_open`, `eval`, `unserialize`, `extract`, `create_function` in production code.
+- **Banned functions** in production code: `exec`, `shell_exec`, `system`, `passthru`,
+  `popen`, `proc_open`, `unserialize`, `extract` and `create_function` through
+  `Generic.PHP.ForbiddenFunctions` in `phpcs.xml.dist`, `eval` through `Squiz.PHP.Eval`, and
+  backticks through `Generic.PHP.BacktickOperator`. Tests and `bin/` are exempt from the
+  function list, because they start restic and rest-server.
   Base64 for restic's key files goes through `Support\Bytes`, which decodes strictly.
 - **Prefixes**: everything global uses `backups_for_restic_` / `backups-for-restic`; classes live in
   `BackupsForRestic\`; `PrefixAllGlobals` configured accordingly.
 - **Cryptography and format code**: `Crypto` and `Format` are `final`, dependency-free,
-  documented with the byte layouts they implement and a pointer to the restic source they
-  mirror. Changes follow the solo-maintainer regime of
+  documented with the byte layouts they implement and, where one exists, the name of the
+  restic type they mirror. Changes follow the solo-maintainer regime of
   [ADR 0024](adr/0024-governance-and-quality-assurance.md): self-review checklist, 24-hour
   cooling-off before merge, green conformance run and mutation gate.
 - `final` by default, immutable value objects, enums for closed sets, one exception base
   class, no static mutable state, docblocks explain *why*.
-- JavaScript: ES2020 modules, ESLint with `@wordpress/eslint-plugin`, no frameworks.
+- JavaScript: one classic script in ES2020, `assets/js/admin.js`; no modules, no frameworks,
+  no build step ([ADR 0012](adr/0012-admin-ui-without-build-step.md)). CI checks its syntax
+  with `node --check`. ESLint with `@wordpress/eslint-plugin` is planned for Milestone 3.
 
 ## 4. Static analysis configuration
 
-PHPStan level `max`, strict rules, WordPress stubs. Architecture rules: WordPress-free
-namespaces may not reference WordPress functions; `Engine` may not depend on `Jobs` or
-adapters; `Admin`/`Rest`/`Cli` may not reference each other; `reveal()` only in the allow-list.
-No baseline on `main`.
+PHPStan level `max`, strict rules, WordPress stubs, no baseline (`phpstan.neon.dist`). The
+project adds two rules in `tests/PHPStan/`:
+
+- `WordPressFreeCoreRule`: no namespace except `WordPress` may call a WordPress function or
+  use a WordPress class with `new`, a static call, a class constant or `instanceof`
+  ([ADR 0029](adr/0029-wordpress-free-core.md)).
+- `SecretRevealRule`: `Secret::reveal()` only in the classes on its list.
+
+A third extension, `UnpackReturnTypeExtension`, only gives `unpack()` a precise return type
+for integer formats.
+
+Two rules of the first design do not exist. That `Engine` does not depend on `Jobs` or on
+an adapter holds in the code, but no tool checks it; adding such a rule is not planned yet.
+A rule between `Admin`, `Rest` and `Cli` has no subject any more, because all adapters live
+in the one namespace `WordPress`.
 
 ## 5. Tests as specification
 
@@ -98,21 +125,28 @@ No baseline on `main`.
 
 | Area | What is asserted |
 | --- | --- |
-| `Crypto\Cipher` | seal/open round trip; vectors: objects produced by `restic cat` open correctly; tampered tag, truncated input and wrong key fail closed; nonces unique across a batch |
-| `Crypto\Scrypt` | RFC 7914 vectors; restic key files from the fixture matrix open; checkpoint/resume yields the same key as a single pass; file-backed table deleted afterwards |
-| `Format\KeyFile`, `Config`, `Snapshot`, `Lock` | parse and emit restic fixtures; unknown fields preserved where restic preserves them; size caps enforced |
-| `Format\Chunker` | boundaries equal restic's on random and structured fixtures (ids from `restic cat snapshot`/`tree`); polynomial generation produces irreducible degree-53 polynomials; table computation matches restic's |
-| `Format\Pack` | writer/reader round trip; header layout byte-exact against `restic cat pack`; data and tree blobs never mixed; header size limit |
-| `Format\Index` | JSON ⇄ entries; 50 000-blob limit; merge and lookup; cache encryption round trip |
-| `Format\Tree` | ordering and uniqueness enforced; Go quoting of names (control characters, quotes, backslashes, invalid UTF-8); mode bit mapping for files, dirs, symlinks, setuid/setgid/sticky; byte parity with restic trees for ASCII fixtures |
-| `Engine\Forget` | parity with recorded `restic forget --dry-run --json` results over generated calendars for every keep flag |
+| `Crypto\Cipher` | seal/open round trip; a file that restic encrypted opens; every modified byte, a short input and a zero nonce are rejected; nonces are fresh for every object |
+| `Crypto\Poly1305` | RFC 8439 vectors and 400 libsodium vectors |
+| `Crypto\Scrypt` | RFC 7914 vectors; the key of the restic 0.19.1 fixture opens; parameters beyond the limits are refused; checkpoint/resume yields the same key as a single pass; a lost table file stops the derivation; the file-backed table is deleted afterwards |
+| `Format\KeyFile`, `Config`, `Snapshot`, `Lock` | the restic 0.19.1 fixtures round-trip byte for byte; unknown versions, other KDFs, short salts and mistyped fields are rejected; a lock is stale after 30 minutes |
+| `Format\Chunker` | the 17 boundaries of a 24 MiB stream equal a vector from restic's chunker library (`tests/Fixtures/vectors/generate-go-vectors.go.txt`); boundaries do not depend on read sizes; irreducibility and polynomial generation match recorded vectors. Parity with `restic backup` itself is tested in the conformance suite, indirectly (§5.2) |
+| `Format\Pack` | writer/reader round trip; the headers of the fixture's packs match its index and every blob verifies; all four entry types; limits on blob and header length; corrupted packs rejected |
+| `Format\Index` | JSON ⇄ entries byte for byte; merge and lookup; the binary form of the cache round-trips and a damaged cache is refused. The split of index files at 50 000 blobs has no test |
+| `Format\Tree` | ordering and uniqueness enforced when a tree is written; Go quoting of names (control characters, quotes, backslashes, invalid UTF-8); mode bit mapping for files, dirs, symlinks, setuid/setgid/sticky; every tree of the restic fixture re-encodes byte for byte |
+| `Engine\Forget` | parity with 11 recorded `restic forget --dry-run --json` results over 150 snapshots in four time zones. The recorded policies use `--keep-last`, `--keep-hourly`, `--keep-daily`, `--keep-weekly`, `--keep-monthly`, `--keep-yearly`, `--keep-within`, `--keep-within-daily`, `--keep-within-weekly` and `--keep-tag`. `--keep-within-hourly` has a hand-written case; `--keep-within-monthly` and `--keep-within-yearly` have none |
 | `Engine\Prune`, `Engine\Check` | against `InMemoryBackend`: unreferenced packs deleted, index rewritten, partially used packs kept; corrupted pack detected |
-| `Engine\Backup` steps | resumability: every step interrupted at every checkpoint produces the same snapshot as an uninterrupted run; unchanged-file detection rules |
-| `Backend\RestBackend` | request shapes (method, path, headers, Range), status mapping (400/401/403/404/507), retry policy, no credentials in URLs |
-| `Database\Dump` | format byte-exact for fixtures; streaming into the chunker; per-table trailer; cursor resumption |
-| `Database\Restore\Importer` | trailer validation, line splitting, refusal of truncated files |
-| `Jobs\Runner` | state machine, lease takeover, budget exhaustion, loopback re-arm, single-active-job invariant |
-| `Secrets`, `Support\Redactor`, `Backup\Roots/Excludes`, `Restore\Apply`, `Settings\Schema` | as in the security document |
+| `Engine\Backup` and `Restore` | an interrupted backup produces the same snapshot tree as an uninterrupted one; unchanged files are reused, changed ones read again, identical files share blobs; restore refuses names that leave the target |
+| `Engine\Locking`, `KeyUnlock`, `IndexCache` | leftovers of a dead refresh, conflicts between runs and hosts; unlock resumed across ticks and key files; the cache fetches only new index files and respects its limit |
+| `Backend\RestBackend` | request shapes (method, path, headers, Range), status mapping (400/401/403/404/507), a retried read, no credentials in URLs. Retries of uploads, the limit of five attempts and the back-off have no test |
+| `Jobs\Runner`, `JobType`, `JobError`, `TickReport`, `RetentionGuard` | steps in order across ticks; cleanup after success, failure and cancellation; back-off of retryable errors; lease and runner lock; one active job; redacted job files; the error codes; which ticks chain; the switching rules of the retention modes |
+| `Secrets`, `Settings`, `Storage`, `Support`, `Doctor`, `Scheduling\SchedulePolicy`, `Notifications\Notifier`, `Connection\ServerProfile` | their own test classes under `tests/Unit/` |
+| Fuzz targets | 2000 deterministic inputs per parser and the saved regression inputs (§5.6) |
+
+Not unit tested: `Support\Redactor` has no test class of its own (the runner test and the
+job test check that a plain secret value is masked); `Backup\PlanFactory` with its roots and
+excludes and `Database\Dump` are covered by the conformance and database suites (§5.2,
+§5.3), not by unit tests; no test loads a class of `src/WordPress` (§5.3). Tests for
+`Database\Restore\Importer` and `Restore\Apply` arrive with those classes in Milestone 3.
 
 ### 5.2 Conformance suite (restic CLI + rest-server)
 
@@ -123,9 +157,23 @@ byte-identically, including a 300 MB streamed database dump; repositories writte
 need `ext-zstd`, which a second CI job installs; a key calibrated by restic unlocks; restic
 respects the plugin's lock; append-only behaviour and every server status code of
 [ADR 0025](adr/0025-repository-servers.md) are asserted against a running rest-server.
-Chunk-boundary and forget parity run in the unit suite against recorded vectors. Runs on
-every change under `src/` and `tests/`, and nightly. Vectors are re-recorded with
-`bin/record-vectors.sh` when a new restic version enters the matrix.
+"Byte-identically" means: for every file the SHA-256 of its content, its permission bits and
+its modification time to the second; for every directory its permission bits; for every
+link its target. Ownership and directory times are not compared.
+
+Prune and check are compared with restic as well: the plugin deletes the packs that
+`restic prune` counts as unused, and its check reports the damaged and the deleted pack that
+`restic check` reports. `BackupJobTest`, `MaintenanceJobTest` and `RetentionSimulationTest`
+run whole jobs (settings, encrypted secrets, runner, many short ticks) without WordPress
+against a TLS rest-server.
+
+Chunk-boundary and forget parity run in the unit suite against recorded vectors (§5.1). The
+chunker's parity with the restic CLI is tested here indirectly: after restic backed up the
+fixture, a plugin backup of the same files must add no data blob, which holds only if both
+cut the same chunks. Runs on every change under `src/` and `tests/`, and nightly. Vectors
+are re-recorded with `bin/record-vectors.sh` and `bin/record-forget-vectors.sh` when a new
+restic version enters the matrix; the versions are pinned in `bin/install-test-tools.sh`,
+and nothing picks up a new restic release by itself (planned for Milestone 3).
 
 ### 5.3 Database and integration tests
 
@@ -139,12 +187,32 @@ without WordPress against a TLS rest-server and the database.
 The **integration suite** (`phpunit-integration.xml.dist`) needs a real WordPress:
 `bin/test-site.sh install` downloads a pinned, checksum-verified WordPress, creates its
 database, links the plugin and writes an application password; `bin/test-site.sh start`
-serves it with PHP's built-in server, `max_execution_time = 30`, `memory_limit = 128M` and
-`set_time_limit()` disabled. The tests talk to the site only over HTTP: the wizard through
-the REST API, a backup driven only by requests to `wp-cron.php`, `restic check --read-data`
-and restore, a database import with identical checksums, a scan for secrets in job files and
-REST responses, and a web server killed in the middle of a tick. `BFR_SITE_FIXTURE_MB` and
-`BFR_DB_FIXTURE_MB` set the fixture sizes; the nightly CI run uses 2048 and 300.
+serves it with PHP's built-in server and several workers, `max_execution_time = 30`,
+`memory_limit = 128M` and `set_time_limit()` disabled. A router script enforces "deny all"
+`.htaccess` files as Apache would. Two notes on that server:
+
+- The JIT is switched off (`opcache.jit=disable`). With PHP 8.3's tracing JIT, which
+  `setup-php` turns on in CI, the server's processes died with SIGSEGV in backup ticks.
+- A tick raises its own memory limit to `WP_MAX_MEMORY_LIMIT` (architecture §4.2). The test
+  site's `wp-config.php` therefore sets that constant to 128M; without it ticks would run
+  with 256M and the 128M of the acceptance criterion would not be in force.
+
+The tests talk to the site only over HTTP. There are four: a request without credentials is
+refused; the wizard through the REST API against a TLS rest-server with its CA certificate,
+then a backup driven only by requests to `wp-cron.php`, `restic check --read-data`, a
+restore of the fixture's uploads directory, a database import with identical checksums of
+three tables, and a search for both passwords in the files under `jobs/` and in four REST
+responses; a web server that is stopped and started again after a tick was requested; and
+prune and check jobs with the dashboard data and the cache route. `BFR_SITE_FIXTURE_MB` and
+`BFR_DB_FIXTURE_MB` set the fixture sizes (64 and 32 by default); the nightly CI run uses
+2048 and 300.
+
+What the suite does not reach: it requests 10 of the 16 route paths, not `/environment`,
+`/jobs/{id}` (admin polling), cancel, `/snapshots`, `/repository/connect` or
+`/recovery-kit`. Nothing tests Site Health, WP-CLI, the multisite guard, deactivation,
+uninstall, an append-only server through WordPress, or the loopback chain as such, because
+the test itself requests `wp-cron.php` every second. Tests for this wiring are planned for
+Milestone 3.
 
 ### 5.4 Benchmarks
 
@@ -155,53 +223,71 @@ repository. The baseline is PHP 8.3 without OPcache and JIT; a JIT run is record
 comparison. Results are committed to `docs/benchmarks/`; the gates in architecture §16 are
 checked in CI and the script exits with status 1 when one fails.
 
+What the figures do not cover: both scrypt figures come from `Scrypt::derive()`, which keeps
+its table in memory, while the unlock of a job keeps the table in a file; nothing times that
+path. The backup figure is the user CPU time of one process that is never interrupted,
+measured for 256 MB and extrapolated to 1 GB, without network and without writes to a
+server. No other test measures CPU time: the nightly integration run backs up 2 GB in ticks
+to a rest-server and times nothing.
+
 ### 5.5 End-to-end (Playwright)
 
-Wizard completion, backup with visible progress to "succeeded", snapshot browsing, single-file
-restore and download, settings changes, Site Health entries.
+Planned for Milestone 3; no browser test exists and Playwright is not set up. The admin
+script is only checked for syntax (§3), and the integration suite calls the REST API without
+loading a page (§5.3). The planned tests: wizard completion, backup with visible progress to
+"succeeded", snapshot browsing, single-file restore and download, settings changes, Site
+Health entries.
 
 ### 5.6 Mutation testing and fuzzing
 
 Infection runs on `Crypto`, `Format` and `Engine\Forget` in every CI run; the covered
 mutation score indicator must stay at or above 90 % (`infection.json5.dist`). The built-in
-fuzzer ([ADR 0028](adr/0028-built-in-fuzzer.md)) drives every parser that reads server data:
-config, key file, master key, snapshot, lock, index, tree, unpacked files, pack header and
-its length, the encryption envelope, the REST listing, Go string quoting, RFC 3339 times,
-durations and ids. The unit suite runs 2000 deterministic inputs per parser; `fuzz.yml`
-runs two minutes per parser every night. Every finding is saved with a replay command and
-becomes a regression input in `tests/Fixtures/fuzz/<target>/`. Both compensate for the
-missing second reviewer and external audit
-([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
+fuzzer ([ADR 0028](adr/0028-built-in-fuzzer.md)) drives every parser that reads server data,
+with 17 targets: config, key file, master key, snapshot, lock, index, tree, the JSON decoder,
+unpacked files, pack header and its length, the encryption envelope, the REST listing, Go
+string quoting, RFC 3339 times, durations and ids. The unit suite runs 2000 deterministic
+inputs per parser; `fuzz.yml` runs two minutes per parser every night. Every finding is
+saved with a replay command and becomes a regression input in
+`tests/Fixtures/fuzz/<target>/`. Both compensate for the missing second reviewer and
+external audit ([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
 
 ### 5.7 Live smoke tests
 
-`live-servers.yml` runs weekly, on manual dispatch and before every release. Against two
-BorgBase free-tier repositories (normal and append-only) it runs init or connect, a backup
-of a small fixture, the v2 listing, ranged reads, the append-only probe, lock creation and
-deletion, a refused forget in append-only mode and a restore. Against a rest-server with
-TLS, a self-signed CA and `--private-repos` it runs the same flow. Credentials are repository
-secrets available only to scheduled and manually dispatched runs on `main`. BorgBase's
-behaviour is verified this way instead of by vendor statements
-([ADR 0025](adr/0025-repository-servers.md)).
+Not built yet. No workflow `live-servers.yml` exists and no test has run against a hosted
+service: every server behaviour the suites assert was measured on a local rest-server
+(§5.2, §5.3), and the answers of BorgBase are not yet measured
+([ADR 0025](adr/0025-repository-servers.md)). The tests need an account at the hosted
+service and are planned for Milestone 3, as follows.
+
+`live-servers.yml` runs weekly, on manual dispatch and before every release. Against a
+rest-server with TLS, a self-signed CA and `--private-repos` it runs init or connect, a
+backup of a small fixture, the v2 listing, ranged reads, the append-only probe, lock
+creation and deletion, a refused forget in append-only mode and a restore. Against two
+BorgBase repositories (normal and append-only) it runs the same flow. Credentials are
+repository secrets available only to scheduled and manually dispatched runs on `main`. A
+hosted service's behaviour is verified this way instead of by vendor statements.
 
 ## 6. Continuous integration
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push, pull request | PHPCS and a JavaScript syntax check; PHPStan with the boundary and reveal rules; unit tests on PHP 8.3 (without OPcache and JIT), 8.4 and 8.5, and 8.6 once released; the database suite against MySQL; mutation testing; later Plugin Check on the built package, `readme.txt` consistency, POT freshness |
-| `conformance.yml` | changes under `src/` or `tests/`, nightly | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; PHPStan with the boundary and reveal rules; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate. Planned for Milestone 3: ESLint, Plugin Check on the built package, `readme.txt` consistency, POT freshness |
+| `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
 | `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
-| `integration.yml` | push, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1 on PHP 8.3; nightly and on request with the acceptance sizes; later WordPress latest-1 and PHP 8.5 |
-| (later) `live-servers.yml` | weekly, manual dispatch, before every release | live smoke tests against BorgBase free-tier repositories and a TLS rest-server (§5.7) |
-| (M2) `e2e.yml` | UI changes, nightly | Playwright |
-| (later) `codeql.yml` | push, weekly | JavaScript analysis |
+| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1.4 on PHP 8.3; nightly and on request with the acceptance sizes; records with `strace` and core dumps how the server's PHP processes ended. WordPress latest-1 and PHP 8.5 are acceptance criteria of Milestone 4 and not in the matrix yet |
+| (M3) `live-servers.yml` | weekly, manual dispatch, before every release | live smoke tests against a TLS rest-server and BorgBase repositories (§5.7) |
+| (M3) `e2e.yml` | UI changes, nightly | Playwright |
+| (M3) `codeql.yml` | push, weekly | JavaScript analysis |
 | (release) `deploy-wordpress-org.yml` | tag `v*` | build with `.distignore`, Plugin Check, manual approval, SVN deploy (`trunk`, `tags/x.y.z`, `assets/`), post-deploy diff, GitHub release notes only |
 
-Workflows marked with a milestone arrive with the code they test. Actions are pinned to
-commit SHAs and kept current by Dependabot; permissions are read-only unless a job needs
-more; fork pull requests get no secrets. Required checks for merging: lint, analyse, unit
-and mutation testing; conformance when `Crypto`, `Format`, `Backend` or `Engine` are
-touched; integration once it has passed for the first time; Plugin Check with the release package.
+The four workflows without a mark exist; those marked (M3) are planned for Milestone 3 and
+`deploy-wordpress-org.yml` comes with the first release. Actions are pinned to commit SHAs;
+Dependabot proposes updates of the actions and of the Composer lock file every week. Every
+workflow has read-only permissions and uses no secret. Checks that must be green before a
+merge: lint, analyse, unit and mutation testing; conformance when `Crypto`, `Format`,
+`Backend` or `Engine` are touched; integration once it has passed for the first time; from
+Milestone 3 Plugin Check with the release package. No job checks the DCO sign-off of
+commits; that check is planned for Milestone 3 as well.
 
 ## 7. Release process (WordPress.org)
 
@@ -209,6 +295,12 @@ WordPress.org is the only place users obtain the plugin
 ([ADR 0017](adr/0017-distribution-via-wordpress-org.md)). Git tags are the source of truth
 for code; the SVN repository on WordPress.org is the distribution artefact, written only by
 CI.
+
+No release exists yet, and the release tooling is not in the repository: neither
+`bin/build-package.sh` nor `deploy-wordpress-org.yml` is written, there is no `.wordpress-org/`
+directory, and the release checklist of step 2 does not exist as a file. The steps below
+are the plan. The submission package (build script, listing assets, Plugin Check) is planned
+for Milestone 3 and the deployment workflow for Milestone 4 ([roadmap](05-roadmap.md)).
 
 1. Update `CHANGELOG.md` and the `== Changelog ==` section of `readme.txt`; bump the version
    in the plugin header, `readme.txt` (`Stable tag`) and `Plugin::VERSION`; verify `Tested up
@@ -235,21 +327,30 @@ contain encryption code?" → it implements restic's published format with PHP's
 hash functions, plus Poly1305, scrypt and restic's chunker, which PHP does not offer, as
 textbook code tested against reference implementations) and in code comments. The slug
 `backups-for-restic` ([ADR 0015](adr/0015-naming-and-license.md)) becomes permanent at
-approval. Pre-release builds are never published; testers build from source with
-`bin/build-package.sh`.
+approval. Pre-release builds are never published. Until `bin/build-package.sh` exists,
+testers link or copy a checkout of the repository into `wp-content/plugins/`; the plugin
+needs no build step and no `composer install` to run, because `src/autoload.php` loads its
+classes.
 
 ## 8. Documentation standards
 
 - `README.md` (GitHub): what, why, requirements, links; installation points to WordPress.org.
 - `readme.txt` (WordPress.org): description, installation, FAQ with review-relevant answers,
-  **External services** section (BorgBase endpoint, what data is sent, links to BorgBase's
-  terms and privacy policy), screenshots, changelog. Reviewed like code.
+  **External services** section (the repository server the user configures, what data is
+  sent and when, the user's own rest-server, and for the BorgBase preset its address form
+  and the links to its terms and privacy policy), changelog. Reviewed like code. A
+  screenshots section comes with the listing assets in Milestone 3.
 - `docs/`: architecture, security, development, roadmap, disaster recovery, appendix, ADRs,
   benchmarks. Updated in the same pull request as the code they describe.
-- Format documentation: every `Format` class header cites the restic design document
-  section and source file it mirrors, with the restic version used for verification.
-- User documentation (`docs/user/`): setup on shared hosting (cron options with panel
-  screenshots), expectations for the first backup, hosting matrix, FAQ.
+- Format documentation: the class headers in `Format` and `Crypto` describe the byte layout
+  or JSON form they implement and name the restic type they mirror where one exists (for
+  example `data.Node`, `crypto.Key.Seal()`). They cite neither a section of restic's design
+  document nor a restic version; the version that produced the test vectors is in the
+  fixture path (`tests/Fixtures/restic-0.19.1/`). Adding those citations is not planned yet.
+- User documentation (`docs/guides/`): running backups with a cron job of the hosting panel
+  (cPanel, Plesk and others, as text) and running your own rest-server. The FAQ is in
+  `readme.txt`. Panel screenshots, a hosting matrix and a page on what to expect from the
+  first backup do not exist and are not planned yet.
 
 ## 9. Contribution workflow
 
