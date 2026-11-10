@@ -16,7 +16,6 @@ use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
-use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
@@ -248,34 +247,18 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Cancels a job: at once while queued, otherwise after the current step's cleanup.
+	 * Cancels a job: at once while queued, otherwise after the current step's cleanup. The
+	 * runner records the request so that a tick running right now can neither lose it nor be
+	 * overwritten by it.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function cancel_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$jobs = $this->container->jobs();
-		$job  = $jobs->get( self::text( $request, 'id' ) );
+		$job = $this->container->runner()->cancel( self::text( $request, 'id' ), [ 'user' => get_current_user_id() ] );
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
 		}
-		$dequeued = JobState::Queued === $job->state;
-		if ( $dequeued ) {
-			$job->state       = JobState::Cancelled;
-			$job->finished_at = time();
-		} elseif ( ! $job->state->is_terminal() ) {
-			$job->cancel_requested = true;
-		}
-		$jobs->save( $job );
-		if ( $dequeued ) {
-			try {
-				( new JobEvents( $this->container ) )->state_changed( $job, JobState::Queued );
-			} catch ( \Throwable $exception ) {
-				// The job is cancelled either way; a failing hook must not turn that into an error.
-				$jobs->log( $job )->write( 'warning', 'Reporting the state change failed.', [ 'code' => JobError::from_throwable( $exception )->code ] );
-			}
-		}
-		$jobs->log( $job )->write( 'info', 'Cancellation requested.', [ 'user' => get_current_user_id() ] );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ] );
 	}
 

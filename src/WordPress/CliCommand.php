@@ -159,13 +159,10 @@ final class CliCommand {
 			\WP_CLI::error( Messages::job_error( 'retention_external' )['message'] );
 		}
 		try {
-			$job = $this->container->jobs()->create( $type, 'cli', time() );
+			// The data is part of the new job document: a later save could meet the job's first tick.
+			$job = $this->container->jobs()->create( $type, 'cli', time(), $data );
 		} catch ( JobConflict ) {
 			\WP_CLI::error( Messages::job_error( 'job_conflict' )['message'] );
-		}
-		if ( [] !== $data ) {
-			$job->data = $data + $job->data;
-			$this->container->jobs()->save( $job );
 		}
 		/* translators: %s: job ID. */
 		\WP_CLI::line( sprintf( __( 'Job %s created.', 'backups-for-restic' ), $job->id ) );
