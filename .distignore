@@ -1,4 +1,5 @@
 # Files that never ship in the WordPress.org package (used by bin/build-package.sh).
+/.claude
 /.git
 /.github
 /.tools

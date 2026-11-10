@@ -101,4 +101,7 @@ branch below them, and pauses after several reviewed pushes; comment `@coderabbi
 when it skipped or paused one. Never put personal data, private e-mail addresses or chat
 transcripts into code, commits or pull requests. Commits use a noreply address: GitHub's
 `…@users.noreply.github.com`; AI-assisted commits may name the tool's noreply address in a
-`Co-Authored-By` trailer.
+`Co-Authored-By` trailer. A link to a recorded session or chat is a chat transcript in this
+sense: [`.claude/settings.json`](.claude/settings.json) switches off the session link that
+Claude Code would otherwise add to commits and pull request descriptions, and CodeRabbit's
+pre-merge check fails a pull request whose description contains one.
