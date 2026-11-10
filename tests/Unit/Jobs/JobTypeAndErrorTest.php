@@ -10,6 +10,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Settings\Settings;
 
 /**
  * Step lists of every job type and the error codes jobs report.
@@ -46,6 +47,36 @@ final class JobTypeAndErrorTest extends TestCase {
 		self::assertTrue( JobType::Check->is_maintenance() );
 		self::assertFalse( JobType::Backup->is_maintenance() );
 		self::assertContains( 'releasing', JobType::Prune->cleanup_steps(), 'An aborted prune releases its exclusive lock.' );
+	}
+
+	public function test_backups_and_maintenance_wait_for_the_completed_setup(): void {
+		$repository = [ 'repository.url' => 'https://backup.example.net/' ];
+		$during     = Settings::from_stored( $repository );
+		foreach ( [ JobType::Backup, JobType::Forget, JobType::Prune, JobType::Check ] as $type ) {
+			self::assertSame( 'setup_incomplete', $type->refusal( $during ), $type->value . ': no job before the recovery kit is acknowledged.' );
+		}
+		self::assertNull( JobType::Unlock->refusal( $during ), 'The wizard unlocks an existing repository before the setup is complete.' );
+
+		$after = Settings::from_stored( $repository + [ 'setup.completed' => true ] );
+		foreach ( JobType::cases() as $type ) {
+			self::assertNull( $type->refusal( $after ), $type->value );
+		}
+	}
+
+	public function test_a_completed_setup_still_needs_a_repository_and_respects_external_retention(): void {
+		self::assertSame( 'configuration', JobType::Backup->refusal( Settings::from_stored( [ 'setup.completed' => true ] ) ) );
+
+		$external = Settings::from_stored(
+			[
+				'repository.url'  => 'https://backup.example.net/',
+				'setup.completed' => true,
+				'retention.mode'  => 'external',
+			]
+		);
+		self::assertSame( 'retention_external', JobType::Forget->refusal( $external ) );
+		self::assertSame( 'retention_external', JobType::Prune->refusal( $external ) );
+		self::assertNull( JobType::Check->refusal( $external ), 'The check never deletes.' );
+		self::assertNull( JobType::Backup->refusal( $external ) );
 	}
 
 	/**

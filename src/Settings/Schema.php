@@ -26,13 +26,36 @@ final class Schema {
 	];
 
 	/**
+	 * The retention floor of the secure defaults (docs/03-security-and-threat-model.md §13):
+	 * keep-within is at least one day, or keep-last is at least 1. Keep-within counts back
+	 * from the newest snapshot and protects what lies in its window from the rules that count
+	 * snapshots (threat T-12); a window of a few hours holds little more than that newest one.
+	 *
+	 * @param string $within Keep-within duration such as 2d or 1y6m.
+	 * @param int    $last   Number of newest snapshots that are always kept.
+	 * @return bool True if the floor holds.
+	 */
+	public static function retention_floor( string $within, int $last ): bool {
+		if ( $last >= 1 ) {
+			return true;
+		}
+		preg_match_all( '/(\d+)([ymdh])/', $within, $parts, PREG_SET_ORDER );
+		foreach ( $parts as [ , $number, $unit ] ) {
+			if ( (int) $number >= ( 'h' === $unit ? 24 : 1 ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * All fields by dotted path.
 	 *
 	 * @return array<string, Field> Fields.
 	 */
 	public static function fields(): array {
 		return [
-			'repository.server'                       => Field::choice( 'borgbase', [ 'borgbase', 'rest-server' ] ),
+			'repository.server'                       => Field::choice( 'rest-server', [ 'rest-server', 'borgbase' ] ),
 			'repository.url'                          => Field::text(),
 			'repository.rest_username'                => Field::text( '', 255 ),
 			'repository.ca_certificate'               => Field::choice( 'none', [ 'none', 'uploaded' ] ),

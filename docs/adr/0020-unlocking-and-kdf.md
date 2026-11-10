@@ -37,3 +37,16 @@ CPU on shared hosting, far beyond one request.
 - **Asking for the password on every run**: unattended backups would be impossible.
 - **Lower `N` for new repositories**: pointless security loss for a two-second gain; passwords
   the plugin generates are random anyway.
+
+## As built (2026-11)
+- `Crypto\ScryptParameters` refuses a key file whose `N` is above 2^20, whose `r` is above
+  32, whose `p` is above 16 or whose table (128 · `N` · `r` bytes) is above 1 GiB; the job
+  ends with `repository_unsupported_version`. Within these limits the table file can reach
+  1 GiB, not 128 MiB.
+- The interface shows the progress of an unlock as a bar and no estimate of the remaining
+  time; estimates are planned for Milestone 3.
+- A cached master key that no longer decrypts does not invalidate the cache: jobs fail with
+  `secrets_undecryptable` ([ADR 0006](0006-secrets-at-rest.md), As built).
+- Vectors as built: the RFC 7914 vectors and the key file of the recorded restic 0.19.1
+  repository in the unit suite, and a key that restic 0.19.1 calibrated in the conformance
+  suite. There is not one key file per restic version of the matrix.

@@ -5,9 +5,9 @@ Date: 2026-11-09
 ## Context
 The plugin needs three secrets for unattended operation: the restic repository password,
 the repository master key derived from it (so that the expensive scrypt derivation runs once,
-ADR 0020), and the BorgBase REST password. They must survive restarts, must not be readable
-from a database leak alone, must never appear in logs or URLs, and the operator must be able
-to recover.
+ADR 0020), and the REST password of the repository server. They must survive restarts, must
+not be readable from a database leak alone, must never appear in logs or URLs, and the
+operator must be able to recover.
 
 ## Decision
 - Secrets are stored in one option (`backups_for_restic_secrets`, `autoload = no`) encrypted
@@ -39,3 +39,17 @@ to recover.
 - **Adding a plugin-owned key file to the repository with cheap KDF parameters** instead of
   caching the master key: modifies the repository and offers no security advantage over the
   encrypted cache.
+
+## As built (2026-11)
+- The settings page does not mark the values that a constant overrides, and no field is
+  read-only: the REST API reports them, the admin script does not use the report. Planned
+  for Milestone 3.
+- A cached master key that no longer decrypts is not derived again.
+  `Connection\RepositoryAccess::open_cached()` passes `SecretsUndecryptable` on, and every
+  job ends with the error `secrets_undecryptable`, also when both password constants are
+  defined. Constants therefore do not avoid the issue once a key is cached: after the salts
+  changed, the option `backups_for_restic_secrets` has to be deleted as well, or the plugin
+  set up again ([disaster-recovery guide](../06-disaster-recovery.md), Scenario E).
+- The plugin detects the state (Doctor check `secrets`, the job error) but has no form to
+  enter the passwords again. That form is planned for Milestone 3; deriving the key again
+  without the administrator is not planned yet.

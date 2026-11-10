@@ -231,6 +231,26 @@ final class CheckTest extends TestCase {
 		self::assertSame( CheckRun::MAX_FINDINGS + 10, $result['warnings'] );
 	}
 
+	public function test_errors_are_kept_when_earlier_warnings_filled_the_list(): void {
+		for ( $i = 0; $i < CheckRun::MAX_FINDINGS + 10; $i++ ) {
+			$this->backend->save( ObjectType::Data, Id::of( 'stray ' . $i )->hex(), 'stray ' . $i );
+		}
+		$snapshots = array_keys( $this->backend->list( ObjectType::Snapshots ) );
+		sort( $snapshots );
+		foreach ( $snapshots as $snapshot ) {
+			$this->backend->objects['snapshots'][ $snapshot ] = 'not an encrypted snapshot';
+		}
+
+		$result = $this->check( 0 );
+
+		self::assertSame( CheckRun::MAX_FINDINGS + 10, $result['warnings'], 'The packs are compared before the snapshots are read.' );
+		self::assertSame( count( $snapshots ), $result['errors'] );
+		self::assertCount( CheckRun::MAX_FINDINGS, $result['findings'] );
+		$errors = array_values( array_filter( $result['findings'], static fn ( array $finding ): bool => 'error' === $finding['severity'] ) );
+		self::assertSame( $snapshots, array_column( $errors, 'object' ), 'Every error kept its details, in the order found.' );
+		self::assertSame( 'warning', $result['findings'][0]['severity'], 'The oldest warnings stay; the newest made room.' );
+	}
+
 	public function test_a_damaged_index_file_is_a_finding_and_the_check_goes_on(): void {
 		$name                                     = array_key_first( $this->backend->list( ObjectType::Index ) );
 		$this->backend->objects['index'][ $name ] = 'not an encrypted index file';
@@ -584,6 +604,63 @@ final class CheckTest extends TestCase {
 		}
 		$other->release( $exclusive );
 		CheckRun::resume( $this->repository, $work, $this->identity, $clock )->abort();
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_requests_that_end_in_a_later_pack_of_the_same_call_still_count_as_attempts(): void {
+		$work            = $this->work_dir();
+		$this->cleanup[] = $aside = TempDir::create( 'killed' );
+		$run             = null;
+		$first           = null;
+		$victim          = null;
+		$kills           = 0;
+		$backend         = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type, string $name ) use ( &$run, &$first, &$victim, &$kills, $work, $aside ): void {
+				if ( 'load' !== $method || ObjectType::Data !== $type || 'read' !== $run?->progress()['phase'] ) {
+					return;
+				}
+				$first ??= $name;
+				if ( $name === $first ) {
+					return;
+				}
+				$victim ??= $name;
+				if ( $name === $victim && $kills < CheckRun::READ_ATTEMPTS ) {
+					// The host kills the request while it reads the second pack of this call. What is
+					// on disk at this moment is what the next request finds.
+					++$kills;
+					copy( $work . '/state.json', $aside . '/state.json' );
+					copy( $work . '/reading.json', $aside . '/reading.json' );
+					throw new \RuntimeException( 'The request was killed.' );
+				}
+			}
+		);
+		$repository      = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run             = CheckRun::start( $repository, $work, $this->identity, new FrozenClock( time() ), new SystemRandom(), 100 );
+
+		for ( $request = 0; $request < CheckRun::READ_ATTEMPTS; $request++ ) {
+			try {
+				$run->advance( INF );
+				self::fail( 'The request must end while it reads the pack.' );
+			} catch ( \RuntimeException $killed ) {
+				self::assertSame( 'The request was killed.', $killed->getMessage() );
+			}
+			// A killed request runs no handler: put back what was on disk when it ended.
+			copy( $aside . '/state.json', $work . '/state.json' );
+			copy( $aside . '/reading.json', $work . '/reading.json' );
+			$run = CheckRun::resume( $repository, $work, $this->identity, new FrozenClock( time() ) );
+		}
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertSame( CheckRun::READ_ATTEMPTS, $kills );
+		self::assertNotNull( $victim );
+		$result = $run->result();
+		self::assertSame( 0, $result['errors'] );
+		self::assertSame( [ 'warning:pack_unverified' ], self::codes( $result ) );
+		self::assertSame( $victim, $result['findings'][0]['object'] );
+		self::assertSame( count( $this->backend->list( ObjectType::Data ) ) - 1, $result['stats']['packs_read'] ?? 0, 'Every other pack was read.' );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 }

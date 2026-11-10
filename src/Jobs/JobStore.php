@@ -12,6 +12,7 @@ namespace BackupsForRestic\Jobs;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Redactor;
 
@@ -20,8 +21,17 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Keeps each job in its own directory under jobs/ (ADR 0014): job.json, written atomically,
  * events.log and the step's working files. IDs sort by creation time.
+ *
+ * After its creation a job document has one writer at a time: whoever holds the runner lock,
+ * as a rule a tick. A request to cancel therefore is a file of its own next to the document.
  */
 final class JobStore {
+
+	/** Held in jobs/ while create() checks for an active job and writes the new one. */
+	public const string CREATE_LOCK = 'create.lock';
+
+	/** In a job's directory once an administrator asked to cancel it. */
+	public const string CANCEL_MARKER = 'cancel-requested';
 
 	private const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
 
@@ -40,21 +50,32 @@ final class JobStore {
 	}
 
 	/**
-	 * Creates a queued job unless another one is active.
+	 * Creates a queued job unless another one is active. The check and the write happen under
+	 * an exclusive lock, so that two requests at the same moment cannot both find no job and
+	 * create one each.
 	 *
-	 * @param JobType $type    Type.
-	 * @param string  $trigger manual, schedule, cli or setup.
-	 * @param int     $now     Unix time.
+	 * @param JobType              $type    Type.
+	 * @param string               $trigger manual, schedule, cli or setup.
+	 * @param int                  $now     Unix time.
+	 * @param array<string, mixed> $data    Step data the job starts with; never secrets.
 	 * @return Job The new job.
 	 * @throws JobConflict If a job is already active.
+	 * @throws StorageFailed If the jobs directory cannot be locked or written.
 	 */
-	public function create( JobType $type, string $trigger, int $now ): Job {
-		$active = $this->active();
-		if ( null !== $active ) {
-			JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
+	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
+		$lock = $this->lock();
+		try {
+			$active = $this->active();
+			if ( null !== $active ) {
+				JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
+			}
+			$job       = new Job( gmdate( 'Ymd\THis\Z', $now ) . '-' . bin2hex( $this->random->bytes( 3 ) ), $type, $trigger, $now );
+			$job->data = $data;
+			$this->save( $job );
+		} finally {
+			flock( $lock, LOCK_UN );
+			fclose( $lock );
 		}
-		$job = new Job( gmdate( 'Ymd\THis\Z', $now ) . '-' . bin2hex( $this->random->bytes( 3 ) ), $type, $trigger, $now );
-		$this->save( $job );
 		$this->log( $job )->write(
 			'info',
 			'Job created.',
@@ -82,7 +103,8 @@ final class JobStore {
 	}
 
 	/**
-	 * Loads a job.
+	 * Loads a job. A request to cancel that the job document does not show yet
+	 * (request_cancel()) is part of what is loaded.
 	 *
 	 * @param string $id Job ID.
 	 * @return Job|null The job, or null if the ID is unknown or invalid.
@@ -97,20 +119,53 @@ final class JobStore {
 		}
 		$fields = json_decode( $json, true );
 		try {
-			return is_array( $fields ) ? Job::from_array( $fields ) : null;
+			$job = is_array( $fields ) ? Job::from_array( $fields ) : null;
 		} catch ( FormatException ) {
 			return null;
 		}
+		if ( null !== $job && ! $job->cancel_requested ) {
+			$job->cancel_requested = $this->cancel_requested( $job );
+		}
+		return $job;
 	}
 
 	/**
-	 * Writes a job atomically.
+	 * Writes a job atomically. After the job's creation only the holder of the runner lock
+	 * calls this; everyone else would overwrite what a tick saves, or be overwritten by it.
 	 *
 	 * @param Job $job Job.
 	 */
 	public function save( Job $job ): void {
 		$json = json_encode( $job->to_array(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR );
 		Files::write_atomic( $this->directory( $job ) . '/job.json', $this->redactor->redact( $json ) . "\n" );
+	}
+
+	/**
+	 * Records that an administrator asked to cancel a job, as a marker file in the job's
+	 * directory. Unlike a changed job document, the marker cannot overwrite what a running
+	 * tick saves, and no save of a tick can lose it; the runner reads it before every step.
+	 *
+	 * @param Job $job Job.
+	 * @throws StorageFailed If the marker cannot be written.
+	 */
+	public function request_cancel( Job $job ): void {
+		// A job whose directory is gone was pruned; there is nothing left to cancel.
+		if ( is_dir( $this->directory . '/' . $job->id ) ) {
+			Files::write_atomic( $this->directory . '/' . $job->id . '/' . self::CANCEL_MARKER, "1\n" );
+		}
+	}
+
+	/**
+	 * Whether cancelling a job was requested with request_cancel().
+	 *
+	 * @param Job $job Job.
+	 * @return bool True if the marker exists.
+	 */
+	public function cancel_requested( Job $job ): bool {
+		$marker = $this->directory . '/' . $job->id . '/' . self::CANCEL_MARKER;
+		// Another request writes the marker while a tick runs: never answer from PHP's stat cache.
+		clearstatcache( true, $marker );
+		return is_file( $marker );
 	}
 
 	/**
@@ -173,6 +228,27 @@ final class JobStore {
 			}
 		}
 		return $deleted;
+	}
+
+	/**
+	 * Takes the lock of create(), waiting for another request that is creating a job.
+	 *
+	 * @return resource The open lock file; closing it releases the lock.
+	 * @throws StorageFailed If the jobs directory cannot be created or locked.
+	 */
+	private function lock() {
+		if ( ! is_dir( $this->directory ) && ! mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) {
+			StorageFailed::raise( 'The jobs directory could not be created.' );
+		}
+		$handle = fopen( $this->directory . '/' . self::CREATE_LOCK, 'c' );
+		if ( false === $handle ) {
+			StorageFailed::raise( 'The jobs directory could not be locked.' );
+		}
+		if ( ! flock( $handle, LOCK_EX ) ) {
+			fclose( $handle );
+			StorageFailed::raise( 'The jobs directory could not be locked.' );
+		}
+		return $handle;
 	}
 
 	/**

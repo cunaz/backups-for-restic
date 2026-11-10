@@ -8,9 +8,10 @@ shell and no way to install programs. WordPress backup plugins that do run every
 plaintext archives on the web server, depend on the vendor's cloud, or ship large amounts of
 third-party code.
 
-This plugin gives a WordPress site a **restic-native, encrypted, deduplicated backup on
-BorgBase or a self-hosted restic REST server**, managed from the WordPress admin, running on plain shared hosting, with a
-restore path that works with nothing but the `restic` command line on any computer.
+This plugin gives a WordPress site a **restic-native, encrypted, deduplicated backup on a
+self-hosted restic REST server or a hosted one such as BorgBase**, managed from the WordPress
+admin, running on plain shared hosting, with a restore path that works with nothing but the
+`restic` command line on any computer.
 
 ## 2. Target users
 
@@ -35,13 +36,14 @@ restore path that works with nothing but the `restic` command line on any comput
    killed requests, flaky WP-Cron and host restarts cost at most one slice.
 6. **Readable code.** A new contributor finds the place to change within minutes and can run
    the full test suite locally, including the restic conformance suite.
-7. **Honest observability.** The dashboard shows what really happened, including how long
-   the first backup will take on this host.
+7. **Honest observability.** The dashboard shows what really happened. Progress shows the
+   files and bytes processed so far; an estimate of how long the first backup will take on
+   this host is planned for Milestone 3.
 
 ## 4. Non-goals
 
 - Not a general-purpose backup product: **restic format over the restic REST protocol**, on
-  BorgBase or a self-hosted `rest-server` ([ADR 0025](adr/0025-repository-servers.md)). Other
+  a self-hosted `rest-server` or BorgBase ([ADR 0025](adr/0025-repository-servers.md)). Other
   backends (S3, SFTP, local) are out of scope.
 - No compression in the native engine (repository format version 1); compression is a CLI
   matter on another computer ([ADR 0019](adr/0019-repository-format-and-chunker.md)).
@@ -63,8 +65,8 @@ restore path that works with nothing but the `restic` command line on any comput
 | --- | --- | --- |
 | Shared hosting (cPanel, Plesk, proprietary panels), `proc_open` disabled, no shell | the majority of WordPress sites | **Primary.** Needs outbound HTTPS; a control-panel cron fetching `wp-cron.php` is recommended |
 | Managed WordPress hosting | mid-tier and premium hosts | **Primary.** Same requirements; hosts with aggressive CPU quotas use the gentle throttle |
-| VPS / dedicated servers / containers | Debian, Ubuntu, Docker | **Supported.** Works unchanged; WP-CLI `--wait` mode gives consistent database snapshots; a future binary engine would add speed and compression |
-| Hosts blocking outbound HTTPS | rare, corporate | **Unsupported**, detected by the Doctor |
+| VPS / dedicated servers / containers | Debian, Ubuntu, Docker | **Supported.** Works unchanged; WP-CLI `--wait` runs a job in one process (the database dump stays consistent per page, as everywhere; a consistent snapshot is a later option, [ADR 0021](adr/0021-database-streaming.md)); a future binary engine would add speed and compression |
+| Hosts blocking outbound HTTPS | rare, corporate | **Unsupported.** The wizard's connection test fails there; a check in the Doctor is planned for Milestone 3 |
 | Windows / IIS | — | **Untested** in 1.0 |
 
 Multisite networks are **not supported in 1.0**: activation is refused with a clear message
@@ -74,20 +76,23 @@ distinct roots.
 
 ## 6. Functional requirements
 
+What 1.0 must do. Where the code does not meet a requirement yet, the row says so and names
+the milestone.
+
 | ID | Requirement |
 | --- | --- |
-| FR-01 | Guided first-run setup: environment check with hosting guidance, choice of repository server (BorgBase or own rest-server), credentials, connection test, append-only detection, repository creation or connection, unlock with progress, recovery kit acknowledgement, schedule, first backup |
+| FR-01 | Guided first-run setup: environment check with hosting guidance, choice of repository server (own rest-server or BorgBase), credentials, connection test, append-only detection, repository creation or connection, unlock with progress, recovery kit acknowledgement, schedule, first backup |
 | FR-02 | Back up the site's files (all distinct roots) and the database into one restic snapshot |
-| FR-03 | Scheduled backups (daily by default, hourly to weekly configurable, site timezone) |
-| FR-04 | Manual backup from the admin UI (and WP-CLI where available) with live progress and time estimates |
+| FR-03 | Scheduled backups in the site's time zone: daily by default, configurable as twice daily, daily or weekly, or manual only. Hourly backups are not offered and not planned yet |
+| FR-04 | Manual backup from the admin UI (and WP-CLI where available) with live progress. Progress shows files and bytes so far; totals and time estimates are planned for Milestone 3 |
 | FR-05 | Retention with restic's policy semantics, or marked as externally managed for append-only repositories |
 | FR-06 | Periodic integrity checks: structural plus a configurable sample of data |
-| FR-07 | Snapshot browser: list snapshots, browse directories, view the manifest |
-| FR-08 | Restore: single file download, selected paths to staging, database restore, guarded apply to the live site |
+| FR-07 | Snapshot browser: list snapshots, browse directories, view the manifest. The list exists; browsing and the manifest view arrive with Milestone 3 |
+| FR-08 | Restore: single file download, selected paths to staging, database restore, guarded apply to the live site (Milestone 3; until then with the restic CLI and the recovery kit) |
 | FR-09 | Notifications on failure and stale backups by e-mail; webhook later |
 | FR-10 | Site Health tests and debug information |
-| FR-11 | WP-CLI commands with parity where a terminal makes sense; nothing requires WP-CLI |
-| FR-12 | Redacted, downloadable logs per job |
+| FR-11 | WP-CLI commands with parity where a terminal makes sense; nothing requires WP-CLI. Today: `doctor`, starting backup, forget, prune and check, `tick`, `status` and `snapshots`; settings, cancelling, logs and the recovery kit are planned for Milestone 3 |
+| FR-12 | Redacted logs per job. They are shown in the admin area (Logs tab); a download does not exist and is not planned yet |
 | FR-13 | Recovery kit: everything needed to restore with the restic CLI, shown once and after re-authentication |
 | FR-14 | Include/exclude configuration with safe defaults |
 | FR-15 | Uninstall removes all local plugin data; the repository on the server is untouched |
@@ -99,12 +104,12 @@ distinct roots.
 | --- | --- |
 | NFR-01 | Every operation runs in slices that fit a 30-second PHP request; no step assumes a long-lived process except WP-CLI `--wait` |
 | NFR-02 | A killed request, a lost WP-Cron run or a host restart loses at most one slice of work and never leaves an inconsistent repository |
-| NFR-03 | Peak memory of the plugin's code stays below 64 MB above WordPress' baseline regardless of site size |
+| NFR-03 | Peak memory of the plugin's code does not grow with the size of files or tables and stays below 64 MB above WordPress' baseline while the repository's index fits into it. The merged index is held in memory at about 100 bytes per blob, which reaches 64 MB at roughly 640 000 blobs (derived, not measured); a measured limit and a bound or preflight estimate are planned for Milestone 3 |
 | NFR-04 | No secret ever appears in process arguments (there are none), URLs, logs, notices, e-mails, HTML or REST responses |
 | NFR-05 | All admin actions require `manage_options` and a nonce or REST authentication |
-| NFR-06 | 100 % of strings translatable; English source strings, German translation maintained on translate.wordpress.org |
+| NFR-06 | 100 % of strings translatable; English source strings, German translation maintained on translate.wordpress.org. Not met yet for three kinds of text that the admin page shows in English: job log lines, job warnings and byte units; closing that gap is not planned yet |
 | NFR-07 | Admin UI accessible (keyboard, screen readers, admin colour schemes) |
-| NFR-08 | PHPStan at maximum level, WordPress Coding Standards and Plugin Check pass in CI; unit tests run without WordPress or a database; the conformance suite passes against the restic CLI; mutation and fuzzing gates hold for `Crypto` and `Format` |
+| NFR-08 | PHPStan at maximum level and WordPress Coding Standards pass in CI; Plugin Check joins them in Milestone 3; unit tests run without WordPress or a database; the conformance suite passes against the restic CLI; the mutation gate holds for `Crypto`, `Format` and `Engine\Forget`, and every parser of server data is fuzzed |
 | NFR-09 | A release is reproducible from a tagged commit by CI and deployed to WordPress.org by CI only |
 | NFR-10 | Throughput gates measured on PHP 8.3 without JIT (see architecture §16) hold on every release |
 
@@ -115,7 +120,8 @@ distinct roots.
   8.3 ([ADR 0003](adr/0003-version-floors.md)).
 - **WordPress.org is the distribution channel** ([ADR 0017](adr/0017-distribution-via-wordpress-org.md)):
   no downloading, bundling or self-updating of executable code; unique prefixes of at least
-  four characters; disclosure of the external service (BorgBase) in `readme.txt`;
+  four characters; disclosure of the external service (the repository server the user
+  configures, with BorgBase named as the preset) in `readme.txt`;
   human-readable code; graceful failure when requirements are missing; translations through
   translate.wordpress.org; a clean Plugin Check run.
 - **Shared hosting** ([ADR 0018](adr/0018-native-php-engine.md)): no processes, bounded
@@ -146,18 +152,18 @@ The plugin is called **Backups for restic** ([ADR 0015](adr/0015-naming-and-lice
 
 | Term | Meaning |
 | --- | --- |
-| **Repository** | The restic repository on the repository server (BorgBase or a self-hosted rest-server); encrypted with the *repository password* |
+| **Repository** | The restic repository on the repository server (a self-hosted rest-server or BorgBase); encrypted with the *repository password* |
 | **Repository password** | The restic password; the single secret nobody can recover |
 | **Master key** | The repository's data key, derived once from the password via the key file and cached encrypted |
-| **REST credentials** | The HTTP username and password of the repository server (per repository on BorgBase; an `.htpasswd` entry on rest-server) |
+| **REST credentials** | The HTTP username and password of the repository server (an `.htpasswd` entry on rest-server; per repository on BorgBase) |
 | **Engine** | The plugin's PHP implementation of the restic format and operations |
 | **Snapshot** | One restic snapshot = one backup run (files + database directory + manifest) |
 | **Blob, pack, index, tree** | restic's building blocks: encrypted chunks, files that bundle them, their directory, and directory listings |
-| **Job** | A unit of work managed by the plugin: backup, forget, prune, check, restore |
+| **Job** | A unit of work managed by the plugin: backup, unlock, forget, prune, check; restore from Milestone 3 |
 | **Tick** | One bounded slice of the job runner, triggered by WP-Cron, loopback chaining, an admin poll or WP-CLI |
-| **Ledger** | The job's append-only record of scanned entries and produced blob ids |
-| **Private directory** | The plugin's working directory for caches, ledger, temp packs, staging and job state |
-| **Recovery kit** | Repository URL, REST credentials, repository password, format version and a restore recipe |
-| **Spool** | A virtual path prefix in the snapshot under which the database files and the manifest appear; nothing is written there on disk |
-| **Append-only** | A server setting (BorgBase repository option, rest-server `--append-only`) that rejects deletions except lock files; detected automatically |
+| **Checkpoint** | What a job keeps on disk between ticks so that the next one continues: for a backup the stack of directories on the walk with their finished entries and the file being read. It replaced the separate ledger of the first design ([ADR 0014](adr/0014-file-based-job-store.md)) |
+| **Private directory** | The plugin's working directory for the index cache, job state with checkpoints and logs, the scrypt table during an unlock and, from Milestone 3, restore staging. Packs are built in memory, not there |
+| **Recovery kit** | Repository URL, REST credentials, repository password, format version, a restore recipe and, for a server with its own certificate authority, the CA certificate |
+| **Spool** | A virtual path prefix in the snapshot under which the database files and the manifest appear; on disk there are only two empty directories for the backup to walk into |
+| **Append-only** | A server setting (rest-server `--append-only`, BorgBase repository option) that rejects deletions except lock files; detected automatically |
 | **Prune-lite** | Deleting packs that no snapshot references, without repacking partially used packs |

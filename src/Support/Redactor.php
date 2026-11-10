@@ -40,6 +40,18 @@ final class Redactor {
 	}
 
 	/**
+	 * Adds the credentials of HTTP basic authentication. The Authorization header carries the
+	 * base64 of "user:password", which contains neither the password nor its base64; the
+	 * combined value is removed in the same forms as any other secret.
+	 *
+	 * @param string $username User name.
+	 * @param Secret $password Password.
+	 */
+	public function add_credentials( string $username, Secret $password ): void {
+		$this->add( new Secret( $username . ':' . $password->reveal() ) );
+	}
+
+	/**
 	 * Redacts a text.
 	 *
 	 * @param string $text Text.

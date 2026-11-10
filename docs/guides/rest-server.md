@@ -30,19 +30,49 @@ sudo chmod 600 /srv/restic/.htpasswd
 Leave out `-c` when you add more logins later, and run the `chown` again afterwards. Start
 rest-server as the user `restic`, never as root.
 
+## Certificate and key
+
+The user `restic` must be able to read the certificate and its key. Let's Encrypt keeps
+both below `/etc/letsencrypt/`, which only root can read, so give rest-server copies of its
+own:
+
+```bash
+sudo install -d -o restic -g restic -m 700 /etc/rest-server
+sudo install -o restic -g restic -m 600 \
+  /etc/letsencrypt/live/backup.example.net/fullchain.pem \
+  /etc/letsencrypt/live/backup.example.net/privkey.pem /etc/rest-server/
+```
+
+rest-server reads the certificate only when it starts. After every renewal the new files
+must therefore be copied and rest-server restarted, or it keeps serving the old certificate
+until that expires. With certbot, save the following as an executable file in
+`/etc/letsencrypt/renewal-hooks/deploy/`; certbot runs it after each successful renewal:
+
+```bash
+#!/bin/sh
+install -o restic -g restic -m 600 \
+  /etc/letsencrypt/live/backup.example.net/fullchain.pem \
+  /etc/letsencrypt/live/backup.example.net/privkey.pem /etc/rest-server/
+systemctl restart rest-server
+```
+
+A job of the plugin that is running during the restart tries again by itself.
+
 ## Start the server
 
 ```bash
 rest-server --path /srv/restic --listen :8000 \
   --append-only --private-repos \
-  --tls --tls-cert /etc/letsencrypt/live/backup.example.net/fullchain.pem \
-  --tls-key /etc/letsencrypt/live/backup.example.net/privkey.pem
+  --tls --tls-cert /etc/rest-server/fullchain.pem \
+  --tls-key /etc/rest-server/privkey.pem
 ```
 
 - `--private-repos` lets each user reach only the repositories below `/<user>/`.
 - `--append-only` is recommended: the server stores new backups but refuses to delete
   anything except lock files. The plugin detects this and leaves the cleanup to you.
-- Run it as a service; the rest-server repository has an example systemd unit.
+- Run it as a service under the user `restic`; the rest-server repository has an example
+  systemd unit. The restart in the renewal hook above assumes that the service is called
+  `rest-server`.
 - If your firewall allows it, open port 8000 only to the outgoing address of your web host.
 
 ## Connect the site
@@ -61,8 +91,11 @@ certificate for this server.
 
 An append-only server never deletes, so old snapshots and the data only they use stay until
 you remove them. On the server itself, restic can work on the data directory directly,
-without going through rest-server and its append-only flag. With the repository password from
-the site's recovery kit, run as the user that owns `/srv/restic`:
+without going through rest-server and its append-only flag. `restic forget` deletes for
+good, so try every new or changed set of options with `--dry-run` in place of `--prune`
+first: restic then only prints which snapshots it would keep and which it would remove.
+With the repository password from the site's recovery kit, run as the user that owns
+`/srv/restic`:
 
 ```bash
 restic -r /srv/restic/mysite/wordpress forget \

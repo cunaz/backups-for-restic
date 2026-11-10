@@ -67,10 +67,15 @@ kill at least 90 % of the covered mutants.
 
 - WordPress coding standards with the deviations in [docs/04 §3](docs/04-development-and-quality.md#3-coding-standards):
   tabs, PSR-4 file names, snake_case functions and variables, no Yoda conditions.
-- `src/Crypto`, `src/Format`, `src/Backend` and `src/Engine` must not call WordPress
-  functions.
-- Every change comes with tests. Changes to `Crypto` or `Format` also need a green
-  conformance run and must keep the mutation score at or above 90 %.
+- Only `src/WordPress` and `src/Plugin.php` may call WordPress functions or use WordPress
+  classes; a PHPStan rule checks it
+  ([ADR 0029](docs/adr/0029-wordpress-free-core.md)).
+- Every change comes with tests. Changes to `Crypto`, `Format`, `Backend` or `Engine` also
+  need a green conformance run. Changes to `Crypto`, `Format` or `Engine\Forget` must keep
+  the covered mutation score at or above 90 %.
+- Changes to `Crypto`, `Format` or `Engine` wait 24 hours after their last commit before
+  they are merged, and the author reads the diff once more before merging (the cooling-off
+  period of [ADR 0024](docs/adr/0024-governance-and-quality-assurance.md)).
 - Never weaken a security control to make a test pass; open an issue instead.
 - Security problems go to [SECURITY.md](SECURITY.md), not to the issue tracker.
 
@@ -79,7 +84,14 @@ kill at least 90 % of the covered mutants.
 All changes, including the maintainer's own, go through pull requests with the required
 checks. Sign off your commits (`git commit -s`) to confirm the Developer Certificate of
 Origin. Describe what changed, why, and the security impact: does the change touch secrets,
-cryptography, filesystem writes, HTTP requests or capability checks?
+cryptography, filesystem writes, HTTP requests or capability checks? If it does, go through
+the [self-review checklist](docs/04-development-and-quality.md#91-self-review-checklist-for-security-relevant-changes)
+and write its result under "Security impact". The pull request template lists the same
+points as checkboxes.
+
+Bug reports use the issue template, which asks for the output of
+`wp backups-for-restic doctor` or the list under **Backups → Environment**. Never paste a
+recovery kit, a password or a repository address with credentials into an issue.
 
 [CodeRabbit](https://www.coderabbit.ai) reviews every pull request automatically with the
 project's instructions in [`.coderabbit.yaml`](.coderabbit.yaml). Answer or resolve its

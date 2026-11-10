@@ -104,6 +104,10 @@ final class Messages {
 				'message' => __( 'The backup is not configured completely.', 'backups-for-restic' ),
 				'hint'    => __( 'Finish the setup wizard or check the settings.', 'backups-for-restic' ),
 			],
+			'setup_incomplete'               => [
+				'message' => __( 'The setup is not finished yet.', 'backups-for-restic' ),
+				'hint'    => __( 'Finish the setup wizard and confirm that you stored the recovery kit. Backups and maintenance start after that.', 'backups-for-restic' ),
+			],
 			default                          => [
 				'message' => __( 'An unexpected error stopped the job.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job has the details. Please report it if it happens again.', 'backups-for-restic' ),
@@ -216,6 +220,7 @@ final class Messages {
 			'too_long'             => __( 'The value is too long.', 'backups-for-restic' ),
 			'invalid_characters'   => __( 'The value contains characters that are not allowed.', 'backups-for-restic' ),
 			'invalid_duration'     => __( 'Enter a duration such as 2d for two days, 12h for twelve hours or 1y6m; it must not be zero.', 'backups-for-restic' ),
+			'retention_floor'      => __( 'Keep every snapshot of at least one day (1d or more), or always keep at least one newest snapshot.', 'backups-for-restic' ),
 			'invalid_email'        => __( 'Enter one valid e-mail address per line.', 'backups-for-restic' ),
 			default                => __( 'This value is not valid.', 'backups-for-restic' ),
 		};

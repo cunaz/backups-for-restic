@@ -57,7 +57,53 @@ All notable changes are documented here. The format follows
 - Benchmarks with the Milestone 0 gates, mutation testing configuration, a PHPStan rule
   that keeps the engine core free of WordPress, and CI workflows.
 
+### Changed
+- The setup wizard lists an own restic REST server first and preselects it; BorgBase is the
+  second option, and `repository.server` defaults to `rest-server`.
+- Retention needs `keep.within` of at least one day or `keep.last` of at least 1. The
+  settings refuse anything below (`retention_floor`), and a forget job that finds such a
+  pair stored fails without deleting anything.
+- A notification that could not be sent is tried again after 15 minutes, 1 hour, 6 hours
+  and 24 hours, not at the next four heartbeats. It is dropped after the fifth refusal or
+  after two days.
+- With `advanced.loopback_chaining` off, creating a job no longer requests `wp-cron.php`;
+  the heartbeat and an open admin page advance the job.
+
+### Security
+- After the setup, `POST /repository/connect` and `POST /repository/create` answer with the
+  recovery kit only if the request carries the administrator's WordPress password, like
+  the recovery kit route; before, any session with the plugin's capability got the
+  repository password and the REST credentials from them. A refused connect no longer
+  replaces the stored password or drops the cached key.
+- The stored REST password is only sent to the host, port and user name it was saved for.
+  A connection test or a save for another server must carry the password
+  (`password_required`); before, a request that named another host got the stored password
+  sent there.
+- Backup, forget, prune and check jobs cannot start before the setup is completed and the
+  recovery kit acknowledged (`setup_incomplete`), neither through the REST API nor WP-CLI.
+- A repository password chosen by the administrator must have at least 12 characters
+  (`password_too_short`); a secret is read back after it is stored, and saving fails if the
+  options table did not keep it.
+- Job files and logs also redact the REST credentials in the form the `Authorization`
+  header carries them.
+
 ### Fixed
+- A cancel request that arrived while a tick was running could be lost, or overwrite the
+  progress the tick had just saved, and two requests at the same moment could both start a
+  job. A cancel request is now a marker file that the runner reads before every step, and
+  jobs are created under a lock.
+- The check alert lists errors before warnings; many warnings of an early phase can no
+  longer push the errors off the list.
+- The dashboard's append-only line shows the latest conclusive probe of the current
+  repository. An inconclusive probe no longer replaces it with the wizard's answer, and a
+  result for another repository is ignored.
+- Uninstalling also removes the working directory selected with the
+  `backups_for_restic_private_dir` filter.
+- The recovery kit is refused (`ca_certificate_missing`) when the settings name an uploaded
+  CA certificate that is missing, instead of leaving the certificate out silently.
+- The texts of the admin page can be extracted for translation: every call passes the text
+  domain as a literal. The settings page no longer claims that repeated checks read the
+  whole repository; each check reads a random sample.
 - Retention removes old snapshots again. Forget grouped snapshots by all their tags, and
   every snapshot carries the tag of the job that wrote it, so each was the newest of a group
   of its own and none was ever removed. Forget now selects this site's snapshots by host
@@ -66,11 +112,20 @@ All notable changes are documented here. The format follows
 - Prune stays safe when requests fail or end at the wrong moment: a tree that was missing
   once is still walked when marking could not start over, so its packs are not taken for
   unused ones; a request that ends while prune deletes is continued in that phase, and the
-  packs it had planned are deleted; a start that was interrupted no longer leaves an
-  exclusive lock that blocks every client for 30 minutes.
+  packs it had planned are deleted, as long as the lock was not lost in between (after a
+  lost lock marking starts over, and packs whose index entries are already gone stay until
+  a full `restic prune`); a start that was interrupted no longer leaves an exclusive lock
+  that blocks every client for 30 minutes.
+- After the site was connected to an existing repository, the cleanup after each job
+  removed the index cache of the repository in use, or left the caches of earlier
+  repositories, because it went by a setting that only a newly created repository sets. It
+  now goes by the repository whose key is cached.
 - A check keeps what it has checked when a request fails (it writes its checkpoint at every
   change of phase and every five seconds), and a repository that this PHP cannot read
   (format 2 with compression, no zstd extension) is reported as that, not as damaged.
+- A check no longer hangs on a pack that the host cannot read within one request: the
+  requests that end while reading it are counted also when they read other packs first,
+  and after three the pack is reported as unverified.
 - A backup, check or forget that no request advanced for more than 30 minutes takes its
   repository lock again instead of refreshing a lock other clients no longer honour, and
   waits for a client that holds a conflicting lock by then.

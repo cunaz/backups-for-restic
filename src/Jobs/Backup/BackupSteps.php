@@ -231,7 +231,9 @@ final class BackupSteps implements StepProvider {
 		Files::remove_tree( $services->unlock_dir( $job ) );
 		Files::remove_tree( $services->work_dir( $job ) );
 		$services->jobs->prune( $services->settings->int( 'advanced.keep_jobs' ) );
-		$services->cache()->remove_others( $services->settings->string( 'repository.id' ) );
+		// The repository in use is the one whose key is cached. Without a cached key nothing is
+		// removed: better an old cache too many than the current one deleted after every job.
+		$services->cache()->remove_others( $services->access->cached_repository_id() );
 		return true;
 	}
 

@@ -8,13 +8,13 @@ Status: design preserved for a possible post-1.0 feature. Not part of 1.0
 
 On a VPS with `proc_open` and a system-installed restic, the binary is faster than PHP
 (chunking in Go, parallel uploads), supports compression (repository format 2 with zstd)
-and full `prune` with repacking. The native engine's seams (`Backend`, `BlobStore`,
-`ResumableStep`) allow a second engine implementation that delegates the heavy operations
-to the binary while the job model, settings, secrets, UI and database streaming stay the
-same. A repository created by the native engine (format version 1) is usable by the binary
-without migration; the reverse requires that the binary keeps the repository at format
-version 1, because in format 2 restic compresses index and snapshot files even with
-`--compression off`, or that `ext-zstd` is available to PHP.
+and full `prune` with repacking. The native engine's seams (`Backend\Backend`,
+`Engine\BlobStore`, `Jobs\Step`) allow a second engine implementation that delegates the
+heavy operations to the binary while the job model, settings, secrets, UI and database
+streaming stay the same. A repository created by the native engine (format version 1) is
+usable by the binary without migration; the reverse requires that the binary keeps the
+repository at format version 1, because in format 2 restic compresses index and snapshot
+files even with `--compression off`, or that `ext-zstd` is available to PHP.
 
 ## Process model (summary of the former design)
 

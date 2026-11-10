@@ -43,7 +43,7 @@ final class MaintenanceServices {
 	 * @return RetentionGuard Guard.
 	 */
 	public function guard(): RetentionGuard {
-		return $this->guard ??= new RetentionGuard( $this->common->state, $this->common->settings->string( 'retention.mode' ), $this->switch_retention, $this->common->clock );
+		return $this->guard ??= new RetentionGuard( $this->common->state, $this->common->settings->string( 'retention.mode' ), $this->switch_retention, $this->common->clock, RetentionGuard::repository( $this->common->settings ) );
 	}
 
 	/**

@@ -61,7 +61,7 @@ final class CheckRun {
 	/** The phases in their order. */
 	private const array PHASES = [ 'index', 'packs', 'snapshots', 'trees', 'read', 'done' ];
 
-	/** At most this many findings are kept with details; all are counted. */
+	/** At most this many findings are kept with details, errors rather than warnings; all are counted. */
 	public const int MAX_FINDINGS = 50;
 
 	/** Bytes of a pack header entry without and with an uncompressed length. */
@@ -517,7 +517,8 @@ final class CheckRun {
 	/**
 	 * Downloads one pack of the sample and verifies it completely. A marker written before the
 	 * read counts the requests that ended during it; after READ_ATTEMPTS the pack becomes a
-	 * warning instead of stopping the check for good.
+	 * warning instead of stopping the check for good. The checkpoint is written before the
+	 * marker, so that the request after a killed one starts with the pack the marker names.
 	 *
 	 * @throws \Throwable Whatever reading the pack throws; the next request tries it again.
 	 */
@@ -533,6 +534,10 @@ final class CheckRun {
 		if ( $attempts > self::READ_ATTEMPTS ) {
 			$this->find( 'warning', 'pack_unverified', $pack, 'Reading the pack did not finish within a request; run restic check --read-data from another computer to verify it.' );
 		} else {
+			// The checkpoint names this pack before the marker does. Otherwise a request that
+			// ends here is followed by one that starts at an earlier pack, replaces the marker,
+			// and the attempts for this pack are never counted.
+			$this->persist();
 			Files::write_atomic(
 				$marker,
 				json_encode(
@@ -729,7 +734,9 @@ final class CheckRun {
 	}
 
 	/**
-	 * Records a finding; details only for the first MAX_FINDINGS, counts for all.
+	 * Records a finding; details only for the first MAX_FINDINGS, counts for all. When the list
+	 * is full, an error takes the place of the newest warning: warnings of an early phase, such
+	 * as many packs that no index lists, must not hide the damage a later phase finds.
 	 *
 	 * @param string $severity error or warning.
 	 * @param string $code     Machine-readable kind.
@@ -739,14 +746,26 @@ final class CheckRun {
 	private function find( string $severity, string $code, string $subject, string $message ): void {
 		$key                           = $severity . ':' . $code;
 		$this->state['counts'][ $key ] = ( $this->state['counts'][ $key ] ?? 0 ) + 1;
-		if ( count( $this->state['findings'] ) < self::MAX_FINDINGS ) {
-			$this->state['findings'][] = [
-				'severity' => $severity,
-				'code'     => $code,
-				'object'   => $subject,
-				'message'  => $message,
-			];
+		$findings                      = $this->state['findings'];
+		if ( count( $findings ) >= self::MAX_FINDINGS ) {
+			$newest_warning = null;
+			foreach ( $findings as $position => $finding ) {
+				if ( 'error' !== $finding['severity'] ) {
+					$newest_warning = $position;
+				}
+			}
+			if ( 'error' !== $severity || null === $newest_warning ) {
+				return;
+			}
+			unset( $findings[ $newest_warning ] );
 		}
+		$findings[]              = [
+			'severity' => $severity,
+			'code'     => $code,
+			'object'   => $subject,
+			'message'  => $message,
+		];
+		$this->state['findings'] = array_values( $findings );
 	}
 
 	/**

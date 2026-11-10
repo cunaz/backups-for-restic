@@ -105,11 +105,17 @@ final class BackupJobTest extends TestCase {
 		mkdir( $site . '/wp-content/cache/page', 0755, true );
 		file_put_contents( $site . '/wp-content/cache/page/index.html', 'cached page' );
 
-		Repository::initialize( $this->server()->backend( 'job' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 16384, 8, 1 ) );
+		$repository         = Repository::initialize( $this->server()->backend( 'job' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 16384, 8, 1 ) );
 		[ $runner, $store ] = $this->components( $site, 'job' );
+		// The cache of a repository this site used before. The site was connected to the
+		// existing repository, so no setting names its ID.
+		$caches = $site . '/wp-content/' . PrivateDirectory::NAME . '/cache';
+		mkdir( $caches . '/' . str_repeat( 'a', 64 ), 0700, true );
 
 		$first = $this->run_job( $runner, $store, 0.4 );
 		self::assertSame( JobState::Succeeded, $first->state, (string) json_encode( $first->error?->to_array() ) );
+		self::assertDirectoryDoesNotExist( $caches . '/' . str_repeat( 'a', 64 ), 'The cache of the other repository is removed.' );
+		self::assertDirectoryExists( $caches . '/' . $repository->config()->id, 'The cache of the repository in use stays.' );
 		self::assertGreaterThan( 5, $first->ticks, 'Unlock and dump spanned many ticks.' );
 
 		$cli = new ResticCli( $this->server(), 'job', self::REPOSITORY_PASSWORD );

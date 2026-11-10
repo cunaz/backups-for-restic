@@ -13,6 +13,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\SystemClock;
@@ -110,6 +111,25 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		$names = array_keys( $backend->list( ObjectType::Index ) );
 		$backend->delete( ObjectType::Index, (string) $names[0] );
 		self::assertSame( $repository->load_index()->to_binary(), $cache->load( $repository )->to_binary(), 'A removed index file forces a rebuild.' );
+	}
+
+	public function test_an_index_cache_whose_directory_cannot_be_created_says_so(): void {
+		$backend    = new InMemoryBackend();
+		$repository = Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$blocked    = $this->directory() . '/not-a-directory';
+		file_put_contents( $blocked, 'A file where the cache directory should be.' );
+		$cache = new IndexCache( $blocked . '/cache' );
+
+		// mkdir() warns before it returns false; the exception is what callers see.
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$cache->load( $repository );
+			self::fail( 'The cache cannot be written.' );
+		} catch ( StorageFailed $e ) {
+			self::assertSame( 'The cache directory could not be created.', $e->getMessage() );
+		} finally {
+			restore_error_handler();
+		}
 	}
 
 	public function test_an_index_larger_than_the_cache_limit_is_not_kept(): void {

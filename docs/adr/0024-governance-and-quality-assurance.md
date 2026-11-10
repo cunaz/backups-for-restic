@@ -67,3 +67,18 @@ can operate.
   nothing for public repositories and catches a different class of mistakes than tests,
   such as missing capability checks or inconsistent documentation.
 - **Pro add-on or paid services**: declined.
+
+## As built (2026-11)
+- The self-review checklist was written on 2026-11-10, after Milestones 0 to 2: it is
+  [§9.1 of the development guide](../04-development-and-quality.md#91-self-review-checklist-for-security-relevant-changes).
+  The pull request template asks for it, for the cooling-off period and for the sign-off of
+  every commit; an issue template asks for the Doctor's output. The changes of Milestones
+  0 to 2 were made without a written checklist.
+- The cooling-off period counts from the last commit that touches `Crypto`, `Format` or
+  `Engine` to the merge. The decision names no starting point; this reading is the one in
+  the checklist and needs the owner's confirmation.
+- Commits are signed off under the Developer Certificate of Origin. No CI job checks the
+  sign-off yet; that check is planned for Milestone 3.
+- `readme.txt` has no donation link. Adding one is not planned yet.
+- The release checklist does not exist as a file. It comes with the release tooling of
+  Milestone 3.

@@ -15,7 +15,7 @@ final class SettingsTest extends TestCase {
 
 	public function test_defaults_match_the_documented_model(): void {
 		$settings = ( new SettingsStore( new InMemoryOptions() ) )->load();
-		self::assertSame( 'borgbase', $settings->string( 'repository.server' ) );
+		self::assertSame( 'rest-server', $settings->string( 'repository.server' ), 'An own server is the first choice; BorgBase is a preset.' );
 		self::assertSame( 'daily', $settings->string( 'schedule.backup.frequency' ) );
 		self::assertSame( 3, $settings->int( 'schedule.backup.hour' ) );
 		self::assertSame( 17, $settings->int( 'schedule.backup.minute' ) );
@@ -36,7 +36,7 @@ final class SettingsTest extends TestCase {
 				'advanced.tick_budget_seconds' => '25',
 				'backup.excludes'              => "*.log\n\n/tmp/cache\n*.log",
 				'backup.exclude_caches'        => 'off',
-				'repository.server'            => 'rest-server',
+				'repository.server'            => 'borgbase',
 			]
 		);
 		self::assertSame( 25, $saved->int( 'advanced.tick_budget_seconds' ) );
@@ -93,6 +93,62 @@ final class SettingsTest extends TestCase {
 		self::assertSame( [], $options->values );
 	}
 
+	/**
+	 * Stored keep-within and keep-last, their new values (null: unchanged), and the field that
+	 * reports the error (null: the change is fine).
+	 *
+	 * @return iterable<string, array{string, int, string|null, int|null, string|null}>
+	 */
+	public static function retention(): iterable {
+		yield 'the defaults without keep-last' => [ '2d', 2, null, 0, null ];
+		yield 'an hour, but always the newest snapshot' => [ '2d', 2, '1h', null, null ];
+		yield 'exactly one day in hours' => [ '2d', 2, '24h', 0, null ];
+		yield 'a month' => [ '2d', 2, '1m', 0, null ];
+		yield 'a day written with a zero hour' => [ '2d', 2, '1d0h', 0, null ];
+		yield 'less than a day and no newest snapshot' => [ '2d', 2, '23h', 0, 'retention.keep.within' ];
+		yield 'zero days and some hours' => [ '2d', 2, '0d12h', 0, 'retention.keep.within' ];
+		yield 'keep-within shortened later' => [ '2d', 0, '1h', null, 'retention.keep.within' ];
+		yield 'keep-last removed later' => [ '1h', 2, null, 0, 'retention.keep.last' ];
+	}
+
+	#[DataProvider( 'retention' )]
+	public function test_retention_keeps_a_day_of_snapshots_or_the_newest_one( string $stored_within, int $stored_last, ?string $within, ?int $last, ?string $refused ): void {
+		$options = new InMemoryOptions();
+		$store   = new SettingsStore( $options );
+		$store->update(
+			[
+				'retention.keep.within' => $stored_within,
+				'retention.keep.last'   => $stored_last,
+			]
+		);
+		$before  = $options->values;
+		$changes = [];
+		if ( null !== $within ) {
+			$changes['retention.keep.within'] = $within;
+		}
+		if ( null !== $last ) {
+			$changes['retention.keep.last'] = $last;
+		}
+		try {
+			$store->update( $changes );
+			self::assertNull( $refused, 'Expected a validation error.' );
+		} catch ( ValidationFailed $e ) {
+			self::assertSame( [ $refused => [ 'code' => 'retention_floor' ] ], $e->errors() );
+			self::assertSame( $before, $options->values, 'Nothing is saved.' );
+		}
+	}
+
+	public function test_a_retention_stored_below_the_floor_does_not_block_other_settings(): void {
+		$options                                  = new InMemoryOptions();
+		$options->values[ SettingsStore::OPTION ] = [
+			'retention.keep.within' => '1h',
+			'retention.keep.last'   => 0,
+		];
+		$saved                                    = ( new SettingsStore( $options ) )->update( [ 'schedule.backup.hour' => 4 ] );
+		self::assertSame( 4, $saved->int( 'schedule.backup.hour' ) );
+		self::assertFalse( Schema::retention_floor( $saved->string( 'retention.keep.within' ), $saved->int( 'retention.keep.last' ) ), 'Forget jobs refuse this policy; see MaintenanceJobTest.' );
+	}
+
 	public function test_invalid_stored_values_fall_back_to_defaults(): void {
 		$settings = Settings::from_stored(
 			[
@@ -102,7 +158,7 @@ final class SettingsTest extends TestCase {
 			]
 		);
 		self::assertSame( 20, $settings->int( 'advanced.tick_budget_seconds' ) );
-		self::assertSame( 'borgbase', $settings->string( 'repository.server' ) );
+		self::assertSame( 'rest-server', $settings->string( 'repository.server' ) );
 		self::assertSame( 5, $settings->int( 'schedule.backup.hour' ) );
 	}
 

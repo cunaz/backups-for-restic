@@ -17,7 +17,7 @@ was not created with mode 0600. What the audit could not close is phase 0 of the
 | --- | --- |
 | Plugin-written repository passes `restic check --read-data`, restore byte for byte | Met: a 20 MB fixture tree, checked by restic 0.19.1, 0.18.1 and 0.14.0, and a 300 MB streamed database dump, checked and restored by restic 0.19.1; incremental backups diff correctly in restic |
 | Restic-written repositories restore identically in PHP | Met for format 1 (restic 0.19.1 and 0.14.0), with zero new data when the plugin backs up the same files. Format 2 needs `ext-zstd` (see below); CI covers it in a second job |
-| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 25 MB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Append-only behaviour green on rest-server. BorgBase pending |
+| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 24 MiB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Append-only behaviour green on rest-server. BorgBase pending |
 | Mutation score of `Crypto` and `Format` ≥ 90 %; fuzzing without open findings | Met. Mutation: 97 % of 2627 mutants in `Crypto`, `Format` and `Engine\Forget` killed or timed out, 70 escaped, none uncovered (CI, 2026-11-09). Fuzzing: 54 million inputs across 17 parsers in a 30-second-per-parser campaign, no findings |
 | Benchmark gates on PHP 8.3 without JIT | Met with wide margins for what was measured: chunker 24 MB/s, scrypt 1.4 s in memory, backup 1.3 CPU minutes per GB, extrapolated from 256 MB written to an in-memory backend by one process ([benchmarks](benchmarks/2026-11-milestone-0.md)). CPU time across ticks to a real server, and the file-backed key derivation that the plugin uses, are not measured yet |
 
@@ -72,16 +72,33 @@ Acceptance
 
 ## Milestone 1 — First backup in WordPress (0.1.0, internal alpha)
 
-**Status (2026-11-09): implemented. The WordPress-free core is verified by running it; the
-WordPress layer only statically (PHPStan at level max against the WordPress stubs, every
-class loaded), because this development environment may not run WordPress itself. The
-integration suite that runs it against a real WordPress is written and waits for CI.**
+**Status (2026-11-10): implemented; the integration suite passes in CI. It runs the plugin
+in a real WordPress 7.1.4 on PHP 8.3: setup through the REST API, a backup driven by
+`wp-cron.php` with `max_execution_time = 30` and a memory ceiling of 128M, `restic check
+--read-data`, a restore with restic, a database import with identical checksums, and a web
+server that is stopped in the middle of a tick. Until 2026-11-10 the suite failed, because
+the CI setup switches on PHP's tracing JIT for the built-in web server and PHP 8.3 then
+crashed in backup ticks; the test server now runs without the JIT, as PHP does by default.
+The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
+which GitHub starts from `main` only, so not before the pull requests are merged.**
+
+**Found by the audit of 2026-11-10 and fixed:** a cancel request was lost when it arrived
+while a tick ran; after the setup the recovery kit could be had without the WordPress
+password through the connect and create routes, and the stored REST password was sent to
+whatever host a request named; backups could start before the setup was completed;
+uninstalling left a working directory chosen with the filter.
+
+**Found and carried into Milestone 3:** no test loads the classes of the WordPress layer
+other than through the HTTP suite, which calls 10 of the 16 routes; loopback chaining, the
+wizard, WP-CLI, uninstall and the multisite refusal are untested. Time estimates, a
+schedule more frequent than twice a day, and the Doctor's checks for outbound HTTPS and for
+how to switch the PHP version were promised and do not exist.
 
 | Acceptance criterion | Result |
 | --- | --- |
-| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration`, run by `integration.yml` with 64 MB per change and with 2 GB plus 300 MB nightly; not yet run. BorgBase pending |
-| A tick killed at any point leaves a resumable job; no stale lock | Engine and runner verified: every step can be interrupted, a killed tick's lease is taken over, and cleanup releases the lock on every path. The kill test through `wp-cron.php` is part of the integration suite |
-| No secret in files under `jobs/`, in REST responses or in HTML | `jobs/` verified in the job test; REST responses checked by the integration suite; the admin HTML contains no settings or secrets by construction |
+| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration` passed in CI on 2026-11-10 with 64 MB of files and 32 MB of database, the restore compared for the uploads directory and the checksums for the fixture tables; the run with 2 GB plus 300 MB is nightly and has not run yet. BorgBase pending |
+| A tick killed at any point leaves a resumable job; no stale lock | Engine and runner verified: every step can be interrupted, a killed tick's lease is taken over, and cleanup releases the lock a checkpoint names on every path. Not covered: a request that dies between taking the lock and writing the first checkpoint of a backup, forget or check leaves a lock nothing recognises, which is stale after 30 minutes (prune writes its checkpoint first). Through `wp-cron.php` in CI: the web server is stopped a few seconds after a cron request started a backup; the job finishes after the restart, `restic check` passes and no lock is left. The test neither asserts that a tick was running when the server stopped nor chooses the step |
+| No secret in files under `jobs/`, in REST responses or in HTML | `jobs/` verified in the job test and in CI; the integration suite searches the responses of four routes (status, settings, jobs, job log) for the two passwords; the admin HTML contains no settings or secrets by construction, which no test checks |
 
 Findings that changed the design:
 - The engine read virtual files in one go and restarted them after an interruption, so a
@@ -143,8 +160,10 @@ real backup job, because every snapshot carries its job's tag and forget grouped
 tags; the simulation had used snapshots with one shared tag and now uses the real ones.
 Prune could delete used packs when a run was tried again after a failed request, could not
 continue after a request ended while it deleted, and could leave its exclusive lock behind.
-A check lost its progress with a failed request and called a repository it could not read
-damaged.
+A check lost its progress with a failed request, called a repository it could not read
+damaged, and could hang on a pack the host cannot read within one request. Notices were
+given up after 20 minutes instead of two days, and many warnings could push the errors off
+the check alert.
 
 **Open, and phase 0 of the [plan for Milestone 3](07-milestone-3-plan.md):** tests for the
 WordPress wiring of the second and third acceptance criterion (the daily probe, the stored
