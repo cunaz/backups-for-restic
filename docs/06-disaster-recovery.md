@@ -214,8 +214,8 @@ is a group of its own, because each carries the tag of the job that wrote it, an
 removed. If several sites with the same host name share the repository, select one site with
 `--tag backups-for-restic,site:<hash>`; `restic snapshots` shows each site's tag.
 
-With append-only enabled, temporarily disable it first (BorgBase: repository settings;
-rest-server: restart without `--append-only`) and re-enable it afterwards. The plugin notices
+With append-only enabled, temporarily disable it first (rest-server: restart without
+`--append-only`; BorgBase: repository settings) and re-enable it afterwards. The plugin notices
 both changes, but it never starts deleting on its own after append-only was turned off. **Do not** run
 `restic migrate upgrade_repo_v2` or `prune --repack-uncompressed` while the plugin uses the
 repository: after the upgrade, restic compresses every index and snapshot file it writes,
@@ -240,8 +240,11 @@ snapshots may then not restore completely. **Do not delete anything and do not p
 the cause is clear.
 
 1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
-   snapshots** to *Another computer*, so that this site runs no forget or prune, and pause
-   maintenance jobs on any other computer that uses the repository.
+   snapshots** to *Another computer*, so that this site starts no forget or prune, and pause
+   maintenance jobs on any other computer that uses the repository. Note what the setting
+   was. The setting does not stop a job that is already running: if the dashboard shows a
+   job that removes old snapshots or unused data, cancel it there and wait until it has
+   stopped.
 
    If a finding says that a pack is missing or damaged (for example "A pack that the index
    lists is missing on the server."), pause the scheduled backups as well, until the index
@@ -260,9 +263,11 @@ the cause is clear.
    builds a new index from the packs that exist, so that it no longer lists lost data.
    Repairs delete files, so on an append-only server they need deletions allowed, as in
    Scenario G.
-4. Start **Back up now** and set the backup schedule back. With a correct index the backup
-   uploads again whatever went missing and still exists on the site, which also heals older
-   snapshots that use the same data.
+4. Start **Back up now**, wait until the dashboard shows that the backup succeeded, and
+   set the backup schedule back. With a correct index the backup uploads again whatever
+   went missing and still exists on the site, which also heals older snapshots that use the
+   same data. While the backup runs it holds a lock, and the check of the next step would
+   refuse to start.
 5. Run `restic check --read-data` again. If it still names snapshots that refer to lost
    data, that data no longer exists on the site. Only then run
    `restic repair snapshots --forget`: it replaces those snapshots with copies without the
@@ -270,7 +275,8 @@ the cause is clear.
 6. Only when `restic check --read-data` finds no errors is the repository healthy; the
    plugin's check reads a sample of the data (2 % by default) and cannot prove that. Then
    start **Check now** on the dashboard to clear the warning, and set retention back to
-   *This site* if the server allows deletions.
+   what it was in step 1. Leave it at *Another computer* if that was your choice or if the
+   server is append-only.
 
 ## Restore drills
 
