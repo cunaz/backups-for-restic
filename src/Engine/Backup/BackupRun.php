@@ -16,6 +16,8 @@ use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\ChunkReader;
 use BackupsForRestic\Format\Chunker\RabinChunker;
@@ -195,12 +197,22 @@ final class BackupRun {
 		$run->state['lock']      = $run->locking->acquire( false )->hex();
 		$run->state['locked_at'] = $seconds;
 
-		$root_tree = null;
-		if ( null !== $parent_id ) {
-			$root_tree = Snapshot::from_json( $repository->load_unpacked( ObjectType::Snapshots, $parent_id ) )->tree->hex();
+		try {
+			$root_tree = null;
+			if ( null !== $parent_id ) {
+				$root_tree = Snapshot::from_json( $repository->load_unpacked( ObjectType::Snapshots, $parent_id ) )->tree->hex();
+			}
+			$run->push_frame( '', 'root', $root_tree, null );
+			$run->persist();
+		} catch ( \Throwable $failure ) {
+			// No checkpoint names the lock yet, so nothing else would ever release it.
+			try {
+				$run->abort();
+			} catch ( PluginException $unreleased ) {
+				unset( $unreleased ); // Stale after 30 minutes; the first failure is the one to report.
+			}
+			throw $failure;
 		}
-		$run->push_frame( '', 'root', $root_tree, null );
-		$run->persist();
 		return $run;
 	}
 
@@ -649,14 +661,20 @@ final class BackupRun {
 	}
 
 	/**
-	 * Refreshes the lock when due and re-acquires it after a long pause.
+	 * Refreshes the lock when due. After a pause of more than 30 minutes, or when the lock is
+	 * gone, the lock is taken again, which waits for a client that holds an exclusive lock by
+	 * now. A client that removed data during such a pause is not noticed here; the next check
+	 * reports what a snapshot then misses.
+	 *
+	 * @throws LockConflict If another client holds an exclusive lock.
 	 */
 	private function keep_lock(): void {
 		$lock = Decoded::string( $this->state['lock'] );
 		if ( '' === $lock ) {
 			return;
 		}
-		if ( null === $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+		$gone = null === $this->repository->backend()->size( ObjectType::Locks, $lock );
+		if ( $gone || $this->locking->lapsed( Decoded::int( $this->state['locked_at'] ) ) ) {
 			$this->state['lock']      = $this->locking->acquire( false )->hex();
 			$this->state['locked_at'] = $this->clock->now()[0];
 			return;

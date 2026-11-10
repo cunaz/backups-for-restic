@@ -439,9 +439,10 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   detecting that deletions became possible only proposes the switch back to `plugin`, which
   needs an administrator's click.
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
-  all snapshots (a walk of every snapshot's trees), delete packs with **no**
-  referenced blob, rewrite index files without them (new index files first, then delete the
-  old ones). Partially used packs are not repacked; the dashboard shows "reclaimable by a
+  all snapshots (a walk of every snapshot's trees), then write the index files that list a
+  pack with **no** referenced blob again without those packs, delete the old index files,
+  and delete the packs last. Every state in between is a repository restic accepts.
+  Partially used packs are not repacked; the dashboard shows "reclaimable by a
   full prune" and the disaster-recovery guide explains `restic prune` from any computer.
   Prune takes an exclusive lock, and the maintenance jobs run it weekly by default
   (`schedule.prune.*`). It fails closed: an inconclusive
@@ -449,6 +450,10 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   index does not lead to, or planning finds a used pack that no index file lists, it marks
   again once with the index as the server has it under the lock (another client may have
   changed the repository in between), and a second mismatch stops it without deleting.
+  Marking starts over completely or not at all, so a failed request in the middle never
+  leaves a tree unwalked. The checkpoint is written before the lock is taken, at every
+  change of phase and at the end of every tick: a request that ends while it deletes is
+  continued in that phase, and a lock it left behind is recognised by the run's number.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),

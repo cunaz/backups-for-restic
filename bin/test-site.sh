@@ -9,7 +9,10 @@
 #            user to .tools/site-app-password for the integration tests.
 #   start    starts PHP's built-in web server with several workers and the limits of the
 #            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
-#            set_time_limit() disabled, as on many shared hosts. bin/test-site-router.php
+#            set_time_limit() disabled, as on many shared hosts. The JIT compiler is off, as
+#            it is by default in PHP 8.3: with PHP's tracing JIT (which setup-php switches on
+#            in CI) the server's processes died by SIGSEGV in backup ticks, on PHP 8.3.6 and
+#            8.3.36. bin/test-site-router.php
 #            enforces "deny all" .htaccess files as Apache does, so the plugin's private
 #            directory is protected as on typical shared hosting. PHP errors go to
 #            .tools/php-errors.log; bin/test-site-diagnostics.php logs every request's start and
@@ -88,7 +91,9 @@ install_site() {
 			. "define( \x27WP_DEBUG\x27, true );\n"
 			. "define( \x27WP_DEBUG_LOG\x27, true );\n"
 			. "define( \x27WP_DEBUG_DISPLAY\x27, false );\n"
-			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n";
+			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n"
+			// Ticks call wp_raise_memory_limit(); without this they would run with 256M.
+			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, \x27128M\x27 );\n";
 		$config = str_replace( "/* That\x27s all, stop editing!", $extra . "\n/* That\x27s all, stop editing!", $config );
 		file_put_contents( $site . "/wp-config.php", $config );
 	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"
@@ -140,6 +145,7 @@ start_server() {
 		-d max_execution_time=30 \
 		-d memory_limit=128M \
 		-d disable_functions=set_time_limit \
+		-d opcache.jit=disable \
 		-d log_errors=1 \
 		-d error_log="$TOOLS/php-errors.log" \
 		-S "127.0.0.1:$PORT" -t "$SITE" "$ROOT/bin/test-site-router.php" >> "$TOOLS/site-server.log" 2>&1 &
