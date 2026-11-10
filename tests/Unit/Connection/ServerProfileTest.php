@@ -49,6 +49,16 @@ final class ServerProfileTest extends TestCase {
 		}
 	}
 
+	public function test_two_urls_name_the_same_server_when_host_and_port_are_equal(): void {
+		self::assertTrue( ServerProfile::same_server( 'https://backup.example.net:8000/a/', 'https://BACKUP.example.net:8000/b/' ) );
+		self::assertTrue( ServerProfile::same_server( 'rest:https://abc.repo.borgbase.com', 'https://abc.repo.borgbase.com:443/' ), 'HTTPS without a port is port 443.' );
+		self::assertFalse( ServerProfile::same_server( 'https://backup.example.net:8000/', 'https://backup.example.net:8001/' ) );
+		self::assertFalse( ServerProfile::same_server( 'https://backup.example.net/', 'https://backup.example.net.evil.example/' ) );
+		self::assertFalse( ServerProfile::same_server( 'https://backup.example.net/', 'https://evil.example/backup.example.net/' ) );
+		self::assertFalse( ServerProfile::same_server( '', '' ), 'No repository is configured yet: nothing is the same server.' );
+		self::assertFalse( ServerProfile::same_server( 'https://backup.example.net/', '' ) );
+	}
+
 	public function test_detects_the_server_type_of_a_url(): void {
 		self::assertSame( 'borgbase', ServerProfile::detect( 'rest:https://abc.repo.borgbase.com' ) );
 		self::assertSame( 'rest-server', ServerProfile::detect( 'https://backup.example.net/' ) );

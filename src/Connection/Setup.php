@@ -16,6 +16,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobStore;
@@ -63,13 +64,55 @@ final class Setup {
 	}
 
 	/**
+	 * The REST password that may be sent to a server named in a request: the one that came with
+	 * the request, or the stored one if the request names the host, port and user name it is
+	 * stored for. Without this rule a request that only names another host would get the stored
+	 * password sent there.
+	 *
+	 * A password defined in wp-config.php cannot be replaced by a request. It stays in force
+	 * for whatever server is saved, so for another server or user name the request has to
+	 * carry exactly that password.
+	 *
+	 * @param string      $server   borgbase or rest-server.
+	 * @param string      $url      Repository URL.
+	 * @param string      $username REST username; empty for a server without authentication.
+	 * @param Secret|null $given    Password from the request, if any.
+	 * @return Secret|null The password to use; null without a user name, when none is sent.
+	 * @throws InvalidArgument With the code password_required if the request has to carry the password, or with the code of a rejected URL.
+	 */
+	public function rest_password( string $server, string $url, string $username, ?Secret $given ): ?Secret {
+		if ( '' === $username ) {
+			// RestBackend sends no credentials without a user name.
+			return $given;
+		}
+		$current = $this->settings->load();
+		$same    = ServerProfile::same_server( ServerProfile::normalize( $server, $url ), $current->string( 'repository.url' ) ) && $username === $current->string( 'repository.rest_username' );
+		try {
+			$stored = $this->secrets->get( SecretName::RestPassword );
+		} catch ( SecretsUndecryptable ) {
+			$stored = null;
+		}
+		if ( null !== $stored && $this->secrets->is_overridden( SecretName::RestPassword ) ) {
+			$allowed = ( $same || ( null !== $given && $stored->equals( $given ) ) ) ? $stored : null;
+		} else {
+			$allowed = $given ?? ( $same ? $stored : null );
+		}
+		if ( null === $allowed ) {
+			InvalidArgument::raise( 'The request names a server or user name that the stored REST password is not for; it has to carry the password.', [ 'code' => 'password_required' ] );
+		}
+		return $allowed;
+	}
+
+	/**
 	 * Saves a server after a successful connection test.
 	 *
 	 * @param string           $server   borgbase or rest-server.
 	 * @param ConnectionReport $report   Test result with the normalized URL.
 	 * @param string           $username REST username.
-	 * @param Secret|null      $password REST password; null keeps the stored one.
+	 * @param Secret|null      $password REST password; null keeps the stored one, which must be
+	 *                                   stored for this server and user name.
 	 * @throws ValidationFailed If a setting is rejected.
+	 * @throws InvalidArgument With the code password_required if the stored REST password would end up with another server or user name.
 	 */
 	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
 		$append_only = match ( $report->append_only ) {
@@ -92,10 +135,22 @@ final class Setup {
 				unset( $changes[ $path ] );
 			}
 		}
-		$this->settings->update( $changes );
-		if ( null !== $password && ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
-			$this->secrets->set( SecretName::RestPassword, $password );
+		// What the jobs will use after the save; a value from wp-config.php stays as it is.
+		$next     = $current->with( $changes );
+		$url      = $next->string( 'repository.url' );
+		$username = $next->string( 'repository.rest_username' );
+		$this->rest_password( ServerProfile::detect( $url ), $url, $username, $password );
+		// The password first: should storing it fail, the settings still name the server that
+		// the stored password is for.
+		if ( ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
+			if ( null !== $password ) {
+				$this->secrets->set( SecretName::RestPassword, $password );
+			} elseif ( '' === $username ) {
+				// The server takes no credentials: a password kept from before belongs to none.
+				$this->secrets->delete( SecretName::RestPassword );
+			}
 		}
+		$this->settings->update( $changes );
 		$this->secrets->delete( SecretName::MasterKey );
 	}
 

@@ -433,6 +433,8 @@ final class RestRoutes {
 			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ) );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
+		} catch ( InvalidArgument $e ) {
+			return $this->server_error( $e );
 		}
 		$this->container->refresh();
 		delete_transient( 'backups_for_restic_snapshots' );
@@ -585,31 +587,43 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Runs the connection test from request parameters.
+	 * Runs the connection test from request parameters. Without a password in the request the
+	 * stored one is used, but only for the server and user name it is stored for; for any
+	 * other the request is refused before anything is sent.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \BackupsForRestic\Connection\ConnectionReport|\WP_Error Report or error.
 	 */
 	private function run_test( \WP_REST_Request $request ): \BackupsForRestic\Connection\ConnectionReport|\WP_Error {
-		$password = $this->secret_param( $request, 'password' );
-		if ( null === $password ) {
-			try {
-				$password = $this->container->secrets()->get( SecretName::RestPassword );
-			} catch ( PluginException ) {
-				$password = null;
-			}
-		}
+		$server   = self::text( $request, 'server' );
+		$url      = self::text( $request, 'url' );
+		$username = self::text( $request, 'username' );
 		try {
-			return $this->container->tester()->test( self::text( $request, 'server' ), self::text( $request, 'url' ), self::text( $request, 'username' ), $password );
+			$password = $this->setup()->rest_password( $server, $url, $username, $this->secret_param( $request, 'password' ) );
+			return $this->container->tester()->test( $server, $url, $username, $password );
 		} catch ( InvalidArgument $e ) {
-			return new \WP_Error(
-				'backups_for_restic_invalid_url',
-				Messages::validation( $e->context() ),
-				[ 'status' => 400 ]
-			);
+			return $this->server_error( $e );
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 502 );
 		}
+	}
+
+	/**
+	 * The error for a server that a request names and the core refused: a missing REST
+	 * password, or an address that breaks the rules.
+	 *
+	 * @param InvalidArgument $refusal Refusal with its code.
+	 * @return \WP_Error Error.
+	 */
+	private function server_error( InvalidArgument $refusal ): \WP_Error {
+		if ( 'password_required' === ( $refusal->context()['code'] ?? null ) ) {
+			return $this->error( 'password_required', 400 );
+		}
+		return new \WP_Error(
+			'backups_for_restic_invalid_url',
+			Messages::validation( $refusal->context() ),
+			[ 'status' => 400 ]
+		);
 	}
 
 	/**
@@ -744,6 +758,10 @@ final class RestRoutes {
 			'invalid_job_type'              => [
 				'message' => __( 'Jobs can be of type backup, forget, prune or check.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'password_required'             => [
+				'message' => __( 'Enter the REST password for this server.', 'backups-for-restic' ),
+				'hint'    => __( 'The stored password is only sent to the server and user name it was saved for. If wp-config.php defines the password, enter that one.', 'backups-for-restic' ),
 			],
 			default                         => Messages::job_error( $code ),
 		};
