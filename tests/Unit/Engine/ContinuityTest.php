@@ -257,6 +257,50 @@ final class ContinuityTest extends TestCase {
 		self::assertSame( 2, $result['stats']['snapshots'] ?? 0 );
 	}
 
+	public function test_a_prune_deletes_the_unindexed_packs_of_a_backup_that_paused_too_long_and_the_backup_starts_over(): void {
+		$work      = $this->unfinished_backup();
+		$unindexed = array_map( 'strval', array_keys( (array) self::state( $work )['unindexed'] ) );
+		self::assertNotSame( [], $unindexed );
+
+		// While the lock of the backup holds, a prune on another site does not even start.
+		try {
+			PruneRun::start( $this->repository, $this->work_dir(), new Identity( 'other.example', 'www-data' ), $this->clock, new SystemRandom() )->advance( INF );
+			self::fail( 'The backup holds a lock.' );
+		} catch ( LockConflict ) {
+			self::assertSame( [], array_diff( $unindexed, $this->names( ObjectType::Data ) ), 'Its packs are untouched.' );
+		}
+
+		$this->gap( true );
+		// Now the lock is stale for everyone. No index file lists these packs, so the prune
+		// takes them for what an interrupted backup left behind.
+		$prune = PruneRun::start( $this->repository, $this->work_dir(), new Identity( 'other.example', 'www-data' ), $this->clock, new SystemRandom() );
+		while ( ! $prune->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( count( $unindexed ), $prune->result()['unindexed_packs'] );
+		self::assertSame( $unindexed, array_values( array_diff( $unindexed, $this->names( ObjectType::Data ) ) ), 'They are gone.' );
+
+		try {
+			$this->resume( $work )->advance( 0.0 );
+			self::fail( 'The run relies on packs that are gone.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame(
+				[
+					'index_files' => 0,
+					'packs'       => count( $unindexed ),
+				],
+				$changed->context()
+			);
+		}
+
+		// A new run in the same directory uploads again what is missing.
+		$this->finish( $this->start( $work ) );
+		$result = $this->check();
+		self::assertSame( 0, $result['errors'], (string) json_encode( $result['findings'] ) );
+		self::assertSame( 0, $result['warnings'], (string) json_encode( $result['findings'] ) );
+		self::assertSame( 2, $result['stats']['snapshots'] ?? 0 );
+	}
+
 	public function test_a_backup_is_given_up_when_one_of_its_unindexed_packs_is_gone(): void {
 		$work      = $this->unfinished_backup();
 		$unindexed = array_map( 'strval', array_keys( (array) self::state( $work )['unindexed'] ) );

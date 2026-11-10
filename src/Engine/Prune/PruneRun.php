@@ -22,6 +22,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -36,23 +37,33 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Deletes the packs that no snapshot uses, as restic's prune does for completely unused packs
- * (ADR 0022). A pack that still holds one used blob stays, so nothing is downloaded or
- * rewritten; `restic prune` on another computer reclaims the rest.
+ * (ADR 0022), and the packs that no index file lists. A pack that still holds one used blob
+ * stays, so nothing is downloaded or rewritten; `restic prune` on another computer reclaims
+ * the rest.
  *
  * The run works in phases, each resumable in short ticks:
  *
  * 1. mark: walks the trees of all snapshots and records every pack that holds a used blob.
  * 2. plan: reads the index files and records the unused packs and the index files that list
- *    them.
+ *    them; then lists the packs on the server and records those that no index file lists.
  * 3. rewrite: writes each of those index files again without the unused packs.
  * 4. delete_indexes: deletes the old index files.
- * 5. delete_packs: deletes the unused packs.
+ * 5. delete_packs: deletes the unused packs and the packs that no index file lists.
+ *
+ * A pack that no index file lists is what an interrupted backup left behind: it uploaded the
+ * pack and never wrote the index file for it. No snapshot can use it, because marking ends
+ * with an error when a snapshot uses a blob the index does not lead to, and every used pack
+ * must be among the listed ones before anything is deleted. Under the exclusive lock nobody
+ * is uploading packs either. restic's prune removes such packs in the same way.
  *
  * Every state between two requests is a repository restic accepts: new index files are written
  * before the old ones go, and packs go last. The run holds an exclusive lock from the first tree
  * it reads to the last pack it deletes. If the lock disappeared or was not refreshed in time,
- * another client may have added snapshots that use an unused pack, so the run starts again with
- * marking; until then it had deleted only packs that no snapshot could use.
+ * another client may have written in the meantime. The run then takes the lock again and
+ * looks: if the snapshots are the ones it marked, and the index files are the ones it read
+ * apart from those it has written or deleted itself, nothing it found has changed and it goes
+ * on where it was. Otherwise it starts again with marking, at most MAX_RESTARTS times; until
+ * then it had deleted only packs that no snapshot could use (ADR 0030).
  *
  * The checkpoint is written before the lock is taken, at every change of phase and at the end of
  * every call. A request that ends at any point therefore leaves a run that resume() continues
@@ -67,7 +78,10 @@ defined( 'ABSPATH' ) || exit;
  */
 final class PruneRun {
 
-	public const int STATE_VERSION = 1;
+	public const int STATE_VERSION = 2;
+
+	/** How often marking starts over because other clients changed the repository meanwhile. */
+	public const int MAX_RESTARTS = 3;
 
 	/** Locks older than 30 minutes are stale for restic; the run refreshes well before. */
 	public const int CONTINUITY_SECONDS = 1500;
@@ -217,6 +231,35 @@ final class PruneRun {
 	private array $index_files;
 
 	/**
+	 * Hex names of the snapshots when marking started, in order.
+	 *
+	 * @var list<string>
+	 */
+	private array $snapshot_names;
+
+	/**
+	 * Hex names of the index files the run takes the repository to have, in order: those
+	 * listed when marking started, and from the plan phase on those the plan reads.
+	 *
+	 * @var list<string>
+	 */
+	private array $index_names;
+
+	/**
+	 * Hex names of the index files this run wrote without the unused packs.
+	 *
+	 * @var list<string>
+	 */
+	private array $written;
+
+	/**
+	 * Number of packs found that no index file lists.
+	 *
+	 * @var int
+	 */
+	private int $unindexed;
+
+	/**
 	 * Position within the list of the current phase.
 	 *
 	 * @var int
@@ -309,6 +352,10 @@ final class PruneRun {
 		$this->missing_examples    = Decoded::strings( $state['missing_examples'] ?? [] );
 		$this->snapshots           = Decoded::count( $state['snapshots'] ?? null );
 		$this->index_files         = Decoded::strings( $state['index_files'] ?? [] );
+		$this->snapshot_names      = Decoded::strings( $state['snapshot_names'] ?? [] );
+		$this->index_names         = Decoded::strings( $state['index_names'] ?? [] );
+		$this->written             = Decoded::strings( $state['written'] ?? [] );
+		$this->unindexed           = Decoded::count( $state['unindexed'] ?? null );
 		$this->position            = Decoded::count( $state['position'] ?? null );
 		$this->unused              = [];
 		$this->affected            = Decoded::strings( $state['affected'] ?? [] );
@@ -401,6 +448,8 @@ final class PruneRun {
 	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when finished and the lock is released.
 	 * @throws FormatException If a snapshot uses a blob that is missing from the index.
+	 * @throws RepositoryChanged If other clients changed the repository again and again while
+	 *                           the run could not hold its lock.
 	 */
 	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( 'done' === $this->phase ) {
@@ -412,8 +461,7 @@ final class PruneRun {
 			$this->step();
 			if ( $phase !== $this->phase && 'done' !== $this->phase ) {
 				// A request that ends while it deletes must not leave the checkpoint of an
-				// earlier phase: planning again would look for index files that are gone, and
-				// the packs it had planned would stay for good.
+				// earlier phase: planning again would look for index files that are gone.
 				$this->persist();
 			}
 			$throttle?->pause();
@@ -461,13 +509,14 @@ final class PruneRun {
 	 * Outcome once finished. reclaimable_bytes estimates the unused space in kept packs that
 	 * only a full prune with repacking frees; -1 if unknown.
 	 *
-	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, reclaimable_bytes: int, index_files_written: int, restarts: int} Result.
+	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, unindexed_packs: int, reclaimable_bytes: int, index_files_written: int, restarts: int} Result.
 	 */
 	public function result(): array {
 		return [
 			'packs_deleted'       => $this->packs_deleted,
 			'bytes_deleted'       => $this->bytes_deleted,
 			'packs_kept'          => count( $this->live ),
+			'unindexed_packs'     => $this->unindexed,
 			'reclaimable_bytes'   => '' === $this->filter ? -1 : max( 0, $this->kept_bytes - $this->used_bytes ),
 			'index_files_written' => $this->index_files_written,
 			'restarts'            => $this->restarts,
@@ -513,8 +562,16 @@ final class PruneRun {
 			$roots[ $snapshot->tree->hex() ] = true;
 		}
 
+		$snapshot_names = array_map( 'strval', array_keys( $snapshots ) );
+		sort( $snapshot_names, SORT_STRING );
+		$index_names = $this->repository->names( ObjectType::Index );
+
 		$this->phase               = 'mark';
 		$this->snapshots           = count( $snapshots );
+		$this->snapshot_names      = $snapshot_names;
+		$this->index_names         = $index_names;
+		$this->written             = [];
+		$this->unindexed           = 0;
 		$this->frontier            = array_keys( $roots );
 		$this->seen                = [];
 		$this->live                = [];
@@ -550,8 +607,14 @@ final class PruneRun {
 	}
 
 	/**
-	 * Refreshes the lock, or starts over with marking if it was lost or not refreshed in time.
-	 * A run whose start did not get as far as marking begins here.
+	 * Refreshes the lock. If it was lost or not refreshed in time, takes it again, which fails
+	 * while another client holds a lock, and goes on only if the repository still is what the
+	 * run takes it for; otherwise marking starts over. A run whose start did not get as far as
+	 * marking begins here.
+	 *
+	 * @throws RepositoryChanged If marking already started over MAX_RESTARTS times.
+	 * @throws \Throwable Whatever taking the lock or reading the snapshots throws; if marking
+	 *                    cannot start over, the lock is released before the error is passed on.
 	 */
 	private function keep_lock(): void {
 		$now  = $this->clock->now()[0];
@@ -568,12 +631,58 @@ final class PruneRun {
 		}
 		$this->lock  = '';
 		$this->index = null;
-		// A run that has not marked anything yet begins; it does not start over.
-		$again = $this->snapshots > 0;
-		$this->begin();
-		if ( $again ) {
-			++$this->restarts;
+		if ( 0 === $this->snapshots ) {
+			// A run that has not marked anything yet begins; it does not start over.
+			$this->begin();
+			return;
 		}
+		$this->locking->remove_own_stale();
+		$this->lock      = $this->locking->acquire( true )->hex();
+		$this->locked_at = $this->clock->now()[0];
+		$this->persist();
+		if ( $this->untouched() ) {
+			return;
+		}
+		if ( $this->restarts >= self::MAX_RESTARTS ) {
+			RepositoryChanged::raise( 'Other clients changed the repository again and again while prune ran; prune gave up.', [ 'restarts' => $this->restarts ] );
+		}
+		$this->remarked = false;
+		try {
+			$this->start_marking();
+		} catch ( \Throwable $failure ) {
+			$this->release_lock();
+			throw $failure;
+		}
+		++$this->restarts;
+	}
+
+	/**
+	 * Whether the repository still is what this run takes it for, after a time in which other
+	 * clients could write: the snapshots are the ones marking started from, and the index
+	 * files are the ones the run read, apart from those it has written or deleted itself.
+	 *
+	 * Then nothing the run found has changed. A new snapshot could use a pack the run takes
+	 * for unused. A changed index means that another client repacked or pruned, so that the
+	 * packs marked as used may be gone and others hold their blobs. Packs that an interrupted
+	 * backup uploaded meanwhile without an index file change neither listing and concern
+	 * nothing: the run deletes only what its plan recorded.
+	 *
+	 * A request of this run that ended between writing or deleting an index file and the next
+	 * checkpoint also makes the listings differ. Marking then starts over needlessly, which is
+	 * safe.
+	 *
+	 * @return bool True if the run may go on where it was.
+	 */
+	private function untouched(): bool {
+		$deleted = match ( $this->phase ) {
+			'delete_indexes' => array_slice( $this->affected, 0, $this->position ),
+			'delete_packs'   => $this->affected,
+			default          => [],
+		};
+		$expected = array_values( array_unique( array_merge( array_diff( $this->index_names, $deleted ), $this->written ) ) );
+		sort( $expected, SORT_STRING );
+		return $this->repository->names( ObjectType::Snapshots ) === $this->snapshot_names
+			&& $this->repository->names( ObjectType::Index ) === $expected;
 	}
 
 	/**
@@ -611,9 +720,9 @@ final class PruneRun {
 				);
 				return;
 			}
-			$index_files = array_keys( $this->repository->backend()->list( ObjectType::Index ) );
-			sort( $index_files );
-			$this->index_files = $index_files;
+			// From here on the run takes the repository to have the index files it reads now.
+			$this->index_files = $this->repository->names( ObjectType::Index );
+			$this->index_names = $this->index_files;
 			$this->position    = 0;
 			$this->phase       = 'plan';
 			return;
@@ -761,13 +870,21 @@ final class PruneRun {
 			$this->mark_again( 'Snapshots use packs that no index file lists; prune stopped without deleting anything.', [ 'packs' => count( $unlisted ) ] );
 			return;
 		}
-		if ( [] === $this->unused ) {
-			$this->finish();
-			return;
-		}
 		$sizes = $this->repository->backend()->list( ObjectType::Data );
 		foreach ( array_keys( $this->unused ) as $pack ) {
 			$this->unused[ $pack ] = $sizes[ $pack ] ?? -1;
+		}
+		// What an interrupted backup left behind. Every used pack is listed, as checked above,
+		// so a pack that no index file lists holds nothing a snapshot uses.
+		foreach ( $sizes as $pack => $size ) {
+			if ( ! isset( $this->listed[ $pack ] ) ) {
+				$this->unused[ $pack ] = $size;
+				++$this->unindexed;
+			}
+		}
+		if ( [] === $this->unused ) {
+			$this->finish();
+			return;
 		}
 		$this->phase    = 'rewrite';
 		$this->position = 0;
@@ -814,7 +931,7 @@ final class PruneRun {
 			}
 		}
 		if ( [] !== $kept ) {
-			$this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( $kept ) );
+			$this->written[] = $this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( $kept ) )->hex();
 			++$this->index_files_written;
 		}
 		++$this->position;
@@ -899,6 +1016,10 @@ final class PruneRun {
 					'missing_examples'    => $this->missing_examples,
 					'snapshots'           => $this->snapshots,
 					'index_files'         => $this->index_files,
+					'snapshot_names'      => $this->snapshot_names,
+					'index_names'         => $this->index_names,
+					'written'             => $this->written,
+					'unindexed'           => $this->unindexed,
 					'position'            => $this->position,
 					'unused'              => $this->unused,
 					'affected'            => $this->affected,
