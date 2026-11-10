@@ -17,11 +17,15 @@ had not shown. They were fixed before this plan was written:
 - Prune could delete used packs when one run was tried again after a failed request, could
   not be resumed after a request ended while it deleted, and left an exclusive lock when
   its start was interrupted.
-- A check lost its progress when a request failed, and reported a repository that this PHP
-  cannot read as damaged.
+- A check lost its progress when a request failed, reported a repository that this PHP
+  cannot read as damaged, and could hang for good on a pack that the host cannot read
+  within one request.
 - Backup, check and forget refreshed a lock that other clients no longer honoured.
 - A cancel request was lost while a tick ran; the recovery kit and the stored REST password
-  could be obtained without the re-authentication the security model requires.
+  could be obtained without the re-authentication the security model requires; backups
+  could start before the setup was completed.
+- After a connection to an existing repository the cleanup removed the wrong index cache;
+  notices were given up after 20 minutes; warnings could hide the errors of a check.
 - The integration suite failed because PHP's tracing JIT, which the CI setup switches on,
   crashes PHP 8.3 in backup ticks. The test server now runs without the JIT.
 
@@ -68,13 +72,14 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 | # | Package | Size | Notes |
 |---|---|---|---|
 | 0.1 | Merge pull requests 1 to 6 | owner | See decision D1. |
-| 0.2 | Job parameters at creation | S | `JobStore::create()` takes the job's data and writes it with the job; `job.json` gets a schema number. Restore jobs depend on it. |
-| 0.3 | Backups after a stale lock | M | A backup that was paused for more than 30 minutes records which index files and unindexed packs it relies on, and after taking its lock again checks that they still exist; if not, the job starts over. A check starts over after such a pause. Without this, a `restic prune` on another computer during the pause can remove data a later snapshot refers to. Needs a decision record. |
+| 0.2 | Schema numbers | S | `JobStore::create()` takes the job's data since the audit fixes, which restore jobs depend on. Open: a schema number in `job.json` and in the settings, so that a later version can tell what it reads. |
+| 0.3 | Backups after a stale lock | M | A backup that was paused for more than 30 minutes records which index files and unindexed packs it relies on, and after taking its lock again checks that they still exist; if not, the job starts over. A check starts over after such a pause. Without this, a `restic prune` on another computer during the pause can remove data a later snapshot refers to. Backup, check and forget also write their run number before they take the lock, as prune does, so that no request can die with a lock nothing recognises. Needs a decision record. |
 | 0.4 | Prune removes packs that no index lists | M | Aborted backups leave such packs; the check reports them, nothing removes them. Under the exclusive lock they are deleted like unused packs, compared with restic's count of unreferenced packs. Depends on 0.3. |
-| 0.5 | Tests for the WordPress layer | L | The HTTP suite gains: every route without and with a non-administrator, cancel during a tick, connect, recovery kit, an append-only rest-server (automatic switch to `external`, no deletion after it is turned off), schedules started by the heartbeat, WP-CLI commands, uninstall, the multisite refusal. |
+| 0.5 | Tests for the WordPress layer | L | The HTTP suite gains: every route without and with a non-administrator, cancel during a tick, connect, recovery kit, an append-only rest-server (automatic switch to `external`, no deletion after it is turned off), schedules started by the heartbeat, WP-CLI commands, uninstall, the multisite refusal. The kill test asserts that it interrupted a running tick, and in which step. |
 | 0.6 | Browser tests | M | Playwright against the test site in CI: wizard, first backup, settings, cancel. The acceptance criterion of this milestone needs it. |
 | 0.7 | Static gates | S | ESLint for `assets/js`, Plugin Check, a check that every commit is signed off, a POT file built in CI. |
-| 0.8 | Smaller promises | M | Repository usage on the dashboard; Doctor hints for an enabled JIT and for outbound HTTPS; a settings form to enter the repository and REST passwords again; response size limits per object type; the recovery kit's validity of five minutes and its event; fields overridden by constants shown read-only; tree order checked on reading. |
+| 0.8 | Smaller promises and gaps | L | Promised earlier: repository usage on the dashboard; Doctor hints for an enabled JIT and for outbound HTTPS; a settings form to enter the repository and REST passwords again and to upload the CA certificate; response size limits per object type; the recovery kit's validity of five minutes and its event; fields overridden by constants shown read-only; tree order checked on reading; totals and time estimates; WP-CLI commands for settings, cancel and logs. Found by the audit and not fixed yet: `repository.format_version` and `repository.id` are not written when connecting to an existing repository; after a change of the salts the stored key cache blocks the constants from `wp-config.php`; `POST /repository/save` changes the server while a job runs; creating a repository can fail after the repository exists but before its password is stored; the check alert and the last results are not bound to the repository; deactivation leaves the active job and its lock; the setup completes although the private directory could not be verified; TLS verification can be filtered off; a few directory and file writes whose result is not checked. |
+| 0.9 | Memory with many blobs | M | The index is held in memory at about 100 bytes per blob, and prune encodes its filter into every checkpoint. Measure backup, prune and check with half a million, one million and two million blobs under 128M; then either a preflight estimate that refuses clearly, or a compact index. NFR-03 is worded for file sizes until then. |
 
 ### Phase 1: read a snapshot
 
@@ -174,6 +179,8 @@ For the owner:
 | D5 | Should apply be able to delete files that are not in the snapshot? | No in 0.3.0. |
 | D6 | Who provides icon, banner and screenshots for WordPress.org, and when is the plugin submitted? | Drafts by the assistant, approval and date by the owner. |
 | D7 | BorgBase: two free repositories and credentials for the live checks, entered by the owner as CI secrets or run by the owner. | Run by the owner with a script from the repository, so that no credential leaves the owner's hands. |
+| D8 | When does the 24-hour cooling-off period of ADR 0024 start? | With the last commit of the pull request that touches `Crypto`, `Format` or `Engine`; the diff is read again before merging. |
+| D9 | The promises without a milestone in section 9: keep or drop each. | As proposed there. |
 
 Still open from earlier: the WordPress.org user name for `readme.txt`, whether review
 threads may be answered through the API, and the old revisions of pull request descriptions.
@@ -191,3 +198,24 @@ threads may be answered through the API, and the old revisions of pull request d
 | PHP's JIT crashes PHP 8.3 in the plugin's hot loops. | Doctor hint (0.8); the cause is narrowed down and reported to PHP. |
 | A restore of another PHP or WordPress version. | The manifest's versions are shown in the report. |
 | Multisite. | Unsupported, as decided in [ADR 0026](adr/0026-multisite-deferred.md). |
+
+## 9. Promises without a milestone
+
+The documents promised these at some point and no milestone carries them. The audit moved
+none of them silently; each needs a yes or no.
+
+| Promise | Proposal |
+|---|---|
+| Hourly backups (FR-03) | Drop: twice a day is the most a shared host carries; say so in the scope. |
+| Download of a job's log | Keep, with the restore screens of phase 2, which need downloads anyway. |
+| Translation of log lines, job warnings and byte units | Keep for 1.0: log lines get codes that the admin page translates. |
+| A log of every request to the server (`http.log`) | Drop: the event log names failed requests; a full log is a privacy and size risk. |
+| The wizard refuses a format 2 repository when PHP lacks zstd | Keep, phase 0.8, together with writing the format version when connecting. |
+| Deriving the cached key again after a change of the salts without the administrator | Drop: the password is not stored in a form that survives the salts by design; the settings form of 0.8 is the answer. |
+| Removing stale locks of other hosts from the plugin (`unlock --yes`) | Keep after 1.0; `restic unlock` exists. |
+| A PHPStan rule for the engine's dependencies; a line length limit | Rule: keep, phase 0.7. Line length: drop. |
+| Citations of restic's design document in the `Format` classes | Keep, as a small pull request at any time. |
+| Screenshots of hosting panels, a hosting matrix, a first-backup page | Drop the matrix; screenshots with the submission package (5.4). |
+| A form-post fallback for the admin page | Drop: the page needs the REST API in any case (ADR 0012, as built). |
+| An option to skip a run without changes | Drop: every run produces a snapshot, which hosted monitoring relies on (ADR 0009). |
+| A donation link in `readme.txt` | Owner's choice; not before the first release. |
