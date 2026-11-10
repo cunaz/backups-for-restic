@@ -242,6 +242,36 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertSame( [], $repository->backend()->list( ObjectType::Locks ), 'The lock was released, not left to go stale.' );
 	}
 
+	public function test_a_forget_job_refuses_a_retention_below_the_floor(): void {
+		self::assertNotNull( self::$server );
+		$site       = $this->site();
+		$repository = Repository::initialize( self::$server->backend( 'floor' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$this->history( $repository, $site );
+		$before = $repository->backend()->list( ObjectType::Snapshots );
+		// A pair that the settings refuse today: stored before they did, or written past them.
+		$options                                  = new InMemoryOptions();
+		$options->values[ SettingsStore::OPTION ] = [
+			'retention.keep.within'  => '1h',
+			'retention.keep.last'    => 0,
+			'retention.keep.daily'   => 0,
+			'retention.keep.weekly'  => 0,
+			'retention.keep.monthly' => 0,
+		];
+		[ $runner, $store ]                       = $this->components( self::$server, 'floor', $site, [], $options );
+
+		$job  = $store->create( JobType::Forget, 'manual', time() );
+		$more = true;
+		for ( $tick = 0; $tick < 200 && $more; $tick++ ) {
+			$more = $runner->tick( 0.3 )->has_more_work();
+		}
+
+		$failed = $store->get( $job->id );
+		self::assertSame( JobState::Failed, $failed?->state );
+		self::assertSame( 'configuration', $failed->error?->code );
+		self::assertSame( $before, $repository->backend()->list( ObjectType::Snapshots ), 'Two of the three snapshots are older than an hour; none was removed.' );
+		self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
+	}
+
 	public function test_a_check_with_damage_raises_the_alert(): void {
 		self::assertNotNull( self::$server );
 		$site       = $this->site();

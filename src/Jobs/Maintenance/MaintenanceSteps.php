@@ -29,6 +29,7 @@ use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
+use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Decoded;
 
@@ -366,16 +367,20 @@ final class MaintenanceSteps implements StepProvider {
 	}
 
 	/**
-	 * The retention policy from the settings; keep-within is mandatory (ADR 0010).
+	 * The retention policy from the settings; keep-within is mandatory (ADR 0010), and the
+	 * policy must not fall below the retention floor, whatever the stored settings say.
 	 *
 	 * @return RetentionPolicy Policy.
-	 * @throws InvalidArgument If keep-within is missing or zero.
+	 * @throws InvalidArgument If keep-within is missing or zero, or the policy is below the floor.
 	 */
 	private function policy(): RetentionPolicy {
 		$settings = $this->services->common->settings;
 		$within   = Duration::parse( $settings->string( 'retention.keep.within' ) );
 		if ( $within->is_zero() ) {
 			InvalidArgument::raise( 'The retention policy needs a keep-within duration.', [ 'code' => 'configuration' ] );
+		}
+		if ( ! Schema::retention_floor( $settings->string( 'retention.keep.within' ), $settings->int( 'retention.keep.last' ) ) ) {
+			InvalidArgument::raise( 'The retention policy must keep every snapshot of at least one day, or at least the newest one.', [ 'code' => 'configuration' ] );
 		}
 		return new RetentionPolicy(
 			$settings->int( 'retention.keep.last' ),

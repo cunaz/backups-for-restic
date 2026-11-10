@@ -81,6 +81,15 @@ final readonly class Settings {
 				$errors[ $path ] = $e->context();
 			}
 		}
+		// The one rule that spans two fields. It is checked when either changes, so that a pair
+		// stored before the rule existed does not block every other setting; forget jobs check
+		// it again before they delete anything.
+		$within = $values['retention.keep.within'] ?? null;
+		$last   = $values['retention.keep.last'] ?? null;
+		$floor  = array_key_exists( 'retention.keep.within', $changes ) ? 'retention.keep.within' : 'retention.keep.last';
+		if ( array_key_exists( $floor, $changes ) && ! isset( $errors['retention.keep.within'] ) && ! isset( $errors['retention.keep.last'] ) && is_string( $within ) && is_int( $last ) && ! Schema::retention_floor( $within, $last ) ) {
+			$errors[ $floor ] = [ 'code' => 'retention_floor' ];
+		}
 		if ( [] !== $errors ) {
 			ValidationFailed::raise_for( $errors );
 		}

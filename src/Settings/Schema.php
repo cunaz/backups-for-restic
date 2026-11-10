@@ -26,6 +26,29 @@ final class Schema {
 	];
 
 	/**
+	 * The retention floor of the secure defaults (docs/03-security-and-threat-model.md §13):
+	 * every snapshot of at least the last day is kept, or at least the newest one. A policy
+	 * below it, such as keep-within 1h without keep-last, could leave a site whose backups
+	 * failed for a day with no snapshot from before the failure.
+	 *
+	 * @param string $within Keep-within duration such as 2d or 1y6m.
+	 * @param int    $last   Number of newest snapshots that are always kept.
+	 * @return bool True if the floor holds.
+	 */
+	public static function retention_floor( string $within, int $last ): bool {
+		if ( $last >= 1 ) {
+			return true;
+		}
+		preg_match_all( '/(\d+)([ymdh])/', $within, $parts, PREG_SET_ORDER );
+		foreach ( $parts as [ , $number, $unit ] ) {
+			if ( (int) $number >= ( 'h' === $unit ? 24 : 1 ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * All fields by dotted path.
 	 *
 	 * @return array<string, Field> Fields.
