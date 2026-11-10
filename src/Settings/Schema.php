@@ -27,9 +27,9 @@ final class Schema {
 
 	/**
 	 * The retention floor of the secure defaults (docs/03-security-and-threat-model.md §13):
-	 * every snapshot of at least the last day is kept, or at least the newest one. A policy
-	 * below it, such as keep-within 1h without keep-last, could leave a site whose backups
-	 * failed for a day with no snapshot from before the failure.
+	 * keep-within is at least one day, or keep-last is at least 1. Keep-within counts back
+	 * from the newest snapshot and protects what lies in its window from the rules that count
+	 * snapshots (threat T-12); a window of a few hours holds little more than that newest one.
 	 *
 	 * @param string $within Keep-within duration such as 2d or 1y6m.
 	 * @param int    $last   Number of newest snapshots that are always kept.

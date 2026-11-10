@@ -95,7 +95,8 @@ final class Runner {
 		$log                   = $this->store->log( $job );
 		$log->write( 'info', 'Cancellation requested.', $context );
 		if ( ! $this->lock->acquire() ) {
-			// A tick is running; it honours the marker before its next step.
+			// The lock is taken, as a rule by a tick, which honours the marker before its next
+			// step; if the heartbeat holds it for a moment instead, the next tick does.
 			return $job;
 		}
 		try {

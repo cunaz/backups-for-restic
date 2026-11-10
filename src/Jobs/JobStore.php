@@ -22,8 +22,8 @@ defined( 'ABSPATH' ) || exit;
  * Keeps each job in its own directory under jobs/ (ADR 0014): job.json, written atomically,
  * events.log and the step's working files. IDs sort by creation time.
  *
- * After its creation a job document has one writer at a time: the tick that holds the runner
- * lock. A request to cancel therefore is a file of its own next to the document.
+ * After its creation a job document has one writer at a time: whoever holds the runner lock,
+ * as a rule a tick. A request to cancel therefore is a file of its own next to the document.
  */
 final class JobStore {
 
