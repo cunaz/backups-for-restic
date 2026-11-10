@@ -67,6 +67,7 @@ final class CliCommand {
 	 * @param array<string, string> $assoc_args Options.
 	 */
 	public function backup( array $args, array $assoc_args ): void {
+		$this->check_start( JobType::Backup );
 		try {
 			$job = $this->container->jobs()->create( JobType::Backup, 'cli', time() );
 		} catch ( JobConflict ) {
@@ -155,9 +156,7 @@ final class CliCommand {
 	 * @param array<string, mixed>  $data       Job data.
 	 */
 	private function maintain( JobType $type, array $assoc_args, array $data = [] ): void {
-		if ( JobType::Check !== $type && 'external' === $this->container->settings()->string( 'retention.mode' ) ) {
-			\WP_CLI::error( Messages::job_error( 'retention_external' )['message'] );
-		}
+		$this->check_start( $type );
 		try {
 			// The data is part of the new job document: a later save could meet the job's first tick.
 			$job = $this->container->jobs()->create( $type, 'cli', time(), $data );
@@ -172,6 +171,19 @@ final class CliCommand {
 			return;
 		}
 		Cron::chain();
+	}
+
+	/**
+	 * Ends the command with an error if a job of a type may not start now: before the setup is
+	 * completed, without a repository, or for forget and prune in retention mode external.
+	 *
+	 * @param JobType $type Job type.
+	 */
+	private function check_start( JobType $type ): void {
+		$refusal = $type->refusal( $this->container->settings() );
+		if ( null !== $refusal ) {
+			\WP_CLI::error( Messages::job_error( $refusal )['message'] );
+		}
 	}
 
 	/**

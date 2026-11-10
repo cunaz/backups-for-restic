@@ -104,6 +104,10 @@ final class Messages {
 				'message' => __( 'The backup is not configured completely.', 'backups-for-restic' ),
 				'hint'    => __( 'Finish the setup wizard or check the settings.', 'backups-for-restic' ),
 			],
+			'setup_incomplete'               => [
+				'message' => __( 'The setup is not finished yet.', 'backups-for-restic' ),
+				'hint'    => __( 'Finish the setup wizard and confirm that you stored the recovery kit. Backups and maintenance start after that.', 'backups-for-restic' ),
+			],
 			default                          => [
 				'message' => __( 'An unexpected error stopped the job.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job has the details. Please report it if it happens again.', 'backups-for-restic' ),

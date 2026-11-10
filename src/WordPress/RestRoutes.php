@@ -200,22 +200,20 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Starts a backup, or with type forget, prune or check a maintenance job.
+	 * Starts a backup, or with type forget, prune or check a maintenance job. None of them
+	 * starts before the setup is completed.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function create_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$settings = $this->container->settings();
-		if ( '' === $settings->string( 'repository.url' ) ) {
-			return $this->error( 'configuration', 409 );
-		}
 		$type = JobType::tryFrom( '' === self::text( $request, 'type' ) ? 'backup' : self::text( $request, 'type' ) );
 		if ( null === $type || JobType::Unlock === $type ) {
 			return $this->error( 'invalid_job_type', 400 );
 		}
-		if ( in_array( $type, [ JobType::Forget, JobType::Prune ], true ) && 'external' === $settings->string( 'retention.mode' ) ) {
-			return $this->error( 'retention_external', 409 );
+		$refusal = $type->refusal( $this->container->settings() );
+		if ( null !== $refusal ) {
+			return $this->error( $refusal, 409 );
 		}
 		try {
 			$job = $this->container->jobs()->create( $type, 'manual', time() );

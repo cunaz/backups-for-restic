@@ -184,7 +184,14 @@ final class WordPressSiteTest extends TestCase {
 		self::assertStringContainsString( '-----BEGIN CERTIFICATE-----', $created['recovery_kit'] );
 		preg_match( "/RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/", $created['recovery_kit'], $match );
 		self::$repository_password = $match[1];
-		[ $status ]                = self::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );
+		[ , $dashboard ]           = self::api( 'GET', '/status' );
+		if ( false === ( $dashboard['setup_completed'] ?? null ) ) {
+			// No backup before the recovery kit is acknowledged. A site this ran on before is set up already.
+			[ $status, $refused, $raw ] = self::api( 'POST', '/jobs' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_setup_incomplete', $refused['code'] ?? null, $raw );
+		}
+		[ $status ] = self::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );
 		self::assertSame( 200, $status );
 		// The wizard showed the recovery kit once; from now on it needs the WordPress password.
 		foreach ( [ '/repository/create', '/repository/connect' ] as $route ) {
