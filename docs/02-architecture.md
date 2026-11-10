@@ -52,7 +52,7 @@ not part of 1.0).
 │                                    │ WordPress HTTP API (cURL, TLS verified)│ private directory   │
 │                                    ▼                                       ▼                     │
 │                     restic REST server over HTTPS              cache · checkpoints · scrypt ·    │
-│                     BorgBase or self-hosted rest-server        staging · job state · logs        │
+│                     self-hosted rest-server or BorgBase        staging · job state · logs        │
 │                     (HTTP basic auth, optional append-only)                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -65,13 +65,14 @@ Participants:
   blobs, packs, index files, trees and snapshots, and talks to the REST endpoint. There is
   no external process at any point.
 - **The repository server** speaks the restic REST protocol over HTTPS
-  ([ADR 0025](adr/0025-repository-servers.md)): **BorgBase**, which according to its public
-  documentation runs nginx in front of restic's `rest-server` with per-repository
-  credentials, an append-only option and stale-backup alerts, or a **self-hosted
-  `rest-server`**. In append-only mode deletions of data, index, key and snapshot files are
-  answered with HTTP 403 while lock files stay deletable. This is verified in the
-  rest-server source; BorgBase's behaviour is verified by live smoke tests, not by vendor
-  statements.
+  ([ADR 0025](adr/0025-repository-servers.md)): a **self-hosted `rest-server`**, or a hosted
+  service. The wizard has a preset for BorgBase, which according to its public documentation
+  runs nginx in front of restic's `rest-server` with per-repository credentials, an
+  append-only option and stale-backup alerts. In append-only mode deletions of data, index,
+  key and snapshot files are answered with HTTP 403 while lock files stay deletable. This is
+  verified in the rest-server source and asserted against a running rest-server by the
+  conformance suite. BorgBase's behaviour is not yet measured: the live checks need an
+  account (ADR 0025).
 - **The restic CLI** is used by operators for disaster recovery and by the test suite as the
   reference implementation. It is never required on the web server.
 
@@ -89,21 +90,32 @@ Participants:
    which is not security critical. All three are pure integer arithmetic, verified against
    reference vectors (RFC 8439 and libsodium, RFC 7914, restic's chunker) and against
    repositories that restic wrote and checks.
-3. **Everything streams and everything is bounded.** Files are read in 1 MiB buffers, blobs
-   are encrypted one at a time, packs are assembled in a temp file, uploads are one request
-   each, index and tree sizes follow restic's own limits. Peak PHP memory is independent of
-   site size.
+3. **Everything streams, and memory does not grow with file sizes.** Files are read in
+   512 KiB buffers and cut into chunks of at most 8 MiB, blobs are encrypted one at a time,
+   packs are built in memory up to the pack size (16 MiB by default) and uploaded with one
+   request each, index files follow restic's limit of 50 000 blobs. A file or a database
+   table of any size therefore costs the same memory. What does grow is the index: every run
+   holds the merged index of the whole repository in one PHP array, about 100 bytes per blob
+   (`Format\Index\IndexSet`). By that figure the 64 MB of NFR-03 are reached at roughly
+   640 000 blobs; this is derived, not measured. The plugin does not limit or estimate it
+   yet: measurements with large blob counts and a bound or a preflight estimate are planned
+   for Milestone 3.
 4. **Ticks, not long processes.** All work happens in bounded slices (default 20 s) driven
    by WP-Cron, loopback chaining, admin polling or WP-CLI. Every slice ends with a durable
    checkpoint; a killed request loses at most one slice of work.
-5. **A thin WordPress shell around a WordPress-free core.** `Engine`, `Format`, `Crypto`,
-   `Jobs`, `Database\Dump`, `Retention`, `Support` call no WordPress functions and are unit
-   tested without WordPress. `Admin`, `Rest`, `Cli`, `Scheduling`, `Http\WpHttpClient` are
-   thin adapters.
+5. **A thin WordPress shell around a WordPress-free core.** Only the namespace `WordPress`
+   and the composition root `Plugin` call WordPress
+   ([ADR 0029](adr/0029-wordpress-free-core.md)). Everything else (`Support`, `Exception`,
+   `Settings`, `Secrets`, `Storage`, `Crypto`, `Format`, `Backend`, `Connection`, `Engine`,
+   `Jobs`, `Backup`, `Database\Dump`, `Doctor`, `Scheduling`, `Notifications`) calls no
+   WordPress function and is tested without WordPress.
 6. **Secrets flow through one type** (`Secrets\Secret`, redacting, `reveal()` allow-listed).
-7. **Fail closed.** Unverifiable preconditions (undecryptable secrets, web-readable private
-   directory, MAC mismatch, unsupported repository version) stop the operation with a precise
-   message.
+7. **Fail closed.** A failed precondition (undecryptable secrets, a private directory that
+   the HTTP probe could read, a MAC mismatch, an unsupported repository version) stops the
+   operation with a precise message. One precondition that cannot be verified does not stop
+   it yet: when the HTTP probe of the private directory cannot run, the Doctor reports
+   `unverified` as a recommendation and backups go on (§13.4,
+   [ADR 0007](adr/0007-private-directory.md)); a stricter rule is planned for Milestone 3.
 8. **Composition root, immutable value objects, `final` by default, `declare(strict_types=1)`.**
 
 ## 3. Module map and dependency rules
@@ -138,36 +150,42 @@ src/
 │   ├── Tree/                      Node, NodeType, FileMode, TreeCodec (ordering, Go quoting, mode bits)
 │   ├── Unpacked.php               non-pack files: plain JSON, or zstd through Compression.php when `ext-zstd` is present
 │   └── Chunker/                   Polynomial (GF(2) ops, irreducibility test), RabinChunker (restic-identical), ChunkReader
-├── Backend/                       Backend interface, RestBackend (restic REST over an HttpClient), AppendOnlyProbe, Http/ (HttpClient port, HttpResponse)
-├── Connection/                    ServerProfile (URL rules), ConnectionTester, RepositoryAccess (backend + master key cache), Setup (wizard: save, create, connect)
+├── Backend/                       Backend interface, ObjectType, RestBackend (restic REST over an HttpClient), AppendOnlyProbe, AppendOnlyStatus, Http/ (HttpClient port, HttpResponse)
+├── Connection/                    ServerProfile (URL rules), ConnectionTester, ConnectionReport, RepositoryAccess (backend + master key cache), Setup (wizard: save, create, connect)
 ├── Engine/                        the restic logic
 │   ├── Repository.php, BlobStore.php, Locking.php, Identity.php
 │   ├── KeyUnlock.php              resumable unlock across key files
 │   ├── IndexCache.php             merged index cached locally, encrypted; fetches only new index files
 │   ├── Backup/                    BackupPlan, BackupRun (resumable, also inside virtual files), NodeFactory, VirtualFile
 │   ├── Restore/                   RestoreRun (resumable, refuses paths that leave the target)
-│   ├── Forget/                    Forget, RetentionPolicy, Duration: restic's ApplyPolicy semantics
+│   ├── Forget/                    Forget, RetentionPolicy, Duration: restic's ApplyPolicy semantics; ForgetRun: the resumable run
 │   ├── Prune/                     PruneRun: prune-lite, resumable, under an exclusive lock
 │   └── Check/                     CheckRun: structural check plus a sampled share of packs read
-├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, JobObserver, Step, StepProvider, TickReport
+├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, JobObserver, Step, ClosureStep, StepProvider, JobSteps, TickReport
 │   ├── Backup/                    BackupSteps (preflight, unlocking, backing_up, recording, releasing, cleaning_up), BackupServices
-│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), RetentionGuard (ADR 0010)
+│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
 ├── Restore/                       (M3) Staging, Selection, Apply, database Importer
-└── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, Mailer port
+└── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, NoticeKind, Mailer port
 ```
 
-Entries marked (M2) or (M3) arrive with that milestone. Dependency rules:
+The entry marked (M3) arrives with that milestone. Dependency rules:
 
 - Only `WordPress\*` and `Plugin` call WordPress functions or use WordPress classes
   ([ADR 0029](adr/0029-wordpress-free-core.md)). The core receives paths, settings values,
-  a `Clock` and the ports `Options`, `HttpClient`, `Connection` and `ExposureCheck` as
-  constructor arguments. `tests/PHPStan/WordPressFreeCoreRule.php` enforces this in CI.
-- `Engine` depends on `Format`, `Crypto`, `Backend`; never on `Jobs` or any adapter.
-  `Jobs\Backup` orchestrates `Engine` operations in bounded slices.
+  a `Clock`, a `RandomSource` and the ports `Options`, `HttpClient`, `Connection`,
+  `ExposureCheck` and `Mailer` as constructor arguments.
+  `tests/PHPStan/WordPressFreeCoreRule.php` enforces this in CI for every namespace except
+  `WordPress`: it reports WordPress functions that are called and WordPress classes that are
+  instantiated, called statically, read for constants or used with `instanceof`.
+- `Engine` depends on `Format`, `Crypto`, `Backend`, `Support` and `Exception`, and on two
+  helpers outside them: `Storage\Files` for atomic writes and `Secrets\Secret` for the
+  password in `KeyUnlock`. It never depends on `Jobs` or any adapter. `Jobs\Backup` and
+  `Jobs\Maintenance` orchestrate `Engine` operations in bounded slices. No tool enforces
+  this rule; it holds in the code today.
 - `Secret::reveal()` is allowed only in the classes listed in
   `tests/PHPStan/SecretRevealRule.php`.
 
@@ -183,42 +201,86 @@ more than one bounded slice at a time and never relies on a particular trigger.
 
 ### 4.2 Jobs and ticks
 
-A **job** (backup, forget, prune, check, restore) is a JSON document in the private
-directory ([ADR 0014](adr/0014-file-based-job-store.md)). A **tick** loads the active job,
-advances it for at most the budget, writes a checkpoint and arranges the next tick. The
-budget is `min(advanced.tick_budget_seconds, max_execution_time − 10 s)`, default 20 s;
-`set_time_limit()` is attempted but never relied upon. Every engine operation is written as a
-**resumable step**: it can stop after any blob, any directory, any HTTP request, and continue
-from the checkpoint in the next tick.
+A **job** (`Jobs\JobType`: backup, unlock, forget, prune or check; restore joins in
+Milestone 3) is a JSON document in the private directory
+([ADR 0014](adr/0014-file-based-job-store.md)). A **tick** loads the active job, advances it
+for at most the budget, writes a checkpoint and arranges the next tick. Every engine
+operation is written as a **resumable step**: it can stop after any blob, any directory, any
+HTTP request, and continue from the checkpoint in the next tick.
+
+The budget comes from `Container::tick_budget()`:
+
+1. Start with `advanced.tick_budget_seconds` (default 20, allowed 5 to 300).
+2. In the gentle CPU mode (`advanced.cpu_throttle = gentle`) halve it.
+3. If `max_execution_time` is greater than 0, cap it at `max(5 s, max_execution_time − 10 s)`.
+   The floor of 5 s means that with a limit of 15 s or less the cap is 5 s, which is more
+   than the limit minus 10 s.
+4. A caller may ask for less: admin polling asks for 5 s.
+
+The halving comes before the cap, so a setting above the cap is not halved in effect: with
+`max_execution_time = 30` a setting of 60 gives 20 s in both modes, and the default setting
+gives 20 s in normal and 10 s in gentle mode. `Cron::tick()` also calls
+`set_time_limit( budget + 30 )` where the function exists, but never relies on it, and
+`ignore_user_abort( true )`.
+
+At the start of each tick `Cron::tick()` calls `wp_raise_memory_limit( 'backups_for_restic' )`.
+WordPress then raises PHP's `memory_limit` to `WP_MAX_MEMORY_LIMIT` when that is higher and
+the host allows the value to be changed; WordPress' default for the constant is 256M, and
+the filter `backups_for_restic_memory_limit` can raise the limit further. On a host with
+`memory_limit = 128M` and no `WP_MAX_MEMORY_LIMIT` in `wp-config.php` a tick therefore runs
+with 256M, and the preflight of §6 sees that value, while the Doctor judges the limit of the
+request that runs the check. The WP-CLI loops (`--wait`, `tick --until-idle`) call the runner
+directly and keep the limit of the CLI process.
 
 ### 4.3 Who ticks
 
 | Driver | Behaviour | Typical on shared hosting |
 | --- | --- | --- |
-| **Loopback chain** | At the end of a tick with remaining work the runner schedules `backups_for_restic_tick` for *now* and calls WordPress' `spawn_cron()`, which fires a non-blocking request to `wp-cron.php`. The next tick starts within a second. Chain stops when the job finishes. | Works on most hosts; some block loopback (Doctor detects it, like Site Health does) |
+| **Loopback chain** | At the end of a tick that advanced a job which still has work (`TickReport::should_chain()`), `Cron::chain()` schedules `backups_for_restic_tick` for *now*, writes WordPress' `doing_cron` transient itself and sends a non-blocking request to `wp-cron.php`. It does not call `spawn_cron()`, which does nothing inside a `wp-cron.php` request and spawns at most once a minute. The next tick starts within a second. The chain stops when the job finishes, when a tick finds the runner busy, and while a job waits out a back-off ([ADR 0011](adr/0011-scheduling.md)). | Works on most hosts; some block loopback (Doctor detects it, like Site Health does) |
 | **WP-Cron on traffic** | Due events run at the end of ordinary page loads. | Baseline; speed depends on visitors |
-| **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; documented with screenshots |
-| **Admin polling** | While the dashboard shows a running job it polls every 3 s; each poll performs a short tick (5 s budget, rate-limited to one per 5 s). "Keep this tab open to speed up the first backup." | Always available |
-| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes: probes for append-only mode once a day (hourly while the last answer was inconclusive), creates due jobs from the schedule, detects expired leases, refreshes repository locks, rotates logs, sends the stale notification and retries unsent ones. | Needs any of the above to fire |
-| **WP-CLI** (`wp backups-for-restic tick`, `backup --wait`) | Runs ticks in a loop until the job ends; `--wait` uses an unbounded budget. | Where the host offers WP-CLI |
+| **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; see [`guides/cron.md`](guides/cron.md) |
+| **Admin polling** | While the admin page follows a running job it requests `GET /jobs/{id}` every 3 s; such a request runs a tick of at most 5 s, at most once per 5 s, and does not chain. "Keep this tab open to speed up the backup on slow hosts." | Always available |
+| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Last it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
+| **WP-CLI** (`wp backups-for-restic …`) | `tick` runs one tick with the budget of §4.2; `tick --until-idle` repeats such ticks until no job is left. `backup`, `forget`, `prune` and `check` with `--wait` run the job in the same process in ticks of 300 s each, which do not pass through `Container::tick_budget()`: neither `max_execution_time` nor the gentle mode shortens them. Without `--wait` these commands create the job and return; the other drivers advance it. | Where the host offers WP-CLI |
 
 Only one runner may advance a job at a time: `flock()` on `<private>/runner.lock`
-(non-blocking) plus a **lease** in the job document (`owner`, `expires_at`). WordPress'
-own `doing_cron` lock additionally serialises WP-Cron requests.
+(non-blocking) plus a **lease** in the job document (`lease_owner`, `lease_expires_at`),
+which a tick holds for its budget plus 60 s. WordPress' own `doing_cron` lock additionally
+serialises WP-Cron requests.
 
 ### 4.4 Job state machine
 
+A job has a state (`Jobs\JobState`: `queued`, `running`, `succeeded`, `failed`, `cancelled`)
+and, while it runs, a current step. The steps of each type come from `Jobs\JobType`:
+
+| Type | Steps of the regular path | Cleanup steps |
+| --- | --- | --- |
+| `backup` | `preflight` → `unlocking` → `backing_up` → `recording` | `releasing` → `cleaning_up` |
+| `unlock` | `unlocking` | `cleaning_up` |
+| `forget` | `preflight` → `unlocking` → `detecting` → `forgetting` → `recording` | `releasing` → `cleaning_up` |
+| `prune` | `preflight` → `unlocking` → `detecting` → `pruning` → `recording` | `releasing` → `cleaning_up` |
+| `check` | `preflight` → `unlocking` → `checking` → `recording` | `releasing` → `cleaning_up` |
+
 ```
- queued → preflight → unlocking → locking → scanning → uploading → building_trees
-       → writing_snapshot → recording → retention? → releasing → cleaning_up → succeeded
- any step ──error──▶ releasing → cleaning_up → failed          cancel ──▶ releasing → cleaning_up → cancelled
+ queued → running: regular steps → cleanup steps → succeeded
+ a step fails ──▶ cleanup steps → failed          cancel ──▶ cleanup steps → cancelled
 ```
 
-- `unlocking` is the KDF step; it is skipped when a cached master key exists
-  ([ADR 0020](adr/0020-unlocking-and-kdf.md)).
-- `locking`/`releasing` manage the repository lock; locks are always released on every
-  terminal path, which rest-server allows even in append-only mode.
-- `forget`, `prune`, `check` and `restore` jobs reuse the machine with their own step lists.
+- The cleanup steps run on every path to the end: success, failure and cancellation.
+- `unlocking` is the KDF step; it does nothing when a cached master key opens the repository
+  ([ADR 0020](adr/0020-unlocking-and-kdf.md)). The `unlock` job exists for the wizard when it
+  connects an existing repository.
+- No step of its own takes the repository lock, scans, uploads or writes the snapshot: the
+  engine run inside `backing_up`, `forgetting`, `pruning` or `checking` does all of that and
+  keeps its own checkpoint (§4.5). `releasing` releases the lock of a run that did not
+  finish, which rest-server allows even in append-only mode.
+- `detecting` is the append-only probe of forget and prune jobs
+  ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
+  by the heartbeat after a successful backup, not a step of the backup job.
+- An error with a retryable code (`repository_unreachable`, `repository_locked`) does not
+  fail the job at once: the runner waits 30 s, then twice as long after each further failure
+  in a row, and fails the job at the sixth.
+- Restore jobs join in Milestone 3 with their own step list.
 - Exactly one job is active at a time; creating another is rejected (HTTP 409), cancel is
   always possible.
 
@@ -228,9 +290,12 @@ A backup job keeps its working state in `<private>/jobs/<id>/`: `job.json` with 
 progress and results; `backup/` with the engine's checkpoint (the stack of directory frames,
 one file of finished nodes per frame, the file being read with its offset and blob ids, or a
 virtual file with its cursor); and `database.json` with the dump's table list and finished
-tables. Every write is atomic or append-only, so a killed tick loses at most the work since
-its last checkpoint. Memory per tick is bounded by one directory listing, one page of rows
-and one pack buffer.
+tables. Forget, prune and check jobs keep the checkpoint of their engine run in
+`maintenance/state.json`; the key derivation keeps its state and table in
+`<private>/kdf/<id>/`. Every write is atomic or append-only, so a killed tick loses at most
+the work since its last checkpoint. Memory per tick is bounded by the directory listings on
+the walk, one page of rows and one pack buffer per blob type, plus the merged index, which
+grows with the number of blobs in the repository (§2, principle 3).
 
 ## 5. The restic repository format as implemented
 
@@ -266,7 +331,10 @@ The user key is `scrypt(password, salt, N, r, p, 64 B)`: bytes 0–31 become the
 `N = 16384, r = 8, p = 1` (restic's own defaults when calibration is unavailable; restic
 accepts any power-of-two `N > 1`). Repositories created by restic typically carry
 `N = 32768…131072`; the plugin derives those too, once, with a file-backed ROMix table and
-checkpointing, then caches the master key ([ADR 0020](adr/0020-unlocking-and-kdf.md)).
+checkpointing, then caches the master key ([ADR 0020](adr/0020-unlocking-and-kdf.md)). Key
+files come from the server, so their cost is capped (`Crypto\ScryptParameters`): `N` above
+2^20, `r` above 32, `p` above 16 or a table of more than 1 GiB (`128 · N · r` bytes) is
+refused with `repository_unsupported_version`.
 
 ### 5.4 Config and repository version
 
@@ -275,8 +343,11 @@ Repositories **created by the plugin are format version 1** ([ADR 0019](adr/0019
 no compression anywhere, so every file the CLI or the plugin writes stays readable by both.
 Connecting to an existing repository: version 1 is fully supported; version 2 is supported
 only when the optional `zstd` PHP extension is present, because restic compresses index and
-snapshot files in every version 2 repository, even with `--compression off`. Otherwise the
-wizard refuses with a clear explanation. In a version 2 repository the plugin writes
+snapshot files in every version 2 repository, even with `--compression off`. Without the
+extension the wizard still connects, because key files and `config` are never compressed;
+the first job that reads an index or snapshot file then fails with
+`repository_unsupported_version`, whose message names the missing extension. A check in the
+wizard is not planned yet. In a version 2 repository the plugin writes
 uncompressed blobs and plain-JSON unpacked files, which restic accepts.
 
 ### 5.5 Chunking and blob ids
@@ -287,8 +358,11 @@ and `mod` tables of 256 entries, minimum chunk 512 KiB, maximum 8 MiB, cut when
 `digest & ((1 << 20) − 1) == 0`, the first `MinSize − 64` bytes of every chunk only fill the
 window. Files smaller than 512 KiB are one blob. The blob id is the SHA-256 of the plaintext
 blob; identical chunks are stored once. The repository polynomial is generated at init with
-the same GF(2) arithmetic and Ben-Or irreducibility test restic uses. Conformance tests
-compare chunk boundaries with those produced by `restic backup` on fixture files.
+the same GF(2) arithmetic and Ben-Or irreducibility test restic uses. The unit suite
+compares the 17 boundaries of a 24 MiB stream with a vector recorded from restic's chunker
+library (`tests/Fixtures/vectors/go-strings-and-chunker.json`). Parity with the CLI is tested
+indirectly: when the plugin backs up files that restic 0.19.1 or 0.14.0 backed up before, it
+adds no data blob.
 
 ### 5.6 Packs
 
@@ -305,8 +379,11 @@ checkpoint as unindexed; the index file follows in the same or a later tick.
 ### 5.7 Index
 
 `index/<id>` is encrypted JSON `{"packs":[{"id":hex,"blobs":[{"id":hex,"type":"data"|"tree","offset":n,"length":n}]}]}`.
-The plugin writes an index file after every pack batch and at the end of every tick, with at
-most 50 000 blobs per file (restic's limit). Reading merges all index files into an
+A backup does not write an index file in every tick. At the end of a tick it writes one when
+50 000 blobs of uploaded packs wait for it or when 600 seconds have passed since the last
+index file, and it writes the rest when it finishes (`BackupRun::INDEX_INTERVAL_SECONDS`,
+`IndexFile::MAX_BLOBS`); like restic it starts a new file after 50 000 blobs. Until then
+an uploaded pack is recorded only in the job's checkpoint. Reading merges all index files into an
 `IndexSet`; a per-repository **index cache** in the private directory stores the merged set
 (encrypted with the master key) so later runs load one file instead of all index files.
 Prune-lite rewrites index files without the deleted packs.
@@ -318,11 +395,20 @@ unique**; restic rejects unordered trees. Node fields: `name` (Go `strconv.Quote
 without the surrounding quotes), `type` (`file`, `dir`, `symlink`; devices and sockets are
 skipped with a warning), `mode` (permission bits plus Go `FileMode` type bits: dir `1<<31`,
 symlink `1<<27`, setuid `1<<23`, setgid `1<<22`, sticky `1<<20`), `mtime`, `atime`, `ctime`
-(RFC 3339 with the site's offset), `uid`, `gid`, `user`, `group`, `inode`, `size`, `links`,
+(RFC 3339 in UTC, written with `Z`), `uid`, `gid`, `user`, `group`, `inode`, `size`, `links`,
 `linktarget`, `content` (list of data blob ids for files, `null` for directories),
 `subtree` (tree blob id for directories). JSON is emitted with Go-compatible escaping so that
 identical directories produce identical tree blobs across implementations where possible;
 parity is measured in tests but is not a correctness requirement.
+
+Times come from PHP's `lstat()`, so they have whole seconds, and `atime` is a copy of `mtime`,
+as restic records it by default, so that reading a file does not change its node
+(`Engine\Backup\NodeFactory`). The plugin writes every time in UTC (`Support\Rfc3339`), the
+snapshot's `time` included. restic's retention rules put a snapshot into the day, week or
+month of its own offset, so for snapshots the plugin wrote these periods begin at midnight
+UTC, not at the site's midnight. Order and uniqueness of the nodes are enforced when a tree
+is written (`TreeCodec::encode()`); a tree read from the repository is not checked for them
+yet, which is planned for Milestone 3.
 
 ### 5.9 Snapshots and locks
 
@@ -350,23 +436,29 @@ its marking again, because another client may have written snapshots in the mean
 | List | `GET {path}/{type}/` with `Accept: application/vnd.x.restic.rest.v2` → `[{"name":…,"size":…}]` |
 
 `{type}` ∈ `config`, `data`, `index`, `keys`, `locks`, `snapshots`; `data` objects are
-addressed flat (`/data/<name>`), the server shards. `{path}` is empty for BorgBase and
-may contain user and repository segments on a self-hosted rest-server, for example with
-`--private-repos`. The client sends HTTP basic
+addressed flat (`/data/<name>`), the server shards. `{path}` may contain user and
+repository segments on a self-hosted rest-server, for example with `--private-repos`, and is
+empty for BorgBase. The client sends HTTP basic
 authentication in the `Authorization` header (never in the URL), verifies TLS against
 WordPress' CA bundle or an uploaded CA certificate for a self-hosted server (never
-disabled), disables redirects, sets a plugin User-Agent, times out after 60 s per
-request, and retries idempotent requests on network errors and 5xx with exponential backoff
-(at most 5 attempts). 507 (quota exceeded) and 403 on delete are surfaced as dedicated
-errors ([ADR 0001](adr/0001-restic-rest-backend.md)).
+disabled), disables redirects, sets a plugin User-Agent and times out after
+`advanced.upload_timeout_seconds` (default 60 s) per request. Reads, listings and deletions
+are tried up to 5 times, with exponential backoff, after a network error, a 429 or a 5xx
+other than 507. An upload is tried again after a 429 or such a 5xx, but not after a network
+error; the upload of `config` gets one attempt. If the server answers an upload with 403
+because the object already exists with the same size, the upload counts as done. 401, 507
+(quota exceeded) and 403 on delete are surfaced as dedicated errors
+([ADR 0001](adr/0001-restic-rest-backend.md)).
 
 ## 6. Backup pipeline
 
 Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
 
-1. **Preflight**: repository configured and password readable, private directory created
-   and not reachable over HTTP (probe cached for a day), free disk space for two packs plus
-   64 MiB, `memory_limit` of at least 96 MB, and the repository's `config` present.
+1. **Preflight**: repository configured and password readable, private directory created,
+   free disk space for two packs plus 64 MiB, `memory_limit` of at least 96 MB (the value
+   after the raise of §4.2), no HTTP probe that found the private directory readable from
+   the web (the answer is cached for a day; a probe that could not run does not stop the
+   backup), and the repository's `config` present.
 2. **Unlocking**: open the repository with the cached master key, which counts only if it
    decrypts the config; otherwise derive it with the resumable scrypt across ticks and cache
    it (ADR 0020).
@@ -384,9 +476,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
    refreshed every five minutes and released at the end.
 4. **Recording**: last result in `backups_for_restic_state` for the dashboard and Site Health.
 5. **Releasing** and **cleaning up** run on every path to the end: an unfinished run releases
-   its lock, the scrypt files and the checkpoint are deleted, old jobs are pruned.
+   its lock, the scrypt files and the checkpoint are deleted, old jobs are pruned to
+   `advanced.keep_jobs`, and index caches of other repositories are removed.
 
-Retention (`forget` after a backup in mode `plugin`) and notifications join in Milestone 2.
+Retention is not a step of the backup job: in mode `plugin` the heartbeat starts a `forget`
+job after every successful backup (`retention.run_forget_after_backup`, §8), and the notifier
+hears of every finished job (§14).
 Files that cannot be read (permission denied, vanished) are recorded as warnings and the
 snapshot is still written, matching restic's exit code 3 behaviour.
 
@@ -402,9 +497,12 @@ snapshot the database appears as a directory:
 <private>/spool/database/010-wp_posts.sql
 …
 <private>/spool/database/900-views.sql           CREATE OR REPLACE VIEW …
-<private>/spool/database/manifest.json           table list in order, rows, bytes, sha256 per file, format id
-<private>/spool/manifest.json                    site manifest (versions, roots, excludes, prefix)
+<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows and bytes, views
+<private>/spool/manifest.json                    site manifest (format id, home URL, paths, roots, excludes, prefix, plugin, WordPress and PHP versions, repository format)
 ```
+
+Neither manifest carries hashes of files: restic authenticates every byte it restores, and a
+running SHA-256 cannot be carried across ticks ([ADR 0021](adr/0021-database-streaming.md)).
 
 Format `backups-for-restic-dump/1`: one SQL statement per line, escaped values, hex-encoded
 binary, ≈ 1 MiB `INSERT` batches, and a trailer line `-- end table rows=<n> bytes=<n>` per
@@ -414,15 +512,18 @@ Streaming and resumability: a table is produced page by page and fed to the chun
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
 yesterday's dump. When a tick's time is up, the table stops after the current page and the
 next tick continues after it, so tables of any size finish. Pages follow an integer primary
-key, otherwise an offset in primary-key order. Consistency is per table in tick mode; in WP-CLI `--wait`
-mode the whole dump runs inside `START TRANSACTION WITH CONSISTENT SNAPSHOT` when all tables
-are InnoDB.
+key, otherwise an offset in primary-key order. Consistency is per page, as with a
+non-transactional `mysqldump`: every row comes from exactly one read, but the pages of a
+table and the tables themselves are read at different moments. That holds in every mode,
+WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
+remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
 
-Import: files are restored to `<private>/restores/<job>/database/`, each trailer verified,
-then executed statement by statement in time-budgeted batches with maintenance mode on and
-the plugin's own options preserved (`PluginStatePreserver`). The manual path with the restic
-CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` in file order
-([`06-disaster-recovery.md`](06-disaster-recovery.md)).
+Import in the plugin arrives with restore in Milestone 3: files are restored to
+`<private>/restores/<job>/database/`, each trailer verified, then executed statement by
+statement in time-budgeted batches with maintenance mode on and the plugin's own options
+preserved (`PluginStatePreserver`). The manual path with the restic
+CLI exists today: `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` in
+file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
 ## 8. Retention, integrity checks and maintenance
 
@@ -457,8 +558,14 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   the server has it under the lock (another client may have changed the repository in
   between), and a second mismatch stops it without deleting.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
-  snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
-  data verification**: download `check.read_data_subset` percent of packs (default 2 %),
+  snapshot's tree walk resolves to indexed blobs, every index file can be read). A blob id
+  that occurs twice is no finding: duplicates are legal in a restic repository, and the
+  index keeps the first location; a whole pack listed in two index files is the warning
+  `pack_in_several_indexes`. A pack that no index file lists, as a cancelled or failed
+  backup leaves it behind, is the warning `pack_unindexed`; prune-lite does not delete such
+  packs yet, which is planned for Milestone 3. Then comes **sampled data verification**:
+  download `schedule.check.read_data_subset_percent` percent of the packs (default 2 %),
+  drawn at random anew for every check without regard to earlier checks, and
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
   never split a blob, so memory does not grow with the pack size; a pack whose reading ends
   the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
@@ -477,7 +584,14 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
 
 ## 9. Restore
 
-Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores are jobs with progress.
+Restore in the plugin arrives with Milestone 3; this section is its plan. Today the engine
+has `Engine\Restore\RestoreRun`, which restores a snapshot or a part of it into a directory
+in resumable slices and validates every name from the repository. Only the unit and
+conformance suites use it: the admin area, the REST API and WP-CLI have no restore yet, and
+until then a restore is done with the recovery kit and the restic CLI
+([`06-disaster-recovery.md`](06-disaster-recovery.md)).
+
+Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs with progress.
 
 | Scenario | Flow |
 | --- | --- |
@@ -498,34 +612,43 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores are jobs with p
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
-├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped), backup/ (engine checkpoint), database.json
+├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
-├── tmp/, logs/                            reserved
-└── restores/<job-id>/                     (M3) staging, expires after 24 h
+├── tmp/, logs/                            reserved, empty
+└── restores/<job-id>/                     (M3) staging, expires after 24 h; the directory exists empty today
 ```
 
 No plaintext site data is written to the private directory except restore staging and
-database import files, both explicit admin actions. The database holds four options:
+database import files, both explicit admin actions that arrive with Milestone 3. The
+database holds four options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
-ciphertext including the cached master key), `backups_for_restic_state` (last backup, exposure
-probe, schedule slot) and `backups_for_restic_schema_version`.
+ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
+last backup and the last forget, prune and check, the check alert, the exposure and
+append-only probes, the retention switch and proposal, the handled schedule slots) and
+`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker and the
+outbox of unsent notices). A fifth name, `backups_for_restic_schema_version`, is reserved:
+nothing writes or reads it, and uninstall deletes it (§18).
 
 ## 11. Settings model
 
-Declared once in `Settings\Schema`; secrets live in the `SecretStore`.
+Declared once in `Settings\Schema` and stored flat by dotted path (`schedule.backup.hour`) in
+one option; secrets live in the `SecretStore`. The block shows the defaults, except
+`repository.server`, `url` and `rest_username`, which show an example and are set by the
+wizard.
 
 ```yaml
 repository:
-  server: borgbase                       # borgbase | rest-server (ADR 0025)
-  url: "https://abc123.repo.borgbase.com/"   # https only; borgbase: *.repo.borgbase.com; rest-server: any host, port, path
-  rest_username: "abc123"                # optional for rest-server without authentication
-  ca_certificate: ""                     # rest-server only: uploaded PEM in the private directory, for self-signed TLS
-  append_only: unknown                   # detected: yes | no | unknown (ADR 0010)
-  format_version: 1                      # informational, read from config after connecting
+  server: rest-server                    # rest-server | borgbase (ADR 0025)
+  url: "https://backup.example.net:8000/mysite/wordpress/"   # https only; rest-server: any host, port, path; borgbase: *.repo.borgbase.com
+  rest_username: "mysite"                # optional for rest-server without authentication
+  ca_certificate: none                   # none | uploaded: whether ca.pem in the private directory is trusted for this server (self-signed TLS)
+  append_only: unknown                   # what the wizard's connection test found: yes | no | unknown (ADR 0010)
+  format_version: 1                      # written when the plugin creates the repository; not updated when the wizard connects an existing one
+  id: ""                                 # repository id (64 hex), written when the plugin creates the repository
 schedule:
-  backup: { frequency: daily, hour: 3, minute: 17 }
-  prune:  { frequency: weekly, weekday: 0, hour: 4 }
-  check:  { frequency: monthly, day: 1, hour: 5, read_data_subset_percent: 2 }
+  backup: { frequency: daily, weekday: 0, hour: 3, minute: 17 }                  # manual | twice_daily | daily | weekly
+  prune:  { frequency: weekly, weekday: 0, hour: 4 }                             # manual | weekly | monthly
+  check:  { frequency: monthly, day: 1, hour: 5, read_data_subset_percent: 2 }   # manual | weekly | monthly
 retention:
   mode: plugin                           # plugin | external
   keep: { last: 2, daily: 7, weekly: 4, monthly: 6, yearly: 0, within: "2d" }
@@ -538,96 +661,172 @@ backup:
 notifications:
   email: { on_failure: true, on_stale: true, stale_after_hours: 36, recipients: [] }
 advanced:
-  tick_budget_seconds: 20                # capped by max_execution_time − 10
+  tick_budget_seconds: 20                # 5–300; halved in gentle mode, then capped at max(5, max_execution_time − 10) (§4.2)
   pack_size_mib: 16                      # 4–64
-  upload_timeout_seconds: 60
-  cache_limit_mib: 256
-  cpu_throttle: normal                   # normal | gentle (half the tick budget, short rests while working) for CPU-quota hosts
+  upload_timeout_seconds: 60             # 10–600; the timeout of every repository request
+  cache_limit_mib: 256                   # 16–4096
+  cpu_throttle: normal                   # normal | gentle: halves tick_budget_seconds before the cap and rests while working (§16), for CPU-quota hosts
   loopback_chaining: auto                # auto | off
-  keep_jobs: 30
+  keep_jobs: 30                          # 5–500
 setup:
   completed: false
-  recovery_kit_acknowledged_at: null
+  recovery_kit_acknowledged_at: ""       # time of the acknowledgement, written by POST /setup/complete
 ```
+
+Schedules (`Scheduling\SchedulePolicy`) are slots in the site's time zone:
+
+- A backup runs `manual` (never by itself), `twice_daily` (at `hour:minute` and twelve hours
+  later), `daily`, or `weekly` on `schedule.backup.weekday` (0 is Sunday).
+- Prune and check slots are on the full hour. Prune runs `manual`, `weekly` on
+  `schedule.prune.weekday`, or `monthly` on the first such weekday of the month. The check
+  runs `manual`, `monthly` on `schedule.check.day` (1 to 28), or `weekly` on the prune
+  weekday: it has no weekday of its own, so that all maintenance shares one day.
+- The heartbeat starts a job when the most recent slot is newer than the last one it
+  handled, so a site that was offline catches up with one run, not with a backlog. The first
+  slot of each schedule after setup is only recorded.
 
 Constants override values: `BACKUPS_FOR_RESTIC_REPOSITORY_URL`, `BACKUPS_FOR_RESTIC_REST_USERNAME`,
 `BACKUPS_FOR_RESTIC_REST_PASSWORD`, `BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD`,
-`BACKUPS_FOR_RESTIC_PRIVATE_DIR`. Overridden fields are read-only in the UI.
+`BACKUPS_FOR_RESTIC_PRIVATE_DIR`. The server never overwrites an overridden setting or
+secret: `Settings::with()` rejects the change (`defined_in_wp_config`), the wizard's save
+skips such fields, and `GET /settings` reports which ones are overridden. The admin UI does
+not read those flags yet: the wizard shows empty, editable fields for them and the
+constant's value wins. Read-only fields in the UI are planned for Milestone 3.
 
 ## 12. Core interfaces
+
+The seams as they are in the code. There is no budget type: every resumable call takes a
+deadline, a Unix time as `microtime( true )` returns it, works until it is done or the
+deadline has passed, and says whether it finished. What it needs for the next tick it keeps
+in its own checkpoint.
 
 ```php
 namespace BackupsForRestic\Backend;
 
-interface Backend {
-    public function exists(ObjectType $type, string $name): ?int;              // size or null
-    public function load(ObjectType $type, string $name, ?Range $range = null): string;
-    public function loadToFile(ObjectType $type, string $name, string $path): void;
-    public function save(ObjectType $type, string $name, string|StreamSource $body): void;
-    public function delete(ObjectType $type, string $name): void;              // throws AppendOnlyRefused on 403
-    /** @return list<ObjectInfo> name + size */
-    public function list(ObjectType $type): array;
-    public function createLayout(): void;
+interface Backend {                                    // RestBackend in the plugin
+    public function create(): void;                                        // repository layout on the server
+    public function size( ObjectType $type, string $name ): ?int;          // null if the object does not exist
+    public function load( ObjectType $type, string $name, int $offset = 0, ?int $length = null ): string;   // whole object or a range; throws NotFound
+    public function save( ObjectType $type, string $name, string $body ): void;   // write-once; throws AlreadyExists
+    public function delete( ObjectType $type, string $name ): void;        // throws AppendOnlyRefused; a missing object is fine
+    /** @return array<string, int> sizes by name; -1 when the server reports names only */
+    public function list( ObjectType $type ): array;                       // skips names that are not object ids
 }
 
 namespace BackupsForRestic\Crypto;
 
 final class Cipher {
-    public function __construct(private MasterKey $key) {}
-    public function seal(string $plaintext): string;                 // nonce ‖ ct ‖ tag
-    public function open(string $ciphertext): string;                // throws AuthenticationFailed
+    public function __construct( MasterKey $key, RandomSource $random );
+    public function seal( string $plaintext ): string;                     // nonce ‖ ct ‖ tag
+    public function open( string $data ): string;                          // throws AuthenticationFailed
 }
 
-interface Scrypt {
-    /** Runs until done or until $budget is exhausted; returns null when it must be resumed. */
-    public function derive(ScryptJob $job, Budget $budget): ?string;
+final class Scrypt {
+    public function __construct( string $password, string $salt, ScryptParameters $parameters, int $length = 64, ?string $table_file = null, array $checkpoint = [] );
+    public static function derive( string $password, string $salt, ScryptParameters $parameters, int $length = 64 ): string;   // in one go, table in memory
+    public function run( float $deadline = INF ): bool;                    // true when finished
+    public function result(): string;                                      // the derived key
+    public function checkpoint(): array;                                   // state for the next request; needs $table_file
+    public function progress(): float;                                     // 0 to 1
 }
 
 namespace BackupsForRestic\Format\Chunker;
 
-interface Chunker { /** @return iterable<Chunk> */ public function chunks(StreamSource $source): iterable; }
+final class RabinChunker {                             // restic's chunker for one polynomial
+    public function __construct( int $polynomial );
+    public function reset(): void;
+    public function next_split_point( string $buffer, int $offset, int $length ): int;   // -1: no boundary in this piece
+}
+
+final class ChunkReader {                              // reads a ByteSource in 512 KiB pieces
+    public function __construct( ByteSource $source, RabinChunker $chunker );
+    public function next(): ?string;                                       // the next chunk, null at the end
+}
 
 namespace BackupsForRestic\Engine;
 
-interface BlobStore {
-    public function has(BlobId $id, BlobType $type): bool;
-    public function put(BlobType $type, string $plaintext, Budget $budget): BlobId;   // dedup, encrypt, pack, upload, index
-    public function get(BlobId $id, BlobType $type): string;
-    public function flush(Budget $budget): void;                                     // finish pack + index
+final class BlobStore {                                // deduplicating writer; reading is Repository::load_blob()
+    public function __construct( Repository $repository, IndexSet $index, int $pack_size = self::DEFAULT_PACK_SIZE );
+    public function save( BlobType $type, string $plaintext ): Id;         // dedup, encrypt, add to the open pack, upload a full pack
+    public function has( BlobType $type, Id $id ): bool;                   // indexed or in an open pack
+    public function flush(): void;                                         // upload the open packs
+    public function write_index(): array;                                  // index files for uploaded packs; returns their ids
 }
 
-interface ResumableStep {
-    public function advance(Job $job, Context $context, Budget $budget): StepResult;  // Continue | Waiting | Done | Failed | Cancelled
+namespace BackupsForRestic\Jobs;
+
+interface Step {                                       // one resumable step of a job
+    public function advance( Job $job, EventLog $log, float $deadline ): bool;   // true when the step is done
+}
+
+interface StepProvider {                               // maps a job type and a step name to its code
+    public function step( JobType $type, string $name ): Step;
+}
+
+interface JobObserver {                                // told when a job starts and when it ends
+    public function state_changed( Job $job, JobState $previous ): void;
 }
 ```
 
-Test doubles: `InMemoryBackend` (with append-only switch), `FakeHttpClient`,
-`InMemorySecretStore`, `FrozenClock`, `ScriptedBudget`. The real `rest-server` and the
-restic CLI are used in integration and conformance tests.
+The engine runs follow one shape without sharing an interface. `BackupRun`, `ForgetRun`,
+`PruneRun` and `CheckRun` have `start()`, `resume()`, `abort()` and
+`advance( float $deadline, ?Throttle $throttle = null ): bool`. `RestoreRun` has `start()`,
+`resume()` and `advance( float $deadline ): bool`. `KeyUnlock::run( float $deadline )`
+returns the master key, or null when it needs another tick.
+`Jobs\Runner::tick( float $budget ): TickReport` is what every driver calls.
+
+Ports that the WordPress layer implements: `Storage\Options` (`WpOptions`),
+`Backend\Http\HttpClient` (`WpHttpClient`), `Database\Dump\Connection` (`WpdbConnection`),
+`Storage\ExposureCheck` (`WpExposureCheck`) and `Notifications\Mailer` (`WpMailer`). Time and
+randomness come through `Support\Clock` and `Crypto\RandomSource`, secrets through
+`Secrets\SecretStore`, and input for the chunker through `Support\ByteSource` and
+`Support\ResumableByteSource`.
+
+Test doubles in `tests/Support/`: `InMemoryBackend` (with an append-only switch),
+`CountingBackend` and `HookedBackend` (wrap a backend to count loads or to act before a
+request), `CurlHttpClient` (the `HttpClient` port on cURL, for the conformance suite and the
+development tools), `InMemoryOptions`, `FrozenClock`, `FixedRandom`, `RecordingMailer` and
+`MysqliConnection`. Steps are scripted in the tests that need them (`RunnerTest`). The real
+`rest-server` and the restic CLI are driven by `RestServer` and `ResticCli` in the
+conformance and integration suites.
 
 ## 13. Surfaces
 
 ### 13.1 Admin UI
 
-Menu "Backups" (`manage_options`; multisite is refused in 1.0). Pages: Dashboard
-(freshness, repository usage from the index set, running job with progress and a "keep this
+Menu "Backups" (`manage_options`, filterable; multisite is refused in 1.0). One admin page
+with five tabs (`AdminPage::TABS`): Dashboard (cards for the last backup, the next backup and
+the repository host with its append-only status, the running job with progress and a "keep this
 tab open" hint, recent jobs, Back up now; maintenance cards for old snapshots, unused data
 with the space only a full prune reclaims, and the repository check, each with its last
 result, next run and a button; notices that stay until their cause is gone: check findings,
-a switch to retention mode `external`, and the proposal to switch back), Snapshots,
-Restore, Settings (Repository, Schedule, Old snapshots, Maintenance, What to back up,
-Notifications, Advanced; saving sends only changed fields, so an open page cannot undo an
-automatic switch), Logs, Setup wizard
-(Environment → Repository server → Password → Unlock progress → Recovery kit → Schedule →
-First backup). The repository step offers BorgBase or an own rest-server, takes the
-credentials and an optional CA certificate, tests Range reads and listing, and detects
-append-only ([ADR 0010](adr/0010-retention-and-append-only.md)). Plain JavaScript as classic
-scripts on core's `wp-api-fetch` and `wp-i18n`, server-rendered fallbacks
+a switch to retention mode `external`, and the proposal to switch back), Snapshots (a list
+with time, id, host, files, size and new data; browsing and restoring arrive with
+Milestone 3), Settings (Schedule, Old snapshots, Maintenance, Notifications, What to back
+up, Advanced, and Repository with the address, the working directory, the cache and the
+recovery kit; saving sends only changed fields, so an open page cannot undo an automatic
+switch), Environment (the Doctor's checks) and Logs (the recent jobs and, for a chosen job,
+its events and warnings on the page; there is no download). Until setup is completed the
+page shows the setup wizard instead
+(Environment → Repository server → Password, with the unlock progress when an existing
+repository is connected → Recovery kit → Schedule → First backup). The repository step
+offers an own restic REST server or the BorgBase preset, takes the credentials and, for an
+own server, an optional CA certificate, tests authentication, listing and a ranged read, and
+detects append-only ([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows
+no repository usage or growth yet; that is planned for Milestone 3.
+
+The whole UI is one classic script, `assets/js/admin.js`, on core's `wp-api-fetch`,
+`wp-i18n` and `wp-dom-ready`. The server renders only the frame of the page, and every view
+and action goes through the REST API. Without JavaScript the page shows a notice and nothing
+else: there are no server-rendered fallbacks
 ([ADR 0012](adr/0012-admin-ui-without-build-step.md)).
 
-The wizard's environment page explains the hosting situation in plain words: loopback
-status, cron recommendation, memory and time limits, expected duration of the first backup
-for the measured site size.
+The wizard's environment step shows the Doctor's checks (§13.4), each with a label and a
+hint. A critical finding keeps the Continue button away in the browser; the server does not
+enforce it, because `POST /setup/complete` checks only the acknowledgement of the recovery
+kit and that the cached key opens the repository. A server-side gate is planned for
+Milestone 3. The step measures nothing about the site and shows no expected duration of the
+first backup; time estimates are planned for Milestone 3.
 
 ### 13.2 REST API (`backups-for-restic/v1`)
 
@@ -652,19 +851,39 @@ All routes: capability check in `permission_callback` (`backups_for_restic_capab
 responses except the recovery kit, which is sent with `Cache-Control: no-store`. Restore
 routes arrive with Milestone 3.
 
+`GET /snapshots` and the WP-CLI command `snapshots` list every snapshot in the repository,
+also those of other hosts that share it. A list limited to this site is planned for
+Milestone 3. Errors of the routes carry the codes of §14 with the prefix
+`backups_for_restic_`.
+
 ### 13.3 WP-CLI (`wp backups-for-restic …`, optional surface)
 
-Milestone 1: `doctor`, `backup [--wait]`, `tick [--until-idle]`, `status`, `snapshots`.
-Later: `jobs …`, `ls <snapshot> [<path>]`, `restore …`, `apply …`, `check`,
-`forget [--dry-run]`, `prune`, `unlock --yes`, `recovery-kit`, `settings get|set`. Feature
-parity with the UI where a terminal makes sense; nothing requires it.
+Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
+`forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
+`tick [--until-idle]`, `status` and `snapshots`. `forget` and `prune` are refused in
+retention mode `external`. `status` prints the last backup and the active job only.
+
+Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
+cancelling a job, job logs, `settings get|set` and `recovery-kit` (parity with the admin
+area beyond starting jobs is planned for Milestone 3); `ls <snapshot> [<path>]`, `restore …`
+and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove
+stale locks of other hosts, stays on the list without a milestone. Nothing requires
+WP-CLI: setup, settings, cancelling and the recovery kit are in the admin area.
 
 ### 13.4 Site Health
 
-Tests: backup freshness; environment (OpenSSL, mbstring, memory, time limit, outbound
-HTTPS, loopback/cron); private directory protection; secrets readable; last check
-result. Debug information: plugin version, repository host and format version, cache size,
-last jobs.
+Three tests (`WordPress\SiteHealth`): backup freshness; the environment, which is the
+Doctor's result from cached probes; and the last check result. The Doctor (`Doctor\Doctor`)
+checks the required extensions (OpenSSL, JSON, mbstring, hash), the memory limit, the time
+limit, free disk space, the protection of the private directory, that the stored secrets
+decrypt and that all eight salt constants are defined, loopback requests and WP-Cron, and
+`zstd` when `repository.format_version` is 2. A private directory inside the web root whose
+HTTP probe could not run is reported as `unverified` with the status `recommended`; only a
+probe that read the file back is `critical`. The Doctor has no check of the PHP version and
+none of outbound HTTPS; the wizard's connection test is what shows that the repository
+server can be reached. An outbound HTTPS check is planned for Milestone 3. Debug information:
+plugin version, repository host and format version, append-only status, cache size, working
+directory and the time of the last backup; it does not list the last jobs.
 
 ### 13.5 Hooks
 
@@ -679,18 +898,53 @@ Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous
 
 ## 14. Errors, logging and observability
 
-Error codes (`Jobs\JobError`): `environment`, `configuration`, `repository_unreachable`,
-`repository_missing`, `repository_unsupported_version`, `repository_compressed_unsupported`,
-`repository_locked`, `repository_append_only`, `wrong_password`, `authentication_failed`
-(MAC mismatch on an object → data corruption or tampering, never retried silently),
-`quota_exceeded` (HTTP 507), `upload_rejected` (HTTP 400 hash mismatch), `server_incompatible` (no Range reads), `timeout`,
-`cancelled`, `database_dump_failed`, `database_import_failed`, `restore_validation_failed`,
-`internal`. Each has a stable code, a human message, a *retryable* flag and a hint.
+`Jobs\JobError::from_throwable()` turns an exception into a stable code, a technical message
+for the log and a *retryable* flag; `WordPress\Messages::job_error()` turns the code into a
+translated message and a hint. The codes:
 
-Logs per job: `events.log` (steps, decisions, warnings), `http.log` (method, type, name,
-status, duration — never headers or bodies), both redacted and capped. Progress:
-`files_done/total`, `bytes_done/total`, current directory, packs uploaded, estimated
-remaining time from the moving average of the last ticks.
+| Code | Raised for |
+| --- | --- |
+| `wrong_password` | no key file accepts the repository password |
+| `authentication_failed` | a MAC mismatch on an object (corruption or tampering), or a failure inside the cryptographic code (`CryptoException`); never retried |
+| `repository_damaged` | an object that does not match its name or cannot be parsed (`FormatException`) |
+| `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
+| `repository_locked` | a conflicting lock of another client; retryable |
+| `repository_append_only` | the server refused a deletion |
+| `repository_unreachable` | a network error or an unexpected status; retryable |
+| `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
+| `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |
+| `quota_exceeded`, `upload_rejected` | HTTP 507; HTTP 400 (hash mismatch) |
+| `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change |
+| `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
+| `database_dump_failed` | a query of the dump failed |
+| `configuration` | setup incomplete or a setting not usable |
+| `job_conflict` | another job is active |
+| `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
+| `internal` | anything else |
+
+Only `repository_unreachable` and `repository_locked` are retryable (§4.4). A cancelled job
+ends in the state `cancelled` without an error code, and there is no `timeout` code: a tick
+that runs out of time simply continues in the next one. Codes for restore
+(`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.
+
+The REST API has codes of its own for requests it refuses: `not_found` (unknown job),
+`not_editable` (a setting that `PUT /settings` does not accept), `invalid_job_type`,
+`invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password`,
+`invalid_settings` (with one message per field) and `invalid_url` for the connection test,
+which also covers a server without ranged reads (`server_incompatible`).
+
+Logs per job: `events.log`, one JSON line per event with time, level, message and context,
+redacted and capped at 1 MiB; once it is full a last line says so and later entries are
+dropped (`Jobs\EventLog`). Requests to the repository are not logged one by one: there is no
+`http.log`, and none is planned yet. Nothing rotates logs. Every job's `cleaning_up` step
+deletes the oldest finished jobs with their logs and keeps `advanced.keep_jobs` (default 30).
+
+Progress is a set of counters, not a share of a total. A backup reports the files and bytes
+processed so far, new, changed and unmodified files and directories, the blobs and bytes
+added, the current directory and the number of warnings; unlocking reports a percentage;
+check and prune report their phase and counts. The plugin does not know the size of the site
+in advance, so it shows no totals and no estimate of the remaining time; both are planned
+for Milestone 3.
 
 Notifications (`Notifications\Notifier`, FR-09) go by e-mail to the configured recipients, or
 to the site's administration address, through the `backups_for_restic_notification_recipients`
@@ -700,7 +954,7 @@ filter:
 | --- | --- | --- |
 | Failure | the first failed backup, forget, prune or check job of a streak, per job type | `on_failure` |
 | Stale | once, when no backup succeeded for `stale_after_hours` (default 36), but at least one and a half backup intervals; never with manual backups only | `on_stale` |
-| Recovery | once, when that job type succeeds again after a failure or stale notice | follows the notice it answers |
+| Recovery | once, when that job type succeeds again after a failure or stale notice; a check that finishes with errors sends the check-findings notice instead | follows the notice it answers |
 | Check findings | every check that finds errors | `on_failure` |
 | Retention external | when a refused deletion switches retention to `external` (ADR 0010) | `on_failure` |
 
@@ -731,14 +985,14 @@ release criteria.
 
 | Operation | Measured | Gate |
 | --- | --- | --- |
-| Rabin chunker | 24 MB/s; 124 MB/s with JIT | ≥ 5 MB/s, passed; the fallback rule (chunk only files > 8 MiB and the database stream) stays off |
+| Rabin chunker | 24 MB/s; 124 MB/s with JIT | ≥ 5 MB/s, passed; the fallback rule that [ADR 0019](adr/0019-repository-format-and-chunker.md) reserved for a slower chunker (chunk only files > 8 MiB and the database stream) was therefore never built |
 | SHA-256 | 261 MB/s | — |
 | Poly1305, pure PHP | 62 MB/s; 143 MB/s with JIT | — |
 | Seal: AES-256-CTR plus Poly1305 | 52 MB/s | — |
 | scrypt `N = 16384, r = 8, p = 1` (keys the plugin creates) | 1.4 s | ≤ 30 s, passed |
-| scrypt `N = 32768, r = 8, p = 6` (a key restic calibrated) | 17.9 s, resumable and file-backed | UI shows progress |
-| Backup of new data | 12 MB/s, 1.3 CPU minutes per GB | ≤ 15 CPU minutes per GB, passed |
-| Peak memory, 300 MB database stream | 38 MB for the whole test process | < 64 MB above WordPress' baseline; tests run with `memory_limit = 128M` |
+| scrypt `N = 32768, r = 8, p = 6` (a key restic calibrated) | 17.9 s in one go with the table in memory (`Scrypt::derive()`); the file-backed, resumable path that unlocking uses is not timed | UI shows progress |
+| Backup of new data | 12 MB/s; 1.3 CPU minutes per GB, extrapolated from 256 MB backed up in one process into an in-memory repository (user CPU time, no network, no resume) | ≤ 15 CPU minutes per GB, passed for that measurement |
+| Peak memory, 300 MB database stream | 38 MB for the whole test process | < 64 MB above the baseline, asserted by the conformance suite; tests run with `memory_limit = 128M`. The stream adds few blobs, so the index hardly counts here (§2, principle 3) |
 
 Derived from those numbers, not yet measured end to end in WordPress:
 
@@ -748,28 +1002,51 @@ Derived from those numbers, not yet measured end to end in WordPress:
 | First backup of 5 GB | about 7 CPU minutes; wall time is set by upload bandwidth and tick cadence: under an hour with loopback chaining, around two hours with a 5-minute cron |
 | Daily backup, 200 MB changed | 1–3 ticks |
 
-`cpu_throttle: gentle` halves the tick budget and rests 0.1 s after every 0.25 s of work in
-backups (also between the chunks of one file), forget, prune and check (`Support\Throttle`),
-for hosts with CPU-second quotas. The rests come between units of work, so it is a pacing,
-not a hard limit: a tick keeps a core busy about 70 % of the time when the units are short,
-and one long unit, such as reading a large pack in a check, runs without a rest. The
-one-time key derivation is not throttled. Uploads are sequential in 1.0; parallel uploads via the bundled Requests
-library's `request_multiple` are a backlog item.
+`cpu_throttle: gentle` halves `advanced.tick_budget_seconds` before the cap of §4.2 is
+applied, so a setting above the cap is not shortened by it, and rests 0.1 s after every
+0.25 s of work in backups (also between the chunks of one file), forget, prune and check
+(`Support\Throttle`), for hosts with CPU-second quotas. The rests come between units of
+work, so it is a pacing, not a hard limit: a tick keeps a core busy about 70 % of the time
+when the units are short. A large pack in a check is read in pieces of 8 MiB with a rest
+between them; a unit that cannot be split, such as one chunk of up to 8 MiB or one request
+to the server, runs without a rest. The WP-CLI `--wait` ticks of 300 s are not halved but
+rest in the same way. The one-time key derivation is not throttled. Uploads are sequential
+in 1.0; parallel uploads via the bundled Requests library's `request_multiple` are a backlog
+item.
 
 ## 17. Internationalisation and accessibility
 
 Text domain `backups-for-restic`, English source strings, translations as language
-packs from translate.wordpress.org. Admin markup with core components, labels, `aria-live`
-progress, keyboard-navigable wizard, admin colour schemes, site timezone and date format.
+packs from translate.wordpress.org. The PHP texts, all e-mails included, and the texts of
+`assets/js/admin.js` pass through the gettext functions, and `wp_set_script_translations()`
+loads the script's translations. Three things are shown in English as the core produces
+them: the messages and context of the job log, the job warnings, and the byte units. The
+repository has no POT file yet; it comes with the release tooling in Milestone 3.
+
+The admin page uses core admin classes for buttons, notices, tabs and tables plus a small
+scoped stylesheet, labels on every field, an `aria-live` region for the views and their
+progress, and ordinary links, buttons and inputs that work from the keyboard. Times on the
+admin page are formatted by the browser; e-mails use the site's time zone and date format,
+and schedules are slots in the site's time zone.
 
 ## 18. Versioning, upgrades and uninstall
 
-- Semantic versioning; `backups_for_restic_schema_version` for settings, `job.schema`, dump format id,
-  manifest schema, index cache format version. Readers accept older versions, writers emit
-  the current one, migrations are forward-only and idempotent.
-- Deactivation: unschedule events, cancel the active job gracefully (release the repository
-  lock), keep data. Uninstall: delete options, secrets, cron events and the private
-  directory after confirmation; the repository on BorgBase is untouched.
+- Semantic versioning. What carries a version today: the dump format id
+  (`backups-for-restic-dump/1`), the site manifest (`backups-for-restic-site/1`), the engine
+  checkpoints (`STATE_VERSION`, a checkpoint of another version is refused), the stored
+  secrets (`v1.` prefix) and the cached index (its magic line). Settings and `job.json` carry
+  no version: `backups_for_restic_schema_version` is reserved but never written or read, and
+  a settings schema version with migrations is planned for Milestone 3, before 1.0. Unknown
+  or invalid stored settings fall back to their defaults field by field.
+- Deactivation only unschedules the two cron events (`Cron::unschedule()`). An active job
+  stays in `jobs/`, queued or running, and resumes after reactivation with the next tick, at
+  the latest the one of the first heartbeat; its repository lock stays on the server and is
+  stale for every restic client after 30 minutes. Cancelling the job and releasing the lock
+  on deactivation is planned for Milestone 3. All data is kept.
+- Uninstall (`uninstall.php`) deletes the plugin's options, its three transients, both cron
+  events and what the plugin put into the private directory; it touches known names only, so
+  a directory that also holds other files keeps them. The plugin asks for no confirmation of
+  its own. The repository on the server is untouched.
 - Plugin headers and `readme.txt` (`Requires at least: 6.7`, `Requires PHP: 8.3`,
   `Tested up to`, `Stable tag`) are WordPress.org metadata kept in sync by the release
   checklist.
