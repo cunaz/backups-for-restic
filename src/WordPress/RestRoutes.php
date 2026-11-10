@@ -433,6 +433,9 @@ final class RestRoutes {
 			return $this->validation_error( $e );
 		} catch ( InvalidArgument $e ) {
 			return $this->server_error( $e );
+		} catch ( PluginException $e ) {
+			// The REST password did not survive being stored.
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
 		$this->container->refresh();
 		delete_transient( 'backups_for_restic_snapshots' );
@@ -477,6 +480,9 @@ final class RestRoutes {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( InvalidArgument ) {
 			return $this->error( 'configuration', 400 );
+		} catch ( PluginException $e ) {
+			// The repository password did not survive being stored.
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
 		$this->container->refresh();
 		Cron::chain();

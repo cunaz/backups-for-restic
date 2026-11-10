@@ -34,6 +34,7 @@ interface SecretStore {
 	 * @param SecretName $name   Secret.
 	 * @param Secret     $secret Value.
 	 * @throws InvalidArgument If a wp-config.php constant defines this secret.
+	 * @throws SecretsUndecryptable If the secret cannot be read back after it was stored.
 	 */
 	public function set( SecretName $name, Secret $secret ): void;
 
