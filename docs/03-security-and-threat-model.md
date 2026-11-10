@@ -327,22 +327,30 @@ or remote code; assets enqueued only on the plugin's screen; no third-party asse
   by Dependabot with CI gates, as are the GitHub Actions. PHPStan is the exception: it is
   installed from its release PHAR through an inline Composer package without a checksum,
   which Dependabot cannot update. The tools outside Composer are pinned by hand with SHA-256
-  checksums: the restic CLI (0.19.1, 0.18.1, 0.14.0), rest-server and Infection in
+  checksums: the restic CLI (0.19.1, 0.18.1, 0.14.0), rest-server, Infection and WP-CLI in
   `bin/install-test-tools.sh`, WordPress for the test site in `bin/test-site.sh`. A version
   bump is a reviewed pull request; nothing picks up a new release by itself (planned for
-  Milestone 3).
+  Milestone 3). The linter for the admin script comes from npm: ESLint and
+  `@wordpress/eslint-plugin` with exact versions in `package.json`, and the about 400
+  packages they bring pinned with their hashes in `package-lock.json`. CI installs them
+  with `npm ci --ignore-scripts`, so no package runs a script while it is installed. Their
+  versions are raised by hand as well.
 - **CI**: actions pinned to commit SHAs, minimal permissions, no secrets for fork PRs; the
   restic CLI used as a test oracle is installed in CI from upstream releases with checksum
-  verification.
+  verification. One job runs software that the project does not pin: the Plugin Check
+  action itself is pinned, but it installs the current `@wordpress/env`, WordPress and
+  Plugin Check when it runs. That job has a read-only token and no secret.
 - **Distribution through WordPress.org** ([ADR 0017](adr/0017-distribution-via-wordpress-org.md)):
   updates only via WordPress.org; SVN deployment automated from signed tags in a protected
   environment with manual approval and a dedicated SVN password; 2FA on all committer
   accounts; post-release diff of the SVN tag; no packages on GitHub.
 - **Repository hygiene**: branch protection with required status checks and no direct
-  pushes, signed commits, `SECURITY.md`. The checks that exist are PHPCS with a JavaScript
-  syntax check, PHPStan, the unit, database, conformance and integration suites and mutation
-  testing ([`04-development-and-quality.md`](04-development-and-quality.md) §6). CodeQL for
-  JavaScript and Plugin Check are not set up yet and are planned for Milestone 3.
+  pushes, signed commits, `SECURITY.md`. The checks that exist are PHPCS, ESLint for the
+  admin script, PHPStan, Plugin Check on the built package, the build of the translation
+  template, the check that every commit of a pull request is signed off, the unit,
+  database, conformance and integration suites and mutation testing
+  ([`04-development-and-quality.md`](04-development-and-quality.md) §6). CodeQL for
+  JavaScript is not set up yet and is planned for Milestone 3.
 
 ## 12. Logging and redaction
 

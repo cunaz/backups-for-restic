@@ -37,5 +37,8 @@ with `wp_set_script_translations()`, which works on classic script handles.
   templates per screen and no script per screen.
 - No action has a form-post fallback. Without JavaScript the page shows "This page needs
   JavaScript." and nothing else; a fallback is not planned yet.
-- CI checks the script with `node --check` only. ESLint with `@wordpress/eslint-plugin` is
-  planned for Milestone 3.
+- Since 2026-11-10 CI runs ESLint on the script, with the rulesets `esnext`, `custom` and
+  `i18n` of `@wordpress/eslint-plugin` and ES2020 as the syntax limit
+  ([development guide](../04-development-and-quality.md) §3). The linter is a development
+  tool installed with npm; the script still has no build step and loads no third-party
+  code. Until then CI only checked its syntax with `node --check`.

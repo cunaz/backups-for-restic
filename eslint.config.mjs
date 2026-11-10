@@ -5,8 +5,9 @@
  * @wordpress/eslint-plugin it gets the ones that apply to such a script: esnext (with jsdoc),
  * custom and i18n. Left out, each for its reason:
  *
- * - "recommended": it switches Prettier on as soon as the package is installed, and npm
- *   installs it as a peer of the plugin. Prettier would rewrite two thirds of the file.
+ * - "recommended": it runs Prettier whenever that package is installed, and npm always
+ *   installs it, as a peer of two packages the plugin depends on. Prettier would rewrite
+ *   two thirds of the file.
  * - "react" and "jsx-a11y": the script has no JSX and uses no React.
  * - the import rules and the Node.js globals of "recommended-with-formatting": a classic
  *   script imports nothing and runs in a browser.

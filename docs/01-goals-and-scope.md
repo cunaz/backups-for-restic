@@ -109,7 +109,7 @@ the milestone.
 | NFR-05 | All admin actions require `manage_options` and a nonce or REST authentication |
 | NFR-06 | 100 % of strings translatable; English source strings, German translation maintained on translate.wordpress.org. Not met yet for three kinds of text that the admin page shows in English: job log lines, job warnings and byte units; closing that gap is not planned yet |
 | NFR-07 | Admin UI accessible (keyboard, screen readers, admin colour schemes) |
-| NFR-08 | PHPStan at maximum level and WordPress Coding Standards pass in CI; Plugin Check joins them in Milestone 3; unit tests run without WordPress or a database; the conformance suite passes against the restic CLI; the mutation gate holds for `Crypto`, `Format` and `Engine\Forget`, and every parser of server data is fuzzed |
+| NFR-08 | PHPStan at maximum level and WordPress Coding Standards pass in CI, for the admin script through ESLint; Plugin Check runs on the built package without errors; unit tests run without WordPress or a database; the conformance suite passes against the restic CLI; the mutation gate holds for `Crypto`, `Format` and `Engine\Forget`, and every parser of server data is fuzzed |
 | NFR-09 | A release is reproducible from a tagged commit by CI and deployed to WordPress.org by CI only |
 | NFR-10 | Throughput gates measured on PHP 8.3 without JIT (see architecture §16) hold on every release |
 

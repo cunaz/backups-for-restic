@@ -77,8 +77,13 @@ can operate.
 - The cooling-off period counts from the last commit that touches `Crypto`, `Format` or
   `Engine` to the merge. The decision names no starting point; this reading is the one in
   the checklist and needs the owner's confirmation.
-- Commits are signed off under the Developer Certificate of Origin. No CI job checks the
-  sign-off yet; that check is planned for Milestone 3.
+- Commits are signed off under the Developer Certificate of Origin. Since 2026-11-10 a CI
+  job checks every commit of a pull request for the trailer.
+- The mutation run does not start for every change any more. It runs on every push to
+  `main` and on every pull request that changes a file its result can depend on; any other
+  pull request skips the run and the job ends green
+  ([development guide](../04-development-and-quality.md) §5.6). For the code it measures it
+  stays the merge gate of point 3.
 - `readme.txt` has no donation link. Adding one is not planned yet.
 - The release checklist does not exist as a file. It comes with the release tooling of
   Milestone 3.
