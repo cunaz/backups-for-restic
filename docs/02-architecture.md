@@ -431,8 +431,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   `yearly`, each keeping the first snapshot of a new bucket value while counts remain and
   always the oldest snapshot while a bucket has counts left; `--keep-within` relative to the
   newest snapshot that is not in the future, so that one snapshot from a wrong clock does
-  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. Scoped to the
-  plugin's host and tags; a dry run is shown in the UI before the first automatic run.
+  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. The forget job
+  selects the snapshots with this site's host name and the tags `backups-for-restic` and
+  `site:<hash>` and applies the policy to them as one group (`--group-by host`); the tag of
+  the job that wrote a snapshot never splits them. A preview of what the policy would remove
+  (a dry run) does not exist yet; it is planned with the snapshot browser of Milestone 3.
   Deletion is `DELETE snapshots/<id>`; HTTP 403 → `repository_append_only`
   ([ADR 0010](adr/0010-retention-and-append-only.md)).
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
@@ -443,9 +446,10 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   switches retention to `external` immediately; detecting that deletions became possible
   only proposes the switch back to `plugin`, which needs an administrator's click.
 - **Prune-lite** ([ADR 0022](adr/0022-maintenance-scope.md)): mark all blobs referenced by
-  all snapshots (a walk of every snapshot's trees), delete packs with **no**
-  referenced blob, rewrite index files without them (new index files first, then delete the
-  old ones). Partially used packs are not repacked; the dashboard shows the space they
+  all snapshots (a walk of every snapshot's trees), then write the index files that list a
+  pack with **no** referenced blob again without those packs, delete the old index files,
+  and delete the packs last. Every state in between is a repository restic accepts.
+  Partially used packs are not repacked; the dashboard shows the space they
   waste, which only a full `restic prune` from any computer reclaims, and the
   disaster-recovery guide explains it. The estimate counts trees exactly and data blobs once
   through a Bloom filter of about two bytes per indexed blob, so it fits small memory limits
@@ -456,6 +460,10 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   planning finds a used pack that no index file lists, it marks again once with the index as
   the server has it under the lock (another client may have changed the repository in
   between), and a second mismatch stops it without deleting.
+  Marking starts over completely or not at all, so a failed request in the middle never
+  leaves a tree unwalked. The checkpoint is written before the lock is taken, at every
+  change of phase and at the end of every tick: a request that ends while it deletes is
+  continued in that phase, and a lock it left behind is recognised by the run's number.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),

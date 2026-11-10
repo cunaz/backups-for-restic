@@ -20,6 +20,7 @@ use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Storage\Files;
@@ -31,11 +32,14 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Removes the snapshots of one site that a retention policy no longer keeps, like `restic
- * forget --host <host> --tag <tags> --group-by host,tags` (ADR 0010, ADR 0022).
+ * forget --host <host> --tag <tags> --group-by host` (ADR 0010, ADR 0022).
  *
  * The run loads the snapshots one per step, decides with Forget::apply() once all are loaded,
  * and deletes the removed snapshot files one per step, under an exclusive lock as restic does.
- * Snapshots of other hosts or without the tags are never touched. A snapshot written by
+ * Snapshots of other hosts or without every one of the tags are never touched. The snapshots
+ * that are left form one group: the tags a snapshot carries besides the required ones, such
+ * as the tag of the job that wrote it, do not split them, or every snapshot would be the
+ * newest of a group of its own and none would ever be removed. A snapshot written by
  * another client during a pause can only make the policy remove more, never keep one that
  * this run removes, so a lost lock is simply taken again.
  */
@@ -128,9 +132,19 @@ final class ForgetRun {
 		$run->locking->remove_own_stale();
 		$run->state['lock']      = $run->locking->acquire( true )->hex();
 		$run->state['locked_at'] = $clock->now()[0];
-		$run->state['names']     = array_keys( $repository->backend()->list( ObjectType::Snapshots ) );
-		sort( $run->state['names'] );
-		$run->persist();
+		try {
+			$run->state['names'] = array_keys( $repository->backend()->list( ObjectType::Snapshots ) );
+			sort( $run->state['names'] );
+			$run->persist();
+		} catch ( \Throwable $failure ) {
+			// No checkpoint names the lock yet, so nothing else would ever release it.
+			try {
+				$run->locking->release( Id::from_hex( $run->state['lock'] ) );
+			} catch ( PluginException $unreleased ) {
+				unset( $unreleased ); // Stale after 30 minutes; the first failure is the one to report.
+			}
+			throw $failure;
+		}
 		return $run;
 	}
 
@@ -211,11 +225,12 @@ final class ForgetRun {
 	}
 
 	/**
-	 * Refreshes the lock, or takes a new one if it disappeared.
+	 * Refreshes the lock, or takes a new one if it disappeared or is older than 30 minutes, when
+	 * other clients no longer honour it.
 	 */
 	private function keep_lock(): void {
 		$lock = $this->state['lock'];
-		if ( '' === $lock || null === $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+		if ( '' === $lock || null === $this->repository->backend()->size( ObjectType::Locks, $lock ) || $this->locking->lapsed( $this->state['locked_at'] ) ) {
 			$this->state['lock']      = $this->locking->acquire( true )->hex();
 			$this->state['locked_at'] = $this->clock->now()[0];
 			return;
@@ -249,12 +264,13 @@ final class ForgetRun {
 	}
 
 	/**
-	 * Applies the policy per host and tag set, as restic does with --group-by host,tags.
+	 * Applies the policy to the selected snapshots as one group, as restic does with
+	 * --group-by host: they all have this site's host name and the required tags.
 	 */
 	private function decide(): void {
 		$snapshots = array_map( Snapshot::from_json( ... ), $this->state['snapshots'] );
 		$remove    = [];
-		foreach ( Forget::group( $snapshots ) as $group ) {
+		foreach ( Forget::group( $snapshots, true, false, false ) as $group ) {
 			array_push( $remove, ...Forget::apply( $group, $this->policy, $this->clock->now() )['remove'] );
 		}
 		sort( $remove );

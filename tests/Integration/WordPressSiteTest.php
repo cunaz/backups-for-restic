@@ -112,14 +112,20 @@ final class WordPressSiteTest extends TestCase {
 	 * @return array<mixed> Job.
 	 */
 	private static function wait_for( string $id, int $timeout ): array {
-		$deadline = time() + $timeout;
+		$deadline   = time() + $timeout;
+		$unanswered = 0;
 		do {
 			self::cron();
-			[ , $list ] = self::api( 'GET', '/jobs' );
+			[ $status, $list ] = self::api( 'GET', '/jobs' );
 			foreach ( $list['jobs'] ?? [] as $job ) {
 				if ( is_array( $job ) && $id === $job['id'] && ! in_array( $job['state'], [ 'queued', 'running' ], true ) ) {
 					return $job;
 				}
+			}
+			// A server that is gone never finishes the job: say so now instead of at the deadline.
+			$unanswered = 0 === $status ? $unanswered + 1 : 0;
+			if ( $unanswered >= 30 ) {
+				self::fail( 'The site stopped answering; see .tools/site-server.log.' );
 			}
 			sleep( 1 );
 		} while ( time() < $deadline );

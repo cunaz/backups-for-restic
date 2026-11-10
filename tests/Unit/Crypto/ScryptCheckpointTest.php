@@ -49,6 +49,17 @@ final class ScryptCheckpointTest extends TestCase {
 		self::assertFileDoesNotExist( $this->table() );
 	}
 
+	public function test_the_table_file_is_readable_by_its_owner_only(): void {
+		$umask = umask( 0022 );
+		try {
+			self::assertFalse( $this->scrypt()->run( 0.0 ) );
+		} finally {
+			umask( $umask );
+		}
+		clearstatcache();
+		self::assertSame( 0600, fileperms( $this->table() ) & 0777 );
+	}
+
 	public function test_an_expired_deadline_still_lets_each_run_do_one_batch_of_64_iterations(): void {
 		$progress   = [];
 		$checkpoint = [];
