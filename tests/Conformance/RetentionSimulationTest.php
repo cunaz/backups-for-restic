@@ -24,12 +24,16 @@ use BackupsForRestic\Tests\Support\TempDir;
  * as the heartbeat runs it, and the weekly prune. Before every forget, restic's forget is asked
  * (dry run, same policy) which snapshots it would keep; the plugin must keep exactly those. At
  * the end restic checks the repository without errors and finds no unused pack.
+ *
+ * The snapshots carry the tags a backup job gives them: the plugin's tag, the site's tag and
+ * the tag of the job, which is different on every snapshot.
  */
 final class RetentionSimulationTest extends TestCase {
 
 	private const string PASSWORD = 'retention password';
 
-	private const string TAG = 'backups-for-restic';
+	/** Tags every snapshot of the site carries; retention selects by them. */
+	private const array TAGS = [ 'backups-for-restic', 'site:1a2b3c4d5e6f' ];
 
 	private const string HOST = 'example.com';
 
@@ -84,9 +88,9 @@ final class RetentionSimulationTest extends TestCase {
 					'--host',
 					self::HOST,
 					'--tag',
-					self::TAG,
+					implode( ',', self::TAGS ),
 					'--group-by',
-					'host,tags',
+					'host',
 					'--keep-last',
 					(string) self::POLICY['last'],
 					'--keep-daily',
@@ -121,13 +125,14 @@ final class RetentionSimulationTest extends TestCase {
 		// Twice a day for a week, as the schedule "twice_daily" runs it.
 		for ( $run = 0; $run < 14; $run++ ) {
 			file_put_contents( $site . '/changing.txt', 'state of run ' . $run );
-			$backup = BackupRun::start( $repository, new BackupPlan( [ $site ], [ self::TAG ] ), $this->work_dir(), $identity, $clock, null, 262144 );
+			$tags   = [ ...self::TAGS, sprintf( 'run:20261102T031700Z-%06x', $run ) ];
+			$backup = BackupRun::start( $repository, new BackupPlan( [ $site ], $tags ), $this->work_dir(), $identity, $clock, null, 262144 );
 			while ( ! $backup->advance( INF ) ) {
 				continue;
 			}
 			$clock->advance( 600 );
 			$expected = self::restic_keeps( $cli );
-			$forget   = ForgetRun::start( $repository, $this->work_dir(), $identity, $clock, $random, $policy, [ self::TAG ] );
+			$forget   = ForgetRun::start( $repository, $this->work_dir(), $identity, $clock, $random, $policy, self::TAGS );
 			while ( ! $forget->advance( INF ) ) {
 				continue;
 			}
