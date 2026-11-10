@@ -23,6 +23,7 @@ use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
@@ -139,8 +140,8 @@ final class MaintenanceSteps implements StepProvider {
 		$policy     = $this->policy();
 		try {
 			$run  = is_file( $work . '/state.json' )
-				? ForgetRun::resume( $repository, $work, $services->identity, $services->clock, $policy, [ PlanFactory::TAG ] )
-				: ForgetRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $policy, [ PlanFactory::TAG ] );
+				? ForgetRun::resume( $repository, $work, $services->identity, $services->clock, $policy, $this->services->retention_tags() )
+				: ForgetRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $policy, $this->services->retention_tags() );
 			$done = $run->advance( $deadline );
 		} catch ( AppendOnlyRefused ) {
 			$this->abandon( $job );
@@ -203,7 +204,8 @@ final class MaintenanceSteps implements StepProvider {
 		$work       = $this->services->work_dir( $job );
 		try {
 			$index = $this->index( $repository );
-		} catch ( BackendException $exception ) {
+		} catch ( BackendException | UnsupportedRepository $exception ) {
+			// Not reachable, or not readable with this PHP: neither is damage for the check to find.
 			throw $exception;
 		} catch ( PluginException ) {
 			// A damaged index file must not stop the check that is to find it: the check then
@@ -344,7 +346,7 @@ final class MaintenanceSteps implements StepProvider {
 		}
 		try {
 			match ( $job->type ) {
-				JobType::Forget => ForgetRun::resume( $repository, $work, $services->identity, $services->clock, new RetentionPolicy(), [ PlanFactory::TAG ] )->abort(), // Aborting needs no policy, and the settings may no longer give one.
+				JobType::Forget => ForgetRun::resume( $repository, $work, $services->identity, $services->clock, new RetentionPolicy(), $this->services->retention_tags() )->abort(), // Aborting needs no policy, and the settings may no longer give one.
 				JobType::Prune  => PruneRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
 				default         => CheckRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
 			};

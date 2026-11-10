@@ -382,7 +382,8 @@ final class Container {
 				function ( string $mode ): void {
 					$this->settings_store()->update( [ 'retention.mode' => $mode ] );
 					$this->refresh();
-				}
+				},
+				$this->site()->site_tag()
 			),
 			$backup
 		);

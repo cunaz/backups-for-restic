@@ -13,8 +13,10 @@ names are not meaningful.
   table plus header, views and a database manifest, ADR 0021). Files and database are always
   restored as a pair from one snapshot id.
 - Snapshot `hostname` is the site's host name (from `home_url()`); tags are
-  `backups-for-restic`, `site:<12 hex of sha256(home_url)>`, `run:<job-id>`. Snapshot listing
-  and forget are scoped by host and the `backups-for-restic` tag.
+  `backups-for-restic`, `site:<12 hex of sha256(home_url)>`, `run:<job-id>`. Forget selects
+  the snapshots with this host name that carry the first two tags and treats them as one
+  group ([ADR 0010](0010-retention-and-append-only.md)). The `run:` tag only names the job
+  that wrote a snapshot; it is different on every snapshot, so nothing may group by it.
 - `manifest.json` records plugin/WordPress/PHP/DB versions, repository format version,
   roots, excludes, table prefix, table list and per-file hashes, so a restore on a different
   layout can map paths.
@@ -22,6 +24,10 @@ names are not meaningful.
   monitoring relies on repository activity); an option to skip unchanged runs exists.
 
 ## Consequences
+- The `site:` tag is computed from the site address. After the address changes (another
+  domain, `http` to `https`), earlier snapshots carry another tag and no longer fall under
+  this site's retention: they stay until someone removes them with restic. That is the safe
+  direction; a site never removes snapshots it cannot tell from another site's.
 - Simplest possible restore semantics; the database is found at a stable virtual path.
 - Several sites may share a repository (distinct host/tags), but one repository per site
   remains the recommendation.

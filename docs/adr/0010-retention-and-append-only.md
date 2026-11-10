@@ -1,5 +1,6 @@
 # 0010 · Retention modes and automatic append-only detection
-Status: accepted (revised: detection and recommendation decided by the owner 2026-11-09)
+Status: accepted (revised: detection and recommendation decided by the owner 2026-11-09;
+forget grouping corrected 2026-11-10)
 Date: 2026-11-09
 
 ## Context
@@ -46,8 +47,13 @@ and recommend append-only; without append-only the plugin cleans up by itself.
 - The heartbeat starts a forget job after every successful backup (mode `plugin`,
   `retention.run_forget_after_backup`), prune on its weekly or monthly slot (mode `plugin`
   only) and the check on its slot (both modes); one job at a time, the first slot after setup
-  is only recorded. Forget is scoped to this site's host name and the `backups-for-restic`
-  tag, grouped by host and tags, and refuses a policy without `keep-within`.
+  is only recorded. Forget is scoped to this site's host name and to the tags
+  `backups-for-restic` and `site:<hash>` ([ADR 0009](0009-snapshot-layout.md)), applies the
+  policy to those snapshots as one group, like `restic forget --host <host> --tag
+  backups-for-restic,site:<hash> --group-by host`, and refuses a policy without
+  `keep-within`. The first version grouped by host and tags, as restic can; because every
+  snapshot also carries the tag of the job that wrote it, each snapshot was a group of its
+  own, and no rule ever removed one. The tests had used snapshots with one shared tag.
 - Administrators start the same jobs from the REST API (`POST /jobs` with `type`) and WP-CLI
   (`forget`, `prune`, `check [--read-data-subset=<percent>]`).
 

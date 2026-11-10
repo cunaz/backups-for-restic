@@ -427,8 +427,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   `yearly`, each keeping the first snapshot of a new bucket value while counts remain and
   always the oldest snapshot while a bucket has counts left; `--keep-within` relative to the
   newest snapshot that is not in the future, so that one snapshot from a wrong clock does
-  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. Scoped to the
-  plugin's host and tags; a dry run is shown in the UI before the first automatic run.
+  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. The forget job
+  selects the snapshots with this site's host name and the tags `backups-for-restic` and
+  `site:<hash>` and applies the policy to them as one group (`--group-by host`); the tag of
+  the job that wrote a snapshot never splits them. A preview of what the policy would remove
+  (a dry run) does not exist yet; it is planned with the snapshot browser of Milestone 3.
   Deletion is `DELETE snapshots/<id>`; HTTP 403 → `repository_append_only`
   ([ADR 0010](adr/0010-retention-and-append-only.md)).
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
