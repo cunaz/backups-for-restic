@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Repository check: index files, packs, snapshot trees and a random share of packs downloaded
+  and verified completely, resumable in short ticks; it reports the damage `restic check`
+  reports.
 - Prune without repacking: deletes the packs no snapshot uses, resumable in short ticks under
   an exclusive lock, verified against `restic prune` and `restic check --read-data`.
 - First backup in WordPress (Milestone 1): setup wizard for an own restic REST server or a

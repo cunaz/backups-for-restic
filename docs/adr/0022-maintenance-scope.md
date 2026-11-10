@@ -31,8 +31,19 @@ a state every restic tool understands.
   (`Engine\Prune\PruneRun`).
 - **Check**: structural (index ↔ listed packs with sizes, snapshot tree walks resolve, no
   duplicate ids) plus a random sample of packs (`read_data_subset_percent`, default 2)
-  downloaded and fully verified (header, blob tags, blob ids). Findings raise a persistent
-  critical notice; repairs are never automatic.
+  downloaded and fully verified (header, blob tags, blob ids). A pack streams in ranged
+  pieces of 8 MiB that never split a blob, so memory stays bounded by the piece and the
+  largest blob, not by the pack size (restic allows packs of up to 128 MiB). PHP cannot carry
+  a SHA-256 state into the next request without `unserialize()`, which the plugin does not
+  use, so one pack is verified within one request; a marker written before the read counts
+  requests that end during it, and after three the pack becomes the warning
+  `pack_unverified` instead of stopping the check for good. Findings raise a persistent
+  critical notice; repairs are never automatic. The check holds a shared lock, as restic's
+  does, so backups may run meanwhile. Damage becomes a finding and the check goes on;
+  transport errors end the tick and the job retries. Errors are what restic check reports as
+  errors; warnings are its hints, such as packs no index lists. Verified against restic
+  0.19.1: on a repository with one damaged and one deleted pack, both report the same packs
+  (`Engine\Check\CheckRun`).
 - All three are resumable steps under the tick model and respect append-only mode (403 →
   `repository_append_only`; lock handling unaffected).
 

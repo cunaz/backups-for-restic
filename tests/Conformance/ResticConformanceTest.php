@@ -15,6 +15,7 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Backup\VirtualFile;
+use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Forget\Forget;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Prune\PruneRun;
@@ -191,6 +192,53 @@ final class ResticConformanceTest extends TestCase {
 		$this->cleanup[] = $target = TempDir::create( 'restic-restore' );
 		$cli->must( [ 'restore', $latest->hex(), '--target', $target ] );
 		self::assertSame( TempDir::describe( $site ), TempDir::describe( $target . $site ) );
+	}
+
+	public function test_check_finds_the_damage_restic_check_finds(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site-check' );
+		TempDir::fixture( $site, 2 * 1048576 );
+		$repository = Repository::initialize( $this->server()->backend( 'check' ), self::PASSWORD, $this->identity(), new SystemRandom() );
+		$cli        = new ResticCli( $this->server(), 'check', self::PASSWORD );
+		$this->backup( $repository, $site );
+		file_put_contents( $site . '/index.php', "<?php\n// Changed.\n" );
+		$this->backup( $repository, $site );
+
+		self::assertSame( 0, $this->plugin_check( $repository )['errors'] );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
+
+		$packs = glob( $this->server()->directory . '/data/check/data/*/*' );
+		self::assertIsArray( $packs );
+		sort( $packs );
+		[ $damaged, $deleted ]                  = $packs;
+		$bytes                                  = (string) file_get_contents( $damaged );
+		$bytes[ intdiv( strlen( $bytes ), 2 ) ] = chr( ord( $bytes[ intdiv( strlen( $bytes ), 2 ) ] ) ^ 0xff );
+		file_put_contents( $damaged, $bytes );
+		unlink( $deleted );
+
+		$result = $this->plugin_check( $repository );
+		$found  = array_map( static fn ( array $finding ): string => $finding['code'] . ' ' . $finding['object'], $result['findings'] );
+		self::assertContains( 'pack_hash ' . basename( $damaged ), $found );
+		self::assertContains( 'pack_missing ' . basename( $deleted ), $found );
+
+		[ $status, $stdout, $stderr ] = $cli->run( [ 'check', '--read-data' ] );
+		self::assertNotSame( 0, $status, 'restic agrees that the repository is damaged.' );
+		self::assertStringContainsString( basename( $damaged ), $stdout . $stderr );
+		self::assertStringContainsString( substr( basename( $deleted ), 0, 10 ), $stdout . $stderr );
+	}
+
+	/**
+	 * Runs the plugin's check with every pack read.
+	 *
+	 * @param Repository $repository Repository.
+	 * @return array{errors: int, warnings: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>, stats: array<string, int>}
+	 */
+	private function plugin_check( Repository $repository ): array {
+		$this->cleanup[] = $work = TempDir::create( 'check' );
+		$run             = CheckRun::start( $repository, $work . '/run', $this->identity(), new SystemClock(), new SystemRandom(), 100 );
+		while ( ! $run->advance( microtime( true ) + 20 ) ) {
+			continue;
+		}
+		return $run->result();
 	}
 
 	/**
