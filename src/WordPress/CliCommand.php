@@ -80,7 +80,7 @@ final class CliCommand {
 			$this->report( $job->id );
 			return;
 		}
-		Cron::chain();
+		Cron::chain( $this->container );
 	}
 
 	/**
@@ -170,7 +170,7 @@ final class CliCommand {
 			$this->report( $job->id );
 			return;
 		}
-		Cron::chain();
+		Cron::chain( $this->container );
 	}
 
 	/**

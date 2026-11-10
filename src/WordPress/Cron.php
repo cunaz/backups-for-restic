@@ -100,8 +100,8 @@ final class Cron {
 			set_time_limit( (int) ceil( $budget ) + 30 );
 		}
 		$report = $container->runner()->tick( $budget );
-		if ( $chain && $report->should_chain() && 'off' !== $container->settings()->string( 'advanced.loopback_chaining' ) ) {
-			self::chain();
+		if ( $chain && $report->should_chain() ) {
+			self::chain( $container );
 		}
 		return $report;
 	}
@@ -111,8 +111,17 @@ final class Cron {
 	 * waiting. Unlike spawn_cron(), this also works from inside a wp-cron.php request and more
 	 * than once a minute; the running cron request notices the new lock holder and stops
 	 * after the current event, as WordPress intends.
+	 *
+	 * With advanced.loopback_chaining off this does nothing, wherever it is called from: after
+	 * a tick, and after a job was created. The heartbeat and the polling of an open admin page
+	 * then advance the job.
+	 *
+	 * @param Container $container Services.
 	 */
-	public static function chain(): void {
+	public static function chain( Container $container ): void {
+		if ( 'off' === $container->settings()->string( 'advanced.loopback_chaining' ) ) {
+			return;
+		}
 		if ( false === wp_next_scheduled( self::TICK ) ) {
 			wp_schedule_single_event( time(), self::TICK );
 		}

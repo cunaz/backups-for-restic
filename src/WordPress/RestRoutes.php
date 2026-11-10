@@ -220,7 +220,7 @@ final class RestRoutes {
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		}
-		Cron::chain();
+		Cron::chain( $this->container );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ], 201 );
 	}
 
@@ -485,7 +485,7 @@ final class RestRoutes {
 			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
 		$this->container->refresh();
-		Cron::chain();
+		Cron::chain( $this->container );
 		return $this->respond(
 			[
 				'job'          => $this->job_summary( $job ),
