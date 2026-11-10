@@ -19,6 +19,7 @@ use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Exception\WrongPassword;
@@ -48,6 +49,13 @@ final class Repository {
 	 * @var Cipher
 	 */
 	private Cipher $cipher;
+
+	/**
+	 * The memory the job that uses this repository may take, if PHP limits it.
+	 *
+	 * @var MemoryBudget|null
+	 */
+	private ?MemoryBudget $memory = null;
 
 	/**
 	 * Creates the handle.
@@ -172,6 +180,26 @@ final class Repository {
 	}
 
 	/**
+	 * Tells the repository how much memory the job may take. The index then stops loading
+	 * with an error instead of running into PHP's limit, and backups choose a pack size that
+	 * fits (ADR 0031).
+	 *
+	 * @param MemoryBudget|null $memory Budget, or null if memory is not limited.
+	 */
+	public function limit_memory( ?MemoryBudget $memory ): void {
+		$this->memory = $memory;
+	}
+
+	/**
+	 * Returns the memory budget, if one was set.
+	 *
+	 * @return MemoryBudget|null Budget.
+	 */
+	public function memory(): ?MemoryBudget {
+		return $this->memory;
+	}
+
+	/**
 	 * Returns the master key, for caching it encrypted (ADR 0020).
 	 *
 	 * @return MasterKey Master key.
@@ -217,12 +245,14 @@ final class Repository {
 	 * Loads all index files.
 	 *
 	 * @return IndexSet Merged index.
+	 * @throws IndexTooLarge If the index does not fit into the memory budget.
 	 */
 	public function load_index(): IndexSet {
 		$index = new IndexSet();
 		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
-			foreach ( IndexFile::decode( $this->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+			foreach ( IndexFile::packs( $this->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
+				$this->memory?->check_index();
 			}
 		}
 		return $index;

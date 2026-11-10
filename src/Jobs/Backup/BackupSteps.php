@@ -164,6 +164,17 @@ final class BackupSteps implements StepProvider {
 
 		$done          = $run->advance( $deadline, $services->throttle() );
 		$job->progress = $run->progress();
+		if ( $run->pack_size() < $services->pack_size() && true !== ( $job->data['small_packs'] ?? null ) ) {
+			$job->data['small_packs'] = true;
+			$log->write(
+				'info',
+				'Packs are made smaller than configured, because the index leaves little memory.',
+				[
+					'pack_size'  => $run->pack_size(),
+					'configured' => $services->pack_size(),
+				]
+			);
+		}
 		foreach ( array_slice( $run->warnings(), count( $job->warnings ) ) as $warning ) {
 			$job->warn( $warning );
 		}
@@ -248,6 +259,7 @@ final class BackupSteps implements StepProvider {
 		if ( null === $repository ) {
 			InvalidArgument::raise( 'The repository key is no longer available; the backup must unlock again.', [ 'code' => 'key_missing' ] );
 		}
+		$repository->limit_memory( $this->services->memory_budget() );
 		return $repository;
 	}
 

@@ -321,6 +321,16 @@ final class BackupRun {
 	}
 
 	/**
+	 * Returns the size at which packs are uploaded, which the memory budget may have made
+	 * smaller than the size asked for (ADR 0031).
+	 *
+	 * @return int Bytes.
+	 */
+	public function pack_size(): int {
+		return $this->store->pack_size();
+	}
+
+	/**
 	 * Returns counters for progress display and logs.
 	 *
 	 * @return array<string, int|string> Counters, the current directory and warnings count.

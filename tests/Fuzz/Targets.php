@@ -19,7 +19,6 @@ use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Format\Id;
-use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\KeyFile;
 use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Format\Pack\PackReader;
@@ -31,6 +30,7 @@ use BackupsForRestic\Support\GoJson;
 use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Tests\Support\Vectors;
+use BackupsForRestic\Tests\Support\WholeIndexDecoder;
 
 /**
  * The fuzz targets: one per parser that reads server data. Seeds come from a repository that
@@ -89,10 +89,17 @@ final class Targets {
 			),
 			new Target(
 				'index',
-				[ Vectors::restic( 'index.json' ) ],
+				[
+					Vectors::restic( 'index.json' ),
+					// Shapes that the cutting into packs must not get wrong: a second "packs" member, an
+					// escaped key, the key inside another member, brackets and quotes inside strings.
+					'{"packs":[{"id":"' . str_repeat( 'ab', 32 ) . '","blobs":[]}],"pack\\u0073":[{"id":"' . str_repeat( 'cd', 32 ) . '","blobs":[{"id":"' . str_repeat( 'ef', 32 ) . '","type":"tree","offset":0,"length":9}]}]}',
+					'{"supersedes":[{"packs":[{"x":"]}\\"{["}]}],"packs":[ {"id":"' . str_repeat( '01', 32 ) . '","note":"}]\\\\","blobs":[]} , {"id":"' . str_repeat( '02', 32 ) . '","blobs":[]} ]}',
+				],
 				true,
 				static function ( string $input ): void {
-					IndexFile::decode( $input );
+					// Also a finding: the pack-by-pack decoder and the whole-document one disagree.
+					WholeIndexDecoder::compare( $input );
 				}
 			),
 			new Target(

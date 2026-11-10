@@ -10,9 +10,11 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Engine;
 
 use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Exception\AuthenticationFailed;
 use BackupsForRestic\Exception\CryptoException;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -26,12 +28,26 @@ defined( 'ABSPATH' ) || exit;
  * own key, together with the names of the index files it covers. A tick then lists the
  * index files and downloads only new ones instead of all of them.
  *
+ * The file is a sequence of pieces of about one megabyte, each sealed on its own and
+ * preceded by its sealed length as pack( 'V' ). Reading and writing therefore need one
+ * piece in memory besides the index, not the whole file two or three times (ADR 0031). The
+ * plaintext of every piece starts with 16 random bytes that are the same throughout one
+ * file and the number of the piece, so that pieces cannot be left out, repeated, reordered
+ * or mixed with those of another file without the cache being discarded. The first piece
+ * holds the names of the covered index files, the others are those of IndexSet::export().
+ *
  * If an index file disappeared from the server (restic prune or rebuild-index ran elsewhere),
  * the cache cannot tell which entries became stale, so it is rebuilt from scratch. An index
  * larger than the cache limit (advanced.cache_limit_mib) is not kept: every tick then reads
  * the index files again, which is slower but never fills the disk.
  */
 final class IndexCache {
+
+	/** Bytes of the random value that marks the pieces of one file. */
+	private const int MARK_BYTES = 16;
+
+	/** No sealed piece is larger than this; export() makes pieces of about one megabyte plus one bucket. */
+	private const int MAX_PIECE = 67108864;
 
 	/**
 	 * Uses a cache directory.
@@ -47,23 +63,28 @@ final class IndexCache {
 	 *
 	 * @param Repository $repository Open repository.
 	 * @return IndexSet Index.
+	 * @throws IndexTooLarge If the index does not fit into the repository's memory budget.
 	 */
 	public function load( Repository $repository ): IndexSet {
 		$listed = array_map( 'strval', array_keys( $repository->backend()->list( ObjectType::Index ) ) );
 		sort( $listed );
-		$cached  = $this->read( $repository );
-		$index   = new IndexSet();
-		$covered = [];
+		$cached   = $this->read( $repository );
+		$readable = null !== $cached;
+		$index    = new IndexSet();
+		$covered  = [];
 		if ( null !== $cached && [] === array_diff( $cached[1], $listed ) ) {
 			[ $index, $covered ] = $cached;
 		}
+		// The only other reference to an index that is not used, if the cache was outdated.
+		unset( $cached );
 		$new = array_values( array_diff( $listed, $covered ) );
 		foreach ( $new as $name ) {
-			foreach ( IndexFile::decode( $repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+			foreach ( IndexFile::packs( $repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
+				$repository->memory()?->check_index();
 			}
 		}
-		if ( [] !== $new || null === $cached || count( $covered ) !== count( $listed ) ) {
+		if ( [] !== $new || ! $readable || count( $covered ) !== count( $listed ) ) {
 			$this->write( $repository, $index, $listed );
 		}
 		return $index;
@@ -89,21 +110,70 @@ final class IndexCache {
 			$this->clear();
 			return null;
 		}
-		$sealed = is_file( $file ) ? file_get_contents( $file ) : false;
-		if ( false === $sealed ) {
+		$handle = is_file( $file ) ? fopen( $file, 'rb' ) : false;
+		if ( false === $handle ) {
 			return null;
 		}
 		try {
-			$plain  = $repository->cipher()->open( $sealed );
-			$fields = unpack( 'Vcount', $plain );
-			$count  = is_array( $fields ) ? $fields['count'] : 0;
-			$names  = [];
-			for ( $i = 0; $i < $count; $i++ ) {
-				$names[] = bin2hex( substr( $plain, 4 + 32 * $i, 32 ) );
+			$pieces = $this->pieces( $handle, $repository->cipher() );
+			$names  = $pieces->valid() ? $pieces->current() : '';
+			if ( 'N' !== ( $names[0] ?? '' ) || 1 !== strlen( $names ) % 32 ) {
+				return null;
 			}
-			return [ IndexSet::from_binary( substr( $plain, 4 + 32 * $count ) ), $names ];
+			$pieces->next();
+			$memory = $repository->memory();
+			$rest   = static function () use ( $pieces, $memory ): \Generator {
+				while ( $pieces->valid() ) {
+					yield $pieces->current();
+					$memory?->check_index();
+					$pieces->next();
+				}
+			};
+			$index  = IndexSet::import( $rest() );
+			return [ $index, 1 === strlen( $names ) ? [] : array_map( 'bin2hex', str_split( substr( $names, 1 ), 32 ) ) ];
 		} catch ( AuthenticationFailed | CryptoException | FormatException ) {
 			return null;
+		} finally {
+			fclose( $handle );
+		}
+	}
+
+	/**
+	 * Reads, opens and checks the pieces of a cache file one after another.
+	 *
+	 * @param resource $handle Open cache file.
+	 * @param Cipher   $cipher Cipher with the repository key.
+	 * @return \Generator<int, string> The content of each piece, without mark and number.
+	 * @throws FormatException If the file is truncated or its pieces do not belong together.
+	 * @throws AuthenticationFailed If a piece was changed.
+	 */
+	private function pieces( $handle, Cipher $cipher ): \Generator {
+		$mark = null;
+		for ( $number = 0; ; $number++ ) {
+			$head = (string) fread( $handle, 4 );
+			if ( '' === $head && 0 < $number ) {
+				return;
+			}
+			$fields = 4 === strlen( $head ) ? unpack( 'Vlength', $head ) : false;
+			$length = is_array( $fields ) ? $fields['length'] : 0;
+			if ( $length < Cipher::OVERHEAD + self::MARK_BYTES + 4 || $length > self::MAX_PIECE ) {
+				throw new FormatException( 'The cached index is damaged.' );
+			}
+			$sealed = '';
+			for ( $missing = $length; $missing > 0; $missing -= strlen( $part ) ) {
+				$part = fread( $handle, $missing );
+				if ( false === $part || '' === $part ) {
+					throw new FormatException( 'The cached index is truncated.' );
+				}
+				$sealed .= $part;
+			}
+			$plain = $cipher->open( $sealed );
+			unset( $sealed );
+			$mark ??= substr( $plain, 0, self::MARK_BYTES );
+			if ( substr( $plain, 0, self::MARK_BYTES ) !== $mark || pack( 'V', $number ) !== substr( $plain, self::MARK_BYTES, 4 ) ) {
+				throw new FormatException( 'The pieces of the cached index do not belong together.' );
+			}
+			yield substr( $plain, self::MARK_BYTES + 4 );
 		}
 	}
 
@@ -116,18 +186,24 @@ final class IndexCache {
 	 * @throws StorageFailed If the cache directory cannot be created or the file not written.
 	 */
 	private function write( Repository $repository, IndexSet $index, array $names ): void {
-		$plain = pack( 'V', count( $names ) );
-		foreach ( $names as $name ) {
-			$plain .= Id::from_hex( $name )->bytes();
-		}
-		$sealed = $repository->cipher()->seal( $plain . $index->to_binary() );
-		if ( strlen( $sealed ) > $this->limit ) {
-			$this->clear();
-			return;
-		}
 		if ( ! is_dir( $this->directory ) && ! mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) {
 			StorageFailed::raise( 'The cache directory could not be created.' );
 		}
-		Files::write_atomic( $this->directory . '/index.bin', $sealed );
+		$cipher = $repository->cipher();
+		$mark   = $repository->random()->bytes( self::MARK_BYTES );
+		$sealed = static function () use ( $cipher, $mark, $index, $names ): \Generator {
+			$number = 0;
+			$seal   = static function ( string $content ) use ( $cipher, $mark, &$number ): string {
+				$piece = $cipher->seal( $mark . pack( 'V', $number++ ) . $content );
+				return pack( 'V', strlen( $piece ) ) . $piece;
+			};
+			yield $seal( 'N' . implode( '', array_map( static fn ( string $name ): string => Id::from_hex( $name )->bytes(), $names ) ) );
+			foreach ( $index->export() as $content ) {
+				yield $seal( $content );
+			}
+		};
+		if ( ! Files::write_atomic_pieces( $this->directory . '/index.bin', $sealed(), $this->limit ) ) {
+			$this->clear();
+		}
 	}
 }

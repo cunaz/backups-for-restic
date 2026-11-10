@@ -60,6 +60,10 @@ final class Messages {
 				'message' => __( 'The server refused to delete data because the repository is append-only.', 'backups-for-restic' ),
 				'hint'    => __( 'That protects your backups. Clean up old snapshots from another computer.', 'backups-for-restic' ),
 			],
+			'index_too_large'                => [
+				'message' => __( 'The repository holds more data than the memory of this host lets the plugin handle.', 'backups-for-restic' ),
+				'hint'    => __( 'The list of everything in the repository must fit into PHP\'s memory limit. Ask your host for a higher memory_limit, or use a repository of its own for this site if several sites share this one.', 'backups-for-restic' ),
+			],
 			'quota_exceeded'                 => [
 				'message' => __( 'The repository server has no space left.', 'backups-for-restic' ),
 				'hint'    => __( 'Increase the quota of the repository or remove old snapshots.', 'backups-for-restic' ),

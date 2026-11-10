@@ -16,6 +16,7 @@ use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\CryptoException;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\LockConflict;
@@ -65,6 +66,7 @@ final readonly class JobError {
 			$error instanceof UnsupportedRepository => 'repository_unsupported_version',
 			$error instanceof LockConflict          => 'repository_locked',
 			$error instanceof AppendOnlyRefused     => 'repository_append_only',
+			$error instanceof IndexTooLarge         => 'index_too_large',
 			$error instanceof QuotaExceeded         => 'quota_exceeded',
 			$error instanceof UploadRejected        => 'upload_rejected',
 			$error instanceof Unauthorized          => 'unauthorized',

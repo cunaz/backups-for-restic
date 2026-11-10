@@ -1,0 +1,201 @@
+<?php
+declare( strict_types=1 );
+
+namespace BackupsForRestic\Tests\Unit\Engine;
+
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Crypto\ScryptParameters;
+use BackupsForRestic\Crypto\SystemRandom;
+use BackupsForRestic\Engine\Backup\BackupPlan;
+use BackupsForRestic\Engine\Backup\BackupRun;
+use BackupsForRestic\Engine\Check\CheckRun;
+use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
+use BackupsForRestic\Engine\MemoryBudget;
+use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Id;
+use BackupsForRestic\Format\Index\IndexFile;
+use BackupsForRestic\Format\Pack\PackEntry;
+use BackupsForRestic\Support\SystemClock;
+use BackupsForRestic\Tests\Support\InMemoryBackend;
+use BackupsForRestic\Tests\Support\TempDir;
+
+/**
+ * PHP's memory limit decides how large an index may be and how large packs are (ADR 0031).
+ */
+final class MemoryBudgetTest extends TestCase {
+
+	private const int MIB = 1048576;
+
+	/** What the smallest backup needs besides the index. */
+	private const int SMALLEST_JOB = MemoryBudget::WORKING_BYTES + MemoryBudget::PACK_COPIES * MemoryBudget::SMALLEST_PACK;
+
+	/** @var list<string> */
+	private array $cleanup = [];
+
+	protected function tearDown(): void {
+		foreach ( $this->cleanup as $path ) {
+			TempDir::remove( $path );
+		}
+	}
+
+	/**
+	 * @return iterable<string, array{string, int|null}>
+	 */
+	public static function limits(): iterable {
+		yield 'megabytes' => [ '128M', 134217728 ];
+		yield 'lower case' => [ '256m', 268435456 ];
+		yield 'gigabytes' => [ '1G', 1073741824 ];
+		yield 'kilobytes' => [ '65536K', 67108864 ];
+		yield 'bytes' => [ '100663296', 100663296 ];
+		yield 'spaces around and inside' => [ ' 128 M ', 134217728 ];
+		yield 'no limit' => [ '-1', null ];
+		yield 'zero' => [ '0', null ];
+		yield 'nothing' => [ '', null ];
+		yield 'a word' => [ 'unlimited', null ];
+		yield 'an unknown unit' => [ '128X', null ];
+		yield 'a fraction' => [ '1.5G', null ];
+		yield 'a unit without a number' => [ 'M', null ];
+	}
+
+	#[DataProvider( 'limits' )]
+	public function test_the_limit_is_read_as_php_writes_it( string $value, ?int $bytes ): void {
+		self::assertSame( $bytes, MemoryBudget::from_ini( $value )?->limit );
+	}
+
+	public function test_the_smallest_job_is_twenty_megabytes_and_three_packs_of_four(): void {
+		self::assertSame( 32 * self::MIB, self::SMALLEST_JOB );
+		self::assertSame( 4 * self::MIB, MemoryBudget::SMALLEST_PACK );
+	}
+
+	public function test_an_index_may_grow_until_the_smallest_backup_no_longer_fits_beside_it(): void {
+		( new MemoryBudget( memory_get_usage() + self::SMALLEST_JOB + self::MIB ) )->check_index();
+
+		$limit = memory_get_usage() + self::SMALLEST_JOB - self::MIB;
+		try {
+			( new MemoryBudget( $limit ) )->check_index();
+			self::fail( 'A megabyte is missing.' );
+		} catch ( IndexTooLarge $e ) {
+			self::assertSame( 'The index of the repository does not fit into the memory this host allows.', $e->getMessage() );
+			self::assertSame( $limit, $e->context()['memory_limit'] );
+			self::assertSame( $limit - self::SMALLEST_JOB, $e->context()['room'] );
+			self::assertGreaterThan( $e->context()['room'], $e->context()['in_use'] );
+		}
+	}
+
+	public function test_packs_are_as_large_as_asked_for_when_three_of_them_fit(): void {
+		$budget = new MemoryBudget( memory_get_usage() + MemoryBudget::WORKING_BYTES + 3 * 16 * self::MIB + self::MIB );
+		self::assertSame( 16 * self::MIB, $budget->pack_size( 16 * self::MIB ) );
+		self::assertSame( 8 * self::MIB, $budget->pack_size( 8 * self::MIB ), 'Never larger than asked for.' );
+	}
+
+	public function test_packs_shrink_to_a_third_of_what_is_left_after_the_working_memory(): void {
+		$budget = new MemoryBudget( memory_get_usage() + MemoryBudget::WORKING_BYTES + 3 * 6 * self::MIB + self::MIB );
+		$size   = $budget->pack_size( 16 * self::MIB );
+		self::assertGreaterThan( 6 * self::MIB - 65536, $size );
+		self::assertLessThan( 6 * self::MIB + 400000, $size );
+	}
+
+	public function test_packs_never_shrink_below_the_smallest_size_but_stay_as_small_as_asked_for(): void {
+		$tight = new MemoryBudget( memory_get_usage() + self::MIB );
+		self::assertSame( MemoryBudget::SMALLEST_PACK, $tight->pack_size( 16 * self::MIB ) );
+		self::assertSame( 2 * self::MIB, $tight->pack_size( 2 * self::MIB ), 'A size below the smallest was asked for on purpose.' );
+	}
+
+	/**
+	 * A repository with an index of 60000 blobs, which takes several megabytes.
+	 */
+	private function repository(): Repository {
+		$repository = Repository::initialize( new InMemoryBackend(), 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$packs      = [];
+		for ( $pack = 0; $pack < 60; $pack++ ) {
+			$entries = [];
+			for ( $i = 0; $i < 1000; $i++ ) {
+				$entries[] = new PackEntry( BlobType::Data, Id::from_bytes( hash( 'sha256', $pack . ':' . $i, true ) ), 1000 * $i, 1000 );
+			}
+			$packs[ hash( 'sha256', 'pack' . $pack ) ] = $entries;
+			if ( 29 === $pack ) {
+				$repository->save_unpacked( ObjectType::Index, IndexFile::encode( $packs ) );
+				$packs = [];
+			}
+		}
+		$repository->save_unpacked( ObjectType::Index, IndexFile::encode( $packs ) );
+		return $repository;
+	}
+
+	public function test_an_index_that_does_not_fit_stops_loading_from_the_index_files(): void {
+		$repository = $this->repository();
+		gc_collect_cycles();
+		$repository->limit_memory( new MemoryBudget( memory_get_usage() + self::SMALLEST_JOB + self::MIB ) );
+
+		$this->expectException( IndexTooLarge::class );
+		$repository->load_index();
+	}
+
+	public function test_an_index_that_does_not_fit_stops_loading_through_the_cache(): void {
+		$repository      = $this->repository();
+		$this->cleanup[] = $directory = TempDir::create( 'budget-cache' );
+		gc_collect_cycles();
+		$repository->limit_memory( new MemoryBudget( memory_get_usage() + self::SMALLEST_JOB + self::MIB ) );
+
+		try {
+			( new IndexCache( $directory ) )->load( $repository );
+			self::fail( 'The index needs more than a megabyte.' );
+		} catch ( IndexTooLarge ) {
+			self::assertFileDoesNotExist( $directory . '/index.bin', 'Nothing is cached of an index that was not loaded.' );
+		}
+	}
+
+	public function test_an_index_that_does_not_fit_stops_loading_from_the_cache_file(): void {
+		$repository      = $this->repository();
+		$this->cleanup[] = $directory = TempDir::create( 'budget-cache' );
+		self::assertSame( 60000, ( new IndexCache( $directory ) )->load( $repository )->count() );
+		$bytes = file_get_contents( $directory . '/index.bin' );
+		gc_collect_cycles();
+		$repository->limit_memory( new MemoryBudget( memory_get_usage() + self::SMALLEST_JOB + self::MIB ) );
+
+		try {
+			( new IndexCache( $directory ) )->load( $repository );
+			self::fail( 'The index needs more than a megabyte.' );
+		} catch ( IndexTooLarge ) {
+			self::assertSame( $bytes, file_get_contents( $directory . '/index.bin' ), 'The cache file is fine and stays.' );
+		}
+
+		$repository->limit_memory( new MemoryBudget( memory_get_usage() + self::SMALLEST_JOB + 64 * self::MIB ) );
+		self::assertSame( 60000, ( new IndexCache( $directory ) )->load( $repository )->count(), 'With enough memory the same file loads.' );
+	}
+
+	public function test_a_backup_with_little_memory_left_writes_smaller_packs(): void {
+		$this->cleanup[] = $site = TempDir::create( 'budget-site' );
+		file_put_contents( $site . '/large.bin', random_bytes( 3 * self::MIB ) );
+		$backend    = new InMemoryBackend();
+		$identity   = new Identity( 'example.com', 'www-data' );
+		$repository = Repository::initialize( $backend, 'budget password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		gc_collect_cycles();
+		$repository->limit_memory( new MemoryBudget( memory_get_usage() + MemoryBudget::WORKING_BYTES + 3 * 5 * self::MIB ) );
+
+		$this->cleanup[] = $work = TempDir::create( 'budget-work' );
+		$run             = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $work . '/run', $identity, new SystemClock(), null, 16 * self::MIB );
+		self::assertLessThan( 5 * self::MIB + 1, $run->pack_size() );
+		self::assertGreaterThan( MemoryBudget::SMALLEST_PACK - 1, $run->pack_size() );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		$repository->limit_memory( null );
+		$check = CheckRun::start( $repository, $work . '/check', $identity, new SystemClock(), new SystemRandom(), 100 );
+		while ( ! $check->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 0, $check->result()['errors'] );
+
+		$this->cleanup[] = $other = TempDir::create( 'budget-work' );
+		$plenty          = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $other . '/run', $identity, new SystemClock(), null, 16 * self::MIB );
+		self::assertSame( 16 * self::MIB, $plenty->pack_size(), 'Without a limit the pack size is the one asked for.' );
+		$plenty->abort();
+	}
+}

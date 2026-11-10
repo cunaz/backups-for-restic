@@ -411,6 +411,7 @@ final class MaintenanceSteps implements StepProvider {
 		if ( null === $repository ) {
 			InvalidArgument::raise( 'The repository key is no longer available; the job must unlock again.', [ 'code' => 'key_missing' ] );
 		}
+		$repository->limit_memory( $this->services->common->memory_budget() );
 		return $repository;
 	}
 

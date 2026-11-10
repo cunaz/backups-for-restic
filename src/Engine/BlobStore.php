@@ -34,6 +34,13 @@ final class BlobStore {
 	public const int DEFAULT_PACK_SIZE = 16777216;
 
 	/**
+	 * Target size of a pack in bytes.
+	 *
+	 * @var int
+	 */
+	private readonly int $pack_size;
+
+	/**
 	 * Open packs by blob type value.
 	 *
 	 * @var array<string, PackWriter>
@@ -76,8 +83,20 @@ final class BlobStore {
 	public function __construct(
 		private readonly Repository $repository,
 		private readonly IndexSet $index,
-		private readonly int $pack_size = self::DEFAULT_PACK_SIZE
+		int $pack_size = self::DEFAULT_PACK_SIZE
 	) {
+		// With the index in memory, what is left decides how large a pack may become.
+		$this->pack_size = $repository->memory()?->pack_size( $pack_size ) ?? $pack_size;
+	}
+
+	/**
+	 * The size at which a pack is uploaded: the one asked for, or a smaller one if the
+	 * repository's memory budget does not allow it.
+	 *
+	 * @return int Bytes.
+	 */
+	public function pack_size(): int {
+		return $this->pack_size;
 	}
 
 	/**
