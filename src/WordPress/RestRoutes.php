@@ -452,6 +452,9 @@ final class RestRoutes {
 		try {
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
 		} catch ( PluginException $e ) {
+			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
+				return $this->error( 'password_too_short', 400 );
+			}
 			return $this->error( JobError::from_throwable( $e )->code, 409 );
 		}
 		$this->container->refresh();
@@ -756,6 +759,11 @@ final class RestRoutes {
 			'invalid_job_type'              => [
 				'message' => __( 'Jobs can be of type backup, forget, prune or check.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'password_too_short'            => [
+				/* translators: %d: number of characters. */
+				'message' => sprintf( __( 'The repository password must have at least %d characters.', 'backups-for-restic' ), Setup::MIN_PASSWORD_LENGTH ),
+				'hint'    => __( 'Leave it empty and the plugin creates a strong one. A password set in wp-config.php has to be changed there.', 'backups-for-restic' ),
 			],
 			'password_required'             => [
 				'message' => __( 'Enter the REST password for this server.', 'backups-for-restic' ),

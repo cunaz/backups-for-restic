@@ -52,18 +52,65 @@ final class SetupTest extends TestCase {
 	}
 
 	/**
-	 * @param array<string, string> $constants Secrets and settings defined in wp-config.php, by constant name.
+	 * @param array<string, string>               $constants Secrets and settings defined in wp-config.php, by constant name.
+	 * @param (\Closure(): RepositoryAccess)|null $access    Reaches the repository; by default the test fails if anything tries.
 	 */
-	private function wizard( array $constants = [] ): Setup {
+	private function wizard( array $constants = [], ?\Closure $access = null ): Setup {
 		return new Setup(
 			new SettingsStore( $this->options, $constants ),
 			new ConstantOverrideStore( $this->stored, $constants ),
-			static function (): RepositoryAccess {
+			$access ?? static function (): RepositoryAccess {
 				self::fail( 'Nothing here may reach the repository server.' );
 			},
 			new SystemRandom(),
 			new Identity( 'example.com', 'www-data' )
 		);
+	}
+
+	/**
+	 * Whether Setup::create() gets as far as the repository server with a password.
+	 *
+	 * @param array<string, string> $constants Secrets defined in wp-config.php.
+	 */
+	private function reaches_the_server( ?Secret $password, array $constants = [] ): bool {
+		$reached = new \LogicException( 'The password was accepted.' );
+		try {
+			$this->wizard(
+				$constants,
+				static function () use ( $reached ): RepositoryAccess {
+					throw $reached;
+				}
+			)->create( $password );
+		} catch ( \LogicException $caught ) {
+			return $caught === $reached;
+		}
+		return false;
+	}
+
+	public function test_a_chosen_repository_password_needs_twelve_characters(): void {
+		try {
+			$this->wizard()->create( new Secret( 'elevenchars' ) );
+			self::fail( 'Eleven characters are too few.' );
+		} catch ( InvalidArgument $e ) {
+			self::assertSame( 'password_too_short', $e->context()['code'] ?? null );
+			self::assertSame( 12, $e->context()['min'] ?? null );
+		}
+		self::assertNull( $this->stored->get( SecretName::RepositoryPassword ), 'Nothing was created and nothing stored.' );
+
+		self::assertTrue( $this->reaches_the_server( new Secret( 'twelve chars' ) ) );
+		self::assertTrue( $this->reaches_the_server( new Secret( 'zwölf Zeiche' ) ), 'Characters count, not bytes.' );
+		self::assertTrue( $this->reaches_the_server( null ), 'A generated password is always long enough.' );
+		self::assertSame( 32, strlen( Setup::generate_password( new SystemRandom() )->reveal() ) );
+	}
+
+	public function test_a_short_repository_password_from_wp_config_is_refused_too(): void {
+		try {
+			$this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'short' ] )->create( new Secret( 'long enough, but not the one in force' ) );
+			self::fail( 'The password from wp-config.php is the one the repository would get.' );
+		} catch ( InvalidArgument $e ) {
+			self::assertSame( 'password_too_short', $e->context()['code'] ?? null );
+		}
+		self::assertTrue( $this->reaches_the_server( null, [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'long enough for a repository' ] ) );
 	}
 
 	private function jobs(): JobStore {

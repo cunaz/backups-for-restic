@@ -35,6 +35,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Setup {
 
+	/** Characters a repository password must have unless the plugin generates it. */
+	public const int MIN_PASSWORD_LENGTH = 12;
+
 	/**
 	 * Creates the setup.
 	 *
@@ -159,11 +162,22 @@ final class Setup {
 	 *
 	 * @param Secret|null $password Password to use; a new one is generated if null.
 	 * @return Secret The repository password, for the recovery kit.
+	 * @throws InvalidArgument With the code password_too_short if a password that somebody chose has fewer than MIN_PASSWORD_LENGTH characters.
 	 * @throws AlreadyExists If the server already holds a repository.
 	 */
 	public function create( ?Secret $password ): Secret {
 		if ( $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
 			$password = $this->secrets->get( SecretName::RepositoryPassword );
+		}
+		// The password is all that protects a new repository; a generated one is long enough.
+		if ( null !== $password && mb_strlen( $password->reveal(), 'UTF-8' ) < self::MIN_PASSWORD_LENGTH ) {
+			InvalidArgument::raise(
+				'The repository password is too short.',
+				[
+					'code' => 'password_too_short',
+					'min'  => self::MIN_PASSWORD_LENGTH,
+				]
+			);
 		}
 		$password ??= self::generate_password( $this->random );
 		$access     = ( $this->access )();
