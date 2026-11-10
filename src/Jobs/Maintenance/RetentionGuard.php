@@ -55,12 +55,17 @@ final class RetentionGuard {
 	 * @return bool True if retention switched to external just now.
 	 */
 	public function detected( AppendOnlyStatus $status, string $job = '' ): bool {
-		$now = $this->clock->now()[0];
+		$now      = $this->clock->now()[0];
+		$previous = $this->state->get( 'append_only' );
 		$this->state->set(
 			'append_only',
 			[
+				// The latest probe, with its time: after an inconclusive one the heartbeat probes
+				// again an hour later instead of a day later.
 				'status'     => $status->value,
 				'checked_at' => $now,
+				// The latest probe that had an answer. An inconclusive probe does not erase it.
+				'conclusive' => AppendOnlyStatus::Unknown === $status ? self::conclusive( $previous ) : $status->value,
 			]
 		);
 		if ( AppendOnlyStatus::AppendOnly === $status ) {
@@ -76,6 +81,33 @@ final class RetentionGuard {
 			);
 		}
 		return false;
+	}
+
+	/**
+	 * Whether the server is append-only, for the dashboard: what the latest conclusive probe
+	 * found, else what the wizard found when the server was saved.
+	 *
+	 * @param string $wizard The wizard's answer: yes, no or unknown.
+	 * @return string yes, no or unknown.
+	 */
+	public function append_only( string $wizard ): string {
+		return match ( self::conclusive( $this->state->get( 'append_only' ) ) ) {
+			AppendOnlyStatus::AppendOnly->value       => 'yes',
+			AppendOnlyStatus::DeletionsAllowed->value => 'no',
+			default                                   => $wizard,
+		};
+	}
+
+	/**
+	 * The answer of the latest conclusive probe in a stored entry. An entry written before the
+	 * conclusive answer was kept apart has only the status of its latest probe.
+	 *
+	 * @param array<string, mixed> $probe Stored entry.
+	 * @return string append_only, deletions_allowed, or unknown if no probe had an answer yet.
+	 */
+	private static function conclusive( array $probe ): string {
+		$status = $probe['conclusive'] ?? $probe['status'] ?? null;
+		return is_string( $status ) && null !== AppendOnlyStatus::tryFrom( $status ) ? $status : AppendOnlyStatus::Unknown->value;
 	}
 
 	/**

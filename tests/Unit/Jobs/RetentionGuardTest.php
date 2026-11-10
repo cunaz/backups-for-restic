@@ -54,9 +54,64 @@ final class RetentionGuardTest extends TestCase {
 			[
 				'status'     => 'append_only',
 				'checked_at' => $this->clock->seconds,
+				'conclusive' => 'append_only',
 			],
 			$this->state->get( 'append_only' )
 		);
+	}
+
+	public function test_an_inconclusive_probe_keeps_the_last_conclusive_answer_and_the_time_of_the_attempt(): void {
+		$guard = $this->guard( 'plugin' );
+		$guard->detected( AppendOnlyStatus::DeletionsAllowed );
+		self::assertSame( 'no', $guard->append_only( 'yes' ), 'A probe with an answer outranks what the wizard found.' );
+
+		$this->clock->advance( 86400 );
+		$guard->detected( AppendOnlyStatus::Unknown );
+
+		self::assertSame( 'no', $guard->append_only( 'yes' ), 'The server was unreachable for a moment; what is known about it did not change.' );
+		self::assertSame(
+			[
+				'status'     => 'unknown',
+				'checked_at' => $this->clock->seconds,
+				'conclusive' => 'deletions_allowed',
+			],
+			$this->state->get( 'append_only' ),
+			'The heartbeat probes again an hour after an inconclusive answer, counted from this attempt.'
+		);
+
+		$this->clock->advance( 3600 );
+		$guard->detected( AppendOnlyStatus::Unknown );
+		self::assertSame( 'no', $guard->append_only( 'yes' ), 'Nor does it change after several inconclusive probes.' );
+
+		$this->clock->advance( 3600 );
+		$guard->detected( AppendOnlyStatus::AppendOnly );
+		self::assertSame( 'yes', $guard->append_only( 'no' ) );
+		self::assertSame( 'append_only', $this->state->get( 'append_only' )['conclusive'] ?? null );
+	}
+
+	public function test_without_a_conclusive_probe_the_wizards_answer_stands(): void {
+		$guard = $this->guard( 'plugin' );
+		self::assertSame( 'yes', $guard->append_only( 'yes' ), 'No probe yet.' );
+		self::assertSame( 'unknown', $guard->append_only( 'unknown' ) );
+
+		$guard->detected( AppendOnlyStatus::Unknown );
+		self::assertSame( 'no', $guard->append_only( 'no' ) );
+		self::assertSame( 'unknown', $this->state->get( 'append_only' )['conclusive'] ?? null );
+	}
+
+	public function test_a_probe_recorded_before_the_conclusive_answer_was_kept_apart_still_counts(): void {
+		$this->state->set(
+			'append_only',
+			[
+				'status'     => 'append_only',
+				'checked_at' => $this->clock->seconds - 86400,
+			]
+		);
+		$guard = $this->guard( 'external' );
+		self::assertSame( 'yes', $guard->append_only( 'unknown' ) );
+
+		$guard->detected( AppendOnlyStatus::Unknown );
+		self::assertSame( 'yes', $guard->append_only( 'unknown' ) );
 	}
 
 	public function test_a_refused_deletion_switches_like_a_detection(): void {

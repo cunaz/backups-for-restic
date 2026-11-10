@@ -432,11 +432,7 @@ final class Container {
 	 * @return string yes, no or unknown.
 	 */
 	public function append_only(): string {
-		return match ( $this->state()->get( 'append_only' )['status'] ?? null ) {
-			'append_only'       => 'yes',
-			'deletions_allowed' => 'no',
-			default             => $this->settings()->string( 'repository.append_only' ),
-		};
+		return $this->retention_guard()->append_only( $this->settings()->string( 'repository.append_only' ) );
 	}
 
 	/**
