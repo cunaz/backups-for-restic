@@ -21,6 +21,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -100,21 +101,78 @@ final class RestRoutes {
 	 */
 	public function status(): \WP_REST_Response {
 		$settings = $this->container->settings();
+		$state    = $this->container->state();
 		$active   = $this->container->jobs()->active();
+		$zone     = wp_timezone();
 		return $this->respond(
 			[
 				'setup_completed' => $settings->bool( 'setup.completed' ),
 				'repository'      => [
 					'server'      => $settings->string( 'repository.server' ),
 					'host'        => (string) wp_parse_url( $settings->string( 'repository.url' ), PHP_URL_HOST ),
-					'append_only' => $settings->string( 'repository.append_only' ),
+					'append_only' => $this->container->append_only(),
 				],
-				'last_backup'     => $this->container->state()->get( 'last_backup' ),
+				'last_backup'     => $state->get( 'last_backup' ),
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),
-				'next_backup'     => SchedulePolicy::next_backup_slot( $settings, wp_timezone(), time() ),
+				'next_backup'     => SchedulePolicy::next_backup_slot( $settings, $zone, time() ),
 				'recent_jobs'     => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 5 ) ),
+				'retention'       => [
+					'mode'           => $settings->string( 'retention.mode' ),
+					'after_backup'   => $settings->bool( 'retention.run_forget_after_backup' ),
+					'proposed_since' => Decoded::int( $state->get( 'retention_proposal' )['since'] ?? null ),
+					'switched_at'    => Decoded::int( $state->get( 'retention_switch' )['at'] ?? null ),
+				],
+				'maintenance'     => [
+					'forget' => $this->last_maintenance( 'forget', [ 'removed', 'keep', 'skipped' ] ),
+					'prune'  => $this->last_maintenance( 'prune', [ 'packs_deleted', 'bytes_deleted', 'reclaimable_bytes', 'skipped' ] ) + [ 'next' => SchedulePolicy::next_maintenance_slot( $settings, $zone, time(), 'prune' ) ],
+					'check'  => $this->last_maintenance( 'check', [ 'errors', 'warnings', 'packs_read', 'bytes_read' ] ) + [ 'next' => SchedulePolicy::next_maintenance_slot( $settings, $zone, time(), 'check' ) ],
+				],
+				'check_alert'     => $this->check_alert(),
 			]
 		);
+	}
+
+	/**
+	 * The last run of a maintenance task, with the result fields the dashboard shows.
+	 *
+	 * @param string       $task   forget, prune or check.
+	 * @param list<string> $fields Result fields.
+	 * @return array<string, mixed> Finish time and fields; finished is 0 if it never ran.
+	 */
+	private function last_maintenance( string $task, array $fields ): array {
+		$last   = $this->container->state()->get( 'last_' . $task );
+		$result = is_array( $last['result'] ?? null ) ? $last['result'] : [];
+		$data   = [ 'finished' => Decoded::int( $last['finished'] ?? null ) ];
+		foreach ( $fields as $field ) {
+			$data[ $field ] = $result[ $field ] ?? null;
+		}
+		return $data;
+	}
+
+	/**
+	 * The persistent alert of a check that found damage, with translated findings.
+	 *
+	 * @return array<string, mixed>|null Alert, or null if the last check found no errors.
+	 */
+	private function check_alert(): ?array {
+		$alert = $this->container->state()->get( 'check_alert' );
+		if ( [] === $alert ) {
+			return null;
+		}
+		$findings = [];
+		foreach ( Decoded::arrays( $alert['findings'] ?? null ) as $finding ) {
+			$findings[] = [
+				'severity' => Decoded::string( $finding['severity'] ?? null ),
+				'code'     => Decoded::string( $finding['code'] ?? null ),
+				'object'   => substr( Decoded::string( $finding['object'] ?? null ), 0, 8 ),
+				'label'    => Messages::check_finding( Decoded::string( $finding['code'] ?? null ) ),
+			];
+		}
+		return [
+			'at'       => Decoded::int( $alert['at'] ?? null ),
+			'errors'   => Decoded::int( $alert['errors'] ?? null ),
+			'findings' => $findings,
+		];
 	}
 
 	/**
@@ -200,13 +258,22 @@ final class RestRoutes {
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
 		}
-		if ( JobState::Queued === $job->state ) {
+		$dequeued = JobState::Queued === $job->state;
+		if ( $dequeued ) {
 			$job->state       = JobState::Cancelled;
 			$job->finished_at = time();
 		} elseif ( ! $job->state->is_terminal() ) {
 			$job->cancel_requested = true;
 		}
 		$jobs->save( $job );
+		if ( $dequeued ) {
+			try {
+				( new JobEvents( $this->container ) )->state_changed( $job, JobState::Queued );
+			} catch ( \Throwable $exception ) {
+				// The job is cancelled either way; a failing hook must not turn that into an error.
+				$jobs->log( $job )->write( 'warning', 'Reporting the state change failed.', [ 'code' => JobError::from_throwable( $exception )->code ] );
+			}
+		}
 		$jobs->log( $job )->write( 'info', 'Cancellation requested.', [ 'user' => get_current_user_id() ] );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ] );
 	}
@@ -316,10 +383,16 @@ final class RestRoutes {
 			}
 			$changes[ $path ] = $value;
 		}
+		$mode = $this->container->settings()->string( 'retention.mode' );
 		try {
-			$this->container->settings_store()->update( $changes );
+			$saved = $this->container->settings_store()->update( $changes );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
+		}
+		if ( $saved->string( 'retention.mode' ) !== $mode ) {
+			// An administrator chose the mode: that answers the proposal and the switch notice.
+			$this->container->state()->set( 'retention_proposal', [] );
+			$this->container->state()->set( 'retention_switch', [] );
 		}
 		$this->container->refresh();
 		return $this->settings();
@@ -574,6 +647,7 @@ final class RestRoutes {
 		return [
 			'id'               => $job->id,
 			'type'             => $job->type->value,
+			'type_label'       => Messages::job_type( $job->type->value ),
 			'trigger'          => $job->trigger,
 			'state'            => $job->state->value,
 			'state_label'      => Messages::state( $job->state->value ),

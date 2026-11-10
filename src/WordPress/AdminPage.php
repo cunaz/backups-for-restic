@@ -49,12 +49,42 @@ final class AdminPage {
 			}
 		);
 		add_action(
+			'admin_notices',
+			static function () use ( $container ): void {
+				self::render_check_alert( $container );
+			}
+		);
+		add_action(
 			'admin_enqueue_scripts',
 			static function ( string $hook ) use ( $container ): void {
 				if ( 'toplevel_page_' . self::SLUG === $hook ) {
 					self::enqueue( $container );
 				}
 			}
+		);
+	}
+
+	/**
+	 * The persistent notice of a check that found damage (ADR 0022), on every admin screen
+	 * except the plugin's own page, whose dashboard lists the findings. It stays until a check
+	 * finds no errors.
+	 *
+	 * @param Container $container Services.
+	 */
+	private static function render_check_alert( Container $container ): void {
+		$screen = get_current_screen();
+		if ( ! RestRoutes::allowed() || ( null !== $screen && 'toplevel_page_' . self::SLUG === $screen->id ) ) {
+			return;
+		}
+		if ( [] === $container->state()->get( 'check_alert' ) ) {
+			return;
+		}
+		printf(
+			'<div class="notice notice-error"><p><strong>%1$s</strong> %2$s <a href="%3$s">%4$s</a></p></div>',
+			esc_html__( 'Backups: the repository check found damage.', 'backups-for-restic' ),
+			esc_html__( 'Some snapshots may not restore completely.', 'backups-for-restic' ),
+			esc_url( admin_url( 'admin.php?page=' . self::SLUG ) ),
+			esc_html__( 'Show the findings', 'backups-for-restic' )
 		);
 	}
 

@@ -9,7 +9,10 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\WordPress;
 
+use BackupsForRestic\Backend\AppendOnlyProbe;
+use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\TickReport;
 use BackupsForRestic\Scheduling\SchedulePolicy;
@@ -127,16 +130,65 @@ final class Cron {
 	}
 
 	/**
-	 * Starts scheduled jobs and advances jobs whose chain broke.
+	 * Probes for append-only mode once a day, starts scheduled jobs, advances jobs whose chain
+	 * broke, and sends the stale notice when it is due.
 	 *
 	 * @param Container $container Services.
 	 */
 	public static function heartbeat( Container $container ): void {
 		if ( $container->settings()->bool( 'setup.completed' ) ) {
+			self::exclusively( $container, static fn () => self::probe_append_only( $container, time() ) );
 			self::start_due( $container, time() );
 		}
 		if ( null !== $container->jobs()->active() ) {
 			self::tick( $container );
+		}
+		self::exclusively( $container, static fn () => $container->notifier()->heartbeat( time() ) );
+	}
+
+	/**
+	 * Runs work under the runner lock: the probe and the notifier write the same state as a
+	 * tick that reports a finished job, and must not race with it. When a tick holds the lock,
+	 * the work waits for the next heartbeat.
+	 *
+	 * @param Container $container Services.
+	 * @param \Closure  $work      Work.
+	 */
+	private static function exclusively( Container $container, \Closure $work ): void {
+		$lock = $container->runner_lock();
+		if ( ! $lock->acquire() ) {
+			return;
+		}
+		try {
+			$work();
+		} finally {
+			$lock->release();
+		}
+	}
+
+	/**
+	 * The daily append-only probe of ADR 0010. Forget and prune jobs probe as well, so this
+	 * matters when neither runs: weekly backups, or retention mode external, where only the
+	 * probe can notice that deletions became possible again. After an inconclusive answer it
+	 * probes again an hour later.
+	 *
+	 * @param Container $container Services.
+	 * @param int       $now       Unix time.
+	 */
+	private static function probe_append_only( Container $container, int $now ): void {
+		$last     = $container->state()->get( 'append_only' );
+		$interval = AppendOnlyStatus::Unknown->value === ( $last['status'] ?? null ) ? HOUR_IN_SECONDS : DAY_IN_SECONDS;
+		if ( $now - Decoded::int( $last['checked_at'] ?? null ) < $interval ) {
+			return;
+		}
+		try {
+			$status = AppendOnlyProbe::detect( $container->access()->backend(), $container->random() );
+		} catch ( PluginException ) {
+			// Wrong credentials or no repository: the next job reports that with a hint.
+			$status = AppendOnlyStatus::Unknown;
+		}
+		if ( $container->retention_guard()->detected( $status ) ) {
+			$container->notifier()->retention_switched( $now );
 		}
 	}
 

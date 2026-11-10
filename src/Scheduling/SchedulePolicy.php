@@ -21,6 +21,27 @@ defined( 'ABSPATH' ) || exit;
 final class SchedulePolicy {
 
 	/**
+	 * After how long without a successful backup the backups count as stale: the configured
+	 * hours, but at least one and a half backup intervals, so that a weekly schedule does not
+	 * raise an alarm between two regular runs.
+	 *
+	 * @param Settings $settings Settings.
+	 * @return int|null Seconds, or null when backups run only manually.
+	 */
+	public static function stale_after( Settings $settings ): ?int {
+		$interval = match ( $settings->string( 'schedule.backup.frequency' ) ) {
+			'twice_daily' => 43200,
+			'daily'       => 86400,
+			'weekly'      => 604800,
+			default       => null,
+		};
+		if ( null === $interval ) {
+			return null;
+		}
+		return max( $settings->int( 'notifications.email.stale_after_hours' ) * 3600, intdiv( 3 * $interval, 2 ) );
+	}
+
+	/**
 	 * The most recent backup slot at or before now.
 	 *
 	 * @param Settings      $settings Settings.
@@ -111,6 +132,28 @@ final class SchedulePolicy {
 			$slot = self::monthly( $month->modify( 'first day of previous month' ), $task, $weekday, $settings );
 		}
 		return $slot->getTimestamp();
+	}
+
+	/**
+	 * The next slot of a maintenance task after now.
+	 *
+	 * @param Settings      $settings Settings.
+	 * @param \DateTimeZone $zone     Site time zone.
+	 * @param int           $now      Unix time.
+	 * @param string        $task     prune or check.
+	 * @return int|null Unix time of the slot, or null if the task runs only on demand.
+	 */
+	public static function next_maintenance_slot( Settings $settings, \DateTimeZone $zone, int $now, string $task ): ?int {
+		$last = self::last_maintenance_slot( $settings, $zone, $now, $task );
+		if ( null === $last ) {
+			return null;
+		}
+		$local = ( new \DateTimeImmutable( '@' . $last ) )->setTimezone( $zone );
+		if ( 'weekly' === $settings->string( 'schedule.' . $task . '.frequency' ) ) {
+			return $local->modify( '+7 days' )->getTimestamp();
+		}
+		$month = $local->modify( 'first day of next month' )->setTime( $settings->int( 'schedule.' . $task . '.hour' ), 0 );
+		return self::monthly( $month, $task, $settings->int( 'schedule.prune.weekday' ), $settings )->getTimestamp();
 	}
 
 	/**

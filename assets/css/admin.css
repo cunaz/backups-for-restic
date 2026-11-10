@@ -94,3 +94,12 @@
 .backups-for-restic .bfr-log td:first-child {
 	white-space: nowrap;
 }
+
+.backups-for-restic .bfr-card h3 {
+	margin: 0.75em 0 0.5em;
+}
+
+.backups-for-restic .bfr-findings {
+	list-style: disc;
+	margin-left: 1.5em;
+}

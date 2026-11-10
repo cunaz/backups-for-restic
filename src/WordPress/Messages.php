@@ -215,6 +215,8 @@ final class Messages {
 			),
 			'too_long'             => __( 'The value is too long.', 'backups-for-restic' ),
 			'invalid_characters'   => __( 'The value contains characters that are not allowed.', 'backups-for-restic' ),
+			'invalid_duration'     => __( 'Enter a duration such as 2d for two days, 12h for twelve hours or 1y6m; it must not be zero.', 'backups-for-restic' ),
+			'invalid_email'        => __( 'Enter one valid e-mail address per line.', 'backups-for-restic' ),
 			default                => __( 'This value is not valid.', 'backups-for-restic' ),
 		};
 	}
@@ -230,10 +232,55 @@ final class Messages {
 			'preflight'   => __( 'Checking the environment', 'backups-for-restic' ),
 			'unlocking'   => __( 'Unlocking the repository', 'backups-for-restic' ),
 			'backing_up'  => __( 'Backing up files and database', 'backups-for-restic' ),
+			'detecting'   => __( 'Checking whether the server allows deletions', 'backups-for-restic' ),
+			'forgetting'  => __( 'Removing old snapshots', 'backups-for-restic' ),
+			'pruning'     => __( 'Deleting data no snapshot uses', 'backups-for-restic' ),
+			'checking'    => __( 'Checking the repository', 'backups-for-restic' ),
 			'recording'   => __( 'Recording the result', 'backups-for-restic' ),
 			'releasing'   => __( 'Releasing the repository', 'backups-for-restic' ),
 			'cleaning_up' => __( 'Cleaning up', 'backups-for-restic' ),
 			default       => __( 'Waiting to start', 'backups-for-restic' ),
+		};
+	}
+
+	/**
+	 * What a finding of the repository check means (ADR 0022).
+	 *
+	 * @param string $code Finding code.
+	 * @return string Description.
+	 */
+	public static function check_finding( string $code ): string {
+		return match ( $code ) {
+			'index_unreadable'        => __( 'An index file cannot be read.', 'backups-for-restic' ),
+			'pack_in_several_indexes' => __( 'A pack is listed in more than one index file.', 'backups-for-restic' ),
+			'pack_missing'            => __( 'A pack that the index lists is missing on the server.', 'backups-for-restic' ),
+			'pack_size'               => __( 'A pack has a different size than the index says.', 'backups-for-restic' ),
+			'pack_unindexed'          => __( 'No index file lists a pack; "restic prune" removes it.', 'backups-for-restic' ),
+			'snapshot_unreadable'     => __( 'A snapshot cannot be read.', 'backups-for-restic' ),
+			'blob_missing'            => __( 'A snapshot uses data that is missing from the index.', 'backups-for-restic' ),
+			'tree_unreadable'         => __( 'A directory listing of a snapshot cannot be read.', 'backups-for-restic' ),
+			'pack_hash'               => __( 'The content of a pack does not match its name.', 'backups-for-restic' ),
+			'pack_header'             => __( 'The header of a pack does not match the index.', 'backups-for-restic' ),
+			'blob_corrupt'            => __( 'Stored data failed its integrity check.', 'backups-for-restic' ),
+			'compressed_unverified'   => __( 'Compressed data could not be verified without the zstd PHP extension.', 'backups-for-restic' ),
+			default                   => __( 'The check found a problem.', 'backups-for-restic' ),
+		};
+	}
+
+	/**
+	 * Name of a job type.
+	 *
+	 * @param string $type Type.
+	 * @return string Name.
+	 */
+	public static function job_type( string $type ): string {
+		return match ( $type ) {
+			'backup'  => __( 'Backup', 'backups-for-restic' ),
+			'unlock'  => __( 'Unlock', 'backups-for-restic' ),
+			'forget'  => __( 'Remove old snapshots', 'backups-for-restic' ),
+			'prune'   => __( 'Prune', 'backups-for-restic' ),
+			'check'   => __( 'Check', 'backups-for-restic' ),
+			default   => $type,
 		};
 	}
 

@@ -219,7 +219,7 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'Every job released its lock.' );
 	}
 
-	public function test_a_cancelled_forget_releases_its_lock_after_the_retention_settings_became_unusable(): void {
+	public function test_a_cancelled_forget_releases_its_lock_after_the_retention_settings_changed(): void {
 		self::assertNotNull( self::$server );
 		$site       = $this->site();
 		$repository = Repository::initialize( self::$server->backend( 'cancelled-forget' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
@@ -233,9 +233,9 @@ final class MaintenanceJobTest extends TestCase {
 		}
 		self::assertCount( 1, $locks, 'The forget run holds its lock.' );
 
-		// The administrator clears keep-within, which the policy needs, and cancels the job; the
-		// next request builds everything again from the changed settings.
-		[ $runner, $store ] = $this->components( self::$server, 'cancelled-forget', $site, [ 'retention.keep.within' => '' ], $this->options );
+		// The administrator changes the retention and cancels the job; the next request builds
+		// everything again from the changed settings. Releasing the lock asks for no policy.
+		[ $runner, $store ] = $this->components( self::$server, 'cancelled-forget', $site, [ 'retention.keep.within' => '1y' ], $this->options );
 		$running            = $store->get( $job->id );
 		self::assertNotNull( $running );
 		$running->cancel_requested = true;
@@ -295,12 +295,15 @@ final class MaintenanceJobTest extends TestCase {
 		$before             = $repository->backend()->list( ObjectType::Snapshots );
 		[ $runner, $store ] = $this->components( self::$append_only, 'append', $site, [ 'retention.keep.last' => 1 ] );
 
+		$switched = [];
 		foreach ( [ JobType::Forget, JobType::Prune ] as $type ) {
 			$job = $this->run_job( $runner, $store, $type );
 			self::assertSame( 'append_only', $job->result['skipped'] ?? null, $type->value );
+			$switched[] = $job->result['retention_switched'] ?? false;
 		}
+		self::assertSame( [ true, false ], $switched, 'Only the job that switched reports it, for the notification.' );
 
-		self::assertSame( [ 'external', 'external' ], $this->switched );
+		self::assertSame( [ 'external' ], $this->switched, 'One switch, however many jobs see the refusal.' );
 		self::assertSame( 'external', $this->state->get( 'retention_switch' )['mode'] ?? null );
 		self::assertSame( 'append_only', $this->state->get( 'append_only' )['status'] ?? null );
 		self::assertSame( $before, $repository->backend()->list( ObjectType::Snapshots ), 'Nothing was deleted.' );

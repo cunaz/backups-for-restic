@@ -18,7 +18,14 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The backup services plus what only maintenance needs.
  */
-final readonly class MaintenanceServices {
+final class MaintenanceServices {
+
+	/**
+	 * Applies the retention modes; one per request, so that it remembers its own switch.
+	 *
+	 * @var RetentionGuard|null
+	 */
+	private ?RetentionGuard $guard = null;
 
 	/**
 	 * Creates the services.
@@ -27,7 +34,16 @@ final readonly class MaintenanceServices {
 	 * @param \Closure(string): void $switch_retention Saves the retention mode (plugin or external).
 	 * @param string                 $site_tag         Tag that every snapshot of this site carries, such as site:1a2b3c4d5e6f.
 	 */
-	public function __construct( public BackupServices $common, public \Closure $switch_retention, public string $site_tag ) {
+	public function __construct( public readonly BackupServices $common, private readonly \Closure $switch_retention, public readonly string $site_tag ) {
+	}
+
+	/**
+	 * The retention guard.
+	 *
+	 * @return RetentionGuard Guard.
+	 */
+	public function guard(): RetentionGuard {
+		return $this->guard ??= new RetentionGuard( $this->common->state, $this->common->settings->string( 'retention.mode' ), $this->switch_retention, $this->common->clock );
 	}
 
 	/**

@@ -28,6 +28,7 @@ use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
+use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
@@ -55,6 +56,13 @@ defined( 'ABSPATH' ) || exit;
  * The checkpoint is written before the lock is taken, at every change of phase and at the end of
  * every call. A request that ends at any point therefore leaves a run that resume() continues
  * in the phase it had reached, and a lock that the run still recognises as its own.
+ *
+ * Packs that hold used and unused blobs stay. The run estimates the space they waste, which
+ * only a full `restic prune` from another computer reclaims: the bytes of all blobs in kept
+ * packs minus the bytes of the used blobs. Trees are counted exactly; data blobs are counted
+ * once with the help of a Bloom filter of about two bytes per indexed blob, because an exact
+ * set of every used blob would not fit the memory of small hosts. A false positive of the
+ * filter leaves a used blob uncounted, so the estimate can only be slightly too high.
  */
 final class PruneRun {
 
@@ -65,6 +73,11 @@ final class PruneRun {
 
 	/** At most this many IDs of missing blobs are kept for the error report. */
 	private const int MISSING_EXAMPLES = 5;
+
+	/** Smallest and largest Bloom filter, in bits: 8 KiB and 8 MiB. */
+	private const int FILTER_MIN_BITS = 65536;
+
+	private const int FILTER_MAX_BITS = 67108864;
 
 	/** The phases in their order. */
 	private const array PHASES = [ 'mark', 'plan', 'rewrite', 'delete_indexes', 'delete_packs', 'done' ];
@@ -124,6 +137,34 @@ final class PruneRun {
 	 * @var array<string, true>
 	 */
 	private array $live;
+
+	/**
+	 * Bloom filter of the data blobs counted in used_bytes; empty if the estimate is unavailable.
+	 *
+	 * @var string
+	 */
+	private string $filter;
+
+	/**
+	 * Bytes of the used blobs, each counted once.
+	 *
+	 * @var int
+	 */
+	private int $used_bytes;
+
+	/**
+	 * Bytes of all blobs in kept packs, from the index files.
+	 *
+	 * @var int
+	 */
+	private int $kept_bytes;
+
+	/**
+	 * Hex IDs of kept packs already counted in kept_bytes.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $counted;
 
 	/**
 	 * Hex IDs of the packs that the index files read while planning list.
@@ -249,11 +290,20 @@ final class PruneRun {
 		if ( ! in_array( $this->phase, self::PHASES, true ) ) {
 			FormatException::raise( 'The prune checkpoint names an unknown phase.', [ 'phase' => $this->phase ] );
 		}
-		$this->frontier            = Decoded::strings( $state['frontier'] ?? [] );
-		$this->seen                = array_fill_keys( Decoded::strings( $state['seen'] ?? [] ), true );
-		$this->live                = array_fill_keys( Decoded::strings( $state['live'] ?? [] ), true );
-		$this->listed              = array_fill_keys( Decoded::strings( $state['listed'] ?? [] ), true );
-		$this->remarked            = true === ( $state['remarked'] ?? null );
+		$this->frontier = Decoded::strings( $state['frontier'] ?? [] );
+		$this->seen     = array_fill_keys( Decoded::strings( $state['seen'] ?? [] ), true );
+		$this->live     = array_fill_keys( Decoded::strings( $state['live'] ?? [] ), true );
+		$this->listed   = array_fill_keys( Decoded::strings( $state['listed'] ?? [] ), true );
+		$this->remarked = true === ( $state['remarked'] ?? null );
+		try {
+			$this->filter = Bytes::base64_decode( Decoded::string( $state['filter'] ?? null ) );
+		} catch ( FormatException ) {
+			// A checkpoint from before the estimate: the run continues without one.
+			$this->filter = '';
+		}
+		$this->used_bytes          = Decoded::count( $state['used_bytes'] ?? null );
+		$this->kept_bytes          = Decoded::count( $state['kept_bytes'] ?? null );
+		$this->counted             = array_fill_keys( Decoded::strings( $state['counted'] ?? [] ), true );
 		$this->missing             = Decoded::count( $state['missing'] ?? null );
 		$this->missing_examples    = Decoded::strings( $state['missing_examples'] ?? [] );
 		$this->snapshots           = Decoded::count( $state['snapshots'] ?? null );
@@ -405,15 +455,17 @@ final class PruneRun {
 	}
 
 	/**
-	 * Outcome once finished.
+	 * Outcome once finished. reclaimable_bytes estimates the unused space in kept packs that
+	 * only a full prune with repacking frees; -1 if unknown.
 	 *
-	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, index_files_written: int, restarts: int} Result.
+	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, reclaimable_bytes: int, index_files_written: int, restarts: int} Result.
 	 */
 	public function result(): array {
 		return [
 			'packs_deleted'       => $this->packs_deleted,
 			'bytes_deleted'       => $this->bytes_deleted,
 			'packs_kept'          => count( $this->live ),
+			'reclaimable_bytes'   => '' === $this->filter ? -1 : max( 0, $this->kept_bytes - $this->used_bytes ),
 			'index_files_written' => $this->index_files_written,
 			'restarts'            => $this->restarts,
 		];
@@ -441,8 +493,8 @@ final class PruneRun {
 
 	/**
 	 * Resets every phase and queues the root trees of all snapshots for marking. Reading the
-	 * snapshots is the only step that can fail, and it comes first: a run whose marking could
-	 * not start over is left exactly as it was.
+	 * snapshots and, for the size of the filter, the index are the only steps that can fail,
+	 * and they come first: a run whose marking could not start over is left exactly as it was.
 	 *
 	 * @throws InvalidArgument If the repository has no snapshots.
 	 */
@@ -452,7 +504,8 @@ final class PruneRun {
 			// An empty listing would make every pack unused; never delete everything.
 			InvalidArgument::raise( 'The repository has no snapshots; prune would delete everything.', [ 'code' => 'no_snapshots' ] );
 		}
-		$roots = [];
+		$filter = str_repeat( "\0", intdiv( self::filter_bits( $this->index()->count() ), 8 ) );
+		$roots  = [];
 		foreach ( $snapshots as $snapshot ) {
 			$roots[ $snapshot->tree->hex() ] = true;
 		}
@@ -462,6 +515,10 @@ final class PruneRun {
 		$this->frontier            = array_keys( $roots );
 		$this->seen                = [];
 		$this->live                = [];
+		$this->filter              = $filter;
+		$this->used_bytes          = 0;
+		$this->kept_bytes          = 0;
+		$this->counted             = [];
 		$this->listed              = [];
 		$this->missing             = 0;
 		$this->missing_examples    = [];
@@ -564,23 +621,24 @@ final class PruneRun {
 		try {
 			$index = $this->index();
 			$tree  = Id::from_hex( $hex );
-			if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
-				$this->seen[ $hex ] = true;
-				return;
-			}
-			$nodes = $this->repository->load_tree( $index, $tree );
+			// A tree the index does not know is counted as missing by mark() below.
+			$nodes = null === $index->find( $tree, BlobType::Tree ) ? [] : $this->repository->load_tree( $index, $tree );
 		} catch ( NotFound ) {
 			// Queued again first: if marking cannot start over now, the tree must not be skipped.
 			$this->frontier[] = $hex;
 			$this->mark_again( 'A tree is missing on the server; prune stopped without deleting anything. Run a check.', [ 'tree' => $hex ] );
 			return;
 		} catch ( \Throwable $failure ) {
-			// The tree stays queued: if the caller tries again on this run, the tree is still
-			// walked, and the packs of its blobs are not taken for unused ones.
+			// The tree stays queued and unmarked: if the caller tries again on this run, the
+			// tree is still walked, its packs are not taken for unused ones, and the estimate
+			// counts it once.
 			$this->frontier[] = $hex;
 			throw $failure;
 		}
 		$this->seen[ $hex ] = true;
+		if ( ! $this->mark( $index, $tree, BlobType::Tree ) ) {
+			return;
+		}
 		foreach ( $nodes as $node ) {
 			if ( null !== $node->subtree && ! isset( $this->seen[ $node->subtree->hex() ] ) ) {
 				$this->frontier[] = $node->subtree->hex();
@@ -609,7 +667,52 @@ final class PruneRun {
 			return false;
 		}
 		$this->live[ $location->pack->hex() ] = true;
+		// Trees reach here once each; data blobs that several files share are counted once.
+		if ( BlobType::Tree === $type || $this->first_use( $blob ) ) {
+			$this->used_bytes += $location->entry->length;
+		}
 		return true;
+	}
+
+	/**
+	 * Enters a data blob into the Bloom filter.
+	 *
+	 * @param Id $blob Blob ID, a SHA-256 hash whose words serve as the three hash values.
+	 * @return bool True if the blob was not in the filter yet; false if it was, or probably was.
+	 */
+	private function first_use( Id $blob ): bool {
+		if ( '' === $this->filter ) {
+			return false;
+		}
+		$mask  = strlen( $this->filter ) * 8 - 1;
+		$words = unpack( 'V3', $blob->bytes() );
+		$new   = false;
+		foreach ( false === $words ? [] : $words as $word ) {
+			$bit  = $word & $mask;
+			$byte = $bit >> 3;
+			$old  = ord( $this->filter[ $byte ] );
+			$flag = 1 << ( $bit & 7 );
+			if ( 0 === ( $old & $flag ) ) {
+				$this->filter[ $byte ] = chr( $old | $flag );
+				$new                   = true;
+			}
+		}
+		return $new;
+	}
+
+	/**
+	 * Size of the Bloom filter for an index: a power of two with about 16 bits per blob, for
+	 * a false-positive rate below one percent with three hash values.
+	 *
+	 * @param int $blobs Blobs in the index.
+	 * @return int Bits.
+	 */
+	private static function filter_bits( int $blobs ): int {
+		$bits = self::FILTER_MIN_BITS;
+		while ( $bits < 16 * $blobs && $bits < self::FILTER_MAX_BITS ) {
+			$bits *= 2;
+		}
+		return $bits;
 	}
 
 	/**
@@ -622,9 +725,15 @@ final class PruneRun {
 			return;
 		}
 		$affected = false;
-		foreach ( array_keys( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) ) as $pack ) {
+		foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 			$this->listed[ $pack ] = true;
 			if ( isset( $this->live[ $pack ] ) ) {
+				if ( ! isset( $this->counted[ $pack ] ) ) {
+					$this->counted[ $pack ] = true;
+					foreach ( $entries as $entry ) {
+						$this->kept_bytes += $entry->length;
+					}
+				}
 				continue;
 			}
 			$this->unused[ $pack ] = -1;
@@ -777,6 +886,10 @@ final class PruneRun {
 					'frontier'            => $this->frontier,
 					'seen'                => array_keys( $this->seen ),
 					'live'                => array_keys( $this->live ),
+					'filter'              => Bytes::base64_encode( $this->filter ),
+					'used_bytes'          => $this->used_bytes,
+					'kept_bytes'          => $this->kept_bytes,
+					'counted'             => array_keys( $this->counted ),
 					'listed'              => array_keys( $this->listed ),
 					'remarked'            => $this->remarked,
 					'missing'             => $this->missing,

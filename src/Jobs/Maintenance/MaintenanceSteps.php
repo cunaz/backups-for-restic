@@ -93,28 +93,15 @@ final class MaintenanceSteps implements StepProvider {
 	 */
 	public function detect( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services->common;
+		$guard    = $this->services->guard();
 		$status   = AppendOnlyProbe::detect( $services->access->backend(), $services->random );
-		$now      = $services->clock->now()[0];
-		$services->state->set(
-			'append_only',
-			[
-				'status'     => $status->value,
-				'checked_at' => $now,
-			]
-		);
-		if ( AppendOnlyStatus::AppendOnly === $status ) {
-			$this->switch_to_external( $job, $log );
-			return true;
+		if ( $guard->detected( $status, $job->id ) ) {
+			$this->switched( $job, $log );
 		}
-		if ( 'external' === $services->settings->string( 'retention.mode' ) ) {
+		if ( AppendOnlyStatus::AppendOnly === $status ) {
+			$job->result['skipped'] = 'append_only';
+		} elseif ( $guard->is_external() ) {
 			if ( AppendOnlyStatus::DeletionsAllowed === $status ) {
-				$services->state->set(
-					'retention_proposal',
-					[
-						'mode'  => 'plugin',
-						'since' => $now,
-					]
-				);
 				$log->write( 'info', 'The server allows deletions again; retention stays external until an administrator switches it back.' );
 			}
 			$job->result['skipped'] = 'retention_external';
@@ -358,27 +345,27 @@ final class MaintenanceSteps implements StepProvider {
 	}
 
 	/**
-	 * Switches retention to external after a detection and ends the job without deleting.
+	 * Switches retention to external after a refused deletion and ends the job without deleting.
 	 *
 	 * @param Job      $job Job.
 	 * @param EventLog $log Log.
 	 */
 	private function switch_to_external( Job $job, EventLog $log ): void {
-		$services = $this->services->common;
-		if ( 'external' !== $services->settings->string( 'retention.mode' ) ) {
-			( $this->services->switch_retention )( 'external' );
-			$services->state->set(
-				'retention_switch',
-				[
-					'mode' => 'external',
-					'at'   => $services->clock->now()[0],
-					'job'  => $job->id,
-				]
-			);
-			$log->write( 'warning', 'The repository is append-only. Retention switched to external: the plugin no longer deletes snapshots.' );
+		if ( $this->services->guard()->refused( $job->id ) ) {
+			$this->switched( $job, $log );
 		}
-		$services->state->set( 'retention_proposal', [] );
 		$job->result['skipped'] = 'append_only';
+	}
+
+	/**
+	 * Notes a switch to external retention in the log and in the result, for the notification.
+	 *
+	 * @param Job      $job Job.
+	 * @param EventLog $log Log.
+	 */
+	private function switched( Job $job, EventLog $log ): void {
+		$job->result['retention_switched'] = true;
+		$log->write( 'warning', 'The repository is append-only. Retention switched to external: the plugin no longer deletes snapshots.' );
 	}
 
 	/**

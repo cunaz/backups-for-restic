@@ -10,6 +10,7 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobObserver;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
@@ -47,7 +48,7 @@ final class RunnerTest extends TestCase {
 		return new JobStore( $this->directory . '/jobs', $redactor ?? new Redactor(), new SystemRandom() );
 	}
 
-	private function runner( ?JobStore $store = null ): Runner {
+	private function runner( ?JobStore $store = null, ?JobObserver $observer = null ): Runner {
 		$provider = new class( $this ) implements StepProvider {
 			public function __construct( private readonly RunnerTest $test ) {
 			}
@@ -63,7 +64,7 @@ final class RunnerTest extends TestCase {
 				};
 			}
 		};
-		return new Runner( $store ?? $this->store(), new RunnerLock( $this->directory . '/runner.lock' ), $provider, $this->clock, new SystemRandom() );
+		return new Runner( $store ?? $this->store(), new RunnerLock( $this->directory . '/runner.lock' ), $provider, $this->clock, new SystemRandom(), $observer );
 	}
 
 	/**
@@ -99,6 +100,45 @@ final class RunnerTest extends TestCase {
 		self::assertSame( 3, $finished->ticks );
 		self::assertSame( '', $finished->lease_owner );
 		self::assertSame( 'idle', $runner->tick( 10 )->status );
+	}
+
+	public function test_the_observer_hears_the_start_and_the_end_after_the_job_is_saved(): void {
+		$store                      = $this->store();
+		$this->script['backing_up'] = [ false, true ];
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$observer                   = new class( $store ) implements JobObserver {
+			/** @var list<string> */
+			public array $heard = [];
+
+			public function __construct( private readonly JobStore $store ) {
+			}
+
+			public function state_changed( Job $job, JobState $previous ): void {
+				$saved         = $this->store->get( $job->id );
+				$this->heard[] = $previous->value . '>' . $job->state->value . '/' . $saved?->state->value;
+			}
+		};
+		$runner                     = $this->runner( $store, $observer );
+		$runner->tick( 10 );
+		self::assertSame( [ 'queued>running/running' ], $observer->heard );
+		$runner->tick( 10 );
+		self::assertSame( [ 'queued>running/running', 'running>succeeded/succeeded' ], $observer->heard );
+	}
+
+	public function test_a_failing_observer_is_logged_and_does_not_change_the_job(): void {
+		$store    = $this->store();
+		$job      = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$observer = new class() implements JobObserver {
+			public function state_changed( Job $job, JobState $previous ): void {
+				throw new \RuntimeException( 'The mail server is gone.' );
+			}
+		};
+		$report   = $this->runner( $store, $observer )->tick( 10 );
+		self::assertSame( 'advanced', $report->status );
+		$finished = $store->get( $job->id );
+		self::assertSame( JobState::Succeeded, $finished?->state );
+		$warnings = array_filter( $store->log( $finished )->read(), static fn ( array $entry ): bool => 'warning' === $entry['level'] );
+		self::assertCount( 2, $warnings, 'One warning for the start, one for the end.' );
 	}
 
 	public function test_a_failure_still_runs_the_cleanup_steps(): void {

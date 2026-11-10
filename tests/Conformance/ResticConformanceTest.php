@@ -194,6 +194,63 @@ final class ResticConformanceTest extends TestCase {
 		self::assertSame( TempDir::describe( $site ), TempDir::describe( $target . $site ) );
 	}
 
+	/**
+	 * Unused bytes as restic's prune counts them (restic prune --dry-run -v): all blobs no
+	 * snapshot uses, and the part of them in packs that are entirely unused.
+	 *
+	 * @param ResticCli $cli restic.
+	 * @return array{unused: int, delete: int} Bytes, as precise as restic prints them.
+	 */
+	private function unused_sizes( ResticCli $cli ): array {
+		$output = $cli->must( [ 'prune', '--dry-run', '--max-unused', 'unlimited', '-v' ] );
+		$sizes  = [];
+		foreach ( [
+			'unused' => 'unused',
+			'delete' => 'to delete',
+		] as $key => $label ) {
+			self::assertSame( 1, preg_match( '/^' . $label . ':\s+\d+ blobs \/ ([\d.]+) (B|KiB|MiB|GiB)$/m', $output, $match ), $output );
+			$sizes[ $key ] = (int) round(
+				(float) $match[1] * [
+					'B'   => 1,
+					'KiB' => 1024,
+					'MiB' => 1048576,
+					'GiB' => 1073741824,
+				][ $match[2] ]
+			);
+		}
+		return $sizes;
+	}
+
+	public function test_prune_estimates_the_unused_space_it_leaves_as_restic_counts_it(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site-reclaim' );
+		TempDir::fixture( $site, 2 * 1048576 );
+		foreach ( [ 'gone-1', 'gone-2', 'gone-3' ] as $name ) {
+			file_put_contents( $site . '/' . $name . '.bin', random_bytes( 300000 ) );
+		}
+		$repository = Repository::initialize( $this->server()->backend( 'reclaim' ), self::PASSWORD, $this->identity(), new SystemRandom() );
+		$cli        = new ResticCli( $this->server(), 'reclaim', self::PASSWORD );
+		$first      = $this->backup( $repository, $site );
+		foreach ( [ 'gone-1', 'gone-2', 'gone-3' ] as $name ) {
+			unlink( $site . '/' . $name . '.bin' );
+		}
+		$this->backup( $repository, $site, $first );
+		$cli->must( [ 'forget', $first->hex() ] );
+		$before = $this->unused_sizes( $cli );
+		self::assertGreaterThan( 900000, $before['unused'] - $before['delete'], 'The removed files share packs with files that stay.' );
+
+		$this->cleanup[] = $work = TempDir::create( 'reclaim' );
+		$run             = PruneRun::start( $repository, $work . '/run', $this->identity(), new SystemClock(), new SystemRandom() );
+		while ( ! $run->advance( microtime( true ) + 20 ) ) {
+			continue;
+		}
+		// restic prints three decimals of the unit: the estimate matches within that rounding.
+		$estimate = $run->result()['reclaimable_bytes'];
+		self::assertEqualsWithDelta( $before['unused'] - $before['delete'], $estimate, 1100 );
+		$after = $this->unused_sizes( $cli );
+		self::assertEqualsWithDelta( $after['unused'], $estimate, 1100, 'restic counts the same unused space after the prune.' );
+		self::assertSame( 0, $after['delete'] );
+	}
+
 	public function test_check_finds_the_damage_restic_check_finds(): void {
 		$this->cleanup[] = $site = TempDir::create( 'site-check' );
 		TempDir::fixture( $site, 2 * 1048576 );
