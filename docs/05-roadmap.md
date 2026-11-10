@@ -10,8 +10,8 @@ restic CLI and against real servers.
 need the owner's two free-tier repositories. An audit of the code against this plan
 (2026-11-10) found two deviations in the engine, both fixed: a paused run refreshed a lock
 other clients no longer honoured instead of taking it again, and the key derivation table
-was not created with mode 0600. What the audit could not close is carried into
-Milestone 3.**
+was not created with mode 0600. What the audit could not close is phase 0 of the
+[plan for Milestone 3](07-milestone-3-plan.md).**
 
 | Acceptance criterion | Result |
 | --- | --- |
@@ -146,7 +146,7 @@ continue after a request ended while it deleted, and could leave its exclusive l
 A check lost its progress with a failed request and called a repository it could not read
 damaged.
 
-**Open, and carried into Milestone 3:** tests for the
+**Open, and phase 0 of the [plan for Milestone 3](07-milestone-3-plan.md):** tests for the
 WordPress wiring of the second and third acceptance criterion (the daily probe, the stored
 switch to `external`, the administrator's click back, the heartbeat's stale notice), which
 are proven below that layer only; browser tests; a preview of what retention would remove;
@@ -174,8 +174,9 @@ Acceptance
 
 ## Milestone 3 — Restore (0.3.0)
 
-**Status (2026-11-10): planned. "Connect to an existing repository" below already exists
-since Milestone 1.**
+**Status (2026-11-10): planned. Work packages, order, tests and the owner's decisions are in
+the [plan for Milestone 3](07-milestone-3-plan.md); its phase 0 closes what Milestones 0 to
+2 left open. "Connect to an existing repository" below already exists since Milestone 1.**
 
 Scope
 - Snapshot browser (tree walk per directory), manifest view.
