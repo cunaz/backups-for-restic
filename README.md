@@ -123,10 +123,10 @@ Install from the WordPress.org plugin directory (Plugins → Add New). No server
 needed; the setup wizard checks PHP extensions, memory and time limits, the hosting's cron
 options and the protection of the plugin's working directory, then guides you through
 connecting a repository on your own restic REST server or a hosted one. Packages are not
-distributed through GitHub. To test unreleased code, link or copy a checkout of this
-repository into `wp-content/plugins/`: the plugin needs no build step. A script that builds
-the release package is planned for Milestone 3
-([development guide](docs/04-development-and-quality.md), §7).
+distributed through GitHub. To test unreleased code, run `bin/build-package.sh` and copy
+`build/backups-for-restic/` into `wp-content/plugins/`, or link a checkout of this
+repository there: the plugin needs no build step
+([development guide](docs/04-development-and-quality.md), §5.8).
 
 ## License
 

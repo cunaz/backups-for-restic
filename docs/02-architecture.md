@@ -189,7 +189,8 @@ The entry marked (M3) arrives with that milestone. Dependency rules:
   of the plugin, `Support` uses `Exception`, `Crypto` uses those two, `Format` uses those
   three, and `Backend` may use those four. Two of them use the helper `Secrets\Secret` as
   well: `Support\Redactor`, which removes secrets from texts, and `Backend\RestBackend`,
-  which builds the basic auth header. The two helper classes are bound as well, so that
+  which builds the basic auth header. A helper is allowed for the whole layer, not only
+  for the class that uses it today. The two helper classes are bound as well, so that
   nothing reaches the stack through them: `Secrets\Secret` uses nothing of the plugin and
   `Storage\Files` only `Exception`.
   `tests/PHPStan/EngineDependencyRule.php` enforces this and the rule above in CI. It reads

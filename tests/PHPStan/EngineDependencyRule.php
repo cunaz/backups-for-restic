@@ -39,7 +39,8 @@ final class EngineDependencyRule implements Rule {
 
 	/**
 	 * What each part may use besides itself, lowest part first. A part is a namespace below
-	 * BackupsForRestic or, for the two helpers outside the stack, a single class.
+	 * BackupsForRestic or, for the two helpers outside the stack, a single class. A helper
+	 * is granted to a whole part; the comments name the class that uses it today.
 	 */
 	private const array MAY_USE = [
 		'Exception'       => [],

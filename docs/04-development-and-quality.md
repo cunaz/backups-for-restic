@@ -133,11 +133,13 @@ project adds three rules in `tests/PHPStan/`:
   in this list, and nothing else of the plugin: not `Jobs`, not the adapters in `WordPress`,
   not `Settings`. Two classes outside the stack are on the rule's list: `Secrets\Secret`,
   used in `Support` (`Redactor`), in `Backend` (`RestBackend`) and in `Engine`
-  (`KeyUnlock`), and `Storage\Files`, used in `Engine`. The two classes are held to the rule
-  themselves: `Secret` may use nothing of the plugin, `Files` only `Exception`. The rule
-  reads the `use` statements of a file and every name in its code; a name that stands only
-  in a comment and needs no import is not seen. A new dependency needs a reviewed change of
-  the list ([architecture](02-architecture.md) §3).
+  (`KeyUnlock`), and `Storage\Files`, used in `Engine`. The list allows a helper for the
+  whole layer, so another class of `Support` may take a `Secret` without a change of the
+  list; where a secret is revealed stays the business of `SecretRevealRule`. The two
+  classes are held to the rule themselves: `Secret` may use nothing of the plugin, `Files`
+  only `Exception`. The rule reads the `use` statements of a file and every name in its
+  code; a name that stands only in a comment and needs no import is not seen. A new
+  dependency needs a reviewed change of the list ([architecture](02-architecture.md) §3).
 - `SecretRevealRule`: `Secret::reveal()` only in the classes on its list.
 
 A fourth extension, `UnpackReturnTypeExtension`, only gives `unpack()` a precise return type
@@ -354,7 +356,7 @@ copy would only go stale.
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js`; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that every commit is signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js`; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
 | `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
 | `integration.yml` | push to `main`, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1.4 on PHP 8.3; nightly and on request with the acceptance sizes; records with `strace` and core dumps how the server's PHP processes ended. WordPress latest-1 and PHP 8.5 are acceptance criteria of Milestone 4 and not in the matrix yet |
@@ -384,7 +386,9 @@ template has no subject, because the template is not committed.
 
 The job "Commits are signed off" runs on pull requests. It fails when a commit between the
 base and the head of the pull request, merge commits included, has no `Signed-off-by`
-trailer with a value. Commits whose author is `dependabot[bot]` are exempt.
+trailer with a value. Commits whose author name is `dependabot[bot]` are exempt. Git lets
+anybody write that name, so the job proves nothing about such a commit; whoever merges
+sees its author.
 
 ## 7. Release process (WordPress.org)
 
@@ -467,7 +471,7 @@ protection, required checks) is a setting of the repository that no file here re
   self-review of §9.1 for security-relevant changes, the sign-off of every commit, and no
   personal data.
 - Commits are signed off under the Developer Certificate of Origin (`git commit -s`). A CI
-  job checks every commit of a pull request for the trailer (§6).
+  job checks the commits of a pull request for the trailer, except Dependabot's (§6).
 - The issue template for bug reports (`.github/ISSUE_TEMPLATE/bug_report.md`) asks for the
   Doctor's output, from `wp backups-for-restic doctor` or **Backups → Environment**, and
   warns against posting a recovery kit or a password.
