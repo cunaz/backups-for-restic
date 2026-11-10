@@ -884,7 +884,7 @@
 						if ( 'append_only' === report.append_only ) {
 							parts.push( __( 'The repository is append-only: this site will never be able to delete backups.', 'backups-for-restic' ) );
 						} else if ( 'deletions_allowed' === report.append_only ) {
-							parts.push( __( 'Recommended: turn on append-only on your server (BorgBase: repository settings; rest-server: --append-only). Then nobody who takes over this website can delete your backups.', 'backups-for-restic' ) );
+							parts.push( __( 'Recommended: turn on append-only on your server (rest-server: --append-only; BorgBase: repository settings). Then nobody who takes over this website can delete your backups.', 'backups-for-restic' ) );
 						}
 						replace( result, [ notice( 'success', parts.join( ' ' ) ), save ] );
 					} )
