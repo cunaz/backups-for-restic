@@ -343,10 +343,14 @@ final class WordPressSiteTest extends TestCase {
 		// While a tick holds the runner lock, the cache is not deleted under it.
 		$lock = fopen( self::$site . '/wp-content/' . PrivateDirectory::NAME . '/runner.lock', 'c' );
 		self::assertNotFalse( $lock );
-		self::assertTrue( flock( $lock, LOCK_EX | LOCK_NB ) );
-		[ $status, , $raw ] = self::api( 'DELETE', '/cache' );
-		flock( $lock, LOCK_UN );
-		fclose( $lock );
+		try {
+			self::assertTrue( flock( $lock, LOCK_EX | LOCK_NB ) );
+			[ $status, , $raw ] = self::api( 'DELETE', '/cache' );
+		} finally {
+			// Whatever happens above, no job of a later test may find the runner lock taken.
+			flock( $lock, LOCK_UN );
+			fclose( $lock );
+		}
 		self::assertSame( 409, $status, $raw );
 		for ( $attempt = 0; $attempt < 10; $attempt++ ) {
 			[ $status, $cleared, $raw ] = self::api( 'DELETE', '/cache' );
