@@ -83,6 +83,39 @@ final class MysqliConnection implements Connection {
 		return $command;
 	}
 
+	/**
+	 * Imports SQL files in name order with the command-line client, as the disaster-recovery
+	 * guide describes. The files are streamed to the client, which sends one statement at a
+	 * time, so neither their size nor the server's max_allowed_packet limits a dump.
+	 *
+	 * @param list<string> $files SQL files.
+	 * @throws \RuntimeException If the client cannot be started or reports an error.
+	 */
+	public static function import( string $database, array $files ): void {
+		sort( $files );
+		$output  = (string) tempnam( sys_get_temp_dir(), 'bfr-import-' );
+		$process = proc_open( self::client( $database ), [ [ 'pipe', 'r' ], [ 'file', $output, 'w' ], [ 'redirect', 1 ] ], $pipes );
+		if ( ! is_resource( $process ) ) {
+			unlink( $output );
+			throw new \RuntimeException( 'The database client could not be started.' );
+		}
+		foreach ( $files as $file ) {
+			$source = fopen( $file, 'rb' );
+			// A client that stopped at an error closes the pipe; its message is reported below.
+			if ( false === $source || false === @stream_copy_to_stream( $source, $pipes[0] ) ) {
+				break;
+			}
+			fclose( $source );
+		}
+		fclose( $pipes[0] );
+		$code    = proc_close( $process );
+		$message = (string) file_get_contents( $output );
+		unlink( $output );
+		if ( 0 !== $code ) {
+			throw new \RuntimeException( 'Import into ' . $database . ' failed: ' . $message );
+		}
+	}
+
 	public static function environment( string $name, string $fallback ): string {
 		$value = getenv( $name );
 		return false === $value || '' === $value ? $fallback : $value;

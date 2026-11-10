@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Integration;
 
+use PHPUnit\Framework\Attributes\Depends;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\MysqliConnection;
@@ -243,18 +244,13 @@ final class WordPressSiteTest extends TestCase {
 		$admin    = MysqliConnection::connect();
 		self::assertNotNull( $admin );
 		$admin->execute( 'CREATE DATABASE `' . $restored . '` CHARACTER SET utf8mb4' );
-		$files = (array) glob( $target . $private . '/spool/database/*.sql' );
-		sort( $files );
-		$sql = '';
-		foreach ( $files as $file ) {
-			$sql .= file_get_contents( (string) $file );
-		}
+		$files = array_map( 'strval', (array) glob( $target . $private . '/spool/database/*.sql' ) );
+		self::assertNotSame( [], $files, 'The snapshot contains the database dump.' );
+		// With the client, like the recovery guide: one request with the whole dump exceeds
+		// the server's max_allowed_packet at the acceptance size.
+		MysqliConnection::import( $restored, $files );
 		$copy = MysqliConnection::connect( $restored );
 		self::assertNotNull( $copy );
-		self::assertTrue( $copy->mysqli->multi_query( $sql ), $copy->mysqli->error );
-		while ( $copy->mysqli->more_results() && $copy->mysqli->next_result() ) {
-			continue;
-		}
 		foreach ( [ 'wp_postmeta', 'wp_posts', 'wp_users' ] as $table ) {
 			self::assertSame( $db->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $copy->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $table );
 		}
@@ -275,9 +271,7 @@ final class WordPressSiteTest extends TestCase {
 		}
 	}
 
-	/**
-	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
-	 */
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_a_killed_tick_leaves_a_resumable_job(): void {
 		self::assertNotNull( self::$server );
 		file_put_contents( self::$site . '/wp-content/uploads/fixture/changed.bin', Vectors::hash_stream( 'changed', 64 * 1048576 ) );
@@ -323,9 +317,7 @@ final class WordPressSiteTest extends TestCase {
 		self::assertArrayHasKey( 'notifications.email.recipients', $error['data']['fields'] ?? [], $raw );
 	}
 
-	/**
-	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
-	 */
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_maintenance_jobs_and_the_dashboard(): void {
 		self::assertNotNull( self::$server );
 		self::idle( 600 );
