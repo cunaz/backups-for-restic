@@ -81,6 +81,41 @@ jobs:
           # read-only token of this workflow cannot do.
           repo-token: ''
 
+  sign-off:
+    name: Commits are signed off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history: the commits of the pull request are compared with its base.
+          fetch-depth: 0
+      # Developer Certificate of Origin (CONTRIBUTING.md): every commit of the pull request,
+      # merge commits included, carries a Signed-off-by trailer. Dependabot is exempt.
+      - name: Every commit has a Signed-off-by trailer
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          commits="$(git rev-list "$BASE_SHA..$HEAD_SHA")"
+          missing=0
+          for commit in $commits; do
+            if [ "$(git show -s --format=%an "$commit")" = 'dependabot[bot]' ]; then
+              continue
+            fi
+            if [ -z "$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit")" ]; then
+              git show -s --format='%h %s' "$commit"
+              missing=$((missing + 1))
+            fi
+          done
+          echo "Commits in the pull request: $(echo "$commits" | grep -c .); without a Signed-off-by trailer: $missing."
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::Commits without a Signed-off-by trailer: $missing, listed in the log. Sign off with: git commit -s (CONTRIBUTING.md)."
+            exit 1
+          fi
+
   unit:
     name: Unit tests (PHP ${{ matrix.php }})
     runs-on: ubuntu-24.04
