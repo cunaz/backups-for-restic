@@ -29,8 +29,10 @@ defined( 'ABSPATH' ) || exit;
  * plugin draws a random one per run, because PHP processes are reused across requests).
  *
  * Backups hold non-exclusive locks; maintenance holds exclusive ones. A lock older than 30
- * minutes is stale for every client, so holders refresh it every five minutes. Lock files can be
- * deleted even in append-only repositories.
+ * minutes is stale for every client, so holders refresh it every five minutes. A run that was
+ * paused for longer takes its lock again instead of refreshing it; what another client did to
+ * the repository in the meantime is not undone by that, and each run says how it deals with
+ * it. Lock files can be deleted even in append-only repositories.
  */
 final class Locking {
 
@@ -95,6 +97,18 @@ final class Locking {
 	 */
 	public function due( int $locked_at ): bool {
 		return $this->clock->now()[0] - $locked_at >= self::REFRESH_AFTER_SECONDS;
+	}
+
+	/**
+	 * Whether other clients may have ignored a held lock: 30 minutes after it was written a
+	 * lock is stale for every client. A run that finds its lock that old takes it again with
+	 * acquire(), which notices a client that holds a conflicting lock by now.
+	 *
+	 * @param int $locked_at Unix time the lock was written.
+	 * @return bool True if the lock is stale.
+	 */
+	public function lapsed( int $locked_at ): bool {
+		return $this->clock->now()[0] - $locked_at > Lock::STALE_AFTER_SECONDS;
 	}
 
 	/**
