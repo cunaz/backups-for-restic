@@ -72,16 +72,28 @@ Acceptance
 
 ## Milestone 1 — First backup in WordPress (0.1.0, internal alpha)
 
-**Status (2026-11-09): implemented. The WordPress-free core is verified by running it; the
-WordPress layer only statically (PHPStan at level max against the WordPress stubs, every
-class loaded), because this development environment may not run WordPress itself. The
-integration suite that runs it against a real WordPress is written and waits for CI.**
+**Status (2026-11-10): implemented; the integration suite passes in CI. It runs the plugin
+in a real WordPress 7.1.4 on PHP 8.3: setup through the REST API, a backup driven by
+`wp-cron.php` with `max_execution_time = 30` and a memory ceiling of 128M, `restic check
+--read-data`, a restore with restic, a database import with identical checksums, and a web
+server that is stopped in the middle of a tick. Until 2026-11-10 the suite failed, because
+the CI setup switches on PHP's tracing JIT for the built-in web server and PHP 8.3 then
+crashed in backup ticks; the test server now runs without the JIT, as PHP does by default.
+The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
+which GitHub starts from `main` only, so not before the pull requests are merged.**
+
+**Found by the audit of 2026-11-10 and carried into Milestone 3:** no test loads the
+classes of the WordPress layer other than through the HTTP suite, which calls 10 of the 16
+routes; loopback chaining, the wizard, WP-CLI, uninstall and the multisite refusal are
+untested. Time estimates, a schedule more frequent than twice a day, and the Doctor's
+checks for outbound HTTPS and for how to switch the PHP version were promised and do not
+exist.
 
 | Acceptance criterion | Result |
 | --- | --- |
-| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration`, run by `integration.yml` with 64 MB per change and with 2 GB plus 300 MB nightly; not yet run. BorgBase pending |
-| A tick killed at any point leaves a resumable job; no stale lock | Engine and runner verified: every step can be interrupted, a killed tick's lease is taken over, and cleanup releases the lock on every path. The kill test through `wp-cron.php` is part of the integration suite |
-| No secret in files under `jobs/`, in REST responses or in HTML | `jobs/` verified in the job test; REST responses checked by the integration suite; the admin HTML contains no settings or secrets by construction |
+| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration` passed in CI on 2026-11-10 with 64 MB of files and 32 MB of database, the restore compared for the uploads directory and the checksums for the fixture tables; the run with 2 GB plus 300 MB is nightly and has not run yet. BorgBase pending |
+| A tick killed at any point leaves a resumable job; no stale lock | Engine and runner verified: every step can be interrupted, a killed tick's lease is taken over, and cleanup releases the lock on every path. Through `wp-cron.php` in CI: the web server is stopped once during a backup tick; the job finishes after the restart, `restic check` passes and no lock is left. The test does not choose the step in which the server stops |
+| No secret in files under `jobs/`, in REST responses or in HTML | `jobs/` verified in the job test and in CI; the integration suite searches the responses of four routes (status, settings, jobs, job log) for the two passwords; the admin HTML contains no settings or secrets by construction, which no test checks |
 
 Findings that changed the design:
 - The engine read virtual files in one go and restarted them after an interruption, so a
