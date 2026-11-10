@@ -95,15 +95,24 @@ jobs:
           coverage: none
           tools: composer:v2
       - run: bin/install-test-tools.sh wp-cli
-      # Builds the package and extracts the strings of its PHP and JavaScript files.
-      - run: composer pot
+      # Builds the package and extracts the strings of its PHP and JavaScript files. WP-CLI
+      # only warns about a string it finds fault with, for example one with two different
+      # translator comments; here a warning fails the job.
+      - name: Build the template
+        shell: bash
+        run: |
+          composer pot 2>&1 | tee "$RUNNER_TEMP/make-pot.log"
+          if grep -q '^Warning:' "$RUNNER_TEMP/make-pot.log"; then
+            echo '::error::wp i18n make-pot warns about translatable strings; see the log of this step.'
+            exit 1
+          fi
       # make-pot leaves out a file it cannot parse without failing. So look for a string
       # that only the admin script has, for one that only src/ has, and for a translator
       # comment that comes from JavaScript.
       - name: Strings of admin.js and src/ are in the template
         run: |
           pot=languages/backups-for-restic.pot
-          echo "$(grep -c '^msgid ' "$pot") entries, $(grep -c '^#: assets/js/' "$pot") of them from JavaScript."
+          echo "$(grep -c '^msgid ' "$pot") entries; $(grep -c 'assets/js/admin.js:' "$pot") lines refer to the admin script."
           grep -F 'msgid "Keep this tab open to speed up the backup on slow hosts."' "$pot"
           grep -F 'msgid "Plugin activation refused"' "$pot"
           grep -B 3 -F 'msgid "Data that no snapshot uses is deleted next on %s."' "$pot" | grep -F '#. translators: %s: date and time.'

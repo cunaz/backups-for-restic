@@ -85,7 +85,7 @@ final class SiteHealth {
 			__( 'Backups are recent', 'backups-for-restic' ),
 			0 === $finished
 				? ''
-				/* translators: %s: human-readable time difference such as "5 hours". */
+				/* translators: %s: human-readable time difference such as "3 days". */
 				: sprintf( __( 'The last backup finished %s ago.', 'backups-for-restic' ), human_time_diff( $finished ) )
 		);
 	}
