@@ -16,7 +16,6 @@ use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
-use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
@@ -28,7 +27,8 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Routes under backups-for-restic/v1 (docs/02-architecture.md §13.2). The admin UI uses nothing
  * else. Every route requires the backup capability; no response contains a secret except the
- * recovery kit, which needs the administrator's password again.
+ * recovery kit, which the wizard shows once during the setup and which needs the
+ * administrator's WordPress password afterwards.
  */
 final class RestRoutes {
 
@@ -58,6 +58,7 @@ final class RestRoutes {
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/log' => [ 'GET', 'job_log' ],
 			'/snapshots'                                 => [ 'GET', 'snapshots' ],
 			'/settings'                                  => [ 'GET', 'settings', 'PUT', 'update_settings' ],
+			'/cache'                                     => [ 'DELETE', 'clear_cache' ],
 			'/repository/test'                           => [ 'POST', 'test_repository' ],
 			'/repository/save'                           => [ 'POST', 'save_repository' ],
 			'/repository/create'                         => [ 'POST', 'create_repository' ],
@@ -199,29 +200,27 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Starts a backup, or with type forget, prune or check a maintenance job.
+	 * Starts a backup, or with type forget, prune or check a maintenance job. None of them
+	 * starts before the setup is completed.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function create_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$settings = $this->container->settings();
-		if ( '' === $settings->string( 'repository.url' ) ) {
-			return $this->error( 'configuration', 409 );
-		}
 		$type = JobType::tryFrom( '' === self::text( $request, 'type' ) ? 'backup' : self::text( $request, 'type' ) );
 		if ( null === $type || JobType::Unlock === $type ) {
 			return $this->error( 'invalid_job_type', 400 );
 		}
-		if ( in_array( $type, [ JobType::Forget, JobType::Prune ], true ) && 'external' === $settings->string( 'retention.mode' ) ) {
-			return $this->error( 'retention_external', 409 );
+		$refusal = $type->refusal( $this->container->settings() );
+		if ( null !== $refusal ) {
+			return $this->error( $refusal, 409 );
 		}
 		try {
 			$job = $this->container->jobs()->create( $type, 'manual', time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		}
-		Cron::chain();
+		Cron::chain( $this->container );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ], 201 );
 	}
 
@@ -247,34 +246,18 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Cancels a job: at once while queued, otherwise after the current step's cleanup.
+	 * Cancels a job: at once while queued, otherwise after the current step's cleanup. The
+	 * runner records the request so that a tick running right now can neither lose it nor be
+	 * overwritten by it.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function cancel_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$jobs = $this->container->jobs();
-		$job  = $jobs->get( self::text( $request, 'id' ) );
+		$job = $this->container->runner()->cancel( self::text( $request, 'id' ), [ 'user' => get_current_user_id() ] );
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
 		}
-		$dequeued = JobState::Queued === $job->state;
-		if ( $dequeued ) {
-			$job->state       = JobState::Cancelled;
-			$job->finished_at = time();
-		} elseif ( ! $job->state->is_terminal() ) {
-			$job->cancel_requested = true;
-		}
-		$jobs->save( $job );
-		if ( $dequeued ) {
-			try {
-				( new JobEvents( $this->container ) )->state_changed( $job, JobState::Queued );
-			} catch ( \Throwable $exception ) {
-				// The job is cancelled either way; a failing hook must not turn that into an error.
-				$jobs->log( $job )->write( 'warning', 'Reporting the state change failed.', [ 'code' => JobError::from_throwable( $exception )->code ] );
-			}
-		}
-		$jobs->log( $job )->write( 'info', 'Cancellation requested.', [ 'user' => get_current_user_id() ] );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ] );
 	}
 
@@ -359,6 +342,7 @@ final class RestRoutes {
 				'overridden'  => $settings->overridden,
 				'secrets'     => $secrets,
 				'private_dir' => $this->container->private_dir()->path,
+				'cache_bytes' => $this->container->cache()->size(),
 			]
 		);
 	}
@@ -399,6 +383,29 @@ final class RestRoutes {
 	}
 
 	/**
+	 * Deletes the local cache; the next job rebuilds it from the repository. The runner lock is
+	 * held from the check for jobs to the end of the deletion, so no tick can start in between
+	 * and write to the cache while it is removed.
+	 *
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	public function clear_cache(): \WP_REST_Response|\WP_Error {
+		$lock = $this->container->runner_lock();
+		if ( ! $lock->acquire() ) {
+			return $this->error( 'job_conflict', 409 );
+		}
+		try {
+			if ( null !== $this->container->jobs()->active() ) {
+				return $this->error( 'job_conflict', 409 );
+			}
+			$this->container->cache()->clear();
+		} finally {
+			$lock->release();
+		}
+		return $this->respond( [ 'cache_bytes' => $this->container->cache()->size() ] );
+	}
+
+	/**
 	 * Tests a repository server without saving anything.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
@@ -424,6 +431,11 @@ final class RestRoutes {
 			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ) );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
+		} catch ( InvalidArgument $e ) {
+			return $this->server_error( $e );
+		} catch ( PluginException $e ) {
+			// The REST password did not survive being stored.
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
 		$this->container->refresh();
 		delete_transient( 'backups_for_restic_snapshots' );
@@ -437,13 +449,22 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function create_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		try {
-			$this->setup()->create( $this->secret_param( $request, 'password' ) );
-		} catch ( PluginException $e ) {
-			return $this->error( JobError::from_throwable( $e )->code, 409 );
+		if ( ! $this->may_see_kit( $request ) ) {
+			return $this->error( 'wrong_user_password', 403 );
 		}
-		$this->container->refresh();
-		return $this->respond( [ 'recovery_kit' => RecoveryKit::text( $this->container ) ], 201, true );
+		try {
+			// The answer is the recovery kit: what the kit needs has to be there before a repository exists.
+			RecoveryKit::ca_certificate( $this->container );
+			$this->setup()->create( $this->secret_param( $request, 'password' ) );
+			$this->container->refresh();
+			$kit = RecoveryKit::text( $this->container );
+		} catch ( PluginException $e ) {
+			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
+				return $this->error( 'password_too_short', 400 );
+			}
+			return $this->kit_error( $e, 409 );
+		}
+		return $this->respond( [ 'recovery_kit' => $kit ], 201, true );
 	}
 
 	/**
@@ -453,24 +474,32 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function connect_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$password = $this->secret_param( $request, 'password' );
-		if ( null === $password && ! $this->container->secrets()->is_overridden( SecretName::RepositoryPassword ) ) {
-			return $this->error( 'configuration', 400 );
+		if ( ! $this->may_see_kit( $request ) ) {
+			return $this->error( 'wrong_user_password', 403 );
 		}
-		if ( null !== $password ) {
-			$this->setup()->connect( $password );
-		}
-		$this->container->refresh();
 		try {
-			$job = $this->container->jobs()->create( JobType::Unlock, 'setup', time() );
+			// The answer contains the recovery kit: what the kit needs has to be there first.
+			RecoveryKit::ca_certificate( $this->container );
+			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), $this->container->jobs(), time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
+		} catch ( InvalidArgument ) {
+			return $this->error( 'configuration', 400 );
+		} catch ( PluginException $e ) {
+			// The CA certificate is missing, or the repository password did not survive being stored.
+			return $this->kit_error( $e, 500 );
 		}
-		Cron::chain();
+		$this->container->refresh();
+		Cron::chain( $this->container );
+		try {
+			$kit = RecoveryKit::text( $this->container );
+		} catch ( PluginException $e ) {
+			return $this->kit_error( $e, 409 );
+		}
 		return $this->respond(
 			[
 				'job'          => $this->job_summary( $job ),
-				'recovery_kit' => RecoveryKit::text( $this->container ),
+				'recovery_kit' => $kit,
 			],
 			201,
 			true
@@ -539,44 +568,94 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function recovery_kit( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$user = wp_get_current_user();
-		if ( ! wp_check_password( self::text( $request, 'user_password' ), $user->user_pass, $user->ID ) ) {
+		if ( ! $this->password_confirmed( $request ) ) {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
 			$kit = RecoveryKit::text( $this->container );
 		} catch ( PluginException $e ) {
-			return $this->error( JobError::from_throwable( $e )->code, 409 );
+			return $this->kit_error( $e, 409 );
 		}
 		return $this->respond( [ 'recovery_kit' => $kit ], 200, true );
 	}
 
 	/**
-	 * Runs the connection test from request parameters.
+	 * The error for a recovery kit that cannot be complete, or for another failure on the way
+	 * to it.
+	 *
+	 * @param PluginException $failure Failure.
+	 * @param int             $status  HTTP status of any other failure.
+	 * @return \WP_Error Error.
+	 */
+	private function kit_error( PluginException $failure, int $status ): \WP_Error {
+		if ( 'ca_certificate_missing' === ( $failure->context()['code'] ?? null ) ) {
+			return $this->error( 'ca_certificate_missing', 409 );
+		}
+		return $this->error( JobError::from_throwable( $failure )->code, $status );
+	}
+
+	/**
+	 * Whether the request carries the WordPress password of the current user, as proof that the
+	 * administrator is present and not only a session of theirs.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return bool True if the password is right.
+	 */
+	private function password_confirmed( \WP_REST_Request $request ): bool {
+		$user = wp_get_current_user();
+		return wp_check_password( self::text( $request, 'user_password' ), $user->user_pass, $user->ID );
+	}
+
+	/**
+	 * Whether a request may get the recovery kit as part of its answer: freely during the
+	 * setup, when the wizard shows the kit once; after it only with the WordPress password, as
+	 * for the recovery kit route (docs/03-security-and-threat-model.md §5.5).
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return bool True if allowed.
+	 */
+	private function may_see_kit( \WP_REST_Request $request ): bool {
+		return ! $this->container->settings()->bool( 'setup.completed' ) || $this->password_confirmed( $request );
+	}
+
+	/**
+	 * Runs the connection test from request parameters. Without a password in the request the
+	 * stored one is used, but only for the server and user name it is stored for; for any
+	 * other the request is refused before anything is sent.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \BackupsForRestic\Connection\ConnectionReport|\WP_Error Report or error.
 	 */
 	private function run_test( \WP_REST_Request $request ): \BackupsForRestic\Connection\ConnectionReport|\WP_Error {
-		$password = $this->secret_param( $request, 'password' );
-		if ( null === $password ) {
-			try {
-				$password = $this->container->secrets()->get( SecretName::RestPassword );
-			} catch ( PluginException ) {
-				$password = null;
-			}
-		}
+		$server   = self::text( $request, 'server' );
+		$url      = self::text( $request, 'url' );
+		$username = self::text( $request, 'username' );
 		try {
-			return $this->container->tester()->test( self::text( $request, 'server' ), self::text( $request, 'url' ), self::text( $request, 'username' ), $password );
+			$password = $this->setup()->rest_password( $server, $url, $username, $this->secret_param( $request, 'password' ) );
+			return $this->container->tester()->test( $server, $url, $username, $password );
 		} catch ( InvalidArgument $e ) {
-			return new \WP_Error(
-				'backups_for_restic_invalid_url',
-				Messages::validation( $e->context() ),
-				[ 'status' => 400 ]
-			);
+			return $this->server_error( $e );
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 502 );
 		}
+	}
+
+	/**
+	 * The error for a server that a request names and the core refused: a missing REST
+	 * password, or an address that breaks the rules.
+	 *
+	 * @param InvalidArgument $refusal Refusal with its code.
+	 * @return \WP_Error Error.
+	 */
+	private function server_error( InvalidArgument $refusal ): \WP_Error {
+		if ( 'password_required' === ( $refusal->context()['code'] ?? null ) ) {
+			return $this->error( 'password_required', 400 );
+		}
+		return new \WP_Error(
+			'backups_for_restic_invalid_url',
+			Messages::validation( $refusal->context() ),
+			[ 'status' => 400 ]
+		);
 	}
 
 	/**
@@ -711,6 +790,19 @@ final class RestRoutes {
 			'invalid_job_type'              => [
 				'message' => __( 'Jobs can be of type backup, forget, prune or check.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'ca_certificate_missing'        => [
+				'message' => __( 'The CA certificate of the repository server is missing.', 'backups-for-restic' ),
+				'hint'    => __( 'Without it restic cannot reach the server, so the recovery kit would be useless. Upload the certificate again.', 'backups-for-restic' ),
+			],
+			'password_too_short'            => [
+				/* translators: %d: number of characters. */
+				'message' => sprintf( __( 'The repository password must have at least %d characters.', 'backups-for-restic' ), Setup::MIN_PASSWORD_LENGTH ),
+				'hint'    => __( 'Leave it empty and the plugin creates a strong one. A password set in wp-config.php has to be changed there.', 'backups-for-restic' ),
+			],
+			'password_required'             => [
+				'message' => __( 'Enter the REST password for this server.', 'backups-for-restic' ),
+				'hint'    => __( 'The stored password is only sent to the server and user name it was saved for. If wp-config.php defines the password, enter that one.', 'backups-for-restic' ),
 			],
 			default                         => Messages::job_error( $code ),
 		};

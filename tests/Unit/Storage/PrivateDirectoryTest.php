@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Storage;
 
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -49,6 +50,26 @@ final class PrivateDirectoryTest extends TestCase {
 			self::markTestIncomplete( 'Root can write everywhere; the uploads fallback cannot be observed.' );
 		}
 		self::assertSame( $this->root . '/uploads/' . PrivateDirectory::NAME, $fallback );
+	}
+
+	public function test_the_uploaded_ca_certificate_is_read_or_reported_missing(): void {
+		$directory = new PrivateDirectory( $this->root . '/' . PrivateDirectory::NAME );
+		$directory->ensure();
+		$missing = static function () use ( $directory ): bool {
+			try {
+				$directory->ca_certificate();
+				return false;
+			} catch ( StorageFailed $e ) {
+				return 'ca_certificate_missing' === ( $e->context()['code'] ?? null );
+			}
+		};
+		self::assertTrue( $missing(), 'No file.' );
+
+		file_put_contents( $directory->path . '/ca.pem', "\n" );
+		self::assertTrue( $missing(), 'An empty file is no certificate.' );
+
+		file_put_contents( $directory->path . '/ca.pem', "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n" );
+		self::assertSame( "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----", $directory->ca_certificate() );
 	}
 
 	public function test_probe_file_and_web_root_check(): void {

@@ -227,17 +227,78 @@ final class NotifierTest extends TestCase {
 		self::assertArrayNotHasKey( Notifier::OPTION, $this->options->values, 'Nothing was even written.' );
 	}
 
-	public function test_refused_notices_are_retried_five_times(): void {
-		$notifier             = $this->notifier();
+	public function test_refused_notices_are_retried_five_times_with_growing_pauses(): void {
+		$notifier             = $this->notifier( [ 'notifications.email.on_stale' => false ] );
+		$this->mailer->accept = false;
+		$failed               = self::SETUP + 10;
+		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, $failed, 'internal' ), $failed );
+		self::assertSame( 1, $this->mailer->refused, 'The first attempt is made at once.' );
+		self::assertSame( 1, $notifier->pending() );
+
+		// The heartbeat comes every five minutes, for two days.
+		$attempts = [ 0 ];
+		for ( $after = 300; $after <= 2 * 24 * self::HOUR; $after += 300 ) {
+			$before = $this->mailer->refused;
+			$notifier->heartbeat( $failed + $after );
+			if ( $this->mailer->refused > $before ) {
+				$attempts[] = $after;
+			}
+		}
+
+		$quarter = 900;
+		self::assertSame(
+			[ 0, $quarter, $quarter + self::HOUR, $quarter + 7 * self::HOUR, $quarter + 31 * self::HOUR ],
+			$attempts,
+			'15 minutes, one hour, six hours and a day lie between the attempts.'
+		);
+		self::assertSame( 0, $notifier->pending(), 'Dropped after the fifth attempt.' );
+		self::assertFalse( $this->options->autoload[ Notifier::OPTION ] );
+	}
+
+	public function test_jobs_that_finish_in_between_do_not_use_up_the_attempts(): void {
+		$notifier             = $this->notifier( [ 'notifications.email.on_stale' => false ] );
 		$this->mailer->accept = false;
 		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 10, 'internal' ), self::SETUP + 10 );
-		self::assertSame( 1, $notifier->pending() );
-		for ( $attempt = 2; $attempt <= 6; $attempt++ ) {
-			$notifier->heartbeat( self::SETUP + 10 + $attempt * 300 );
+		self::assertSame( 1, $this->mailer->refused );
+
+		// Six more jobs and a heartbeat within the first quarter of an hour: each flushes the outbox.
+		for ( $minute = 1; $minute <= 6; $minute++ ) {
+			$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 10 + 60 * $minute, 'internal' ), self::SETUP + 10 + 60 * $minute );
 		}
-		self::assertSame( 5, $this->mailer->refused );
-		self::assertSame( 0, $notifier->pending(), 'Dropped after five attempts.' );
-		self::assertFalse( $this->options->autoload[ Notifier::OPTION ] );
+		$notifier->heartbeat( self::SETUP + 10 + 899 );
+		self::assertSame( 1, $this->mailer->refused, 'The notice waits for its pause to end.' );
+		self::assertSame( 1, $notifier->pending() );
+
+		$this->mailer->accept = true;
+		$notifier->heartbeat( self::SETUP + 10 + 900 );
+		self::assertSame( [ 'failure' ], $this->mailer->kinds() );
+		self::assertSame( 0, $notifier->pending() );
+	}
+
+	public function test_a_new_notice_is_tried_at_once_while_an_older_one_waits(): void {
+		$notifier             = $this->notifier( [ 'notifications.email.on_stale' => false ] );
+		$this->mailer->accept = false;
+		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 10, 'internal' ), self::SETUP + 10 );
+		$this->mailer->accept = true;
+
+		$notifier->job_finished( $this->job( JobType::Check, JobState::Failed, self::SETUP + 100, 'internal' ), self::SETUP + 100 );
+
+		self::assertSame( [ 'check' ], array_map( static fn ( Notice $notice ): string => $notice->job_type, $this->mailer->sent ) );
+		self::assertSame( 1, $notifier->pending(), 'The backup notice waits for its second attempt.' );
+		$notifier->heartbeat( self::SETUP + 10 + 900 );
+		self::assertSame( [ 'check', 'backup' ], array_map( static fn ( Notice $notice ): string => $notice->job_type, $this->mailer->sent ) );
+	}
+
+	public function test_a_notice_stored_without_the_time_of_its_last_attempt_is_tried_again(): void {
+		$notice                                    = new Notice( NoticeKind::Failure, self::SETUP + 10, 'backup', 'job', 'internal' );
+		$this->options->values[ Notifier::OPTION ] = [
+			'outbox' => [
+				[ 'attempts' => 2 ] + $notice->to_array(),
+				[ 'attempts' => 5 ] + $notice->to_array(),
+			],
+		];
+		$this->notifier( [ 'notifications.email.on_stale' => false ] )->heartbeat( self::SETUP + 20 );
+		self::assertEquals( [ $notice ], $this->mailer->sent, 'An entry from an earlier version is due; one that used up its attempts is dropped.' );
 	}
 
 	public function test_a_notice_waits_for_the_mail_server_and_old_ones_are_dropped(): void {
@@ -246,7 +307,9 @@ final class NotifierTest extends TestCase {
 		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 10, 'internal' ), self::SETUP + 10 );
 		$this->mailer->accept = true;
 		$notifier->heartbeat( self::SETUP + 310 );
-		self::assertSame( [ 'failure' ], $this->mailer->kinds(), 'Delivered at the next heartbeat.' );
+		self::assertSame( [], $this->mailer->kinds(), 'Five minutes later the notice still waits.' );
+		$notifier->heartbeat( self::SETUP + 910 );
+		self::assertSame( [ 'failure' ], $this->mailer->kinds(), 'Delivered once the mail server is back and the pause is over.' );
 
 		$this->mailer->accept = false;
 		$notifier->job_finished( $this->job( JobType::Check, JobState::Failed, self::SETUP + 400, 'internal' ), self::SETUP + 400 );

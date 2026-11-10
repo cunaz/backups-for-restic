@@ -11,6 +11,7 @@ use BackupsForRestic\Secrets\ConstantOverrideStore;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Storage\Options;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 
 final class SecretStoresTest extends TestCase {
@@ -37,6 +38,68 @@ final class SecretStoresTest extends TestCase {
 		self::assertStringNotContainsString( 'rest password', $raw );
 		self::assertMatchesRegularExpression( '/^v1\.[A-Za-z0-9_-]{32}\.[A-Za-z0-9_-]+$/', $options->values[ EncryptedOptionStore::OPTION ]['secrets']['repository_password'] );
 		self::assertTrue( $store->readable() );
+	}
+
+	/**
+	 * An options table that stops keeping what it is given, or changes it on the way.
+	 */
+	private function unreliable_options(): Options {
+		return new class() implements Options {
+			/** Whether writes are dropped, as when the database refuses an update. */
+			public bool $read_only = false;
+
+			/** Whether stored texts lose their last characters, as with a column that is too short. */
+			public bool $truncating = false;
+
+			private mixed $value = null;
+
+			public function get( string $name ): mixed {
+				return $this->value;
+			}
+
+			public function set( string $name, mixed $value, bool $autoload ): void {
+				if ( $this->read_only ) {
+					return;
+				}
+				if ( $this->truncating && is_array( $value ) && is_array( $value['secrets'] ?? null ) ) {
+					$value['secrets'] = array_map( static fn ( string $box ): string => substr( $box, 0, -4 ), $value['secrets'] );
+				}
+				$this->value = $value;
+			}
+
+			public function delete( string $name ): void {
+				$this->value = null;
+			}
+		};
+	}
+
+	public function test_a_secret_that_was_not_kept_does_not_pass_for_saved(): void {
+		$options            = $this->unreliable_options();
+		$store              = new EncryptedOptionStore( $options, new Secret( self::SALTS ), new SystemRandom() );
+		$options->read_only = true;
+		try {
+			$store->set( SecretName::RepositoryPassword, new Secret( 'never stored' ) );
+			self::fail( 'Nothing was stored.' );
+		} catch ( SecretsUndecryptable $e ) {
+			self::assertSame( 'repository_password', $e->context()['secret'] ?? null );
+		}
+
+		$options->read_only = false;
+		$store->set( SecretName::RepositoryPassword, new Secret( 'the old password' ) );
+		$options->read_only = true;
+		try {
+			$store->set( SecretName::RepositoryPassword, new Secret( 'the new password' ) );
+			self::fail( 'The old password is still the stored one.' );
+		} catch ( SecretsUndecryptable ) {
+			self::assertSame( 'the old password', $store->get( SecretName::RepositoryPassword )?->reveal() );
+		}
+	}
+
+	public function test_a_secret_that_comes_back_changed_does_not_pass_for_saved(): void {
+		$options             = $this->unreliable_options();
+		$options->truncating = true;
+		$this->expectException( SecretsUndecryptable::class );
+		( new EncryptedOptionStore( $options, new Secret( self::SALTS ), new SystemRandom() ) )->set( SecretName::RestPassword, new Secret( 'rest password' ) );
 	}
 
 	public function test_changed_salts_make_secrets_undecryptable_instead_of_empty(): void {

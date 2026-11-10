@@ -179,6 +179,10 @@ final class SiteHealth {
 				'label' => __( 'Append-only', 'backups-for-restic' ),
 				'value' => $container->append_only(),
 			],
+			'cache'       => [
+				'label' => __( 'Local cache', 'backups-for-restic' ),
+				'value' => size_format( $container->cache()->size() ),
+			],
 			'private_dir' => [
 				'label'   => __( 'Working directory', 'backups-for-restic' ),
 				'value'   => $container->private_dir()->path,

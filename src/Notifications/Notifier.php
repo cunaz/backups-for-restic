@@ -29,14 +29,18 @@ defined( 'ABSPATH' ) || exit;
  *
  * Notices wait in an outbox in their own option until the mailer accepts them, so that a mail
  * server that is down for a while delays a notice instead of losing it. Each notice is tried
- * at most five times and for at most two days.
+ * at most five times, with growing pauses between the attempts, and for at most two days.
  */
 final class Notifier {
 
 	public const string OPTION = 'backups_for_restic_notifications';
 
-	/** Attempts per notice before it is dropped. */
-	private const int MAX_ATTEMPTS = 5;
+	/**
+	 * Seconds to wait after the first, second, third and fourth failed attempt: 15 minutes, one
+	 * hour, six hours and a day. With the first attempt that makes five, spread over a good day,
+	 * where the heartbeat alone would use them up within twenty minutes.
+	 */
+	private const array RETRY_AFTER = [ 900, 3600, 21600, 86400 ];
 
 	/** Seconds after which an unsent notice is dropped: two days. */
 	private const int MAX_AGE = 172800;
@@ -133,7 +137,10 @@ final class Notifier {
 	}
 
 	/**
-	 * Hands every waiting notice to the mailer; keeps those it refused for another attempt.
+	 * Hands the waiting notices that are due to the mailer. A notice it refused stays for
+	 * another attempt after the pause of RETRY_AFTER; the heartbeat and every finished job call
+	 * this, which must not use up the attempts of a notice while the mail server is down. After
+	 * the last attempt, or two days, the notice is dropped.
 	 *
 	 * @param int $now Unix time.
 	 */
@@ -145,12 +152,17 @@ final class Notifier {
 		$kept = [];
 		foreach ( $data['outbox'] as $entry ) {
 			$notice   = Notice::from_array( $entry );
-			$attempts = Decoded::int( $entry['attempts'] ?? null );
-			if ( null === $notice || $attempts >= self::MAX_ATTEMPTS || $now - $notice->at > self::MAX_AGE ) {
+			$attempts = Decoded::count( $entry['attempts'] ?? null );
+			$tried_at = Decoded::int( $entry['tried_at'] ?? null );
+			if ( null === $notice || $attempts > count( self::RETRY_AFTER ) || $now - $notice->at > self::MAX_AGE ) {
 				continue;
 			}
-			if ( ! $this->mailer->send( $notice ) ) {
-				$kept[] = [ 'attempts' => $attempts + 1 ] + $notice->to_array();
+			if ( $attempts > 0 && $now - $tried_at < self::RETRY_AFTER[ $attempts - 1 ] ) {
+				$kept[] = self::waiting( $notice, $attempts, $tried_at );
+				continue;
+			}
+			if ( ! $this->mailer->send( $notice ) && $attempts < count( self::RETRY_AFTER ) ) {
+				$kept[] = self::waiting( $notice, $attempts + 1, $now );
 			}
 		}
 		$data['outbox'] = $kept;
@@ -204,7 +216,22 @@ final class Notifier {
 	 * @return array<mixed> Entry.
 	 */
 	private function entry( Notice $notice ): array {
-		return [ 'attempts' => 0 ] + $notice->to_array();
+		return self::waiting( $notice, 0, 0 );
+	}
+
+	/**
+	 * An outbox entry.
+	 *
+	 * @param Notice $notice   Notice.
+	 * @param int    $attempts Failed attempts so far.
+	 * @param int    $tried_at Unix time of the last attempt; 0 before the first.
+	 * @return array<mixed> Entry.
+	 */
+	private static function waiting( Notice $notice, int $attempts, int $tried_at ): array {
+		return [
+			'attempts' => $attempts,
+			'tried_at' => $tried_at,
+		] + $notice->to_array();
 	}
 
 	/**

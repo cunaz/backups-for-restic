@@ -13,6 +13,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\SystemClock;
@@ -110,6 +111,51 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		$names = array_keys( $backend->list( ObjectType::Index ) );
 		$backend->delete( ObjectType::Index, (string) $names[0] );
 		self::assertSame( $repository->load_index()->to_binary(), $cache->load( $repository )->to_binary(), 'A removed index file forces a rebuild.' );
+	}
+
+	public function test_an_index_cache_whose_directory_cannot_be_created_says_so(): void {
+		$backend    = new InMemoryBackend();
+		$repository = Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$blocked    = $this->directory() . '/not-a-directory';
+		file_put_contents( $blocked, 'A file where the cache directory should be.' );
+		$cache = new IndexCache( $blocked . '/cache' );
+
+		// mkdir() warns before it returns false; the exception is what callers see.
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$cache->load( $repository );
+			self::fail( 'The cache cannot be written.' );
+		} catch ( StorageFailed $e ) {
+			self::assertSame( 'The cache directory could not be created.', $e->getMessage() );
+		} finally {
+			restore_error_handler();
+		}
+	}
+
+	public function test_an_index_larger_than_the_cache_limit_is_not_kept(): void {
+		$backend    = new CountingBackend();
+		$repository = Repository::initialize( $backend, self::PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$site       = $this->cleanup[] = TempDir::create( 'limit-site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->back_up( $repository, $site );
+		$directory = $this->directory() . '/limited';
+		$full      = $repository->load_index();
+
+		$small = new IndexCache( $directory, 64 );
+		self::assertSame( $full->to_binary(), $small->load( $repository )->to_binary(), 'The index is still complete.' );
+		self::assertFileDoesNotExist( $directory . '/index.bin' );
+
+		$roomy = new IndexCache( $directory, 1048576 );
+		$roomy->load( $repository );
+		self::assertFileExists( $directory . '/index.bin' );
+		self::assertSame( $full->to_binary(), $small->load( $repository )->to_binary() );
+		self::assertFileDoesNotExist( $directory . '/index.bin', 'A cache written under a higher limit goes when read under a lower one.' );
+
+		$roomy->load( $repository );
+		file_put_contents( $site . '/new.txt', 'new content' );
+		$this->back_up( $repository, $site );
+		self::assertSame( $repository->load_index()->to_binary(), $roomy->load( $repository )->to_binary() );
+		self::assertFileExists( $directory . '/index.bin', 'Within the limit, the cache grows with the repository.' );
 	}
 
 	private function back_up( Repository $repository, string $site ): void {

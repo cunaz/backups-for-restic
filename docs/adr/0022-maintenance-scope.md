@@ -60,3 +60,13 @@ a state every restic tool understands.
 ## Alternatives considered
 - **Full prune in PHP in 1.0**: feasible but slow and risky under tick limits; deferred.
 - **No retention at all in the plugin**: leaves every user with unbounded growth.
+
+## As built (2026-11)
+- The check has no finding for a blob id that occurs twice. Duplicates are legal in a restic
+  repository, and the index keeps the first location. What the check reports is a whole
+  pack that more than one index file lists, as the warning `pack_in_several_indexes`.
+- A pack that no index file lists is the warning `pack_unindexed`. Prune-lite does not
+  delete such packs: it takes its candidates from the index files only, so what a cancelled
+  or failed backup left behind stays until a `restic prune` from another computer. Deleting
+  these packs under the exclusive lock is planned for Milestone 3.
+- The setting for the sample is `schedule.check.read_data_subset_percent`.

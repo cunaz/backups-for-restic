@@ -79,6 +79,33 @@ final class ServerProfile {
 	}
 
 	/**
+	 * Whether two repository URLs name the same server: the same host, compared without regard
+	 * to case, and the same port. Credentials stored for one server only ever go to that server.
+	 *
+	 * @param string $url   URL.
+	 * @param string $other Other URL.
+	 * @return bool True if both have a host, and host and port are equal.
+	 */
+	public static function same_server( string $url, string $other ): bool {
+		$endpoint = self::endpoint( $url );
+		return null !== $endpoint && self::endpoint( $other ) === $endpoint;
+	}
+
+	/**
+	 * Host and port of a URL; 443 is the port of a URL that names none.
+	 *
+	 * @param string $url URL.
+	 * @return string|null Lowercase host, a colon and the port; null without a host.
+	 */
+	private static function endpoint( string $url ): ?string {
+		$parts = parse_url( str_starts_with( $url, 'rest:' ) ? substr( $url, 5 ) : $url );
+		if ( ! is_array( $parts ) || '' === ( $parts['host'] ?? '' ) ) {
+			return null;
+		}
+		return strtolower( $parts['host'] ) . ':' . ( $parts['port'] ?? 443 );
+	}
+
+	/**
 	 * Host of a URL, for messages and logs.
 	 *
 	 * @param string $url URL.

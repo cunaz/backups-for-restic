@@ -28,6 +28,12 @@ loopback requests. The native engine needs many short slices of work (ticks) per
 - A recurring heartbeat (5 minutes) creates due jobs, detects expired leases, refreshes
   repository locks and sends stale notifications.
 - WP-CLI (`tick`, `backup --wait`) is supported where available but never required.
+- **Gentle CPU mode** (`advanced.cpu_throttle = gentle`, for hosts that limit CPU time per
+  request or per minute): each tick gets half the budget, and the engine rests a tenth of a
+  second after every quarter second of work, between units of work and inside the long
+  ones (the chunks of a large file, the pieces of a large pack). Rests lower the average
+  load; they cap no single stretch of work, so a host's per-request limits still apply.
+  Jobs take longer and resume as above.
 
 ## Consequences
 - Works everywhere WordPress works; fastest with chaining or a cron ping.
@@ -39,3 +45,20 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   `wp-cron.php`.
 - **Requiring system cron and WP-CLI**: excludes the target audience.
 - **Action Scheduler**: see ADR 0002.
+
+## As built (2026-11)
+- Chaining does not call `spawn_cron()`. `WordPress\Cron::chain()` schedules
+  `backups_for_restic_tick` for now, writes WordPress' `doing_cron` lock itself and sends a
+  non-blocking request to `wp-cron.php`. Unlike `spawn_cron()`, that also works from inside
+  a `wp-cron.php` request and more than once a minute; the running cron request sees the new
+  lock holder and stops after its current event.
+- Disabling chaining (`advanced.loopback_chaining: off`) turns `Cron::chain()` off in every
+  place: after a tick, and after a job was created through REST or WP-CLI. No tick event is
+  scheduled then and `wp-cron.php` is not requested. A job advances with one tick per
+  heartbeat, every five minutes, and with the ticks of an open admin page; an external cron
+  ping makes the heartbeat fire on time but starts no tick of its own.
+- The heartbeat runs the append-only probe when it is due, starts the jobs that are due,
+  runs one tick when a job is active and hands waiting notices to the mailer. It refreshes
+  no repository lock.
+- The wizard says that the first backup uploads everything once. It names no expected
+  duration; estimates are planned for Milestone 3.

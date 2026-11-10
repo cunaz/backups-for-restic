@@ -11,7 +11,6 @@ namespace BackupsForRestic\Jobs\Backup;
 
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Engine\Backup\BackupRun;
-use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
@@ -144,7 +143,7 @@ final class BackupSteps implements StepProvider {
 	public function back_up( Job $job, EventLog $log, float $deadline ): bool {
 		$services   = $this->services;
 		$repository = $this->repository();
-		$index      = ( new IndexCache( $services->private_dir->subdirectory( 'cache' ) . '/' . $repository->config()->id ) )->load( $repository );
+		$index      = $services->index_cache( $repository )->load( $repository );
 		$plan       = ( $services->plan )( $job );
 		$work       = $services->work_dir( $job );
 
@@ -163,7 +162,7 @@ final class BackupSteps implements StepProvider {
 			);
 		}
 
-		$done          = $run->advance( $deadline );
+		$done          = $run->advance( $deadline, $services->throttle() );
 		$job->progress = $run->progress();
 		foreach ( array_slice( $run->warnings(), count( $job->warnings ) ) as $warning ) {
 			$job->warn( $warning );
@@ -232,6 +231,9 @@ final class BackupSteps implements StepProvider {
 		Files::remove_tree( $services->unlock_dir( $job ) );
 		Files::remove_tree( $services->work_dir( $job ) );
 		$services->jobs->prune( $services->settings->int( 'advanced.keep_jobs' ) );
+		// The repository in use is the one whose key is cached. Without a cached key nothing is
+		// removed: better an old cache too many than the current one deleted after every job.
+		$services->cache()->remove_others( $services->access->cached_repository_id() );
 		return true;
 	}
 

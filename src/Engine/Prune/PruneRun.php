@@ -30,6 +30,7 @@ use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\Decoded;
+use BackupsForRestic\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -396,11 +397,12 @@ final class PruneRun {
 	 * Works until the prune is finished or the deadline has passed. Each call does at least one
 	 * unit of work, so a slow host still makes progress.
 	 *
-	 * @param float $deadline Unix time (microtime(true)) at which to stop.
+	 * @param float         $deadline Unix time (microtime(true)) at which to stop.
+	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when finished and the lock is released.
 	 * @throws FormatException If a snapshot uses a blob that is missing from the index.
 	 */
-	public function advance( float $deadline ): bool {
+	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( 'done' === $this->phase ) {
 			return true;
 		}
@@ -414,6 +416,7 @@ final class PruneRun {
 				// the packs it had planned would stay for good.
 				$this->persist();
 			}
+			$throttle?->pause();
 			// A long call, such as one without a deadline, must not outlive its lock.
 			if ( 'done' !== $this->phase && $this->locking->due( $this->locked_at ) ) {
 				$this->keep_lock();

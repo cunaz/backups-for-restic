@@ -42,6 +42,7 @@ use BackupsForRestic\Secrets\SecretStore;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\CacheDirectory;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
@@ -211,13 +212,15 @@ final class Container {
 	}
 
 	/**
-	 * Removes every known secret from logs and job files.
+	 * Removes every known secret from logs and job files: the passwords, and the REST user name
+	 * and password together as the Authorization header of repository requests carries them.
 	 *
 	 * @return Redactor Redactor.
 	 */
 	public function redactor(): Redactor {
 		if ( null === $this->redactor ) {
 			$this->redactor = new Redactor();
+			$username       = $this->settings()->string( 'repository.rest_username' );
 			foreach ( [ SecretName::RepositoryPassword, SecretName::RestPassword ] as $name ) {
 				try {
 					$secret = $this->secrets()->get( $name );
@@ -226,6 +229,9 @@ final class Container {
 				}
 				if ( null !== $secret ) {
 					$this->redactor->add( $secret );
+				}
+				if ( null !== $secret && SecretName::RestPassword === $name && '' !== $username ) {
+					$this->redactor->add_credentials( $username, $secret );
 				}
 			}
 		}
@@ -240,6 +246,15 @@ final class Container {
 	public function jobs(): JobStore {
 		$this->private_dir()->ensure();
 		return new JobStore( $this->private_dir()->subdirectory( 'jobs' ), $this->redactor(), $this->random() );
+	}
+
+	/**
+	 * The cache directory.
+	 *
+	 * @return CacheDirectory Cache.
+	 */
+	public function cache(): CacheDirectory {
+		return new CacheDirectory( $this->private_dir()->subdirectory( 'cache' ) );
 	}
 
 	/**
@@ -408,20 +423,17 @@ final class Container {
 	 * @return RetentionGuard Guard.
 	 */
 	public function retention_guard(): RetentionGuard {
-		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock() );
+		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock(), RetentionGuard::repository( $this->settings() ) );
 	}
 
 	/**
-	 * Whether the server is append-only: the latest conclusive probe, else the wizard's answer.
+	 * Whether the server is append-only: the latest conclusive probe of this repository, else
+	 * the wizard's answer.
 	 *
 	 * @return string yes, no or unknown.
 	 */
 	public function append_only(): string {
-		return match ( $this->state()->get( 'append_only' )['status'] ?? null ) {
-			'append_only'       => 'yes',
-			'deletions_allowed' => 'no',
-			default             => $this->settings()->string( 'repository.append_only' ),
-		};
+		return $this->retention_guard()->append_only( $this->settings()->string( 'repository.append_only' ) );
 	}
 
 	/**
@@ -443,14 +455,18 @@ final class Container {
 	}
 
 	/**
-	 * Seconds one tick may spend: the setting, capped ten seconds below max_execution_time.
+	 * Seconds one tick may spend: the setting, capped ten seconds below max_execution_time,
+	 * and halved in the gentle CPU mode.
 	 *
 	 * @param float|null $requested Shorter budget, for example for admin polling.
 	 * @return float Seconds.
 	 */
 	public function tick_budget( ?float $requested = null ): float {
 		$budget = (float) $this->settings()->int( 'advanced.tick_budget_seconds' );
-		$limit  = (int) ini_get( 'max_execution_time' );
+		if ( 'gentle' === $this->settings()->string( 'advanced.cpu_throttle' ) ) {
+			$budget /= 2;
+		}
+		$limit = (int) ini_get( 'max_execution_time' );
 		if ( $limit > 0 ) {
 			$budget = min( $budget, max( 5.0, $limit - 10.0 ) );
 		}

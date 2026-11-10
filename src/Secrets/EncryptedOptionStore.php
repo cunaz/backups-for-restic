@@ -70,15 +70,22 @@ final class EncryptedOptionStore implements SecretStore {
 	}
 
 	/**
-	 * Encrypts and stores a secret.
+	 * Encrypts and stores a secret, then reads it back: a secret that the options table did not
+	 * keep, or that comes back changed, must not pass for saved
+	 * (docs/03-security-and-threat-model.md §13).
 	 *
 	 * @param SecretName $name   Secret.
 	 * @param Secret     $secret Value.
+	 * @throws SecretsUndecryptable If the secret that is stored afterwards is not the one given.
 	 */
 	public function set( SecretName $name, Secret $secret ): void {
 		$stored                            = $this->stored();
 		$stored['secrets'][ $name->value ] = $this->seal( $secret, $stored['salt'] );
 		$this->options->set( self::OPTION, $stored, false );
+		$saved = $this->get( $name );
+		if ( null === $saved || ! $saved->equals( $secret ) ) {
+			SecretsUndecryptable::raise( 'A secret could not be read back after it was saved.', [ 'secret' => $name->value ] );
+		}
 	}
 
 	/**

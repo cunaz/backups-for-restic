@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Secrets;
 
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\SecretsUndecryptable;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -60,6 +61,7 @@ final class ConstantOverrideStore implements SecretStore {
 	 * @param SecretName $name   Secret.
 	 * @param Secret     $secret Value.
 	 * @throws InvalidArgument If a constant defines the secret.
+	 * @throws SecretsUndecryptable If the secret cannot be read back after it was stored.
 	 */
 	public function set( SecretName $name, Secret $secret ): void {
 		if ( $this->is_overridden( $name ) ) {

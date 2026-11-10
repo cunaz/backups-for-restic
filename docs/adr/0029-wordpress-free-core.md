@@ -32,3 +32,12 @@ WordPress-free core" but left the boundary to discipline.
 - **Brain Monkey or similar function mocking**: tests the adapters' calls, not their effect,
   and adds a dependency.
 - **Booting WordPress in every test**: slow, needs a database, and blurs which layer failed.
+
+## As built (2026-11)
+- A fifth port came with the notifications of Milestone 2: `Notifications\Mailer`, with the
+  adapter `WordPress\WpMailer`.
+- The integration suite covers part of the adapters. It requests 11 of the 16 REST route
+  paths and drives jobs through `wp-cron.php`; Site Health, WP-CLI, the multisite guard,
+  deactivation and uninstall have no test
+  ([development guide](../04-development-and-quality.md) §5.3). Tests of this wiring are
+  planned for Milestone 3.

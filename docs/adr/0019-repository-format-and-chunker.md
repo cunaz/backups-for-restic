@@ -44,3 +44,16 @@ algorithm deduplicates against snapshots written by restic.
 - **Implementing zstd in PHP**: out of scope by an order of magnitude.
 - **A simpler chunker (fixed-size or Gear)**: faster, but loses deduplication parity with
   restic and complicates the fallback story; kept only as the measured fallback above.
+
+## As built (2026-11)
+- The wizard does not refuse a format 2 repository on a server without `ext-zstd`.
+  `Connection\Setup::connect()` stores the password and the unlock runs; the first job that
+  reads a compressed file, in practice the first backup when it loads the index, fails with
+  `repository_unsupported_version`. A check in the wizard is not planned yet.
+- The Doctor does not read the repository's version. Its `zstd` check uses the setting
+  `repository.format_version`, which only `Setup::create()` writes. After connecting to an
+  existing repository the setting stays 1, so the check does not turn critical for a
+  format 2 repository, and the recovery kit and the site manifest name format 1. Writing
+  the setting on connect is not planned yet.
+- The fallback chunking rule was never written, and no switch for it exists. The gate that
+  would have called for it was met with 24 MB/s.

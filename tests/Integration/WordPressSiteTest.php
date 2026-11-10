@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Integration;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\RestServer;
 use BackupsForRestic\Tests\Support\ResticCli;
@@ -23,6 +24,9 @@ use BackupsForRestic\Tests\Support\Vectors;
 final class WordPressSiteTest extends TestCase {
 
 	private const string URL = 'http://127.0.0.1:8890';
+
+	/** The administrator's WordPress password, as bin/test-site.sh install sets it. */
+	private const string ADMIN_PASSWORD = 'admin-password-test-only';
 
 	private static ?RestServer $server = null;
 
@@ -178,13 +182,29 @@ final class WordPressSiteTest extends TestCase {
 		self::assertFalse( $test['report']['exists'] );
 		[ $status ] = self::api( 'POST', '/repository/save', $connection );
 		self::assertSame( 200, $status );
-		[ $status, $created, $raw ] = self::api( 'POST', '/repository/create' );
+		// The WordPress password only matters when this runs again on a site that is set up already.
+		[ $status, $created, $raw ] = self::api( 'POST', '/repository/create', [ 'user_password' => self::ADMIN_PASSWORD ] );
 		self::assertSame( 201, $status, $raw );
 		self::assertMatchesRegularExpression( "/RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/", $created['recovery_kit'] );
+		self::assertStringContainsString( '--cacert ca.pem', $created['recovery_kit'], 'restic needs the self-signed CA too.' );
+		self::assertStringContainsString( '-----BEGIN CERTIFICATE-----', $created['recovery_kit'] );
 		preg_match( "/RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/", $created['recovery_kit'], $match );
 		self::$repository_password = $match[1];
-		[ $status ]                = self::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );
+		[ , $dashboard ]           = self::api( 'GET', '/status' );
+		if ( false === ( $dashboard['setup_completed'] ?? null ) ) {
+			// No backup before the recovery kit is acknowledged. A site this ran on before is set up already.
+			[ $status, $refused, $raw ] = self::api( 'POST', '/jobs' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_setup_incomplete', $refused['code'] ?? null, $raw );
+		}
+		[ $status ] = self::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );
 		self::assertSame( 200, $status );
+		// The wizard showed the recovery kit once; from now on it needs the WordPress password.
+		foreach ( [ '/repository/create', '/repository/connect' ] as $route ) {
+			[ $status, $refused, $raw ] = self::api( 'POST', $route, [ 'password' => self::$repository_password ] );
+			self::assertSame( 403, $status, $raw );
+			self::assertSame( 'backups_for_restic_wrong_user_password', $refused['code'] ?? null, $raw );
+		}
 
 		// The fixture: files in uploads and a large table.
 		$uploads = self::$site . '/wp-content/uploads/fixture';
@@ -287,12 +307,7 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock remains.' );
 	}
 
-	/**
-	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
-	 */
-	public function test_maintenance_jobs_and_the_dashboard(): void {
-		self::assertNotNull( self::$server );
-		self::idle( 600 );
+	public function test_invalid_settings_are_refused_with_an_error_for_each_field(): void {
 		[ $status, $error, $raw ] = self::api(
 			'PUT',
 			'/settings',
@@ -306,11 +321,20 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 400, $status, $raw );
 		self::assertArrayHasKey( 'retention.keep.within', $error['data']['fields'] ?? [], $raw );
 		self::assertArrayHasKey( 'notifications.email.recipients', $error['data']['fields'] ?? [], $raw );
+	}
 
+	/**
+	 * @depends test_setup_and_backup_through_wp_cron_restore_with_restic
+	 */
+	public function test_maintenance_jobs_and_the_dashboard(): void {
+		self::assertNotNull( self::$server );
+		self::idle( 600 );
+		$ids = [];
 		foreach ( [ 'prune', 'check' ] as $type ) {
 			[ $status, $started, $raw ] = self::api( 'POST', '/jobs', [ 'type' => $type ] );
 			self::assertSame( 201, $status, $raw );
-			$job = self::wait_for( $started['job']['id'], 1800 );
+			$ids[ $type ] = $started['job']['id'];
+			$job          = self::wait_for( $ids[ $type ], 1800 );
 			self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
 			self::idle( 600 );
 		}
@@ -322,8 +346,36 @@ final class WordPressSiteTest extends TestCase {
 		self::assertIsInt( $dashboard['maintenance']['prune']['reclaimable_bytes'] ?? null, $raw );
 		self::assertSame( 0, $dashboard['maintenance']['check']['errors'] ?? null, $raw );
 		self::assertNull( $dashboard['check_alert'] ?? null, $raw );
-		self::assertSame( 'Check', $dashboard['recent_jobs'][0]['type_label'] ?? null, $raw );
+		// By its ID, not by its place: IDs begin with the second of creation, and two jobs of the
+		// same second sort by their random ends.
+		$recent = array_column( $dashboard['recent_jobs'] ?? [], 'type_label', 'id' );
+		self::assertSame( 'Check', $recent[ $ids['check'] ] ?? null, $raw );
 		$cli = new ResticCli( self::$server, 'site', self::$repository_password );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
+
+		// While a tick holds the runner lock, the cache is not deleted under it.
+		$lock = fopen( self::$site . '/wp-content/' . PrivateDirectory::NAME . '/runner.lock', 'c' );
+		self::assertNotFalse( $lock );
+		try {
+			self::assertTrue( flock( $lock, LOCK_EX | LOCK_NB ) );
+			[ $status, , $raw ] = self::api( 'DELETE', '/cache' );
+		} finally {
+			// Whatever happens above, no job of a later test may find the runner lock taken.
+			flock( $lock, LOCK_UN );
+			fclose( $lock );
+		}
+		self::assertSame( 409, $status, $raw );
+		// An active job answers 409 as well: wait for it here, so that the loop below only
+		// waits for a heartbeat that holds the lock for a moment.
+		self::idle( 600 );
+		for ( $attempt = 0; $attempt < 10; $attempt++ ) {
+			[ $status, $cleared, $raw ] = self::api( 'DELETE', '/cache' );
+			if ( 409 !== $status ) {
+				break;
+			}
+			sleep( 1 ); // A heartbeat may hold the lock for a moment.
+		}
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
 }

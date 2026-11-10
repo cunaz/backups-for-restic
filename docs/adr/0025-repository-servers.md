@@ -77,3 +77,12 @@ BorgBase's documented use of rest-server behind nginx.
 - **BorgBase only, or self-hosted servers only through a constant**: declined by the owner.
 - **Asking BorgBase to confirm behaviour**: declined by the owner; replaced by live tests.
 - **Plain HTTP on private networks**: credentials and metadata in clear text; rejected.
+
+## As built (2026-11)
+- No live check exists. There is no workflow `live-servers.yml`, Milestone 0 measured
+  rest-server only, and no test has used a hosted repository. Every statement about
+  BorgBase's answers is therefore "not yet measured", in this record and in the other
+  documents, and BorgBase is a preset, not a tested provider. The measurements need an
+  account at BorgBase and are planned for Milestone 3.
+- Until they exist, no test notices a change in BorgBase's behaviour. The connection test
+  of the wizard is the only check a user's repository gets.

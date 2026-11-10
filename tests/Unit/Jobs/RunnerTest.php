@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\JobConflict;
@@ -29,7 +30,7 @@ final class RunnerTest extends TestCase {
 
 	private FrozenClock $clock;
 
-	/** @var array<string, list<bool|\Throwable>> Scripted outcomes per step. */
+	/** @var array<string, list<bool|\Throwable|\Closure(Job): bool>> Scripted outcomes per step; a closure runs inside the step. */
 	private array $script = [];
 
 	/** @var list<string> */
@@ -78,8 +79,40 @@ final class RunnerTest extends TestCase {
 		if ( $outcome instanceof \Throwable ) {
 			throw $outcome;
 		}
+		if ( $outcome instanceof \Closure ) {
+			$outcome = $outcome( $job );
+		}
 		$job->progress['last'] = $step;
 		return $outcome;
+	}
+
+	/**
+	 * The job document as it is on disk, without what JobStore::get() adds.
+	 *
+	 * @return array<mixed>
+	 */
+	private function document( Job $job ): array {
+		$document = json_decode( (string) file_get_contents( $this->directory . '/jobs/' . $job->id . '/job.json' ), true );
+		self::assertIsArray( $document );
+		return $document;
+	}
+
+	/**
+	 * An observer that remembers what it heard and what the store held at that moment.
+	 */
+	private function listener( JobStore $store ): JobObserver {
+		return new class( $store ) implements JobObserver {
+			/** @var list<string> */
+			public array $heard = [];
+
+			public function __construct( private readonly JobStore $store ) {
+			}
+
+			public function state_changed( Job $job, JobState $previous ): void {
+				$saved         = $this->store->get( $job->id );
+				$this->heard[] = $previous->value . '>' . $job->state->value . '/' . $saved?->state->value;
+			}
+		};
 	}
 
 	public function test_steps_run_in_order_across_ticks_and_cleanup_runs_on_success(): void {
@@ -193,6 +226,131 @@ final class RunnerTest extends TestCase {
 		self::assertSame( [ 'releasing', 'cleaning_up' ], array_slice( $this->calls, -2 ) );
 	}
 
+	public function test_a_cancel_request_during_a_step_is_honoured_before_the_next_step(): void {
+		$store                     = $this->store();
+		$job                       = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$this->script['unlocking'] = [
+			static function ( Job $running ) use ( $store ): bool {
+				$store->request_cancel( $running );
+				return true;
+			},
+		];
+
+		$this->runner( $store )->tick( 10 );
+
+		self::assertSame( [ 'preflight', 'unlocking', 'releasing', 'cleaning_up' ], $this->calls, 'The backup itself never started.' );
+		$ended = $store->get( $job->id );
+		self::assertSame( JobState::Cancelled, $ended?->state );
+		self::assertTrue( $this->document( $ended )['cancel_requested'], 'The runner wrote the request into its own document.' );
+	}
+
+	public function test_a_cancel_request_during_a_tick_is_honoured_and_survives_the_ticks_own_save(): void {
+		$store                      = $this->store();
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$during                     = [];
+		$this->script['backing_up'] = [
+			function ( Job $running ) use ( $store, &$during ): bool {
+				// Another request, as the REST API makes it, while this tick holds the runner lock.
+				$answer = $this->runner( $store )->cancel( $running->id, [ 'user' => 7 ] );
+				$during = [ $answer?->cancel_requested, $this->document( $running ) ];
+				return false;
+			},
+			false,
+		];
+		$runner                     = $this->runner( $store );
+
+		self::assertTrue( $runner->tick( 10 )->has_more_work() );
+
+		self::assertTrue( $during[0], 'The answer shows the request.' );
+		self::assertFalse( $during[1]['cancel_requested'], 'The request did not touch the document of the running tick.' );
+		self::assertNotSame( '', $during[1]['lease_owner'] );
+		$saved = $this->document( $job );
+		self::assertSame( 'running', $saved['state'] );
+		self::assertSame( 'backing_up', $saved['step'], 'The tick saved its own result.' );
+		self::assertSame( 1, $saved['ticks'] );
+		self::assertTrue( $store->get( $job->id )?->cancel_requested, 'The request outlived the save of the tick.' );
+
+		self::assertFalse( $runner->tick( 10 )->has_more_work() );
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'releasing', 'cleaning_up' ], $this->calls, 'The backup step did not run again.' );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+		$requests = array_filter( $store->log( $job )->read(), static fn ( array $entry ): bool => 'Cancellation requested.' === $entry['message'] );
+		self::assertSame( [ [ 'user' => 7 ] ], array_column( $requests, 'context' ) );
+	}
+
+	public function test_a_queued_job_is_cancelled_at_once(): void {
+		$store    = $this->store();
+		$job      = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$observer = $this->listener( $store );
+		$this->clock->advance( 5 );
+
+		$cancelled = $this->runner( $store, $observer )->cancel( $job->id );
+
+		self::assertSame( JobState::Cancelled, $cancelled?->state );
+		self::assertSame( $this->clock->seconds, $cancelled->finished_at );
+		self::assertSame( 'cancelled', $this->document( $job )['state'] );
+		self::assertSame( [ 'queued>cancelled/cancelled' ], $observer->heard );
+		self::assertSame( [], $this->calls, 'No step ran, so nothing needs cleaning up.' );
+		self::assertSame( 'idle', $this->runner( $store )->tick( 10 )->status );
+		$store->create( JobType::Backup, 'manual', $this->clock->seconds );
+	}
+
+	public function test_a_queued_job_is_cancelled_by_the_next_tick_when_the_request_found_the_lock_taken(): void {
+		$store    = $this->store();
+		$job      = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$observer = $this->listener( $store );
+		$held     = new RunnerLock( $this->directory . '/runner.lock' );
+		self::assertTrue( $held->acquire() );
+
+		$answer = $this->runner( $store, $observer )->cancel( $job->id );
+
+		self::assertSame( JobState::Queued, $answer?->state );
+		self::assertTrue( $answer->cancel_requested );
+		self::assertSame( 'queued', $this->document( $job )['state'], 'Whoever holds the lock may be about to save the job.' );
+		self::assertSame( [], $observer->heard );
+		$held->release();
+
+		$report = $this->runner( $store, $observer )->tick( 10 );
+
+		self::assertSame( 'advanced', $report->status );
+		self::assertFalse( $report->has_more_work() );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+		self::assertSame( [ 'queued>cancelled/cancelled' ], $observer->heard );
+		self::assertSame( [], $this->calls );
+	}
+
+	public function test_a_cancel_request_between_ticks_ends_a_job_that_waits_for_a_retry(): void {
+		$store                      = $this->store();
+		$this->script['backing_up'] = [ new BackendException( 'Connection reset.' ) ];
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$runner                     = $this->runner( $store );
+		$runner->tick( 10 );
+		self::assertSame( 'waiting', $runner->tick( 10 )->status );
+
+		$answer = $runner->cancel( $job->id );
+
+		self::assertSame( JobState::Running, $answer?->state );
+		self::assertTrue( $answer->cancel_requested );
+		self::assertFalse( $this->document( $job )['cancel_requested'], 'Only a tick writes the document of a started job.' );
+		self::assertSame( 'advanced', $runner->tick( 10 )->status, 'A cancelled job does not wait for its retry.' );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+		self::assertSame( [ 'releasing', 'cleaning_up' ], array_slice( $this->calls, -2 ) );
+	}
+
+	public function test_a_cancel_request_for_a_finished_or_unknown_job_changes_nothing(): void {
+		$store = $this->store();
+		$job   = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$this->runner( $store )->tick( 10 );
+		$before = $this->document( $job );
+
+		$answer = $this->runner( $store )->cancel( $job->id );
+
+		self::assertSame( JobState::Succeeded, $answer?->state );
+		self::assertFalse( $answer->cancel_requested );
+		self::assertSame( $before, $this->document( $job ) );
+		self::assertFileDoesNotExist( $this->directory . '/jobs/' . $job->id . '/' . JobStore::CANCEL_MARKER );
+		self::assertNull( $this->runner( $store )->cancel( '20260101T000000Z-abcdef' ) );
+	}
+
 	public function test_a_failing_cleanup_step_cannot_keep_the_job_alive(): void {
 		$store                     = $this->store();
 		$this->script['releasing'] = [ new BackendException( 'Connection reset.' ) ];
@@ -245,6 +403,48 @@ final class RunnerTest extends TestCase {
 		self::assertCount( 2, $store->latest( 10 ) );
 		self::assertNull( $store->get( $first->id ) );
 		self::assertNull( $store->get( '../../etc/passwd' ) );
+	}
+
+	public function test_a_job_is_checked_for_and_created_under_an_exclusive_lock(): void {
+		$file  = $this->directory . '/jobs/' . JobStore::CREATE_LOCK;
+		$probe = new class( $file ) implements RandomSource {
+			/** @var list<bool> Whether the lock was taken each time an ID was drawn. */
+			public array $locked = [];
+
+			public function __construct( private readonly string $file ) {
+			}
+
+			public function bytes( int $length ): string {
+				$this->locked[] = ! self::free( $this->file );
+				return random_bytes( $length );
+			}
+
+			/**
+			 * Whether another open file could take the lock now.
+			 */
+			public static function free( string $file ): bool {
+				$handle = fopen( $file, 'c' );
+				if ( false === $handle ) {
+					return false;
+				}
+				$free = flock( $handle, LOCK_EX | LOCK_NB );
+				fclose( $handle );
+				return $free;
+			}
+		};
+		$store = new JobStore( $this->directory . '/jobs', new Redactor(), $probe );
+
+		$job = $store->create( JobType::Check, 'cli', $this->clock->seconds, [ 'read_data_subset_percent' => 7 ] );
+
+		self::assertSame( [ true ], $probe->locked, 'Between the check for an active job and the new job document nobody else can create one.' );
+		self::assertTrue( $probe::free( $file ), 'The lock is released afterwards.' );
+		self::assertSame( [ 'read_data_subset_percent' => 7 ], $store->get( $job->id )?->data, 'The data is written with the job, not by a second save.' );
+		try {
+			$store->create( JobType::Backup, 'manual', $this->clock->seconds );
+			self::fail( 'A second active job must be refused.' );
+		} catch ( JobConflict ) {
+			self::assertTrue( $probe::free( $file ), 'A refusal releases the lock too.' );
+		}
 	}
 
 	public function test_job_files_are_redacted_and_private(): void {

@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Exception\AuthenticationFailed;
 use BackupsForRestic\Exception\CryptoException;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
@@ -26,7 +27,9 @@ defined( 'ABSPATH' ) || exit;
  * index files and downloads only new ones instead of all of them.
  *
  * If an index file disappeared from the server (restic prune or rebuild-index ran elsewhere),
- * the cache cannot tell which entries became stale, so it is rebuilt from scratch.
+ * the cache cannot tell which entries became stale, so it is rebuilt from scratch. An index
+ * larger than the cache limit (advanced.cache_limit_mib) is not kept: every tick then reads
+ * the index files again, which is slower but never fills the disk.
  */
 final class IndexCache {
 
@@ -34,8 +37,9 @@ final class IndexCache {
 	 * Uses a cache directory.
 	 *
 	 * @param string $directory cache/<repository-id> in the private directory.
+	 * @param int    $limit     Largest cache file to keep, in bytes.
 	 */
-	public function __construct( private readonly string $directory ) {
+	public function __construct( private readonly string $directory, private readonly int $limit = PHP_INT_MAX ) {
 	}
 
 	/**
@@ -79,7 +83,13 @@ final class IndexCache {
 	 * @return array{IndexSet, list<string>}|null Index and covered index file names, or null.
 	 */
 	private function read( Repository $repository ): ?array {
-		$sealed = is_file( $this->directory . '/index.bin' ) ? file_get_contents( $this->directory . '/index.bin' ) : false;
+		$file = $this->directory . '/index.bin';
+		if ( is_file( $file ) && (int) filesize( $file ) > $this->limit ) {
+			// Written under a higher limit than the one set now.
+			$this->clear();
+			return null;
+		}
+		$sealed = is_file( $file ) ? file_get_contents( $file ) : false;
 		if ( false === $sealed ) {
 			return null;
 		}
@@ -103,15 +113,21 @@ final class IndexCache {
 	 * @param Repository   $repository Repository whose key encrypts the cache.
 	 * @param IndexSet     $index      Index.
 	 * @param list<string> $names      Index files it covers.
+	 * @throws StorageFailed If the cache directory cannot be created or the file not written.
 	 */
 	private function write( Repository $repository, IndexSet $index, array $names ): void {
-		if ( ! is_dir( $this->directory ) ) {
-			mkdir( $this->directory, 0700, true );
-		}
 		$plain = pack( 'V', count( $names ) );
 		foreach ( $names as $name ) {
 			$plain .= Id::from_hex( $name )->bytes();
 		}
-		Files::write_atomic( $this->directory . '/index.bin', $repository->cipher()->seal( $plain . $index->to_binary() ) );
+		$sealed = $repository->cipher()->seal( $plain . $index->to_binary() );
+		if ( strlen( $sealed ) > $this->limit ) {
+			$this->clear();
+			return;
+		}
+		if ( ! is_dir( $this->directory ) && ! mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) {
+			StorageFailed::raise( 'The cache directory could not be created.' );
+		}
+		Files::write_atomic( $this->directory . '/index.bin', $sealed );
 	}
 }

@@ -18,7 +18,7 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   touches the filesystem and answers 403; otherwise it ignores the missing file and answers
   200 (verified in the rest-server source). Mapping: 200, 204 or 404 → deletions allowed;
   403 or 405 → append-only; 401 → credentials invalid; anything else → unknown, and the
-  wizard asks. BorgBase's answers are verified by the live smoke tests (ADR 0025).
+  wizard asks. BorgBase's answers are not yet measured (ADR 0025).
 - **When**: in the wizard, daily by the heartbeat, and at the start of every forget or
   prune job. A 403 during forget or prune counts as a detection. After an inconclusive
   answer (a timeout, a 5xx, an unexpected status), the heartbeat probes again hourly
@@ -40,7 +40,7 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   notifies the administrator. Detecting that deletions became possible only *proposes* the
   switch back to `plugin`; nothing is deleted until an administrator confirms.
 - **Recommendation** shown by the wizard when deletions are allowed: *"Recommended: turn on
-  append-only on your server (BorgBase: repository settings; rest-server: `--append-only`).
+  append-only on your server (rest-server: `--append-only`; BorgBase: repository settings).
   Then nobody who takes over this website can delete your backups. Old snapshots must then
   be cleaned up from another computer."*
 
@@ -79,3 +79,24 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   hurdle for shared-hosting users.
 - **Probing by uploading and deleting a test object**: leaves garbage in append-only
   repositories that restic cannot decrypt; rejected.
+
+## As built (2026-11)
+- The wizard does not ask after an inconclusive probe. Its connection test then says nothing
+  about append-only, the wizard saves `repository.append_only: unknown`, and retention stays
+  in mode `plugin`. The heartbeat probes at its first run after the setup and hourly until
+  it has an answer, and every forget and prune job probes for itself.
+- After an inconclusive probe the dashboard does not fall back to "unknown". It shows the
+  latest probe of the current repository that had an answer, and until there is one, what
+  the wizard's connection test found. Each result is stored with a fingerprint of the
+  repository's address and REST user name (`RetentionGuard::repository()`). A result for
+  another repository is ignored, and the heartbeat then probes at its next run instead of
+  waiting a day.
+- The dashboard shows neither the size of the repository nor its growth. In mode `external`
+  it says that old snapshots are removed from another computer; size and growth are planned
+  for Milestone 3.
+- "Notifies the administrator" is a notice on the dashboard and, when
+  `notifications.email.on_failure` is on, one e-mail.
+- Tests: the conformance suite runs the probe, a refused forget, and whole forget and prune
+  jobs against `rest-server --append-only`. The integration suite with WordPress uses a
+  server that allows deletions, and no test runs against BorgBase (ADR 0025). Tests of the
+  WordPress layer against an append-only server are planned for Milestone 3.

@@ -231,6 +231,26 @@ final class CheckTest extends TestCase {
 		self::assertSame( CheckRun::MAX_FINDINGS + 10, $result['warnings'] );
 	}
 
+	public function test_errors_are_kept_when_earlier_warnings_filled_the_list(): void {
+		for ( $i = 0; $i < CheckRun::MAX_FINDINGS + 10; $i++ ) {
+			$this->backend->save( ObjectType::Data, Id::of( 'stray ' . $i )->hex(), 'stray ' . $i );
+		}
+		$snapshots = array_keys( $this->backend->list( ObjectType::Snapshots ) );
+		sort( $snapshots );
+		foreach ( $snapshots as $snapshot ) {
+			$this->backend->objects['snapshots'][ $snapshot ] = 'not an encrypted snapshot';
+		}
+
+		$result = $this->check( 0 );
+
+		self::assertSame( CheckRun::MAX_FINDINGS + 10, $result['warnings'], 'The packs are compared before the snapshots are read.' );
+		self::assertSame( count( $snapshots ), $result['errors'] );
+		self::assertCount( CheckRun::MAX_FINDINGS, $result['findings'] );
+		$errors = array_values( array_filter( $result['findings'], static fn ( array $finding ): bool => 'error' === $finding['severity'] ) );
+		self::assertSame( $snapshots, array_column( $errors, 'object' ), 'Every error kept its details, in the order found.' );
+		self::assertSame( 'warning', $result['findings'][0]['severity'], 'The oldest warnings stay; the newest made room.' );
+	}
+
 	public function test_a_damaged_index_file_is_a_finding_and_the_check_goes_on(): void {
 		$name                                     = array_key_first( $this->backend->list( ObjectType::Index ) );
 		$this->backend->objects['index'][ $name ] = 'not an encrypted index file';

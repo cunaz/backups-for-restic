@@ -107,6 +107,23 @@ final class RepositoryAccess {
 	}
 
 	/**
+	 * ID of the repository whose master key is cached, read without a request to the server.
+	 * This is the repository the jobs work with; the setting `repository.id` is written when
+	 * the plugin creates a repository and does not follow a connection to an existing one.
+	 *
+	 * @return string Repository ID, or '' without a cached key.
+	 */
+	public function cached_repository_id(): string {
+		try {
+			$cached = $this->secrets->get( SecretName::MasterKey );
+		} catch ( SecretsUndecryptable ) {
+			return '';
+		}
+		$fields = null === $cached ? null : json_decode( $cached->reveal(), true );
+		return is_array( $fields ) && is_string( $fields['repository'] ?? null ) ? $fields['repository'] : '';
+	}
+
+	/**
 	 * Caches the master key.
 	 *
 	 * @param Config    $config Configuration of the repository the key opened.

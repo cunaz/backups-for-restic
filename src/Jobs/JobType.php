@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Jobs;
 
+use BackupsForRestic\Settings\Settings;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -64,6 +66,32 @@ enum JobType: string {
 	 */
 	public function is_maintenance(): bool {
 		return in_array( $this, [ self::Forget, self::Prune, self::Check ], true );
+	}
+
+	/**
+	 * Why an administrator, or the command line, may not start a job of this type now.
+	 *
+	 * Backups and maintenance wait until the setup is completed, that is, until the recovery
+	 * kit is acknowledged (docs/03-security-and-threat-model.md §13): a backup that nobody can
+	 * restore once the site is lost protects nothing. Unlocking is a step of the setup itself.
+	 *
+	 * @param Settings $settings Settings.
+	 * @return string|null Error code setup_incomplete, configuration or retention_external; null if the job may start.
+	 */
+	public function refusal( Settings $settings ): ?string {
+		if ( self::Unlock === $this ) {
+			return null;
+		}
+		if ( ! $settings->bool( 'setup.completed' ) ) {
+			return 'setup_incomplete';
+		}
+		if ( '' === $settings->string( 'repository.url' ) ) {
+			return 'configuration';
+		}
+		if ( in_array( $this, [ self::Forget, self::Prune ], true ) && 'external' === $settings->string( 'retention.mode' ) ) {
+			return 'retention_external';
+		}
+		return null;
 	}
 
 	/**

@@ -32,6 +32,7 @@ use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Decoded;
+use BackupsForRestic\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -60,7 +61,7 @@ final class CheckRun {
 	/** The phases in their order. */
 	private const array PHASES = [ 'index', 'packs', 'snapshots', 'trees', 'read', 'done' ];
 
-	/** At most this many findings are kept with details; all are counted. */
+	/** At most this many findings are kept with details, errors rather than warnings; all are counted. */
 	public const int MAX_FINDINGS = 50;
 
 	/** Bytes of a pack header entry without and with an uncompressed length. */
@@ -93,6 +94,13 @@ final class CheckRun {
 	 * @var Locking
 	 */
 	private Locking $locking;
+
+	/**
+	 * Pauses for the gentle CPU mode during the current call, if any.
+	 *
+	 * @var Throttle|null
+	 */
+	private ?Throttle $throttle = null;
 
 	/**
 	 * Checkpoint fields; see persist() for the shape.
@@ -244,13 +252,15 @@ final class CheckRun {
 	 * Works until the check is finished or the deadline has passed. Each call does at least one
 	 * unit of work, so a slow host still makes progress.
 	 *
-	 * @param float $deadline Unix time (microtime(true)) at which to stop.
+	 * @param float         $deadline Unix time (microtime(true)) at which to stop.
+	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when finished and the lock is released.
 	 */
-	public function advance( float $deadline ): bool {
+	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( 'done' === $this->state['phase'] ) {
 			return true;
 		}
+		$this->throttle = $throttle;
 		$this->keep_lock();
 		do {
 			$phase = $this->state['phase'];
@@ -260,6 +270,7 @@ final class CheckRun {
 				// Only finished units are recorded: a unit that fails ends the call before this.
 				$this->persist();
 			}
+			$throttle?->pause();
 			// A long call, such as one without a deadline, must not outlive its lock.
 			if ( 'done' !== $this->state['phase'] && $this->locking->due( $this->state['locked_at'] ) ) {
 				$this->keep_lock();
@@ -600,6 +611,7 @@ final class CheckRun {
 				}
 				$offset = $end;
 				$next   = $last;
+				$this->throttle?->pause(); // A large pack is a long unit of work.
 			}
 		} catch ( NotFound ) {
 			$this->pack_missing( $pack );
@@ -722,7 +734,9 @@ final class CheckRun {
 	}
 
 	/**
-	 * Records a finding; details only for the first MAX_FINDINGS, counts for all.
+	 * Records a finding; details only for the first MAX_FINDINGS, counts for all. When the list
+	 * is full, an error takes the place of the newest warning: warnings of an early phase, such
+	 * as many packs that no index lists, must not hide the damage a later phase finds.
 	 *
 	 * @param string $severity error or warning.
 	 * @param string $code     Machine-readable kind.
@@ -732,14 +746,26 @@ final class CheckRun {
 	private function find( string $severity, string $code, string $subject, string $message ): void {
 		$key                           = $severity . ':' . $code;
 		$this->state['counts'][ $key ] = ( $this->state['counts'][ $key ] ?? 0 ) + 1;
-		if ( count( $this->state['findings'] ) < self::MAX_FINDINGS ) {
-			$this->state['findings'][] = [
-				'severity' => $severity,
-				'code'     => $code,
-				'object'   => $subject,
-				'message'  => $message,
-			];
+		$findings                      = $this->state['findings'];
+		if ( count( $findings ) >= self::MAX_FINDINGS ) {
+			$newest_warning = null;
+			foreach ( $findings as $position => $finding ) {
+				if ( 'error' !== $finding['severity'] ) {
+					$newest_warning = $position;
+				}
+			}
+			if ( 'error' !== $severity || null === $newest_warning ) {
+				return;
+			}
+			unset( $findings[ $newest_warning ] );
 		}
+		$findings[]              = [
+			'severity' => $severity,
+			'code'     => $code,
+			'object'   => $subject,
+			'message'  => $message,
+		];
+		$this->state['findings'] = array_values( $findings );
 	}
 
 	/**
