@@ -19,6 +19,7 @@ use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
+use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobType;
@@ -66,27 +67,7 @@ final class BackupSteps implements StepProvider {
 			'cleaning_up' => $this->clean_up( ... ),
 			default       => InvalidArgument::raise( 'Unknown step.', [ 'step' => $name ] ),
 		};
-		return new class( $method ) implements Step {
-			/**
-			 * Wraps a method.
-			 *
-			 * @param \Closure(Job, EventLog, float): bool $method Step.
-			 */
-			public function __construct( private readonly \Closure $method ) {
-			}
-
-			/**
-			 * Runs the method.
-			 *
-			 * @param Job      $job      Job.
-			 * @param EventLog $log      Log.
-			 * @param float    $deadline Unix time.
-			 * @return bool True when done.
-			 */
-			public function advance( Job $job, EventLog $log, float $deadline ): bool {
-				return ( $this->method )( $job, $log, $deadline );
-			}
-		};
+		return new ClosureStep( $method );
 	}
 
 	/**

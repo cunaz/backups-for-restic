@@ -60,4 +60,48 @@ final class SchedulePolicyTest extends TestCase {
 		self::assertSame( null === $last ? null : self::at( $last ), SchedulePolicy::last_backup_slot( $values, $zone, self::at( $now ) ) );
 		self::assertSame( null === $next ? null : self::at( $next ), SchedulePolicy::next_backup_slot( $values, $zone, self::at( $now ) ) );
 	}
+
+	/**
+	 * November 2026 begins on a Sunday; the 9th is a Monday.
+	 *
+	 * @return iterable<string, array{string, array<string, mixed>, string, ?string}>
+	 */
+	public static function maintenance_slots(): iterable {
+		$prune = [
+			'schedule.prune.frequency' => 'weekly',
+			'schedule.prune.weekday'   => 0,
+			'schedule.prune.hour'      => 4,
+		];
+		yield 'prune weekly on Sunday, on Monday' => [ 'prune', $prune, '2026-11-09 12:00', '2026-11-08 04:00' ];
+		yield 'prune weekly on Monday, early on Monday' => [ 'prune', [ 'schedule.prune.weekday' => 1 ] + $prune, '2026-11-09 03:00', '2026-11-02 04:00' ];
+		yield 'prune monthly on the first Sunday' => [ 'prune', [ 'schedule.prune.frequency' => 'monthly' ] + $prune, '2026-11-09 12:00', '2026-11-01 04:00' ];
+		yield 'prune monthly on the first Tuesday, before it' => [
+			'prune',
+			[
+				'schedule.prune.frequency' => 'monthly',
+				'schedule.prune.weekday'   => 2,
+			] + $prune,
+			'2026-11-02 12:00',
+			'2026-10-06 04:00',
+		];
+		yield 'prune on demand' => [ 'prune', [ 'schedule.prune.frequency' => 'manual' ], '2026-11-09 12:00', null ];
+		$check = [
+			'schedule.check.frequency' => 'monthly',
+			'schedule.check.day'       => 1,
+			'schedule.check.hour'      => 5,
+		];
+		yield 'check monthly on the 1st' => [ 'check', $check, '2026-11-09 12:00', '2026-11-01 05:00' ];
+		yield 'check monthly on the 1st, before the hour' => [ 'check', $check, '2026-11-01 04:00', '2026-10-01 05:00' ];
+		yield 'check monthly on the 28th' => [ 'check', [ 'schedule.check.day' => 28 ] + $check, '2026-11-09 12:00', '2026-10-28 05:00' ];
+		yield 'check weekly on the prune weekday' => [ 'check', [ 'schedule.check.frequency' => 'weekly' ] + $check + $prune, '2026-11-09 12:00', '2026-11-08 05:00' ];
+	}
+
+	/**
+	 * @param array<string, mixed> $settings
+	 */
+	#[DataProvider( 'maintenance_slots' )]
+	public function test_maintenance_slots( string $task, array $settings, string $now, ?string $last ): void {
+		$values = Settings::from_stored( $settings );
+		self::assertSame( null === $last ? null : self::at( $last ), SchedulePolicy::last_maintenance_slot( $values, new \DateTimeZone( 'Europe/Berlin' ), self::at( $now ), $task ) );
+	}
 }

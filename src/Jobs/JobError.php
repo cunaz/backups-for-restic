@@ -38,6 +38,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final readonly class JobError {
 
+	/** Context codes that replace the code derived from the exception class. */
+	private const array CONTEXT_CODES = [ 'no_snapshots', 'retention_external' ];
+
 	/**
 	 * Creates the error.
 	 *
@@ -78,6 +81,11 @@ final readonly class JobError {
 			$error instanceof PluginException       => 'internal',
 			default                                 => 'internal',
 		};
+		// A few refusals carry a more precise code in their context.
+		$context = $error instanceof PluginException ? $error->context()['code'] ?? null : null;
+		if ( in_array( $context, self::CONTEXT_CODES, true ) ) {
+			$code = $context;
+		}
 		$retryable = in_array( $code, [ 'repository_unreachable', 'repository_locked' ], true );
 		$message   = $error instanceof PluginException ? $error->getMessage() : 'Unexpected ' . $error::class . ' at ' . basename( $error->getFile() ) . ':' . $error->getLine();
 		return new self( $code, $message, $retryable );

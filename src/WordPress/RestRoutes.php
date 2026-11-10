@@ -141,16 +141,25 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Starts a backup.
+	 * Starts a backup, or with type forget, prune or check a maintenance job.
 	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
-	public function create_job(): \WP_REST_Response|\WP_Error {
-		if ( '' === $this->container->settings()->string( 'repository.url' ) ) {
+	public function create_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$settings = $this->container->settings();
+		if ( '' === $settings->string( 'repository.url' ) ) {
 			return $this->error( 'configuration', 409 );
 		}
+		$type = JobType::tryFrom( '' === self::text( $request, 'type' ) ? 'backup' : self::text( $request, 'type' ) );
+		if ( null === $type || JobType::Unlock === $type ) {
+			return $this->error( 'invalid_job_type', 400 );
+		}
+		if ( in_array( $type, [ JobType::Forget, JobType::Prune ], true ) && 'external' === $settings->string( 'retention.mode' ) ) {
+			return $this->error( 'retention_external', 409 );
+		}
 		try {
-			$job = $this->container->jobs()->create( JobType::Backup, 'manual', time() );
+			$job = $this->container->jobs()->create( $type, 'manual', time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		}
@@ -623,6 +632,10 @@ final class RestRoutes {
 			],
 			'wrong_user_password'           => [
 				'message' => __( 'Your WordPress password was not correct.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'invalid_job_type'              => [
+				'message' => __( 'Jobs can be of type backup, forget, prune or check.', 'backups-for-restic' ),
 				'hint'    => '',
 			],
 			default                         => Messages::job_error( $code ),

@@ -125,9 +125,13 @@ Acceptance
 
 ## Milestone 2 — Operations (0.2.0, public beta)
 
-**Status (2026-11-09): in progress. Done in the engine: prune without repacking and the
-repository check ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic
-0.19.1. Open: the space held by partly used packs for the dashboard, and everything below.**
+**Status (2026-11-09): in progress. Done: prune without repacking and the repository check
+in the engine ([ADR 0022](adr/0022-maintenance-scope.md)), both verified against restic
+0.19.1; forget, prune and check as jobs with their schedules, the retention modes with
+append-only re-detection before every forget and prune ([ADR 0010](adr/0010-retention-and-append-only.md)),
+REST and WP-CLI parity. Open: the heartbeat's daily probe, notifications, the dashboard for
+maintenance and alerts, the space held by partly used packs, `cpu_throttle`, cache
+management, `readme.txt` and the user guides.**
 
 Scope
 - Schedules, retention (forget parity), prune-lite, check with sampled data, retention modes

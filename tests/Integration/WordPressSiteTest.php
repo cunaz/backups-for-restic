@@ -81,7 +81,11 @@ final class WordPressSiteTest extends TestCase {
 			$options[ CURLOPT_POSTFIELDS ] = (string) json_encode( $data );
 		}
 		curl_setopt_array( $handle, $options );
-		$body    = (string) curl_exec( $handle );
+		$body = curl_exec( $handle );
+		if ( ! is_string( $body ) ) {
+			// No HTTP response at all: report why, so a failing assertion shows the cause.
+			return [ 0, [], $method . ' ' . $route . ': ' . curl_error( $handle ) ];
+		}
 		$decoded = json_decode( $body, true );
 		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), is_array( $decoded ) ? $decoded : [], $body ];
 	}
@@ -125,6 +129,25 @@ final class WordPressSiteTest extends TestCase {
 			sleep( 1 );
 		} while ( time() < $deadline );
 		self::fail( 'The job did not finish in time.' );
+	}
+
+	/**
+	 * Drives cron until no job is queued or running. After a backup the heartbeat may start a
+	 * forget job, which holds an exclusive lock; restic and new jobs wait for it.
+	 */
+	private static function idle( int $timeout ): void {
+		$deadline = time() + $timeout;
+		do {
+			self::cron();
+			[ $status, $list, $raw ] = self::api( 'GET', '/jobs' );
+			self::assertSame( 200, $status, $raw );
+			$active = array_filter( $list['jobs'] ?? [], static fn ( mixed $job ): bool => is_array( $job ) && in_array( $job['state'] ?? '', [ 'queued', 'running' ], true ) );
+			if ( [] === $active ) {
+				return;
+			}
+			sleep( 1 );
+		} while ( time() < $deadline );
+		self::fail( 'Jobs were still active.' );
 	}
 
 	private static function site_database(): MysqliConnection {
@@ -182,10 +205,12 @@ final class WordPressSiteTest extends TestCase {
 			$db->execute( 'INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES ' . implode( ',', $values ) );
 		}
 
-		[ $status, $started ] = self::api( 'POST', '/jobs' );
-		self::assertSame( 201, $status );
+		self::idle( 600 );
+		[ $status, $started, $raw ] = self::api( 'POST', '/jobs' );
+		self::assertSame( 201, $status, $raw );
 		$job = self::wait_for( $started['job']['id'], 3600 );
 		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
+		self::idle( 600 );
 
 		$cli = new ResticCli( $server, 'site', self::$repository_password );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
@@ -236,8 +261,10 @@ final class WordPressSiteTest extends TestCase {
 	public function test_a_killed_tick_leaves_a_resumable_job(): void {
 		self::assertNotNull( self::$server );
 		file_put_contents( self::$site . '/wp-content/uploads/fixture/changed.bin', Vectors::hash_stream( 'changed', 64 * 1048576 ) );
-		[ , $started ] = self::api( 'POST', '/jobs' );
-		$id            = $started['job']['id'];
+		self::idle( 600 );
+		[ $status, $started, $raw ] = self::api( 'POST', '/jobs' );
+		self::assertSame( 201, $status, $raw );
+		$id = $started['job']['id'];
 
 		$handle = curl_init( self::URL . '/wp-cron.php?doing_wp_cron' );
 		curl_setopt_array(
@@ -254,6 +281,7 @@ final class WordPressSiteTest extends TestCase {
 
 		$job = self::wait_for( $id, 1800 );
 		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
+		self::idle( 600 );
 		$cli = new ResticCli( self::$server, 'site', self::$repository_password );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock remains.' );

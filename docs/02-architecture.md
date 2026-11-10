@@ -326,12 +326,13 @@ Snapshot: `{"time","parent","tree","paths","hostname","username","uid","gid","ex
 with `hostname` set to the site host, tags `backups-for-restic`, `site:<12 hex>`,
 `run:<job-id>`, and `program_version` `backups-for-restic/<version>`.
 
-Lock: `{"time","exclusive","hostname","username","pid","uid","gid"}`. Backup takes a
-non-exclusive lock; forget, prune and check take an exclusive lock (as restic does). A lock
+Lock: `{"time","exclusive","hostname","username","pid","uid","gid"}`. Backup and check take
+a non-exclusive lock; forget and prune take an exclusive lock (as restic does). A lock
 older than 30 minutes is stale for every restic client, so the heartbeat and every tick
 **refresh** the lock (write new, delete old) when it is older than 5 minutes. If no tick ran
-for more than 30 minutes the job re-acquires its lock before continuing. Locks are deletable
-even in append-only mode.
+for more than 30 minutes the job re-acquires its lock before continuing; prune instead starts
+its marking again, because another client may have written snapshots in the meantime
+([ADR 0022](adr/0022-maintenance-scope.md)). Locks are deletable even in append-only mode.
 
 ### 5.10 REST protocol
 
@@ -426,8 +427,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   `yearly`, each keeping the first snapshot of a new bucket value while counts remain and
   always the oldest snapshot while a bucket has counts left; `--keep-within` relative to the
   newest snapshot that is not in the future, so that one snapshot from a wrong clock does
-  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. Scoped to the
-  plugin's host and tags; a dry run is shown in the UI before the first automatic run.
+  not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. The forget job
+  selects the snapshots with this site's host name and the tags `backups-for-restic` and
+  `site:<hash>` and applies the policy to them as one group (`--group-by host`); the tag of
+  the job that wrote a snapshot never splits them. A preview of what the policy would remove
+  (a dry run) does not exist yet; it is planned with the snapshot browser of Milestone 3.
   Deletion is `DELETE snapshots/<id>`; HTTP 403 → `repository_append_only`
   ([ADR 0010](adr/0010-retention-and-append-only.md)).
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
@@ -443,8 +447,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   and delete the packs last. Every state in between is a repository restic accepts.
   Partially used packs are not repacked; the dashboard shows "reclaimable by a
   full prune" and the disaster-recovery guide explains `restic prune` from any computer.
-  Prune takes an exclusive lock; the maintenance jobs that run it weekly by default are
-  planned next in Milestone 2. It fails closed: an inconclusive
+  Prune takes an exclusive lock, and the maintenance jobs run it weekly by default
+  (`schedule.prune.*`). It fails closed: an inconclusive
   append-only probe stops it before the lock; if marking meets a used blob or tree that the
   index does not lead to, or planning finds a used pack that no index file lists, it marks
   again once with the index as the server has it under the lock (another client may have
@@ -459,7 +463,8 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
   never split a blob, so memory does not grow with the pack size; a pack whose reading ends
   the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
-  default; findings raise a persistent critical notice and are reported in Site Health.
+  default; errors raise a persistent critical notice and are reported in Site Health,
+  warnings only appear with the result (ADR 0022).
   Repairs are never attempted automatically; the guide points to `restic repair`.
 - **Cache hygiene**: tree-pack cache and index cache size-capped (default 256 MiB), oldest
   first.

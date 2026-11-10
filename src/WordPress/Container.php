@@ -24,6 +24,9 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
+use BackupsForRestic\Jobs\JobSteps;
+use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
+use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\Runner;
@@ -354,13 +357,13 @@ final class Container {
 	}
 
 	/**
-	 * The job runner with the backup steps.
+	 * The job runner with the backup and maintenance steps.
 	 *
 	 * @return Runner Runner.
 	 */
 	public function runner(): Runner {
-		$jobs     = $this->jobs();
-		$services = new BackupServices(
+		$jobs        = $this->jobs();
+		$services    = new BackupServices(
 			$this->settings(),
 			$this->access(),
 			$this->private_dir(),
@@ -372,7 +375,19 @@ final class Container {
 			$this->plan( ... ),
 			$this->exposure()
 		);
-		return new Runner( $jobs, new RunnerLock( $this->private_dir()->path . '/runner.lock' ), new BackupSteps( $services ), $this->clock(), $this->random() );
+		$backup      = new BackupSteps( $services );
+		$maintenance = new MaintenanceSteps(
+			new MaintenanceServices(
+				$services,
+				function ( string $mode ): void {
+					$this->settings_store()->update( [ 'retention.mode' => $mode ] );
+					$this->refresh();
+				},
+				$this->site()->site_tag()
+			),
+			$backup
+		);
+		return new Runner( $jobs, new RunnerLock( $this->private_dir()->path . '/runner.lock' ), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random() );
 	}
 
 	/**

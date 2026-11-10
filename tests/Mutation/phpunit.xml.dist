@@ -23,6 +23,7 @@
             <directory>../Unit/Support</directory>
             <directory>../Unit/Fuzz</directory>
             <file>../Unit/Engine/ForgetTest.php</file>
+            <file>../Unit/Engine/ForgetRunTest.php</file>
         </testsuite>
     </testsuites>
     <groups>

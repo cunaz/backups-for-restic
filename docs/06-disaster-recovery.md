@@ -154,8 +154,14 @@ snapshot references. Packs that still contain some live data are not repacked by
 Run a full prune from any computer when the dashboard shows a large reclaimable amount:
 
 ```bash
-restic forget --host example.com --tag backups-for-restic --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-within 2d --prune
+restic forget --host example.com --tag backups-for-restic --group-by host --keep-last 2 --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-within 2d --dry-run
 ```
+
+Check the list, then run the command again with `--prune` in place of `--dry-run`. Without
+`--group-by host`, restic also groups by paths, and with `--group-by host,tags` every snapshot
+is a group of its own, because each carries the tag of the job that wrote it, and nothing is
+removed. If several sites with the same host name share the repository, select one site with
+`--tag backups-for-restic,site:<hash>`; `restic snapshots` shows each site's tag.
 
 With append-only enabled, temporarily disable it first (BorgBase: repository settings;
 rest-server: restart without `--append-only`) and re-enable it afterwards. The plugin notices

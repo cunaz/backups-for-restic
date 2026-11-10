@@ -1,5 +1,6 @@
 # 0010 · Retention modes and automatic append-only detection
-Status: accepted (revised: detection and recommendation decided by the owner 2026-11-09)
+Status: accepted (revised: detection and recommendation decided by the owner 2026-11-09;
+forget grouping corrected 2026-11-10)
 Date: 2026-11-09
 
 ## Context
@@ -25,7 +26,10 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   `keep-within` (default 2 days), never with `unsafe-allow-remove-all`.
 - **Retention mode `external`** (append-only): the plugin never deletes data, index or
   snapshot files; it still releases its own locks. The dashboard shows repository growth and
-  the disaster-recovery guide explains pruning from another computer.
+  the disaster-recovery guide explains pruning from another computer. In this mode the
+  heartbeat schedules no forget or prune, and REST and WP-CLI refuse to start them; the
+  daily probe is what notices that deletions work again. A forget or prune job that was
+  already queued detects it as well and only records the proposal.
 - **Asymmetric switching**: detecting append-only switches to `external` at once and
   notifies the administrator. Detecting that deletions became possible only *proposes* the
   switch back to `plugin`; nothing is deleted until an administrator confirms.
@@ -33,6 +37,25 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   append-only on your server (BorgBase: repository settings; rest-server: `--append-only`).
   Then nobody who takes over this website can delete your backups. Old snapshots must then
   be cleaned up from another computer."*
+
+## Implementation
+- Forget and prune jobs begin with a `detecting` step that runs the probe; a refused deletion
+  during the run counts as a detection too. On append-only, `retention.mode` becomes
+  `external` and the job ends without deleting (`skipped: append_only`). In mode `external`
+  the jobs end at once (`skipped: retention_external`); if deletions work again they record a
+  proposal in the site state for the dashboard and change nothing.
+- The heartbeat starts a forget job after every successful backup (mode `plugin`,
+  `retention.run_forget_after_backup`), prune on its weekly or monthly slot (mode `plugin`
+  only) and the check on its slot (both modes); one job at a time, the first slot after setup
+  is only recorded. Forget is scoped to this site's host name and to the tags
+  `backups-for-restic` and `site:<hash>` ([ADR 0009](0009-snapshot-layout.md)), applies the
+  policy to those snapshots as one group, like `restic forget --host <host> --tag
+  backups-for-restic,site:<hash> --group-by host`, and refuses a policy without
+  `keep-within`. The first version grouped by host and tags, as restic can; because every
+  snapshot also carries the tag of the job that wrote it, each snapshot was a group of its
+  own, and no rule ever removed one. The tests had used snapshots with one shared tag.
+- Administrators start the same jobs from the REST API (`POST /jobs` with `type`) and WP-CLI
+  (`forget`, `prune`, `check [--read-data-subset=<percent>]`).
 
 ## Consequences
 - No question in the wizard for the common case; the secure setup is explained, not forced.

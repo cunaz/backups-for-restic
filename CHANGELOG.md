@@ -7,6 +7,10 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Maintenance jobs: forget after every successful backup, prune and check on their schedules,
+  and on demand from the REST API and WP-CLI (`forget`, `prune`, `check`). Forget and prune
+  detect append-only servers first and then switch retention to external without deleting
+  anything; switching back needs an administrator. A check with errors raises a lasting alert.
 - Repository check: index files, packs, snapshot trees and a random share of packs downloaded
   and verified completely, resumable in short ticks; it reports the damage `restic check`
   reports.

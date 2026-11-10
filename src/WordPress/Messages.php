@@ -38,7 +38,15 @@ final class Messages {
 			],
 			'repository_damaged'             => [
 				'message' => __( 'The repository contains data the plugin cannot read.', 'backups-for-restic' ),
-				'hint'    => __( 'Run "restic check" from another computer to find out more.', 'backups-for-restic' ),
+				'hint'    => __( 'Start a repository check (on the dashboard, or with "wp backups-for-restic check"), or run "restic check" from another computer, to find out more.', 'backups-for-restic' ),
+			],
+			'no_snapshots'                   => [
+				'message' => __( 'The repository lists no snapshots, so prune did not delete anything.', 'backups-for-restic' ),
+				'hint'    => __( 'An empty listing must never mean "delete everything". Check the repository URL.', 'backups-for-restic' ),
+			],
+			'retention_external'             => [
+				'message' => __( 'Old snapshots are cleaned up from another computer (retention mode "external").', 'backups-for-restic' ),
+				'hint'    => __( 'The repository is or was append-only. Switch retention back to the plugin in the settings if deletions are allowed again.', 'backups-for-restic' ),
 			],
 			'repository_unsupported_version' => [
 				'message' => __( 'This repository uses compression, which needs the zstd PHP extension.', 'backups-for-restic' ),
