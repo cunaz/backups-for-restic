@@ -99,13 +99,18 @@ final class MysqliConnection implements Connection {
 			unlink( $output );
 			throw new \RuntimeException( 'The database client could not be started.' );
 		}
+		$incomplete = null;
 		foreach ( $files as $file ) {
-			$source = fopen( $file, 'rb' );
-			// A client that stopped at an error closes the pipe; its message is reported below.
-			if ( false === $source || false === @stream_copy_to_stream( $source, $pipes[0] ) ) {
+			$source = @fopen( $file, 'rb' );
+			$copied = false === $source ? false : @stream_copy_to_stream( $source, $pipes[0] );
+			if ( false !== $source ) {
+				fclose( $source );
+			}
+			if ( false === $copied || filesize( $file ) !== $copied ) {
+				// The file cannot be read, or the client stopped at an error and closed the pipe.
+				$incomplete = $file;
 				break;
 			}
-			fclose( $source );
 		}
 		fclose( $pipes[0] );
 		$code    = proc_close( $process );
@@ -113,6 +118,10 @@ final class MysqliConnection implements Connection {
 		unlink( $output );
 		if ( 0 !== $code ) {
 			throw new \RuntimeException( 'Import into ' . $database . ' failed: ' . $message );
+		}
+		if ( null !== $incomplete ) {
+			// The client found nothing wrong with what it got, but it did not get everything.
+			throw new \RuntimeException( 'Import into ' . $database . ' is incomplete: ' . $incomplete . ' could not be read or sent completely.' );
 		}
 	}
 
