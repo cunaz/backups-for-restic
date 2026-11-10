@@ -264,7 +264,9 @@ final class MaintenanceSteps implements StepProvider {
 	}
 
 	/**
-	 * Counts and the first findings of a finished check, read from its checkpoint.
+	 * Counts and the first findings of a finished check, read from its checkpoint. Errors come
+	 * before warnings, each in the order found: the alert announces errors, and warnings from
+	 * an earlier phase, such as packs that no index lists, must not take their places.
 	 *
 	 * @param Job $job Check job.
 	 * @return array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>}|null Details, or null if the check did not run.
@@ -275,11 +277,14 @@ final class MaintenanceSteps implements StepProvider {
 		if ( ! is_file( $work . '/state.json' ) ) {
 			return null;
 		}
-		$result = CheckRun::resume( $this->repository(), $work, $services->identity, $services->clock )->result();
+		$result   = CheckRun::resume( $this->repository(), $work, $services->identity, $services->clock )->result();
+		$findings = $result['findings'];
+		// usort() is stable, so each severity keeps the order in which the check found it.
+		usort( $findings, static fn ( array $a, array $b ): int => ( 'error' === $b['severity'] ) <=> ( 'error' === $a['severity'] ) );
 		return [
 			'errors'   => $result['errors'],
 			'counts'   => $result['counts'],
-			'findings' => array_slice( $result['findings'], 0, self::REPORTED_FINDINGS ),
+			'findings' => array_slice( $findings, 0, self::REPORTED_FINDINGS ),
 		];
 	}
 

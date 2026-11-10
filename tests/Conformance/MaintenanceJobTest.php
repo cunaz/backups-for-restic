@@ -12,6 +12,7 @@ use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
+use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Jobs\Backup\BackupServices;
@@ -289,6 +290,36 @@ final class MaintenanceJobTest extends TestCase {
 		self::assertSame( $check->id, $alert['job'] ?? null );
 		self::assertIsArray( $alert['findings'] ?? null );
 		self::assertNotSame( [], $alert['findings'] );
+	}
+
+	public function test_the_alert_lists_errors_before_the_warnings_of_an_earlier_phase(): void {
+		self::assertNotNull( self::$server );
+		$site       = $this->site();
+		$repository = Repository::initialize( self::$server->backend( 'crowded' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$this->history( $repository, $site );
+		// Packs that no index lists, as an interrupted backup leaves them: warnings, and more of
+		// them than the check keeps details of. The check finds them before it reads snapshots.
+		for ( $i = 0; $i < CheckRun::MAX_FINDINGS + 5; $i++ ) {
+			$repository->backend()->save( ObjectType::Data, hash( 'sha256', 'stray pack ' . $i ), 'stray pack ' . $i );
+		}
+		$snapshots = glob( self::$server->directory . '/data/crowded/snapshots/*' );
+		self::assertIsArray( $snapshots );
+		self::assertCount( 3, $snapshots );
+		sort( $snapshots );
+		file_put_contents( $snapshots[1], 'not an encrypted snapshot' );
+		[ $runner, $store ] = $this->components( self::$server, 'crowded', $site, [] );
+
+		$check = $this->run_job( $runner, $store, JobType::Check, [ 'read_data_subset_percent' => 0 ] );
+
+		self::assertSame( 1, $check->result['errors'] ?? null );
+		self::assertSame( CheckRun::MAX_FINDINGS + 5, $check->result['warnings'] ?? null );
+		$alert    = $this->state->get( 'check_alert' );
+		$findings = $alert['findings'] ?? null;
+		self::assertIsArray( $findings );
+		self::assertCount( 10, $findings );
+		self::assertSame( [ 'error', 'snapshot_unreadable', basename( $snapshots[1] ) ], [ $findings[0]['severity'], $findings[0]['code'], $findings[0]['object'] ], 'What the alert counts as an error leads its list.' );
+		self::assertSame( array_fill( 0, 9, 'pack_unindexed' ), array_column( array_slice( $findings, 1 ), 'code' ) );
+		self::assertSame( $findings, $this->state->get( 'last_check' )['findings'] ?? null );
 	}
 
 	public function test_a_damaged_index_file_does_not_stop_the_check_that_finds_it(): void {
