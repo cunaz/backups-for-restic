@@ -37,8 +37,9 @@ minutes ahead.
    it again with `Locking::acquire()`, which fails with `repository_locked` while another
    client holds a conflicting lock. Prune used this margin already.
 2. **The lock comes before the index in every call.** `start()` and `resume()` of
-   `BackupRun`, `CheckRun` and `ForgetRun` send nothing to the server. `advance()` first
-   takes or refreshes the lock and only then loads the index, through the `IndexCache` it
+   `BackupRun` and `CheckRun` send nothing to the server; `ForgetRun::start()` sends only
+   the append-only probe, a delete of a random snapshot name. `advance()` first takes or
+   refreshes the lock and only then loads the index, through the `IndexCache` it
    was given. What the index lists can then no longer be removed by a client that honours
    locks.
 3. **`start()` writes the checkpoint with the run's number before any lock exists.** The
