@@ -76,6 +76,10 @@
         ],
         "mutation": ".tools/bin/infection --threads=max",
         "fuzz": "php bin/fuzz.php --seconds=10",
-        "bench": "php -d opcache.enable_cli=0 bin/bench.php"
+        "bench": "php -d opcache.enable_cli=0 bin/bench.php",
+        "pot": [
+            "bin/build-package.sh",
+            ".tools/bin/wp i18n make-pot build/backups-for-restic languages/backups-for-restic.pot --slug=backups-for-restic --domain=backups-for-restic"
+        ]
     }
 }

@@ -6,6 +6,7 @@
 /bin
 /build
 /docs
+/languages/*.pot
 /node_modules
 /tests
 /vendor

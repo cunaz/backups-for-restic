@@ -3,6 +3,8 @@
 # Downloaded tools and their output: restic, rest-server, Infection logs, fuzz findings.
 /.tools/
 /build/
+# Built in CI from the package (composer pot); language packs come from translate.wordpress.org.
+/languages/*.pot
 /.phpunit.cache/
 /.phpunit.result.cache
 .DS_Store

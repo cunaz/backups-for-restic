@@ -81,6 +81,39 @@ jobs:
           # read-only token of this workflow cannot do.
           repo-token: ''
 
+  pot:
+    name: Translation template (POT)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - run: bin/install-test-tools.sh wp-cli
+      # Builds the package and extracts the strings of its PHP and JavaScript files.
+      - run: composer pot
+      # make-pot leaves out a file it cannot parse without failing. So look for a string
+      # that only the admin script has, for one that only src/ has, and for a translator
+      # comment that comes from JavaScript.
+      - name: Strings of admin.js and src/ are in the template
+        run: |
+          pot=languages/backups-for-restic.pot
+          echo "$(grep -c '^msgid ' "$pot") entries, $(grep -c '^#: assets/js/' "$pot") of them from JavaScript."
+          grep -F 'msgid "Keep this tab open to speed up the backup on slow hosts."' "$pot"
+          grep -F 'msgid "Plugin activation refused"' "$pot"
+          grep -B 3 -F 'msgid "Data that no snapshot uses is deleted next on %s."' "$pot" | grep -F '#. translators: %s: date and time.'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: translation-template
+          path: languages/backups-for-restic.pot
+          retention-days: 14
+
   sign-off:
     name: Commits are signed off
     if: github.event_name == 'pull_request'
