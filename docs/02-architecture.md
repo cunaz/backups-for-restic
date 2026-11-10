@@ -513,10 +513,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
 2. **Unlocking**: open the repository with the cached master key, which counts only if it
    decrypts the config; otherwise derive it with the resumable scrypt across ticks and cache
    it (ADR 0020).
-3. **Backing up**: the engine's `BackupRun`, resumed every tick from its checkpoint. Every
-   tick takes or refreshes the shared lock first and then loads the index through the local
-   cache (§5.9). The first tick also removes this site's stale locks; the parent is the
-   newest snapshot of the same host with the same paths. It walks the roots from `Backup\PlanFactory` (distinct, non-nested set of
+3. **Backing up**: the engine's `BackupRun`, resumed every tick from its checkpoint. In
+   every tick the run takes or refreshes the shared lock before it loads the index through
+   the local cache (§5.9). The first tick also removes this site's stale locks. It chooses
+   the parent, the newest snapshot of the same host with the same paths, before the run
+   exists and so before the lock; a parent that another client removes in between is done
+   without. It walks the roots from `Backup\PlanFactory` (distinct, non-nested set of
    `ABSPATH`, `WP_CONTENT_DIR`, the uploads directory and extra roots; excludes from the
    defaults, the settings and the `backups_for_restic_backup_excludes` filter; `CACHEDIR.TAG`
    and `.nobackup` markers). A file whose size, mtime, ctime and inode match the parent
