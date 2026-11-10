@@ -88,6 +88,14 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- A backup that was paused for longer than its repository lock lasts could end with a
+  snapshot that referred to data a `restic prune` on another computer had removed in the
+  meantime. The backup now checks after such a pause that everything it relies on is still
+  in the repository, and starts over if not. A check starts over instead of reporting as
+  damage what another computer pruned or forgot during its pause.
+- A request that ended at the very start of a backup, check or forget could leave a
+  repository lock that blocked other programs for 30 minutes. Every run now records its
+  number first and removes such a lock itself.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
   job. A cancel request is now a marker file that the runner reads before every step, and
