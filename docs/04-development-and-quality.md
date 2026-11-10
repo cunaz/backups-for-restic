@@ -33,7 +33,7 @@ backups-for-restic/
 │   └── Fixtures/                    restic vectors per version, Go and libsodium vectors, fuzz regressions
 ├── bin/                             install-test-tools.sh, test-site.sh with its router and diagnostics, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php; (M3) build-package.sh
 ├── docs/                            design documents, ADRs, guides/, benchmarks/
-└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; (M3) live-servers.yml, e2e.yml, codeql.yml; (release) deploy-wordpress-org.yml
+└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; ISSUE_TEMPLATE/bug_report.md; (M3) live-servers.yml, e2e.yml, codeql.yml; (release) deploy-wordpress-org.yml
 ```
 
 Entries marked (M3) are not in the repository yet; they are planned for Milestone 3
@@ -93,8 +93,8 @@ for coverage and mutation runs.
 - **Cryptography and format code**: `Crypto` and `Format` are `final`, dependency-free,
   documented with the byte layouts they implement and, where one exists, the name of the
   restic type they mirror. Changes follow the solo-maintainer regime of
-  [ADR 0024](adr/0024-governance-and-quality-assurance.md): self-review checklist, 24-hour
-  cooling-off before merge, green conformance run and mutation gate.
+  [ADR 0024](adr/0024-governance-and-quality-assurance.md): self-review checklist (§9.1),
+  24-hour cooling-off before merge, green conformance run and mutation gate.
 - `final` by default, immutable value objects, enums for closed sets, one exception base
   class, no static mutable state, docblocks explain *why*.
 - JavaScript: one classic script in ES2020, `assets/js/admin.js`; no modules, no frameworks,
@@ -257,7 +257,8 @@ Not built yet. No workflow `live-servers.yml` exists and no test has run against
 service: every server behaviour the suites assert was measured on a local rest-server
 (§5.2, §5.3), and the answers of BorgBase are not yet measured
 ([ADR 0025](adr/0025-repository-servers.md)). The tests need an account at the hosted
-service and are planned for Milestone 3, as follows.
+service and are planned for Milestone 3. The design so far, not yet confirmed by the
+owner:
 
 `live-servers.yml` runs weekly, on manual dispatch and before every release. Against a
 rest-server with TLS, a self-signed CA and `--private-repos` it runs init or connect, a
@@ -354,13 +355,69 @@ classes.
 
 ## 9. Contribution workflow
 
-`main` protected; short-lived branches; conventional commit subjects; PR template asks for
-tests, docs, security impact and, for `Crypto`/`Format`/`Engine`, a conformance run link.
-Issue templates include Doctor output. DCO sign-off. Definition of done: code + tests + docs
+Short-lived branches; conventional commit subjects; definition of done: code + tests + docs
 + changelog + green CI. The maintainer works through pull requests and the same checks as
-everyone else; nobody pushes to `main` directly. CodeRabbit reviews every pull request with
-the instructions in `.coderabbit.yaml`; its comments are answered or resolved before merging
-([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
+everyone else; nobody pushes to `main` directly. Whether GitHub enforces that (branch
+protection, required checks) is a setting of the repository that no file here records.
+
+- The pull request template (`.github/pull_request_template.md`) asks what changes and why
+  and for the security impact. Its checklist: tests, documents and decision records, the
+  changelog, a green conformance run for changes to `Crypto`, `Format`, `Backend` or
+  `Engine`, the cooling-off period for changes to `Crypto`, `Format` or `Engine`, the
+  self-review of §9.1 for security-relevant changes, the sign-off of every commit, and no
+  personal data.
+- Commits are signed off under the Developer Certificate of Origin (`git commit -s`). No CI
+  job checks the sign-off yet (§6).
+- The issue template for bug reports (`.github/ISSUE_TEMPLATE/bug_report.md`) asks for the
+  Doctor's output, from `wp backups-for-restic doctor` or **Backups → Environment**, and
+  warns against posting a recovery kit or a password.
+- CodeRabbit reviews every pull request with the instructions in `.coderabbit.yaml`; its
+  comments are answered or resolved before merging
+  ([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
+
+### 9.1 Self-review checklist for security-relevant changes
+
+The project has no second reviewer
+([ADR 0024](adr/0024-governance-and-quality-assurance.md)), so the author asks what a
+reviewer would ask. A change is security-relevant when it touches secrets, cryptography or
+the repository format, deletions in the repository, files the plugin writes, HTTP requests,
+or what a REST route or a WP-CLI command allows. The author goes through this list before
+the merge and writes the result under "Security impact" in the pull request: one sentence
+for every point that applies, "not affected" for the others.
+
+1. **Secrets.** No secret can reach a log line, a job file, an exception message, a REST
+   response, a URL or an e-mail. A new call of `Secret::reveal()` is on the list of
+   `SecretRevealRule`, and the pull request says why it is needed. A new kind of secret is
+   added to the `Redactor`.
+2. **Cryptography.** No new primitive, no new parameter and no changed order of operations
+   without a decision record. The tag is verified before anything is decrypted, and the
+   SHA-256 of a blob before its content is used. Random values come from `RandomSource`.
+3. **Data from the server.** Everything the repository server returns is untrusted. Lengths,
+   counts and names are checked before they size an allocation, bound a loop or become part
+   of a path. A new or changed parser has a fuzz target in `tests/Fuzz/Targets.php`.
+4. **Deleting and overwriting.** A new `DELETE` or overwrite in the repository happens only
+   in a job that holds the lock it needs, never in retention mode `external`, and it stops
+   on a 403. When a precondition cannot be verified, the code stops instead of going on. A
+   test shows what is not deleted.
+5. **Files.** The plugin writes files only inside the private directory, with owner-only
+   permissions. A path that comes from the repository, a request or a setting is checked to
+   stay inside its root before it is used. No password and no database content is written
+   to disk in plain text.
+6. **HTTP.** Requests go to the configured repository server only, over HTTPS with
+   certificate verification, with the credentials in the `Authorization` header and never
+   in the URL. The requests to the site itself (the tick chain, the loopback test and the
+   exposure probe) stay the only others.
+7. **WordPress surface.** Every REST route has a `permission_callback` that checks the
+   capability, and a route that returns a secret asks for the WordPress password again
+   ([security](03-security-and-threat-model.md) §5.5). Input is validated against
+   `Settings\Schema`, output is escaped, and WP-CLI prints no secret.
+8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`
+   or `Engine` the conformance run is green; for `Crypto`, `Format` and `Engine\Forget` the
+   covered mutation score stays at or above 90 %. Documents and decision records say what
+   changed.
+9. **Cooling-off.** A change to `Crypto`, `Format` or `Engine` is merged no earlier than 24
+   hours after the last commit that touches these namespaces, and the author reads the
+   whole diff once more before merging.
 
 ## 10. Licensing and attribution
 
