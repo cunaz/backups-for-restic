@@ -90,14 +90,15 @@ final class MysqliConnection implements Connection {
 	}
 
 	/**
-	 * The mariadb or mysql client: the first one on the PATH, where bin/test-site.sh finds its
-	 * client too, or in /usr/bin.
+	 * The mariadb or mysql client from the first directory of the PATH that has one, which is
+	 * where bin/test-site.sh finds its client too, or from /usr/bin. Within a directory
+	 * mariadb comes first: where both names exist there, mysql is its deprecated alias.
 	 */
 	private static function client_binary(): string {
 		$directories   = array_filter( explode( PATH_SEPARATOR, (string) getenv( 'PATH' ) ), static fn ( string $directory ): bool => '' !== $directory );
 		$directories[] = '/usr/bin';
-		foreach ( [ 'mariadb', 'mysql' ] as $name ) {
-			foreach ( $directories as $directory ) {
+		foreach ( $directories as $directory ) {
+			foreach ( [ 'mariadb', 'mysql' ] as $name ) {
 				if ( is_executable( $directory . '/' . $name ) ) {
 					return $directory . '/' . $name;
 				}
