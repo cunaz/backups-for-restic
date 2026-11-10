@@ -243,12 +243,13 @@ final class Repository {
 	 * Loads index files.
 	 *
 	 * @param list<string>|null $names The index files to read, for a caller that has to know
-	 *                                 which they were; all that the server lists otherwise.
+	 *                                 which they were; all that the server lists otherwise, in
+	 *                                 the order of its listing.
 	 * @return IndexSet Merged index.
 	 */
 	public function load_index( ?array $names = null ): IndexSet {
 		$index = new IndexSet();
-		foreach ( $names ?? $this->names( ObjectType::Index ) as $name ) {
+		foreach ( $names ?? array_map( 'strval', array_keys( $this->backend->list( ObjectType::Index ) ) ) as $name ) {
 			foreach ( IndexFile::decode( $this->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
 			}
