@@ -66,10 +66,16 @@ minutes ahead.
    cannot take the lock again, because another client holds an exclusive lock by now, has
    recorded what it uploaded before it asked, and the next call goes on from there.
 
+   The checkpoint names the new lock only after the comparison. A request that ends between
+   the two, because a listing fails or the host stops it, leaves the old lock in the
+   checkpoint, so the next request takes the lock again and compares again. A lock written
+   a moment ago says nothing about the time before it. The lock that was written and not
+   recorded is recognised by the run's number and removed, as in decision 3.
+
    Each call reads the index from the index files that the server lists at that moment and
    compares its record with that listing, which costs no request. An index file that is
-   missing there, although the lock held, was removed by a client that does not honour
-   locks; the run is given up in the same way.
+   missing there although the lock held, or that goes between the listing and the reading,
+   was removed by a client that does not honour locks; the run is given up in the same way.
 5. **The backup job then starts a new run** with the next tick. What the old run uploaded
    and still exists is found by deduplication and not sent again; the database dump lists
    its tables again. After three such restarts (`BackupSteps::MAX_RESTARTS`) the job fails
@@ -80,7 +86,8 @@ minutes ahead.
    `repository_changed`. If nothing is gone it continues: new index files, packs and
    snapshots of other clients do not concern a check that began before them. The check
    looks once more before it ends, so that what it found in a call that lost its lock is
-   not reported as damage.
+   not reported as damage. Like the backup, it records a lock it took again only after it
+   has compared.
 7. **Forget needs no comparison.** It holds an exclusive lock and removes snapshot files it
    selected by a policy. A snapshot another client wrote during a gap can only make the
    policy remove more, never keep one this run removes, and deleting a file that is already
@@ -102,7 +109,12 @@ minutes ahead.
 - The index is read later in a tick than before, after the lock request. The index cache
   keeps this cheap.
 - The checkpoints of backup, check and forget have a new version. A job that is active
-  while the plugin is updated fails once with its old checkpoint; the next one runs.
+  while the plugin is updated fails once with its old checkpoint; the next one runs. The
+  lock of that job is not released, because a checkpoint of another version is not read:
+  it stays until it is stale, 30 minutes at most. No released version has written the old
+  checkpoints. Releasing the lock of a checkpoint the plugin cannot continue belongs to the
+  handling of upgrades and is on the list of phase 0.8 of the
+  [plan for Milestone 3](../07-milestone-3-plan.md).
 - A lock left by a killed first request no longer blocks other clients for 30 minutes.
 - Prune keeps its own rule: it reads the index files under its exclusive lock when it
   plans, compares them with what marking found, and starts marking again after a gap

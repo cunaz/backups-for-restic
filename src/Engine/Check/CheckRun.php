@@ -363,20 +363,22 @@ final class CheckRun {
 		if ( ! $this->state['begun'] ) {
 			$this->locking->remove_own_stale();
 		}
-		$this->state['lock']      = $this->locking->acquire( false )->hex();
-		$this->state['locked_at'] = $this->clock->now()[0];
-		$this->persist();
-		if ( ! $this->state['begun'] ) {
-			return;
+		$fresh = $this->locking->acquire( false )->hex();
+		$taken = $this->clock->now()[0];
+		if ( $this->state['begun'] && ( [] !== $this->repository->missing( ObjectType::Index, $this->state['index_files'] ) || [] !== $this->repository->missing( ObjectType::Snapshots, $this->state['snapshot_names'] ) ) ) {
+			if ( $this->state['restarts'] >= self::MAX_RESTARTS ) {
+				RepositoryChanged::raise( 'Other clients changed the repository again and again while the check ran; the check gave up.', [ 'restarts' => $this->state['restarts'] ] );
+			}
+			++$this->state['restarts'];
+			$this->begin();
 		}
-		if ( [] === $this->repository->missing( ObjectType::Index, $this->state['index_files'] ) && [] === $this->repository->missing( ObjectType::Snapshots, $this->state['snapshot_names'] ) ) {
-			return;
-		}
-		if ( $this->state['restarts'] >= self::MAX_RESTARTS ) {
-			RepositoryChanged::raise( 'Other clients changed the repository again and again while the check ran; the check gave up.', [ 'restarts' => $this->state['restarts'] ] );
-		}
-		++$this->state['restarts'];
-		$this->begin();
+		// Recorded only now. A checkpoint that names a lock says that the check looked at what
+		// it had listed when that lock was taken. A request that ends before this point leaves
+		// the old lock in the checkpoint: the next request takes the lock again and looks
+		// again, and the lock written here is a leftover of the run, which taking the lock
+		// removes.
+		$this->state['lock']      = $fresh;
+		$this->state['locked_at'] = $taken;
 		$this->persist();
 	}
 

@@ -771,35 +771,40 @@ final class BackupRun {
 		if ( ! $begun ) {
 			$this->locking->remove_own_stale();
 		}
-		$this->state['lock']      = $this->locking->acquire( false )->hex();
-		$this->state['locked_at'] = $this->clock->now()[0];
+		$fresh = $this->locking->acquire( false )->hex();
+		$taken = $this->clock->now()[0];
+		if ( $begun ) {
+			$index_files = $this->repository->missing( ObjectType::Index, Decoded::strings( $this->state['index_files'] ) );
+			$unindexed   = array_map( 'strval', array_keys( is_array( $this->state['unindexed'] ) ? $this->state['unindexed'] : [] ) );
+			$packs       = $this->repository->missing( ObjectType::Data, $unindexed );
+			if ( [] !== $index_files || [] !== $packs ) {
+				$this->give_up( count( $index_files ), count( $packs ) );
+			}
+		}
+		// Recorded only now. A checkpoint that names a lock says that everything on the record
+		// was there when that lock was taken. A request that ends before this point, for
+		// example because a listing fails, leaves the old lock in the checkpoint: the next
+		// request takes the lock again and looks again, and the lock written here is a
+		// leftover of the run, which taking the lock removes.
+		$this->state['lock']      = $fresh;
+		$this->state['locked_at'] = $taken;
 		$this->persist();
-		if ( ! $begun ) {
-			return;
-		}
-
-		$index_files = $this->repository->missing( ObjectType::Index, Decoded::strings( $this->state['index_files'] ) );
-		$unindexed   = array_map( 'strval', array_keys( is_array( $this->state['unindexed'] ) ? $this->state['unindexed'] : [] ) );
-		$packs       = $this->repository->missing( ObjectType::Data, $unindexed );
-		if ( [] !== $index_files || [] !== $packs ) {
-			$this->give_up( $index_files, $packs );
-		}
 	}
 
 	/**
 	 * Gives the run up because another client removed what it relied on.
 	 *
-	 * @param list<string> $index_files Index files that are gone.
-	 * @param list<string> $packs       Packs that no index file listed and that are gone.
+	 * @param int $index_files Number of index files that are gone.
+	 * @param int $packs       Number of packs that no index file listed and that are gone.
 	 * @throws RepositoryChanged Always.
 	 */
-	private function give_up( array $index_files, array $packs ): never {
+	private function give_up( int $index_files, int $packs ): never {
 		$this->abort();
 		RepositoryChanged::raise(
 			'Another client removed data from the repository that the backup relied on; the backup starts over.',
 			[
-				'index_files' => count( $index_files ),
-				'packs'       => count( $packs ),
+				'index_files' => $index_files,
+				'packs'       => $packs,
 			]
 		);
 	}
@@ -842,8 +847,9 @@ final class BackupRun {
 	 * The index is read from the index files that are listed at this moment, and the run relies
 	 * on them from here on, as on those of its earlier calls. These must all be among them:
 	 * while the lock held nobody removed an index file, and after a gap keep_lock() has looked.
-	 * If one is missing all the same, a client that does not honour locks removed data, and
-	 * the run is given up like after a gap. The listing is at hand, so this costs no request.
+	 * If one is missing all the same, or goes between the listing and the reading, a client
+	 * that does not honour locks removed data, and the run is given up like after a gap. The
+	 * listing is at hand, so this costs no request.
 	 *
 	 * @return BlobStore Store.
 	 * @throws RepositoryChanged If an index file the run relied on is gone; the run is given up.
@@ -853,9 +859,14 @@ final class BackupRun {
 			$names = $this->repository->names( ObjectType::Index );
 			$gone  = array_values( array_diff( Decoded::strings( $this->state['index_files'] ), $names ) );
 			if ( [] !== $gone ) {
-				$this->give_up( $gone, [] );
+				$this->give_up( count( $gone ), 0 );
 			}
-			$index       = null === $this->cache ? $this->repository->load_index( $names ) : $this->cache->load( $this->repository, $names );
+			try {
+				$index = null === $this->cache ? $this->repository->load_index( $names ) : $this->cache->load( $this->repository, $names );
+			} catch ( NotFound ) {
+				// Listed a moment ago and gone now: the same client at work, a moment later.
+				$this->give_up( 1, 0 );
+			}
 			$this->index = $index;
 			$this->rely_on( $names );
 			$this->store = new BlobStore( $this->repository, $index, $this->pack_size );

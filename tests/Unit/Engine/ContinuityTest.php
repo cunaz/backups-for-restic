@@ -281,6 +281,92 @@ final class ContinuityTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
+	/**
+	 * A repository whose backend ends the request at the first listing of a type, once: the
+	 * connection breaks, or the host kills the request there.
+	 */
+	private function request_ends_at_listing( ObjectType $listed ): Repository {
+		$ended   = false;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( $listed, &$ended ): void {
+				if ( ! $ended && 'list' === $method && $listed === $type ) {
+					$ended = true;
+					throw new \RuntimeException( 'The request ended.' );
+				}
+			}
+		);
+		return Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+	}
+
+	public function test_a_request_that_ends_between_taking_the_lock_again_and_looking_does_not_spare_the_next_one_the_look(): void {
+		$work      = $this->unfinished_backup();
+		$unindexed = array_map( 'strval', array_keys( (array) self::state( $work )['unindexed'] ) );
+		$lock      = self::state( $work )['lock'];
+
+		$this->gap();
+		$this->backend->delete( ObjectType::Data, $unindexed[0] );
+		// The first request after the gap takes the lock again and ends at the listing it
+		// compares with.
+		try {
+			$this->resume( $work, $this->request_ends_at_listing( ObjectType::Index ) )->advance( 0.0 );
+			self::fail( 'The request must end while the run compares.' );
+		} catch ( \RuntimeException $ended ) {
+			self::assertSame( 'The request ended.', $ended->getMessage() );
+		}
+		self::assertSame( $lock, self::state( $work )['lock'], 'The checkpoint does not name the new lock before the run has looked.' );
+		$written = array_map( 'strval', array_keys( $this->backend->list( ObjectType::Locks ) ) );
+		self::assertCount( 1, $written, 'Taking the lock again removed the old one.' );
+		self::assertNotSame( $lock, $written[0] );
+
+		// A lock written a moment ago proves nothing about the time before it.
+		try {
+			$this->resume( $work )->advance( 0.0 );
+			self::fail( 'The run relies on a pack that is gone.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame(
+				[
+					'index_files' => 0,
+					'packs'       => 1,
+				],
+				$changed->context()
+			);
+		}
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'Neither lock is left.' );
+	}
+
+	public function test_an_index_file_that_goes_between_its_listing_and_its_reading_gives_the_run_up(): void {
+		$work    = $this->unfinished_backup();
+		$inner   = $this->backend;
+		$removed = '';
+		$backend = new HookedBackend(
+			$inner,
+			static function ( string $method, ?ObjectType $type, string $name ) use ( $inner, &$removed ): void {
+				if ( '' === $removed && 'load' === $method && ObjectType::Index === $type ) {
+					// A client that does not honour locks deletes the file right now.
+					$removed = $name;
+					$inner->delete( ObjectType::Index, $name );
+				}
+			}
+		);
+
+		try {
+			$this->resume( $work, Repository::open( $backend, $this->repository->master_key(), new SystemRandom() ) )->advance( 0.0 );
+			self::fail( 'The index cannot be read from the files that were listed.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame(
+				[
+					'index_files' => 1,
+					'packs'       => 0,
+				],
+				$changed->context()
+			);
+		}
+		self::assertNotSame( '', $removed );
+		self::assertFileDoesNotExist( $work . '/state.json' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
 	public function test_a_lock_that_someone_removed_counts_like_a_gap(): void {
 		$work  = $this->unfinished_backup();
 		$state = self::state( $work );
@@ -628,6 +714,36 @@ final class ContinuityTest extends TestCase {
 		self::assertSame( 1, $run->result()['restarts'], 'The clock did not move, so nothing refreshed the lock: only the look before the end noticed.' );
 		self::assertSame( [], $run->result()['findings'] );
 		self::assertSame( count( $this->backend->list( ObjectType::Index ) ), $run->result()['stats']['index_files'] ?? 0 );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_check_whose_request_ended_before_it_looked_looks_in_the_next_one(): void {
+		$second = $this->finish( $this->start() );
+		$work   = $this->work_dir();
+		$run    = CheckRun::start( $this->repository, $work, $this->identity, $this->clock, new SystemRandom(), 0 );
+		$calls  = 0;
+		while ( [] === ( self::state( $work )['snapshot_names'] ?? [] ) ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+			self::assertLessThan( 1000, ++$calls );
+		}
+		$lock = self::state( $work )['lock'];
+
+		$this->gap();
+		$this->backend->delete( ObjectType::Snapshots, $second->hex() );
+		try {
+			CheckRun::resume( $this->request_ends_at_listing( ObjectType::Index ), $work, $this->identity, $this->clock )->advance( 0.0 );
+			self::fail( 'The request must end while the check compares.' );
+		} catch ( \RuntimeException $ended ) {
+			self::assertSame( 'The request ended.', $ended->getMessage() );
+		}
+		self::assertSame( $lock, self::state( $work )['lock'], 'The checkpoint does not name the new lock before the check has looked.' );
+
+		$run = CheckRun::resume( $this->repository, $work, $this->identity, $this->clock );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 1, $run->result()['restarts'], 'The snapshot that was forgotten made the check start over.' );
+		self::assertSame( 0, $run->result()['errors'], (string) json_encode( $run->result()['findings'] ) );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
