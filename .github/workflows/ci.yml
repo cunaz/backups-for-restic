@@ -80,6 +80,28 @@ jobs:
           # The action would use a token only to comment on the pull request, which the
           # read-only token of this workflow cannot do.
           repo-token: ''
+          # Native file functions and parse_url() in the WordPress-free core. The core must
+          # not call WordPress (ADR 0029), and it streams and renames files in ways that
+          # WP_Filesystem does not offer. The project's own PHPCS run keeps this sniff on for
+          # src/WordPress and src/Plugin.php (phpcs.xml.dist).
+          ignore-codes: |-
+            WordPress.WP.AlternativeFunctions.file_system_operations_chmod
+            WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+            WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+            WordPress.WP.AlternativeFunctions.file_system_operations_fread
+            WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+            WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
+            WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
+            WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
+            WordPress.WP.AlternativeFunctions.file_system_operations_touch
+            WordPress.WP.AlternativeFunctions.parse_url_parse_url
+            WordPress.WP.AlternativeFunctions.rename_rename
+            WordPress.WP.AlternativeFunctions.unlink_unlink
+          # mb_chr() and mb_ord() in this file are PHP's own, from the mbstring extension that
+          # the plugin requires (readme.txt, Doctor). The check reports them as WordPress
+          # functions that need WordPress 7.1. The file is plain PHP without WordPress calls,
+          # so the check has nothing else to find in it.
+          exclude-files: src/Support/GoQuote.php
 
   pot:
     name: Translation template (POT)
