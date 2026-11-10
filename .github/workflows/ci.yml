@@ -63,6 +63,24 @@ jobs:
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpstan.phar analyse --no-progress --memory-limit=1G
 
+  plugin-check:
+    name: Plugin Check on the package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The scanner of the WordPress.org review team sees what would ship, not the repository.
+      - run: bin/build-package.sh
+      # Errors fail the job; warnings are listed as annotations and in the log.
+      - uses: WordPress/plugin-check-action@10857da14b6c2246d15402b3e69f777edcf8c12e # v1.1.9
+        with:
+          build-dir: build/backups-for-restic
+          # The action would use a token only to comment on the pull request, which the
+          # read-only token of this workflow cannot do.
+          repo-token: ''
+
   unit:
     name: Unit tests (PHP ${{ matrix.php }})
     runs-on: ubuntu-24.04
