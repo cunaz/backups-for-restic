@@ -553,7 +553,7 @@
 				[ 'schedule.check.frequency', __( 'Check the repository', 'backups-for-restic' ), 'choice', { manual: __( 'Only manually', 'backups-for-restic' ), weekly: __( 'Weekly', 'backups-for-restic' ), monthly: __( 'Monthly', 'backups-for-restic' ) } ],
 				[ 'schedule.check.day', __( 'Day of the month for monthly checks', 'backups-for-restic' ), 'number' ],
 				[ 'schedule.check.hour', __( 'Hour for checks', 'backups-for-restic' ), 'number' ],
-				[ 'schedule.check.read_data_subset_percent', __( 'Share of the data each check downloads and verifies, in percent', 'backups-for-restic' ), 'number', null, __( 'Each check picks other packs, so the whole repository is read over time.', 'backups-for-restic' ) ],
+				[ 'schedule.check.read_data_subset_percent', __( 'Share of the data each check downloads and verifies, in percent', 'backups-for-restic' ), 'number', null, __( 'Each check reads a random sample of the stored data.', 'backups-for-restic' ) ],
 			],
 		},
 		{
