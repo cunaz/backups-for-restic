@@ -517,7 +517,8 @@ final class CheckRun {
 	/**
 	 * Downloads one pack of the sample and verifies it completely. A marker written before the
 	 * read counts the requests that ended during it; after READ_ATTEMPTS the pack becomes a
-	 * warning instead of stopping the check for good.
+	 * warning instead of stopping the check for good. The checkpoint is written before the
+	 * marker, so that the request after a killed one starts with the pack the marker names.
 	 *
 	 * @throws \Throwable Whatever reading the pack throws; the next request tries it again.
 	 */
@@ -533,6 +534,10 @@ final class CheckRun {
 		if ( $attempts > self::READ_ATTEMPTS ) {
 			$this->find( 'warning', 'pack_unverified', $pack, 'Reading the pack did not finish within a request; run restic check --read-data from another computer to verify it.' );
 		} else {
+			// The checkpoint names this pack before the marker does. Otherwise a request that
+			// ends here is followed by one that starts at an earlier pack, replaces the marker,
+			// and the attempts for this pack are never counted.
+			$this->persist();
 			Files::write_atomic(
 				$marker,
 				json_encode(
