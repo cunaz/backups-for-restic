@@ -66,8 +66,14 @@ All notable changes are documented here. The format follows
 - Prune stays safe when requests fail or end at the wrong moment: a tree that was missing
   once is still walked when marking could not start over, so its packs are not taken for
   unused ones; a request that ends while prune deletes is continued in that phase, and the
-  packs it had planned are deleted; a start that was interrupted no longer leaves an
-  exclusive lock that blocks every client for 30 minutes.
+  packs it had planned are deleted, as long as the lock was not lost in between (after a
+  lost lock marking starts over, and packs whose index entries are already gone stay until
+  a full `restic prune`); a start that was interrupted no longer leaves an exclusive lock
+  that blocks every client for 30 minutes.
+- After the site was connected to an existing repository, the cleanup after each job
+  removed the index cache of the repository in use, or left the caches of earlier
+  repositories, because it went by a setting that only a newly created repository sets. It
+  now goes by the repository whose key is cached.
 - A check keeps what it has checked when a request fails (it writes its checkpoint at every
   change of phase and every five seconds), and a repository that this PHP cannot read
   (format 2 with compression, no zstd extension) is reported as that, not as damaged.
