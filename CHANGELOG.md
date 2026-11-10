@@ -71,6 +71,9 @@ All notable changes are documented here. The format follows
 - A check keeps what it has checked when a request fails (it writes its checkpoint at every
   change of phase and every five seconds), and a repository that this PHP cannot read
   (format 2 with compression, no zstd extension) is reported as that, not as damaged.
+- A check no longer hangs on a pack that the host cannot read within one request: the
+  requests that end while reading it are counted also when they read other packs first,
+  and after three the pack is reported as unverified.
 - A backup, check or forget that no request advanced for more than 30 minutes takes its
   repository lock again instead of refreshing a lock other clients no longer honour, and
   waits for a client that holds a conflicting lock by then.
