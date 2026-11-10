@@ -20,6 +20,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
@@ -75,6 +76,16 @@ final class CheckRun {
 	 * so only a marker written before the read tells the next request what happened.
 	 */
 	public const int READ_ATTEMPTS = 3;
+
+	/** Within a call, the checkpoint is written again once it is this many seconds old. */
+	private const int CHECKPOINT_SECONDS = 5;
+
+	/**
+	 * Unix time of the last checkpoint written by this object.
+	 *
+	 * @var int
+	 */
+	private int $persisted_at;
 
 	/**
 	 * Lock handling.
@@ -146,7 +157,8 @@ final class CheckRun {
 		if ( ! in_array( $this->state['phase'], self::PHASES, true ) ) {
 			FormatException::raise( 'The check checkpoint names an unknown phase.', [ 'phase' => $this->state['phase'] ] );
 		}
-		$this->locking = new Locking( $repository, $identity, $clock, $this->state['pid'] );
+		$this->locking      = new Locking( $repository, $identity, $clock, $this->state['pid'] );
+		$this->persisted_at = $clock->now()[0];
 	}
 
 	/**
@@ -241,7 +253,13 @@ final class CheckRun {
 		}
 		$this->keep_lock();
 		do {
+			$phase = $this->state['phase'];
 			$this->step();
+			if ( 'done' !== $this->state['phase'] && ( $phase !== $this->state['phase'] || $this->clock->now()[0] - $this->persisted_at >= self::CHECKPOINT_SECONDS ) ) {
+				// A call that fails or is killed later keeps what it has checked up to here.
+				// Only finished units are recorded: a unit that fails ends the call before this.
+				$this->persist();
+			}
 			// A long call, such as one without a deadline, must not outlive its lock.
 			if ( 'done' !== $this->state['phase'] && $this->locking->due( $this->state['locked_at'] ) ) {
 				$this->keep_lock();
@@ -297,12 +315,13 @@ final class CheckRun {
 	}
 
 	/**
-	 * Refreshes the shared lock, or takes a new one if it disappeared. A check only reads, so a
-	 * gap is harmless.
+	 * Refreshes the shared lock, or takes a new one if it disappeared or is older than 30
+	 * minutes, when other clients no longer honour it. A check only reads, so a gap does no
+	 * harm to the repository; what another client removed during a gap can show up as a finding.
 	 */
 	private function keep_lock(): void {
 		$lock = $this->state['lock'];
-		if ( '' === $lock || null === $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+		if ( '' === $lock || null === $this->repository->backend()->size( ObjectType::Locks, $lock ) || $this->locking->lapsed( $this->state['locked_at'] ) ) {
 			$this->state['lock']      = $this->locking->acquire( false )->hex();
 			$this->state['locked_at'] = $this->clock->now()[0];
 			return;
@@ -346,7 +365,7 @@ final class CheckRun {
 		} catch ( NotFound ) {
 			$this->find( 'error', 'index_unreadable', $name, 'The index file disappeared from the server.' );
 			return;
-		} catch ( BackendException $exception ) {
+		} catch ( BackendException | UnsupportedRepository $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'index_unreadable', $name, $exception->getMessage() );
@@ -415,7 +434,7 @@ final class CheckRun {
 			$this->state['roots'][ Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) )->tree->hex() ] = true;
 		} catch ( NotFound ) {
 			$this->find( 'error', 'snapshot_unreadable', $name, 'The snapshot disappeared from the server.' );
-		} catch ( BackendException $exception ) {
+		} catch ( BackendException | UnsupportedRepository $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'snapshot_unreadable', $name, $exception->getMessage() );
@@ -451,7 +470,7 @@ final class CheckRun {
 			// Damage, not a transport error: the pack that holds the tree is gone.
 			$this->find( 'error', 'tree_unreadable', $hex, 'The pack that holds the tree is missing on the server.' );
 			return;
-		} catch ( BackendException $exception ) {
+		} catch ( BackendException | UnsupportedRepository $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'tree_unreadable', $hex, $exception->getMessage() );
@@ -532,6 +551,7 @@ final class CheckRun {
 	 *
 	 * @param string $pack Pack ID (hex).
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws UnsupportedRepository If a blob is compressed and PHP lacks the zstd extension.
 	 */
 	private function verify_pack( string $pack ): void {
 		$backend = $this->repository->backend();
@@ -567,6 +587,8 @@ final class CheckRun {
 					try {
 						PackReader::open_blob( $this->repository->cipher(), $entry, substr( $bytes, $entry->offset - $offset, $entry->length ) );
 						++$verified;
+					} catch ( UnsupportedRepository $exception ) {
+						throw $exception;
 					} catch ( PluginException $exception ) {
 						$failed[ $position ] = $exception->getMessage();
 					}
@@ -629,7 +651,7 @@ final class CheckRun {
 		try {
 			$length  = PackReader::header_length( $backend->load( ObjectType::Data, $pack, $size - 4, 4 ), $size );
 			$entries = PackReader::read_header( $this->repository->cipher(), $backend->load( ObjectType::Data, $pack, $size - 4 - $length, $length ), $size );
-		} catch ( BackendException $exception ) {
+		} catch ( BackendException | UnsupportedRepository $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			return [ [], $exception->getMessage() ];
@@ -777,7 +799,7 @@ final class CheckRun {
 				$packs = IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) );
 			} catch ( NotFound ) {
 				continue;
-			} catch ( BackendException $exception ) {
+			} catch ( BackendException | UnsupportedRepository $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				continue;
@@ -807,10 +829,11 @@ final class CheckRun {
 	 * Writes the checkpoint atomically.
 	 */
 	private function persist(): void {
-		$state            = $this->state;
-		$state['seen']    = array_keys( $state['seen'] );
-		$state['roots']   = array_keys( $state['roots'] );
-		$state['missing'] = array_keys( $state['missing'] );
+		$this->persisted_at = $this->clock->now()[0];
+		$state              = $this->state;
+		$state['seen']      = array_keys( $state['seen'] );
+		$state['roots']     = array_keys( $state['roots'] );
+		$state['missing']   = array_keys( $state['missing'] );
 		Files::write_atomic( $this->work_dir . '/state.json', json_encode( [ 'version' => self::STATE_VERSION ] + $state, JSON_THROW_ON_ERROR ) );
 	}
 }

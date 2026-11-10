@@ -16,11 +16,17 @@ use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Compression;
+use BackupsForRestic\Format\Config;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
+use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Support\SystemClock;
+use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -440,5 +446,144 @@ final class CheckTest extends TestCase {
 		self::assertCount( 2, $this->backend->list( ObjectType::Locks ) );
 		$run->abort();
 		self::assertSame( [ $other->hex() ], array_keys( $this->backend->list( ObjectType::Locks ) ) );
+	}
+
+	public function test_a_call_that_fails_while_reading_packs_keeps_the_phases_before_it(): void {
+		$work    = $this->work_dir();
+		$run     = null;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$run ): void {
+				if ( 'load' === $method && ObjectType::Data === $type && 'read' === $run?->progress()['phase'] ) {
+					throw new BackendException( 'Connection reset by peer.' );
+				}
+			}
+		);
+		$run     = CheckRun::start( Repository::open( $backend, $this->repository->master_key(), new SystemRandom() ), $work, $this->identity, new SystemClock(), new SystemRandom(), 100 );
+		try {
+			// One call does every phase up to reading the packs, where the first request fails.
+			$run->advance( INF );
+			self::fail( 'The transport error ends the call.' );
+		} catch ( BackendException ) {
+			$trees = $run->progress()['trees'];
+		}
+		self::assertGreaterThan( 0, $trees );
+
+		$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+		self::assertSame( 'read', $run->progress()['phase'], 'The checkpoint is from the phase that was reached.' );
+		self::assertSame( $trees, $run->progress()['trees'], 'The walked trees are not walked again.' );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 0, $run->result()['errors'] );
+		self::assertSame( count( $this->backend->list( ObjectType::Data ) ), $run->result()['stats']['packs_read'] ?? 0 );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_long_call_writes_checkpoints_while_it_works(): void {
+		$work    = $this->work_dir();
+		$clock   = new FrozenClock( time() );
+		$loads   = 0;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( $clock, &$loads ): void {
+				if ( 'load' === $method && ObjectType::Data === $type ) {
+					$clock->advance( 2 ); // Every tree takes a while, as on a slow server.
+					if ( 8 === ++$loads ) {
+						throw new BackendException( 'Connection reset by peer.' );
+					}
+				}
+			}
+		);
+		$run     = CheckRun::start( Repository::open( $backend, $this->repository->master_key(), new SystemRandom() ), $work, $this->identity, $clock, new SystemRandom(), 0 );
+		try {
+			$run->advance( INF );
+			self::fail( 'The transport error ends the call.' );
+		} catch ( BackendException ) {
+			self::assertSame( 'trees', $run->progress()['phase'] );
+		}
+
+		$resumed = CheckRun::resume( $this->repository, $work, $this->identity, $clock );
+		self::assertSame( 'trees', $resumed->progress()['phase'] );
+		self::assertGreaterThan( 0, $resumed->progress()['trees'], 'Trees walked before the failure are in the checkpoint.' );
+		$resumed->abort();
+	}
+
+	public function test_a_repository_this_php_cannot_read_is_not_reported_as_damaged(): void {
+		if ( Compression::available() ) {
+			self::markTestSkipped( 'The zstd extension is installed.' );
+		}
+		// A format 2 repository with a compressed index file, on a PHP without zstd.
+		$config = $this->repository->config();
+		$this->backend->objects[ ObjectType::Config->value ]['config'] = $this->repository->cipher()->seal( ( new Config( Config::VERSION_2, $config->id, $config->chunker_polynomial ) )->to_json() );
+		$repository = Repository::open( $this->backend, $this->repository->master_key(), new SystemRandom() );
+		$repository->save_unpacked( ObjectType::Index, "\x02" . 'compressed with zstd' );
+
+		$run = CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		try {
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+			self::fail( 'The check cannot read this repository.' );
+		} catch ( UnsupportedRepository ) {
+			self::assertSame( 0, $run->result()['errors'], 'Nothing was reported as damage.' );
+			self::assertSame( [], $run->result()['findings'] );
+		}
+		$run->abort();
+	}
+
+	public function test_refreshes_its_lock_during_a_long_check(): void {
+		$clock = new FrozenClock( time() );
+		$run   = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, $clock, new SystemRandom(), 0 );
+		$first = array_keys( $this->backend->list( ObjectType::Locks ) );
+
+		$clock->advance( Locking::REFRESH_AFTER_SECONDS );
+		$run->advance( 0.0 );
+
+		$second = array_keys( $this->backend->list( ObjectType::Locks ) );
+		self::assertCount( 1, $second );
+		self::assertNotSame( $first, $second, 'A fresh lock replaced the old one.' );
+		$run->abort();
+	}
+
+	public function test_takes_a_new_lock_when_its_lock_was_removed(): void {
+		$work = $this->work_dir();
+		$run  = CheckRun::start( $this->repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		$run->advance( 0.0 );
+		foreach ( array_keys( $this->backend->list( ObjectType::Locks ) ) as $lock ) {
+			$this->backend->delete( ObjectType::Locks, $lock );
+		}
+
+		$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+		$run->advance( 0.0 );
+
+		self::assertCount( 1, $this->backend->list( ObjectType::Locks ) );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 0, $run->result()['errors'] );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_check_paused_for_too_long_waits_for_an_exclusive_lock(): void {
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		$run   = CheckRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom(), 0 );
+		$run->advance( 0.0 );
+
+		// The lock is stale by now, so another client's maintenance ignored it.
+		$clock->advance( Lock::STALE_AFTER_SECONDS + 1 );
+		$other     = new Locking( $this->repository, new Identity( 'laptop', 'admin' ), $clock, 4711 );
+		$exclusive = $other->acquire( true );
+
+		try {
+			CheckRun::resume( $this->repository, $work, $this->identity, $clock )->advance( 0.0 );
+			self::fail( 'The check must wait for the exclusive lock.' );
+		} catch ( LockConflict ) {
+			self::assertSame( [ $exclusive->hex() ], array_keys( $this->backend->list( ObjectType::Locks ) ) );
+		}
+		$other->release( $exclusive );
+		CheckRun::resume( $this->repository, $work, $this->identity, $clock )->abort();
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 }

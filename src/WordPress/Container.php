@@ -378,7 +378,7 @@ final class Container {
 			$this->exposure()
 		);
 		$backup      = new BackupSteps( $services );
-		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ) ), $backup );
+		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ), $this->site()->site_tag() ), $backup );
 		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random(), new JobEvents( $this ) );
 	}
 

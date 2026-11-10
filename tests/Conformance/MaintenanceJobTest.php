@@ -106,7 +106,7 @@ final class MaintenanceJobTest extends TestCase {
 		$private     = new PrivateDirectory( $site . '/wp-content/' . PrivateDirectory::NAME );
 		$store       = new JobStore( $private->subdirectory( 'jobs' ), new Redactor(), $random );
 		$this->state = new SiteState( $options );
-		$paths       = new SitePaths( $site, $site . '/wp-content', $site . '/wp-content/uploads', 'https://example.com', 'wp_', '7.1.4', '0.1.0-test' );
+		$paths       = self::paths( $site );
 		$plan        = static fn ( Job $job ): BackupPlan => ( new PlanFactory( $paths, $loaded, $private, [], [], null, $job->id, $job->created_at ) )->plan();
 		$access      = new RepositoryAccess( $loaded, $secrets, new CurlHttpClient( $server->certificate ), $random, 'backups-for-restic-tests' );
 		$services    = new BackupServices( $loaded, $access, $private, $store, $this->state, new SystemClock(), $random, new Identity( 'example.com', 'www-data' ), $plan );
@@ -116,7 +116,8 @@ final class MaintenanceJobTest extends TestCase {
 				$services,
 				function ( string $mode ): void {
 					$this->switched[] = $mode;
-				}
+				},
+				$paths->site_tag()
 			),
 			$backup
 		);
@@ -146,8 +147,13 @@ final class MaintenanceJobTest extends TestCase {
 		return $finished;
 	}
 
+	private static function paths( string $site ): SitePaths {
+		return new SitePaths( $site, $site . '/wp-content', $site . '/wp-content/uploads', 'https://example.com', 'wp_', '7.1.4', '0.1.0-test' );
+	}
+
 	/**
-	 * Writes snapshots dated days apart; only the middle one holds a large unique file.
+	 * Writes snapshots dated days apart; only the middle one holds a large unique file. They
+	 * carry the tags the backup job gives them: the plugin's, the site's and the job's own.
 	 */
 	private function history( Repository $repository, string $site ): void {
 		$identity = new Identity( 'example.com', 'www-data' );
@@ -158,7 +164,8 @@ final class MaintenanceJobTest extends TestCase {
 				unlink( $site . '/unique.bin' );
 			}
 			$this->cleanup[] = $work = TempDir::create( 'history' );
-			$run             = BackupRun::start( $repository, new BackupPlan( [ $site ], [ PlanFactory::TAG ] ), $work, $identity, new FrozenClock( time() - $days_ago * 86400 ), null, 4 * 1048576 );
+			$tags            = [ PlanFactory::TAG, self::paths( $site )->site_tag(), sprintf( 'run:20260101T000000Z-%06x', $days_ago ) ];
+			$run             = BackupRun::start( $repository, new BackupPlan( [ $site ], $tags ), $work, $identity, new FrozenClock( time() - $days_ago * 86400 ), null, 4 * 1048576 );
 			while ( ! $run->advance( INF ) ) {
 				continue;
 			}

@@ -15,13 +15,16 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Format\Id;
+use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
+use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -30,7 +33,8 @@ use BackupsForRestic\Tests\Support\TempDir;
  */
 final class ForgetRunTest extends TestCase {
 
-	private const array TAGS = [ 'backups-for-restic' ];
+	/** Tags every snapshot of this site carries; forget selects by them. */
+	private const array TAGS = [ 'backups-for-restic', 'site:1a2b3c4d5e6f' ];
 
 	private InMemoryBackend $backend;
 
@@ -59,12 +63,15 @@ final class ForgetRunTest extends TestCase {
 	}
 
 	/**
-	 * Writes a snapshot directly; forget reads only its metadata.
+	 * Writes a snapshot directly; forget reads only its metadata. Like a real backup, the
+	 * snapshot carries the site's tags and the tag of the job that wrote it, which no other
+	 * snapshot has.
 	 *
-	 * @param list<string> $tags Tags.
+	 * @param list<string>|null $tags Tags, or null for this site's.
 	 */
-	private function snapshot( int $days_ago, string $hostname = 'example.com', array $tags = self::TAGS ): string {
-		$time = Rfc3339::format( 1767225600 - $days_ago * 86400 + 3600 );
+	private function snapshot( int $days_ago, string $hostname = 'example.com', ?array $tags = null ): string {
+		$tags ??= [ ...self::TAGS, sprintf( 'run:20260101T000000Z-%06x', $days_ago ) ];
+		$time   = Rfc3339::format( 1767225600 - $days_ago * 86400 + 3600 );
 		return $this->repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( $time, Id::of( 'tree ' . $days_ago . $hostname ), [ '/var/www' ], $hostname, 'www-data', 0, 0, [], $tags ) )->to_json() )->hex();
 	}
 
@@ -89,7 +96,12 @@ final class ForgetRunTest extends TestCase {
 		for ( $day = 0; $day < 10; $day++ ) {
 			$ours[] = $this->snapshot( $day );
 		}
-		$foreign = [ $this->snapshot( 20, 'laptop' ), $this->snapshot( 21, 'example.com', [ 'manual' ] ) ];
+		$foreign = [
+			$this->snapshot( 20, 'laptop' ),
+			$this->snapshot( 21, 'example.com', [ 'manual' ] ),
+			// Another site with the same host name in the same repository.
+			$this->snapshot( 22, 'example.com', [ 'backups-for-restic', 'site:ffffffffffff', 'run:20260101T000000Z-ffffff' ] ),
+		];
 		return [
 			'ours'    => $ours,
 			'foreign' => $foreign,
@@ -136,7 +148,7 @@ final class ForgetRunTest extends TestCase {
 			self::assertNotContains( $id, $left );
 		}
 		foreach ( $history['foreign'] as $id ) {
-			self::assertContains( $id, $left, 'Snapshots of other hosts or without the tag stay.' );
+			self::assertContains( $id, $left, 'Snapshots of other hosts, of other sites or without the tags stay.' );
 		}
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
@@ -157,7 +169,7 @@ final class ForgetRunTest extends TestCase {
 		self::assertSame( count( $expected ), $result['removed'] );
 		$left = array_keys( $this->backend->list( ObjectType::Snapshots ) );
 		self::assertSame( [], array_values( array_intersect( $expected, $left ) ) );
-		self::assertCount( 12 - count( $expected ), $left );
+		self::assertCount( 10 + count( $history['foreign'] ) - count( $expected ), $left );
 	}
 
 	public function test_refuses_an_empty_policy(): void {
@@ -178,11 +190,68 @@ final class ForgetRunTest extends TestCase {
 		}
 	}
 
-	public function test_waits_for_another_clients_lock(): void {
+	public function test_refuses_while_another_client_holds_a_lock(): void {
 		$this->history();
 		( new Locking( $this->repository, new Identity( 'laptop', 'admin' ), new SystemClock(), 4711 ) )->acquire( false );
 
 		$this->expectException( LockConflict::class );
 		$this->forget( new RetentionPolicy( 1 ) );
+	}
+
+	public function test_the_tag_of_the_job_that_wrote_a_snapshot_does_not_keep_it(): void {
+		// Every snapshot has a tag no other snapshot has. Grouped by all their tags, each would
+		// be the newest of its own group and the policy would keep them all.
+		$history = $this->history();
+
+		$result = $this->forget( new RetentionPolicy( 2 ) )->result();
+
+		self::assertSame( 8, $result['removed'] );
+		$left = array_keys( $this->backend->list( ObjectType::Snapshots ) );
+		self::assertCount( 2 + count( $history['foreign'] ), $left );
+		self::assertContains( $history['ours'][0], $left, 'The newest snapshot stays.' );
+		self::assertContains( $history['ours'][1], $left );
+	}
+
+	public function test_a_start_that_fails_after_locking_leaves_no_lock(): void {
+		$this->history();
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ): void {
+				if ( 'list' === $method && ObjectType::Snapshots === $type ) {
+					throw new BackendException( 'The connection was reset.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+
+		try {
+			ForgetRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), new RetentionPolicy( 1 ), self::TAGS );
+			self::fail( 'The start must fail.' );
+		} catch ( BackendException ) {
+			self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The exclusive lock is released.' );
+		}
+	}
+
+	public function test_a_forget_paused_for_too_long_waits_for_another_clients_lock(): void {
+		$this->history();
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		$run   = ForgetRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom(), new RetentionPolicy( 1 ), self::TAGS );
+		$run->advance( 0.0 );
+
+		// The exclusive lock is stale by now, so another client's backup ignored it.
+		$clock->advance( Lock::STALE_AFTER_SECONDS + 1 );
+		$other  = new Locking( $this->repository, new Identity( 'laptop', 'admin' ), $clock, 4711 );
+		$shared = $other->acquire( false );
+
+		try {
+			ForgetRun::resume( $this->repository, $work, $this->identity, $clock, new RetentionPolicy( 1 ), self::TAGS )->advance( 0.0 );
+			self::fail( 'The forget must wait for the other lock.' );
+		} catch ( LockConflict ) {
+			self::assertSame( [ $shared->hex() ], array_keys( $this->backend->list( ObjectType::Locks ) ) );
+		}
+		$other->release( $shared );
+		ForgetRun::resume( $this->repository, $work, $this->identity, $clock, new RetentionPolicy( 1 ), self::TAGS )->abort();
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 }
