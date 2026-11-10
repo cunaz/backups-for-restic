@@ -23,6 +23,15 @@ defined( 'ABSPATH' ) || exit;
  * act on. So the index stops loading, with an error that says why, once the smallest packs
  * the plugin writes would no longer fit beside it; and a backup makes its packs smaller
  * when the configured size does not fit, down to that smallest size.
+ *
+ * PHP holds against its limit the memory it has reserved from the system, not the memory
+ * in use. It reserves blocks of 2 MiB and keeps a block as long as anything in it is in
+ * use, so in a process that has run for a while the two figures differ. The records of an
+ * index are small and fit into the free parts of such blocks; a pack of several megabytes
+ * does not and needs memory of its own. While an index loads, the budget therefore looks
+ * at the memory in use, which costs nothing to read. Once the index has loaded, and when a
+ * pack size is chosen, it looks at the reserved memory, after PHP has given back the blocks
+ * that are free altogether, as PHP itself does before it gives up.
  */
 final readonly class MemoryBudget {
 
@@ -66,22 +75,21 @@ final readonly class MemoryBudget {
 
 	/**
 	 * Stops the loading of an index that leaves no room for a backup with the smallest packs.
+	 * Called for every pack while an index loads.
 	 *
 	 * @throws IndexTooLarge If the memory in use is beyond what the index may take.
 	 */
 	public function check_index(): void {
-		$used = memory_get_usage();
-		$room = $this->limit - self::WORKING_BYTES - self::PACK_COPIES * self::SMALLEST_PACK;
-		if ( $used > $room ) {
-			IndexTooLarge::raise(
-				'The index of the repository does not fit into the memory this host allows.',
-				[
-					'memory_limit' => $this->limit,
-					'in_use'       => $used,
-					'room'         => $room,
-				]
-			);
-		}
+		$this->refuse_beyond( memory_get_usage(), 'in_use' );
+	}
+
+	/**
+	 * Makes sure that a backup with the smallest packs fits beside an index that has loaded.
+	 *
+	 * @throws IndexTooLarge If PHP has reserved more memory than the index may take.
+	 */
+	public function check_loaded_index(): void {
+		$this->refuse_beyond( self::reserved(), 'reserved' );
 	}
 
 	/**
@@ -91,7 +99,38 @@ final readonly class MemoryBudget {
 	 * @return int The configured size, or a smaller one that fits; never below the smallest pack.
 	 */
 	public function pack_size( int $wanted ): int {
-		$affordable = intdiv( $this->limit - memory_get_usage() - self::WORKING_BYTES, self::PACK_COPIES );
+		$affordable = intdiv( $this->limit - self::reserved() - self::WORKING_BYTES, self::PACK_COPIES );
 		return min( $wanted, max( self::SMALLEST_PACK, $affordable ) );
+	}
+
+	/**
+	 * Raises the error if a measure of memory is beyond what the index may take.
+	 *
+	 * @param int    $bytes   Memory in use, or memory reserved.
+	 * @param string $measure Name of the measure in the error's context: in_use or reserved.
+	 * @throws IndexTooLarge If it is.
+	 */
+	private function refuse_beyond( int $bytes, string $measure ): void {
+		$room = $this->limit - self::WORKING_BYTES - self::PACK_COPIES * self::SMALLEST_PACK;
+		if ( $bytes > $room ) {
+			IndexTooLarge::raise(
+				'The index of the repository does not fit into the memory this host allows.',
+				[
+					'memory_limit' => $this->limit,
+					$measure       => $bytes,
+					'room'         => $room,
+				]
+			);
+		}
+	}
+
+	/**
+	 * The memory PHP has reserved once it has given back the blocks that are free altogether.
+	 *
+	 * @return int Bytes.
+	 */
+	private static function reserved(): int {
+		gc_mem_caches();
+		return memory_get_usage( true );
 	}
 }

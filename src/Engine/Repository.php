@@ -255,6 +255,7 @@ final class Repository {
 				$this->memory?->check_index();
 			}
 		}
+		$this->memory?->check_loaded_index();
 		return $index;
 	}
 

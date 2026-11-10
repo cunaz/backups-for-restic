@@ -34,6 +34,9 @@ final class MemoryBudgetTest extends TestCase {
 	/** What the smallest backup needs besides the index. */
 	private const int SMALLEST_JOB = MemoryBudget::WORKING_BYTES + MemoryBudget::PACK_COPIES * MemoryBudget::SMALLEST_PACK;
 
+	/** PHP reserves memory in blocks of this size, so the reserved figure moves in such steps. */
+	private const int BLOCK = 2 * self::MIB;
+
 	/** @var list<string> */
 	private array $cleanup = [];
 
@@ -41,6 +44,14 @@ final class MemoryBudgetTest extends TestCase {
 		foreach ( $this->cleanup as $path ) {
 			TempDir::remove( $path );
 		}
+	}
+
+	/**
+	 * The memory PHP holds against its limit, as the budget measures it.
+	 */
+	private static function reserved(): int {
+		gc_mem_caches();
+		return memory_get_usage( true );
 	}
 
 	/**
@@ -81,33 +92,81 @@ final class MemoryBudgetTest extends TestCase {
 			self::fail( 'A megabyte is missing.' );
 		} catch ( IndexTooLarge $e ) {
 			self::assertSame( 'The index of the repository does not fit into the memory this host allows.', $e->getMessage() );
+			self::assertSame( [ 'memory_limit', 'in_use', 'room' ], array_keys( $e->context() ) );
 			self::assertSame( $limit, $e->context()['memory_limit'] );
 			self::assertSame( $limit - self::SMALLEST_JOB, $e->context()['room'] );
 			self::assertGreaterThan( $e->context()['room'], $e->context()['in_use'] );
 		}
 	}
 
+	public function test_a_loaded_index_is_measured_by_the_memory_php_has_reserved(): void {
+		( new MemoryBudget( self::reserved() + self::SMALLEST_JOB + 2 * self::BLOCK ) )->check_loaded_index();
+
+		$limit = self::reserved() + self::SMALLEST_JOB - 2 * self::BLOCK;
+		try {
+			( new MemoryBudget( $limit ) )->check_loaded_index();
+			self::fail( 'Two blocks are missing.' );
+		} catch ( IndexTooLarge $e ) {
+			self::assertSame( 'The index of the repository does not fit into the memory this host allows.', $e->getMessage() );
+			self::assertSame( [ 'memory_limit', 'reserved', 'room' ], array_keys( $e->context() ) );
+			self::assertSame( $limit, $e->context()['memory_limit'] );
+			self::assertSame( $limit - self::SMALLEST_JOB, $e->context()['room'] );
+			self::assertGreaterThan( $e->context()['room'], $e->context()['reserved'] );
+			self::assertSame( 0, $e->context()['reserved'] % self::BLOCK, 'Reserved memory, which comes in blocks, not the memory in use.' );
+		}
+	}
+
 	public function test_packs_are_as_large_as_asked_for_when_three_of_them_fit(): void {
-		$budget = new MemoryBudget( memory_get_usage() + MemoryBudget::WORKING_BYTES + 3 * 16 * self::MIB + self::MIB );
+		$budget = new MemoryBudget( self::reserved() + MemoryBudget::WORKING_BYTES + 3 * 16 * self::MIB + 2 * self::BLOCK );
 		self::assertSame( 16 * self::MIB, $budget->pack_size( 16 * self::MIB ) );
 		self::assertSame( 8 * self::MIB, $budget->pack_size( 8 * self::MIB ), 'Never larger than asked for.' );
 	}
 
 	public function test_packs_shrink_to_a_third_of_what_is_left_after_the_working_memory(): void {
-		$budget = new MemoryBudget( memory_get_usage() + MemoryBudget::WORKING_BYTES + 3 * 6 * self::MIB + self::MIB );
+		$budget = new MemoryBudget( self::reserved() + MemoryBudget::WORKING_BYTES + 3 * 8 * self::MIB );
 		$size   = $budget->pack_size( 16 * self::MIB );
-		self::assertGreaterThan( 6 * self::MIB - 65536, $size );
-		self::assertLessThan( 6 * self::MIB + 400000, $size );
+		// Eight megabytes, give or take a third of a block that PHP reserved or gave back since.
+		self::assertGreaterThan( 7 * self::MIB, $size );
+		self::assertLessThan( 9 * self::MIB, $size );
 	}
 
 	public function test_packs_never_shrink_below_the_smallest_size_but_stay_as_small_as_asked_for(): void {
-		$tight = new MemoryBudget( memory_get_usage() + self::MIB );
+		$tight = new MemoryBudget( self::reserved() + self::MIB );
 		self::assertSame( MemoryBudget::SMALLEST_PACK, $tight->pack_size( 16 * self::MIB ) );
 		self::assertSame( 2 * self::MIB, $tight->pack_size( 2 * self::MIB ), 'A size below the smallest was asked for on purpose.' );
 	}
 
+	public function test_memory_that_is_reserved_but_not_in_use_does_not_count_as_room_for_packs(): void {
+		// Many small strings of which every 400th stays: no block of memory becomes free again.
+		$kept    = [];
+		$dropped = [];
+		for ( $i = 0; $i < 300000; $i++ ) {
+			$string = str_repeat( 'x', 96 ) . $i;
+			if ( 0 === $i % 400 ) {
+				$kept[] = $string;
+			} else {
+				$dropped[] = $string;
+			}
+		}
+		unset( $dropped );
+		$reserved = self::reserved();
+		$in_use   = memory_get_usage();
+		self::assertGreaterThan( $in_use + 16 * self::MIB, $reserved, 'PHP still holds what the dropped strings took.' );
+		self::assertCount( 750, $kept );
+
+		// By the memory in use, three packs of at least 13 MiB would fit under this limit.
+		$budget = new MemoryBudget( $reserved + MemoryBudget::WORKING_BYTES + 3 * 8 * self::MIB );
+		self::assertGreaterThan( 13 * self::MIB, intdiv( $budget->limit - $in_use - MemoryBudget::WORKING_BYTES, 3 ) );
+		self::assertLessThan( 9 * self::MIB, $budget->pack_size( 16 * self::MIB ), 'A pack finds no room in blocks that are partly in use.' );
+
+		$tight = new MemoryBudget( $reserved + self::SMALLEST_JOB - 2 * self::BLOCK );
+		$tight->check_index();
+		$this->expectException( IndexTooLarge::class );
+		$tight->check_loaded_index();
+	}
+
 	/**
-	 * A repository with an index of 60000 blobs, which takes several megabytes.
+	 * A repository with an index of 60000 blobs in six index files, which takes several megabytes.
 	 */
 	private function repository(): Repository {
 		$repository = Repository::initialize( new InMemoryBackend(), 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
@@ -118,12 +177,11 @@ final class MemoryBudgetTest extends TestCase {
 				$entries[] = new PackEntry( BlobType::Data, Id::from_bytes( hash( 'sha256', $pack . ':' . $i, true ) ), 1000 * $i, 1000 );
 			}
 			$packs[ hash( 'sha256', 'pack' . $pack ) ] = $entries;
-			if ( 29 === $pack ) {
+			if ( 9 === $pack % 10 ) {
 				$repository->save_unpacked( ObjectType::Index, IndexFile::encode( $packs ) );
 				$packs = [];
 			}
 		}
-		$repository->save_unpacked( ObjectType::Index, IndexFile::encode( $packs ) );
 		return $repository;
 	}
 
@@ -165,7 +223,7 @@ final class MemoryBudgetTest extends TestCase {
 			self::assertSame( $bytes, file_get_contents( $directory . '/index.bin' ), 'The cache file is fine and stays.' );
 		}
 
-		$repository->limit_memory( new MemoryBudget( memory_get_usage() + self::SMALLEST_JOB + 64 * self::MIB ) );
+		$repository->limit_memory( new MemoryBudget( self::reserved() + self::SMALLEST_JOB + 64 * self::MIB ) );
 		self::assertSame( 60000, ( new IndexCache( $directory ) )->load( $repository )->count(), 'With enough memory the same file loads.' );
 	}
 
@@ -176,11 +234,11 @@ final class MemoryBudgetTest extends TestCase {
 		$identity   = new Identity( 'example.com', 'www-data' );
 		$repository = Repository::initialize( $backend, 'budget password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
 		gc_collect_cycles();
-		$repository->limit_memory( new MemoryBudget( memory_get_usage() + MemoryBudget::WORKING_BYTES + 3 * 5 * self::MIB ) );
+		$repository->limit_memory( new MemoryBudget( self::reserved() + MemoryBudget::WORKING_BYTES + 3 * 6 * self::MIB ) );
 
 		$this->cleanup[] = $work = TempDir::create( 'budget-work' );
 		$run             = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $work . '/run', $identity, new SystemClock(), null, 16 * self::MIB );
-		self::assertLessThan( 5 * self::MIB + 1, $run->pack_size() );
+		self::assertLessThan( 7 * self::MIB, $run->pack_size() );
 		self::assertGreaterThan( MemoryBudget::SMALLEST_PACK - 1, $run->pack_size() );
 		while ( ! $run->advance( INF ) ) {
 			continue;

@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\ScryptParameters;
@@ -239,9 +240,14 @@ final class IndexCacheTest extends TestCase {
 		self::assertGreaterThan( 100000, filesize( $limited . '/index.bin' ) );
 	}
 
+	/**
+	 * In a process of its own: what the tests before it left reserved would count against the
+	 * suite's memory limit, and against the figures measured here.
+	 */
+	#[RunInSeparateProcess]
 	public function test_reading_the_cache_needs_little_more_memory_than_the_index(): void {
-		for ( $file = 0; $file < 2; $file++ ) {
-			$this->index_file( 'file' . $file, 50, 1000 );
+		for ( $file = 0; $file < 10; $file++ ) {
+			$this->index_file( 'file' . $file, 10, 1000 );
 		}
 		( new IndexCache( $this->directory ) )->load( $this->repository );
 		$size = (int) filesize( $this->directory . '/index.bin' );

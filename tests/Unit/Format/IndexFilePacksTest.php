@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Format;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\BlobType;
@@ -152,6 +153,11 @@ final class IndexFilePacksTest extends TestCase {
 		$packs->current();
 	}
 
+	/**
+	 * In a process of its own: decoding the file whole, for comparison, takes more memory than
+	 * the suite's limit leaves after the tests before it.
+	 */
+	#[RunInSeparateProcess]
 	public function test_a_full_index_file_is_decoded_with_a_fraction_of_the_memory(): void {
 		$packs = [];
 		for ( $pack = 0; $pack < 250; $pack++ ) {

@@ -54,10 +54,20 @@ ends the same way.
    the decoder would refuse in the whole document. The fuzzer compares both ways of
    decoding on every input.
 6. **A job has a memory budget** (`Engine\MemoryBudget`, from PHP's `memory_limit` as it is
-   during the tick). The index stops loading with the error `index_too_large` once the
-   memory in use leaves less than 20 MiB and three packs of 4 MiB, the smallest pack size.
-   A backup makes its packs smaller than configured when three of them do not fit beside the
-   index, down to 4 MiB, and says so in the job's log.
+   during the tick). The index stops loading with the error `index_too_large` once it
+   leaves less than 20 MiB and three packs of 4 MiB, the smallest pack size. A backup makes
+   its packs smaller than configured when three of them do not fit beside the index, down
+   to 4 MiB, and says so in the job's log.
+
+   PHP holds against its limit the memory it has reserved from the system, not the memory
+   in use: it reserves blocks of 2 MiB and keeps a block as long as anything in it is in
+   use. The records of an index are small and fit into the free parts of such blocks; a
+   pack of several megabytes needs memory of its own. So the budget reads the memory in
+   use for every pack while an index loads, which costs nothing and stops an index that is
+   far too large early. Once the index has loaded, and when it chooses the pack size, it
+   reads the reserved memory, after PHP has given back the blocks that are free altogether.
+   In a process that has run for a while the two figures differ by tens of megabytes: the
+   unit suite showed 24 MiB in use and 36 to 62 MiB reserved.
 
 ## Consequences
 - Measured after the change: 33 MB for 500 000 blobs, 61 MB for a million, 115 MB for two
