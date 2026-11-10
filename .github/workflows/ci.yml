@@ -203,24 +203,52 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # A pull request is checked out as its merge into the base branch. With the two
+          # parents of that commit the next step can list the files the pull request changes.
+          fetch-depth: 2
+      # The run takes about 40 minutes, so a pull request that cannot change its result skips
+      # it and the job ends green. Such a pull request touches neither the mutated code
+      # (src/Crypto, src/Format, src/Engine/Forget), nor the code it calls, nor the tests, the
+      # tools or this workflow. The list is wider than needed on purpose. A push to main always
+      # runs in full, and so does a pull request whose files cannot be listed.
+      - name: Can this change alter the result?
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WATCHED: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
+        run: |
+          run=true
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null || ! git diff --name-only --no-renames -z 'HEAD^1' HEAD > "$RUNNER_TEMP/changed-files"; then
+              echo 'The files of the pull request could not be listed: running in full.'
+            elif ! tr '\0' '\n' < "$RUNNER_TEMP/changed-files" | grep -Eq "$WATCHED"; then
+              run=false
+              echo '::notice::Mutation testing skipped: this pull request changes none of the files the run depends on (src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml). A push to main always runs it.'
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        if: steps.changes.outputs.run == 'true'
         with:
           php-version: '8.3'
           coverage: pcov
           tools: composer:v2
       - run: composer install --no-interaction --no-progress --prefer-dist
+        if: steps.changes.outputs.run == 'true'
       - run: bin/install-test-tools.sh infection
+        if: steps.changes.outputs.run == 'true'
       # Infection mutates covered lines only (the default since 0.31); the gate (covered MSI of
       # at least 90 %) lives in infection.json5.dist.
       - run: .tools/bin/infection --threads=max --no-progress
+        if: steps.changes.outputs.run == 'true'
       # A gate that measured nothing must not pass: show the counts and require mutants.
       - name: Mutation summary
-        if: always()
+        if: always() && steps.changes.outputs.run == 'true'
         run: |
           cat .tools/infection/summary.log
           grep -Eq '^Total: [1-9]' .tools/infection/summary.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.changes.outputs.run == 'true'
         with:
           name: mutation-logs
           path: .tools/infection/
