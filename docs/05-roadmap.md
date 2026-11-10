@@ -82,12 +82,17 @@ crashed in backup ticks; the test server now runs without the JIT, as PHP does b
 The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
 which GitHub starts from `main` only, so not before the pull requests are merged.**
 
-**Found by the audit of 2026-11-10 and carried into Milestone 3:** no test loads the
-classes of the WordPress layer other than through the HTTP suite, which calls 10 of the 16
-routes; loopback chaining, the wizard, WP-CLI, uninstall and the multisite refusal are
-untested. Time estimates, a schedule more frequent than twice a day, and the Doctor's
-checks for outbound HTTPS and for how to switch the PHP version were promised and do not
-exist.
+**Found by the audit of 2026-11-10 and fixed:** a cancel request was lost when it arrived
+while a tick ran; after the setup the recovery kit could be had without the WordPress
+password through the connect and create routes, and the stored REST password was sent to
+whatever host a request named; backups could start before the setup was completed;
+uninstalling left a working directory chosen with the filter.
+
+**Found and carried into Milestone 3:** no test loads the classes of the WordPress layer
+other than through the HTTP suite, which calls 10 of the 16 routes; loopback chaining, the
+wizard, WP-CLI, uninstall and the multisite refusal are untested. Time estimates, a
+schedule more frequent than twice a day, and the Doctor's checks for outbound HTTPS and for
+how to switch the PHP version were promised and do not exist.
 
 | Acceptance criterion | Result |
 | --- | --- |
@@ -155,8 +160,10 @@ real backup job, because every snapshot carries its job's tag and forget grouped
 tags; the simulation had used snapshots with one shared tag and now uses the real ones.
 Prune could delete used packs when a run was tried again after a failed request, could not
 continue after a request ended while it deleted, and could leave its exclusive lock behind.
-A check lost its progress with a failed request and called a repository it could not read
-damaged.
+A check lost its progress with a failed request, called a repository it could not read
+damaged, and could hang on a pack the host cannot read within one request. Notices were
+given up after 20 minutes instead of two days, and many warnings could push the errors off
+the check alert.
 
 **Open, and carried into Milestone 3:** tests for the
 WordPress wiring of the second and third acceptance criterion (the daily probe, the stored
