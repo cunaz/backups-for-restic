@@ -5,7 +5,6 @@ namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
@@ -438,35 +437,14 @@ final class PruneTest extends TestCase {
 	public function test_refuses_when_it_cannot_tell_whether_deletions_are_allowed(): void {
 		$this->history_with_a_forgotten_snapshot();
 		$objects    = $this->backend->objects;
-		$inner      = $this->backend;
-		$unreliable = new class( $inner ) implements Backend {
-			public function __construct( private readonly Backend $inner ) {
+		$unreliable = new HookedBackend(
+			$this->backend,
+			static function ( string $method ): void {
+				if ( 'delete' === $method ) {
+					throw new BackendException( 'The server answered 503.' );
+				}
 			}
-
-			public function create(): void {
-				$this->inner->create();
-			}
-
-			public function size( ObjectType $type, string $name ): ?int {
-				return $this->inner->size( $type, $name );
-			}
-
-			public function load( ObjectType $type, string $name, int $offset = 0, ?int $length = null ): string {
-				return $this->inner->load( $type, $name, $offset, $length );
-			}
-
-			public function save( ObjectType $type, string $name, string $body ): void {
-				$this->inner->save( $type, $name, $body );
-			}
-
-			public function delete( ObjectType $type, string $name ): void {
-				throw new BackendException( 'The server answered 503.' );
-			}
-
-			public function list( ObjectType $type ): array {
-				return $this->inner->list( $type );
-			}
-		};
+		);
 		$repository = Repository::open( $unreliable, $this->repository->master_key(), new SystemRandom() );
 
 		try {
@@ -634,7 +612,7 @@ final class PruneTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
-	public function test_waits_for_another_clients_lock(): void {
+	public function test_refuses_while_another_client_holds_a_lock(): void {
 		$this->history_with_a_forgotten_snapshot();
 		( new Locking( $this->repository, new Identity( 'laptop', 'admin' ), new SystemClock(), 4711 ) )->acquire( false );
 

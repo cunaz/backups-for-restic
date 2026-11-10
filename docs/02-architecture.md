@@ -464,6 +464,11 @@ CLI is `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` i
   leaves a tree unwalked. The checkpoint is written before the lock is taken, at every
   change of phase and at the end of every tick: a request that ends while it deletes is
   continued in that phase, and a lock it left behind is recognised by the run's number.
+  That holds while the lock is continuous. If the lock was lost, or not refreshed for 25
+  minutes, while prune was deleting, marking starts over, and the packs whose index entries
+  were already removed are no longer found by any plan: they stay on the server as packs
+  that no index lists. The check reports such packs as a warning, a full `restic prune`
+  removes them, and so will prune itself once it deletes unlisted packs (Milestone 3).
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, no duplicate blob ids) plus **sampled
   data verification**: download `check.read_data_subset` percent of packs (default 2 %),
