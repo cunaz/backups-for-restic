@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Plugin;
 use BackupsForRestic\Secrets\SecretName;
 
@@ -23,11 +24,24 @@ defined( 'ABSPATH' ) || exit;
 final class RecoveryKit {
 
 	/**
+	 * The CA certificate the kit has to carry: a self-signed server needs it for restic too. It
+	 * is public, not a secret.
+	 *
+	 * @param Container $container Services.
+	 * @return string PEM text, or an empty string if no certificate was uploaded.
+	 * @throws StorageFailed With the code ca_certificate_missing if the settings name an uploaded certificate that is not there; a kit without it would be useless.
+	 */
+	public static function ca_certificate( Container $container ): string {
+		return 'uploaded' === $container->settings()->string( 'repository.ca_certificate' ) ? $container->private_dir()->ca_certificate() : '';
+	}
+
+	/**
 	 * Builds the kit.
 	 *
 	 * @param Container $container Services.
 	 * @return string Plain text.
 	 * @throws SecretsUndecryptable If the stored secrets cannot be decrypted.
+	 * @throws StorageFailed If the uploaded CA certificate is missing.
 	 */
 	public static function text( Container $container ): string {
 		$settings = $container->settings();
@@ -37,11 +51,9 @@ final class RecoveryKit {
 		$url      = $settings->string( 'repository.url' );
 		$username = $settings->string( 'repository.rest_username' );
 		$hostname = $container->site()->hostname();
-		// A self-signed server needs its CA certificate for restic too; it is public, not a secret.
-		$ca_file = $container->private_dir()->path . '/ca.pem';
-		$ca      = 'uploaded' === $settings->string( 'repository.ca_certificate' ) && is_readable( $ca_file ) ? trim( (string) file_get_contents( $ca_file ) ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- A local file in the private directory.
-		$cacert  = '' === $ca ? '' : ' --cacert ca.pem';
-		$lines   = [
+		$ca       = self::ca_certificate( $container );
+		$cacert   = '' === $ca ? '' : ' --cacert ca.pem';
+		$lines    = [
 			__( 'Backup recovery kit', 'backups-for-restic' ),
 			str_repeat( '=', 40 ),
 			/* translators: %s: site address. */

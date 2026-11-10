@@ -121,6 +121,23 @@ final readonly class PrivateDirectory {
 	}
 
 	/**
+	 * The CA certificate that an administrator uploaded for a server with a certificate of its
+	 * own authority (ca.pem). Whoever asks expects it to be there: restic cannot reach such a
+	 * server without it.
+	 *
+	 * @return string PEM text.
+	 * @throws StorageFailed With the code ca_certificate_missing if the file is missing, unreadable or empty.
+	 */
+	public function ca_certificate(): string {
+		$file = $this->path . '/ca.pem';
+		$pem  = is_file( $file ) && is_readable( $file ) ? file_get_contents( $file ) : false;
+		if ( false === $pem || '' === trim( $pem ) ) {
+			StorageFailed::raise( 'The CA certificate of the repository server is missing from the private directory.', [ 'code' => 'ca_certificate_missing' ] );
+		}
+		return trim( $pem );
+	}
+
+	/**
 	 * Deletes everything the plugin put into the directory, then the directory if it is empty.
 	 * Only known names are touched, so a directory chosen with BACKUPS_FOR_RESTIC_PRIVATE_DIR that
 	 * also holds other files keeps them.

@@ -453,15 +453,18 @@ final class RestRoutes {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
+			// The answer is the recovery kit: what the kit needs has to be there before a repository exists.
+			RecoveryKit::ca_certificate( $this->container );
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
+			$this->container->refresh();
+			$kit = RecoveryKit::text( $this->container );
 		} catch ( PluginException $e ) {
 			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
 				return $this->error( 'password_too_short', 400 );
 			}
-			return $this->error( JobError::from_throwable( $e )->code, 409 );
+			return $this->kit_error( $e, 409 );
 		}
-		$this->container->refresh();
-		return $this->respond( [ 'recovery_kit' => RecoveryKit::text( $this->container ) ], 201, true );
+		return $this->respond( [ 'recovery_kit' => $kit ], 201, true );
 	}
 
 	/**
@@ -475,21 +478,28 @@ final class RestRoutes {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
+			// The answer contains the recovery kit: what the kit needs has to be there first.
+			RecoveryKit::ca_certificate( $this->container );
 			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), $this->container->jobs(), time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( InvalidArgument ) {
 			return $this->error( 'configuration', 400 );
 		} catch ( PluginException $e ) {
-			// The repository password did not survive being stored.
-			return $this->error( JobError::from_throwable( $e )->code, 500 );
+			// The CA certificate is missing, or the repository password did not survive being stored.
+			return $this->kit_error( $e, 500 );
 		}
 		$this->container->refresh();
 		Cron::chain( $this->container );
+		try {
+			$kit = RecoveryKit::text( $this->container );
+		} catch ( PluginException $e ) {
+			return $this->kit_error( $e, 409 );
+		}
 		return $this->respond(
 			[
 				'job'          => $this->job_summary( $job ),
-				'recovery_kit' => RecoveryKit::text( $this->container ),
+				'recovery_kit' => $kit,
 			],
 			201,
 			true
@@ -564,9 +574,24 @@ final class RestRoutes {
 		try {
 			$kit = RecoveryKit::text( $this->container );
 		} catch ( PluginException $e ) {
-			return $this->error( JobError::from_throwable( $e )->code, 409 );
+			return $this->kit_error( $e, 409 );
 		}
 		return $this->respond( [ 'recovery_kit' => $kit ], 200, true );
+	}
+
+	/**
+	 * The error for a recovery kit that cannot be complete, or for another failure on the way
+	 * to it.
+	 *
+	 * @param PluginException $failure Failure.
+	 * @param int             $status  HTTP status of any other failure.
+	 * @return \WP_Error Error.
+	 */
+	private function kit_error( PluginException $failure, int $status ): \WP_Error {
+		if ( 'ca_certificate_missing' === ( $failure->context()['code'] ?? null ) ) {
+			return $this->error( 'ca_certificate_missing', 409 );
+		}
+		return $this->error( JobError::from_throwable( $failure )->code, $status );
 	}
 
 	/**
@@ -765,6 +790,10 @@ final class RestRoutes {
 			'invalid_job_type'              => [
 				'message' => __( 'Jobs can be of type backup, forget, prune or check.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'ca_certificate_missing'        => [
+				'message' => __( 'The CA certificate of the repository server is missing.', 'backups-for-restic' ),
+				'hint'    => __( 'Without it restic cannot reach the server, so the recovery kit would be useless. Upload the certificate again.', 'backups-for-restic' ),
 			],
 			'password_too_short'            => [
 				/* translators: %d: number of characters. */
