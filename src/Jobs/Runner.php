@@ -23,6 +23,10 @@ defined( 'ABSPATH' ) || exit;
  * are released after failures and cancellations too. Retryable errors (an unreachable server,
  * a lock held by another client) are retried with exponential backoff before they fail the
  * job.
+ *
+ * Only the holder of the runner lock writes a job document. A request to cancel reaches a
+ * running tick as a marker file (JobStore::request_cancel()), which the tick reads before
+ * every step.
  */
 final class Runner {
 
@@ -69,6 +73,45 @@ final class Runner {
 	}
 
 	/**
+	 * Asks a job to stop: at once while it is queued, otherwise after the step that is running,
+	 * through the cleanup steps.
+	 *
+	 * The request is recorded as a marker next to the job document first. A tick that is running
+	 * finds the marker before its next step, and nothing it saves can lose the request; nothing
+	 * written here can overwrite what the tick saves. The job document itself is changed only
+	 * for a queued job, and only under the runner lock, that is, while no tick runs.
+	 *
+	 * @param string                     $id      Job ID.
+	 * @param array<string, scalar|null> $context Who asked, for the job's log.
+	 * @return Job|null The job as it is now, or null if the ID is unknown.
+	 */
+	public function cancel( string $id, array $context = [] ): ?Job {
+		$job = $this->store->get( $id );
+		if ( null === $job || $job->state->is_terminal() ) {
+			return $job;
+		}
+		$this->store->request_cancel( $job );
+		$job->cancel_requested = true;
+		$log                   = $this->store->log( $job );
+		$log->write( 'info', 'Cancellation requested.', $context );
+		if ( ! $this->lock->acquire() ) {
+			// The lock is taken, as a rule by a tick, which honours the marker before its next
+			// step; if the heartbeat holds it for a moment instead, the next tick does.
+			return $job;
+		}
+		try {
+			// What the tick that just ended saved, not what was read before the lock was taken.
+			$job = $this->store->get( $id ) ?? $job;
+			if ( JobState::Queued === $job->state ) {
+				$this->cancel_queued( $job, $log );
+			}
+		} finally {
+			$this->lock->release();
+		}
+		return $job;
+	}
+
+	/**
 	 * Advances the job while holding the runner lock.
 	 *
 	 * @param float $budget Seconds.
@@ -82,6 +125,11 @@ final class Runner {
 		$now = $this->now();
 		if ( '' !== $job->lease_owner && $job->lease_expires_at > $now ) {
 			return new TickReport( 'busy', $job );
+		}
+		if ( JobState::Queued === $job->state && $job->cancel_requested ) {
+			// The request came while the runner lock was taken, so cancel() left it to this tick.
+			$this->cancel_queued( $job, $this->store->log( $job ) );
+			return new TickReport( 'advanced', $job );
 		}
 		if ( $job->not_before > $now && ! $job->cancel_requested ) {
 			return new TickReport( 'waiting', $job );
@@ -121,6 +169,23 @@ final class Runner {
 	}
 
 	/**
+	 * Ends a job that was asked to stop before its first step: nothing ran, so there is nothing
+	 * to clean up. The caller holds the runner lock.
+	 *
+	 * @param Job      $job Queued job.
+	 * @param EventLog $log Log.
+	 */
+	private function cancel_queued( Job $job, EventLog $log ): void {
+		$job->state            = JobState::Cancelled;
+		$job->cancel_requested = true;
+		$job->finished_at      = $this->now();
+		$job->updated_at       = $job->finished_at;
+		$this->store->save( $job );
+		$log->write( 'info', 'Job finished.', [ 'state' => $job->state->value ] );
+		$this->notify( $job, JobState::Queued, $log );
+	}
+
+	/**
 	 * Tells the observer about a state change. Its failure is logged and does not change the
 	 * job: a notification that cannot be sent must not turn a backup into a failure.
 	 *
@@ -148,6 +213,8 @@ final class Runner {
 	 */
 	private function run_steps( Job $job, EventLog $log, float $deadline ): void {
 		while ( true ) {
+			// A request to cancel may have arrived while the last step ran.
+			$job->cancel_requested = $job->cancel_requested || $this->store->cancel_requested( $job );
 			if ( $job->cancel_requested && null === $job->outcome && ! $job->type->is_cleanup( $job->step ) ) {
 				$job->outcome = JobState::Cancelled;
 				$job->step    = $job->type->cleanup_steps()[0];

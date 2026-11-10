@@ -14,7 +14,13 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AlreadyExists;
+use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobStore;
+use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
 use BackupsForRestic\Secrets\SecretStore;
@@ -28,6 +34,9 @@ defined( 'ABSPATH' ) || exit;
  * password of an existing repository whose key is then derived by an unlock job.
  */
 final class Setup {
+
+	/** Characters a repository password must have unless the plugin generates it. */
+	public const int MIN_PASSWORD_LENGTH = 12;
 
 	/**
 	 * Creates the setup.
@@ -58,13 +67,55 @@ final class Setup {
 	}
 
 	/**
+	 * The REST password that may be sent to a server named in a request: the one that came with
+	 * the request, or the stored one if the request names the host, port and user name it is
+	 * stored for. Without this rule a request that only names another host would get the stored
+	 * password sent there.
+	 *
+	 * A password defined in wp-config.php cannot be replaced by a request. It stays in force
+	 * for whatever server is saved, so for another server or user name the request has to
+	 * carry exactly that password.
+	 *
+	 * @param string      $server   borgbase or rest-server.
+	 * @param string      $url      Repository URL.
+	 * @param string      $username REST username; empty for a server without authentication.
+	 * @param Secret|null $given    Password from the request, if any.
+	 * @return Secret|null The password to use; null without a user name, when none is sent.
+	 * @throws InvalidArgument With the code password_required if the request has to carry the password, or with the code of a rejected URL.
+	 */
+	public function rest_password( string $server, string $url, string $username, ?Secret $given ): ?Secret {
+		if ( '' === $username ) {
+			// RestBackend sends no credentials without a user name.
+			return $given;
+		}
+		$current = $this->settings->load();
+		$same    = ServerProfile::same_server( ServerProfile::normalize( $server, $url ), $current->string( 'repository.url' ) ) && $username === $current->string( 'repository.rest_username' );
+		try {
+			$stored = $this->secrets->get( SecretName::RestPassword );
+		} catch ( SecretsUndecryptable ) {
+			$stored = null;
+		}
+		if ( null !== $stored && $this->secrets->is_overridden( SecretName::RestPassword ) ) {
+			$allowed = ( $same || ( null !== $given && $stored->equals( $given ) ) ) ? $stored : null;
+		} else {
+			$allowed = $given ?? ( $same ? $stored : null );
+		}
+		if ( null === $allowed ) {
+			InvalidArgument::raise( 'The request names a server or user name that the stored REST password is not for; it has to carry the password.', [ 'code' => 'password_required' ] );
+		}
+		return $allowed;
+	}
+
+	/**
 	 * Saves a server after a successful connection test.
 	 *
 	 * @param string           $server   borgbase or rest-server.
 	 * @param ConnectionReport $report   Test result with the normalized URL.
 	 * @param string           $username REST username.
-	 * @param Secret|null      $password REST password; null keeps the stored one.
+	 * @param Secret|null      $password REST password; null keeps the stored one, which must be
+	 *                                   stored for this server and user name.
 	 * @throws ValidationFailed If a setting is rejected.
+	 * @throws InvalidArgument With the code password_required if the stored REST password would end up with another server or user name.
 	 */
 	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
 		$append_only = match ( $report->append_only ) {
@@ -87,10 +138,22 @@ final class Setup {
 				unset( $changes[ $path ] );
 			}
 		}
-		$this->settings->update( $changes );
-		if ( null !== $password && ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
-			$this->secrets->set( SecretName::RestPassword, $password );
+		// What the jobs will use after the save; a value from wp-config.php stays as it is.
+		$next     = $current->with( $changes );
+		$url      = $next->string( 'repository.url' );
+		$username = $next->string( 'repository.rest_username' );
+		$this->rest_password( ServerProfile::detect( $url ), $url, $username, $password );
+		// The password first: should storing it fail, the settings still name the server that
+		// the stored password is for.
+		if ( ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
+			if ( null !== $password ) {
+				$this->secrets->set( SecretName::RestPassword, $password );
+			} elseif ( '' === $username ) {
+				// The server takes no credentials: a password kept from before belongs to none.
+				$this->secrets->delete( SecretName::RestPassword );
+			}
 		}
+		$this->settings->update( $changes );
 		$this->secrets->delete( SecretName::MasterKey );
 	}
 
@@ -99,11 +162,22 @@ final class Setup {
 	 *
 	 * @param Secret|null $password Password to use; a new one is generated if null.
 	 * @return Secret The repository password, for the recovery kit.
+	 * @throws InvalidArgument With the code password_too_short if a password that somebody chose has fewer than MIN_PASSWORD_LENGTH characters.
 	 * @throws AlreadyExists If the server already holds a repository.
 	 */
 	public function create( ?Secret $password ): Secret {
 		if ( $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
 			$password = $this->secrets->get( SecretName::RepositoryPassword );
+		}
+		// The password is all that protects a new repository; a generated one is long enough.
+		if ( null !== $password && mb_strlen( $password->reveal(), 'UTF-8' ) < self::MIN_PASSWORD_LENGTH ) {
+			InvalidArgument::raise(
+				'The repository password is too short.',
+				[
+					'code' => 'password_too_short',
+					'min'  => self::MIN_PASSWORD_LENGTH,
+				]
+			);
 		}
 		$password ??= self::generate_password( $this->random );
 		$access     = ( $this->access )();
@@ -122,15 +196,34 @@ final class Setup {
 	}
 
 	/**
-	 * Stores the password of an existing repository. The key derivation runs as an unlock
-	 * job, because it can take longer than one request.
+	 * Stores the password of an existing repository and queues the unlock job that derives its
+	 * key, because the derivation can take longer than one request.
 	 *
-	 * @param Secret $password Repository password.
+	 * Nothing is stored while another job is active: that job would lose the cached key in the
+	 * middle of its work, and no unlock job could tell whether the new password is right.
+	 *
+	 * @param Secret|null $password Repository password; null for the one defined in wp-config.php.
+	 * @param JobStore    $jobs     Jobs.
+	 * @param int         $now      Unix time.
+	 * @return Job The unlock job.
+	 * @throws InvalidArgument If there is no password: none given and none in wp-config.php.
+	 * @throws JobConflict If another job is active.
 	 */
-	public function connect( Secret $password ): void {
-		if ( ! $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
-			$this->secrets->set( SecretName::RepositoryPassword, $password );
+	public function connect( ?Secret $password, JobStore $jobs, int $now ): Job {
+		$overridden = $this->secrets->is_overridden( SecretName::RepositoryPassword );
+		if ( null === $password && ! $overridden ) {
+			InvalidArgument::raise( 'No repository password was given.', [ 'code' => 'no_password' ] );
 		}
-		$this->secrets->delete( SecretName::MasterKey );
+		$active = $jobs->active();
+		if ( null !== $active ) {
+			JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
+		}
+		if ( null !== $password ) {
+			if ( ! $overridden ) {
+				$this->secrets->set( SecretName::RepositoryPassword, $password );
+			}
+			$this->secrets->delete( SecretName::MasterKey );
+		}
+		return $jobs->create( JobType::Unlock, 'setup', $now );
 	}
 }

@@ -212,13 +212,15 @@ final class Container {
 	}
 
 	/**
-	 * Removes every known secret from logs and job files.
+	 * Removes every known secret from logs and job files: the passwords, and the REST user name
+	 * and password together as the Authorization header of repository requests carries them.
 	 *
 	 * @return Redactor Redactor.
 	 */
 	public function redactor(): Redactor {
 		if ( null === $this->redactor ) {
 			$this->redactor = new Redactor();
+			$username       = $this->settings()->string( 'repository.rest_username' );
 			foreach ( [ SecretName::RepositoryPassword, SecretName::RestPassword ] as $name ) {
 				try {
 					$secret = $this->secrets()->get( $name );
@@ -227,6 +229,9 @@ final class Container {
 				}
 				if ( null !== $secret ) {
 					$this->redactor->add( $secret );
+				}
+				if ( null !== $secret && SecretName::RestPassword === $name && '' !== $username ) {
+					$this->redactor->add_credentials( $username, $secret );
 				}
 			}
 		}
@@ -418,20 +423,17 @@ final class Container {
 	 * @return RetentionGuard Guard.
 	 */
 	public function retention_guard(): RetentionGuard {
-		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock() );
+		return new RetentionGuard( $this->state(), $this->settings()->string( 'retention.mode' ), $this->switch_retention( ... ), $this->clock(), RetentionGuard::repository( $this->settings() ) );
 	}
 
 	/**
-	 * Whether the server is append-only: the latest conclusive probe, else the wizard's answer.
+	 * Whether the server is append-only: the latest conclusive probe of this repository, else
+	 * the wizard's answer.
 	 *
 	 * @return string yes, no or unknown.
 	 */
 	public function append_only(): string {
-		return match ( $this->state()->get( 'append_only' )['status'] ?? null ) {
-			'append_only'       => 'yes',
-			'deletions_allowed' => 'no',
-			default             => $this->settings()->string( 'repository.append_only' ),
-		};
+		return $this->retention_guard()->append_only( $this->settings()->string( 'repository.append_only' ) );
 	}
 
 	/**
