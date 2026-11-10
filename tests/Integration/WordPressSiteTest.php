@@ -365,6 +365,9 @@ final class WordPressSiteTest extends TestCase {
 			fclose( $lock );
 		}
 		self::assertSame( 409, $status, $raw );
+		// An active job answers 409 as well: wait for it here, so that the loop below only
+		// waits for a heartbeat that holds the lock for a moment.
+		self::idle( 600 );
 		for ( $attempt = 0; $attempt < 10; $attempt++ ) {
 			[ $status, $cleared, $raw ] = self::api( 'DELETE', '/cache' );
 			if ( 409 !== $status ) {
