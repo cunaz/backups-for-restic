@@ -14,6 +14,10 @@ Date: YYYY-MM-DD
 ## Alternatives considered
 ```
 
+A decision is not rewritten when the code turns out differently. A wrong name or number is
+corrected in place; where the implementation differs from the decision, a last section
+`## As built (YYYY-MM)` says what differs and where the open part is planned.
+
 | # | Title |
 | --- | --- |
 | [0001](0001-restic-rest-backend.md) | Talk to the repository server through restic's REST protocol over HTTPS |

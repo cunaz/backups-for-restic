@@ -43,7 +43,7 @@ WordPress.org plugin could not use.
   supply-chain surface, nothing for the review team to object to.
 - Ubuntu LTS users install the upstream release manually; the guide makes this a five-minute
   task.
-- Integration tests install restic through a developer script (`bin/install-restic-for-tests.sh`),
+- Integration tests install restic through a developer script (`bin/install-test-tools.sh`),
   not through plugin code.
 
 ## Alternatives considered

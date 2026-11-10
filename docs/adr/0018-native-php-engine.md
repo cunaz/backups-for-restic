@@ -24,8 +24,8 @@ protocol is a handful of HTTP requests.
   in CI (ADR 0023), never a runtime dependency.
 - All engine operations are resumable steps of the tick-driven job model (ADR 0011, 0014);
   nothing runs outside a bounded PHP request except in WP-CLI `--wait` mode.
-- The engine's seams (`Backend`, `BlobStore`, `ResumableStep`) keep a future binary engine
-  possible for VPS operators (Appendix A); it is not part of 1.0.
+- The engine's seams (`Backend\Backend`, `Engine\BlobStore`, `Jobs\Step`) keep a future
+  binary engine possible for VPS operators (Appendix A); it is not part of 1.0.
 - Scope limits are explicit: no compression (ADR 0019), one-time unlock cost (ADR 0020),
   prune without repacking (ADR 0022).
 

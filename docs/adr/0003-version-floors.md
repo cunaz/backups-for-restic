@@ -40,3 +40,11 @@ restore with the CLI and for the test oracle.
   stack-trace redaction.
 - **PHP 8.2**: 67.7 % reach, but unsupported upstream before 1.0 ships.
 - **Repository format 2**: needs zstd, which PHP lacks (ADR 0019).
+
+## As built (2026-11)
+- The restic CLI has a floor of its own for restoring: the recovery kit and the
+  disaster-recovery guide name restic 0.16.1 or newer. Their commands pass the REST user
+  name and password in `RESTIC_REST_USERNAME` and `RESTIC_REST_PASSWORD`, which older
+  releases do not read; those take the credentials only from the repository URL. The
+  repository format itself stays readable by every release since 0.9.
+- The oracle is pinned to restic 0.19.1, 0.18.1 and 0.14.0 in `bin/install-test-tools.sh`.

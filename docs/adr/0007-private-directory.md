@@ -35,3 +35,22 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 - **System temp directory**: shared with other users and periodically cleaned.
 - **Uploads directory by default**: always web-served.
 - **Database-backed job store**: see ADR 0014.
+
+## As built (2026-11)
+- What the directory holds today: `jobs/` with job state, event logs and the engine's
+  checkpoints (the ledger is gone, [ADR 0014](0014-file-based-job-store.md)), `cache/` with
+  the encrypted merged index, `kdf/` with the scrypt table and its checkpoint during an
+  unlock, `probe/`, the uploaded CA certificate and the runner lock. Trees are not cached,
+  and a pack under construction is held in memory, so there is no pack temp file. `tmp/`,
+  `logs/` and `restores/` are created and still empty; restore staging and import files
+  come with Milestone 3.
+- The probe has three results for a directory inside the web root. An answer of 200 with
+  the probe's content is the critical finding `exposed`: the wizard does not continue, and
+  the preflight of a backup fails. An answer that shows the directory protected is reported
+  as `protected_inside_web_root`. A probe that cannot run, because the site cannot request
+  itself, is reported as `unverified` with the status "recommended" and blocks nothing: on
+  such hosts the protection is assumed, not verified. Treating that as a blocker is planned
+  for Milestone 3.
+- Only the wizard's script stops at a critical finding; the REST routes of the setup do not
+  check it. Of the jobs, only the backup asks the probe before it starts; forget, prune and
+  check do not. A check on the server side is planned for Milestone 3.

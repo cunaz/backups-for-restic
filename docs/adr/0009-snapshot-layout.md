@@ -30,3 +30,16 @@ names are not meaningful.
 - **Separate snapshots for files and database**: pairs must be reconstructed by tag.
 - **Single `database.sql` file**: no per-table resumability; an interrupted dump restarts
   from zero; worse deduplication of large unchanged tables.
+
+## As built (2026-11)
+- `spool/manifest.json` has the format `backups-for-restic-site/1` and records the time, the
+  site address, `abspath`, `content`, `uploads`, `roots`, `excludes`, the table prefix,
+  whether the database is included, the versions of the plugin, WordPress and PHP, and the
+  repository format. The table list with rows and bytes per table and the version of the
+  database server are in a second manifest, `spool/database/manifest.json`
+  ([ADR 0021](0021-database-streaming.md)). Neither holds hashes per file: the trees of the
+  snapshot already carry the id of every blob.
+- Every run writes a snapshot. No option skips a run without changes; one is not planned
+  yet.
+- The snapshot list of the admin page and of WP-CLI shows every snapshot in the repository,
+  whatever its host name and tags. A list limited to this site is planned for Milestone 3.
