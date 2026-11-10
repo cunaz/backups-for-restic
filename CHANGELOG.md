@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The stored settings and every job carry a layout number, so that later versions can
+  convert them. A version installed over a newer one stays inactive and says so instead of
+  acting on settings it may misread.
 - E-mail notifications: the first failure of a backup, forget, prune or check, once when
   backups become stale (36 hours by default, at least one and a half backup intervals), once
   when they work again, every check that finds damage, and an automatic switch to retention

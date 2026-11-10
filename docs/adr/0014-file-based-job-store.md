@@ -57,6 +57,8 @@ with the notifications of Milestone 2.
   directory, where the job state lives.
 - Uninstalling deletes it with the other options (`uninstall.php`).
 
-With it the plugin writes four options: settings, secrets, state and notifications.
-`uninstall.php` also deletes a fifth name, `backups_for_restic_schema_version`, which is
-reserved and which nothing writes yet.
+With it the plugin writes four options: settings, secrets, state and notifications. Since
+2026-11 a fifth one, `backups_for_restic_schema_version`, holds the layout number of
+settings, state and notifications, and every `job.json` carries a `schema` field of its
+own; a version that finds a higher number than it knows stays inert or does not load the
+job (docs/02-architecture.md §18).
