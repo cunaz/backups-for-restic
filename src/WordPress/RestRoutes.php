@@ -27,7 +27,8 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Routes under backups-for-restic/v1 (docs/02-architecture.md §13.2). The admin UI uses nothing
  * else. Every route requires the backup capability; no response contains a secret except the
- * recovery kit, which needs the administrator's password again.
+ * recovery kit, which the wizard shows once during the setup and which needs the
+ * administrator's WordPress password afterwards.
  */
 final class RestRoutes {
 
@@ -445,6 +446,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function create_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		if ( ! $this->may_see_kit( $request ) ) {
+			return $this->error( 'wrong_user_password', 403 );
+		}
 		try {
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
 		} catch ( PluginException $e ) {
@@ -461,19 +465,17 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function connect_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$password = $this->secret_param( $request, 'password' );
-		if ( null === $password && ! $this->container->secrets()->is_overridden( SecretName::RepositoryPassword ) ) {
-			return $this->error( 'configuration', 400 );
+		if ( ! $this->may_see_kit( $request ) ) {
+			return $this->error( 'wrong_user_password', 403 );
 		}
-		if ( null !== $password ) {
-			$this->setup()->connect( $password );
-		}
-		$this->container->refresh();
 		try {
-			$job = $this->container->jobs()->create( JobType::Unlock, 'setup', time() );
+			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), $this->container->jobs(), time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
+		} catch ( InvalidArgument ) {
+			return $this->error( 'configuration', 400 );
 		}
+		$this->container->refresh();
 		Cron::chain();
 		return $this->respond(
 			[
@@ -547,8 +549,7 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function recovery_kit( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$user = wp_get_current_user();
-		if ( ! wp_check_password( self::text( $request, 'user_password' ), $user->user_pass, $user->ID ) ) {
+		if ( ! $this->password_confirmed( $request ) ) {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
@@ -557,6 +558,30 @@ final class RestRoutes {
 			return $this->error( JobError::from_throwable( $e )->code, 409 );
 		}
 		return $this->respond( [ 'recovery_kit' => $kit ], 200, true );
+	}
+
+	/**
+	 * Whether the request carries the WordPress password of the current user, as proof that the
+	 * administrator is present and not only a session of theirs.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return bool True if the password is right.
+	 */
+	private function password_confirmed( \WP_REST_Request $request ): bool {
+		$user = wp_get_current_user();
+		return wp_check_password( self::text( $request, 'user_password' ), $user->user_pass, $user->ID );
+	}
+
+	/**
+	 * Whether a request may get the recovery kit as part of its answer: freely during the
+	 * setup, when the wizard shows the kit once; after it only with the WordPress password, as
+	 * for the recovery kit route (docs/03-security-and-threat-model.md §5.5).
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return bool True if allowed.
+	 */
+	private function may_see_kit( \WP_REST_Request $request ): bool {
+		return ! $this->container->settings()->bool( 'setup.completed' ) || $this->password_confirmed( $request );
 	}
 
 	/**

@@ -25,6 +25,9 @@ final class WordPressSiteTest extends TestCase {
 
 	private const string URL = 'http://127.0.0.1:8890';
 
+	/** The administrator's WordPress password, as bin/test-site.sh install sets it. */
+	private const string ADMIN_PASSWORD = 'admin-password-test-only';
+
 	private static ?RestServer $server = null;
 
 	private static string $credentials = '';
@@ -173,7 +176,8 @@ final class WordPressSiteTest extends TestCase {
 		self::assertFalse( $test['report']['exists'] );
 		[ $status ] = self::api( 'POST', '/repository/save', $connection );
 		self::assertSame( 200, $status );
-		[ $status, $created, $raw ] = self::api( 'POST', '/repository/create' );
+		// The WordPress password only matters when this runs again on a site that is set up already.
+		[ $status, $created, $raw ] = self::api( 'POST', '/repository/create', [ 'user_password' => self::ADMIN_PASSWORD ] );
 		self::assertSame( 201, $status, $raw );
 		self::assertMatchesRegularExpression( "/RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/", $created['recovery_kit'] );
 		self::assertStringContainsString( '--cacert ca.pem', $created['recovery_kit'], 'restic needs the self-signed CA too.' );
@@ -182,6 +186,12 @@ final class WordPressSiteTest extends TestCase {
 		self::$repository_password = $match[1];
 		[ $status ]                = self::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );
 		self::assertSame( 200, $status );
+		// The wizard showed the recovery kit once; from now on it needs the WordPress password.
+		foreach ( [ '/repository/create', '/repository/connect' ] as $route ) {
+			[ $status, $refused, $raw ] = self::api( 'POST', $route, [ 'password' => self::$repository_password ] );
+			self::assertSame( 403, $status, $raw );
+			self::assertSame( 'backups_for_restic_wrong_user_password', $refused['code'] ?? null, $raw );
+		}
 
 		// The fixture: files in uploads and a large table.
 		$uploads = self::$site . '/wp-content/uploads/fixture';

@@ -14,7 +14,12 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AlreadyExists;
+use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobStore;
+use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
 use BackupsForRestic\Secrets\SecretStore;
@@ -122,15 +127,34 @@ final class Setup {
 	}
 
 	/**
-	 * Stores the password of an existing repository. The key derivation runs as an unlock
-	 * job, because it can take longer than one request.
+	 * Stores the password of an existing repository and queues the unlock job that derives its
+	 * key, because the derivation can take longer than one request.
 	 *
-	 * @param Secret $password Repository password.
+	 * Nothing is stored while another job is active: that job would lose the cached key in the
+	 * middle of its work, and no unlock job could tell whether the new password is right.
+	 *
+	 * @param Secret|null $password Repository password; null for the one defined in wp-config.php.
+	 * @param JobStore    $jobs     Jobs.
+	 * @param int         $now      Unix time.
+	 * @return Job The unlock job.
+	 * @throws InvalidArgument If there is no password: none given and none in wp-config.php.
+	 * @throws JobConflict If another job is active.
 	 */
-	public function connect( Secret $password ): void {
-		if ( ! $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
-			$this->secrets->set( SecretName::RepositoryPassword, $password );
+	public function connect( ?Secret $password, JobStore $jobs, int $now ): Job {
+		$overridden = $this->secrets->is_overridden( SecretName::RepositoryPassword );
+		if ( null === $password && ! $overridden ) {
+			InvalidArgument::raise( 'No repository password was given.', [ 'code' => 'no_password' ] );
 		}
-		$this->secrets->delete( SecretName::MasterKey );
+		$active = $jobs->active();
+		if ( null !== $active ) {
+			JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
+		}
+		if ( null !== $password ) {
+			if ( ! $overridden ) {
+				$this->secrets->set( SecretName::RepositoryPassword, $password );
+			}
+			$this->secrets->delete( SecretName::MasterKey );
+		}
+		return $jobs->create( JobType::Unlock, 'setup', $now );
 	}
 }
