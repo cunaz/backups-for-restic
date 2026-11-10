@@ -29,3 +29,13 @@ with `wp_set_script_translations()`, which works on classic script handles.
 - **React via `@wordpress/scripts`**: thousands of transitive packages for a few screens.
 - **Script modules**: modern, but they do not use `wp_set_script_translations()`.
 - **Alpine or htmx**: external code or a vendored dependency to track.
+
+## As built (2026-11)
+- One script, `assets/js/admin.js`, builds every screen (wizard, dashboard, snapshots,
+  settings, environment, logs) from REST responses. PHP renders only the frame: heading,
+  tabs, a `noscript` notice and an empty container (`WordPress\AdminPage`). There are no
+  templates per screen and no script per screen.
+- No action has a form-post fallback. Without JavaScript the page shows "This page needs
+  JavaScript." and nothing else; a fallback is not planned yet.
+- CI checks the script with `node --check` only. ESLint with `@wordpress/eslint-plugin` is
+  planned for Milestone 3.

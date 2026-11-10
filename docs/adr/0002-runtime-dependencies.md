@@ -33,3 +33,10 @@ shared hosting does not have.
   audience (ADR 0016).
 - **Action Scheduler**: large dependency for a problem solved by one file-based state
   machine (ADR 0004, 0018).
+
+## As built (2026-11)
+- The admin interface is one classic script, `assets/js/admin.js`, not ES modules. ADR 0012
+  gives the reason: WordPress delivers translations to classic script handles. The decision
+  stands: no JavaScript package ships.
+- Nothing uses `ZipArchive`: downloads from a snapshot do not exist yet. They come with
+  restore in Milestone 3.

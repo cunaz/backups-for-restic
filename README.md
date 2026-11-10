@@ -1,12 +1,16 @@
 # Backups for restic
 
-> **Project status: Milestone 2, operations, is nearly complete.** The restic format engine
-> in pure PHP is verified against the restic CLI. On top of it come the setup wizard,
-> scheduled and resumable backup jobs on WP-Cron, the streamed database dump, and now
+> **Project status: Milestones 0 to 2 are implemented; nothing is released yet.** The restic
+> format engine in pure PHP is verified against the restic CLI. On top of it come the setup
+> wizard, scheduled and resumable backup jobs on WP-Cron, the streamed database dump, and
 > maintenance: retention with restic's semantics, prune without repacking, a repository check
 > that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
-> mode. Nothing is released yet. Open: live checks against a hosted server and the mutation
-> score gate ([roadmap](docs/05-roadmap.md)). The design documents explain *why* things are
+> mode. The plugin cannot restore yet: that is Milestone 3, and until then every backup is
+> restored with the restic command line ([guide](docs/06-disaster-recovery.md)). Also open
+> and planned for Milestone 3: browser tests and tests of the WordPress layer, the checks
+> Plugin Check and ESLint, a preview of what retention would remove, the size of the
+> repository on the dashboard, and measurements against a hosted server, which has not been
+> tested yet ([roadmap](docs/05-roadmap.md)). The design documents explain *why* things are
 > built the way they are.
 >
 > **Distribution:** the plugin will be published in the
@@ -32,12 +36,12 @@ other hand, assume a server you control. This plugin closes the gap:
   checking and retention follow restic's proven repository design. The plugin implements
   that design in PHP so that it works where no binary can be installed, and every backup
   stays an ordinary restic repository.
-- **You choose the storage.** Your own restic REST server or a hosted one such as BorgBase:
-  one HTTPS endpoint per repository, optionally in append-only mode, so that nobody who takes over the website
-  can delete the backups.
+- **You choose the storage.** Your own restic REST server or a hosted one: one HTTPS
+  endpoint per repository, optionally in append-only mode, so that nobody who takes over
+  the website can delete the backups.
 - **Your data stays yours.** The repository password never leaves the server; the storage
-  provider and the plugin author never see plaintext. Every backup can be restored with the plain `restic`
-  command line on any computer, without WordPress and without this plugin.
+  provider and the plugin author never see plaintext. Every backup can be restored with the
+  plain `restic` command line on any computer, without WordPress and without this plugin.
 
 ## Design principles (short version)
 
@@ -74,7 +78,7 @@ other hand, assume a server you control. This plugin closes the gap:
 | [docs/guides/rest-server.md](docs/guides/rest-server.md) | Running your own restic REST server, append-only, and cleaning up from the server |
 | [docs/appendix-a-binary-engine.md](docs/appendix-a-binary-engine.md) | Design of an optional restic-binary engine for VPS users (future option) |
 | [docs/adr/](docs/adr/) | Architecture Decision Records: the reasoning behind every non-obvious choice |
-| [docs/benchmarks/](docs/benchmarks/) | Measured throughput, unlock time and memory, with the gates they must pass |
+| [docs/benchmarks/](docs/benchmarks/) | Measured throughput and unlock time, with the gates they must pass |
 
 ## Decisions at a glance
 
@@ -94,7 +98,7 @@ other hand, assume a server you control. This plugin closes the gap:
 | Maintenance | Forget with restic's semantics, prune without repacking, structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
 | Conformance | The restic CLI is the oracle in CI; every release passes `restic check --read-data` and restore parity | [0023](docs/adr/0023-restic-cli-as-conformance-oracle.md) |
 | Admin UI | Vanilla JavaScript, no build step, REST API as the only data channel | [0012](docs/adr/0012-admin-ui-without-build-step.md) |
-| Restore | Staging first; applying to the live site is a separate, guarded step | [0013](docs/adr/0013-restore-safety.md) |
+| Restore (Milestone 3, not built yet) | Staging first; applying to the live site is a separate, guarded step | [0013](docs/adr/0013-restore-safety.md) |
 | Executables | The plugin never downloads, bundles or updates executables | [0016](docs/adr/0016-no-binary-provisioning.md) |
 | Distribution | WordPress.org plugin directory is the only release channel; GitHub holds source, issues and CI | [0017](docs/adr/0017-distribution-via-wordpress-org.md) |
 | Name and license | Backups for restic, slug `backups-for-restic`; GPL-2.0-or-later | [0015](docs/adr/0015-naming-and-license.md) |
@@ -107,20 +111,23 @@ other hand, assume a server you control. This plugin closes the gap:
 
 | Component | Minimum | Recommended |
 | --- | --- | --- |
-| PHP | 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache with JIT (about five times faster chunking) |
+| PHP | 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache. The JIT is not part of the recommendation: it makes chunking about five times faster, but on PHP 8.3 its tracing mode has crashed PHP during backups in the project's tests |
 | WordPress | 6.7, single site (multisite planned for 1.1) | current release |
 | Hosting | outbound HTTPS to the repository server; a few hundred MB of disk for caches and restores | a control-panel cron fetching `wp-cron.php` every 1–5 minutes |
 | Server software | none | none |
-| Repository server | a restic REST server with TLS, one repository per site: self-hosted rest-server or a hosted service such as BorgBase | append-only mode enabled |
-| restic CLI | not needed on the server; any release since 0.9 can restore the repositories on another computer | current release |
+| Repository server | a restic REST server with TLS, one repository per site: self-hosted rest-server or a hosted service | append-only mode enabled |
+| restic CLI | not needed on the server; to restore on another computer, restic 0.16.1 or newer, which the recovery kit's commands need (the repository format itself is readable since 0.9) | current release |
 
 ## Installation (once published)
 
 Install from the WordPress.org plugin directory (Plugins → Add New). No server software is
 needed; the setup wizard checks PHP extensions, memory and time limits, the hosting's cron
 options and the protection of the plugin's working directory, then guides you through
-connecting a repository on your own restic REST server or a hosted one. Packages are not distributed through GitHub; to test
-unreleased code, build the package from source as described in the development guide.
+connecting a repository on your own restic REST server or a hosted one. Packages are not
+distributed through GitHub. To test unreleased code, link or copy a checkout of this
+repository into `wp-content/plugins/`: the plugin needs no build step. A script that builds
+the release package is planned for Milestone 3
+([development guide](docs/04-development-and-quality.md), §7).
 
 ## License
 

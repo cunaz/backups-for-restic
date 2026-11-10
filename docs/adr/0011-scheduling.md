@@ -45,3 +45,15 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   `wp-cron.php`.
 - **Requiring system cron and WP-CLI**: excludes the target audience.
 - **Action Scheduler**: see ADR 0002.
+
+## As built (2026-11)
+- Chaining does not call `spawn_cron()`. `WordPress\Cron::chain()` schedules
+  `backups_for_restic_tick` for now, writes WordPress' `doing_cron` lock itself and sends a
+  non-blocking request to `wp-cron.php`. Unlike `spawn_cron()`, that also works from inside
+  a `wp-cron.php` request and more than once a minute; the running cron request sees the new
+  lock holder and stops after its current event.
+- The heartbeat runs the append-only probe when it is due, starts the jobs that are due,
+  runs one tick when a job is active and hands waiting notices to the mailer. It refreshes
+  no repository lock.
+- The wizard says that the first backup uploads everything once. It names no expected
+  duration; estimates are planned for Milestone 3.
