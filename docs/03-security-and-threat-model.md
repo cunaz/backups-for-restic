@@ -370,7 +370,7 @@ chosen repository password, the read-back of stored secrets and the retention fl
 | --- | --- |
 | HTTPS to the repository server | URL validation: `https://` only, for both server options |
 | Strong repository password | generated (32 characters, 192 bits). Enforced by the core: a password that somebody chose for a new repository, in the request or in `wp-config.php`, must have at least 12 characters, else `Setup::create()` refuses with `password_too_short` |
-| Recovery kit acknowledged | required before the first backup and before enabling the schedule |
+| Recovery kit acknowledged | required before the first backup and before enabling the schedule; enforced by the core: jobs are refused with `setup_incomplete` until the setup is completed |
 | Private directory protected | the HTTP probe must not read its file back: then the Doctor is critical, the wizard does not continue and backups stop. A probe that cannot run is reported as `unverified` and blocks nothing (a stricter rule is planned for Milestone 3) |
 | Secrets decryptable | enforced by the core: `EncryptedOptionStore::set()` reads every secret back after it stored it; if the secret is not there or comes back changed, saving fails with `secrets_undecryptable` |
 | Retention floor | enforced by the core (`Schema::retention_floor()`): `retention.keep.within` of at least one day, or `retention.keep.last` of at least 1. The settings refuse a change below it with `retention_floor`; a forget job that finds such a pair stored fails with `configuration` and deletes nothing |

@@ -207,9 +207,9 @@ prune and check jobs with the dashboard data and the cache route. `BFR_SITE_FIXT
 `BFR_DB_FIXTURE_MB` set the fixture sizes (64 and 32 by default); the nightly CI run uses
 2048 and 300.
 
-What the suite does not reach: it requests 10 of the 16 route paths, not `/environment`,
-`/jobs/{id}` (admin polling), cancel, `/snapshots`, `/repository/connect` or
-`/recovery-kit`. Nothing tests Site Health, WP-CLI, the multisite guard, deactivation,
+What the suite does not reach: it requests 11 of the 16 route paths, not `/environment`,
+`/jobs/{id}` (admin polling), cancel, `/snapshots` or `/recovery-kit`, and of
+`/repository/connect` only the refusal after the setup. Nothing tests Site Health, WP-CLI, the multisite guard, deactivation,
 uninstall, an append-only server through WordPress, or the loopback chain as such, because
 the test itself requests `wp-cron.php` every second. Tests for this wiring are planned for
 Milestone 3.

@@ -89,7 +89,7 @@ whatever host a request named; backups could start before the setup was complete
 uninstalling left a working directory chosen with the filter.
 
 **Found and carried into Milestone 3:** no test loads the classes of the WordPress layer
-other than through the HTTP suite, which calls 10 of the 16 routes; loopback chaining, the
+other than through the HTTP suite, which calls 11 of the 16 routes; loopback chaining, the
 wizard, WP-CLI, uninstall and the multisite refusal are untested. Time estimates, a
 schedule more frequent than twice a day, and the Doctor's checks for outbound HTTPS and for
 how to switch the PHP version were promised and do not exist.

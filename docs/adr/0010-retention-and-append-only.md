@@ -40,7 +40,7 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   notifies the administrator. Detecting that deletions became possible only *proposes* the
   switch back to `plugin`; nothing is deleted until an administrator confirms.
 - **Recommendation** shown by the wizard when deletions are allowed: *"Recommended: turn on
-  append-only on your server (BorgBase: repository settings; rest-server: `--append-only`).
+  append-only on your server (rest-server: `--append-only`; BorgBase: repository settings).
   Then nobody who takes over this website can delete your backups. Old snapshots must then
   be cleaned up from another computer."*
 
