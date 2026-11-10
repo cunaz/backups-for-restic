@@ -13,9 +13,9 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\LockConflict;
-use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Lock;
+use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -126,30 +126,79 @@ final class LockingTest extends TestCase {
 		self::assertSame( [], $this->locks(), 'No lock outlives the backup.' );
 	}
 
-	public function test_a_lock_counts_as_lapsed_once_other_clients_treat_it_as_stale(): void {
+	public function test_a_lock_is_trusted_for_less_time_than_other_clients_honour_it(): void {
 		$locking   = $this->locking();
 		$locked_at = $this->clock->now()[0];
+		self::assertSame( 300, Lock::STALE_AFTER_SECONDS - Locking::TRUSTED_SECONDS, 'Five minutes are left for clocks that differ.' );
 
-		$this->clock->advance( Lock::STALE_AFTER_SECONDS );
-		self::assertFalse( $locking->lapsed( $locked_at ), 'Exactly 30 minutes old is not stale yet.' );
+		$this->clock->advance( Locking::TRUSTED_SECONDS );
+		self::assertFalse( $locking->lapsed( $locked_at ) );
 		$this->clock->advance( 1 );
-		self::assertTrue( $locking->lapsed( $locked_at ) );
+		self::assertTrue( $locking->lapsed( $locked_at ), 'A client whose clock runs ahead may call the lock stale from now on.' );
 	}
 
-	public function test_a_backup_start_that_fails_after_locking_leaves_no_lock(): void {
+	public function test_a_backup_writes_its_run_number_before_it_takes_a_lock(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$plan            = new BackupPlan( [ $site ], [ 'backups-for-restic' ] );
+
+		BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, null, 262144 );
+
+		$state = json_decode( (string) file_get_contents( $work . '/run/state.json' ), true );
+		self::assertIsArray( $state );
+		self::assertIsInt( $state['pid'] );
+		self::assertSame( '', $state['lock'] );
+		self::assertSame( [], $this->locks(), 'Starting sends nothing to the server.' );
+
+		// The first request wrote its lock and ended before it could record the lock's name.
+		$orphan = $this->repository->save_unpacked( ObjectType::Locks, ( new Lock( '2026-01-01T00:00:00Z', false, 'example.com', 'www-data', $state['pid'] ) )->to_json() );
+
+		$run = BackupRun::resume( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, 262144 );
+		$run->advance( 0.0 );
+		self::assertCount( 1, $this->locks() );
+		self::assertNotContains( $orphan->hex(), $this->locks(), 'The run recognised the lock by its number and replaced it.' );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertNotNull( $run->snapshot_id() );
+		self::assertSame( [], $this->locks() );
+	}
+
+	public function test_giving_up_a_backup_removes_a_lock_that_was_never_recorded(): void {
+		$this->cleanup[] = $site = TempDir::create( 'site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$plan            = new BackupPlan( [ $site ], [ 'backups-for-restic' ] );
+		BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, null, 262144 );
+		$state = json_decode( (string) file_get_contents( $work . '/run/state.json' ), true );
+		self::assertIsArray( $state );
+		$this->repository->save_unpacked( ObjectType::Locks, ( new Lock( '2026-01-01T00:00:00Z', false, 'example.com', 'www-data', $state['pid'] ) )->to_json() );
+		$foreign = $this->locking( 4711, new Identity( 'laptop', 'admin' ) )->acquire( false );
+
+		BackupRun::resume( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, 262144 )->abort();
+
+		self::assertSame( [ $foreign->hex() ], $this->locks(), 'Only the lock of the other client is left.' );
+		self::assertFileDoesNotExist( $work . '/run/state.json' );
+	}
+
+	public function test_a_backup_does_without_a_parent_snapshot_that_is_gone(): void {
 		$this->cleanup[] = $site = TempDir::create( 'site' );
 		TempDir::fixture( $site, 1048576 );
 		$this->cleanup[] = $work = TempDir::create( 'work' );
 		$plan            = new BackupPlan( [ $site ], [ 'backups-for-restic' ] );
 		$missing_parent  = Id::from_hex( str_repeat( 'a', 64 ) );
 
-		try {
-			BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, $missing_parent, 262144 );
-			self::fail( 'The parent snapshot does not exist.' );
-		} catch ( NotFound ) {
-			self::assertSame( [], $this->locks(), 'The lock taken before the failure is released.' );
+		$run = BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, $missing_parent, 262144 );
+		while ( ! $run->advance( INF ) ) {
+			continue;
 		}
-		self::assertFileDoesNotExist( $work . '/run/state.json' );
+
+		$id = $run->snapshot_id();
+		self::assertNotNull( $id );
+		self::assertNull( Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, $id ) )->parent_id, 'A snapshot names no parent that does not exist.' );
+		self::assertSame( [ 'The previous snapshot is gone; every file is read again.' ], $run->warnings() );
+		self::assertSame( [], $this->locks() );
 	}
 
 	public function test_a_backup_paused_for_too_long_takes_its_lock_again_and_notices_a_conflict(): void {

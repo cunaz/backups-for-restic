@@ -31,13 +31,20 @@ defined( 'ABSPATH' ) || exit;
  * Backups hold non-exclusive locks; maintenance holds exclusive ones. A lock older than 30
  * minutes is stale for every client, so holders refresh it every five minutes. A run that was
  * paused for longer takes its lock again instead of refreshing it; what another client did to
- * the repository in the meantime is not undone by that, and each run says how it deals with
- * it. Lock files can be deleted even in append-only repositories.
+ * the repository in the meantime is not undone by that, so each run then checks that what it
+ * relies on is still there, or starts over (ADR 0030). Lock files can be deleted even in
+ * append-only repositories.
  */
 final class Locking {
 
 	/** Refresh a held lock once it is this old. */
 	public const int REFRESH_AFTER_SECONDS = 300;
+
+	/**
+	 * A held lock counts as honoured by other clients until it is this old: five minutes less
+	 * than the 30 after which they call it stale, because they judge by their own clocks.
+	 */
+	public const int TRUSTED_SECONDS = Lock::STALE_AFTER_SECONDS - 300;
 
 	/**
 	 * Creates the helper.
@@ -101,14 +108,15 @@ final class Locking {
 
 	/**
 	 * Whether other clients may have ignored a held lock: 30 minutes after it was written a
-	 * lock is stale for every client. A run that finds its lock that old takes it again with
-	 * acquire(), which notices a client that holds a conflicting lock by now.
+	 * lock is stale for every client, and a client whose clock runs ahead says so earlier. A
+	 * run that finds its lock that old takes it again with acquire(), which notices a client
+	 * that holds a conflicting lock by now, and then deals with what may have changed.
 	 *
 	 * @param int $locked_at Unix time the lock was written.
-	 * @return bool True if the lock is stale.
+	 * @return bool True if the lock can no longer be trusted.
 	 */
 	public function lapsed( int $locked_at ): bool {
-		return $this->clock->now()[0] - $locked_at > Lock::STALE_AFTER_SECONDS;
+		return $this->clock->now()[0] - $locked_at > self::TRUSTED_SECONDS;
 	}
 
 	/**

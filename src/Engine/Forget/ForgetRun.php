@@ -20,7 +20,6 @@ use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
-use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Storage\Files;
@@ -42,10 +41,14 @@ defined( 'ABSPATH' ) || exit;
  * newest of a group of its own and none would ever be removed. A snapshot written by
  * another client during a pause can only make the policy remove more, never keep one that
  * this run removes, so a lost lock is simply taken again.
+ *
+ * start() only writes the checkpoint with the run's number; the first advance() takes the
+ * lock and lists the snapshots. A request that ends between writing a lock and recording it
+ * therefore leaves a lock that the run still recognises as its own (ADR 0030).
  */
 final class ForgetRun {
 
-	public const int STATE_VERSION = 1;
+	public const int STATE_VERSION = 2;
 
 	/**
 	 * Lock handling.
@@ -55,10 +58,10 @@ final class ForgetRun {
 	private Locking $locking;
 
 	/**
-	 * Checkpoint: pid, lock, locked_at, phase, names, position, snapshots (JSON by name),
-	 * remove, removed.
+	 * Checkpoint: pid, lock, locked_at, begun, phase, names, position, snapshots (JSON by
+	 * name), remove, removed.
 	 *
-	 * @var array{pid: int, lock: string, locked_at: int, phase: string, names: list<string>, position: int, snapshots: array<string, string>, remove: list<string>, removed: int}
+	 * @var array{pid: int, lock: string, locked_at: int, begun: bool, phase: string, names: list<string>, position: int, snapshots: array<string, string>, remove: list<string>, removed: int}
 	 */
 	private array $state;
 
@@ -90,6 +93,7 @@ final class ForgetRun {
 			'pid'       => Decoded::int( $fields['pid'] ?? null, random_int( 100000, 2147483647 ) ),
 			'lock'      => Decoded::string( $fields['lock'] ?? null ),
 			'locked_at' => Decoded::int( $fields['locked_at'] ?? null ),
+			'begun'     => true === ( $fields['begun'] ?? null ),
 			'phase'     => Decoded::string( $fields['phase'] ?? null, 'load' ),
 			'names'     => Decoded::strings( $fields['names'] ?? [] ),
 			'position'  => Decoded::count( $fields['position'] ?? null ),
@@ -101,8 +105,8 @@ final class ForgetRun {
 	}
 
 	/**
-	 * Starts a forget: refuses append-only repositories, takes the exclusive lock and lists the
-	 * snapshots.
+	 * Starts a forget: refuses append-only repositories and writes the checkpoint with the
+	 * run's number. The first advance() takes the exclusive lock and lists the snapshots.
 	 *
 	 * @param Repository      $repository Repository.
 	 * @param string          $work_dir   Empty directory for the checkpoint.
@@ -129,22 +133,7 @@ final class ForgetRun {
 			AppendOnlyRefused::raise( 'The repository is append-only; forget runs on another computer.' );
 		}
 		$run = new self( $repository, $work_dir, $identity, $clock, $policy, $tags, [] );
-		$run->locking->remove_own_stale();
-		$run->state['lock']      = $run->locking->acquire( true )->hex();
-		$run->state['locked_at'] = $clock->now()[0];
-		try {
-			$run->state['names'] = array_keys( $repository->backend()->list( ObjectType::Snapshots ) );
-			sort( $run->state['names'] );
-			$run->persist();
-		} catch ( \Throwable $failure ) {
-			// No checkpoint names the lock yet, so nothing else would ever release it.
-			try {
-				$run->locking->release( Id::from_hex( $run->state['lock'] ) );
-			} catch ( PluginException $unreleased ) {
-				unset( $unreleased ); // Stale after 30 minutes; the first failure is the one to report.
-			}
-			throw $failure;
-		}
+		$run->persist();
 		return $run;
 	}
 
@@ -185,6 +174,12 @@ final class ForgetRun {
 			return true;
 		}
 		$this->keep_lock();
+		if ( ! $this->state['begun'] ) {
+			$names = array_map( 'strval', array_keys( $this->repository->backend()->list( ObjectType::Snapshots ) ) );
+			sort( $names );
+			$this->state['names'] = $names;
+			$this->state['begun'] = true;
+		}
 		do {
 			match ( $this->state['phase'] ) {
 				'load'   => $this->load_one(),
@@ -201,8 +196,10 @@ final class ForgetRun {
 	 * Releases the lock and deletes the checkpoint of an abandoned forget.
 	 */
 	public function abort(): void {
-		if ( '' !== $this->state['lock'] ) {
-			$this->locking->release( Id::from_hex( $this->state['lock'] ) );
+		if ( 'done' !== $this->state['phase'] ) {
+			// Also without a recorded lock: a request that ended between writing a lock and
+			// recording it left one that only the run's number identifies.
+			$this->locking->release( '' === $this->state['lock'] ? null : Id::from_hex( $this->state['lock'] ) );
 			$this->state['lock'] = '';
 		}
 		Files::remove_tree( $this->work_dir );
@@ -225,20 +222,25 @@ final class ForgetRun {
 	}
 
 	/**
-	 * Refreshes the lock, or takes a new one if it disappeared or is older than 30 minutes, when
-	 * other clients no longer honour it.
+	 * Takes the exclusive lock, or refreshes it when due. A lock that is gone, or older than
+	 * other clients are sure to honour, is taken again. The state in memory is the one of the
+	 * checkpoint here, so the new lock is recorded at once.
 	 */
 	private function keep_lock(): void {
 		$lock = $this->state['lock'];
-		if ( '' === $lock || null === $this->repository->backend()->size( ObjectType::Locks, $lock ) || $this->locking->lapsed( $this->state['locked_at'] ) ) {
-			$this->state['lock']      = $this->locking->acquire( true )->hex();
-			$this->state['locked_at'] = $this->clock->now()[0];
+		if ( '' !== $lock && ! $this->locking->lapsed( $this->state['locked_at'] ) && null !== $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+			if ( $this->locking->due( $this->state['locked_at'] ) ) {
+				$this->state['lock']      = $this->locking->refresh( Id::from_hex( $lock ), true )->hex();
+				$this->state['locked_at'] = $this->clock->now()[0];
+			}
 			return;
 		}
-		if ( $this->locking->due( $this->state['locked_at'] ) ) {
-			$this->state['lock']      = $this->locking->refresh( Id::from_hex( $lock ), true )->hex();
-			$this->state['locked_at'] = $this->clock->now()[0];
+		if ( ! $this->state['begun'] ) {
+			$this->locking->remove_own_stale();
 		}
+		$this->state['lock']      = $this->locking->acquire( true )->hex();
+		$this->state['locked_at'] = $this->clock->now()[0];
+		$this->persist();
 	}
 
 	/**

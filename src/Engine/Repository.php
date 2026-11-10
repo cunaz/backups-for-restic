@@ -214,6 +214,20 @@ final class Repository {
 	}
 
 	/**
+	 * Tells which of some files the server no longer lists.
+	 *
+	 * @param ObjectType   $type  Type of the files.
+	 * @param list<string> $names Hex names.
+	 * @return list<string> The names that are gone; nothing is requested for an empty list.
+	 */
+	public function missing( ObjectType $type, array $names ): array {
+		if ( [] === $names ) {
+			return [];
+		}
+		return array_values( array_diff( $names, array_map( 'strval', array_keys( $this->backend->list( $type ) ) ) ) );
+	}
+
+	/**
 	 * Loads all index files.
 	 *
 	 * @return IndexSet Merged index.

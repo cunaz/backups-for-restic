@@ -212,24 +212,59 @@ final class ForgetRunTest extends TestCase {
 		self::assertContains( $history['ours'][1], $left );
 	}
 
-	public function test_a_start_that_fails_after_locking_leaves_no_lock(): void {
-		$this->history();
+	public function test_a_first_call_that_cannot_list_the_snapshots_keeps_a_lock_the_run_knows(): void {
+		$history    = $this->history();
+		$fail       = true;
 		$backend    = new HookedBackend(
 			$this->backend,
-			static function ( string $method, ?ObjectType $type ): void {
-				if ( 'list' === $method && ObjectType::Snapshots === $type ) {
+			static function ( string $method, ?ObjectType $type ) use ( &$fail ): void {
+				if ( $fail && 'list' === $method && ObjectType::Snapshots === $type ) {
 					throw new BackendException( 'The connection was reset.' );
 				}
 			}
 		);
 		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$work       = $this->work_dir();
 
+		$run = ForgetRun::start( $repository, $work, $this->identity, new SystemClock(), new SystemRandom(), new RetentionPolicy( 1 ), self::TAGS );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'Starting takes no lock yet.' );
 		try {
-			ForgetRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), new RetentionPolicy( 1 ), self::TAGS );
-			self::fail( 'The start must fail.' );
+			$run->advance( 0.0 );
+			self::fail( 'The snapshots cannot be listed.' );
 		} catch ( BackendException ) {
-			self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The exclusive lock is released.' );
+			$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true );
+			self::assertIsArray( $state );
+			self::assertSame( [ $state['lock'] ], array_keys( $this->backend->list( ObjectType::Locks ) ), 'The checkpoint names the exclusive lock.' );
+			self::assertCount( count( $history['ours'] ) + count( $history['foreign'] ), $this->backend->list( ObjectType::Snapshots ), 'Nothing was removed.' );
 		}
+
+		$fail = false;
+		$run  = ForgetRun::resume( $repository, $work, $this->identity, new SystemClock(), new RetentionPolicy( 1 ), self::TAGS );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( count( $history['ours'] ) - 1, $run->result()['removed'], 'The run listed the snapshots in its second call and applied the policy.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_forget_recognises_a_lock_it_wrote_but_never_recorded(): void {
+		$this->history();
+		$work = $this->work_dir();
+		ForgetRun::start( $this->repository, $work, $this->identity, new SystemClock(), new SystemRandom(), new RetentionPolicy( 1 ), self::TAGS );
+		$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true );
+		self::assertIsArray( $state );
+		self::assertIsInt( $state['pid'] );
+		// The first request wrote its exclusive lock and ended before it recorded the name.
+		$orphan = ( new Locking( $this->repository, $this->identity, new SystemClock(), $state['pid'] ) )->acquire( true );
+
+		$run = ForgetRun::resume( $this->repository, $work, $this->identity, new SystemClock(), new RetentionPolicy( 1 ), self::TAGS );
+		$run->advance( 0.0 );
+
+		$locks = array_keys( $this->backend->list( ObjectType::Locks ) );
+		self::assertCount( 1, $locks, 'Its own exclusive lock did not block the run.' );
+		self::assertNotContains( $orphan->hex(), $locks );
+		$run->abort();
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
 	public function test_a_forget_paused_for_too_long_waits_for_another_clients_lock(): void {
