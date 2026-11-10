@@ -196,7 +196,7 @@ final class MaintenanceSteps implements StepProvider {
 		$restarts   = $run->result()['restarts'];
 		$done       = $run->advance( $deadline, $services->throttle() );
 		if ( $run->result()['restarts'] > $restarts ) {
-			$log->write( 'warning', 'The repository changed while the check was paused; the check starts over.', [ 'restart' => $run->result()['restarts'] ] );
+			$log->write( 'warning', 'Another program removed snapshots or data from the repository; the check starts over.', [ 'restart' => $run->result()['restarts'] ] );
 		}
 
 		$job->progress = $run->progress();

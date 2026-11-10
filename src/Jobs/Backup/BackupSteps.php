@@ -42,7 +42,7 @@ final class BackupSteps implements StepProvider {
 	/** Smallest memory_limit accepted for a backup. */
 	private const int MIN_MEMORY_BYTES = 100663296;
 
-	/** How often a backup may start over because the repository changed while it was paused. */
+	/** How often a backup may start over because the repository changed while its lock did not hold. */
 	public const int MAX_RESTARTS = 3;
 
 	/**
@@ -139,10 +139,11 @@ final class BackupSteps implements StepProvider {
 	/**
 	 * Runs the engine's resumable backup.
 	 *
-	 * A run that was paused for longer than its lock lasts, and then finds that another
-	 * client removed what it relied on, is given up by the engine (ADR 0030). The step then
-	 * starts a new run with the next tick; what was uploaded and is still there is found again
-	 * and not sent twice. After MAX_RESTARTS such runs the job fails rather than go on for ever.
+	 * A run whose lock did not hold, after a long pause or because someone removed it, and
+	 * that then finds that another client removed what it relied on, is given up by the
+	 * engine (ADR 0030). The step then starts a new run with the next tick; what was uploaded
+	 * and is still there is found again and not sent twice. After MAX_RESTARTS such runs the
+	 * job fails rather than go on for ever.
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
@@ -188,7 +189,7 @@ final class BackupSteps implements StepProvider {
 			if ( is_file( $dump ) ) {
 				unlink( $dump );
 			}
-			$log->write( 'warning', 'The repository changed while the backup was paused; the backup starts over.', [ 'restart' => $restarts ] + $changed->context() );
+			$log->write( 'warning', 'Another program removed data that the backup relied on; the backup starts over.', [ 'restart' => $restarts ] + $changed->context() );
 			return false;
 		}
 		$job->progress = $run->progress();

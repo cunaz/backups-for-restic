@@ -442,14 +442,17 @@ by their own clocks. A backup, check or forget that finds its lock older, or gon
 again (`Locking::acquire()`), which fails with `repository_locked` while another client
 holds a conflicting lock. Then it looks at what other clients did in the meantime:
 
-- A **backup** compares the index files and the unindexed packs of its last checkpoint with
-  the server. If all are still there, nothing it uploaded or reused was removed, and it
-  continues. If one is gone, as after `restic unlock` and `restic prune` on another
-  computer, the run is given up and the job starts a new one, at most three times; a
-  snapshot built on the old run could refer to data that no longer exists.
+- A **backup** keeps a record of the index files it has read its index from or written, and
+  of the packs it uploaded that no index file lists yet, and compares it with the server.
+  If all are still there, nothing it uploaded or reused was removed, and it continues. If
+  one is gone, as after `restic unlock` and `restic prune` on another computer, the run is
+  given up and the job starts a new one, at most three times; a snapshot built on the old
+  run could refer to data that no longer exists. The backup looks at its lock not only at
+  the start of a call but also in every checkpoint and at the end, before it writes an
+  index file or the snapshot, so a lock lost in the middle of a call is noticed in time.
 - A **check** compares the index files and snapshots it listed. If one is gone it starts
   over with a new listing, at most three times, instead of reporting as damage what a prune
-  or forget removed.
+  or forget removed. It looks once more before it ends.
 - A **forget** needs no comparison: what others wrote in the meantime can only make its
   policy remove more.
 - **Prune** starts its marking again, because another client may have written snapshots
@@ -985,7 +988,7 @@ translated message and a hint. The codes:
 | `repository_damaged` | an object that does not match its name or cannot be parsed (`FormatException`) |
 | `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
 | `repository_locked` | a conflicting lock of another client; retryable |
-| `repository_changed` | another client removed what a backup or a check relied on while the job was paused for longer than its lock lasts, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
+| `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
 | `repository_append_only` | the server refused a deletion |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |

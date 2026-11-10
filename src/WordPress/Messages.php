@@ -57,7 +57,7 @@ final class Messages {
 				'hint'    => __( 'The plugin tries again automatically. If nothing else uses the repository, stale locks expire after 30 minutes.', 'backups-for-restic' ),
 			],
 			'repository_changed'             => [
-				'message' => __( 'Another program kept removing data from the repository while the job was paused.', 'backups-for-restic' ),
+				'message' => __( 'Another program kept removing data from the repository that this job relied on.', 'backups-for-restic' ),
 				'hint'    => __( 'The job started over three times and then stopped. If another computer cleans up this repository, let it run at a time when no backup is running, and make sure the scheduled jobs of this site are not paused for long.', 'backups-for-restic' ),
 			],
 			'repository_append_only'         => [

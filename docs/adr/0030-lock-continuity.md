@@ -45,15 +45,31 @@ minutes ahead.
    first `advance()` takes the lock. A request that ends between writing a lock and
    recording its name leaves a lock that the next request, or `abort()`, recognises by the
    number and removes.
-4. **A backup that took its lock again checks what it relies on.** Every checkpoint records
-   the names of the index files on the server and the packs the run uploaded that no index
-   file lists yet. After the lock was taken again, all of them must still exist. restic's
-   prune and the plugin's own delete an indexed pack only after every index file that lists
-   it, and packs that no index lists at any time; index files are named by their content.
-   So if every recorded index file and every unindexed pack is still there, nothing the run
-   uploaded or reused is gone, and the run continues. Otherwise the run is given up:
-   its checkpoint is deleted, its lock released, and `advance()` throws
-   `RepositoryChanged`.
+4. **A backup keeps a record of what it relies on, and checks it whenever its lock did not
+   hold.** The record names the index files the run has read its index from or written
+   itself, and the packs it uploaded that no index file lists yet. It only grows. Every
+   blob the run refers to was found in one of these index files or lies in one of these
+   packs. restic's prune and the plugin's own delete an indexed pack only after every
+   index file that lists it, and packs that no index lists at any time; index files are
+   named by their content. So if every index file and every pack on the record is still
+   there, nothing the run uploaded or reused is gone.
+
+   The run makes sure of its lock at the start of every call, and again in every checkpoint
+   and at the end, each time after the packs are uploaded and recorded and before an index
+   file or the snapshot is written. A lock that still exists and is younger than 25 minutes
+   has held since the run last looked, so nothing is compared. A lock that is gone or older
+   is taken again, and the record is compared with the server. If something is missing the
+   run is given up: its checkpoint is deleted, its lock released, and `advance()` throws
+   `RepositoryChanged`. This also holds within one long call and in the first call, which
+   has no earlier checkpoint to compare with: an index file must not list packs that were
+   removed while the lock did not hold, and a snapshot must not refer to them. A call that
+   cannot take the lock again, because another client holds an exclusive lock by now, has
+   recorded what it uploaded before it asked, and the next call goes on from there.
+
+   Each call reads the index from the index files that the server lists at that moment and
+   compares its record with that listing, which costs no request. An index file that is
+   missing there, although the lock held, was removed by a client that does not honour
+   locks; the run is given up in the same way.
 5. **The backup job then starts a new run** with the next tick. What the old run uploaded
    and still exists is found by deduplication and not sent again; the database dump lists
    its tables again. After three such restarts (`BackupSteps::MAX_RESTARTS`) the job fails
@@ -62,7 +78,9 @@ minutes ahead.
    with what the server lists now. If one is gone it starts over from its first phase with a
    new listing, at most three times (`CheckRun::MAX_RESTARTS`), then it fails with
    `repository_changed`. If nothing is gone it continues: new index files, packs and
-   snapshots of other clients do not concern a check that began before them.
+   snapshots of other clients do not concern a check that began before them. The check
+   looks once more before it ends, so that what it found in a call that lost its lock is
+   not reported as damage.
 7. **Forget needs no comparison.** It holds an exclusive lock and removes snapshot files it
    selected by a policy. A snapshot another client wrote during a gap can only make the
    policy remove more, never keep one this run removes, and deleting a file that is already
@@ -73,9 +91,14 @@ minutes ahead.
   suite proves it against `restic unlock` and `restic prune`: the job starts over once and
   `restic check --read-data` finds no error; with the comparison switched off the same test
   fails.
-- A gap costs two listings (index files and packs) when it happens and one listing of the
-  index files at every checkpoint. A site whose ticks are often more than 25 minutes apart
-  still finishes its jobs, because nothing is repeated unless something was removed.
+- A gap costs two listings (index files and packs) when it happens. Without a gap a call
+  costs one request for the lock at its start and one in every checkpoint, and the listing
+  of the index files it reads the index from. A site whose ticks are often more than 25
+  minutes apart still finishes its jobs, because nothing is repeated unless something was
+  removed.
+- A client that removes or rewrites index files without honouring locks makes a running
+  backup start over, even if the data is still there. Clients that work without locks
+  exist; rustic is one.
 - The index is read later in a tick than before, after the lock request. The index cache
   keeps this cheap.
 - The checkpoints of backup, check and forget have a new version. A job that is active

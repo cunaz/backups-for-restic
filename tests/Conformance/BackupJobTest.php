@@ -223,7 +223,7 @@ final class BackupJobTest extends TestCase {
 		self::assertSame( JobState::Succeeded, $finished->state, (string) json_encode( $finished->error?->to_array() ) );
 		self::assertSame( 1, $finished->data['restarts'] ?? null, 'The backup noticed the missing packs and started over once.' );
 		$messages = array_column( $store->log( $finished )->read(), 'message' );
-		self::assertContains( 'The repository changed while the backup was paused; the backup starts over.', $messages );
+		self::assertContains( 'Another program removed data that the backup relied on; the backup starts over.', $messages );
 		self::assertSame( 2, count( array_keys( $messages, 'Backup started.', true ) ) );
 
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ), 'The snapshot refers to nothing that is gone.' );
