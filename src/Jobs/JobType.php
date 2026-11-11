@@ -107,6 +107,19 @@ enum JobType: string {
 	}
 
 	/**
+	 * Whether a request to cancel still stops the job before a step. It does before the
+	 * steps that do the work. Once the work is done, the snapshot written or the packs
+	 * deleted, only its result is left to record: a job that stopped there would call
+	 * itself cancelled over a repository that it changed all the same.
+	 *
+	 * @param string $step Step name.
+	 * @return bool True if the job can still be cancelled before the step.
+	 */
+	public function cancels_before( string $step ): bool {
+		return 'recording' !== $step && ! $this->is_cleanup( $step );
+	}
+
+	/**
 	 * Whether a step belongs to the cleanup part.
 	 *
 	 * @param string $step Step name.

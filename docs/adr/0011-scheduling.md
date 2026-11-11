@@ -62,3 +62,11 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   no repository lock.
 - The wizard says that the first backup uploads everything once. It names no expected
   duration; estimates are planned for Milestone 3.
+- Since 2026-11-11 the tick deadline holds back regular steps only. The cleanup steps of a
+  job (release the repository lock, remove working files) run in the tick that reaches
+  them, also past the deadline, and a request to cancel that arrives while a step ends or
+  fails is turned into the cleanup by the same tick. The reason is deactivation: it asks
+  the job to cancel and no later tick comes, so a job left between its cleanup steps would
+  keep its lock in the repository for half an hour and stay active with nobody to finish
+  it. The price is a request that can outlast its budget by the time limits of the
+  cleanup's own requests.

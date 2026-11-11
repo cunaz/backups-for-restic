@@ -11,6 +11,7 @@ namespace BackupsForRestic\Backup;
 
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\VirtualFile;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Support\ByteSource;
@@ -193,10 +194,11 @@ final class PlanFactory {
 	 * Creates a spool directory, which exists only so that the backup walks into it.
 	 *
 	 * @param string $path Directory.
+	 * @throws StorageFailed If the directory cannot be created.
 	 */
 	private function ensure( string $path ): void {
-		if ( ! is_dir( $path ) ) {
-			mkdir( $path, 0700, true );
+		if ( ! is_dir( $path ) && ! mkdir( $path, 0700, true ) && ! is_dir( $path ) ) {
+			StorageFailed::raise( 'A spool directory could not be created in the private directory.', [ 'directory' => basename( $path ) ] );
 		}
 	}
 }

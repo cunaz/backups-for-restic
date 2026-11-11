@@ -60,6 +60,8 @@ final class EventLog {
 		if ( $size + strlen( $line ) + 1 > self::MAX_BYTES ) {
 			$line = '{"level":"warning","message":"The log reached its size limit; later entries are dropped."}';
 		}
+		// The result is not checked on purpose: a line that cannot be written must not fail the
+		// job it tells about. The job document, which decides what happens next, is checked.
 		file_put_contents( $this->file, $line . "\n", FILE_APPEND | LOCK_EX );
 	}
 

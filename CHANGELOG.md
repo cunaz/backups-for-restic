@@ -88,6 +88,26 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Connecting to an existing repository now records its ID and format version. Before, the
+  settings kept format 1, so the Doctor did not ask for the zstd extension, and the recovery
+  kit and the site manifest named the wrong format.
+- A repository of format version 2 is refused when a job unlocks it on a server without the
+  zstd extension, instead of failing later in the first backup.
+- After a change of the salts in `wp-config.php`, a site that defines both passwords there
+  goes on backing up: the cached repository key is derived again. Before, every job failed
+  until the stored secrets were deleted by hand.
+- Creating a repository stores its password before the repository exists. Before, a failure
+  between the two left a repository that nobody could open.
+- The last backup, the last forget, prune and check and the check alert belong to one
+  repository and are dropped when the jobs turn to another one. The stale notice then counts
+  from that day.
+- Saving another server or creating a repository is refused while a job is running.
+- Deactivating the plugin ends the running job and releases its lock in the repository.
+- The setup cannot be completed by a request while the Doctor reports a critical finding.
+- A request to cancel that arrives while a step is running is honoured by the same tick.
+- A request to cancel that arrives just after a backup wrote its snapshot no longer ends
+  the job as cancelled with the snapshot left unrecorded; the job ends as succeeded.
+- A CA certificate that could not be written to disk is no longer announced as uploaded.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
   job. A cancel request is now a marker file that the runner reads before every step, and

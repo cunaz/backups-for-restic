@@ -22,11 +22,15 @@ final class InMemoryOptions implements Options {
 	/** @var array<string, bool> */
 	public array $autoload = [];
 
+	/** Number of calls of set(). */
+	public int $writes = 0;
+
 	public function get( string $name ): mixed {
 		return $this->values[ $name ] ?? null;
 	}
 
 	public function set( string $name, mixed $value, bool $autoload ): void {
+		++$this->writes;
 		$this->values[ $name ]   = $value;
 		$this->autoload[ $name ] = $autoload;
 	}

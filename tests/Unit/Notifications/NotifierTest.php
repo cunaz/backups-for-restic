@@ -122,6 +122,52 @@ final class NotifierTest extends TestCase {
 		self::assertSame( self::SETUP, $this->mailer->sent[0]->since );
 	}
 
+	public function test_without_a_backup_in_a_new_repository_the_stale_time_counts_from_the_day_it_was_opened(): void {
+		$state = new SiteState( $this->options );
+		$state->bind( 'first', self::SETUP );
+		$notifier = $this->notifier();
+		$this->backup_succeeded( $notifier, self::SETUP + self::HOUR );
+
+		// A year later the jobs turn to another repository; what was remembered is dropped.
+		$moved = self::SETUP + 365 * 24 * self::HOUR;
+		$state->bind( 'second', $moved );
+
+		$notifier->heartbeat( $moved + 36 * self::HOUR - 1 );
+		self::assertSame( [], $this->mailer->kinds(), 'Not at once: the new repository had no time for a backup yet.' );
+		$notifier->heartbeat( $moved + 36 * self::HOUR );
+		self::assertSame( [ 'stale' ], $this->mailer->kinds() );
+		self::assertSame( $moved, $this->mailer->sent[0]->since );
+	}
+
+	public function test_a_stale_notice_for_one_repository_does_not_hold_back_the_one_for_the_next(): void {
+		$state = new SiteState( $this->options );
+		$state->bind( 'first', self::SETUP );
+		$notifier = $this->notifier();
+		$notifier->heartbeat( self::SETUP + 36 * self::HOUR );
+		self::assertSame( [ 'stale' ], $this->mailer->kinds() );
+
+		$moved = self::SETUP + 100 * self::HOUR;
+		$state->bind( 'second', $moved );
+		$notifier->heartbeat( $moved + 36 * self::HOUR );
+
+		self::assertSame( [ 'stale', 'stale' ], $this->mailer->kinds() );
+		self::assertSame( $moved, $this->mailer->sent[1]->since );
+	}
+
+	public function test_a_success_in_another_repository_ends_no_failure_streak_of_the_old_one(): void {
+		$state = new SiteState( $this->options );
+		$state->bind( 'first', self::SETUP );
+		$notifier = $this->notifier();
+		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 100, 'repository_unreachable' ), self::SETUP + 100 );
+
+		$state->bind( 'second', self::SETUP + 200 );
+		$this->backup_succeeded( $notifier, self::SETUP + 300 );
+		self::assertSame( [ 'failure' ], $this->mailer->kinds(), 'No recovery: nothing failed in this repository.' );
+
+		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 400, 'quota_exceeded' ), self::SETUP + 400 );
+		self::assertSame( [ 'failure', 'failure' ], $this->mailer->kinds(), 'Its own first failure is reported.' );
+	}
+
 	public function test_the_stale_threshold_follows_the_schedule(): void {
 		$this->notifier( [ 'schedule.backup.frequency' => 'manual' ] )->heartbeat( self::SETUP + 1000 * self::HOUR );
 		self::assertSame( [], $this->mailer->kinds(), 'Manual backups never become stale.' );

@@ -44,12 +44,14 @@ operator must be able to recover.
 - The settings page does not mark the values that a constant overrides, and no field is
   read-only: the REST API reports them, the admin script does not use the report. Planned
   for Milestone 3.
-- A cached master key that no longer decrypts is not derived again.
-  `Connection\RepositoryAccess::open_cached()` passes `SecretsUndecryptable` on, and every
-  job ends with the error `secrets_undecryptable`, also when both password constants are
-  defined. Constants therefore do not avoid the issue once a key is cached: after the salts
-  changed, the option `backups_for_restic_secrets` has to be deleted as well, or the plugin
-  set up again ([disaster-recovery guide](../06-disaster-recovery.md), Scenario E).
+- A cached master key that no longer decrypts is a cache that missed:
+  `Connection\RepositoryAccess::open_cached()` forgets it, and the unlock step derives the
+  key again from the repository password. With both passwords defined as constants the jobs
+  therefore go on after a change of the salts without anybody's help. Passwords that are
+  stored in the database do not survive the change, by design; then every job ends with
+  `secrets_undecryptable` ([disaster-recovery guide](../06-disaster-recovery.md),
+  Scenario E).
+- The Doctor's check `secrets` asks whether the two passwords can be read, wherever they
+  come from. A stored value that a constant overrides, and the cached key, do not count.
 - The plugin detects the state (Doctor check `secrets`, the job error) but has no form to
-  enter the passwords again. That form is planned for Milestone 3; deriving the key again
-  without the administrator is not planned yet.
+  enter the passwords again. That form is planned for phase 0.8 of Milestone 3.
