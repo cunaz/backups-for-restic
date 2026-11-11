@@ -296,7 +296,10 @@ final class Runner {
 				return;
 			}
 			$job->step = $next;
-			if ( microtime( true ) >= $deadline ) {
+			// The deadline holds back regular steps only. The cleanup steps are short, they
+			// release the lock in the repository, and the tick that could run them may be the
+			// last one for a long time, for example when the plugin is being deactivated.
+			if ( microtime( true ) >= $deadline && ! $job->type->is_cleanup( $next ) ) {
 				return;
 			}
 		}

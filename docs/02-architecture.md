@@ -307,7 +307,8 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   back-off. A request that arrives during a tick can therefore neither be lost nor overwrite
   what the tick saves. When the step that was running wants another tick, the tick looks for
   the marker once more and starts the cleanup itself instead of leaving it to a tick that
-  may not come. A job that is still `queued` is cancelled at once and without cleanup
+  may not come. The tick's deadline holds back regular steps only: once a job is in its
+  cleanup steps, the same tick runs them all. A job that is still `queued` is cancelled at once and without cleanup
   steps, because nothing ran: by `cancel()` itself if it gets the runner lock, otherwise by
   the next tick. `Runner::stop()` is both in one call, for the deactivation (§18): it asks
   the active job to cancel and runs one tick, which is the cleanup.
