@@ -803,8 +803,8 @@
 
 		// CA certificate of a server with a certificate of its own authority.
 		const caBox = el( 'div' );
-		const renderCa = function ( state, message ) {
-			const pem = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----' } );
+		const renderCa = function ( state, message, entered ) {
+			const pem = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----', value: entered || '' } );
 			const upload = button( __( 'Upload certificate', 'backups-for-restic' ), function () {
 				upload.disabled = true;
 				remove.disabled = true;
@@ -814,7 +814,8 @@
 						renderCa( 'uploaded', notice( 'success', __( 'The certificate is uploaded.', 'backups-for-restic' ) ) );
 					} )
 					.catch( function ( error ) {
-						renderCa( state, notice( 'error', errorText( error ) ) );
+						// What was pasted stays, to be corrected.
+						renderCa( state, notice( 'error', errorText( error ) ), pem.value );
 					} );
 			} );
 			const remove = button( __( 'Remove certificate', 'backups-for-restic' ), function () {
@@ -938,16 +939,23 @@
 	 */
 	function recoveryKitForm() {
 		const box = el( 'div' );
+		// Counts the changes: a kit that was asked for before the last one is not shown.
+		let changes = 0;
 		function render( message ) {
 			const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
 			const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
+				const asked = changes;
 				show.disabled = true;
 				api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
 					.then( function ( response ) {
-						replace( box, [ kitView( response.recovery_kit ) ] );
+						if ( asked === changes ) {
+							replace( box, [ kitView( response.recovery_kit ) ] );
+						}
 					} )
 					.catch( function ( error ) {
-						render( notice( 'error', errorText( error ) ) );
+						if ( asked === changes ) {
+							render( notice( 'error', errorText( error ) ) );
+						}
 					} );
 			} );
 			replace( box, [ message, field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
@@ -956,7 +964,8 @@
 		return {
 			box,
 			reset() {
-				if ( box.querySelector( '.bfr-kit' ) ) {
+				changes++;
+				if ( box.querySelector( '.bfr-kit' ) || box.querySelector( 'button:disabled' ) ) {
 					render( notice( 'info', __( 'The recovery kit changed. Show it again and replace your copy.', 'backups-for-restic' ) ) );
 				}
 			},
@@ -1144,8 +1153,21 @@
 			};
 			// The certificate has to be there before the first request to the server: the
 			// connection test of a server with a certificate of its own authority fails without it.
+			// A certificate that this wizard uploaded is for the server it was entered with. For
+			// another choice it is taken back: BorgBase's certificate would not verify against it.
+			let uploaded = false;
 			const upload = function () {
-				return own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
+				if ( own.checked && ca.value.trim() ) {
+					return api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ).then( function () {
+						uploaded = true;
+					} );
+				}
+				if ( uploaded ) {
+					return api( '/repository/ca-certificate', { method: 'DELETE' } ).then( function () {
+						uploaded = false;
+					} );
+				}
+				return Promise.resolve();
 			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
