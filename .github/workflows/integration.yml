@@ -60,8 +60,9 @@ jobs:
           path: .tools/bin
           key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: bin/install-test-tools.sh restic rest-server
+      - run: bin/install-test-tools.sh restic rest-server wp-cli
       - run: bin/test-site.sh install
+      - run: bin/test-site.sh install-multisite
       - run: ulimit -c "$(ulimit -Hc)" && bin/test-site.sh start
       - name: Integration tests
         env:

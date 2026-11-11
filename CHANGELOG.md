@@ -70,6 +70,9 @@ All notable changes are documented here. The format follows
   the heartbeat and an open admin page advance the job.
 
 ### Security
+- Repository requests verify the server's certificate even when other code on the site
+  switches certificate verification off for all requests (a filter on `https_ssl_verify` or
+  on the request arguments, or the `http_api_curl` action).
 - After the setup, `POST /repository/connect` and `POST /repository/create` answer with the
   recovery kit only if the request carries the administrator's WordPress password, like
   the recovery kit route; before, any session with the plugin's capability got the
