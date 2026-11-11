@@ -323,6 +323,25 @@ final class RunnerTest extends TestCase {
 		self::assertTrue( $this->document( $ended )['cancel_requested'], 'The runner wrote the request into its own document.' );
 	}
 
+	public function test_a_cancel_request_that_arrives_when_the_work_is_done_does_not_undo_it(): void {
+		$store                      = $this->store();
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$this->script['backing_up'] = [
+			static function ( Job $running ) use ( $store ): bool {
+				// The snapshot is written; the request comes a moment too late.
+				$store->request_cancel( $running );
+				return true;
+			},
+		];
+
+		$this->runner( $store )->tick( 10 );
+
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'recording', 'releasing', 'cleaning_up' ], $this->calls, 'The backup is recorded: its snapshot is in the repository.' );
+		$ended = $store->get( $job->id );
+		self::assertSame( JobState::Succeeded, $ended?->state );
+		self::assertTrue( $ended->cancel_requested, 'The request is not hidden.' );
+	}
+
 	public function test_a_cancel_request_during_a_tick_is_honoured_by_that_tick_and_does_not_touch_its_document(): void {
 		$store                      = $this->store();
 		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );

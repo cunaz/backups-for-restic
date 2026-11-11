@@ -235,7 +235,7 @@ final class Runner {
 		while ( true ) {
 			// A request to cancel may have arrived while the last step ran.
 			$job->cancel_requested = $job->cancel_requested || $this->store->cancel_requested( $job );
-			if ( $job->cancel_requested && null === $job->outcome && ! $job->type->is_cleanup( $job->step ) ) {
+			if ( $job->cancel_requested && null === $job->outcome && $job->type->cancels_before( $job->step ) ) {
 				$job->outcome = JobState::Cancelled;
 				$job->step    = $job->type->cleanup_steps()[0];
 				$log->write( 'info', 'Cancelled; cleaning up.' );
@@ -283,7 +283,7 @@ final class Runner {
 			if ( ! $done ) {
 				// A step that wants another tick, and a request to cancel that came while it ran:
 				// the cleanup starts in this tick. After a deactivation no other tick comes.
-				if ( null === $job->outcome && ! $job->type->is_cleanup( $job->step ) && $this->store->cancel_requested( $job ) ) {
+				if ( null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
 					continue;
 				}
 				return;
