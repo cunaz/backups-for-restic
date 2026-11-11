@@ -13,7 +13,9 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\UnsupportedRepository;
+use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
@@ -103,8 +105,8 @@ final class BackupStepsTest extends TestCase {
 	/**
 	 * Runs the unlock step until it is done.
 	 */
-	private function unlock(): Job {
-		$job = new Job( sprintf( '20270115T0300%02dZ-abcdef', ++$this->unlocks ), JobType::Unlock, 'setup', 1_800_000_000 );
+	private function unlock( JobType $type = JobType::Unlock ): Job {
+		$job = new Job( sprintf( '20270115T0300%02dZ-abcdef', ++$this->unlocks ), $type, 'setup', 1_800_000_000 );
 		for ( $tick = 0; $tick < 100; $tick++ ) {
 			if ( $this->steps()->unlock( $job, $this->jobs->log( $job ), microtime( true ) + 5 ) ) {
 				return $job;
@@ -139,6 +141,64 @@ final class BackupStepsTest extends TestCase {
 		self::assertSame( [ $repository->config()->id, 1 ], $this->recorded() );
 		self::assertSame( $repository->config()->id, $this->access()->cached_repository_id() );
 		self::assertSame( $repository->config()->id, ( new SiteState( $this->options ) )->get( 'repository' )['id'] ?? null );
+	}
+
+	public function test_an_entered_password_that_opens_the_repository_becomes_the_repository_password(): void {
+		$repository = $this->repository();
+		// The stored password is the one from before somebody changed it with restic.
+		$this->secrets->set( SecretName::RepositoryPassword, new Secret( 'the password before' ) );
+		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( self::PASSWORD ) );
+
+		$this->unlock();
+
+		self::assertSame( self::PASSWORD, $this->secrets->get( SecretName::RepositoryPassword )?->reveal() );
+		self::assertNull( $this->secrets->get( SecretName::RepositoryPasswordCandidate ) );
+		self::assertSame( $repository->config()->id, $this->access()->cached_repository_id() );
+	}
+
+	public function test_an_entered_password_is_tried_even_though_a_key_is_cached(): void {
+		$this->repository();
+		$this->unlock();
+		$cached = $this->secrets->get( SecretName::MasterKey )?->reveal();
+		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'not the password of this repository' ) );
+		$job = new Job( '20270115T030100Z-abcdef', JobType::Unlock, 'setup', 1_800_000_000 );
+
+		try {
+			$this->steps()->unlock( $job, $this->jobs->log( $job ), microtime( true ) + 5 );
+			self::fail( 'The cached key says nothing about the entered password.' );
+		} catch ( WrongPassword ) {
+			self::assertSame( self::PASSWORD, $this->secrets->get( SecretName::RepositoryPassword )?->reveal(), 'The backups go on with the password that works.' );
+			self::assertSame( $cached, $this->secrets->get( SecretName::MasterKey )?->reveal() );
+		}
+
+		self::assertTrue( $this->steps()->clean_up( $job, $this->jobs->log( $job ), microtime( true ) + 5 ) );
+		self::assertNull( $this->secrets->get( SecretName::RepositoryPasswordCandidate ), 'The wrong password is not kept.' );
+		self::assertSame( $cached, $this->secrets->get( SecretName::MasterKey )?->reveal() );
+	}
+
+	public function test_an_entered_password_that_cannot_be_read_fails_the_unlock_job(): void {
+		$this->repository();
+		$this->unlock();
+		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'entered before the security keys changed' ) );
+		$this->secrets = new EncryptedOptionStore( $this->options, new Secret( 'other salts' ), new SystemRandom() );
+		$job           = new Job( '20270115T030100Z-abcdef', JobType::Unlock, 'setup', 1_800_000_000 );
+
+		$this->expectException( SecretsUndecryptable::class );
+
+		// Going on with the cached key would report a password as confirmed that nobody tried.
+		$this->steps()->unlock( $job, $this->jobs->log( $job ), microtime( true ) + 5 );
+	}
+
+	public function test_only_the_unlock_job_tries_an_entered_password(): void {
+		$this->repository();
+		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'left behind by an unlock that never ended' ) );
+
+		$job = $this->unlock( JobType::Backup );
+
+		self::assertNotSame( '', $this->access()->cached_repository_id(), 'The backup unlocked with the stored password.' );
+		self::assertSame( self::PASSWORD, $this->secrets->get( SecretName::RepositoryPassword )?->reveal() );
+		self::assertTrue( $this->steps()->clean_up( $job, $this->jobs->log( $job ), microtime( true ) + 5 ) );
+		self::assertNull( $this->secrets->get( SecretName::RepositoryPasswordCandidate ), 'Nothing unconfirmed stays stored.' );
 	}
 
 	public function test_a_job_with_a_cached_key_notices_another_repository_at_the_address(): void {

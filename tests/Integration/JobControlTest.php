@@ -176,7 +176,7 @@ final class JobControlTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
-	public function test_a_wrong_repository_password_fails_the_unlock_and_the_right_one_repairs_it(): void {
+	public function test_a_wrong_repository_password_fails_the_unlock_and_leaves_the_working_one_in_place(): void {
 		TestSite::idle( 600 );
 		[ , $before ] = TestSite::api( 'GET', '/status' );
 		self::assertNotSame( '', (string) ( $before['last_backup']['snapshot'] ?? '' ), 'The site has a backup in this repository.' );
@@ -195,8 +195,14 @@ final class JobControlTest extends TestCase {
 			$job = TestSite::wait_for( (string) $answer['job']['id'], 600 );
 			self::assertSame( 'failed', $job['state'], (string) json_encode( $job ) );
 			self::assertSame( 'wrong_password', $job['error']['code'] ?? null, (string) json_encode( $job ) );
-			[ $status, , $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
-			self::assertSame( 409, $status, 'Without the key there is nothing to list: ' . $raw );
+			// The password that works and the key stay: the site's backups do not depend on what
+			// somebody typed into the form.
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
+			self::assertSame( 200, $status, $raw );
+			self::assertNotSame( [], $listed['snapshots'] ?? [], $raw );
+			[ $status, $kit, $raw ] = TestSite::api( 'POST', '/recovery-kit', [ 'user_password' => TestSite::ADMIN_PASSWORD ] );
+			self::assertSame( 200, $status, $raw );
+			self::assertStringContainsString( "RESTIC_PASSWORD='" . TestSite::$repository_password . "'", (string) ( $kit['recovery_kit'] ?? '' ), 'The kit names the password that opens the repository.' );
 		} catch ( \Throwable $failure ) {
 			// The later tests need the repository: the right password back, whatever went wrong here.
 			TestSite::idle( 600 );

@@ -109,6 +109,11 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- A wrong repository password entered under Settings → Repository no longer replaces the
+  stored one. Before, the stored password and the cached key were gone as soon as the form
+  was sent, and backups failed until the right password was entered. Now the entered
+  password is kept apart and takes effect only once the unlock job has opened the
+  repository with it.
 - The setup wizard sends the CA certificate along with the connection test. Before, the
   test ran without it and a server with a certificate of its own authority could not be
   set up. The test stores nothing; the certificate is kept when the server is saved.
