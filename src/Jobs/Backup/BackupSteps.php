@@ -209,8 +209,8 @@ final class BackupSteps implements StepProvider {
 			$job->warnings         = [];
 			// The new run lists the tables again; the old list may be as outdated as the rest.
 			$dump = BackupServices::dump_state( $services->jobs, $job );
-			if ( is_file( $dump ) ) {
-				unlink( $dump );
+			if ( is_file( $dump ) && ! unlink( $dump ) ) {
+				StorageFailed::raise( 'The previous database dump state could not be removed.', [ 'file' => basename( $dump ) ] );
 			}
 			$log->write( 'warning', 'Another program removed data that the backup relied on; the backup starts over.', [ 'restart' => $restarts ] + $changed->context() );
 			return false;
