@@ -271,10 +271,11 @@ final class Runner {
 					$job->outcome ??= JobState::Failed;
 					$job->error   ??= $error;
 					$done           = true;
-				} elseif ( $error->retryable && null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
+				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES && null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
 					// Asked to cancel while the step failed with what would be tried again: no
 					// retry is waited for, the cleanup starts now. After a deactivation no later
-					// tick would come to start it. An error that ends the job stays the outcome.
+					// tick would come to start it. An error that ends the job stays the outcome, also the
+					// last of too many attempts.
 					$job->cancel_requested = true;
 					continue;
 				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES ) {
