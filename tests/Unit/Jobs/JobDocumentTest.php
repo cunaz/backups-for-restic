@@ -7,7 +7,10 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
+use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Support\Redactor;
@@ -93,6 +96,65 @@ final class JobDocumentTest extends TestCase {
 		self::assertNull( $store->get( $job->id ), 'A layout this version does not know is never interpreted.' );
 		self::assertNull( $store->active() );
 		self::assertSame( [], $store->latest( 10 ) );
+		$this->assert_blocks_changes( $store, $job );
+	}
+
+	private function assert_blocks_changes( JobStore $store, Job $unreadable ): void {
+		try {
+			$store->create( JobType::Backup, 'manual', $unreadable->created_at + 1 );
+			self::fail( 'An unreadable job must not allow a second one.' );
+		} catch ( JobConflict $conflict ) {
+			self::assertSame( $unreadable->id, $conflict->context()['job'] ?? null );
+			self::assertSame( 'job_unreadable', JobError::from_throwable( $conflict )->code );
+		}
+		$changed = false;
+		try {
+			$store->while_idle(
+				static function () use ( &$changed ): void {
+					$changed = true;
+				}
+			);
+			self::fail( 'An unreadable job cannot prove that the store is idle.' );
+		} catch ( JobConflict $conflict ) {
+			self::assertSame( $unreadable->id, $conflict->context()['job'] ?? null );
+		}
+		self::assertFalse( $changed );
+	}
+
+	public function test_a_newer_document_is_kept_even_if_its_raw_state_looks_terminal(): void {
+		$store = $this->store();
+		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );
+		$this->rewrite(
+			$job,
+			static fn ( array $document ): array => [
+				'schema' => Job::SCHEMA + 1,
+				'state'  => 'succeeded',
+			] + $document
+		);
+		$this->assert_blocks_changes( $store, $job );
+		$before       = file_get_contents( $this->directory . '/' . $job->id . '/job.json' );
+		$newer        = new Job( '20260102T000000Z-abcdef', JobType::Backup, 'manual', 1767312000 );
+		$newer->state = JobState::Succeeded;
+		$store->save( $newer );
+
+		self::assertSame( 0, $store->prune( 1 ) );
+		self::assertSame( $before, file_get_contents( $this->directory . '/' . $job->id . '/job.json' ) );
+		$this->assert_blocks_changes( $store, $job );
+	}
+
+	public function test_a_damaged_document_also_cannot_prove_that_the_store_is_idle(): void {
+		$store = $this->store();
+		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );
+		file_put_contents( $this->directory . '/' . $job->id . '/job.json', '{"state":' );
+		$this->assert_blocks_changes( $store, $job );
+	}
+
+	public function test_a_directory_without_a_document_does_not_block_a_new_job(): void {
+		$store = $this->store();
+		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );
+		unlink( $this->directory . '/' . $job->id . '/job.json' );
+		$next = $store->while_idle( fn (): Job => $store->create( JobType::Check, 'manual', 1767225601 ) );
+		self::assertSame( $next->id, $store->active()?->id );
 	}
 
 	public function test_the_refusal_names_the_layout(): void {

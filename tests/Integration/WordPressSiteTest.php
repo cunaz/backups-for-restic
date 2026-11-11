@@ -300,6 +300,41 @@ final class WordPressSiteTest extends TestCase {
 	}
 
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_an_unreadable_job_blocks_new_jobs_and_repository_changes_with_an_explanation(): void {
+		TestSite::idle( 600 );
+		$id = '20990101T000000Z-abcdef';
+		try {
+			TestSite::php(
+				'
+				$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/" . $arguments[0] );
+				$store = $container->jobs();
+				$job = new BackupsForRestic\Jobs\Job( $arguments[1], BackupsForRestic\Jobs\JobType::Backup, "manual", time() );
+				$document = $job->to_array();
+				$document["schema"] = BackupsForRestic\Jobs\Job::SCHEMA + 1;
+				$document["state"] = "succeeded";
+				BackupsForRestic\Storage\Files::write_atomic( $store->directory( $job ) . "/job.json", json_encode( $document ) );
+				',
+				[ TestSite::PLUGIN, $id ]
+			);
+			$requests = [
+				'/jobs'            => [],
+				'/repository/save' => TestSite::connection(),
+			];
+			foreach ( $requests as $route => $body ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'POST', $route, $body );
+				self::assertSame( 409, $status, $raw );
+				self::assertSame( 'backups_for_restic_job_unreadable', $answer['code'] ?? null, $raw );
+				self::assertStringContainsString( 'Install a plugin version', $answer['data']['hint'] ?? '', $raw );
+			}
+		} finally {
+			TestSite::php(
+				'$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/" . $arguments[0] ); BackupsForRestic\Storage\Files::remove_tree( $container->private_dir()->path . "/jobs/" . $arguments[1] );',
+				[ TestSite::PLUGIN, $id ]
+			);
+		}
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_deactivation_leaves_jobs_alone_when_the_options_have_a_newer_layout(): void {
 		TestSite::idle( 600 );
 		$output = TestSite::php(

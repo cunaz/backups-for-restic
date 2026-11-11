@@ -1034,6 +1034,7 @@ translated message and a hint. The codes:
 | `repository_damaged` | an object that does not match its name or cannot be parsed (`FormatException`) |
 | `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
 | `repository_locked` | a conflicting lock of another client; retryable |
+| `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
@@ -1191,8 +1192,11 @@ and schedules are slots in the site's time zone.
   the settings, and retention deletes snapshots by what it reads. Deactivation unschedules
   events but leaves jobs and their repository locks alone when the options have a newer
   layout. A job document with a higher number, or with one that is not a number, is not
-  loaded. Unknown or invalid stored
-  settings of the same layout fall back to their defaults field by field.
+  loaded. Any existing job document that cannot be read blocks `create()` and `while_idle()`
+  under the creation lock with `job_unreadable`; its raw state is not trusted, and pruning
+  job history leaves it alone. A directory without a job document does not block changes.
+  Unknown or invalid stored settings of the same layout fall back to their defaults field
+  by field.
 - Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active
   job (`Cron::stop()`, `Runner::stop()`): it asks the job to cancel and runs its cleanup
   steps, which releases the repository lock. The budget of ten seconds holds back regular
