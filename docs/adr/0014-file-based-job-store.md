@@ -40,12 +40,15 @@ resumable after any step.
   problem.
 
 ## As built (2026-11)
-Both documents in the database, the state and the notifications, are changed by more than
-one request. Every change starts from the database and holds a `flock()` on
+The documents in the database that more than one request changes are the state, the
+notifications and the secrets. Every change starts from the database and holds a `flock()` on
 `state.lock` in the private directory until it is written (`Storage\FileLock`). Without
 that, a tick that had read the state when it started wrote back its copy seconds later,
 with everything that other requests had stored in between undone. Where `flock()` does not
 work the changes are not serialised, as before; they still start from the database.
+Notices are handed to the mailer by one request at a time (`notify.lock`, not waited
+for), and one that is queued while a mail is on its way goes out with the next heartbeat
+instead of at once.
 
 The database holds one more option than the decision lists:
 `backups_for_restic_notifications` (`Notifications\Notifier::OPTION`, not autoloaded), added

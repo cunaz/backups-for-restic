@@ -212,7 +212,7 @@ final class Container {
 		foreach ( self::SALT_CONSTANTS as $constant ) {
 			$material .= self::constant_string( $constant );
 		}
-		return $this->stored_secrets ??= new EncryptedOptionStore( $this->options(), new Secret( $material ), $this->random() );
+		return $this->stored_secrets ??= new EncryptedOptionStore( $this->options(), new Secret( $material ), $this->random(), $this->state_lock() );
 	}
 
 	/**

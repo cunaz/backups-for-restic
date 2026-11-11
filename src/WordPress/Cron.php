@@ -241,7 +241,7 @@ final class Cron {
 		if ( null !== $slot && $slot > $handled ) {
 			// The first slot after setup is only recorded: the wizard ran the first backup.
 			if ( 0 === $handled || self::start( $container, JobType::Backup, 'schedule', $now ) ) {
-				$state->update( 'schedule', static fn ( array $stored ): array => [ 'backup_slot' => $slot ] + $stored );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ 'backup_slot' => max( $slot, Decoded::int( $stored['backup_slot'] ?? null ) ) ] + $stored );
 			}
 			return;
 		}
@@ -265,7 +265,7 @@ final class Cron {
 				continue;
 			}
 			if ( 0 === $handled || self::start( $container, $type, 'schedule', $now ) ) {
-				$state->update( 'schedule', static fn ( array $stored ): array => [ $key => $slot ] + $stored );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ $key => max( $slot, Decoded::int( $stored[ $key ] ?? null ) ) ] + $stored );
 			}
 			return;
 		}
