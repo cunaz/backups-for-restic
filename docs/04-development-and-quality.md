@@ -311,7 +311,7 @@ on one site, without retries:
 - settings that are saved and still there after a reload, an invalid retention window that
   is refused with a message at its field, and the recovery kit, which needs the WordPress
   password;
-- a backup of 512 MiB of new data that is cancelled from the dashboard while it runs.
+- a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.
 
 Still to come with the restore of Milestone 3: snapshot browsing, single-file restore and
 download, and the acceptance test of that milestone. Site Health has no browser test.

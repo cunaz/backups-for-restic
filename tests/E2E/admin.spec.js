@@ -137,18 +137,19 @@ test( 'settings are saved, refused when invalid, and the recovery kit needs the 
 } );
 
 test( 'a running backup is cancelled from the dashboard', async ( { page } ) => {
-	// Enough new data that the backup is still at work when the button is clicked.
-	addUpload( 'cancelled.bin', 512 );
+	// More new data than one tick of twenty seconds gets through on any machine: a request to
+	// cancel that arrives once the snapshot is written no longer stops the job.
+	addUpload( 'cancelled.bin', 1024 );
 	try {
 		await openBackups( page );
 		await page.getByRole( 'button', { name: 'Back up now' } ).click();
 		const running = page.locator( '.bfr-running' );
 		await expect( running.locator( '.bfr-step' ) ).toBeVisible( { timeout: 60 * 1000 } );
-		await expect( running ).toContainText( 'of new data uploaded', { timeout: 120 * 1000 } );
 		// While a job runs, no other can be started.
 		await expect( page.getByRole( 'button', { name: 'Back up now' } ) ).toBeDisabled();
 
 		await running.getByRole( 'button', { name: 'Cancel' } ).click();
+		await expect( running.getByRole( 'button', { name: 'Cancel' } ) ).toBeDisabled();
 
 		// The dashboard comes back with the job in its list, and with the buttons free again.
 		const jobs = page.locator( 'table' ).filter( { has: page.getByRole( 'columnheader', { name: 'Result' } ) } );
@@ -156,6 +157,7 @@ test( 'a running backup is cancelled from the dashboard', async ( { page } ) => 
 		await expect( page.getByRole( 'button', { name: 'Back up now' } ) ).toBeEnabled();
 		await expect( card( page, 'Last backup' ) ).toContainText( /Snapshot [0-9a-f]{8}/ );
 
+		// No snapshot came of it.
 		await page.locator( '.nav-tab-wrapper' ).getByRole( 'link', { name: 'Snapshots', exact: true } ).click();
 		await expect( page.locator( 'table tbody tr' ) ).toHaveCount( 1 );
 	} finally {
