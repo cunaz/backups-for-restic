@@ -412,8 +412,11 @@ final class SetupTest extends TestCase {
 		$state->set( 'check_alert', [ 'errors' => 2 ] );
 		$state->set( 'last_backup', [ 'job' => 'in the old repository' ] );
 
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"of the repository at this address"}' ) );
 		$this->wizard()->save_server( 'rest-server', self::report( self::URL ), 'backup', new Secret( 'a new REST password for the same address' ) );
 		self::assertSame( [ 'errors' => 2 ], $state->get( 'check_alert' ), 'The same address is the same repository.' );
+		self::assertSame( 'a new REST password for the same address', $this->stored->get( SecretName::RestPassword )?->reveal() );
+		self::assertSame( '{"key":"of the repository at this address"}', $this->stored->get( SecretName::MasterKey )?->reveal(), 'A new REST password does not cost the key that took minutes to derive.' );
 		self::assertSame( str_repeat( 'ab', 32 ), ( new SettingsStore( $this->options ) )->load()->string( 'repository.id' ) );
 
 		$this->wizard()->save_server( 'rest-server', self::report( 'https://backup.example.net:8000/another-site/' ), 'backup', null );

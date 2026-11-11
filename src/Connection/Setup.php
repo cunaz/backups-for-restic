@@ -166,8 +166,10 @@ final class Setup {
 			}
 		}
 		$this->settings->update( $changes );
-		$this->secrets->delete( SecretName::MasterKey );
+		// The same address is the same repository: a new REST password or user name for it
+		// leaves the cached key alone, and deriving it again can take minutes.
 		if ( $url !== $current->string( 'repository.url' ) ) {
+			$this->secrets->delete( SecretName::MasterKey );
 			$this->record->moved();
 		}
 	}

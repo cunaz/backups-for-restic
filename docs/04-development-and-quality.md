@@ -248,7 +248,8 @@ installed is skipped:
 - **`JobControlTest`**: the recovery kit only with the WordPress password; a running backup
   that refuses a new server, a new repository, another password, clearing the cache and a
   second job, and is cancelled with its lock released; deactivation, which ends the running
-  backup without any further tick; a wrong repository password and its repair; repository
+  backup without any further tick; a wrong repository password and its repair; a security
+  key replaced in `wp-config.php` and the two passwords entered again; repository
   requests that verify certificates while a must-use plugin switches verification off for
   the site (`bin/test-site-hostile-filters.php`); the probe of the private directory as a
   browser makes it, on a site that the same file keeps from requesting itself; a setup
@@ -313,6 +314,8 @@ on one site, without retries:
 - settings that are saved and still there after a reload, an invalid retention window that
   is refused with a message at its field, and the recovery kit, which needs the WordPress
   password;
+- the forms of the Settings tab for the REST password, the CA certificate and the
+  repository password, each with the refusal of a wrong value;
 - the Environment tab on a site that cannot request itself: the browser makes the probe
   of the working directory, and the check says "protected";
 - a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.

@@ -679,7 +679,8 @@
 					...groups,
 					el( 'fieldset', { className: 'bfr-group' }, [
 						el( 'legend', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
-						el( 'p', {}, [ response.values[ 'repository.url' ] ] ),
+						...repositoryForms( response ),
+						el( 'h3', {}, [ __( 'Working files and recovery kit', 'backups-for-restic' ) ] ),
 						el( 'p', { className: 'description' }, [
 							/* translators: %s: directory path. */
 							sprintf( __( 'Working directory: %s', 'backups-for-restic' ), response.private_dir ),
@@ -694,6 +695,136 @@
 			.catch( function ( error ) {
 				replace( root, [ notice( 'error', errorText( error ) ) ] );
 			} );
+	}
+
+	/**
+	 * The repository part of the settings: where the backups go, and the forms to enter the
+	 * two passwords again and to change the server's CA certificate. What wp-config.php
+	 * defines is shown as such and cannot be changed here.
+	 *
+	 * @param {Object} response Answer of the settings route.
+	 * @return {Array} Nodes.
+	 */
+	function repositoryForms( response ) {
+		const values = response.values;
+		const secrets = response.secrets || {};
+		const fromConfig = __( 'Defined in wp-config.php; change it there.', 'backups-for-restic' );
+		const overridden = function ( path ) {
+			return ( response.overridden || [] ).includes( path );
+		};
+		const address = function ( label, path ) {
+			return el( 'p', {}, [
+				el( 'strong', {}, [ label + ': ' ] ),
+				values[ path ] || '–',
+				overridden( path ) ? el( 'span', { className: 'description' }, [ ' ', fromConfig ] ) : null,
+			] );
+		};
+
+		// REST password: tested against the server, then saved.
+		const restResult = el( 'div' );
+		const restFixed = !! ( secrets.rest_password && secrets.rest_password.overridden );
+		const restPassword = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'new-password', disabled: restFixed } );
+		const restSave = button( __( 'Test and save', 'backups-for-restic' ), function () {
+			restSave.disabled = true;
+			api( '/repository/save', {
+				method: 'POST',
+				data: { server: values[ 'repository.server' ], url: values[ 'repository.url' ], username: values[ 'repository.rest_username' ], password: restPassword.value },
+			} )
+				.then( function () {
+					restPassword.value = '';
+					replace( restResult, [ notice( 'success', __( 'The server accepted the password. It is saved.', 'backups-for-restic' ) ) ] );
+				} )
+				.catch( function ( error ) {
+					replace( restResult, [ notice( 'error', errorText( error ) ) ] );
+				} )
+				.finally( function () {
+					restSave.disabled = false;
+				} );
+		} );
+		restSave.disabled = restFixed;
+
+		// Repository password: an unlock job derives the key with it.
+		const unlockResult = el( 'div' );
+		const repositoryFixed = !! ( secrets.repository_password && secrets.repository_password.overridden );
+		const repositoryPassword = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'off', disabled: repositoryFixed } );
+		const confirmation = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password', disabled: repositoryFixed } );
+		const unlock = button( __( 'Unlock with this password', 'backups-for-restic' ), function () {
+			unlock.disabled = true;
+			api( '/repository/connect', { method: 'POST', data: { password: repositoryPassword.value, user_password: confirmation.value } } )
+				.then( function ( created ) {
+					repositoryPassword.value = '';
+					confirmation.value = '';
+					follow( created.job.id, unlockResult, function ( job ) {
+						unlock.disabled = false;
+						if ( 'succeeded' === job.state ) {
+							replace( unlockResult, [ notice( 'success', __( 'The repository is unlocked with this password.', 'backups-for-restic' ) ) ] );
+						}
+					} );
+				} )
+				.catch( function ( error ) {
+					unlock.disabled = false;
+					replace( unlockResult, [ notice( 'error', errorText( error ) ) ] );
+				} );
+		} );
+		unlock.disabled = repositoryFixed;
+
+		// CA certificate of a server with a certificate of its own authority.
+		const caBox = el( 'div' );
+		const renderCa = function ( state, message ) {
+			const pem = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----' } );
+			const upload = button( __( 'Upload certificate', 'backups-for-restic' ), function () {
+				upload.disabled = true;
+				api( '/repository/ca-certificate', { method: 'POST', data: { pem: pem.value } } )
+					.then( function () {
+						renderCa( 'uploaded', notice( 'success', __( 'The certificate is uploaded.', 'backups-for-restic' ) ) );
+					} )
+					.catch( function ( error ) {
+						renderCa( state, notice( 'error', errorText( error ) ) );
+					} );
+			} );
+			const remove = button( __( 'Remove certificate', 'backups-for-restic' ), function () {
+				remove.disabled = true;
+				api( '/repository/ca-certificate', { method: 'DELETE' } )
+					.then( function () {
+						renderCa( 'none', notice( 'success', __( 'The certificate is removed.', 'backups-for-restic' ) ) );
+					} )
+					.catch( function ( error ) {
+						renderCa( state, notice( 'error', errorText( error ) ) );
+					} );
+			} );
+			replace( caBox, [
+				field(
+					__( 'CA certificate of the server (PEM)', 'backups-for-restic' ),
+					pem,
+					'uploaded' === state
+						? __( 'A certificate is uploaded. Paste another one to replace it.', 'backups-for-restic' )
+						: __( 'Only for a server with a certificate of its own authority.', 'backups-for-restic' ),
+				),
+				el( 'p', {}, [ upload, ' ', 'uploaded' === state ? remove : null ] ),
+				message,
+			] );
+		};
+		renderCa( values[ 'repository.ca_certificate' ], null );
+
+		return [
+			address( __( 'Repository URL', 'backups-for-restic' ), 'repository.url' ),
+			address( __( 'REST username', 'backups-for-restic' ), 'repository.rest_username' ),
+			el( 'h3', {}, [ __( 'REST password', 'backups-for-restic' ) ] ),
+			field( __( 'New REST password', 'backups-for-restic' ), restPassword, restFixed ? fromConfig : __( 'For example after you changed it on the server.', 'backups-for-restic' ) ),
+			el( 'p', {}, [ restSave ] ),
+			restResult,
+			el( 'h3', {}, [ __( 'Repository password', 'backups-for-restic' ) ] ),
+			field(
+				__( 'Repository password', 'backups-for-restic' ),
+				repositoryPassword,
+				repositoryFixed ? fromConfig : __( 'Enter it again if the stored one can no longer be read, or after it was changed with restic.', 'backups-for-restic' ),
+			),
+			field( __( 'Confirm with your WordPress password', 'backups-for-restic' ), confirmation ),
+			el( 'p', {}, [ unlock ] ),
+			unlockResult,
+			el( 'h3', {}, [ __( 'CA certificate', 'backups-for-restic' ) ] ),
+			caBox,
+		];
 	}
 
 	function cacheControl( bytes ) {

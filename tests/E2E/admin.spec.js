@@ -22,6 +22,23 @@ function notice( page, type, text ) {
 }
 
 /**
+ * Does something until the page shows a notice. Saving a server or a password is refused for
+ * the moment in which a job of the heartbeat, such as forget after the backup, is active;
+ * an administrator would click again.
+ *
+ * @param {import('@playwright/test').Page} page   Page.
+ * @param {() => Promise<void>}             action What to do.
+ * @param {string}                          type   error, success, warning or info.
+ * @param {string}                          text   Part of the notice's text.
+ */
+async function until( page, action, type, text ) {
+	await expect( async () => {
+		await action();
+		await expect( notice( page, type, text ) ).toBeVisible( { timeout: 60 * 1000 } );
+	} ).toPass( { timeout: 5 * 60 * 1000 } );
+}
+
+/**
  * A card of the dashboard by its heading.
  *
  * @param {import('@playwright/test').Page} page    Page.
@@ -126,14 +143,69 @@ test( 'settings are saved, refused when invalid, and the recovery kit needs the 
 	await expect( page.getByLabel( 'Keep every snapshot of the last' ) ).toHaveValue( '2d' );
 
 	// The recovery kit shows the repository password: only to somebody who knows the WordPress password.
-	const password = page.getByLabel( 'Your WordPress password' );
+	const password = page.getByLabel( 'Your WordPress password', { exact: true } );
 	await password.fill( 'not the password' );
 	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
 	await expect( notice( page, 'error', 'Your WordPress password was not correct.' ) ).toBeVisible();
 	await expect( page.locator( '.bfr-kit' ) ).toHaveCount( 0 );
-	await page.getByLabel( 'Your WordPress password' ).fill( ADMIN.password );
+	await page.getByLabel( 'Your WordPress password', { exact: true } ).fill( ADMIN.password );
 	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
 	await expect( page.locator( '.bfr-kit textarea' ) ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/ );
+} );
+
+test( 'the passwords and the CA certificate can be entered again in the settings', async ( { page } ) => {
+	const server = repositoryServer();
+	await openBackups( page, 'settings' );
+	await expect( page.getByText( server.url ) ).toBeVisible();
+
+	// The repository password, from the recovery kit: the forms below need it.
+	await page.getByLabel( 'Your WordPress password', { exact: true } ).fill( ADMIN.password );
+	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
+	const kit = await page.locator( '.bfr-kit textarea' ).inputValue();
+	const repositoryPassword = kit.match( /RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/ )[ 1 ];
+
+	// REST password: only one that the server accepts is saved.
+	await page.getByLabel( 'New REST password' ).fill( 'not the password' );
+	await page.getByRole( 'button', { name: 'Test and save' } ).click();
+	await expect( notice( page, 'error', 'The repository server rejected the username or password.' ) ).toBeVisible( { timeout: 60 * 1000 } );
+	const saveRestPassword = async () => {
+		await page.getByLabel( 'New REST password' ).fill( server.password );
+		await page.getByRole( 'button', { name: 'Test and save' } ).click();
+	};
+	await until( page, saveRestPassword, 'success', 'The server accepted the password. It is saved.' );
+
+	// CA certificate: without it the server's certificate is unknown again.
+	await expect( page.getByText( 'A certificate is uploaded.' ) ).toBeVisible();
+	await page.getByRole( 'button', { name: 'Remove certificate' } ).click();
+	await expect( notice( page, 'success', 'The certificate is removed.' ) ).toBeVisible();
+	await expect( page.getByRole( 'button', { name: 'Remove certificate' } ) ).toHaveCount( 0 );
+	await page.getByLabel( 'New REST password' ).fill( server.password );
+	await page.getByRole( 'button', { name: 'Test and save' } ).click();
+	await expect( notice( page, 'error', 'The repository server could not be reached.' ) ).toBeVisible( { timeout: 120 * 1000 } );
+	await page.getByLabel( 'CA certificate of the server (PEM)' ).fill( 'not a certificate' );
+	await page.getByRole( 'button', { name: 'Upload certificate' } ).click();
+	await expect( notice( page, 'error', 'This is not a valid PEM certificate.' ) ).toBeVisible();
+	await page.getByLabel( 'CA certificate of the server (PEM)' ).fill( server.certificate );
+	await page.getByRole( 'button', { name: 'Upload certificate' } ).click();
+	await expect( notice( page, 'success', 'The certificate is uploaded.' ) ).toBeVisible();
+	await until( page, saveRestPassword, 'success', 'The server accepted the password. It is saved.' );
+
+	// Repository password: needs the WordPress password, and a wrong one fails the unlock.
+	await page.getByLabel( 'Repository password', { exact: true } ).fill( repositoryPassword );
+	await page.getByLabel( 'Confirm with your WordPress password' ).fill( 'not the password' );
+	await page.getByRole( 'button', { name: 'Unlock with this password' } ).click();
+	await expect( notice( page, 'error', 'Your WordPress password was not correct.' ) ).toBeVisible();
+	const unlockWith = ( password ) => async () => {
+		await page.getByLabel( 'Repository password', { exact: true } ).fill( password );
+		await page.getByLabel( 'Confirm with your WordPress password' ).fill( ADMIN.password );
+		await page.getByRole( 'button', { name: 'Unlock with this password' } ).click();
+	};
+	await until( page, unlockWith( 'not the password of this repository' ), 'error', 'The repository password is wrong.' );
+	await until( page, unlockWith( repositoryPassword ), 'success', 'The repository is unlocked with this password.' );
+
+	// The site works with its repository as before.
+	await page.locator( '.nav-tab-wrapper' ).getByRole( 'link', { name: 'Snapshots', exact: true } ).click();
+	await expect( page.locator( 'table tbody tr' ) ).toHaveCount( 1 );
 } );
 
 test( 'the browser checks the working directory where the site cannot request itself', async ( { page } ) => {

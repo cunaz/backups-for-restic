@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Settings → Repository: forms to enter the REST password and the repository password
+  again, for example after the security keys in `wp-config.php` changed, and to upload or
+  remove the CA certificate of the server. Values that `wp-config.php` defines are marked.
 - On hosts where a site cannot request its own address, the browser of the administrator
   checks that the working directory is not served, in the setup wizard and on the
   Environment tab. Before, the check stayed "could not be verified" on such hosts.
@@ -111,6 +114,7 @@ All notable changes are documented here. The format follows
   repository and are dropped when the jobs turn to another one. The stale notice then counts
   from that day.
 - Saving another server or creating a repository is refused while a job is running.
+- Saving a new REST password for the same address keeps the cached repository key.
 - Deactivating the plugin ends the running job and releases its lock in the repository.
 - The setup cannot be completed by a request while the Doctor reports a critical finding.
 - A request to cancel that arrives while a step is running is honoured by the same tick.

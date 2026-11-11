@@ -162,16 +162,16 @@ The security keys (salts) in `wp-config.php` changed, or the database moved to a
 other keys. The stored passwords and the cached repository key no longer decrypt, and jobs
 fail with "The stored passwords can no longer be decrypted." Nothing is lost: the repository
 and the recovery kit are not affected. A site that defines both passwords in `wp-config.php`
-is not affected either: its jobs derive the repository key again and go on. The plugin has
-no form yet to enter the passwords again; one is planned for Milestone 3. Until then there
-are two ways:
+is not affected either: its jobs derive the repository key again and go on. There are two
+ways back:
 
-- **Through the admin area**: deactivate and delete the plugin, install it again and enter
-  the kit's values in the setup wizard, which connects to the existing repository (the last
-  paragraph of Scenario B, step 7). Deleting removes the plugin's settings, passwords and
-  working files, never the repository; schedule, retention and exclusions have to be set
-  again.
-- **Keeping the settings**: define both passwords from the kit in `wp-config.php`,
+- **Through the admin area**: open **Backups → Settings** and go to **Repository**. Enter
+  the kit's REST password under "REST password" and choose "Test and save". Then enter the
+  kit's repository password and your WordPress password under "Repository password" and
+  choose "Unlock with this password"; the plugin derives the key in the background, which
+  can take a few minutes on shared hosting. Schedule, retention and exclusions stay as they
+  are.
+- **In `wp-config.php`**: define both passwords from the kit there,
 
   ```php
   define( 'BACKUPS_FOR_RESTIC_REST_PASSWORD', '…' );

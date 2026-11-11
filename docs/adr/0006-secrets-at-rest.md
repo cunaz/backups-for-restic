@@ -41,9 +41,8 @@ operator must be able to recover.
   encrypted cache.
 
 ## As built (2026-11)
-- The settings page does not mark the values that a constant overrides, and no field is
-  read-only: the REST API reports them, the admin script does not use the report. Planned
-  for Milestone 3.
+- The Settings tab marks the repository address and REST user name that a constant
+  defines, and disables the field of a password that a constant defines.
 - A cached master key that no longer decrypts is a cache that missed:
   `Connection\RepositoryAccess::open_cached()` forgets it, and the unlock step derives the
   key again from the repository password. With both passwords defined as constants the jobs
@@ -53,5 +52,7 @@ operator must be able to recover.
   Scenario E).
 - The Doctor's check `secrets` asks whether the two passwords can be read, wherever they
   come from. A stored value that a constant overrides, and the cached key, do not count.
-- The plugin detects the state (Doctor check `secrets`, the job error) but has no form to
-  enter the passwords again. That form is planned for phase 0.8 of Milestone 3.
+- The plugin detects the state (Doctor check `secrets`, the job error), and the Settings
+  tab has forms to enter both passwords again and to replace the CA certificate. The REST
+  password is saved only after the server accepted it; the repository password needs the
+  administrator's WordPress password and is checked by an unlock job.
