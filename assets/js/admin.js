@@ -675,18 +675,19 @@
 							save.disabled = false;
 						} );
 				}, true );
+				const kit = recoveryKitForm();
 				replace( root, [
 					...groups,
 					el( 'fieldset', { className: 'bfr-group' }, [
 						el( 'legend', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
-						...repositoryForms( response ),
+						...repositoryForms( response, kit.reset ),
 						el( 'h3', {}, [ __( 'Working files and recovery kit', 'backups-for-restic' ) ] ),
 						el( 'p', { className: 'description' }, [
 							/* translators: %s: directory path. */
 							sprintf( __( 'Working directory: %s', 'backups-for-restic' ), response.private_dir ),
 						] ),
 						cacheControl( response.cache_bytes ),
-						recoveryKitForm(),
+						kit.box,
 					] ),
 					message,
 					save,
@@ -702,10 +703,11 @@
 	 * two passwords again and to change the server's CA certificate. What wp-config.php
 	 * defines is shown as such and cannot be changed here.
 	 *
-	 * @param {Object} response Answer of the settings route.
+	 * @param {Object}     response Answer of the settings route.
+	 * @param {() => void} changed  Called after a password or the certificate changed.
 	 * @return {Array} Nodes.
 	 */
-	function repositoryForms( response ) {
+	function repositoryForms( response, changed ) {
 		const values = response.values;
 		const secrets = response.secrets || {};
 		const fromConfig = __( 'Defined in wp-config.php; change it there.', 'backups-for-restic' );
@@ -732,6 +734,7 @@
 			} )
 				.then( function () {
 					restPassword.value = '';
+					changed();
 					replace( restResult, [ notice( 'success', __( 'The server accepted the password. It is saved.', 'backups-for-restic' ) ) ] );
 				} )
 				.catch( function ( error ) {
@@ -757,6 +760,7 @@
 					follow( created.job.id, unlockResult, function ( job ) {
 						unlock.disabled = false;
 						if ( 'succeeded' === job.state ) {
+							changed();
 							replace( unlockResult, [ notice( 'success', __( 'The repository is unlocked with this password.', 'backups-for-restic' ) ) ] );
 						}
 					} );
@@ -774,8 +778,10 @@
 			const pem = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----' } );
 			const upload = button( __( 'Upload certificate', 'backups-for-restic' ), function () {
 				upload.disabled = true;
+				remove.disabled = true;
 				api( '/repository/ca-certificate', { method: 'POST', data: { pem: pem.value } } )
 					.then( function () {
+						changed();
 						renderCa( 'uploaded', notice( 'success', __( 'The certificate is uploaded.', 'backups-for-restic' ) ) );
 					} )
 					.catch( function ( error ) {
@@ -783,9 +789,11 @@
 					} );
 			} );
 			const remove = button( __( 'Remove certificate', 'backups-for-restic' ), function () {
+				upload.disabled = true;
 				remove.disabled = true;
 				api( '/repository/ca-certificate', { method: 'DELETE' } )
 					.then( function () {
+						changed();
 						renderCa( 'none', notice( 'success', __( 'The certificate is removed.', 'backups-for-restic' ) ) );
 					} )
 					.catch( function ( error ) {
@@ -872,22 +880,38 @@
 		return el( 'div', { className: 'bfr-kit' }, [ text, el( 'p', {}, [ download, ' ', copy ] ) ] );
 	}
 
+	/**
+	 * The form that shows the recovery kit. Its second part puts the form back in place of a
+	 * kit that is on the screen: after a password or the certificate changed, that kit is no
+	 * longer the one to keep.
+	 *
+	 * @return {Object} The form's element as `box`, and `reset()`.
+	 */
 	function recoveryKitForm() {
 		const box = el( 'div' );
-		const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
-		const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
-			show.disabled = true;
-			api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
-				.then( function ( response ) {
-					replace( box, [ kitView( response.recovery_kit ) ] );
-				} )
-				.catch( function ( error ) {
-					show.disabled = false;
-					replace( box, [ notice( 'error', errorText( error ) ), field( __( 'Your WordPress password', 'backups-for-restic' ), password ), show ] );
-				} );
-		} );
-		replace( box, [ field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
-		return box;
+		function render( message ) {
+			const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
+			const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
+				show.disabled = true;
+				api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
+					.then( function ( response ) {
+						replace( box, [ kitView( response.recovery_kit ) ] );
+					} )
+					.catch( function ( error ) {
+						render( notice( 'error', errorText( error ) ) );
+					} );
+			} );
+			replace( box, [ message, field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
+		}
+		render( null );
+		return {
+			box,
+			reset() {
+				if ( box.querySelector( '.bfr-kit' ) ) {
+					render( notice( 'info', __( 'The recovery kit changed. Show it again and replace your copy.', 'backups-for-restic' ) ) );
+				}
+			},
+		};
 	}
 
 	/* ----------------------------------------------------------- Environment */
