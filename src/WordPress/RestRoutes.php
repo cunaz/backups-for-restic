@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Connection\Setup;
+use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
@@ -20,6 +21,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
@@ -429,6 +431,8 @@ final class RestRoutes {
 		}
 		try {
 			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ) );
+		} catch ( JobConflict ) {
+			return $this->error( 'job_conflict', 409 );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
 		} catch ( InvalidArgument $e ) {
@@ -457,7 +461,10 @@ final class RestRoutes {
 			RecoveryKit::ca_certificate( $this->container );
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
 			$this->container->refresh();
+			delete_transient( 'backups_for_restic_snapshots' );
 			$kit = RecoveryKit::text( $this->container );
+		} catch ( JobConflict ) {
+			return $this->error( 'job_conflict', 409 );
 		} catch ( PluginException $e ) {
 			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
 				return $this->error( 'password_too_short', 400 );
@@ -480,7 +487,7 @@ final class RestRoutes {
 		try {
 			// The answer contains the recovery kit: what the kit needs has to be there first.
 			RecoveryKit::ca_certificate( $this->container );
-			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), $this->container->jobs(), time() );
+			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( InvalidArgument ) {
@@ -490,6 +497,7 @@ final class RestRoutes {
 			return $this->kit_error( $e, 500 );
 		}
 		$this->container->refresh();
+		delete_transient( 'backups_for_restic_snapshots' );
 		Cron::chain( $this->container );
 		try {
 			$kit = RecoveryKit::text( $this->container );
@@ -518,9 +526,13 @@ final class RestRoutes {
 			return $this->error( 'invalid_certificate', 400 );
 		}
 		$directory = $this->container->private_dir();
-		$directory->ensure();
-		file_put_contents( $directory->path . '/ca.pem', $pem ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- The private directory is written with native functions (docs/04 §3).
-		chmod( $directory->path . '/ca.pem', 0600 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Same.
+		try {
+			$directory->ensure();
+			// Only a certificate that is on disk may be announced in the settings.
+			Files::write_atomic( $directory->path . '/ca.pem', $pem );
+		} catch ( PluginException $e ) {
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
+		}
 		$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'uploaded' ] );
 		$this->container->refresh();
 		return $this->respond( [ 'ca_certificate' => 'uploaded' ] );
@@ -550,6 +562,10 @@ final class RestRoutes {
 		}
 		if ( null === $this->container->access()->open_cached() ) {
 			return $this->error( 'configuration', 409 );
+		}
+		// The wizard's script stops at a critical finding of the Doctor; a request must not get past it either.
+		if ( Doctor::blocked( $this->container->doctor() ) ) {
+			return $this->error( 'environment_blocked', 409 );
 		}
 		$this->container->settings_store()->update(
 			[
@@ -672,7 +688,9 @@ final class RestRoutes {
 				return $this->container->access();
 			},
 			$this->container->random(),
-			$this->container->identity()
+			$this->container->identity(),
+			$this->container->repository_record(),
+			$this->container->jobs()
 		);
 	}
 
@@ -799,6 +817,10 @@ final class RestRoutes {
 				/* translators: %d: number of characters. */
 				'message' => sprintf( __( 'The repository password must have at least %d characters.', 'backups-for-restic' ), Setup::MIN_PASSWORD_LENGTH ),
 				'hint'    => __( 'Leave it empty and the plugin creates a strong one. A password set in wp-config.php has to be changed there.', 'backups-for-restic' ),
+			],
+			'environment_blocked'           => [
+				'message' => __( 'This server does not meet a requirement for backups yet.', 'backups-for-restic' ),
+				'hint'    => __( 'Open the first step of the setup again, or the Site Health screen, and fix what is marked as critical.', 'backups-for-restic' ),
 			],
 			'password_required'             => [
 				'message' => __( 'Enter the REST password for this server.', 'backups-for-restic' ),

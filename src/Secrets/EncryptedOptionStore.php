@@ -112,23 +112,6 @@ final class EncryptedOptionStore implements SecretStore {
 	}
 
 	/**
-	 * Checks that every stored secret decrypts, for the Doctor and Site Health.
-	 *
-	 * @return bool True if all stored secrets can be opened.
-	 */
-	public function readable(): bool {
-		$stored = $this->stored();
-		try {
-			foreach ( $stored['secrets'] as $box ) {
-				$this->open( $box, $stored['salt'] );
-			}
-		} catch ( SecretsUndecryptable ) {
-			return false;
-		}
-		return true;
-	}
-
-	/**
 	 * Loads the option, creating the installation salt on first use.
 	 *
 	 * @return array{salt: string, secrets: array<string, string>} Stored data.

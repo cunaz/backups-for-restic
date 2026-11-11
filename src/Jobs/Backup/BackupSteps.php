@@ -16,6 +16,8 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\StorageFailed;
+use BackupsForRestic\Exception\UnsupportedRepository;
+use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Jobs\ClosureStep;
@@ -107,27 +109,38 @@ final class BackupSteps implements StepProvider {
 	}
 
 	/**
-	 * Gets the master key: from the cache, or with the resumable key derivation.
+	 * Gets the master key: from the cache, or with the resumable key derivation. Every job
+	 * comes through here, so this is also where the plugin records which repository it works
+	 * with, and where a repository that it cannot read is refused (ADR 0019).
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool True once the key is cached.
+	 * @throws UnsupportedRepository If the repository has format version 2 and PHP lacks the zstd extension.
 	 */
 	public function unlock( Job $job, EventLog $log, float $deadline ): bool {
-		$services = $this->services;
-		if ( null !== $services->access->open_cached() ) {
-			return true;
+		$services   = $this->services;
+		$repository = $services->access->open_cached();
+		if ( null === $repository ) {
+			$unlock = new KeyUnlock( $services->access->backend(), $services->access->password(), $services->unlock_dir( $job ), $services->random );
+			$key    = $unlock->run( $deadline );
+			if ( null === $key ) {
+				$job->progress['unlock_percent'] = (int) round( 100 * $unlock->progress() );
+				return false;
+			}
+			$repository = $services->access->open( $key );
+			$services->access->cache_master_key( $repository->config(), $key );
+			$log->write( 'info', 'Repository unlocked.', [ 'format' => $repository->config()->version ] );
 		}
-		$unlock = new KeyUnlock( $services->access->backend(), $services->access->password(), $services->unlock_dir( $job ), $services->random );
-		$key    = $unlock->run( $deadline );
-		if ( null === $key ) {
-			$job->progress['unlock_percent'] = (int) round( 100 * $unlock->progress() );
-			return false;
+		$config = $repository->config();
+		// Recorded before the refusal: the Doctor then names the missing extension.
+		if ( null !== $services->opened ) {
+			( $services->opened )( $config );
 		}
-		$repository = $services->access->open( $key );
-		$services->access->cache_master_key( $repository->config(), $key );
-		$log->write( 'info', 'Repository unlocked.', [ 'format' => $repository->config()->version ] );
+		if ( $config->version >= 2 && ! Compression::available() ) {
+			UnsupportedRepository::raise( 'The repository has format version 2, which needs the zstd PHP extension.', [ 'version' => $config->version ] );
+		}
 		return true;
 	}
 

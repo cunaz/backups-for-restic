@@ -190,9 +190,11 @@ final class Notifier {
 		if ( null === $limit || $data['stale'] > 0 || ! $this->settings->bool( 'setup.completed' ) || ! $this->settings->bool( 'notifications.email.on_stale' ) ) {
 			return null;
 		}
-		$last  = $this->state->get( 'last_backup' );
-		$job   = Decoded::string( $last['job'] ?? null );
-		$since = '' === $job ? $this->setup_time() : Decoded::int( $last['finished'] ?? null );
+		$last = $this->state->get( 'last_backup' );
+		$job  = Decoded::string( $last['job'] ?? null );
+		// Without a backup in this repository yet, the time counts from the setup, or from the
+		// day the jobs turned to this repository if that was later.
+		$since = '' === $job ? max( $this->setup_time(), Decoded::int( $this->state->get( 'repository' )['since'] ?? null ) ) : Decoded::int( $last['finished'] ?? null );
 		if ( 0 === $since || $now - $since < $limit ) {
 			return null;
 		}

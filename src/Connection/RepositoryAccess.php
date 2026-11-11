@@ -85,15 +85,41 @@ final class RepositoryAccess {
 	}
 
 	/**
+	 * Whether the two passwords can be read, for the Doctor: one defined in wp-config.php
+	 * always can, a stored one if it decrypts with the current salts. A stored value that a
+	 * constant overrides does not count, and neither does the cached key, which open_cached()
+	 * replaces on its own.
+	 *
+	 * @return bool False if a job would fail with secrets_undecryptable.
+	 */
+	public function passwords_readable(): bool {
+		try {
+			$this->secrets->get( SecretName::RepositoryPassword );
+			$this->secrets->get( SecretName::RestPassword );
+		} catch ( SecretsUndecryptable ) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
 	 * The repository opened with the cached master key, if there is one and it fits. A key
 	 * fits when it decrypts the repository's config, so a cached key never serves another
 	 * repository; a key that does not fit is forgotten.
 	 *
+	 * So is a cached key that cannot be decrypted, as after a change of the salts in
+	 * wp-config.php: it is a cache, and the password derives the key again. Whether the
+	 * password survived the change is the unlock's matter; one defined in wp-config.php did.
+	 *
 	 * @return Repository|null Repository, or null if it has to be unlocked.
-	 * @throws SecretsUndecryptable If the cache cannot be decrypted.
 	 */
 	public function open_cached(): ?Repository {
-		$cached = $this->secrets->get( SecretName::MasterKey );
+		try {
+			$cached = $this->secrets->get( SecretName::MasterKey );
+		} catch ( SecretsUndecryptable ) {
+			$this->forget_master_key();
+			return null;
+		}
 		$fields = null === $cached ? null : json_decode( $cached->reveal(), true );
 		if ( ! is_array( $fields ) || ! is_string( $fields['key'] ?? null ) ) {
 			return null;
@@ -108,8 +134,9 @@ final class RepositoryAccess {
 
 	/**
 	 * ID of the repository whose master key is cached, read without a request to the server.
-	 * This is the repository the jobs work with; the setting `repository.id` is written when
-	 * the plugin creates a repository and does not follow a connection to an existing one.
+	 * This is the repository the jobs work with. The setting `repository.id` names it as well
+	 * once a job has opened it (RepositoryRecord), but stays empty from the moment another
+	 * address is saved until then.
 	 *
 	 * @return string Repository ID, or '' without a cached key.
 	 */

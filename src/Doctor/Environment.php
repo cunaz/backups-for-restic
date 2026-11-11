@@ -30,7 +30,7 @@ final readonly class Environment {
 	 * @param int          $salt_constants     Number of the eight salt constants defined in wp-config.php.
 	 * @param bool         $cron_disabled      Whether DISABLE_WP_CRON is set.
 	 * @param bool|null    $loopback           Whether a loopback request worked; null if not tested.
-	 * @param bool         $secrets_readable   Whether the stored secrets decrypt.
+	 * @param bool         $secrets_readable   Whether the two passwords can be read (RepositoryAccess::passwords_readable()).
 	 * @param int          $repository_format  Format version of the connected repository, 0 if none.
 	 */
 	public function __construct(

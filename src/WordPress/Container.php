@@ -18,6 +18,7 @@ use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Backup\SitePaths;
 use BackupsForRestic\Connection\ConnectionTester;
 use BackupsForRestic\Connection\RepositoryAccess;
+use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Database\Dump\DatabaseDump;
@@ -26,6 +27,7 @@ use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
@@ -163,7 +165,7 @@ final class Container {
 	}
 
 	/**
-	 * The encrypted option store itself, for the readability check.
+	 * The encrypted option store itself, below the constants of wp-config.php.
 	 *
 	 * @return EncryptedOptionStore Store.
 	 */
@@ -392,11 +394,27 @@ final class Container {
 			$this->random(),
 			$this->identity(),
 			$this->plan( ... ),
-			$this->exposure()
+			$this->exposure(),
+			function ( Config $config ): void {
+				if ( $this->repository_record()->opened( $config ) ) {
+					// The plan of this very tick records the format version, and the snapshot list is another repository's.
+					$this->refresh();
+					delete_transient( 'backups_for_restic_snapshots' );
+				}
+			}
 		);
 		$backup      = new BackupSteps( $services );
 		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ), $this->site()->site_tag() ), $backup );
 		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random(), new JobEvents( $this ) );
+	}
+
+	/**
+	 * Which repository the plugin works with.
+	 *
+	 * @return RepositoryRecord Record.
+	 */
+	public function repository_record(): RepositoryRecord {
+		return new RepositoryRecord( $this->settings_store(), $this->state(), $this->clock() );
 	}
 
 	/**
@@ -511,7 +529,7 @@ final class Container {
 			$salts,
 			defined( 'DISABLE_WP_CRON' ) && true === constant( 'DISABLE_WP_CRON' ),
 			Cron::loopback_works( $fresh ),
-			$this->stored_secrets()->readable(),
+			$this->access()->passwords_readable(),
 			$this->settings()->int( 'repository.format_version' )
 		);
 	}
