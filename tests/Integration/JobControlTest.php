@@ -218,6 +218,18 @@ final class JobControlTest extends TestCase {
 			self::assertSame( 502, $status, $raw );
 			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
 
+			// A certificate that comes with the test is used for that test, and for nothing after it.
+			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', [ 'ca_certificate' => 'not a certificate' ] + TestSite::connection() );
+			self::assertSame( 400, $status, $raw );
+			self::assertSame( 'backups_for_restic_invalid_certificate', $refused['code'] ?? null, $raw );
+			[ $status, $tested, $raw ] = TestSite::api( 'POST', '/repository/test', [ 'ca_certificate' => $certificate ] + TestSite::connection() );
+			self::assertSame( 200, $status, $raw );
+			self::assertTrue( $tested['report']['exists'] ?? null, $raw );
+			[ , $settings ] = TestSite::api( 'GET', '/settings' );
+			self::assertSame( 'none', $settings['values']['repository.ca_certificate'] ?? null, 'A test stores nothing.' );
+			[ $status, , $raw ] = TestSite::api( 'POST', '/repository/test', TestSite::connection() );
+			self::assertSame( 502, $status, 'The certificate of the last test is gone: ' . $raw );
+
 			// A snippet that switches verification off for the whole site does not reach these requests.
 			TestSite::hostile_filters( true );
 			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', TestSite::connection() );
