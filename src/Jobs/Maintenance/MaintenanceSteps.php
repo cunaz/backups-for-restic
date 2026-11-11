@@ -281,7 +281,9 @@ final class MaintenanceSteps implements StepProvider {
 	 */
 	private static function kept_details( Job $job ): ?array {
 		$kept = $job->data['check_details'] ?? null;
-		if ( ! is_array( $kept ) || ! is_array( $kept['counts'] ?? null ) || ! is_array( $kept['findings'] ?? null ) ) {
+		// Anything but what the checking step wrote: the checkpoint is asked. A count of errors
+		// that was taken for zero would clear the alert of a damaged repository.
+		if ( ! is_array( $kept ) || ! is_int( $kept['errors'] ?? null ) || $kept['errors'] < 0 || ! is_array( $kept['counts'] ?? null ) || ! is_array( $kept['findings'] ?? null ) ) {
 			return null;
 		}
 		$counts = [];
@@ -298,7 +300,7 @@ final class MaintenanceSteps implements StepProvider {
 			];
 		}
 		return [
-			'errors'   => Decoded::int( $kept['errors'] ?? null ),
+			'errors'   => $kept['errors'],
 			'counts'   => $counts,
 			'findings' => $findings,
 		];
