@@ -479,7 +479,10 @@ final class RestRoutes {
 			return $report;
 		}
 		try {
-			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ) );
+			// The certificate the test just used becomes the saved server's with the server, under
+			// the same lock, and is put back as it was should the save fail: a saved server
+			// never has a certificate that is not its own.
+			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ), fn (): \Closure => $this->keep_candidate_ca( $request ) );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( ValidationFailed $e ) {
@@ -489,12 +492,6 @@ final class RestRoutes {
 		} catch ( PluginException $e ) {
 			// The REST password did not survive being stored.
 			return $this->error( JobError::from_throwable( $e )->code, 500 );
-		}
-		// The certificate the test just used becomes the saved server's, and only now: a test
-		// that fails must not leave the saved server with a certificate that is not its own.
-		$kept = $this->keep_candidate_ca( $request );
-		if ( $kept instanceof \WP_Error ) {
-			return $kept;
 		}
 		$this->container->refresh();
 		delete_transient( 'backups_for_restic_snapshots' );
@@ -527,28 +524,42 @@ final class RestRoutes {
 	}
 
 	/**
-	 * After a server was saved: stores the certificate the request brought as the server's,
-	 * and removes a stored one for a server of the preset, which has a public certificate.
+	 * While a server is being saved: stores the certificate the request brought as the
+	 * server's, and removes a stored one for a server of the preset, which has a public
+	 * certificate.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return \WP_Error|null Error if the certificate could not be stored.
+	 * @return \Closure(): void What puts certificate and setting back as they were.
+	 * @throws PluginException If the certificate cannot be written.
 	 */
-	private function keep_candidate_ca( \WP_REST_Request $request ): ?\WP_Error {
+	private function keep_candidate_ca( \WP_REST_Request $request ): \Closure {
 		$pem       = $this->candidate_ca( $request );
 		$directory = $this->container->private_dir();
-		if ( is_string( $pem ) ) {
-			try {
-				$directory->ensure();
-				Files::write_atomic( $directory->path . '/ca.pem', $pem );
-			} catch ( PluginException $e ) {
-				return $this->error( JobError::from_throwable( $e )->code, 500 );
-			}
-			$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'uploaded' ] );
-		} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $this->container->settings()->string( 'repository.ca_certificate' ) ) {
-			wp_delete_file( $directory->path . '/ca.pem' );
-			$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'none' ] );
+		$file      = $directory->path . '/ca.pem';
+		$store     = $this->container->settings_store();
+		$setting   = $this->container->settings()->string( 'repository.ca_certificate' );
+		try {
+			$stored = $directory->ca_certificate();
+		} catch ( PluginException ) {
+			$stored = null;
 		}
-		return null;
+		$undo = static function () use ( $file, $store, $setting, $stored ): void {
+			if ( null === $stored ) {
+				wp_delete_file( $file );
+			} else {
+				Files::write_atomic( $file, $stored );
+			}
+			$store->update( [ 'repository.ca_certificate' => $setting ] );
+		};
+		if ( is_string( $pem ) ) {
+			$directory->ensure();
+			Files::write_atomic( $file, $pem );
+			$store->update( [ 'repository.ca_certificate' => 'uploaded' ] );
+		} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $setting ) {
+			wp_delete_file( $file );
+			$store->update( [ 'repository.ca_certificate' => 'none' ] );
+		}
+		return $undo;
 	}
 
 	/**
