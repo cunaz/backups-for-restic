@@ -248,6 +248,93 @@ final class JobControlTest extends TestCase {
 		}
 	}
 
+	/**
+	 * The Doctor's finding about the private directory, and whether the admin page is asked to
+	 * let the browser look.
+	 *
+	 * @return array{string, string, bool} Status, code and the request for a browser probe.
+	 */
+	private static function private_directory( bool $fresh ): array {
+		[ $status, $environment, $raw ] = TestSite::api( 'GET', '/environment' . ( $fresh ? '&fresh=1' : '' ) );
+		self::assertSame( 200, $status, $raw );
+		$found = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'private_directory' === ( $check['id'] ?? null ) ) );
+		return [ (string) ( $found[0]['status'] ?? '' ), (string) ( $found[0]['code'] ?? '' ), true === ( $environment['browser_probe'] ?? null ) ];
+	}
+
+	/**
+	 * What the admin page's script does when it is asked for a browser probe: asks for a
+	 * probe file, requests it without credentials, and reports what came back.
+	 *
+	 * @return array{int, bool|null} The status the visit got, and what the report made of it.
+	 */
+	private static function probe_as_a_browser(): array {
+		[ $status, $probe, $raw ] = TestSite::api( 'POST', '/environment/probe' );
+		self::assertSame( 200, $status, $raw );
+		self::assertStringStartsWith( TestSite::URL . '/wp-content/backups-for-restic/probe/', (string) ( $probe['url'] ?? '' ), $raw );
+		[ $seen, $body ]           = TestSite::visit( (string) $probe['url'] );
+		[ $status, $report, $raw ] = TestSite::api(
+			'POST',
+			'/environment/probe/report',
+			[
+				'probe'  => $probe['probe'] ?? '',
+				'status' => $seen,
+				'body'   => substr( $body, 0, 1024 ),
+			]
+		);
+		self::assertSame( 200, $status, $raw );
+		self::assertArrayHasKey( 'exposed', $report, $raw );
+		return [ $seen, $report['exposed'] ];
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_a_browser_checks_the_private_directory_where_the_site_cannot_request_itself(): void {
+		TestSite::idle( 600 );
+		$deny  = TestSite::private_dir() . '/.htaccess';
+		$rules = (string) file_get_contents( $deny );
+		try {
+			TestSite::no_loopback( true );
+			// What a browser reported in an earlier run of this test does not count here.
+			// A probe that such a run left pending keeps its entry: the next one deletes its file.
+			TestSite::state( 'exposure_browser', [ 'result' => null ] );
+			self::assertSame( [ 'recommended', 'unverified', true ], self::private_directory( true ), 'The site\'s own probe gets no answer.' );
+
+			self::assertSame( [ 403, false ], self::probe_as_a_browser() );
+			self::assertSame( [ 'recommended', 'protected_inside_web_root', true ], self::private_directory( false ), 'The browser saw the directory refused.' );
+			self::assertSame( [], (array) glob( TestSite::private_dir() . '/probe/*' ), 'No probe file is left.' );
+
+			// A server that ignores the deny file: the browser gets the probe file, and that is proof.
+			file_put_contents( $deny, "# Emptied by a test.\n" );
+			self::assertSame( [ 200, true ], self::probe_as_a_browser() );
+			self::assertSame( [ 'critical', 'exposed', true ], self::private_directory( false ) );
+			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => true ] );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_environment_blocked', $refused['code'] ?? null, $raw );
+
+			// A report that no probe file stands behind says nothing.
+			[ $status, $report, $raw ] = TestSite::api(
+				'POST',
+				'/environment/probe/report',
+				[
+					'status' => 403,
+					'body'   => 'Forbidden',
+				]
+			);
+			self::assertSame( 200, $status, $raw );
+			self::assertArrayHasKey( 'exposed', $report, $raw );
+			self::assertNull( $report['exposed'], $raw );
+			self::assertSame( [ 'critical', 'exposed', true ], self::private_directory( false ), 'It cannot talk the finding away either.' );
+
+			file_put_contents( $deny, $rules );
+			self::assertSame( [ 403, false ], self::probe_as_a_browser() );
+			self::assertSame( [ 'recommended', 'protected_inside_web_root', true ], self::private_directory( false ) );
+		} finally {
+			file_put_contents( $deny, $rules );
+			TestSite::no_loopback( false );
+			TestSite::api( 'GET', '/environment&fresh=1' );
+		}
+		self::assertSame( [ 'recommended', 'protected_inside_web_root', false ], self::private_directory( false ), 'With requests to itself the site needs no browser.' );
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_repository_requests_verify_the_host_name_whatever_the_sites_filters_say(): void {
 		TestSite::idle( 600 );

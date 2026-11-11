@@ -69,4 +69,19 @@ function removeUpload( name ) {
 	fs.rmSync( path.join( UPLOADS, name ), { force: true } );
 }
 
-module.exports = { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload };
+/**
+ * Blocks the site's requests to its own address, as the firewall of many shared hosts does
+ * (bin/test-site-hostile-filters.php), or stops doing so.
+ *
+ * @param {boolean} active Whether to block.
+ */
+function noLoopback( active ) {
+	const flag = path.join( ROOT, '.tools/site/wp-content/bfr-no-loopback' );
+	if ( active ) {
+		fs.writeFileSync( flag, '' );
+	} else {
+		fs.rmSync( flag, { force: true } );
+	}
+}
+
+module.exports = { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload, noLoopback };

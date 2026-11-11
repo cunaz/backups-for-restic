@@ -48,11 +48,18 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
   the probe's content is the critical finding `exposed`: the wizard does not continue, and
   the preflight of a backup fails. An answer that shows the directory protected is reported
   as `protected_inside_web_root`. A probe that cannot run, because the site cannot request
-  itself, is reported as `unverified` with the status "recommended" and blocks nothing: on
-  such hosts the protection is assumed, not verified. Blocking there would shut out the
-  hosts the plugin is made for; instead a probe from the administrator's browser, which can
-  reach the site where the site cannot reach itself, is planned with the wizard's browser
-  tests (phase 0.6 of Milestone 3).
+  itself, is reported as `unverified` with the status "recommended" and blocks nothing.
+  Blocking there would shut out the hosts the plugin is made for.
+- On such hosts the administrator's browser makes the request (`Storage\BrowserProbe`). It
+  reaches the site from outside, which is also where an attacker would come from. The
+  wizard's environment step and the Environment tab ask for a probe file, request its URL
+  without credentials and report what came back. A report with the file's content proves
+  that the directory is served, and counts like the site's own finding: the Doctor is
+  critical, the setup cannot be completed and backups stop. Any other answer counts as
+  protected; that is taken on trust from an administrator's session. A report is accepted
+  for five minutes after its probe file was written, once, and the file is deleted with it.
+  The result stays until the next report, because nothing but a browser can renew it; the
+  admin page asks for a new one whenever the environment is checked.
 - The wizard's script stops at a critical finding, and `POST /setup/complete` refuses with
   `environment_blocked` while the Doctor has one; the routes before it do not ask. Of the
   jobs, only the backup asks the probe before it starts; forget, prune and check do not.

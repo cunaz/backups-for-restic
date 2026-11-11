@@ -774,8 +774,63 @@
 		);
 	}
 
+	/**
+	 * Lets this browser request a probe file in the working directory, where the site could not
+	 * request it from itself, and reports what came back. Never fails: a probe that cannot run
+	 * leaves the check as it was.
+	 *
+	 * @return {Promise} Settled when the report is in.
+	 */
+	function probeFromBrowser() {
+		return api( '/environment/probe', { method: 'POST' } )
+			.then( function ( probe ) {
+				if ( ! probe.url ) {
+					return null;
+				}
+				// A server that accepts the request and never answers must not hold the page up.
+				const patience = new window.AbortController();
+				const timer = window.setTimeout( function () {
+					patience.abort();
+				}, 10000 );
+				return window
+					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal } )
+					.then( function ( answer ) {
+						return answer.text().then( function ( body ) {
+							return { status: answer.status, body: body.slice( 0, 1024 ) };
+						} );
+					} )
+					.catch( function () {
+						return { status: 0, body: '' };
+					} )
+					.then( function ( seen ) {
+						window.clearTimeout( timer );
+						seen.probe = probe.probe;
+						return api( '/environment/probe/report', { method: 'POST', data: seen } );
+					} );
+			} )
+			.catch( function () {
+				return null;
+			} );
+	}
+
+	/**
+	 * The checks of this server, fresh, with the browser's probe where it is needed.
+	 *
+	 * @return {Promise<Object>} Response of the environment route.
+	 */
+	function checkEnvironment() {
+		return api( '/environment?fresh=1' ).then( function ( response ) {
+			if ( ! response.browser_probe ) {
+				return response;
+			}
+			return probeFromBrowser().then( function () {
+				return api( '/environment' );
+			} );
+		} );
+	}
+
 	function environment( root ) {
-		api( '/environment?fresh=1' )
+		checkEnvironment()
 			.then( function ( response ) {
 				replace( root, [
 					checkList( response.checks ),
@@ -844,7 +899,7 @@
 
 		function stepEnvironment() {
 			show( 0, [ el( 'p', {}, [ __( 'Checking this server…', 'backups-for-restic' ) ] ) ] );
-			api( '/environment?fresh=1' )
+			checkEnvironment()
 				.then( function ( response ) {
 					const blocked = response.checks.some( function ( check ) {
 						return 'critical' === check.status;

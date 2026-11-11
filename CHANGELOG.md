@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- On hosts where a site cannot request its own address, the browser of the administrator
+  checks that the working directory is not served, in the setup wizard and on the
+  Environment tab. Before, the check stayed "could not be verified" on such hosts.
 - E-mail notifications: the first failure of a backup, forget, prune or check, once when
   backups become stale (36 hours by default, at least one and a half backup intervals), once
   when they work again, every check that finds damage, and an automatic switch to retention
