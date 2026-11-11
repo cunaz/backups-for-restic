@@ -109,6 +109,10 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- What the plugin remembers between requests (last results, handled schedule slots, who
+  looked at the recovery kit, waiting notices) is no longer overwritten when two requests
+  change it at the same time, for example a running backup and the admin page. A notice is
+  not sent twice when two requests try to deliver it at once.
 - The setup wizard sends the CA certificate along with the connection test. Before, the
   test ran without it and a server with a certificate of its own authority could not be
   set up. The test stores nothing; the certificate is kept when the server is saved.

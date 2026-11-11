@@ -39,6 +39,25 @@ final class SecretStoresTest extends TestCase {
 		self::assertMatchesRegularExpression( '/^v1\.[A-Za-z0-9_-]{32}\.[A-Za-z0-9_-]+$/', $options->values[ EncryptedOptionStore::OPTION ]['secrets']['repository_password'] );
 	}
 
+	public function test_storing_a_secret_keeps_one_that_another_request_stored_since_this_one_read(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$tick                   = new EncryptedOptionStore( $options, new Secret( 'salts' ), new SystemRandom() );
+		$tick->set( SecretName::RepositoryPassword, new Secret( 'repository password' ) );
+		// While the tick derives the key, the administrator saves a new REST password.
+		$admin         = new InMemoryOptions();
+		$admin->values = $options->values;
+		( new EncryptedOptionStore( $admin, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RestPassword, new Secret( 'rest password' ) );
+		$options->values = $admin->values;
+
+		$tick->set( SecretName::MasterKey, new Secret( '{"key":"derived"}' ) );
+
+		$after         = new EncryptedOptionStore( $admin, new Secret( 'salts' ), new SystemRandom() );
+		$admin->values = $options->values;
+		self::assertSame( 'rest password', $after->get( SecretName::RestPassword )?->reveal() );
+		self::assertSame( '{"key":"derived"}', $after->get( SecretName::MasterKey )?->reveal() );
+	}
+
 	/**
 	 * An options table that stops keeping what it is given, or changes it on the way.
 	 */
@@ -53,6 +72,10 @@ final class SecretStoresTest extends TestCase {
 			private mixed $value = null;
 
 			public function get( string $name ): mixed {
+				return $this->value;
+			}
+
+			public function fresh( string $name ): mixed {
 				return $this->value;
 			}
 

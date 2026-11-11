@@ -707,7 +707,14 @@ deliveries of the recovery kit, and the number and size of the repository's pack
 backup or a prune last listed them) and
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
 repository both are counted for, and the outbox of unsent notices; streaks and marker start
-anew when the jobs turn to another repository). A fifth name, `backups_for_restic_schema_version`, is reserved:
+anew when the jobs turn to another repository). The last two are documents that several
+requests change: a job's tick, the heartbeat and a request of the admin page. A change
+therefore reads the document from the database, past what the request read before
+(`Options::fresh()`), and holds `flock()` on `<private>/state.lock` until it is written
+back (`Storage\FileLock`), so that no request stores a copy from before another one's
+change. Notices are handed to the mailer by one request at a time (`<private>/notify.lock`,
+not waited for); the state is not locked while a mail is on its way, and what is queued in
+that time goes out with the next heartbeat. A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
 
 ## 11. Settings model

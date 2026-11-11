@@ -79,7 +79,9 @@ final class EncryptedOptionStore implements SecretStore {
 	 * @throws SecretsUndecryptable If the secret that is stored afterwards is not the one given.
 	 */
 	public function set( SecretName $name, Secret $secret ): void {
-		$stored                            = $this->stored();
+		// From the database: all secrets are in the one option, and a job's tick that caches the
+		// key must not write back the passwords as they were when it started.
+		$stored                            = $this->stored( true );
 		$stored['secrets'][ $name->value ] = $this->seal( $secret, $stored['salt'] );
 		$this->options->set( self::OPTION, $stored, false );
 		$saved = $this->get( $name );
@@ -94,7 +96,7 @@ final class EncryptedOptionStore implements SecretStore {
 	 * @param SecretName $name Secret.
 	 */
 	public function delete( SecretName $name ): void {
-		$stored = $this->stored();
+		$stored = $this->stored( true );
 		if ( isset( $stored['secrets'][ $name->value ] ) ) {
 			unset( $stored['secrets'][ $name->value ] );
 			$this->options->set( self::OPTION, $stored, false );
@@ -114,10 +116,11 @@ final class EncryptedOptionStore implements SecretStore {
 	/**
 	 * Loads the option, creating the installation salt on first use.
 	 *
+	 * @param bool $fresh Whether to read past what this request read before, as a change has to.
 	 * @return array{salt: string, secrets: array<string, string>} Stored data.
 	 */
-	private function stored(): array {
-		$value   = $this->options->get( self::OPTION );
+	private function stored( bool $fresh = false ): array {
+		$value   = $fresh ? $this->options->fresh( self::OPTION ) : $this->options->get( self::OPTION );
 		$salt    = is_array( $value ) && is_string( $value['salt'] ?? null ) ? $value['salt'] : '';
 		$secrets = [];
 		if ( is_array( $value ) && is_array( $value['secrets'] ?? null ) ) {

@@ -57,6 +57,7 @@ use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
 use BackupsForRestic\Storage\BrowserProbe;
 use BackupsForRestic\Storage\CacheDirectory;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
@@ -109,6 +110,13 @@ final class Container {
 	 * @var ?Redactor
 	 */
 	private ?Redactor $redactor = null;
+
+	/**
+	 * Lock for changes to the state, shared by everything in this request.
+	 *
+	 * @var FileLock|null
+	 */
+	private ?FileLock $state_lock = null;
 
 	/**
 	 * Randomness.
@@ -297,7 +305,17 @@ final class Container {
 	 * @return SiteState State.
 	 */
 	public function state(): SiteState {
-		return new SiteState( $this->options() );
+		return new SiteState( $this->options(), $this->state_lock() );
+	}
+
+	/**
+	 * The lock for changes to the remembered results and to the notifications. One object for
+	 * the request: a change that leads to another one takes the lock only once.
+	 *
+	 * @return FileLock Lock.
+	 */
+	private function state_lock(): FileLock {
+		return $this->state_lock ??= new FileLock( $this->private_dir()->path . '/state.lock' );
 	}
 
 	/**
@@ -494,7 +512,7 @@ final class Container {
 	 * @return Notifier Notifier.
 	 */
 	public function notifier(): Notifier {
-		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ) );
+		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ), $this->state_lock(), new FileLock( $this->private_dir()->path . '/notify.lock' ) );
 	}
 
 	/**

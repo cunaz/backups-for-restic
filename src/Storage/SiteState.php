@@ -29,9 +29,10 @@ final class SiteState {
 	/**
 	 * Uses the options table.
 	 *
-	 * @param Options $options Options.
+	 * @param Options       $options Options.
+	 * @param FileLock|null $lock    Held while the document is read, changed and written back.
 	 */
-	public function __construct( private readonly Options $options ) {
+	public function __construct( private readonly Options $options, private readonly ?FileLock $lock = null ) {
 	}
 
 	/**
@@ -60,9 +61,32 @@ final class SiteState {
 	 * @param array<string, mixed> $value Entry.
 	 */
 	public function set( string $key, array $value ): void {
-		$state         = $this->all();
-		$state[ $key ] = $value;
-		$this->options->set( self::OPTION, $state, false );
+		$this->change(
+			static function ( array $state ) use ( $key, $value ): array {
+				$state[ $key ] = $value;
+				return $state;
+			}
+		);
+	}
+
+	/**
+	 * Changes one entry, starting from what is stored now: for an entry that more than one
+	 * request adds to, such as a list.
+	 *
+	 * @param string                                               $key    Entry name.
+	 * @param \Closure(array<string, mixed>): array<string, mixed> $change Gets the entry, empty if unknown, and returns what replaces it.
+	 */
+	public function update( string $key, \Closure $change ): void {
+		$this->change(
+			static function ( array $state ) use ( $key, $change ): array {
+				$entry = [];
+				foreach ( is_array( $state[ $key ] ?? null ) ? $state[ $key ] : [] as $field => $value ) {
+					$entry[ (string) $field ] = $value;
+				}
+				$state[ $key ] = $change( $entry );
+				return $state;
+			}
+		);
 	}
 
 	/**
@@ -81,24 +105,52 @@ final class SiteState {
 	 * @return bool True if the state now describes another repository than before.
 	 */
 	public function bind( string $repository, int $now, string $known = '' ): bool {
-		$state = $this->all();
-		$bound = is_array( $state['repository'] ?? null ) ? $state['repository'] : null;
-		if ( null !== $bound && ( $bound['id'] ?? null ) === $repository ) {
-			return false;
-		}
-		$adopted = null === $bound && '' !== $repository && in_array( $known, [ '', $repository ], true );
-		if ( ! $adopted ) {
-			foreach ( self::OF_THE_REPOSITORY as $key ) {
-				unset( $state[ $key ] );
+		$rebound = false;
+		$this->change(
+			static function ( array $state ) use ( $repository, $now, $known, &$rebound ): ?array {
+				$bound = is_array( $state['repository'] ?? null ) ? $state['repository'] : null;
+				if ( null !== $bound && ( $bound['id'] ?? null ) === $repository ) {
+					return null;
+				}
+				$adopted = null === $bound && '' !== $repository && in_array( $known, [ '', $repository ], true );
+				if ( ! $adopted ) {
+					foreach ( self::OF_THE_REPOSITORY as $key ) {
+						unset( $state[ $key ] );
+					}
+				}
+				$state['repository'] = [
+					'id'    => $repository,
+					// Since when: without a backup yet, the stale notice counts from here.
+					'since' => $adopted ? 0 : $now,
+				];
+				$rebound             = ! $adopted;
+				return $state;
 			}
+		);
+		return $rebound;
+	}
+
+	/**
+	 * Changes the document. Every entry is in the one option, so a request that wrote back
+	 * the document as it had read it earlier would undo what other requests stored since: a
+	 * job's tick runs for many seconds. The change therefore starts from the database, and the
+	 * lock keeps two changes from crossing.
+	 *
+	 * @param \Closure(array<mixed>): (array<mixed>|null) $change Gets the document and returns what to store; null to store nothing.
+	 */
+	private function change( \Closure $change ): void {
+		$apply = function () use ( $change ): void {
+			$stored = $this->options->fresh( self::OPTION );
+			$next   = $change( is_array( $stored ) ? $stored : [] );
+			if ( null !== $next ) {
+				$this->options->set( self::OPTION, $next, false );
+			}
+		};
+		if ( null === $this->lock ) {
+			$apply();
+		} else {
+			$this->lock->hold( $apply );
 		}
-		$state['repository'] = [
-			'id'    => $repository,
-			// Since when: without a backup yet, the stale notice counts from here.
-			'since' => $adopted ? 0 : $now,
-		];
-		$this->options->set( self::OPTION, $state, false );
-		return ! $adopted;
 	}
 
 	/**

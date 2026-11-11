@@ -4,7 +4,9 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Storage;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\SiteState;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 
 /**
@@ -112,5 +114,93 @@ final class SiteStateTest extends TestCase {
 		self::assertTrue( $this->state->bind( 'first', self::NOW + 120 ), 'Even the old repository again: nothing tells that nothing happened to it in between.' );
 		self::assertSame( [], $this->state->get( 'last_backup' ) );
 		self::assertSame( self::NOW + 120, $this->state->get( 'repository' )['since'] ?? null );
+	}
+
+	public function test_storing_an_entry_keeps_what_another_request_stored_since_this_one_read(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$state                  = new SiteState( $options );
+		// A job's tick reads the state when it starts and records its result many seconds later.
+		self::assertSame( [], $state->get( 'last_backup' ) );
+		$options->values[ SiteState::OPTION ] = [ 'recovery_kit' => [ 'views' => [ [ 'user' => 1 ] ] ] ];
+
+		$state->set( 'last_backup', [ 'job' => 'the job of this tick' ] );
+
+		self::assertSame(
+			[
+				'recovery_kit' => [ 'views' => [ [ 'user' => 1 ] ] ],
+				'last_backup'  => [ 'job' => 'the job of this tick' ],
+			],
+			$options->values[ SiteState::OPTION ]
+		);
+		self::assertSame( [ 'views' => [ [ 'user' => 1 ] ] ], $state->get( 'recovery_kit' ), 'The request now knows it as well.' );
+	}
+
+	public function test_an_entry_is_updated_from_what_is_stored_now(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$state                  = new SiteState( $options );
+		self::assertSame( [], $state->get( 'schedule' ) );
+		$options->values[ SiteState::OPTION ] = [ 'schedule' => [ 'backup_slot' => 12 ] ];
+
+		$state->update( 'schedule', static fn ( array $schedule ): array => [ 'forget_for' => 'a job' ] + $schedule );
+
+		self::assertSame(
+			[
+				'forget_for'  => 'a job',
+				'backup_slot' => 12,
+			],
+			$options->values[ SiteState::OPTION ]['schedule']
+		);
+	}
+
+	public function test_binding_a_repository_keeps_what_another_request_stored_since_this_one_read(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$state                  = new SiteState( $options );
+		self::assertSame( [], $state->get( 'repository' ) );
+		$options->values[ SiteState::OPTION ] = [ 'schedule' => [ 'backup_slot' => 12 ] ];
+
+		$state->bind( 'first', self::NOW );
+
+		self::assertSame( [ 'backup_slot' => 12 ], $options->values[ SiteState::OPTION ]['schedule'] );
+		self::assertSame( 'first', $options->values[ SiteState::OPTION ]['repository']['id'] );
+	}
+
+	public function test_binding_the_bound_repository_again_writes_nothing(): void {
+		$options = new InMemoryOptions();
+		$state   = new SiteState( $options );
+		$state->bind( 'first', self::NOW );
+		$writes = $options->writes;
+
+		self::assertFalse( $state->bind( 'first', self::NOW + 60 ) );
+
+		self::assertSame( $writes, $options->writes );
+	}
+
+	public function test_a_change_holds_the_lock_from_reading_to_writing(): void {
+		$directory = TempDir::create( 'state' );
+		try {
+			$options = new InMemoryOptions();
+			$state   = new SiteState( $options, new FileLock( $directory . '/state.lock' ) );
+			$busy    = null;
+			// What another request would meet that wants to change the state at this moment.
+			$options->meanwhile = static function () use ( $directory, &$busy ): void {
+				$handle = fopen( $directory . '/state.lock', 'c' );
+				self::assertNotFalse( $handle );
+				$busy = ! flock( $handle, LOCK_EX | LOCK_NB );
+				fclose( $handle );
+			};
+
+			$state->set( 'last_backup', [ 'job' => 'a job' ] );
+
+			self::assertTrue( $busy, 'It waits until this change is written.' );
+			$handle = fopen( $directory . '/state.lock', 'c' );
+			self::assertNotFalse( $handle );
+			self::assertTrue( flock( $handle, LOCK_EX | LOCK_NB ), 'Afterwards the lock is free.' );
+			fclose( $handle );
+		} finally {
+			TempDir::remove( $directory );
+		}
 	}
 }

@@ -40,6 +40,13 @@ resumable after any step.
   problem.
 
 ## As built (2026-11)
+Both documents in the database, the state and the notifications, are changed by more than
+one request. Every change starts from the database and holds a `flock()` on
+`state.lock` in the private directory until it is written (`Storage\FileLock`). Without
+that, a tick that had read the state when it started wrote back its copy seconds later,
+with everything that other requests had stored in between undone. Where `flock()` does not
+work the changes are not serialised, as before; they still start from the database.
+
 The database holds one more option than the decision lists:
 `backups_for_restic_notifications` (`Notifications\Notifier::OPTION`, not autoloaded), added
 with the notifications of Milestone 2.

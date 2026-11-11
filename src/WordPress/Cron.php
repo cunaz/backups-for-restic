@@ -241,8 +241,7 @@ final class Cron {
 		if ( null !== $slot && $slot > $handled ) {
 			// The first slot after setup is only recorded: the wizard ran the first backup.
 			if ( 0 === $handled || self::start( $container, JobType::Backup, 'schedule', $now ) ) {
-				$schedule['backup_slot'] = $slot;
-				$state->set( 'schedule', $schedule );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ 'backup_slot' => $slot ] + $stored );
 			}
 			return;
 		}
@@ -250,8 +249,7 @@ final class Cron {
 		$last_backup = Decoded::string( $state->get( 'last_backup' )['job'] ?? null );
 		if ( $plugin && $settings->bool( 'retention.run_forget_after_backup' ) && '' !== $last_backup && Decoded::string( $schedule['forget_for'] ?? null ) !== $last_backup ) {
 			if ( self::start( $container, JobType::Forget, 'after_backup', $now ) ) {
-				$schedule['forget_for'] = $last_backup;
-				$state->set( 'schedule', $schedule );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ 'forget_for' => $last_backup ] + $stored );
 			}
 			return;
 		}
@@ -267,8 +265,7 @@ final class Cron {
 				continue;
 			}
 			if ( 0 === $handled || self::start( $container, $type, 'schedule', $now ) ) {
-				$schedule[ $key ] = $slot;
-				$state->set( 'schedule', $schedule );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ $key => $slot ] + $stored );
 			}
 			return;
 		}
