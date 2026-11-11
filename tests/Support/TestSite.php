@@ -400,6 +400,36 @@ final class TestSite {
 	}
 
 	/**
+	 * The directory of the multisite network (bin/test-site.sh install-multisite).
+	 */
+	public static function network_root(): string {
+		return dirname( __DIR__, 2 ) . '/.tools/site-ms';
+	}
+
+	/**
+	 * Whether WP-CLI is installed (bin/install-test-tools.sh wp-cli).
+	 */
+	public static function has_wp_cli(): bool {
+		return is_file( dirname( __DIR__, 2 ) . '/.tools/bin/wp' );
+	}
+
+	/**
+	 * Runs a WP-CLI command on a WordPress, as an administrator with shell access does.
+	 *
+	 * @param list<string> $arguments Command and arguments, such as [ 'backups-for-restic', 'status' ].
+	 * @param string|null  $path      WordPress directory; the test site by default.
+	 * @return array{int, string} Exit status and everything the command printed.
+	 */
+	public static function wp( array $arguments, ?string $path = null ): array {
+		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( dirname( __DIR__, 2 ) . '/.tools/bin/wp' ) . ' --no-color --path=' . escapeshellarg( $path ?? self::root() );
+		foreach ( $arguments as $argument ) {
+			$command .= ' ' . escapeshellarg( $argument );
+		}
+		exec( $command . ' 2>&1', $output, $status );
+		return [ $status, implode( "\n", $output ) ];
+	}
+
+	/**
 	 * Lets the plugin's heartbeat run now instead of at its next five minutes: makes its cron
 	 * event due and requests wp-cron.php. A cron run that is under way keeps the lock of
 	 * WordPress for a moment and this request then does nothing, so callers repeat it until

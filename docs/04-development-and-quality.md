@@ -31,7 +31,7 @@ backups-for-restic/
 │   ├── Support/                     test doubles, the restic and rest-server harness, fixture generators
 │   ├── PHPStan/                     PHPStan extensions for the analysis of src/
 │   ├── Database/                    the dump against a real MySQL or MariaDB, imported with the mariadb client
-│   ├── Integration/                 a real WordPress from bin/test-site.sh: who may call the routes, wizard over REST, backups through wp-cron.php, a killed tick, cancelling, deactivation, schedules, an append-only server, uninstall
+│   ├── Integration/                 a real WordPress from bin/test-site.sh: who may call the routes, wizard over REST, backups through wp-cron.php, a killed tick, cancelling, deactivation, schedules, an append-only server, WP-CLI, the multisite refusal, uninstall
 │   ├── E2E/                         (M3) browser tests with Playwright
 │   └── Fixtures/                    restic vectors per version, Go and libsodium vectors, fuzz regressions
 ├── bin/                             install-test-tools.sh, test-site.sh with its router, diagnostics and the filters that switch TLS verification off for a test, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php, build-package.sh
@@ -231,7 +231,8 @@ administrator acts outside the plugin's own interface (deactivating or deleting 
 a user) they run PHP inside the site's WordPress on the command line, and for what only the
 files show (a job's lease, its log) they read the private directory. `tests/Support/TestSite.php`
 is that access. The classes share one site and one repository, so
-`phpunit-integration.xml.dist` names the files in order:
+`phpunit-integration.xml.dist` names the files in order. A class whose tool or site is not
+installed is skipped:
 
 - **`AccessTest`**: every route without credentials and as an editor; its list of routes is
   compared with what WordPress has registered, so a new route cannot go untested; the files
@@ -257,6 +258,14 @@ is that access. The classes share one site and one repository, so
 - **`AppendOnlyTest`**: the rest-server restarted in append-only mode and back: the switch
   to retention mode external without a deletion, backups that go on, the proposal to switch
   back, and no deletion until an administrator decides.
+- **`CliTest`**: the WP-CLI commands with a real, pinned WP-CLI
+  (`bin/install-test-tools.sh wp-cli`): `doctor`, `status`, `snapshots`, `backup`, `forget`,
+  `prune` and `check` with `--wait`, `tick --until-idle`, a second job that is refused, and
+  forget and prune that are refused in retention mode external.
+- **`MultisiteTest`**: on a second WordPress that is a multisite network
+  (`bin/test-site.sh install-multisite`, never served, reached through WP-CLI): activation
+  is refused for the network and for one site, and a plugin that is active all the same
+  registers no route, no cron event and no command, and shows its notice.
 - **`UninstallTest`**: what the Plugins screen runs on "Delete" leaves no option, transient,
   cron event or file of the plugin, and the repository unchanged.
 
@@ -264,9 +273,9 @@ is that access. The classes share one site and one repository, so
 the nightly CI run uses 2048 and 300. The tests that catch a backup in the middle add
 256 or 512 MiB of random data of their own.
 
-What the suite does not reach yet: Site Health, the WP-CLI commands and the multisite
-guard, the admin page itself (browser tests, phase 0.6), and the loopback chain as such,
-because the tests request `wp-cron.php` themselves.
+What the suite does not reach yet: Site Health, the admin page itself (browser tests,
+phase 0.6), and the loopback chain as such, because the tests request `wp-cron.php`
+themselves.
 
 ### 5.4 Benchmarks
 

@@ -18,7 +18,9 @@ because they need the site, a database server and the restic tools; CI runs them
             <file>tests/Integration/WordPressSiteTest.php</file>
             <file>tests/Integration/JobControlTest.php</file>
             <file>tests/Integration/ScheduleTest.php</file>
+            <file>tests/Integration/CliTest.php</file>
             <file>tests/Integration/AppendOnlyTest.php</file>
+            <file>tests/Integration/MultisiteTest.php</file>
             <!-- Last: it removes everything the tests before it set up. -->
             <file>tests/Integration/UninstallTest.php</file>
         </testsuite>
