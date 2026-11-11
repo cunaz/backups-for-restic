@@ -883,10 +883,14 @@
 			const data = function () {
 				return { server: state.server, url: url.value, username: username.value, password: password.value };
 			};
+			// The certificate has to be there before the first request to the server: the
+			// connection test of a server with a certificate of its own authority fails without it.
+			const upload = function () {
+				return own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
+			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
-				const upload = own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
-				upload
+				upload()
 					.then( function () {
 						return api( '/repository/save', { method: 'POST', data: data() } );
 					} )
@@ -901,7 +905,10 @@
 			}, true );
 			const test = button( __( 'Test connection', 'backups-for-restic' ), function () {
 				test.disabled = true;
-				api( '/repository/test', { method: 'POST', data: data() } )
+				upload()
+					.then( function () {
+						return api( '/repository/test', { method: 'POST', data: data() } );
+					} )
 					.then( function ( response ) {
 						const report = response.report;
 						const parts = [ report.exists ? __( 'Connected. A repository exists at this address.', 'backups-for-restic' ) : __( 'Connected. The address is empty; a new repository will be created.', 'backups-for-restic' ) ];
