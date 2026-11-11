@@ -234,6 +234,7 @@ final class JobControlTest extends TestCase {
 			'POST',
 			'/environment/probe/report',
 			[
+				'probe'  => $probe['probe'] ?? '',
 				'status' => $seen,
 				'body'   => substr( $body, 0, 1024 ),
 			]

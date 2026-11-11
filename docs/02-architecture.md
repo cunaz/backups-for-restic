@@ -916,7 +916,7 @@ first backup; time estimates are planned for Milestone 3.
 | --- | --- |
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
-| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's URL (null if the directory is outside the web root); then the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (no probe pending, older than five minutes, or a failed request) |
+| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
@@ -977,8 +977,10 @@ because jobs derive it again) and that all eight salt constants are defined, loo
 HTTP probe could not run is reported as `unverified` with the status `recommended`; only a
 probe that read the file back is `critical`. In that case the admin page lets the browser
 make the request (`Storage\BrowserProbe`): it asks `POST /environment/probe` for a probe
-file, requests the file's URL without credentials and reports status and body to
-`POST /environment/probe/report`. A report with the file's content is the finding
+file, requests the file's URL without credentials, waits at most ten seconds for the answer
+and reports status and body under the probe's name to `POST /environment/probe/report`. A
+report on another probe than the pending one, as from a second tab, changes nothing. A
+report with the file's content is the finding
 `exposed`; any other answer counts as protected. The site's own probe, where it gets an
 answer, comes first. The Doctor has no check of the PHP version and
 none of outbound HTTPS; the wizard's connection test is what shows that the repository
