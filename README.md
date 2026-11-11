@@ -72,6 +72,8 @@ other hand, assume a server you control. This plugin closes the gap:
 | [docs/04-development-and-quality.md](docs/04-development-and-quality.md) | Repository layout, standards, tooling, tests incl. the restic conformance oracle, CI, WordPress.org releases |
 | [docs/05-roadmap.md](docs/05-roadmap.md) | Milestones, acceptance criteria, open questions, risks |
 | [docs/06-disaster-recovery.md](docs/06-disaster-recovery.md) | How to get a site back with or without the plugin |
+| [docs/07-milestone-3-plan.md](docs/07-milestone-3-plan.md) | Plan for Milestone 3 (restore): work packages, order, decisions, risks |
+| [docs/08-handoff.md](docs/08-handoff.md) | Where the work stands and what is open, as of the date in its title |
 | [docs/guides/cron.md](docs/guides/cron.md) | Running backups with a real cron job of the hosting panel |
 | [docs/guides/rest-server.md](docs/guides/rest-server.md) | Running your own restic REST server, append-only, and cleaning up from the server |
 | [docs/appendix-a-binary-engine.md](docs/appendix-a-binary-engine.md) | Design of an optional restic-binary engine for VPS users (future option) |
