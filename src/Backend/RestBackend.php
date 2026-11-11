@@ -14,6 +14,7 @@ use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\QuotaExceeded;
@@ -35,6 +36,29 @@ defined( 'ABSPATH' ) || exit;
 final class RestBackend implements Backend {
 
 	private const string LIST_V2 = 'application/vnd.x.restic.rest.v2';
+
+	/**
+	 * The most that a whole repository file of each kind is read (threat T-19). The server is
+	 * not trusted: without a limit it could answer a request for a lock with a gigabyte, and
+	 * PHP would hold it. The values leave room: restic writes configs and keys of under a
+	 * kilobyte, locks and snapshots of a few, and splits its index into files of a few
+	 * megabytes; 128 MiB is what an old, unsplit index can reach and what Compression takes
+	 * for a decompressed file. Packs are read in ranges, never whole, but the limit is there.
+	 */
+	private const array MAX_BYTES = [
+		'config'    => 65536,
+		'keys'      => 65536,
+		'locks'     => 1048576,
+		'snapshots' => 16777216,
+		'index'     => 134217728,
+		'data'      => 134217728,
+	];
+
+	/** The most that a listing is read: a million packs with their sizes. */
+	private const int MAX_LISTING_BYTES = 134217728;
+
+	/** The most that is read of an answer whose body nothing uses: a status, an error page. */
+	private const int MAX_ANSWER_BYTES = 65536;
 
 	/**
 	 * Base URL ending with a slash.
@@ -129,12 +153,23 @@ final class RestBackend implements Backend {
 			$headers['Range'] = 'bytes=' . $offset . '-' . ( null === $length ? '' : (string) ( $offset + $length - 1 ) );
 		}
 
-		$response = $this->send( 'GET', $this->url( $type, $name ), $headers, '', true );
+		// A range is as long as it was asked for; a whole file as long as its kind may be.
+		$limit    = $length ?? self::MAX_BYTES[ $type->value ];
+		$response = $this->send( 'GET', $this->url( $type, $name ), $headers, '', true, $limit );
 		$this->expect_success( $response, 'load' );
+		if ( null === $length && strlen( $response->body ) > $limit ) {
+			FormatException::raise(
+				'The server sent more than a repository file of this kind can hold.',
+				[
+					'type'  => $type->value,
+					'limit' => $limit,
+				]
+			);
+		}
 
 		if ( null !== $length && strlen( $response->body ) !== $length ) {
 			BackendException::raise(
-				'Server returned fewer bytes than requested.',
+				'The server did not return the number of bytes that were requested.',
 				[
 					'expected' => $length,
 					'received' => strlen( $response->body ),
@@ -202,8 +237,11 @@ final class RestBackend implements Backend {
 	 * @throws BackendException If the request fails or the listing is malformed.
 	 */
 	public function list( ObjectType $type ): array {
-		$response = $this->send( 'GET', $this->base_url . $type->value . '/', [ 'Accept' => self::LIST_V2 ], '', true );
+		$response = $this->send( 'GET', $this->base_url . $type->value . '/', [ 'Accept' => self::LIST_V2 ], '', true, self::MAX_LISTING_BYTES );
 		$this->expect_success( $response, 'list' );
+		if ( strlen( $response->body ) > self::MAX_LISTING_BYTES ) {
+			BackendException::raise( 'The listing is larger than the plugin can read.', [ 'type' => $type->value ] );
+		}
 
 		$entries = GoJson::decode( $response->body );
 		if ( null === $entries ) {
@@ -257,10 +295,11 @@ final class RestBackend implements Backend {
 	 * @param array<string, string> $headers    Extra headers.
 	 * @param string                $body       Body.
 	 * @param bool                  $idempotent Whether retries are safe.
+	 * @param int                   $limit      Most bytes of response body to read.
 	 * @return HttpResponse Response.
 	 * @throws BackendException When all attempts fail without a response.
 	 */
-	private function send( string $method, string $url, array $headers, string $body, bool $idempotent ): HttpResponse {
+	private function send( string $method, string $url, array $headers, string $body, bool $idempotent, int $limit = self::MAX_ANSWER_BYTES ): HttpResponse {
 		$headers['User-Agent'] = $this->user_agent;
 		if ( null !== $this->username && '' !== $this->username ) {
 			$headers['Authorization'] = 'Basic ' . Bytes::base64_encode( $this->username . ':' . ( $this->password?->reveal() ?? '' ) );
@@ -269,7 +308,7 @@ final class RestBackend implements Backend {
 		$attempts = $idempotent ? $this->max_attempts : 1;
 		for ( $attempt = 1; ; $attempt++ ) {
 			try {
-				$response = $this->http->request( $method, $url, $headers, $body );
+				$response = $this->http->request( $method, $url, $headers, $body, $limit );
 				if ( 401 === $response->status ) {
 					Unauthorized::raise( 'The server rejected the repository credentials.' );
 				}

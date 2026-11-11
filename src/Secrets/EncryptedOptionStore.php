@@ -12,6 +12,7 @@ namespace BackupsForRestic\Secrets;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\Options;
 use BackupsForRestic\Support\Bytes;
 
@@ -45,14 +46,16 @@ final class EncryptedOptionStore implements SecretStore {
 	/**
 	 * Creates the store.
 	 *
-	 * @param Options      $options      Options table.
-	 * @param Secret       $key_material Concatenated salt constants from wp-config.php.
-	 * @param RandomSource $random       Source of salts and nonces.
+	 * @param Options       $options      Options table.
+	 * @param Secret        $key_material Concatenated salt constants from wp-config.php.
+	 * @param RandomSource  $random       Source of salts and nonces.
+	 * @param FileLock|null $lock         Held while the option is read, changed and written back.
 	 */
 	public function __construct(
 		private readonly Options $options,
 		private readonly Secret $key_material,
-		private readonly RandomSource $random
+		private readonly RandomSource $random,
+		private readonly ?FileLock $lock = null
 	) {
 	}
 
@@ -79,9 +82,15 @@ final class EncryptedOptionStore implements SecretStore {
 	 * @throws SecretsUndecryptable If the secret that is stored afterwards is not the one given.
 	 */
 	public function set( SecretName $name, Secret $secret ): void {
-		$stored                            = $this->stored();
-		$stored['secrets'][ $name->value ] = $this->seal( $secret, $stored['salt'] );
-		$this->options->set( self::OPTION, $stored, false );
+		// From the database and under the lock: all secrets are in the one option, and a job's
+		// tick that caches the key must not write back the passwords as they were when it
+		// started, nor cross a password that is saved at the same moment.
+		$this->change(
+			function ( array $stored ) use ( $name, $secret ): array {
+				$stored['secrets'][ $name->value ] = $this->seal( $secret, $stored['salt'] );
+				return $stored;
+			}
+		);
 		$saved = $this->get( $name );
 		if ( null === $saved || ! $saved->equals( $secret ) ) {
 			SecretsUndecryptable::raise( 'A secret could not be read back after it was saved.', [ 'secret' => $name->value ] );
@@ -94,10 +103,33 @@ final class EncryptedOptionStore implements SecretStore {
 	 * @param SecretName $name Secret.
 	 */
 	public function delete( SecretName $name ): void {
-		$stored = $this->stored();
-		if ( isset( $stored['secrets'][ $name->value ] ) ) {
-			unset( $stored['secrets'][ $name->value ] );
-			$this->options->set( self::OPTION, $stored, false );
+		$this->change(
+			static function ( array $stored ) use ( $name ): ?array {
+				if ( ! isset( $stored['secrets'][ $name->value ] ) ) {
+					return null;
+				}
+				unset( $stored['secrets'][ $name->value ] );
+				return $stored;
+			}
+		);
+	}
+
+	/**
+	 * Changes the option, starting from what the database holds now.
+	 *
+	 * @param \Closure(array{salt: string, secrets: array<string, string>}): (array{salt: string, secrets: array<string, string>}|null) $change Returns what to store; null to store nothing.
+	 */
+	private function change( \Closure $change ): void {
+		$apply = function () use ( $change ): void {
+			$next = $change( $this->stored( true ) );
+			if ( null !== $next ) {
+				$this->options->set( self::OPTION, $next, false );
+			}
+		};
+		if ( null === $this->lock ) {
+			$apply();
+		} else {
+			$this->lock->hold( $apply );
 		}
 	}
 
@@ -112,29 +144,13 @@ final class EncryptedOptionStore implements SecretStore {
 	}
 
 	/**
-	 * Checks that every stored secret decrypts, for the Doctor and Site Health.
-	 *
-	 * @return bool True if all stored secrets can be opened.
-	 */
-	public function readable(): bool {
-		$stored = $this->stored();
-		try {
-			foreach ( $stored['secrets'] as $box ) {
-				$this->open( $box, $stored['salt'] );
-			}
-		} catch ( SecretsUndecryptable ) {
-			return false;
-		}
-		return true;
-	}
-
-	/**
 	 * Loads the option, creating the installation salt on first use.
 	 *
+	 * @param bool $fresh Whether to read past what this request read before, as a change has to.
 	 * @return array{salt: string, secrets: array<string, string>} Stored data.
 	 */
-	private function stored(): array {
-		$value   = $this->options->get( self::OPTION );
+	private function stored( bool $fresh = false ): array {
+		$value   = $fresh ? $this->options->fresh( self::OPTION ) : $this->options->get( self::OPTION );
 		$salt    = is_array( $value ) && is_string( $value['salt'] ?? null ) ? $value['salt'] : '';
 		$secrets = [];
 		if ( is_array( $value ) && is_array( $value['secrets'] ?? null ) ) {

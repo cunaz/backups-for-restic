@@ -115,11 +115,13 @@ final class BackupJobTest extends TestCase {
 		$caches = $site . '/wp-content/' . PrivateDirectory::NAME . '/cache';
 		mkdir( $caches . '/' . str_repeat( 'a', 64 ), 0700, true );
 
-		$first = $this->run_job( $runner, $store, 0.4 );
+		// Ticks of a fifth of a second: deriving the key alone takes several of them on any machine.
+		$first = $this->run_job( $runner, $store, 0.2 );
 		self::assertSame( JobState::Succeeded, $first->state, (string) json_encode( $first->error?->to_array() ) );
 		self::assertDirectoryDoesNotExist( $caches . '/' . str_repeat( 'a', 64 ), 'The cache of the other repository is removed.' );
 		self::assertDirectoryExists( $caches . '/' . $repository->config()->id, 'The cache of the repository in use stays.' );
-		self::assertGreaterThan( 5, $first->ticks, 'Unlock and dump spanned many ticks.' );
+		// How many depends on the machine. The cleanup steps add none: they run in the tick that reaches them.
+		self::assertGreaterThan( 3, $first->ticks, 'Unlock and dump spanned several ticks.' );
 
 		$cli = new ResticCli( $this->server(), 'job', self::REPOSITORY_PASSWORD );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
@@ -167,6 +169,9 @@ final class BackupJobTest extends TestCase {
 		// cuts that were depends on the machine's speed, so the bound is the dump itself plus a
 		// margin for the changed file and the trees.
 		self::assertGreaterThan( 0, (int) ( $second->progress['files_unmodified'] ?? 0 ) );
+		// The first backup is the measure for the second one's progress bar and estimate.
+		self::assertArrayNotHasKey( 'expected_bytes', $first->progress );
+		self::assertSame( $first->progress['total_bytes_processed'] ?? null, $second->progress['expected_bytes'] ?? null );
 		$dump_bytes = array_sum( array_map( static fn ( mixed $file ): int => (int) filesize( (string) $file ), $sql ) );
 		self::assertLessThan( $dump_bytes + 1048576, (int) ( $second->progress['data_added'] ?? PHP_INT_MAX ) );
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock is left behind.' );

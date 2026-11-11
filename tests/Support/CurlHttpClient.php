@@ -24,7 +24,7 @@ final class CurlHttpClient implements HttpClient {
 	public function __construct( private readonly ?string $ca_file = null, private readonly int $timeout = 60 ) {
 	}
 
-	public function request( string $method, string $url, array $headers = [], string $body = '' ): HttpResponse {
+	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
 		++$this->requests;
 		$handle = curl_init( $url );
 		if ( false === $handle ) {
@@ -59,14 +59,26 @@ final class CurlHttpClient implements HttpClient {
 		if ( null !== $this->ca_file ) {
 			$options[ CURLOPT_CAINFO ] = $this->ca_file;
 		}
+		$received = '';
+		if ( $limit > 0 ) {
+			// Stops the transfer once the body is longer than the caller accepts.
+			$options[ CURLOPT_WRITEFUNCTION ] = static function ( $curl, string $chunk ) use ( &$received, $limit ): int {
+				$received .= $chunk;
+				return strlen( $received ) > $limit ? 0 : strlen( $chunk );
+			};
+		}
 		curl_setopt_array( $handle, $options );
 
 		$result = curl_exec( $handle );
-		if ( false === $result ) {
+		$cut    = $limit > 0 && strlen( $received ) > $limit;
+		if ( false === $result && ! $cut ) {
 			$error = curl_error( $handle );
 			throw new BackendException( 'The request to the repository server failed.', [ 'curl' => $error ] );
 		}
 		$status = (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE );
+		if ( $limit > 0 ) {
+			return new HttpResponse( $status, $response_headers, substr( $received, 0, $limit + 1 ) );
+		}
 		return new HttpResponse( $status, $response_headers, is_string( $result ) ? $result : '' );
 	}
 }

@@ -14,6 +14,7 @@ use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Settings\Settings;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\Options;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Decoded;
@@ -51,16 +52,20 @@ final class Notifier {
 	/**
 	 * Creates the notifier.
 	 *
-	 * @param Options   $options  Options table, for the notifier's own state and outbox.
-	 * @param SiteState $state    Remembered results, for the last successful backup.
-	 * @param Settings  $settings Settings.
-	 * @param Mailer    $mailer   Delivery.
+	 * @param Options       $options  Options table, for the notifier's own state and outbox.
+	 * @param SiteState     $state    Remembered results, for the last successful backup.
+	 * @param Settings      $settings Settings.
+	 * @param Mailer        $mailer   Delivery.
+	 * @param FileLock|null $lock     Held while the state is read, changed and written back.
+	 * @param FileLock|null $sending  Held by the one request that hands notices to the mailer.
 	 */
 	public function __construct(
 		private readonly Options $options,
 		private readonly SiteState $state,
 		private readonly Settings $settings,
-		private readonly Mailer $mailer
+		private readonly Mailer $mailer,
+		private readonly ?FileLock $lock = null,
+		private readonly ?FileLock $sending = null
 	) {
 	}
 
@@ -74,7 +79,19 @@ final class Notifier {
 		if ( ! in_array( $job->type, self::REPORTED, true ) || ! in_array( $job->state, [ JobState::Failed, JobState::Succeeded ], true ) ) {
 			return;
 		}
-		$data       = $this->load();
+		$this->change( fn ( array $data ): array => $this->counted( $data, $job, $now ) );
+		$this->flush( $now );
+	}
+
+	/**
+	 * Counts the outcome of a job and queues the notices it calls for.
+	 *
+	 * @param array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
+	 * @param Job                                                                                                 $job  Finished job.
+	 * @param int                                                                                                 $now  Unix time.
+	 * @return array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State with the outcome.
+	 */
+	private function counted( array $data, Job $job, int $now ): array {
 		$type       = $job->type->value;
 		$on_failure = $this->settings->bool( 'notifications.email.on_failure' );
 		if ( JobState::Failed === $job->state ) {
@@ -100,8 +117,7 @@ final class Notifier {
 				$data['outbox'][] = $this->entry( new Notice( NoticeKind::RetentionExternal, $now, $type, $job->id ) );
 			}
 		}
-		$this->save( $data );
-		$this->flush( $now );
+		return $data;
 	}
 
 	/**
@@ -114,9 +130,12 @@ final class Notifier {
 		if ( ! $this->settings->bool( 'notifications.email.on_failure' ) ) {
 			return;
 		}
-		$data             = $this->load();
-		$data['outbox'][] = $this->entry( new Notice( NoticeKind::RetentionExternal, $now ) );
-		$this->save( $data );
+		$this->change(
+			function ( array $data ) use ( $now ): array {
+				$data['outbox'][] = $this->entry( new Notice( NoticeKind::RetentionExternal, $now ) );
+				return $data;
+			}
+		);
 		$this->flush( $now );
 	}
 
@@ -126,13 +145,17 @@ final class Notifier {
 	 * @param int $now Unix time.
 	 */
 	public function heartbeat( int $now ): void {
-		$data  = $this->load();
-		$stale = $this->stale_notice( $data, $now );
-		if ( null !== $stale ) {
-			$data['stale']    = $now;
-			$data['outbox'][] = $this->entry( $stale );
-			$this->save( $data );
-		}
+		$this->change(
+			function ( array $data ) use ( $now ): ?array {
+				$stale = $this->stale_notice( $data, $now );
+				if ( null === $stale ) {
+					return null;
+				}
+				$data['stale']    = $now;
+				$data['outbox'][] = $this->entry( $stale );
+				return $data;
+			}
+		);
 		$this->flush( $now );
 	}
 
@@ -145,12 +168,31 @@ final class Notifier {
 	 * @param int $now Unix time.
 	 */
 	public function flush( int $now ): void {
-		$data = $this->load();
-		if ( [] === $data['outbox'] ) {
+		$send = function () use ( $now ): void {
+			$this->send_due( $now );
+		};
+		if ( null === $this->sending ) {
+			$send();
+		} else {
+			// Another request is at it: its notices are these, and nobody gets a mail twice.
+			$this->sending->hold_if_free( $send );
+		}
+	}
+
+	/**
+	 * What flush() does as the only request that sends. The mailer can take long, so the
+	 * state is not locked meanwhile: what other requests queue in that time is kept when the
+	 * outcome is stored.
+	 *
+	 * @param int $now Unix time.
+	 */
+	private function send_due( int $now ): void {
+		$handled = $this->load( true )['outbox'];
+		if ( [] === $handled ) {
 			return;
 		}
 		$kept = [];
-		foreach ( $data['outbox'] as $entry ) {
+		foreach ( $handled as $entry ) {
 			$notice   = Notice::from_array( $entry );
 			$attempts = Decoded::count( $entry['attempts'] ?? null );
 			$tried_at = Decoded::int( $entry['tried_at'] ?? null );
@@ -165,8 +207,13 @@ final class Notifier {
 				$kept[] = self::waiting( $notice, $attempts + 1, $now );
 			}
 		}
-		$data['outbox'] = $kept;
-		$this->save( $data );
+		$this->change(
+			static function ( array $data ) use ( $handled, $kept ): array {
+				$queued         = array_values( array_filter( $data['outbox'], static fn ( array $entry ): bool => ! in_array( $entry, $handled, true ) ) );
+				$data['outbox'] = [ ...$kept, ...$queued ];
+				return $data;
+			}
+		);
 	}
 
 	/**
@@ -181,8 +228,8 @@ final class Notifier {
 	/**
 	 * The stale notice that is due now, if any.
 	 *
-	 * @param array{failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
-	 * @param int                                                                        $now  Unix time.
+	 * @param array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
+	 * @param int                                                                                                 $now  Unix time.
 	 * @return Notice|null Notice.
 	 */
 	private function stale_notice( array $data, int $now ): ?Notice {
@@ -190,9 +237,11 @@ final class Notifier {
 		if ( null === $limit || $data['stale'] > 0 || ! $this->settings->bool( 'setup.completed' ) || ! $this->settings->bool( 'notifications.email.on_stale' ) ) {
 			return null;
 		}
-		$last  = $this->state->get( 'last_backup' );
-		$job   = Decoded::string( $last['job'] ?? null );
-		$since = '' === $job ? $this->setup_time() : Decoded::int( $last['finished'] ?? null );
+		$last = $this->state->get( 'last_backup' );
+		$job  = Decoded::string( $last['job'] ?? null );
+		// Without a backup in this repository yet, the time counts from the setup, or from the
+		// day the jobs turned to this repository if that was later.
+		$since = '' === $job ? max( $this->setup_time(), Decoded::int( $this->state->get( 'repository' )['since'] ?? null ) ) : Decoded::int( $last['finished'] ?? null );
 		if ( 0 === $since || $now - $since < $limit ) {
 			return null;
 		}
@@ -237,10 +286,11 @@ final class Notifier {
 	/**
 	 * The stored state.
 	 *
-	 * @return array{failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State.
+	 * @param bool $fresh Whether to read past what this request read before, as a change has to.
+	 * @return array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State.
 	 */
-	private function load(): array {
-		$stored  = $this->options->get( self::OPTION );
+	private function load( bool $fresh = false ): array {
+		$stored  = $fresh ? $this->options->fresh( self::OPTION ) : $this->options->get( self::OPTION );
 		$stored  = is_array( $stored ) ? $stored : [];
 		$failing = [];
 		foreach ( is_array( $stored['failing'] ?? null ) ? $stored['failing'] : [] as $type => $since ) {
@@ -248,19 +298,42 @@ final class Notifier {
 				$failing[ $type ] = $since;
 			}
 		}
+		$stale = Decoded::int( $stored['stale'] ?? null );
+		// What is being counted belongs to one repository. Once the jobs turn to another one,
+		// its first stale notice is not held back by the old one's, and its first success ends
+		// no failure streak of the old one. Notices that wait to be sent stay true and go out.
+		$bound = $this->state->get( 'repository' )['id'] ?? null;
+		$known = $stored['repository'] ?? null;
+		if ( is_string( $bound ) && is_string( $known ) && $bound !== $known ) {
+			$failing = [];
+			$stale   = 0;
+		}
 		return [
-			'failing' => $failing,
-			'stale'   => Decoded::int( $stored['stale'] ?? null ),
-			'outbox'  => Decoded::arrays( $stored['outbox'] ?? null ),
+			'repository' => is_string( $bound ) ? $bound : ( is_string( $known ) ? $known : null ),
+			'failing'    => $failing,
+			'stale'      => $stale,
+			'outbox'     => Decoded::arrays( $stored['outbox'] ?? null ),
 		];
 	}
 
 	/**
-	 * Stores the state; not autoloaded.
+	 * Changes the state, starting from what the database holds now and under the lock, so that
+	 * a notice another request queued at the same moment is not written over.
 	 *
-	 * @param array{failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
+	 * @param \Closure(array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>}): (array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>}|null) $change Returns what to store; null to store nothing.
 	 */
-	private function save( array $data ): void {
-		$this->options->set( self::OPTION, $data, false );
+	private function change( \Closure $change ): void {
+		$apply = function () use ( $change ): void {
+			$next = $change( $this->load( true ) );
+			if ( null !== $next ) {
+				// Not autoloaded.
+				$this->options->set( self::OPTION, $next, false );
+			}
+		};
+		if ( null === $this->lock ) {
+			$apply();
+		} else {
+			$this->lock->hold( $apply );
+		}
 	}
 }

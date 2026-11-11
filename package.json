@@ -1,13 +1,18 @@
 {
     "name": "backups-for-restic",
     "private": true,
-    "description": "Development tooling for assets/js: ESLint only. Nothing from npm ships with the plugin or runs on a site.",
+    "description": "Development tooling for assets/js: ESLint, and Playwright for the browser tests. Nothing from npm ships with the plugin or runs on a site.",
     "license": "GPL-2.0-or-later",
     "scripts": {
-        "lint:js": "eslint --max-warnings=0 assets/js"
+        "lint:js": "eslint --max-warnings=0 assets/js tests/E2E playwright.config.js",
+        "test:e2e": "playwright test"
     },
     "devDependencies": {
+        "@playwright/test": "1.63.0",
         "@wordpress/eslint-plugin": "28.0.0",
         "eslint": "10.13.0"
+    },
+    "overrides": {
+        "minimatch@>=7.0.0 <11.0.1": "11.0.8"
     }
 }

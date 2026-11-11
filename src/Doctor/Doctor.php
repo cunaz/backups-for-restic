@@ -41,6 +41,8 @@ final class Doctor {
 			self::secrets( $environment ),
 			self::cron( $environment ),
 			self::zstd( $environment ),
+			self::jit( $environment ),
+			self::repository_server( $environment ),
 		];
 	}
 
@@ -179,5 +181,35 @@ final class Doctor {
 			return new Check( 'zstd', Check::CRITICAL, 'needed' );
 		}
 		return new Check( 'zstd', Check::GOOD, $environment->zstd ? 'present' : 'not_needed' );
+	}
+
+	/**
+	 * PHP's JIT compiler. With the tracing JIT, processes of PHP 8.3 died by SIGSEGV in the
+	 * middle of backup ticks (docs/04-development-and-quality.md §5.3): a job then stops
+	 * without an error and goes on with the next tick, slower and for no visible reason.
+	 *
+	 * @param Environment $environment Environment.
+	 * @return Check Result.
+	 */
+	private static function jit( Environment $environment ): Check {
+		return $environment->jit
+			? new Check( 'jit', Check::RECOMMENDED, 'enabled' )
+			: new Check( 'jit', Check::GOOD, 'off' );
+	}
+
+	/**
+	 * Whether the repository server answers from here. Hosts that block outgoing HTTPS to
+	 * other ports or hosts are the usual reason when it does not.
+	 *
+	 * @param Environment $environment Environment.
+	 * @return Check Result.
+	 */
+	private static function repository_server( Environment $environment ): Check {
+		if ( null === $environment->repository_reached ) {
+			return new Check( 'repository_server', Check::GOOD, 'not_tested' );
+		}
+		return $environment->repository_reached
+			? new Check( 'repository_server', Check::GOOD, 'reached' )
+			: new Check( 'repository_server', Check::RECOMMENDED, 'unreachable' );
 	}
 }

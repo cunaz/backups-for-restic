@@ -100,3 +100,7 @@ and recommend append-only; without append-only the plugin cleans up by itself.
   jobs against `rest-server --append-only`. The integration suite with WordPress uses a
   server that allows deletions, and no test runs against BorgBase (ADR 0025). Tests of the
   WordPress layer against an append-only server are planned for Milestone 3.
+- A switch of the retention mode that the database refuses to store (2026-11-11) is not
+  taken for done: `SettingsStore::update()` raises `StorageFailed`. In a job that ends the
+  job with the error `environment`; the heartbeat's probe goes on without
+  the switch and without the notice, and the next probe finds the same and tries again.

@@ -12,8 +12,17 @@ because they need the site, a database server and the restic tools; CI runs them
          failOnRisky="true"
          failOnWarning="true">
     <testsuites>
+        <!-- In this order: the classes share one site, and the later ones need the repository that WordPressSiteTest sets up. -->
         <testsuite name="integration">
-            <directory>tests/Integration</directory>
+            <file>tests/Integration/AccessTest.php</file>
+            <file>tests/Integration/WordPressSiteTest.php</file>
+            <file>tests/Integration/JobControlTest.php</file>
+            <file>tests/Integration/ScheduleTest.php</file>
+            <file>tests/Integration/CliTest.php</file>
+            <file>tests/Integration/AppendOnlyTest.php</file>
+            <file>tests/Integration/MultisiteTest.php</file>
+            <!-- Last: it removes everything the tests before it set up. -->
+            <file>tests/Integration/UninstallTest.php</file>
         </testsuite>
     </testsuites>
 </phpunit>

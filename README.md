@@ -7,9 +7,8 @@
 > that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
 > mode. The plugin cannot restore yet: that is Milestone 3, and until then every backup is
 > restored with the restic command line ([guide](docs/06-disaster-recovery.md)). Also open
-> and planned for Milestone 3: browser tests and tests of the WordPress layer, a preview of
-> what retention would remove, the size of the repository on the dashboard, and measurements
-> against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
+> and planned for Milestone 3: a preview of what retention would remove, how the repository
+> grows over time, and measurements against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
 > The design documents explain *why* things are built the way they are.
 >
 > **Distribution:** the plugin will be published in the
@@ -73,6 +72,8 @@ other hand, assume a server you control. This plugin closes the gap:
 | [docs/04-development-and-quality.md](docs/04-development-and-quality.md) | Repository layout, standards, tooling, tests incl. the restic conformance oracle, CI, WordPress.org releases |
 | [docs/05-roadmap.md](docs/05-roadmap.md) | Milestones, acceptance criteria, open questions, risks |
 | [docs/06-disaster-recovery.md](docs/06-disaster-recovery.md) | How to get a site back with or without the plugin |
+| [docs/07-milestone-3-plan.md](docs/07-milestone-3-plan.md) | Plan for Milestone 3 (restore): work packages, order, decisions, risks |
+| [docs/08-handoff.md](docs/08-handoff.md) | Where the work stands and what is open, as of the date in its title |
 | [docs/guides/cron.md](docs/guides/cron.md) | Running backups with a real cron job of the hosting panel |
 | [docs/guides/rest-server.md](docs/guides/rest-server.md) | Running your own restic REST server, append-only, and cleaning up from the server |
 | [docs/appendix-a-binary-engine.md](docs/appendix-a-binary-engine.md) | Design of an optional restic-binary engine for VPS users (future option) |
