@@ -11,6 +11,7 @@ use BackupsForRestic\Backend\RestBackend;
 use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\QuotaExceeded;
@@ -26,20 +27,20 @@ final class RestBackendTest extends TestCase {
 
 	/**
 	 * @param list<HttpResponse|\Throwable> $responses
-	 * @return array{RestBackend, \ArrayObject<int, array{string, string, array<string, string>, string}>}
+	 * @return array{RestBackend, \ArrayObject<int, array{string, string, array<string, string>, string, int}>}
 	 */
 	private function backend( array $responses, ?string $username = 'user' ): array {
 		$log    = new \ArrayObject();
 		$client = new class( $responses, $log ) implements HttpClient {
 			/**
 			 * @param list<HttpResponse|\Throwable> $responses
-			 * @param \ArrayObject<int, array{string, string, array<string, string>, string}> $log
+			 * @param \ArrayObject<int, array{string, string, array<string, string>, string, int}> $log
 			 */
 			public function __construct( private array $responses, private \ArrayObject $log ) {
 			}
 
-			public function request( string $method, string $url, array $headers = [], string $body = '' ): HttpResponse {
-				$this->log->append( [ $method, $url, $headers, $body ] );
+			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
+				$this->log->append( [ $method, $url, $headers, $body, $limit ] );
 				$next = array_shift( $this->responses ) ?? new HttpResponse( 500, [], '' );
 				if ( $next instanceof \Throwable ) {
 					throw $next;
@@ -48,6 +49,68 @@ final class RestBackendTest extends TestCase {
 			}
 		};
 		return [ new RestBackend( $client, 'https://repo.example.com/site/', $username, 'secret', 'test-agent', 3, static function ( int $ms ): void {} ), $log ];
+	}
+
+	public function test_a_whole_file_is_read_up_to_what_its_kind_can_hold(): void {
+		$kinds = [
+			[ ObjectType::Config, 65536 ],
+			[ ObjectType::Keys, 65536 ],
+			[ ObjectType::Locks, 1048576 ],
+			[ ObjectType::Snapshots, 16777216 ],
+			[ ObjectType::Index, 134217728 ],
+		];
+		foreach ( $kinds as [ $type, $limit ] ) {
+			[ $backend, $log ] = $this->backend( [ new HttpResponse( 200, [], 'content' ) ] );
+			self::assertSame( 'content', $backend->load( $type, self::NAME ) );
+			self::assertSame( $limit, $log[0][4], 'The client is told where to stop reading a file of the kind ' . $type->value . '.' );
+		}
+
+		// A file of exactly that size is one; a longer answer is not a repository file, whatever it holds.
+		[ $backend ] = $this->backend( [ new HttpResponse( 200, [], str_repeat( 'x', 65536 ) ) ] );
+		self::assertSame( 65536, strlen( $backend->load( ObjectType::Keys, self::NAME ) ) );
+		[ $backend ] = $this->backend( [ new HttpResponse( 200, [], str_repeat( 'x', 65537 ) ) ] );
+		try {
+			$backend->load( ObjectType::Keys, self::NAME );
+			self::fail( 'A key file of restic has a few hundred bytes.' );
+		} catch ( FormatException $e ) {
+			self::assertSame(
+				[
+					'type'  => 'keys',
+					'limit' => 65536,
+				],
+				$e->context()
+			);
+		}
+	}
+
+	public function test_a_range_is_read_no_further_than_it_was_asked_for(): void {
+		[ $backend, $log ] = $this->backend( [ new HttpResponse( 206, [], str_repeat( 'x', 100 ) ) ] );
+		self::assertSame( 100, strlen( $backend->load( ObjectType::Data, self::NAME, 4096, 100 ) ) );
+		self::assertSame( 'bytes=4096-4195', $log[0][2]['Range'] );
+		self::assertSame( 100, $log[0][4] );
+
+		// A server that ignores the range and sends the whole pack.
+		[ $backend ] = $this->backend( [ new HttpResponse( 200, [], str_repeat( 'x', 101 ) ) ] );
+		$this->expectException( BackendException::class );
+		$backend->load( ObjectType::Data, self::NAME, 4096, 100 );
+	}
+
+	public function test_answers_whose_body_nothing_uses_are_cut_short_and_listings_have_a_limit_too(): void {
+		[ $backend, $log ] = $this->backend(
+			[
+				new HttpResponse( 200, [ 'content-length' => '7' ], '' ),
+				new HttpResponse( 200, [], '' ),
+				new HttpResponse( 200, [], '' ),
+				new HttpResponse( 200, [], '[]' ),
+			]
+		);
+		$backend->size( ObjectType::Snapshots, self::NAME );
+		$backend->save( ObjectType::Snapshots, self::NAME, 'content' );
+		$backend->delete( ObjectType::Snapshots, self::NAME );
+		$backend->list( ObjectType::Data );
+
+		self::assertSame( [ 'HEAD', 'POST', 'DELETE', 'GET' ], array_column( $log->getArrayCopy(), 0 ) );
+		self::assertSame( [ 65536, 65536, 65536, 134217728 ], array_column( $log->getArrayCopy(), 4 ) );
 	}
 
 	public function test_requests_carry_basic_auth_and_never_put_credentials_into_urls(): void {

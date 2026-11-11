@@ -83,6 +83,9 @@ All notable changes are documented here. The format follows
   the heartbeat and an open admin page advance the job.
 
 ### Security
+- The plugin reads no more of a server's answer than a repository file of that kind can
+  hold. Before, a broken or malicious server could answer the request for a lock or a
+  snapshot with a body larger than PHP's memory.
 - Repository requests verify the server's certificate even when other code on the site
   switches certificate verification off for all requests (a filter on `https_ssl_verify` or
   on the request arguments, or the `http_api_curl` action).
@@ -128,6 +131,8 @@ All notable changes are documented here. The format follows
 - A request to cancel that arrives just after a backup wrote its snapshot no longer ends
   the job as cancelled with the snapshot left unrecorded; the job ends as succeeded.
 - A CA certificate that could not be written to disk is no longer announced as uploaded.
+- `wp backups-for-restic tick --until-idle` and the commands with `--wait` returned at once
+  when another tick was working on the job. They now wait for it.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
   job. A cancel request is now a marker file that the runner reads before every step, and

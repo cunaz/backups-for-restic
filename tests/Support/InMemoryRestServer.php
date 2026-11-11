@@ -41,7 +41,7 @@ final class InMemoryRestServer implements HttpClient {
 	 */
 	public ?\Closure $after = null;
 
-	public function request( string $method, string $url, array $headers = [], string $body = '' ): HttpResponse {
+	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
 		$path             = (string) parse_url( $url, PHP_URL_PATH );
 		$query            = (string) parse_url( $url, PHP_URL_QUERY );
 		$this->requests[] = $method . ' ' . $path . ( '' === $query ? '' : '?' . $query );
@@ -49,7 +49,9 @@ final class InMemoryRestServer implements HttpClient {
 		$answer   = null === $this->before ? null : ( $this->before )( $method, $path );
 		$answer ??= $this->answer( $method, $path, $query, $headers, $body );
 		$replaced = null === $this->after ? null : ( $this->after )( $method, $path );
-		return $replaced ?? $answer;
+		$answer   = $replaced ?? $answer;
+		// As a client has to: nothing beyond one byte more than the caller accepts.
+		return $limit > 0 && strlen( $answer->body ) > $limit + 1 ? new HttpResponse( $answer->status, $answer->headers, substr( $answer->body, 0, $limit + 1 ) ) : $answer;
 	}
 
 	/**

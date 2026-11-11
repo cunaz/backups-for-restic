@@ -45,10 +45,11 @@ final class WpHttpClient implements HttpClient {
 	 * @param string                $url     Absolute URL.
 	 * @param array<string, string> $headers Request headers.
 	 * @param string                $body    Request body.
+	 * @param int                   $limit   Most bytes of response body the caller accepts; 0 for no limit.
 	 * @return HttpResponse Response, for every HTTP status.
 	 * @throws BackendException On network or TLS errors.
 	 */
-	public function request( string $method, string $url, array $headers = [], string $body = '' ): HttpResponse {
+	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
 		$user_agent = $headers['User-Agent'] ?? 'backups-for-restic';
 		unset( $headers['User-Agent'] );
 		$arguments = [
@@ -61,6 +62,10 @@ final class WpHttpClient implements HttpClient {
 			'user-agent'  => $user_agent,
 			'cookies'     => [],
 		];
+		if ( $limit > 0 ) {
+			// One byte more than accepted: the caller sees that the body was longer.
+			$arguments['limit_response_size'] = $limit + 1;
+		}
 		// Without an uploaded certificate, the bundle that WordPress itself uses by default.
 		$bundle                       = null !== $this->ca_file && '' !== $this->ca_file ? $this->ca_file : ABSPATH . 'wp-includes/certificates/ca-bundle.crt';
 		$arguments['sslcertificates'] = $bundle;
