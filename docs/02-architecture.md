@@ -685,6 +685,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── .htaccess, web.config, index.php       deny rules / empty index
 ├── probe/<random>.txt                     HTTP exposure check, deleted after the request
 ├── runner.lock                            flock target
+├── state.lock, notify.lock                flock targets for changes to the state and for sending notices
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends

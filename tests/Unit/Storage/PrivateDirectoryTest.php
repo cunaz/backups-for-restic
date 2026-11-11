@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Unit\Storage;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\StorageFailed;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -80,5 +81,29 @@ final class PrivateDirectoryTest extends TestCase {
 		self::assertTrue( $directory->is_inside( $this->root . '/site/' ) );
 		self::assertFalse( $directory->is_inside( $this->root . '/si' ) );
 		self::assertNotNull( $directory->free_space() );
+	}
+
+	public function test_uninstalling_leaves_nothing_of_what_the_plugin_put_into_the_directory(): void {
+		$directory = new PrivateDirectory( $this->root . '/backups-for-restic' );
+		$directory->ensure();
+		$directory->write_probe( new SystemRandom() );
+		foreach ( [ 'runner.lock', 'state.lock', 'notify.lock' ] as $name ) {
+			self::assertTrue( ( new FileLock( $directory->path . '/' . $name ) )->hold( static fn (): bool => true ) );
+			self::assertFileExists( $directory->path . '/' . $name );
+		}
+
+		$directory->remove_contents();
+
+		self::assertDirectoryDoesNotExist( $directory->path );
+	}
+
+	public function test_uninstalling_keeps_files_that_are_not_the_plugins(): void {
+		$directory = new PrivateDirectory( $this->root . '/shared' );
+		$directory->ensure();
+		file_put_contents( $directory->path . '/notes.txt', 'Somebody else put this here.' );
+
+		$directory->remove_contents();
+
+		self::assertSame( [ 'notes.txt' ], array_values( array_diff( (array) scandir( $directory->path ), [ '.', '..' ] ) ) );
 	}
 }
