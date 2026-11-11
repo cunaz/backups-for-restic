@@ -391,7 +391,7 @@ chosen repository password, the read-back of stored secrets and the retention fl
 | Retention floor | enforced by the core (`Schema::retention_floor()`): `retention.keep.within` of at least one day, or `retention.keep.last` of at least 1. The settings refuse a change below it with `retention_floor`; a forget job that finds such a pair stored fails with `configuration` and deletes nothing |
 | Sensible schedule | daily backup at a randomised minute, weekly prune-lite, monthly check |
 | Notifications on | e-mail on failure to `admin_email` |
-| Supported repository | version 1, or version 2 with `ext-zstd`. The wizard does not check this: without the extension it connects a version 2 repository, and the first job that reads a compressed file fails with `repository_unsupported_version` (a check in the wizard is not planned yet) |
+| Supported repository | version 1, or version 2 with `ext-zstd`. Without the extension a version 2 repository is refused when it is unlocked, in the wizard as in every job, with `repository_unsupported_version`; the Doctor reports the same as a critical finding, which keeps the setup from being completed |
 | Append-only | detected automatically and recommended; retention switches to `external` when present |
 
 ## 14. Disclosure policy

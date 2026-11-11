@@ -89,3 +89,13 @@ BorgBase's documented use of rest-server behind nginx.
   account at BorgBase and are planned for Milestone 3.
 - Until they exist, no test notices a change in BorgBase's behaviour. The connection test
   of the wizard is the only check a user's repository gets.
+- "TLS verification is never disabled" is enforced against the site's own code since
+  2026-11-11. Snippets that switch verification off for every request of a site are common
+  (a filter on `https_ssl_verify` or on the request arguments, a line in the `http_api_curl`
+  action). While a repository request is under way, `WordPress\WpHttpClient` registers its
+  own callbacks last on these hooks, scoped to the request's URL, and puts verification of
+  certificate and host name, the certificate bundle and the ban on redirects back. The
+  alternative, a client of our own beside WordPress' HTTP API, was rejected: it would lose
+  the proxy settings and transports a host has configured there. The limit is stated in
+  the class: it holds against careless code, not against code that means harm, which
+  could as well read the passwords. An integration test runs with such a snippet active.
