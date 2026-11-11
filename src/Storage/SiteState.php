@@ -71,19 +71,22 @@ final class SiteState {
 	 * last backup's time must not pass for facts about the new one.
 	 *
 	 * State from before this record existed is taken to describe the repository that is
-	 * opened first, so an update of the plugin drops nothing.
+	 * opened first, so an update of the plugin drops nothing. Unless the settings knew the
+	 * repository by another ID: then the first one opened replaced it at the same address, and
+	 * the results are not its own.
 	 *
 	 * @param string $repository Repository ID, or '' while the settings name a repository that was never opened.
 	 * @param int    $now        Unix time.
+	 * @param string $known      Repository ID the settings held until now, or '' if none.
 	 * @return bool True if the state now describes another repository than before.
 	 */
-	public function bind( string $repository, int $now ): bool {
+	public function bind( string $repository, int $now, string $known = '' ): bool {
 		$state = $this->all();
 		$bound = is_array( $state['repository'] ?? null ) ? $state['repository'] : null;
 		if ( null !== $bound && ( $bound['id'] ?? null ) === $repository ) {
 			return false;
 		}
-		$adopted = null === $bound && '' !== $repository;
+		$adopted = null === $bound && '' !== $repository && in_array( $known, [ '', $repository ], true );
 		if ( ! $adopted ) {
 			foreach ( self::OF_THE_REPOSITORY as $key ) {
 				unset( $state[ $key ] );
