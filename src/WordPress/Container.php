@@ -578,15 +578,27 @@ final class Container {
 	}
 
 	/**
-	 * Whether PHP's JIT compiler is switched on for this request.
+	 * Whether PHP's JIT compiler is at work in this request.
 	 *
-	 * @return bool True if OPcache is on and its JIT has a buffer and is not disabled.
+	 * OPcache says so itself where it may be asked. Where it may not, the settings are read:
+	 * a mode of four digits whose last one is 0 compiles nothing, and on the command line
+	 * OPcache is off unless it is switched on for it.
+	 *
+	 * @return bool True if the JIT compiles code of this request.
 	 */
 	private static function jit_enabled(): bool {
+		if ( ! extension_loaded( 'Zend OPcache' ) ) {
+			return false;
+		}
+		$status = function_exists( 'opcache_get_status' ) ? @opcache_get_status( false ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Warns where opcache.restrict_api forbids the question; the settings answer it then.
+		if ( is_array( $status ) && is_array( $status['jit'] ?? null ) && is_bool( $status['jit']['on'] ?? null ) ) {
+			return $status['jit']['on'];
+		}
 		$mode = strtolower( trim( (string) ini_get( 'opcache.jit' ) ) );
-		return extension_loaded( 'Zend OPcache' )
-			&& filter_var( ini_get( 'opcache.enable' ), FILTER_VALIDATE_BOOLEAN )
+		return filter_var( ini_get( 'opcache.enable' ), FILTER_VALIDATE_BOOLEAN )
+			&& ( 'cli' !== PHP_SAPI || filter_var( ini_get( 'opcache.enable_cli' ), FILTER_VALIDATE_BOOLEAN ) )
 			&& ! in_array( $mode, [ '', '0', 'off', 'no', 'false', 'disable' ], true )
+			&& 1 !== preg_match( '/\A\d{3}0\z/', $mode )
 			&& self::bytes( (string) ini_get( 'opcache.jit_buffer_size' ) ) > 0;
 	}
 

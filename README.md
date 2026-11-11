@@ -7,9 +7,8 @@
 > that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
 > mode. The plugin cannot restore yet: that is Milestone 3, and until then every backup is
 > restored with the restic command line ([guide](docs/06-disaster-recovery.md)). Also open
-> and planned for Milestone 3: browser tests and tests of the WordPress layer, a preview of
-> what retention would remove, the size of the repository on the dashboard, and measurements
-> against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
+> and planned for Milestone 3: a preview of what retention would remove, how the repository
+> grows over time, and measurements against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
 > The design documents explain *why* things are built the way they are.
 >
 > **Distribution:** the plugin will be published in the

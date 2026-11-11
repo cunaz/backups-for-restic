@@ -230,9 +230,11 @@ hours. Where the site can call itself, each slice starts the next one. Where it 
 progress continues while the dashboard tab is open, with every visit to the site, and with a
 control-panel cron that fetches `wp-cron.php`
 ([Running backups with a real cron job](guides/cron.md)). The dashboard shows how many files
-and how much data the backup has processed and how much new data it has uploaded. It shows
-no rate and no estimate of the remaining time; both are planned for Milestone 3. Later
-backups touch only changed files and finish in minutes.
+and how much data the backup has processed and how much new data it has uploaded. The first
+backup shows no estimate of the remaining time, because the plugin does not know the size
+of the site before it has gone through it. Later backups are measured against the last one,
+with a bar and the minutes left at the speed so far; they touch only changed files and
+finish in minutes.
 
 ## Scenario I — the check found damage
 
