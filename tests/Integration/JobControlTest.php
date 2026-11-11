@@ -177,6 +177,36 @@ final class JobControlTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_repository_requests_verify_certificates_whatever_the_sites_filters_say(): void {
+		TestSite::idle( 600 );
+		$certificate = (string) file_get_contents( TestSite::server()->certificate );
+		try {
+			// The server's certificate is from its own authority. Without it uploaded, nothing may be sent there.
+			[ $status, , $raw ] = TestSite::api( 'DELETE', '/repository/ca-certificate' );
+			self::assertSame( 200, $status, $raw );
+			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', TestSite::connection() );
+			self::assertSame( 502, $status, $raw );
+			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
+
+			// A snippet that switches verification off for the whole site does not reach these requests.
+			TestSite::hostile_filters( true );
+			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', TestSite::connection() );
+			self::assertSame( 502, $status, 'The certificate was accepted without being verified: ' . $raw );
+			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
+
+			// And the uploaded certificate still counts while the snippet is active.
+			[ $status, , $raw ] = TestSite::api( 'POST', '/repository/ca-certificate', [ 'pem' => $certificate ] );
+			self::assertSame( 200, $status, $raw );
+			[ $status, $tested, $raw ] = TestSite::api( 'POST', '/repository/test', TestSite::connection() );
+			self::assertSame( 200, $status, $raw );
+			self::assertTrue( $tested['report']['exists'] ?? null, $raw );
+		} finally {
+			TestSite::hostile_filters( false );
+			TestSite::api( 'POST', '/repository/ca-certificate', [ 'pem' => $certificate ] );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_the_setup_is_not_completed_while_the_private_directory_is_served(): void {
 		TestSite::idle( 600 );
 		$deny  = TestSite::private_dir() . '/.htaccess';

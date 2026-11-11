@@ -145,17 +145,20 @@ final class WordPressSiteTest extends TestCase {
 		TestSite::cron( 3 );
 		$caught = TestSite::wait_for_backup_tick( $id, 120 );
 
-		TestSite::kill_server();
+		try {
+			TestSite::kill_server();
 
-		$left = TestSite::job_document( $id );
-		self::assertSame( 'running', $left['state'] ?? null );
-		self::assertSame( $caught['lease_owner'], $left['lease_owner'] ?? null, 'The tick died holding its lease: it never came to save the job again.' );
-		self::assertSame( $caught['ticks'], $left['ticks'] ?? null );
-		$log = TestSite::job_log( $id );
-		self::assertSame( 1, substr_count( $log, 'Backup started.' ), $log );
-		self::assertStringNotContainsString( 'Snapshot saved.', $log, 'It was killed in the backup step.' );
-
-		TestSite::start_server();
+			$left = TestSite::job_document( $id );
+			self::assertSame( 'running', $left['state'] ?? null );
+			self::assertSame( $caught['lease_owner'], $left['lease_owner'] ?? null, 'The tick died holding its lease: it never came to save the job again.' );
+			self::assertSame( $caught['ticks'], $left['ticks'] ?? null );
+			$log = TestSite::job_log( $id );
+			self::assertSame( 1, substr_count( $log, 'Backup started.' ), $log );
+			self::assertStringNotContainsString( 'Snapshot saved.', $log, 'It was killed in the backup step.' );
+		} finally {
+			// Whatever the assertions say, the later tests need the site.
+			TestSite::start_server();
+		}
 		$job = TestSite::wait_for( $id, 1800 );
 		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
 		self::assertSame( 1, substr_count( TestSite::job_log( $id ), 'Backup started.' ), 'The backup went on from its checkpoint; it did not start over.' );

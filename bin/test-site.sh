@@ -16,7 +16,8 @@
 #            enforces "deny all" .htaccess files as Apache does, so the plugin's private
 #            directory is protected as on typical shared hosting. PHP errors go to
 #            .tools/php-errors.log; bin/test-site-diagnostics.php logs every request's start and
-#            end to .tools/requests.log.
+#            end to .tools/requests.log. bin/test-site-hostile-filters.php switches certificate
+#            verification off for the whole site while a test asks for it.
 #   stop     stops the web server.
 #   reset    stops the server and deletes the site and its database.
 #
@@ -101,6 +102,7 @@ install_site() {
 	ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
 	mkdir -p "$SITE/wp-content/mu-plugins"
 	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
+	ln -s "$ROOT/bin/test-site-hostile-filters.php" "$SITE/wp-content/mu-plugins/test-site-hostile-filters.php"
 
 	php -r '
 		define( "WP_INSTALLING", true );

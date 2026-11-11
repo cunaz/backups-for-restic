@@ -318,7 +318,8 @@ final class TestSite {
 	public static function kill_server(): void {
 		exec( escapeshellarg( dirname( __DIR__, 2 ) . '/bin/test-site.sh' ) . ' stop 2>&1', $output, $status );
 		Assert::assertSame( 0, $status, implode( "\n", $output ) );
-		$pattern = '-S 127.0.0.1:' . (string) parse_url( self::URL, PHP_URL_PORT );
+		// Written so that the shell that runs pgrep does not match its own command line.
+		$pattern = '[-]S 127[.]0[.]0[.]1:' . (string) parse_url( self::URL, PHP_URL_PORT );
 		for ( $attempt = 0; $attempt < 100; $attempt++ ) {
 			$left = [];
 			exec( 'pgrep -f -- ' . escapeshellarg( $pattern ), $left );
@@ -328,6 +329,19 @@ final class TestSite {
 			usleep( 100_000 );
 		}
 		Assert::fail( 'Processes of the web server outlived its stop: ' . implode( ' ', $left ) );
+	}
+
+	/**
+	 * Switches certificate verification off for every HTTP request of the site, as snippets
+	 * from the web do it (bin/test-site-hostile-filters.php), or stops doing so.
+	 */
+	public static function hostile_filters( bool $active ): void {
+		$flag = self::root() . '/wp-content/bfr-hostile-filters';
+		if ( $active ) {
+			file_put_contents( $flag, '' );
+		} elseif ( is_file( $flag ) ) {
+			unlink( $flag );
+		}
 	}
 
 	/**
