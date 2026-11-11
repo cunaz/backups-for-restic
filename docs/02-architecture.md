@@ -950,17 +950,21 @@ Milestone 3. Errors of the routes carry the codes of §14 with the prefix
 
 Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
 `forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
-`tick [--until-idle]`, `status` and `snapshots`. The four commands that start a job end
+`tick [--until-idle]`, `status`, `snapshots`, `settings list|get|set`, `cancel [<job>]` and
+`logs [<job>] [--lines=<number>]`. `settings set` changes what the settings page can change
+(`Settings\Schema::editable()`), with the same validation; `cancel` asks the active or the
+named job to stop and runs one tick for its cleanup; `logs` prints a job's event log,
+which is redacted when it is written. The four commands that start a job end
 with an error under the same conditions as `POST /jobs` (§13.2): before the setup is
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. `status` prints the last backup and the active job only.
 
 Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
-cancelling a job, job logs, `settings get|set` and `recovery-kit` (parity with the admin
-area beyond starting jobs is planned for Milestone 3); `ls <snapshot> [<path>]`, `restore …`
-and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove
-stale locks of other hosts, stays on the list without a milestone. Nothing requires
-WP-CLI: setup, settings, cancelling and the recovery kit are in the admin area.
+`ls <snapshot> [<path>]`, `restore …` and `apply …`, which arrive with restore in
+Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
+list without a milestone. There is no command for the setup or for the recovery kit: both
+are in the admin area, where the kit asks for the WordPress password. Nothing requires
+WP-CLI.
 
 ### 13.4 Site Health
 

@@ -11,8 +11,10 @@ namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Settings\Schema;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -230,6 +232,135 @@ final class CliCommand {
 			}
 		} catch ( PluginException $e ) {
 			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $e )->code )['message'] );
+		}
+	}
+
+	/**
+	 * Shows or changes settings.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <action>
+	 * : list, get or set.
+	 *
+	 * [<path>]
+	 * : The setting, for example schedule.backup.hour.
+	 *
+	 * [<value>...]
+	 * : The new value. Several values make a list.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp backups-for-restic settings list
+	 *     wp backups-for-restic settings get retention.keep.daily
+	 *     wp backups-for-restic settings set retention.keep.daily 14
+	 *     wp backups-for-restic settings set backup.extra_roots /var/www/shared /var/www/media
+	 *
+	 * @param list<string> $args Action, path and values.
+	 */
+	public function settings( array $args ): void {
+		$settings = $this->container->settings();
+		$values   = $settings->to_array();
+		$action   = $args[0] ?? '';
+		$path     = $args[1] ?? '';
+		if ( 'list' === $action ) {
+			foreach ( $values as $name => $value ) {
+				\WP_CLI::line( $name . ' = ' . self::shown( $value ) . ( $settings->is_overridden( $name ) ? ' (wp-config.php)' : '' ) );
+			}
+			return;
+		}
+		if ( ! in_array( $action, [ 'get', 'set' ], true ) || ! array_key_exists( $path, $values ) ) {
+			\WP_CLI::error( __( 'Usage: settings list, settings get <path>, or settings set <path> <value>. "settings list" names the paths.', 'backups-for-restic' ) );
+		}
+		if ( 'get' === $action ) {
+			\WP_CLI::line( self::shown( $values[ $path ] ) );
+			return;
+		}
+		if ( ! Schema::editable( $path ) ) {
+			\WP_CLI::error( __( 'This setting cannot be changed here.', 'backups-for-restic' ) );
+		}
+		$given = array_slice( $args, 2 );
+		if ( [] === $given ) {
+			\WP_CLI::error( __( 'Give the new value after the path.', 'backups-for-restic' ) );
+		}
+		try {
+			// One value as it is; several are the lines of a list.
+			$saved = $this->container->save_settings( [ $path => implode( "\n", $given ) ] );
+		} catch ( ValidationFailed $e ) {
+			\WP_CLI::error( Messages::validation( $e->errors()[ $path ] ?? [] ) );
+		}
+		\WP_CLI::success( $path . ' = ' . self::shown( $saved->to_array()[ $path ] ?? null ) );
+	}
+
+	/**
+	 * A setting's value as one line of text.
+	 *
+	 * @param mixed $value Value.
+	 * @return string Text.
+	 */
+	private static function shown( mixed $value ): string {
+		if ( is_bool( $value ) ) {
+			return $value ? 'true' : 'false';
+		}
+		if ( is_array( $value ) ) {
+			return implode( ', ', array_map( 'strval', array_filter( $value, 'is_scalar' ) ) );
+		}
+		return is_scalar( $value ) ? (string) $value : '';
+	}
+
+	/**
+	 * Cancels a job: the active one, or the one named.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<job>]
+	 * : Job ID. Default: the active job.
+	 *
+	 * @param list<string> $args Job ID.
+	 */
+	public function cancel( array $args ): void {
+		$id = $args[0] ?? $this->container->jobs()->active()?->id;
+		if ( null === $id ) {
+			\WP_CLI::success( __( 'No job is active.', 'backups-for-restic' ) );
+			return;
+		}
+		$job = $this->container->runner()->cancel( $id, [ 'user' => 'wp-cli' ] );
+		if ( null === $job ) {
+			\WP_CLI::error( __( 'The job does not exist.', 'backups-for-restic' ) );
+		}
+		if ( ! $job->state->is_terminal() ) {
+			// The cleanup releases the repository lock; do it now if no other tick is at work.
+			Cron::tick( $this->container, null, false );
+			$job = $this->container->jobs()->get( $id ) ?? $job;
+		}
+		\WP_CLI::success( $job->id . ' ' . Messages::state( $job->state->value ) . ( $job->state->is_terminal() ? '' : ' ' . __( '(cancel requested; the running step ends first)', 'backups-for-restic' ) ) );
+	}
+
+	/**
+	 * Prints the log of a job: the latest one, or the one named.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<job>]
+	 * : Job ID. Default: the latest job.
+	 *
+	 * [--lines=<number>]
+	 * : How many of the last entries to print. Default: 50.
+	 *
+	 * @param list<string>          $args       Job ID.
+	 * @param array<string, string> $assoc_args Options.
+	 */
+	public function logs( array $args, array $assoc_args ): void {
+		$jobs = $this->container->jobs();
+		$job  = isset( $args[0] ) ? $jobs->get( $args[0] ) : ( $jobs->latest( 1 )[0] ?? null );
+		if ( null === $job ) {
+			\WP_CLI::error( __( 'The job does not exist.', 'backups-for-restic' ) );
+		}
+		$lines = max( 1, (int) ( $assoc_args['lines'] ?? 50 ) );
+		\WP_CLI::line( $job->id . ' ' . Messages::job_type( $job->type->value ) . ' ' . Messages::state( $job->state->value ) );
+		foreach ( $jobs->log( $job )->read( $lines ) as $entry ) {
+			$context = is_array( $entry['context'] ?? null ) && [] !== $entry['context'] ? ' ' . (string) wp_json_encode( $entry['context'] ) : '';
+			\WP_CLI::line( sprintf( '%s %-7s %s%s', gmdate( 'Y-m-d H:i:s', is_int( $entry['time'] ?? null ) ? $entry['time'] : 0 ), is_string( $entry['level'] ?? null ) ? $entry['level'] : '', is_string( $entry['message'] ?? null ) ? $entry['message'] : '', $context ) );
 		}
 	}
 

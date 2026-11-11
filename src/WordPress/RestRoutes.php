@@ -21,6 +21,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Decoded;
 
@@ -37,8 +38,6 @@ final class RestRoutes {
 	public const string NAMESPACE = 'backups-for-restic/v1';
 
 	/** Settings that the settings page may change; repository and setup have their own routes. */
-	private const array EDITABLE = [ 'schedule.', 'retention.', 'backup.', 'notifications.', 'advanced.' ];
-
 	/**
 	 * Creates the routes.
 	 *
@@ -403,28 +402,17 @@ final class RestRoutes {
 		$values  = $request->get_param( 'values' );
 		$changes = [];
 		foreach ( is_array( $values ) ? $values : [] as $path => $value ) {
-			$path    = (string) $path;
-			$allowed = false;
-			foreach ( self::EDITABLE as $prefix ) {
-				$allowed = $allowed || str_starts_with( $path, $prefix );
-			}
-			if ( ! $allowed ) {
+			$path = (string) $path;
+			if ( ! Schema::editable( $path ) ) {
 				return $this->error( 'not_editable', 400 );
 			}
 			$changes[ $path ] = $value;
 		}
-		$mode = $this->container->settings()->string( 'retention.mode' );
 		try {
-			$saved = $this->container->settings_store()->update( $changes );
+			$this->container->save_settings( $changes );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
 		}
-		if ( $saved->string( 'retention.mode' ) !== $mode ) {
-			// An administrator chose the mode: that answers the proposal and the switch notice.
-			$this->container->state()->set( 'retention_proposal', [] );
-			$this->container->state()->set( 'retention_switch', [] );
-		}
-		$this->container->refresh();
 		return $this->settings();
 	}
 

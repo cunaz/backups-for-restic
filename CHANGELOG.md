@@ -7,6 +7,7 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- WP-CLI: `settings list`, `settings get` and `settings set`, `cancel` and `logs`.
 - The plugin records when the recovery kit was shown and to whom; the Settings tab shows
   the latest time, and the action `backups_for_restic_recovery_kit_shown` fires.
 - The environment checks and Site Health point out a JIT compiler that is switched on,

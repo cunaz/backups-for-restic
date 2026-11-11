@@ -29,6 +29,7 @@ use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
@@ -143,6 +144,25 @@ final class Container {
 	 */
 	public function settings(): Settings {
 		return $this->settings ??= $this->settings_store()->load();
+	}
+
+	/**
+	 * Saves what an administrator changed, on the settings page or with WP-CLI.
+	 *
+	 * @param array<string, mixed> $changes New values by dotted path.
+	 * @return Settings The saved settings.
+	 * @throws ValidationFailed If a value is invalid; nothing is saved then.
+	 */
+	public function save_settings( array $changes ): Settings {
+		$mode  = $this->settings()->string( 'retention.mode' );
+		$saved = $this->settings_store()->update( $changes );
+		if ( $saved->string( 'retention.mode' ) !== $mode ) {
+			// An administrator chose the mode: that answers the proposal and the switch notice.
+			$this->state()->set( 'retention_proposal', [] );
+			$this->state()->set( 'retention_switch', [] );
+		}
+		$this->refresh();
+		return $saved;
 	}
 
 	/**

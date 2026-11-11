@@ -263,8 +263,9 @@ installed is skipped:
   back, and no deletion until an administrator decides.
 - **`CliTest`**: the WP-CLI commands with a real, pinned WP-CLI
   (`bin/install-test-tools.sh wp-cli`): `doctor`, `status`, `snapshots`, `backup`, `forget`,
-  `prune` and `check` with `--wait`, `tick --until-idle`, a second job that is refused, and
-  forget and prune that are refused in retention mode external.
+  `prune` and `check` with `--wait`, `tick --until-idle`, a second job that is refused,
+  forget and prune that are refused in retention mode external, `settings` with the
+  refusals of the settings page, and `cancel` and `logs` on a backup that is at work.
 - **`MultisiteTest`**: on a second WordPress that is a multisite network
   (`bin/test-site.sh install-multisite`, never served, reached through WP-CLI): activation
   is refused for the network and for one site, and a plugin that is active all the same
