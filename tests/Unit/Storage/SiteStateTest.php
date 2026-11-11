@@ -44,6 +44,23 @@ final class SiteStateTest extends TestCase {
 		);
 	}
 
+	public function test_state_from_before_the_record_is_not_taken_for_a_repository_that_replaced_the_known_one(): void {
+		$this->remember_results();
+
+		self::assertTrue( $this->state->bind( 'second', self::NOW, 'first' ), 'The settings knew the repository at this address by another ID.' );
+
+		self::assertSame( [], $this->state->get( 'last_backup' ) );
+		self::assertSame( self::NOW, $this->state->get( 'repository' )['since'] ?? null );
+	}
+
+	public function test_state_from_before_the_record_stays_with_the_repository_the_settings_knew(): void {
+		$this->remember_results();
+
+		self::assertFalse( $this->state->bind( 'first', self::NOW, 'first' ) );
+
+		self::assertSame( [ 'job' => 'a job of the first repository' ], $this->state->get( 'last_backup' ) );
+	}
+
 	public function test_another_address_drops_the_results_also_when_nothing_was_recorded_yet(): void {
 		$this->remember_results();
 
