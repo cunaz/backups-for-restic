@@ -4,7 +4,6 @@
  * Plain JavaScript on core's wp-api-fetch and wp-i18n (ADR 0012). Server data is always
  * inserted as text, never as HTML.
  */
-/* global wp */
 ( function () {
 	'use strict';
 
@@ -83,12 +82,12 @@
 		return el( 'button', { type: 'button', className: 'button' + ( primary ? ' button-primary' : '' ), onClick }, [ label ] );
 	}
 
-	function field( label, input, help ) {
+	function field( label, control, help ) {
 		const id = 'bfr-' + Math.random().toString( 36 ).slice( 2 );
-		input.id = id;
+		control.id = id;
 		return el( 'p', { className: 'bfr-field' }, [
 			el( 'label', { htmlFor: id }, [ label ] ),
-			input,
+			control,
 			help ? el( 'span', { className: 'description' }, [ help ] ) : null,
 		] );
 	}
@@ -108,17 +107,35 @@
 						/* translators: 1: number of files, 2: amount of data such as 1.2 GB. */
 						__( '%1$d files, %2$s processed', 'backups-for-restic' ),
 						progress.total_files_processed,
-						formatBytes( progress.total_bytes_processed )
+						formatBytes( progress.total_bytes_processed ),
 					),
-				] )
+				] ),
 			);
+		}
+		if ( 'number' === typeof progress.total_bytes_processed && progress.expected_bytes > 0 ) {
+			// Measured against the last backup: this one knows its own total only at the end.
+			const processed = Math.min( progress.total_bytes_processed, progress.expected_bytes );
+			const elapsed = ( Date.now() / 1000 ) - job.started_at;
+			lines.push( el( 'progress', { max: progress.expected_bytes, value: processed } ) );
+			if ( job.started_at > 0 && elapsed >= 30 && processed > 0 && processed < progress.expected_bytes ) {
+				const minutes = Math.ceil( ( ( progress.expected_bytes - processed ) / ( processed / elapsed ) ) / 60 );
+				lines.push(
+					el( 'p', { className: 'description bfr-estimate' }, [
+						sprintf(
+							/* translators: %d: number of minutes. */
+							_n( 'About %d minute left, judging by the last backup.', 'About %d minutes left, judging by the last backup.', minutes, 'backups-for-restic' ),
+							minutes,
+						),
+					] ),
+				);
+			}
 		}
 		if ( 'number' === typeof progress.data_added ) {
 			lines.push(
 				el( 'p', {}, [
 					/* translators: %s: amount of data such as 15 MB. */
 					sprintf( __( '%s of new data uploaded', 'backups-for-restic' ), formatBytes( progress.data_added ) ),
-				] )
+				] ),
 			);
 		}
 		if ( 'number' === typeof progress.packs_to_read && progress.packs_to_read > 0 ) {
@@ -128,7 +145,7 @@
 				el( 'p', {}, [
 					/* translators: %d: number of directory listings. */
 					sprintf( __( '%d directory listings read', 'backups-for-restic' ), progress.trees ),
-				] )
+				] ),
 			);
 		}
 		if ( 'number' === typeof progress.bytes_deleted && progress.bytes_deleted > 0 ) {
@@ -136,7 +153,7 @@
 				el( 'p', {}, [
 					/* translators: %s: amount of data such as 15 MB. */
 					sprintf( __( '%s deleted', 'backups-for-restic' ), formatBytes( progress.bytes_deleted ) ),
-				] )
+				] ),
 			);
 		}
 		if ( progress.current ) {
@@ -174,7 +191,7 @@
 				warnings ? 'warning' : 'success',
 				warnings
 					? /* translators: %d: number of warnings. */ sprintf( __( 'Finished with %d warnings; see the log.', 'backups-for-restic' ), warnings )
-					: __( 'Finished successfully.', 'backups-for-restic' )
+					: __( 'Finished successfully.', 'backups-for-restic' ),
 			);
 		}
 		return notice( 'info', job.state_label );
@@ -184,9 +201,9 @@
 	 * Follows a job until it ends. Each request also advances the job a little, so an open tab
 	 * speeds up slow hosts.
 	 *
-	 * @param {string}   id       Job ID.
-	 * @param {Element}  target   Where to show progress.
-	 * @param {Function} finished Called with the final job.
+	 * @param {string}                id       Job ID.
+	 * @param {Element}               target   Where to show progress.
+	 * @param {(job: Object) => void} finished Called with the final job.
 	 */
 	function follow( id, target, finished ) {
 		const cancel = button( __( 'Cancel', 'backups-for-restic' ), function () {
@@ -218,8 +235,12 @@
 	}
 
 	function jobRow( job, onSelect ) {
+		const select = function ( event ) {
+			event.preventDefault();
+			onSelect( job );
+		};
 		const name = onSelect
-			? el( 'a', { href: '#', onClick: function ( event ) { event.preventDefault(); onSelect( job ); } }, [ formatTime( job.created_at ) ] )
+			? el( 'a', { href: '#', onClick: select }, [ formatTime( job.created_at ) ] )
 			: formatTime( job.created_at );
 		return el( 'tr', {}, [
 			el( 'td', {}, [ name ] ),
@@ -239,7 +260,9 @@
 					el( 'th', {}, [ __( 'Message', 'backups-for-restic' ) ] ),
 				] ),
 			] ),
-			el( 'tbody', {}, jobs.map( function ( job ) { return jobRow( job, onSelect ); } ) ),
+			el( 'tbody', {}, jobs.map( function ( job ) {
+				return jobRow( job, onSelect );
+			} ) ),
 		] );
 	}
 
@@ -248,8 +271,8 @@
 	/**
 	 * Notices that stay until their cause is gone: check findings and retention changes.
 	 *
-	 * @param {Object}   status Dashboard data.
-	 * @param {Function} reload Shows the dashboard again.
+	 * @param {Object}     status Dashboard data.
+	 * @param {() => void} reload Shows the dashboard again.
 	 * @return {Array} Nodes.
 	 */
 	function alerts( status, reload ) {
@@ -264,7 +287,7 @@
 								/* translators: 1: number of errors, 2: date and time. */
 								_n( 'The repository check on %2$s found %1$d error.', 'The repository check on %2$s found %1$d errors.', alert.errors, 'backups-for-restic' ),
 								alert.errors,
-								formatTime( alert.at )
+								formatTime( alert.at ),
 							),
 						] ),
 					] ),
@@ -274,9 +297,9 @@
 						{ className: 'bfr-findings' },
 						alert.findings.map( function ( finding ) {
 							return el( 'li', {}, [ finding.label, ' ', el( 'code', {}, [ finding.object ] ) ] );
-						} )
+						} ),
 					),
-				] )
+				] ),
 			);
 		}
 		const retention = status.retention;
@@ -299,15 +322,15 @@
 					] ),
 					el( 'p', {}, [ switchBack ] ),
 					message,
-				] )
+				] ),
 			);
 		} else if ( 'external' === retention.mode && retention.switched_at ) {
 			nodes.push(
 				notice(
 					'warning',
 					/* translators: %s: date and time. */
-					sprintf( __( 'On %s the server refused to delete data: it is append-only, which protects your backups. This site no longer removes old snapshots; remove them from another computer with "restic forget" and "restic prune".', 'backups-for-restic' ), formatTime( retention.switched_at ) )
-				)
+					sprintf( __( 'On %s the server refused to delete data: it is append-only, which protects your backups. This site no longer removes old snapshots; remove them from another computer with "restic forget" and "restic prune".', 'backups-for-restic' ), formatTime( retention.switched_at ) ),
+				),
 			);
 		}
 		return nodes;
@@ -316,8 +339,8 @@
 	/**
 	 * The three maintenance cards: old snapshots, unused data, repository check.
 	 *
-	 * @param {Object}   status Dashboard data.
-	 * @param {Function} action Creates a button that starts a job of a type.
+	 * @param {Object}                                       status Dashboard data.
+	 * @param {(type: string, label: string) => HTMLElement} action Creates a button that starts a job of a type.
 	 * @return {Element} Cards.
 	 */
 	function maintenanceCards( status, action ) {
@@ -329,6 +352,13 @@
 			return el( 'p', { className: 'description' }, [ text ] );
 		};
 
+		let forgetWhen = __( 'They are removed from another computer, because the server was append-only.', 'backups-for-restic' );
+		if ( plugin && status.retention.after_backup ) {
+			forgetWhen = __( 'This site removes them after each backup, following the retention settings.', 'backups-for-restic' );
+		} else if ( plugin ) {
+			forgetWhen = __( 'This site removes them when you start it here.', 'backups-for-restic' );
+		}
+
 		let forgetLast = __( 'Not run yet.', 'backups-for-restic' );
 		if ( forget.finished && 'append_only' === forget.skipped ) {
 			/* translators: %s: date and time. */
@@ -336,6 +366,14 @@
 		} else if ( forget.finished && 'number' === typeof forget.removed ) {
 			/* translators: 1: date and time, 2: snapshots removed, 3: snapshots kept. */
 			forgetLast = sprintf( __( 'Last run on %1$s: %2$d removed, %3$d kept.', 'backups-for-restic' ), formatTime( forget.finished ), forget.removed, forget.keep || 0 );
+		}
+
+		let pruneWhen = __( 'It is deleted from another computer with "restic prune".', 'backups-for-restic' );
+		if ( plugin && prune.next ) {
+			/* translators: %s: date and time. */
+			pruneWhen = sprintf( __( 'Data that no snapshot uses is deleted next on %s.', 'backups-for-restic' ), formatTime( prune.next ) );
+		} else if ( plugin ) {
+			pruneWhen = __( 'Data that no snapshot uses is deleted when you start it here.', 'backups-for-restic' );
 		}
 
 		let pruneLast = __( 'Not run yet.', 'backups-for-restic' );
@@ -362,27 +400,18 @@
 		return el( 'div', { className: 'bfr-cards' }, [
 			el( 'div', { className: 'bfr-card' }, [
 				el( 'h3', {}, [ __( 'Old snapshots', 'backups-for-restic' ) ] ),
-				el( 'p', {}, [
-					plugin
-						? ( status.retention.after_backup ? __( 'This site removes them after each backup, following the retention settings.', 'backups-for-restic' ) : __( 'This site removes them when you start it here.', 'backups-for-restic' ) )
-						: __( 'They are removed from another computer, because the server was append-only.', 'backups-for-restic' ),
-				] ),
+				el( 'p', {}, [ forgetWhen ] ),
 				description( forgetLast ),
 				plugin ? action( 'forget', __( 'Remove old snapshots now', 'backups-for-restic' ) ) : null,
 			] ),
 			el( 'div', { className: 'bfr-card' }, [
 				el( 'h3', {}, [ __( 'Unused data', 'backups-for-restic' ) ] ),
-				el( 'p', {}, [
-					plugin
-						/* translators: %s: date and time. */
-						? ( prune.next ? sprintf( __( 'Data that no snapshot uses is deleted next on %s.', 'backups-for-restic' ), formatTime( prune.next ) ) : __( 'Data that no snapshot uses is deleted when you start it here.', 'backups-for-restic' ) )
-						: __( 'It is deleted from another computer with "restic prune".', 'backups-for-restic' ),
-				] ),
+				el( 'p', {}, [ pruneWhen ] ),
 				description( pruneLast ),
 				prune.reclaimable_bytes > 0
 					? description(
 						/* translators: %s: amount of data such as 15 MB. */
-						sprintf( __( 'About %s more lies unused in partly used packs. Only "restic prune" on another computer can free it.', 'backups-for-restic' ), formatBytes( prune.reclaimable_bytes ) )
+						sprintf( __( 'About %s more lies unused in partly used packs. Only "restic prune" on another computer can free it.', 'backups-for-restic' ), formatBytes( prune.reclaimable_bytes ) ),
 					)
 					: null,
 				plugin ? action( 'prune', __( 'Prune now', 'backups-for-restic' ) ) : null,
@@ -397,7 +426,7 @@
 				check.finished && 'number' === typeof check.packs_read
 					? description(
 						/* translators: 1: number of packs, 2: amount of data such as 15 MB. */
-						sprintf( __( '%1$d packs with %2$s were downloaded and verified.', 'backups-for-restic' ), check.packs_read, formatBytes( check.bytes_read ) )
+						sprintf( __( '%1$d packs with %2$s were downloaded and verified.', 'backups-for-restic' ), check.packs_read, formatBytes( check.bytes_read ) ),
 					)
 					: null,
 				action( 'check', __( 'Check now', 'backups-for-restic' ) ),
@@ -454,6 +483,16 @@
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
 							el( 'p', {}, [ status.repository.host ] ),
+							status.repository.usage && status.repository.usage.at
+								? el( 'p', { className: 'bfr-usage' }, [
+									sprintf(
+										/* translators: 1: amount of data such as 1.2 GB, 2: date and time. */
+										__( '%1$s stored, measured on %2$s', 'backups-for-restic' ),
+										formatBytes( status.repository.usage.bytes ),
+										formatTime( status.repository.usage.at ),
+									),
+								] )
+								: null,
 							el( 'p', { className: 'description' }, [ appendOnly[ status.repository.append_only ] || '' ] ),
 						] ),
 					] ),
@@ -508,7 +547,7 @@
 									el( 'td', {}, [ formatBytes( snapshot.bytes ) ] ),
 									el( 'td', {}, [ formatBytes( snapshot.data_added ) ] ),
 								] );
-							} )
+							} ),
 						),
 					] ),
 					el( 'p', { className: 'description' }, [ __( 'Restoring from the admin area arrives in a later version. Until then, the recovery kit explains how to restore with the restic command line.', 'backups-for-restic' ) ] ),
@@ -600,7 +639,7 @@
 				{},
 				Object.entries( choices ).map( function ( [ key, label ] ) {
 					return el( 'option', { value: key, selected: key === value }, [ label ] );
-				} )
+				} ),
 			);
 		}
 		if ( 'list' === kind ) {
@@ -664,17 +703,28 @@
 							save.disabled = false;
 						} );
 				}, true );
+				// The record of who saw the kit, kept current without touching the form above it.
+				const views = el( 'div', {}, [ kitViews( response.kit_views ) ] );
+				const kit = recoveryKitForm( function () {
+					api( '/settings' )
+						.then( function ( fresh ) {
+							replace( views, [ kitViews( fresh.kit_views ) ] );
+						} )
+						.catch( function () {} );
+				} );
 				replace( root, [
 					...groups,
 					el( 'fieldset', { className: 'bfr-group' }, [
 						el( 'legend', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
-						el( 'p', {}, [ response.values[ 'repository.url' ] ] ),
+						...repositoryForms( response, kit.reset ),
+						el( 'h3', {}, [ __( 'Working files and recovery kit', 'backups-for-restic' ) ] ),
 						el( 'p', { className: 'description' }, [
 							/* translators: %s: directory path. */
 							sprintf( __( 'Working directory: %s', 'backups-for-restic' ), response.private_dir ),
 						] ),
 						cacheControl( response.cache_bytes ),
-						recoveryKitForm(),
+						kit.box,
+						views,
 					] ),
 					message,
 					save,
@@ -683,6 +733,144 @@
 			.catch( function ( error ) {
 				replace( root, [ notice( 'error', errorText( error ) ) ] );
 			} );
+	}
+
+	/**
+	 * The repository part of the settings: where the backups go, and the forms to enter the
+	 * two passwords again and to change the server's CA certificate. What wp-config.php
+	 * defines is shown as such and cannot be changed here.
+	 *
+	 * @param {Object}     response Answer of the settings route.
+	 * @param {() => void} changed  Called after a password or the certificate changed.
+	 * @return {Array} Nodes.
+	 */
+	function repositoryForms( response, changed ) {
+		const values = response.values;
+		const secrets = response.secrets || {};
+		const fromConfig = __( 'Defined in wp-config.php; change it there.', 'backups-for-restic' );
+		const overridden = function ( path ) {
+			return ( response.overridden || [] ).includes( path );
+		};
+		const address = function ( label, path ) {
+			return el( 'p', {}, [
+				el( 'strong', {}, [ label + ': ' ] ),
+				values[ path ] || '–',
+				overridden( path ) ? el( 'span', { className: 'description' }, [ ' ', fromConfig ] ) : null,
+			] );
+		};
+
+		// REST password: tested against the server, then saved.
+		const restResult = el( 'div' );
+		const restFixed = !! ( secrets.rest_password && secrets.rest_password.overridden );
+		const restPassword = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'new-password', disabled: restFixed } );
+		const restSave = button( __( 'Test and save', 'backups-for-restic' ), function () {
+			restSave.disabled = true;
+			api( '/repository/save', {
+				method: 'POST',
+				data: { server: values[ 'repository.server' ], url: values[ 'repository.url' ], username: values[ 'repository.rest_username' ], password: restPassword.value },
+			} )
+				.then( function () {
+					restPassword.value = '';
+					changed();
+					replace( restResult, [ notice( 'success', __( 'The server accepted the password. It is saved.', 'backups-for-restic' ) ) ] );
+				} )
+				.catch( function ( error ) {
+					replace( restResult, [ notice( 'error', errorText( error ) ) ] );
+				} )
+				.finally( function () {
+					restSave.disabled = false;
+				} );
+		} );
+		restSave.disabled = restFixed;
+
+		// Repository password: an unlock job derives the key with it.
+		const unlockResult = el( 'div' );
+		const repositoryFixed = !! ( secrets.repository_password && secrets.repository_password.overridden );
+		const repositoryPassword = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'off', disabled: repositoryFixed } );
+		const confirmation = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password', disabled: repositoryFixed } );
+		const unlock = button( __( 'Unlock with this password', 'backups-for-restic' ), function () {
+			unlock.disabled = true;
+			api( '/repository/connect', { method: 'POST', data: { password: repositoryPassword.value, user_password: confirmation.value } } )
+				.then( function ( created ) {
+					repositoryPassword.value = '';
+					confirmation.value = '';
+					follow( created.job.id, unlockResult, function ( job ) {
+						unlock.disabled = false;
+						if ( 'succeeded' === job.state ) {
+							changed();
+							replace( unlockResult, [ notice( 'success', __( 'The repository is unlocked with this password.', 'backups-for-restic' ) ) ] );
+						}
+					} );
+				} )
+				.catch( function ( error ) {
+					unlock.disabled = false;
+					replace( unlockResult, [ notice( 'error', errorText( error ) ) ] );
+				} );
+		} );
+		unlock.disabled = repositoryFixed;
+
+		// CA certificate of a server with a certificate of its own authority.
+		const caBox = el( 'div' );
+		const renderCa = function ( state, message, entered ) {
+			const pem = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----', value: entered || '' } );
+			const upload = button( __( 'Upload certificate', 'backups-for-restic' ), function () {
+				upload.disabled = true;
+				remove.disabled = true;
+				api( '/repository/ca-certificate', { method: 'POST', data: { pem: pem.value } } )
+					.then( function () {
+						changed();
+						renderCa( 'uploaded', notice( 'success', __( 'The certificate is uploaded.', 'backups-for-restic' ) ) );
+					} )
+					.catch( function ( error ) {
+						// What was pasted stays, to be corrected.
+						renderCa( state, notice( 'error', errorText( error ) ), pem.value );
+					} );
+			} );
+			const remove = button( __( 'Remove certificate', 'backups-for-restic' ), function () {
+				upload.disabled = true;
+				remove.disabled = true;
+				api( '/repository/ca-certificate', { method: 'DELETE' } )
+					.then( function () {
+						changed();
+						renderCa( 'none', notice( 'success', __( 'The certificate is removed.', 'backups-for-restic' ) ) );
+					} )
+					.catch( function ( error ) {
+						renderCa( state, notice( 'error', errorText( error ) ) );
+					} );
+			} );
+			replace( caBox, [
+				field(
+					__( 'CA certificate of the server (PEM)', 'backups-for-restic' ),
+					pem,
+					'uploaded' === state
+						? __( 'A certificate is uploaded. Paste another one to replace it.', 'backups-for-restic' )
+						: __( 'Only for a server with a certificate of its own authority.', 'backups-for-restic' ),
+				),
+				el( 'p', {}, [ upload, ' ', 'uploaded' === state ? remove : null ] ),
+				message,
+			] );
+		};
+		renderCa( values[ 'repository.ca_certificate' ], null );
+
+		return [
+			address( __( 'Repository URL', 'backups-for-restic' ), 'repository.url' ),
+			address( __( 'REST username', 'backups-for-restic' ), 'repository.rest_username' ),
+			el( 'h3', {}, [ __( 'REST password', 'backups-for-restic' ) ] ),
+			field( __( 'New REST password', 'backups-for-restic' ), restPassword, restFixed ? fromConfig : __( 'For example after you changed it on the server.', 'backups-for-restic' ) ),
+			el( 'p', {}, [ restSave ] ),
+			restResult,
+			el( 'h3', {}, [ __( 'Repository password', 'backups-for-restic' ) ] ),
+			field(
+				__( 'Repository password', 'backups-for-restic' ),
+				repositoryPassword,
+				repositoryFixed ? fromConfig : __( 'Enter it again if the stored one can no longer be read, or after it was changed with restic.', 'backups-for-restic' ),
+			),
+			field( __( 'Confirm with your WordPress password', 'backups-for-restic' ), confirmation ),
+			el( 'p', {}, [ unlock ] ),
+			unlockResult,
+			el( 'h3', {}, [ __( 'CA certificate', 'backups-for-restic' ) ] ),
+			caBox,
+		];
 	}
 
 	function cacheControl( bytes ) {
@@ -730,22 +918,68 @@
 		return el( 'div', { className: 'bfr-kit' }, [ text, el( 'p', {}, [ download, ' ', copy ] ) ] );
 	}
 
-	function recoveryKitForm() {
+	/**
+	 * Who was shown the recovery kit last, and when.
+	 *
+	 * @param {Array} views Latest deliveries of the kit, newest first.
+	 * @return {Element|null} Paragraph, or null if the kit was never shown.
+	 */
+	function kitViews( views ) {
+		if ( ! views || ! views.length ) {
+			return null;
+		}
+		return el( 'p', { className: 'description bfr-kit-views' }, [
+			sprintf(
+				/* translators: 1: date and time, 2: user name. */
+				__( 'The recovery kit was last shown on %1$s to %2$s.', 'backups-for-restic' ),
+				formatTime( views[ 0 ].at ),
+				views[ 0 ].login,
+			),
+		] );
+	}
+
+	/**
+	 * The form that shows the recovery kit. Its second part puts the form back in place of a
+	 * kit that is on the screen: after a password or the certificate changed, that kit is no
+	 * longer the one to keep.
+	 *
+	 * @param {() => void} shown Called after the server delivered the kit.
+	 * @return {Object} The form's element as `box`, and `reset()`.
+	 */
+	function recoveryKitForm( shown ) {
 		const box = el( 'div' );
-		const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
-		const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
-			show.disabled = true;
-			api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
-				.then( function ( response ) {
-					replace( box, [ kitView( response.recovery_kit ) ] );
-				} )
-				.catch( function ( error ) {
-					show.disabled = false;
-					replace( box, [ notice( 'error', errorText( error ) ), field( __( 'Your WordPress password', 'backups-for-restic' ), password ), show ] );
-				} );
-		} );
-		replace( box, [ field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
-		return box;
+		// Counts the changes: a kit that was asked for before the last one is not shown.
+		let changes = 0;
+		function render( message ) {
+			const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
+			const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
+				const asked = changes;
+				show.disabled = true;
+				api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
+					.then( function ( response ) {
+						if ( asked === changes ) {
+							replace( box, [ kitView( response.recovery_kit ) ] );
+						}
+						shown();
+					} )
+					.catch( function ( error ) {
+						if ( asked === changes ) {
+							render( notice( 'error', errorText( error ) ) );
+						}
+					} );
+			} );
+			replace( box, [ message, field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
+		}
+		render( null );
+		return {
+			box,
+			reset() {
+				changes++;
+				if ( box.querySelector( '.bfr-kit' ) || box.querySelector( 'button:disabled' ) ) {
+					render( notice( 'info', __( 'The recovery kit changed. Show it again and replace your copy.', 'backups-for-restic' ) ) );
+				}
+			},
+		};
 	}
 
 	/* ----------------------------------------------------------- Environment */
@@ -759,14 +993,74 @@
 					el( 'strong', {}, [ check.label ] ),
 					check.description ? el( 'span', {}, [ ' ', check.description ] ) : null,
 				] );
-			} )
+			} ),
 		);
 	}
 
+	/**
+	 * Lets this browser request a probe file in the working directory, where the site could not
+	 * request it from itself, and reports what came back. Never fails: a probe that cannot run
+	 * leaves the check as it was.
+	 *
+	 * @return {Promise} Settled when the report is in.
+	 */
+	function probeFromBrowser() {
+		return api( '/environment/probe', { method: 'POST' } )
+			.then( function ( probe ) {
+				if ( ! probe.url ) {
+					return null;
+				}
+				// A server that accepts the request and never answers must not hold the page up.
+				const patience = new window.AbortController();
+				const timer = window.setTimeout( function () {
+					patience.abort();
+				}, 10000 );
+				return window
+					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal } )
+					.then( function ( answer ) {
+						return answer.text().then( function ( body ) {
+							return { status: answer.status, body: body.slice( 0, 1024 ) };
+						} );
+					} )
+					.catch( function () {
+						return { status: 0, body: '' };
+					} )
+					.then( function ( seen ) {
+						window.clearTimeout( timer );
+						seen.probe = probe.probe;
+						return api( '/environment/probe/report', { method: 'POST', data: seen } );
+					} );
+			} )
+			.catch( function () {
+				return null;
+			} );
+	}
+
+	/**
+	 * The checks of this server, fresh, with the browser's probe where it is needed.
+	 *
+	 * @return {Promise<Object>} Response of the environment route.
+	 */
+	function checkEnvironment() {
+		return api( '/environment?fresh=1' ).then( function ( response ) {
+			if ( ! response.browser_probe ) {
+				return response;
+			}
+			return probeFromBrowser().then( function () {
+				return api( '/environment' );
+			} );
+		} );
+	}
+
 	function environment( root ) {
-		api( '/environment?fresh=1' )
+		checkEnvironment()
 			.then( function ( response ) {
-				replace( root, [ checkList( response.checks ), button( __( 'Check again', 'backups-for-restic' ), function () { environment( root ); } ) ] );
+				replace( root, [
+					checkList( response.checks ),
+					button( __( 'Check again', 'backups-for-restic' ), function () {
+						environment( root );
+					} ),
+				] );
 			} )
 			.catch( function ( error ) {
 				replace( root, [ notice( 'error', errorText( error ) ) ] );
@@ -793,9 +1087,13 @@
 											el( 'td', {}, [ entry.level ] ),
 											el( 'td', {}, [ entry.message, entry.context && Object.keys( entry.context ).length ? ' ' + JSON.stringify( entry.context ) : '' ] ),
 										] );
-									} )
+									} ),
 								),
-								( log.job.warnings || [] ).length ? el( 'ul', {}, log.job.warnings.map( function ( warning ) { return el( 'li', {}, [ warning ] ); } ) ) : null,
+								( log.job.warnings || [] ).length
+									? el( 'ul', {}, log.job.warnings.map( function ( warning ) {
+										return el( 'li', {}, [ warning ] );
+									} ) )
+									: null,
 							] );
 						} );
 					} ),
@@ -824,9 +1122,11 @@
 
 		function stepEnvironment() {
 			show( 0, [ el( 'p', {}, [ __( 'Checking this server…', 'backups-for-restic' ) ] ) ] );
-			api( '/environment?fresh=1' )
+			checkEnvironment()
 				.then( function ( response ) {
-					const blocked = response.checks.some( function ( check ) { return 'critical' === check.status; } );
+					const blocked = response.checks.some( function ( check ) {
+						return 'critical' === check.status;
+					} );
 					show( 0, [
 						checkList( response.checks ),
 						blocked
@@ -858,25 +1158,28 @@
 			borgbase.addEventListener( 'change', sync );
 			own.addEventListener( 'change', sync );
 			sync();
+			// The certificate travels with the request. A test uses it for that test only; it
+			// becomes the server's certificate when the server is saved.
 			const data = function () {
-				return { server: state.server, url: url.value, username: username.value, password: password.value };
+				return { server: state.server, url: url.value, username: username.value, password: password.value, ca_certificate: own.checked ? ca.value.trim() : '' };
 			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
-				const upload = own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
-				upload
-					.then( function () { return api( '/repository/save', { method: 'POST', data: data() } ); } )
+				test.disabled = true;
+				api( '/repository/save', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						state.report = response.report;
 						stepPassword();
 					} )
 					.catch( function ( error ) {
 						save.disabled = false;
+						test.disabled = false;
 						replace( result, [ notice( 'error', errorText( error ) ) ] );
 					} );
 			}, true );
 			const test = button( __( 'Test connection', 'backups-for-restic' ), function () {
 				test.disabled = true;
+				save.disabled = true;
 				api( '/repository/test', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						const report = response.report;
@@ -893,6 +1196,7 @@
 					} )
 					.finally( function () {
 						test.disabled = false;
+						save.disabled = false;
 					} );
 			}, true );
 			show( 1, [

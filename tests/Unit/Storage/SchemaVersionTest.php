@@ -16,7 +16,7 @@ final class SchemaVersionTest extends TestCase {
 		self::assertSame( 0, $version->stored(), 'Nothing is recorded on a fresh installation.' );
 		self::assertFalse( $version->is_newer() );
 
-		$version->upgrade();
+		self::assertTrue( $version->upgrade() );
 
 		self::assertSame( SchemaVersion::CURRENT, $options->values[ SchemaVersion::OPTION ] );
 		self::assertTrue( $options->autoload[ SchemaVersion::OPTION ], 'Every request reads the number, so it is loaded with the other options.' );
@@ -24,7 +24,7 @@ final class SchemaVersionTest extends TestCase {
 
 		// A second write would set the flag again.
 		$options->autoload[ SchemaVersion::OPTION ] = false;
-		$version->upgrade();
+		self::assertTrue( $version->upgrade() );
 		self::assertFalse( $options->autoload[ SchemaVersion::OPTION ], 'The number is written only when it changes.' );
 	}
 
@@ -42,9 +42,24 @@ final class SchemaVersionTest extends TestCase {
 		$version                                  = new SchemaVersion( $options );
 		self::assertTrue( $version->is_newer() );
 
-		$version->upgrade();
+		self::assertFalse( $version->upgrade() );
 
 		self::assertSame( (string) ( SchemaVersion::CURRENT + 1 ), $options->values[ SchemaVersion::OPTION ], 'An older version never lowers the number.' );
+	}
+
+	public function test_a_refused_write_does_not_count_as_an_upgrade(): void {
+		$options                  = new InMemoryOptions();
+		$options->refuses         = static fn ( string $name ): bool => SchemaVersion::OPTION === $name;
+		$options->refuses_quietly = true;
+		$version                  = new SchemaVersion( $options );
+
+		self::assertFalse( $version->upgrade() );
+		self::assertSame( 0, $version->stored() );
+		self::assertSame( [], $options->values );
+
+		$options->refuses = null;
+		self::assertTrue( $version->upgrade() );
+		self::assertSame( SchemaVersion::CURRENT, $version->stored() );
 	}
 
 	/**

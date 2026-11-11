@@ -18,7 +18,12 @@ suites already run against rest-server.
   - **Own restic REST server**: any `https://` URL with host, port and path (for example
     rest-server with `--private-repos`); username and password optional; an optional CA
     certificate (PEM, validated with `openssl_x509_parse`, stored in the private directory)
-    for self-signed TLS, used only for requests to that server.
+    for self-signed TLS, used only for requests to that server. The wizard sends the
+    certificate along with the connection test: the test runs on the site's server, which
+    could not verify the repository server without it. A test uses it from a file of
+    its own in the private directory, removed after the test, and stores nothing; it becomes the server's certificate when the server is saved, under the same lock and put back as it was if the save fails, together with the settings, the REST password and the cached key that the save changed, as far as the database takes these writes; an address that `wp-config.php` defines does not get the certificate of another address that was tested,
+    so a test that fails never leaves the saved server with a certificate that is not its
+    own. Saving a server of the preset removes a stored certificate.
 - **Weighting**: BorgBase is a convenience preset that is simply selectable, not a headline
   feature. If the preset does not fit, the user pastes any repository URL into the generic
   option. Positioning leads with restic-compatible, encrypted backups in pure PHP on shared
@@ -86,3 +91,13 @@ BorgBase's documented use of rest-server behind nginx.
   account at BorgBase and are planned for Milestone 3.
 - Until they exist, no test notices a change in BorgBase's behaviour. The connection test
   of the wizard is the only check a user's repository gets.
+- "TLS verification is never disabled" is enforced against the site's own code since
+  2026-11-11. Snippets that switch verification off for every request of a site are common
+  (a filter on `https_ssl_verify` or on the request arguments, a line in the `http_api_curl`
+  action). While a repository request is under way, `WordPress\WpHttpClient` registers its
+  own callbacks last on these hooks, scoped to the request's URL, and puts verification of
+  certificate and host name, the certificate bundle and the ban on redirects back. The
+  alternative, a client of our own beside WordPress' HTTP API, was rejected: it would lose
+  the proxy settings and transports a host has configured there. The limit is stated in
+  the class: it holds against careless code, not against code that means harm, which
+  could as well read the passwords. An integration test runs with such a snippet active.

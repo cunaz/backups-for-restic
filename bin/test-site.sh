@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # A disposable WordPress site for integration and acceptance tests (docs/04 §5.3).
 #
-# Usage: bin/test-site.sh install|start|stop|reset
+# Usage: bin/test-site.sh install|install-multisite|start|stop|reset
 #
 #   install  creates the database and its user, installs WordPress (pinned, checksum-verified),
 #            writes wp-config.php, runs the WordPress installer, links this plugin into
 #            wp-content/plugins, activated, and writes an application password for the admin
 #            user to .tools/site-app-password for the integration tests.
+#   install-multisite
+#            installs a second WordPress as a multisite network into .tools/site-ms, with a
+#            database of its own, and links the plugin without activating it. It is never
+#            served: the tests of the multisite refusal (ADR 0026) use it through WP-CLI.
+#            Needs `install` (for the WordPress archive) and bin/install-test-tools.sh wp-cli.
 #   start    starts PHP's built-in web server with several workers and the limits of the
 #            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
 #            set_time_limit() disabled, as on many shared hosts. The JIT compiler is off, as
@@ -16,9 +21,10 @@
 #            enforces "deny all" .htaccess files as Apache does, so the plugin's private
 #            directory is protected as on typical shared hosting. PHP errors go to
 #            .tools/php-errors.log; bin/test-site-diagnostics.php logs every request's start and
-#            end to .tools/requests.log.
+#            end to .tools/requests.log. bin/test-site-hostile-filters.php switches certificate
+#            verification off for the whole site while a test asks for it.
 #   stop     stops the web server.
-#   reset    stops the server and deletes the site and its database.
+#   reset    stops the server and deletes both sites and their databases.
 #
 # Needs a running MySQL or MariaDB server. The database administrator defaults to root over
 # the local socket; set BFR_DB_ADMIN_USER and BFR_DB_ADMIN_PASSWORD (and BFR_DB_HOST) to
@@ -40,6 +46,8 @@ DB_PASSWORD="${BFR_DB_PASSWORD:-bfr-site-test-only}"
 PORT="${BFR_SITE_PORT:-8890}"
 URL="http://127.0.0.1:$PORT"
 PID_FILE="$TOOLS/site-server.pid"
+MS_SITE="$TOOLS/site-ms"
+MS_DB_NAME="${DB_NAME}_ms"
 
 admin_sql() {
 	local args=(-u "${BFR_DB_ADMIN_USER:-root}")
@@ -101,6 +109,7 @@ install_site() {
 	ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
 	mkdir -p "$SITE/wp-content/mu-plugins"
 	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
+	ln -s "$ROOT/bin/test-site-hostile-filters.php" "$SITE/wp-content/mu-plugins/test-site-hostile-filters.php"
 
 	php -r '
 		define( "WP_INSTALLING", true );
@@ -128,6 +137,30 @@ install_site() {
 		chmod( $argv[2], 0600 );
 		echo "WordPress ", get_bloginfo( "version" ), " installed at ", home_url(), "; plugin active.\n";
 	' "$SITE" "$TOOLS/site-app-password"
+}
+
+install_multisite() {
+	local archive="$TOOLS/wordpress-$WP_VERSION.tar.gz"
+	if [ ! -f "$archive" ] || [ ! -x "$TOOLS/bin/wp" ]; then
+		echo "Run bin/test-site.sh install and bin/install-test-tools.sh wp-cli first." >&2
+		exit 1
+	fi
+	rm -rf "$MS_SITE"
+	mkdir -p "$MS_SITE"
+	tar -xzf "$archive" -C "$MS_SITE" --strip-components=1
+
+	admin_sql "DROP DATABASE IF EXISTS \`$MS_DB_NAME\`;
+		CREATE DATABASE \`$MS_DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+		GRANT ALL PRIVILEGES ON \`$MS_DB_NAME\`.* TO '$DB_USER'@'localhost';
+		GRANT ALL PRIVILEGES ON \`$MS_DB_NAME\`.* TO '$DB_USER'@'%';
+		FLUSH PRIVILEGES;"
+
+	local wp=(php -d opcache.jit=disable "$TOOLS/bin/wp" --path="$MS_SITE")
+	"${wp[@]}" config create --dbname="$MS_DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST" --skip-check
+	# Without a port: a network's address has none, and this site is never served.
+	"${wp[@]}" core multisite-install --url="http://127.0.0.1" --title="Backup test network" \
+		--admin_user=admin --admin_password=admin-password-test-only --admin_email=admin@example.com --skip-email
+	ln -s "$ROOT" "$MS_SITE/wp-content/plugins/backups-for-restic"
 }
 
 start_server() {
@@ -180,12 +213,13 @@ stop_server() {
 
 case "${1:-}" in
 	install) install_site ;;
+	install-multisite) install_multisite ;;
 	start) start_server ;;
 	stop) stop_server ;;
 	reset)
 		stop_server
-		rm -rf "$SITE"
-		admin_sql "DROP DATABASE IF EXISTS \`$DB_NAME\`;"
+		rm -rf "$SITE" "$MS_SITE"
+		admin_sql "DROP DATABASE IF EXISTS \`$DB_NAME\`; DROP DATABASE IF EXISTS \`$MS_DB_NAME\`;"
 		;;
-	*) echo "Usage: bin/test-site.sh install|start|stop|reset" >&2; exit 2 ;;
+	*) echo "Usage: bin/test-site.sh install|install-multisite|start|stop|reset" >&2; exit 2 ;;
 esac

@@ -20,6 +20,27 @@ final class Schema {
 	/**
 	 * Settings that a wp-config.php constant can override, by dotted path.
 	 */
+	/**
+	 * Beginnings of the paths that an administrator may change after the setup, on the
+	 * settings page and with WP-CLI. Everything else is written by the setup and the jobs.
+	 */
+	public const array EDITABLE = [ 'schedule.', 'retention.', 'backup.', 'notifications.', 'advanced.' ];
+
+	/**
+	 * Whether a setting may be changed after the setup.
+	 *
+	 * @param string $path Dotted path.
+	 * @return bool True if the settings page and WP-CLI may change it.
+	 */
+	public static function editable( string $path ): bool {
+		foreach ( self::EDITABLE as $prefix ) {
+			if ( str_starts_with( $path, $prefix ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public const array CONSTANTS = [
 		'repository.url'           => 'BACKUPS_FOR_RESTIC_REPOSITORY_URL',
 		'repository.rest_username' => 'BACKUPS_FOR_RESTIC_REST_USERNAME',

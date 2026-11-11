@@ -63,10 +63,13 @@ final class SchemaVersion {
 	/**
 	 * Records this version's number once the options have its layout. Nothing is converted
 	 * yet: 1 is the first layout, and options without a number have it.
+	 *
+	 * @return bool True if the current layout number is stored; false if the write was refused
+	 *              or a newer version wrote the options.
 	 */
-	public function upgrade(): void {
-		if ( $this->stored() < self::CURRENT ) {
-			$this->options->set( self::OPTION, self::CURRENT, true );
-		}
+	public function upgrade(): bool {
+		$stored = $this->stored();
+		return self::CURRENT === $stored
+			|| ( $stored < self::CURRENT && $this->options->set( self::OPTION, self::CURRENT, true ) );
 	}
 }

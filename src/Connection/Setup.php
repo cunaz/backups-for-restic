@@ -10,12 +10,15 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Connection;
 
 use BackupsForRestic\Backend\AppendOnlyStatus;
+use BackupsForRestic\Backend\Backend;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
@@ -30,8 +33,11 @@ use BackupsForRestic\Support\Bytes;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Saves a tested server, creates a new repository with a generated password, or stores the
- * password of an existing repository whose key is then derived by an unlock job.
+ * Saves a tested server, creates a new repository with a generated password, or takes the
+ * password of an existing repository, which an unlock job then confirms by deriving the key.
+ *
+ * None of the three happens while a job is active: the job would go on with another server,
+ * another password or without its key in the middle of its work.
  */
 final class Setup {
 
@@ -46,13 +52,17 @@ final class Setup {
 	 * @param \Closure(): RepositoryAccess $access   Builds access from the current settings.
 	 * @param RandomSource                 $random   Randomness.
 	 * @param Identity                     $identity Recorded in the key file.
+	 * @param RepositoryRecord             $record   Which repository the plugin works with.
+	 * @param JobStore                     $jobs     Jobs.
 	 */
 	public function __construct(
 		private readonly SettingsStore $settings,
 		private readonly SecretStore $secrets,
 		private readonly \Closure $access,
 		private readonly RandomSource $random,
-		private readonly Identity $identity
+		private readonly Identity $identity,
+		private readonly RepositoryRecord $record,
+		private readonly JobStore $jobs
 	) {
 	}
 
@@ -109,15 +119,42 @@ final class Setup {
 	/**
 	 * Saves a server after a successful connection test.
 	 *
-	 * @param string           $server   borgbase or rest-server.
-	 * @param ConnectionReport $report   Test result with the normalized URL.
-	 * @param string           $username REST username.
-	 * @param Secret|null      $password REST password; null keeps the stored one, which must be
-	 *                                   stored for this server and user name.
+	 * @param string                            $server   borgbase or rest-server.
+	 * @param ConnectionReport                  $report   Test result with the normalized URL.
+	 * @param string                            $username REST username.
+	 * @param Secret|null                       $password REST password; null keeps the stored one, which must be
+	 *                                                    stored for this server and user name.
+	 * @param (\Closure(string): \Closure)|null $with What belongs to the server and has to change with it, such as its CA
+	 *                                                   certificate: called once the server is accepted, under the
+	 *                                                   same lock, with the address the jobs will use, which is
+	 *                                                   another one than the tested one if wp-config.php defines
+	 *                                                   it. Returns what undoes the change should the save fail.
 	 * @throws ValidationFailed If a setting is rejected.
 	 * @throws InvalidArgument With the code password_required if the stored REST password would end up with another server or user name.
+	 * @throws JobConflict If a job is active.
+	 * @throws \Throwable Whatever stopped the save or the companion change, after everything that was changed was put back.
 	 */
-	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
+	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password, ?\Closure $with = null ): void {
+		$this->jobs->while_idle(
+			function () use ( $server, $report, $username, $password, $with ): void {
+				$this->store_server( $server, $report, $username, $password, $with );
+			}
+		);
+	}
+
+	/**
+	 * What save_server() does once no job can be in the way.
+	 *
+	 * @param string                            $server   Server address as entered.
+	 * @param ConnectionReport                  $report   Report of the connection test.
+	 * @param string                            $username REST user name.
+	 * @param Secret|null                       $password REST password, or null for the stored one.
+	 * @param (\Closure(string): \Closure)|null $with The companion change of save_server().
+	 * @throws ValidationFailed If a setting is rejected.
+	 * @throws InvalidArgument With the code password_required.
+	 * @throws \Throwable Whatever stopped the save, after what was changed was put back.
+	 */
+	private function store_server( string $server, ConnectionReport $report, string $username, ?Secret $password, ?\Closure $with = null ): void {
 		$append_only = match ( $report->append_only ) {
 			AppendOnlyStatus::AppendOnly       => 'yes',
 			AppendOnlyStatus::DeletionsAllowed => 'no',
@@ -143,30 +180,132 @@ final class Setup {
 		$url      = $next->string( 'repository.url' );
 		$username = $next->string( 'repository.rest_username' );
 		$this->rest_password( ServerProfile::detect( $url ), $url, $username, $password );
-		// The password first: should storing it fail, the settings still name the server that
-		// the stored password is for.
-		if ( ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
-			if ( null !== $password ) {
-				$this->secrets->set( SecretName::RestPassword, $password );
-			} elseif ( '' === $username ) {
-				// The server takes no credentials: a password kept from before belongs to none.
-				$this->secrets->delete( SecretName::RestPassword );
+		// What the save can put back should it fail half way: the settings it writes, the REST
+		// password and the cached key. A secret that cannot be read cannot be put back either.
+		$fixed    = $this->secrets->is_overridden( SecretName::RestPassword );
+		$before   = array_intersect_key( $current->to_stored(), $changes + array_fill_keys( [ 'repository.id', 'repository.format_version' ], true ) );
+		$previous = $fixed ? null : $this->readable( SecretName::RestPassword );
+		$key      = $this->readable( SecretName::MasterKey );
+		$undo     = null === $with ? null : $with( $url );
+		try {
+			// The password first: should storing it fail, the settings still name the server that
+			// the stored password is for.
+			if ( ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
+				if ( null !== $password ) {
+					$this->secrets->set( SecretName::RestPassword, $password );
+				} elseif ( '' === $username ) {
+					// The server takes no credentials: a password kept from before belongs to none.
+					$this->secrets->delete( SecretName::RestPassword );
+				}
+			}
+			$this->settings->update( $changes );
+			// The same address is the same repository: a new REST password or user name for it
+			// leaves the cached key alone, and deriving it again can take minutes.
+			if ( $url !== $current->string( 'repository.url' ) ) {
+				$this->secrets->delete( SecretName::MasterKey );
+				$this->record->moved();
+			}
+		} catch ( \Throwable $failure ) {
+			$this->put_back( $before, $previous, $key, $undo );
+			throw $failure;
+		}
+	}
+
+	/**
+	 * A stored secret as it is before a change, to be put back should the change fail.
+	 *
+	 * @param SecretName $name Secret.
+	 * @return array{Secret|null}|null The secret, or null in the array if none is stored; null if it cannot be read, and so cannot be put back.
+	 */
+	private function readable( SecretName $name ): ?array {
+		try {
+			return [ $this->secrets->get( $name ) ];
+		} catch ( SecretsUndecryptable ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Puts back what a failed save of a server changed. Every part is tried, whatever happens
+	 * to the others: the reason of the failure is what the caller reports, and a database that
+	 * is gone will refuse all of them alike.
+	 *
+	 * @param array<string, mixed>    $settings Values the settings had, by dotted path.
+	 * @param array{Secret|null}|null $password REST password stored before; null to leave it alone.
+	 * @param array{Secret|null}|null $key      Cached key stored before; null to leave it alone.
+	 * @param \Closure|null           $undo     What undoes the companion change.
+	 */
+	private function put_back( array $settings, ?array $password, ?array $key, ?\Closure $undo ): void {
+		$steps = [
+			function () use ( $settings ): void {
+				$this->settings->update( $settings );
+			},
+			function () use ( $password ): void {
+				$this->restore( SecretName::RestPassword, $password );
+			},
+			function () use ( $key ): void {
+				$this->restore( SecretName::MasterKey, $key );
+			},
+			$undo,
+		];
+		foreach ( $steps as $step ) {
+			try {
+				if ( null !== $step ) {
+					$step();
+				}
+			} catch ( \Throwable ) {
+				continue;
 			}
 		}
-		$this->settings->update( $changes );
-		$this->secrets->delete( SecretName::MasterKey );
+	}
+
+	/**
+	 * Stores a secret as readable() found it.
+	 *
+	 * @param SecretName              $name   Secret.
+	 * @param array{Secret|null}|null $before What readable() returned.
+	 */
+	private function restore( SecretName $name, ?array $before ): void {
+		if ( null === $before ) {
+			return;
+		}
+		if ( null === $before[0] ) {
+			$this->secrets->delete( $name );
+		} else {
+			$this->secrets->set( $name, $before[0] );
+		}
 	}
 
 	/**
 	 * Creates a new repository on the saved server.
 	 *
+	 * The password is stored before the repository exists: a repository whose password was
+	 * lost on the way into the database could be opened by nobody. If the repository then does
+	 * not come to exist, the password stored before is put back.
+	 *
 	 * @param Secret|null $password Password to use; a new one is generated if null.
 	 * @return Secret The repository password, for the recovery kit.
 	 * @throws InvalidArgument With the code password_too_short if a password that somebody chose has fewer than MIN_PASSWORD_LENGTH characters.
 	 * @throws AlreadyExists If the server already holds a repository.
+	 * @throws JobConflict If a job is active.
+	 * @throws PluginException If the password cannot be stored, or the repository cannot be created.
+	 * @throws \Throwable Whatever else stopped the creation, after the stored password was put back.
 	 */
 	public function create( ?Secret $password ): Secret {
-		if ( $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
+		return $this->jobs->while_idle( fn (): Secret => $this->create_repository( $password ) );
+	}
+
+	/**
+	 * What create() does once no job can be in the way.
+	 *
+	 * @param Secret|null $password Password to use; a new one is generated if null.
+	 * @return Secret The repository password.
+	 * @throws PluginException If the password cannot be stored, or the repository cannot be created.
+	 * @throws \Throwable Whatever else stopped the creation.
+	 */
+	private function create_repository( ?Secret $password ): Secret {
+		$overridden = $this->secrets->is_overridden( SecretName::RepositoryPassword );
+		if ( $overridden ) {
 			$password = $this->secrets->get( SecretName::RepositoryPassword );
 		}
 		// The password is all that protects a new repository; a generated one is long enough.
@@ -181,49 +320,112 @@ final class Setup {
 		}
 		$password ??= self::generate_password( $this->random );
 		$access     = ( $this->access )();
-		$repository = Repository::initialize( $access->backend(), $password->reveal(), $this->identity, $this->random );
-		if ( ! $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
+		$backend    = $access->backend();
+		if ( null !== $backend->size( ObjectType::Config, 'config' ) ) {
+			// Before anything is stored: the stored password may be the one of that repository.
+			AlreadyExists::raise( 'A repository already exists at this location.' );
+		}
+		$previous = $overridden ? null : $this->stored_password();
+		if ( ! $overridden ) {
 			$this->secrets->set( SecretName::RepositoryPassword, $password );
 		}
+		try {
+			$repository = Repository::initialize( $backend, $password->reveal(), $this->identity, $this->random );
+		} catch ( \Throwable $failure ) {
+			// A repository that somebody else created in the meantime is not opened by this password.
+			if ( ! $overridden && ( $failure instanceof AlreadyExists || self::certainly_absent( $backend ) ) ) {
+				$this->restore_password( $previous );
+			}
+			throw $failure;
+		}
 		$access->cache_master_key( $repository->config(), $repository->master_key() );
-		$this->settings->update(
-			[
-				'repository.format_version' => $repository->config()->version,
-				'repository.id'             => $repository->config()->id,
-			]
-		);
+		$this->record->opened( $repository->config() );
 		return $password;
 	}
 
 	/**
-	 * Stores the password of an existing repository and queues the unlock job that derives its
+	 * Whether the server holds no repository after a failed attempt to create one. An attempt
+	 * can fail after the server stored the config, for example when its answer got lost; then,
+	 * and whenever the server does not say, the new password has to stay. connect() without a
+	 * password then unlocks the repository with it.
+	 *
+	 * @param Backend $backend Storage.
+	 * @return bool True only if the server answered that there is no config.
+	 */
+	private static function certainly_absent( Backend $backend ): bool {
+		try {
+			return null === $backend->size( ObjectType::Config, 'config' );
+		} catch ( PluginException ) {
+			return false;
+		}
+	}
+
+	/**
+	 * The repository password from wp-config.php or the database, if there is one that can be
+	 * read.
+	 *
+	 * @return Secret|null Password.
+	 */
+	private function stored_password(): ?Secret {
+		try {
+			return $this->secrets->get( SecretName::RepositoryPassword );
+		} catch ( SecretsUndecryptable ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Puts back the repository password that was stored before a failed attempt to create a
+	 * repository. Failing at this must not hide why the repository could not be created.
+	 *
+	 * @param Secret|null $previous Password stored before, if any.
+	 */
+	private function restore_password( ?Secret $previous ): void {
+		try {
+			if ( null === $previous ) {
+				$this->secrets->delete( SecretName::RepositoryPassword );
+			} else {
+				$this->secrets->set( SecretName::RepositoryPassword, $previous );
+			}
+		} catch ( PluginException ) {
+			return;
+		}
+	}
+
+	/**
+	 * Takes the password of an existing repository and queues the unlock job that derives its
 	 * key, because the derivation can take longer than one request.
 	 *
-	 * Nothing is stored while another job is active: that job would lose the cached key in the
-	 * middle of its work, and no unlock job could tell whether the new password is right.
+	 * A password that is given is kept apart until the unlock job has opened the repository
+	 * with it; only then does it replace the stored password and the cached key. A wrong one
+	 * leaves both as they are, and so the backups of a site that is set up keep running.
 	 *
-	 * @param Secret|null $password Repository password; null for the one defined in wp-config.php.
-	 * @param JobStore    $jobs     Jobs.
+	 * Nothing happens while another job is active: no unlock job could then say whether the
+	 * password is right.
+	 *
+	 * @param Secret|null $password Repository password; null for the one defined in wp-config.php, or else the stored one. One defined in wp-config.php stays in force whatever is given.
 	 * @param int         $now      Unix time.
 	 * @return Job The unlock job.
-	 * @throws InvalidArgument If there is no password: none given and none in wp-config.php.
+	 * @throws InvalidArgument If there is no password: none given, none in wp-config.php and none stored.
 	 * @throws JobConflict If another job is active.
 	 */
-	public function connect( ?Secret $password, JobStore $jobs, int $now ): Job {
-		$overridden = $this->secrets->is_overridden( SecretName::RepositoryPassword );
-		if ( null === $password && ! $overridden ) {
+	public function connect( ?Secret $password, int $now ): Job {
+		if ( $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
+			$password = null;
+		}
+		if ( null === $password && null === $this->stored_password() ) {
 			InvalidArgument::raise( 'No repository password was given.', [ 'code' => 'no_password' ] );
 		}
-		$active = $jobs->active();
-		if ( null !== $active ) {
-			JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
-		}
-		if ( null !== $password ) {
-			if ( ! $overridden ) {
-				$this->secrets->set( SecretName::RepositoryPassword, $password );
+		return $this->jobs->while_idle(
+			function () use ( $password, $now ): Job {
+				// Also without a password: one left behind by a job that never ended is not what
+				// this unlock is about.
+				$this->secrets->delete( SecretName::RepositoryPasswordCandidate );
+				if ( null !== $password ) {
+					$this->secrets->set( SecretName::RepositoryPasswordCandidate, $password );
+				}
+				return $this->jobs->create( JobType::Unlock, 'setup', $now );
 			}
-			$this->secrets->delete( SecretName::MasterKey );
-		}
-		return $jobs->create( JobType::Unlock, 'setup', $now );
+		);
 	}
 }

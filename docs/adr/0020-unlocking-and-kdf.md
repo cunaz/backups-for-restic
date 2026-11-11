@@ -16,7 +16,9 @@ CPU on shared hosting, far beyond one request.
   job checkpoints `(phase, i, X)` at the end of each tick and continues in the next one.
 - The derivation runs **once** per repository password. The resulting master key is cached
   in the encrypted secret store (ADR 0006); later operations skip the KDF entirely. The cache
-  is invalidated when the password changes or becomes undecryptable.
+  is replaced when another password has opened the repository, and forgotten when it becomes
+  undecryptable. A password that somebody enters is tried by an unlock job first; until it
+  has opened the repository, the stored password and the cached key stay in force.
 - Repositories created by the plugin use `N = 16384, r = 8, p = 1` (restic's own defaults
   when calibration is unavailable; accepted by restic). Existing repositories keep their
   parameters; the UI shows unlock progress and an estimate.
@@ -45,8 +47,8 @@ CPU on shared hosting, far beyond one request.
   1 GiB, not 128 MiB.
 - The interface shows the progress of an unlock as a bar and no estimate of the remaining
   time; estimates are planned for Milestone 3.
-- A cached master key that no longer decrypts does not invalidate the cache: jobs fail with
-  `secrets_undecryptable` ([ADR 0006](0006-secrets-at-rest.md), As built).
+- A cached master key that no longer decrypts is forgotten and derived again from the
+  repository password ([ADR 0006](0006-secrets-at-rest.md), As built).
 - Vectors as built: the RFC 7914 vectors and the key file of the recorded restic 0.19.1
   repository in the unit suite, and a key that restic 0.19.1 calibrated in the conformance
   suite. There is not one key file per restic version of the matrix.

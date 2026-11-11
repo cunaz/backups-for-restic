@@ -12,7 +12,9 @@ use BackupsForRestic\Notifications\Notice;
 use BackupsForRestic\Notifications\NoticeKind;
 use BackupsForRestic\Notifications\Notifier;
 use BackupsForRestic\Settings\Settings;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\SiteState;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 use BackupsForRestic\Tests\Support\RecordingMailer;
 
@@ -120,6 +122,52 @@ final class NotifierTest extends TestCase {
 		self::assertSame( [ 'stale' ], $this->mailer->kinds() );
 		self::assertSame( '', $this->mailer->sent[0]->job_id );
 		self::assertSame( self::SETUP, $this->mailer->sent[0]->since );
+	}
+
+	public function test_without_a_backup_in_a_new_repository_the_stale_time_counts_from_the_day_it_was_opened(): void {
+		$state = new SiteState( $this->options );
+		$state->bind( 'first', self::SETUP );
+		$notifier = $this->notifier();
+		$this->backup_succeeded( $notifier, self::SETUP + self::HOUR );
+
+		// A year later the jobs turn to another repository; what was remembered is dropped.
+		$moved = self::SETUP + 365 * 24 * self::HOUR;
+		$state->bind( 'second', $moved );
+
+		$notifier->heartbeat( $moved + 36 * self::HOUR - 1 );
+		self::assertSame( [], $this->mailer->kinds(), 'Not at once: the new repository had no time for a backup yet.' );
+		$notifier->heartbeat( $moved + 36 * self::HOUR );
+		self::assertSame( [ 'stale' ], $this->mailer->kinds() );
+		self::assertSame( $moved, $this->mailer->sent[0]->since );
+	}
+
+	public function test_a_stale_notice_for_one_repository_does_not_hold_back_the_one_for_the_next(): void {
+		$state = new SiteState( $this->options );
+		$state->bind( 'first', self::SETUP );
+		$notifier = $this->notifier();
+		$notifier->heartbeat( self::SETUP + 36 * self::HOUR );
+		self::assertSame( [ 'stale' ], $this->mailer->kinds() );
+
+		$moved = self::SETUP + 100 * self::HOUR;
+		$state->bind( 'second', $moved );
+		$notifier->heartbeat( $moved + 36 * self::HOUR );
+
+		self::assertSame( [ 'stale', 'stale' ], $this->mailer->kinds() );
+		self::assertSame( $moved, $this->mailer->sent[1]->since );
+	}
+
+	public function test_a_success_in_another_repository_ends_no_failure_streak_of_the_old_one(): void {
+		$state = new SiteState( $this->options );
+		$state->bind( 'first', self::SETUP );
+		$notifier = $this->notifier();
+		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 100, 'repository_unreachable' ), self::SETUP + 100 );
+
+		$state->bind( 'second', self::SETUP + 200 );
+		$this->backup_succeeded( $notifier, self::SETUP + 300 );
+		self::assertSame( [ 'failure' ], $this->mailer->kinds(), 'No recovery: nothing failed in this repository.' );
+
+		$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, self::SETUP + 400, 'quota_exceeded' ), self::SETUP + 400 );
+		self::assertSame( [ 'failure', 'failure' ], $this->mailer->kinds(), 'Its own first failure is reported.' );
 	}
 
 	public function test_the_stale_threshold_follows_the_schedule(): void {
@@ -323,5 +371,38 @@ final class NotifierTest extends TestCase {
 		$notice = new Notice( NoticeKind::Recovery, 5, 'prune', 'job', 'code', 4, 3 );
 		self::assertEquals( $notice, Notice::from_array( $notice->to_array() ) );
 		self::assertNull( Notice::from_array( [ 'kind' => 'gossip' ] ) );
+	}
+
+	/**
+	 * A notifier as a request on a site has it: with the locks in the private directory.
+	 */
+	private function request( string $directory ): Notifier {
+		$settings = [
+			'setup.completed'              => true,
+			'notifications.email.on_stale' => false,
+		];
+		return new Notifier( $this->options, new SiteState( $this->options ), Settings::from_stored( $settings ), $this->mailer, new FileLock( $directory . '/state.lock' ), new FileLock( $directory . '/notify.lock' ) );
+	}
+
+	public function test_a_notice_queued_while_a_mail_goes_out_is_not_lost_and_not_sent_twice(): void {
+		$directory = TempDir::create( 'notify' );
+		try {
+			$notifier = $this->request( $directory );
+			$failed   = self::SETUP + 10;
+			// The mail server is slow; meanwhile the tick of another request ends a check that found damage.
+			$this->mailer->meanwhile = function () use ( $directory, $failed ): void {
+				$this->request( $directory )->job_finished( $this->job( JobType::Check, JobState::Succeeded, $failed + 5, '', [ 'errors' => 2 ] ), $failed + 5 );
+			};
+
+			$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, $failed, 'internal' ), $failed );
+
+			self::assertSame( [ 'failure' ], $this->mailer->kinds(), 'The other request left the sending to the one that was at it.' );
+			self::assertSame( 1, $notifier->pending(), 'The notice about the damage waits for the next heartbeat.' );
+			$notifier->heartbeat( $failed + 300 );
+			self::assertSame( [ 'failure', 'check_findings' ], $this->mailer->kinds() );
+			self::assertSame( 0, $notifier->pending() );
+		} finally {
+			TempDir::remove( $directory );
+		}
 	}
 }

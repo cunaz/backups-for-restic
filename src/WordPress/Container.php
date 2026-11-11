@@ -9,11 +9,17 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\WordPress;
 
+// Before the imports, unlike in the other files: Plugin Check looks for this line only near
+// the top of a file, and this file imports more classes than fit there.
+defined( 'ABSPATH' ) || exit;
+
 use BackupsForRestic\Backend\Http\HttpClient;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Backup\SitePaths;
 use BackupsForRestic\Connection\ConnectionTester;
 use BackupsForRestic\Connection\RepositoryAccess;
+use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Database\Dump\DatabaseDump;
@@ -21,7 +27,13 @@ use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Exception\Unauthorized;
+use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
@@ -29,6 +41,7 @@ use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
 use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
@@ -42,15 +55,15 @@ use BackupsForRestic\Secrets\SecretStore;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\BrowserProbe;
 use BackupsForRestic\Storage\CacheDirectory;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SchemaVersion;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Support\SystemClock;
-
-defined( 'ABSPATH' ) || exit;
 
 /**
  * Builds every service from WordPress' constants, options and filters, once per request.
@@ -59,6 +72,9 @@ defined( 'ABSPATH' ) || exit;
 final class Container {
 
 	/** The eight salt constants of wp-config.php that protect the stored secrets (ADR 0006). */
+	/** Seconds the Doctor waits for the repository server. */
+	private const int PROBE_SECONDS = 10;
+
 	public const array SALT_CONSTANTS = [ 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ];
 
 	/**
@@ -95,6 +111,13 @@ final class Container {
 	 * @var ?Redactor
 	 */
 	private ?Redactor $redactor = null;
+
+	/**
+	 * Lock for changes to the state, shared by everything in this request.
+	 *
+	 * @var FileLock|null
+	 */
+	private ?FileLock $state_lock = null;
 
 	/**
 	 * Randomness.
@@ -148,6 +171,25 @@ final class Container {
 	}
 
 	/**
+	 * Saves what an administrator changed, on the settings page or with WP-CLI.
+	 *
+	 * @param array<string, mixed> $changes New values by dotted path.
+	 * @return Settings The saved settings.
+	 * @throws ValidationFailed If a value is invalid; nothing is saved then.
+	 */
+	public function save_settings( array $changes ): Settings {
+		$mode  = $this->settings()->string( 'retention.mode' );
+		$saved = $this->settings_store()->update( $changes );
+		if ( $saved->string( 'retention.mode' ) !== $mode ) {
+			// An administrator chose the mode: that answers the proposal and the switch notice.
+			$this->state()->set( 'retention_proposal', [] );
+			$this->state()->set( 'retention_switch', [] );
+		}
+		$this->refresh();
+		return $saved;
+	}
+
+	/**
 	 * Forgets cached settings after an update.
 	 */
 	public function refresh(): void {
@@ -171,7 +213,7 @@ final class Container {
 	}
 
 	/**
-	 * The encrypted option store itself, for the readability check.
+	 * The encrypted option store itself, below the constants of wp-config.php.
 	 *
 	 * @return EncryptedOptionStore Store.
 	 */
@@ -180,7 +222,7 @@ final class Container {
 		foreach ( self::SALT_CONSTANTS as $constant ) {
 			$material .= self::constant_string( $constant );
 		}
-		return $this->stored_secrets ??= new EncryptedOptionStore( $this->options(), new Secret( $material ), $this->random() );
+		return $this->stored_secrets ??= new EncryptedOptionStore( $this->options(), new Secret( $material ), $this->random(), $this->state_lock() );
 	}
 
 	/**
@@ -222,8 +264,9 @@ final class Container {
 	}
 
 	/**
-	 * Removes every known secret from logs and job files: the passwords, and the REST user name
-	 * and password together as the Authorization header of repository requests carries them.
+	 * Removes every known secret from logs and job files: the passwords, among them a
+	 * repository password that was entered and is not confirmed yet, and the REST user name and
+	 * password together as the Authorization header of repository requests carries them.
 	 *
 	 * @return Redactor Redactor.
 	 */
@@ -231,7 +274,7 @@ final class Container {
 		if ( null === $this->redactor ) {
 			$this->redactor = new Redactor();
 			$username       = $this->settings()->string( 'repository.rest_username' );
-			foreach ( [ SecretName::RepositoryPassword, SecretName::RestPassword ] as $name ) {
+			foreach ( [ SecretName::RepositoryPassword, SecretName::RepositoryPasswordCandidate, SecretName::RestPassword ] as $name ) {
 				try {
 					$secret = $this->secrets()->get( $name );
 				} catch ( SecretsUndecryptable ) {
@@ -273,18 +316,29 @@ final class Container {
 	 * @return SiteState State.
 	 */
 	public function state(): SiteState {
-		return new SiteState( $this->options() );
+		return new SiteState( $this->options(), $this->state_lock() );
+	}
+
+	/**
+	 * The lock for changes to the remembered results and to the notifications. One object for
+	 * the request: a change that leads to another one takes the lock only once.
+	 *
+	 * @return FileLock Lock.
+	 */
+	private function state_lock(): FileLock {
+		return $this->state_lock ??= new FileLock( $this->private_dir()->path . '/state.lock' );
 	}
 
 	/**
 	 * HTTP client for the repository server, with the uploaded CA certificate if any.
 	 *
+	 * @param int|null $timeout Seconds per request; null for the setting that the jobs use.
 	 * @return HttpClient Client.
 	 */
-	public function http(): HttpClient {
+	public function http( ?int $timeout = null ): HttpClient {
 		$ca = $this->private_dir()->path . '/ca.pem';
 		$ca = 'uploaded' === $this->settings()->string( 'repository.ca_certificate' ) && is_file( $ca ) ? $ca : null;
-		return new WpHttpClient( $this->settings()->int( 'advanced.upload_timeout_seconds' ), $ca );
+		return new WpHttpClient( $timeout ?? $this->settings()->int( 'advanced.upload_timeout_seconds' ), $ca );
 	}
 
 	/**
@@ -299,10 +353,11 @@ final class Container {
 	/**
 	 * Connection tester for the wizard.
 	 *
+	 * @param HttpClient|null $http Client to test with; null for the one the jobs use, with the uploaded CA certificate if any.
 	 * @return ConnectionTester Tester.
 	 */
-	public function tester(): ConnectionTester {
-		return new ConnectionTester( $this->http(), $this->random(), $this->user_agent() );
+	public function tester( ?HttpClient $http = null ): ConnectionTester {
+		return new ConnectionTester( $http ?? $this->http(), $this->random(), $this->user_agent() );
 	}
 
 	/**
@@ -400,11 +455,27 @@ final class Container {
 			$this->random(),
 			$this->identity(),
 			$this->plan( ... ),
-			$this->exposure()
+			$this->exposure(),
+			function ( Config $config ): void {
+				if ( $this->repository_record()->opened( $config ) ) {
+					// The plan of this very tick records the format version, and the snapshot list is another repository's.
+					$this->refresh();
+					delete_transient( 'backups_for_restic_snapshots' );
+				}
+			}
 		);
 		$backup      = new BackupSteps( $services );
 		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ), $this->site()->site_tag() ), $backup );
 		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random(), new JobEvents( $this ) );
+	}
+
+	/**
+	 * Which repository the plugin works with.
+	 *
+	 * @return RepositoryRecord Record.
+	 */
+	public function repository_record(): RepositoryRecord {
+		return new RepositoryRecord( $this->settings_store(), $this->state(), $this->clock() );
 	}
 
 	/**
@@ -452,7 +523,7 @@ final class Container {
 	 * @return Notifier Notifier.
 	 */
 	public function notifier(): Notifier {
-		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ) );
+		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ), $this->state_lock(), new FileLock( $this->private_dir()->path . '/notify.lock' ) );
 	}
 
 	/**
@@ -461,7 +532,16 @@ final class Container {
 	 * @return WpExposureCheck Check.
 	 */
 	public function exposure(): WpExposureCheck {
-		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random() );
+		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random(), $this->browser_probe() );
+	}
+
+	/**
+	 * The probe of the private directory from the administrator's browser.
+	 *
+	 * @return BrowserProbe Probe.
+	 */
+	public function browser_probe(): BrowserProbe {
+		return new BrowserProbe( $this->private_dir(), $this->state(), $this->random(), $this->clock() );
 	}
 
 	/**
@@ -519,9 +599,81 @@ final class Container {
 			$salts,
 			defined( 'DISABLE_WP_CRON' ) && true === constant( 'DISABLE_WP_CRON' ),
 			Cron::loopback_works( $fresh ),
-			$this->stored_secrets()->readable(),
-			$this->settings()->int( 'repository.format_version' )
+			$this->access()->passwords_readable(),
+			$this->settings()->int( 'repository.format_version' ),
+			self::jit_enabled(),
+			$this->repository_reached( $fresh )
 		);
+	}
+
+	/**
+	 * Whether PHP's JIT compiler is at work in this request.
+	 *
+	 * OPcache says so itself where it may be asked. Where it may not, the settings are read:
+	 * a mode of four digits whose last one is 0 compiles nothing, and on the command line
+	 * OPcache is off unless it is switched on for it.
+	 *
+	 * @return bool True if the JIT compiles code of this request.
+	 */
+	private static function jit_enabled(): bool {
+		if ( ! extension_loaded( 'Zend OPcache' ) ) {
+			return false;
+		}
+		$status = function_exists( 'opcache_get_status' ) ? @opcache_get_status( false ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Warns where opcache.restrict_api forbids the question; the settings answer it then.
+		if ( is_array( $status ) && is_array( $status['jit'] ?? null ) && is_bool( $status['jit']['on'] ?? null ) ) {
+			return $status['jit']['on'];
+		}
+		$mode = strtolower( trim( (string) ini_get( 'opcache.jit' ) ) );
+		return filter_var( ini_get( 'opcache.enable' ), FILTER_VALIDATE_BOOLEAN )
+			&& ( 'cli' !== PHP_SAPI || filter_var( ini_get( 'opcache.enable_cli' ), FILTER_VALIDATE_BOOLEAN ) )
+			&& ! in_array( $mode, [ '', '0', 'off', 'no', 'false', 'disable' ], true )
+			&& 1 !== preg_match( '/\A\d{3}0\z/', $mode )
+			&& self::bytes( (string) ini_get( 'opcache.jit_buffer_size' ) ) > 0;
+	}
+
+	/**
+	 * Whether the repository server answers, cached for a day like the other probes. Any
+	 * answer counts, also a refusal of the credentials or an error of the server: the question
+	 * is whether this host lets the request out at all.
+	 *
+	 * The probe is one request with a short time limit of its own. With the time limit and
+	 * the repetitions of the jobs, the page that is to explain an outage would wait minutes
+	 * for it. What was found is kept for the address it was found for.
+	 *
+	 * @param bool $fresh Ask the server now.
+	 * @return bool|null True if it answered, false if not, null if no repository is configured or none was asked yet.
+	 */
+	private function repository_reached( bool $fresh ): ?bool {
+		$url = $this->settings()->string( 'repository.url' );
+		if ( '' === $url ) {
+			return null;
+		}
+		if ( ! $fresh ) {
+			$cached = get_transient( 'backups_for_restic_reachable' );
+			return is_array( $cached ) && $url === ( $cached['url'] ?? null ) && is_bool( $cached['reached'] ?? null ) ? $cached['reached'] : null;
+		}
+		try {
+			$this->access()->probe_backend( $this->http( self::PROBE_SECONDS ) )->size( ObjectType::Config, 'config' );
+			$reached = true;
+		} catch ( SecretsUndecryptable | InvalidArgument ) {
+			// Nothing was sent: the password cannot be read, or the address is none to ask.
+			return null;
+		} catch ( BackendException $e ) {
+			// A refusal of the credentials is an answer, and so is every other status; without
+			// one the request did not get there.
+			$reached = $e instanceof Unauthorized || isset( $e->context()['status'] );
+		} catch ( PluginException ) {
+			$reached = true;
+		}
+		set_transient(
+			'backups_for_restic_reachable',
+			[
+				'url'     => $url,
+				'reached' => $reached,
+			],
+			DAY_IN_SECONDS
+		);
+		return $reached;
 	}
 
 	/**

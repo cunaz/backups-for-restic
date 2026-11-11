@@ -40,7 +40,7 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 - What the directory holds today: `jobs/` with job state, event logs and the engine's
   checkpoints (the ledger is gone, [ADR 0014](0014-file-based-job-store.md)), `cache/` with
   the encrypted merged index, `kdf/` with the scrypt table and its checkpoint during an
-  unlock, `probe/`, the uploaded CA certificate and the runner lock. Trees are not cached,
+  unlock, `probe/`, the uploaded CA certificate, the runner lock and, since 2026-11-11, `state.lock` and `notify.lock`: empty files that serialise changes to the state, the notifications and the secrets in the database, and the sending of notices ([ADR 0014](0014-file-based-job-store.md), As built). Trees are not cached,
   and a pack under construction is held in memory, so there is no pack temp file. `tmp/`,
   `logs/` and `restores/` are created and still empty; restore staging and import files
   come with Milestone 3.
@@ -48,9 +48,18 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
   the probe's content is the critical finding `exposed`: the wizard does not continue, and
   the preflight of a backup fails. An answer that shows the directory protected is reported
   as `protected_inside_web_root`. A probe that cannot run, because the site cannot request
-  itself, is reported as `unverified` with the status "recommended" and blocks nothing: on
-  such hosts the protection is assumed, not verified. Treating that as a blocker is planned
-  for Milestone 3.
-- Only the wizard's script stops at a critical finding; the REST routes of the setup do not
-  check it. Of the jobs, only the backup asks the probe before it starts; forget, prune and
-  check do not. A check on the server side is planned for Milestone 3.
+  itself, is reported as `unverified` with the status "recommended" and blocks nothing.
+  Blocking there would shut out the hosts the plugin is made for.
+- On such hosts the administrator's browser makes the request (`Storage\BrowserProbe`). It
+  reaches the site from outside, which is also where an attacker would come from. The
+  wizard's environment step and the Environment tab ask for a probe file, request its URL
+  without credentials and report what came back. A report with the file's content proves
+  that the directory is served, and counts like the site's own finding: the Doctor is
+  critical, the setup cannot be completed and backups stop. Any other answer counts as
+  protected; that is taken on trust from an administrator's session. A report is accepted
+  for five minutes after its probe file was written, once, and the file is deleted with it.
+  The result stays until the next report, because nothing but a browser can renew it; the
+  admin page asks for a new one whenever the environment is checked.
+- The wizard's script stops at a critical finding, and `POST /setup/complete` refuses with
+  `environment_blocked` while the Doctor has one; the routes before it do not ask. Of the
+  jobs, only the backup asks the probe before it starts; forget, prune and check do not.

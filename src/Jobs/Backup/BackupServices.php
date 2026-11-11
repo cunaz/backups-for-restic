@@ -15,6 +15,7 @@ use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Settings\Settings;
@@ -35,16 +36,17 @@ final readonly class BackupServices {
 	/**
 	 * Collects the services.
 	 *
-	 * @param Settings                  $settings Settings.
-	 * @param RepositoryAccess          $access   Repository connection and key cache.
-	 * @param PrivateDirectory          $private_dir  Private directory.
-	 * @param JobStore                  $jobs     Jobs.
-	 * @param SiteState                 $state    Remembered results.
-	 * @param Clock                     $clock    Time source.
-	 * @param RandomSource              $random   Randomness.
-	 * @param Identity                  $identity Host and user recorded in snapshots.
-	 * @param \Closure(Job): BackupPlan $plan     Builds the plan of a job.
-	 * @param ExposureCheck|null        $exposure HTTP probe of the private directory.
+	 * @param Settings                      $settings Settings.
+	 * @param RepositoryAccess              $access   Repository connection and key cache.
+	 * @param PrivateDirectory              $private_dir  Private directory.
+	 * @param JobStore                      $jobs     Jobs.
+	 * @param SiteState                     $state    Remembered results.
+	 * @param Clock                         $clock    Time source.
+	 * @param RandomSource                  $random   Randomness.
+	 * @param Identity                      $identity Host and user recorded in snapshots.
+	 * @param \Closure(Job): BackupPlan     $plan     Builds the plan of a job.
+	 * @param ExposureCheck|null            $exposure HTTP probe of the private directory.
+	 * @param (\Closure(Config): void)|null $opened Told which repository a job opened (RepositoryRecord).
 	 */
 	public function __construct(
 		public Settings $settings,
@@ -56,7 +58,8 @@ final readonly class BackupServices {
 		public RandomSource $random,
 		public Identity $identity,
 		public \Closure $plan,
-		public ?ExposureCheck $exposure = null
+		public ?ExposureCheck $exposure = null,
+		public ?\Closure $opened = null
 	) {
 	}
 

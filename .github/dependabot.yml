@@ -11,3 +11,11 @@ updates:
     schedule:
       interval: weekly
     versioning-strategy: lockfile-only
+  # ESLint for assets/js. package.json names exact versions, so with this strategy a new
+  # version of ESLint or of its WordPress plugin is a change by hand, like the pinned tools
+  # of bin/install-test-tools.sh; Dependabot only ever touches package-lock.json.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
