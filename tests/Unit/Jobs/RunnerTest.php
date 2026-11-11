@@ -294,6 +294,23 @@ final class RunnerTest extends TestCase {
 		self::assertSame( 0, $ended->not_before );
 	}
 
+	public function test_a_cancel_request_does_not_hide_an_error_that_ends_the_job(): void {
+		$store                     = $this->store();
+		$job                       = $store->create( JobType::Unlock, 'setup', $this->clock->seconds );
+		$this->script['unlocking'] = [
+			static function ( Job $running ) use ( $store ): bool {
+				$store->request_cancel( $running );
+				throw new WrongPassword( 'The password does not open the repository.' );
+			},
+		];
+
+		$this->runner( $store )->tick( 10 );
+
+		$ended = $store->get( $job->id );
+		self::assertSame( JobState::Failed, $ended?->state );
+		self::assertSame( 'wrong_password', $ended->error?->code );
+	}
+
 	public function test_a_change_that_no_job_may_see_runs_only_without_a_job_and_may_create_one(): void {
 		$store = $this->store();
 
