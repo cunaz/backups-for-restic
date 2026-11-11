@@ -299,7 +299,9 @@ final class Runner {
 			// The deadline holds back regular steps only. The cleanup steps are short, they
 			// release the lock in the repository, and the tick that could run them may be the
 			// last one for a long time, for example when the plugin is being deactivated.
-			if ( microtime( true ) >= $deadline && ! $job->type->is_cleanup( $next ) ) {
+			// Nor a request to cancel that came while the last step ran: the loop turns it into
+			// the cleanup now.
+			if ( microtime( true ) >= $deadline && ! $job->type->is_cleanup( $next ) && ! ( $job->type->cancels_before( $next ) && $this->store->cancel_requested( $job ) ) ) {
 				return;
 			}
 		}

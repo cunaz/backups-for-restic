@@ -299,7 +299,10 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   two requests at the same moment cannot both find no job and create one each. What a job
   needs from its caller, such as the share of packs that `check --read-data-subset` asks
   for, is passed to `create()` and is part of the first document; the caller does not write
-  the job a second time.
+  the job a second time. The setup takes the same lock (`JobStore::while_idle()`) around its
+  check for an active job and what it then changes: the server address, a password, the
+  cached key, a new repository, the unlock job. No job can start in between and find the
+  address or the key changed under it.
 - **Cancelling** (`Runner::cancel()`) never changes the document of a running job. It writes
   the marker `<private>/jobs/<id>/cancel-requested`. `JobStore::get()` reports the marker
   with the job, and a tick looks for it before every step: the job then leaves the regular
@@ -684,7 +687,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
-├── jobs/create.lock                       flock target while a job is created (§4.4)
+├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
@@ -699,8 +702,9 @@ ciphertext including the cached master key), `backups_for_restic_state` (autoloa
 last backup and the last forget, prune and check, the check alert, the exposure and
 append-only probes, the retention switch and proposal, the handled schedule slots, and the
 repository that the first five belong to) and
-`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker and the
-outbox of unsent notices). A fifth name, `backups_for_restic_schema_version`, is reserved:
+`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
+repository both are counted for, and the outbox of unsent notices; streaks and marker start
+anew when the jobs turn to another repository). A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
 
 ## 11. Settings model
@@ -1146,7 +1150,9 @@ and schedules are slots in the site's time zone.
   or invalid stored settings fall back to their defaults field by field.
 - Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active
   job (`Cron::stop()`, `Runner::stop()`): it asks the job to cancel and runs its cleanup
-  steps for at most ten seconds, which releases the repository lock. A job that another
+  steps, which releases the repository lock. The budget of ten seconds holds back regular
+  steps only; a cleanup step is not cut short by it and ends with its own requests' time
+  limits. A job that another
   tick is working on at that moment is cancelled by that tick after its current step.
   Deactivation never fails over this. If the cleanup could not finish, for example because
   the server did not answer, the job stays in `jobs/` and is cleaned up by the first tick

@@ -55,12 +55,18 @@ final class RepositoryRecord {
 	}
 
 	/**
-	 * The settings now name another address: which repository is there shows when it is opened,
-	 * and what was remembered belongs to the old one.
+	 * The settings now name another address: which repository is there, and in which format,
+	 * shows when it is opened, and what was remembered belongs to the old one.
 	 */
 	public function moved(): void {
 		$this->state->bind( '', $this->clock->now()[0] );
-		$this->write( [ 'repository.id' => '' ] );
+		$this->write(
+			[
+				'repository.id'             => '',
+				// Not the old repository's format: the Doctor would hold it against the new address.
+				'repository.format_version' => 1,
+			]
+		);
 	}
 
 	/**
