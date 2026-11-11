@@ -31,10 +31,10 @@ backups-for-restic/
 │   ├── Support/                     test doubles, the restic and rest-server harness, fixture generators
 │   ├── PHPStan/                     PHPStan extensions for the analysis of src/
 │   ├── Database/                    the dump against a real MySQL or MariaDB, imported with the mariadb client
-│   ├── Integration/                 a real WordPress from bin/test-site.sh: wizard over REST, backups through wp-cron.php, a killed tick
+│   ├── Integration/                 a real WordPress from bin/test-site.sh: who may call the routes, wizard over REST, backups through wp-cron.php, a killed tick, cancelling, deactivation, schedules, an append-only server, uninstall
 │   ├── E2E/                         (M3) browser tests with Playwright
 │   └── Fixtures/                    restic vectors per version, Go and libsodium vectors, fuzz regressions
-├── bin/                             install-test-tools.sh, test-site.sh with its router and diagnostics, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php, build-package.sh
+├── bin/                             install-test-tools.sh, test-site.sh with its router, diagnostics and the filters that switch TLS verification off for a test, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php, build-package.sh
 ├── docs/                            design documents, ADRs, guides/, benchmarks/
 └── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; ISSUE_TEMPLATE/bug_report.md; (M3) live-servers.yml, e2e.yml, codeql.yml; (release) deploy-wordpress-org.yml
 ```
@@ -226,22 +226,47 @@ serves it with PHP's built-in server and several workers, `max_execution_time = 
   site's `wp-config.php` therefore sets that constant to 128M; without it ticks would run
   with 256M and the 128M of the acceptance criterion would not be in force.
 
-The tests talk to the site only over HTTP. There are four: a request without credentials is
-refused; the wizard through the REST API against a TLS rest-server with its CA certificate,
-then a backup driven only by requests to `wp-cron.php`, `restic check --read-data`, a
-restore of the fixture's uploads directory, a database import with identical checksums of
-three tables, and a search for both passwords in the files under `jobs/` and in four REST
-responses; a web server that is stopped and started again after a tick was requested; and
-prune and check jobs with the dashboard data and the cache route. `BFR_SITE_FIXTURE_MB` and
-`BFR_DB_FIXTURE_MB` set the fixture sizes (64 and 32 by default); the nightly CI run uses
-2048 and 300.
+The tests reach the site over HTTP, as a browser and a cron service do. Where an
+administrator acts outside the plugin's own interface (deactivating or deleting it, creating
+a user) they run PHP inside the site's WordPress on the command line, and for what only the
+files show (a job's lease, its log) they read the private directory. `tests/Support/TestSite.php`
+is that access. The classes share one site and one repository, so
+`phpunit-integration.xml.dist` names the files in order:
 
-What the suite does not reach: it requests 11 of the 16 route paths, not `/environment`,
-`/jobs/{id}` (admin polling), cancel, `/snapshots` or `/recovery-kit`, and of
-`/repository/connect` only the refusal after the setup. Nothing tests Site Health, WP-CLI, the multisite guard, deactivation,
-uninstall, an append-only server through WordPress, or the loopback chain as such, because
-the test itself requests `wp-cron.php` every second. Tests for this wiring are planned for
-Milestone 3.
+- **`AccessTest`**: every route without credentials and as an editor; its list of routes is
+  compared with what WordPress has registered, so a new route cannot go untested; the files
+  of the private directory are not served.
+- **`WordPressSiteTest`**: the wizard through the REST API against a TLS rest-server with its
+  CA certificate, then a backup driven only by requests to `wp-cron.php`, `restic check
+  --read-data`, a restore of the fixture's uploads directory, a database import with
+  identical checksums of three tables, and a search for both passwords in the files under
+  `jobs/` and in four REST responses; a tick that is killed in the backup step, shown by
+  the lease it left in the job document, after which the backup goes on from its
+  checkpoint; refused settings; prune and check jobs with the dashboard data and the cache
+  route.
+- **`JobControlTest`**: the recovery kit only with the WordPress password; a running backup
+  that refuses a new server, a new repository, another password, clearing the cache and a
+  second job, and is cancelled with its lock released; deactivation, which ends the running
+  backup without any further tick; a wrong repository password and its repair; repository
+  requests that verify certificates while a must-use plugin switches verification off for
+  the site (`bin/test-site-hostile-filters.php`); a setup that is not completed, and a
+  backup that does not run, while the private directory is served.
+- **`ScheduleTest`**: the heartbeat, run through `wp-cron.php`, records the first slot,
+  starts a backup whose slot has come and forget after it, prune and check on their slots,
+  and nothing for manual schedules.
+- **`AppendOnlyTest`**: the rest-server restarted in append-only mode and back: the switch
+  to retention mode external without a deletion, backups that go on, the proposal to switch
+  back, and no deletion until an administrator decides.
+- **`UninstallTest`**: what the Plugins screen runs on "Delete" leaves no option, transient,
+  cron event or file of the plugin, and the repository unchanged.
+
+`BFR_SITE_FIXTURE_MB` and `BFR_DB_FIXTURE_MB` set the fixture sizes (64 and 32 by default);
+the nightly CI run uses 2048 and 300. The tests that catch a backup in the middle add
+256 or 512 MiB of random data of their own.
+
+What the suite does not reach yet: Site Health, the WP-CLI commands and the multisite
+guard, the admin page itself (browser tests, phase 0.6), and the loopback chain as such,
+because the tests request `wp-cron.php` themselves.
 
 ### 5.4 Benchmarks
 

@@ -256,9 +256,15 @@ carries `Cache-Control: no-store`.
 - WordPress HTTP API with `sslverify => true`, `redirection => 0`, explicit timeouts, basic
   auth via header, plugin User-Agent, no cookies (`WordPress\WpHttpClient`). `sslverify` is
   passed as a request argument on every repository request, and the plugin has no setting
-  that turns it off. It is an argument, not a guarantee: other code on the site can change
-  request arguments through WordPress' HTTP filters, and the plugin does not guard against
-  that yet (planned for Milestone 3).
+  that turns it off. Other code on the site can change request arguments through WordPress'
+  HTTP filters, and snippets that switch certificate verification off for a whole site are
+  common. While a repository request is under way, the client therefore registers its own
+  callbacks last on `http_request_args`, `https_ssl_verify`, `https_local_ssl_verify` and
+  the `http_api_curl` action, for this request's URL only, and puts verification, the
+  certificate bundle and the ban on redirects back. The integration suite switches
+  verification off in all three ways and expects the connection to a server with an
+  unknown certificate to fail. This holds against careless code, not against code that
+  means harm: such code runs in the same process and could read the passwords as well (§3).
 - Reads, listings and deletions are retried on network errors, on 429 and on 5xx other than
   507; uploads on 429 and such 5xx, but not on network errors. Every other 4xx is final and
   mapped to a dedicated error (401/403 → credentials or append-only; 404 → missing; 400 →
