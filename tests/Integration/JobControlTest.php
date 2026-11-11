@@ -243,23 +243,58 @@ final class JobControlTest extends TestCase {
 		$before = TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] );
 
 		// Somebody replaces a security key in wp-config.php: nothing that is stored decrypts any more.
-		$config  = TestSite::root() . '/wp-config.php';
-		$changed = preg_replace( "/(define\\(\\s*'NONCE_SALT',\\s*')[^']*('\\s*\\);)/", '${1}' . bin2hex( random_bytes( 32 ) ) . '${2}', (string) file_get_contents( $config ), 1, $count );
+		$config   = TestSite::root() . '/wp-config.php';
+		$original = (string) file_get_contents( $config );
+		$changed  = preg_replace( "/(define\\(\\s*'NONCE_SALT',\\s*')[^']*('\\s*\\);)/", '${1}' . bin2hex( random_bytes( 32 ) ) . '${2}', $original, 1, $count );
 		self::assertSame( 1, $count );
 		file_put_contents( $config, (string) $changed );
-		// The web server's opcode cache looks at the file again after two seconds.
-		sleep( 3 );
+		try {
+			// The web server's opcode cache looks at the file again after two seconds.
+			sleep( 3 );
 
-		[ , $environment, $raw ] = TestSite::api( 'GET', '/environment' );
-		$secrets                 = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'secrets' === ( $check['id'] ?? null ) ) );
-		self::assertSame( [ 'critical', 'undecryptable' ], [ $secrets[0]['status'] ?? null, $secrets[0]['code'] ?? null ], $raw );
-		$job = TestSite::wait_for( TestSite::start(), 300 );
-		self::assertSame( [ 'failed', 'secrets_undecryptable' ], [ $job['state'], $job['error']['code'] ?? null ], (string) json_encode( $job ) );
+			[ , $environment, $raw ] = TestSite::api( 'GET', '/environment' );
+			$secrets                 = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'secrets' === ( $check['id'] ?? null ) ) );
+			self::assertSame( [ 'critical', 'undecryptable' ], [ $secrets[0]['status'] ?? null, $secrets[0]['code'] ?? null ], $raw );
+			$job = TestSite::wait_for( TestSite::start(), 300 );
+			self::assertSame( [ 'failed', 'secrets_undecryptable' ], [ $job['state'], $job['error']['code'] ?? null ], (string) json_encode( $job ) );
 
-		// What the forms of the Settings tab send: the REST password first, then the repository password.
-		[ $status, , $raw ] = TestSite::api( 'POST', '/repository/save', TestSite::connection() );
-		self::assertSame( 200, $status, $raw );
-		[ $status, $answer, $raw ] = TestSite::api(
+			// What the forms of the Settings tab send: the REST password first, then the repository password.
+			[ $status, , $raw ] = TestSite::api( 'POST', '/repository/save', TestSite::connection() );
+			self::assertSame( 200, $status, $raw );
+			$unlock = self::unlock_again();
+			self::assertSame( 'succeeded', $unlock['state'] ?? null, (string) json_encode( $unlock ) );
+
+			[ , $environment, $raw ] = TestSite::api( 'GET', '/environment' );
+			$secrets                 = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'secrets' === ( $check['id'] ?? null ) ) );
+			self::assertSame( 'good', $secrets[0]['status'] ?? null, $raw );
+			$backup = TestSite::wait_for( TestSite::start(), 1800 );
+			self::assertSame( 'succeeded', $backup['state'], (string) json_encode( $backup ) );
+			TestSite::idle( 600 );
+			self::assertCount( count( (array) json_decode( $before, true ) ) + 1, (array) json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true ), 'The repository is the same, with one snapshot more.' );
+		} catch ( \Throwable $failure ) {
+			// The later tests need a site whose passwords can be read: the old key back, and
+			// both passwords stored once more under it, whatever this test got done.
+			file_put_contents( $config, $original );
+			sleep( 3 );
+			try {
+				TestSite::idle( 600 );
+				TestSite::api( 'POST', '/repository/save', TestSite::connection() );
+				self::unlock_again();
+			} catch ( \Throwable $second ) {
+				// The failure that counts is the first one; it is thrown below.
+				fwrite( STDERR, 'The test site could not be repaired: ' . $second->getMessage() . "\n" );
+			}
+			throw $failure;
+		}
+	}
+
+	/**
+	 * Enters the repository password again, as the Settings tab does, and waits for the unlock.
+	 *
+	 * @return array<mixed> The unlock job, or an empty array if none was created.
+	 */
+	private static function unlock_again(): array {
+		[ $status, $answer ] = TestSite::api(
 			'POST',
 			'/repository/connect',
 			[
@@ -267,17 +302,7 @@ final class JobControlTest extends TestCase {
 				'password'      => TestSite::$repository_password,
 			]
 		);
-		self::assertSame( 201, $status, $raw );
-		$unlock = TestSite::wait_for( (string) $answer['job']['id'], 600 );
-		self::assertSame( 'succeeded', $unlock['state'], (string) json_encode( $unlock ) );
-
-		[ , $environment, $raw ] = TestSite::api( 'GET', '/environment' );
-		$secrets                 = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'secrets' === ( $check['id'] ?? null ) ) );
-		self::assertSame( 'good', $secrets[0]['status'] ?? null, $raw );
-		$backup = TestSite::wait_for( TestSite::start(), 1800 );
-		self::assertSame( 'succeeded', $backup['state'], (string) json_encode( $backup ) );
-		TestSite::idle( 600 );
-		self::assertCount( count( (array) json_decode( $before, true ) ) + 1, (array) json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true ), 'The repository is the same, with one snapshot more.' );
+		return 201 === $status ? TestSite::wait_for( (string) ( $answer['job']['id'] ?? '' ), 600 ) : [];
 	}
 
 	/**
@@ -308,6 +333,7 @@ final class JobControlTest extends TestCase {
 			'POST',
 			'/environment/probe/report',
 			[
+				'probe'  => $probe['probe'] ?? '',
 				'status' => $seen,
 				'body'   => substr( $body, 0, 1024 ),
 			]
@@ -361,6 +387,41 @@ final class JobControlTest extends TestCase {
 			TestSite::api( 'GET', '/environment&fresh=1' );
 		}
 		self::assertSame( [ 'recommended', 'protected_inside_web_root', false ], self::private_directory( false ), 'With requests to itself the site needs no browser.' );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_repository_requests_verify_the_host_name_whatever_the_sites_filters_say(): void {
+		TestSite::idle( 600 );
+		// The server's certificate names 127.0.0.1 only. Under the name localhost the same
+		// server answers, with a certificate that is trusted but is not for that name.
+		$connection = TestSite::connection();
+		$other      = str_replace( '//127.0.0.1:', '//localhost:', $connection['url'] );
+		self::assertNotSame( $connection['url'], $other );
+		$handle = curl_init( $other );
+		self::assertNotFalse( $handle );
+		// The name check is off for this one request of the test itself: it shows that the
+		// server is reached under this name and that only the name stands in the way.
+		curl_setopt_array(
+			$handle,
+			[
+				CURLOPT_CAINFO         => TestSite::server()->certificate,
+				CURLOPT_SSL_VERIFYHOST => 0,
+				CURLOPT_NOBODY         => true,
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_TIMEOUT        => 10,
+			]
+		);
+		curl_exec( $handle );
+		self::assertSame( 0, curl_errno( $handle ), 'The server is not reached as localhost: ' . curl_error( $handle ) );
+
+		try {
+			TestSite::hostile_filters( true );
+			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', [ 'url' => $other ] + $connection );
+			self::assertSame( 502, $status, 'A certificate for another name was accepted: ' . $raw );
+			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
+		} finally {
+			TestSite::hostile_filters( false );
+		}
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]

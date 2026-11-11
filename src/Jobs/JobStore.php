@@ -36,6 +36,13 @@ final class JobStore {
 	private const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
 
 	/**
+	 * Whether while_idle() holds the lock of create() in this process.
+	 *
+	 * @var bool
+	 */
+	private bool $held = false;
+
+	/**
 	 * Opens the store.
 	 *
 	 * @param string       $directory The private directory's jobs/ folder.
@@ -63,7 +70,7 @@ final class JobStore {
 	 * @throws StorageFailed If the jobs directory cannot be locked or written.
 	 */
 	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
-		$lock = $this->lock();
+		$lock = $this->held ? null : $this->lock();
 		try {
 			$active = $this->active();
 			if ( null !== $active ) {
@@ -73,8 +80,10 @@ final class JobStore {
 			$job->data = $data;
 			$this->save( $job );
 		} finally {
-			flock( $lock, LOCK_UN );
-			fclose( $lock );
+			if ( null !== $lock ) {
+				flock( $lock, LOCK_UN );
+				fclose( $lock );
+			}
 		}
 		$this->log( $job )->write(
 			'info',
@@ -85,6 +94,35 @@ final class JobStore {
 			]
 		);
 		return $job;
+	}
+
+	/**
+	 * Runs a change that no job may see half done, such as another server address or another
+	 * repository password. The check for an active job and the change happen under the lock of
+	 * create(), so no job can come to exist in between; create() may be called from within the
+	 * change. Whoever wants to create a job meanwhile waits, so the change has to be short.
+	 *
+	 * @template T
+	 * @param \Closure(): T $change The change.
+	 * @param-immediately-invoked-callable $change
+	 * @return T What the change returns.
+	 * @throws JobConflict If a job is active.
+	 * @throws StorageFailed If the jobs directory cannot be locked.
+	 */
+	public function while_idle( \Closure $change ): mixed {
+		$lock       = $this->lock();
+		$this->held = true;
+		try {
+			$active = $this->active();
+			if ( null !== $active ) {
+				JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
+			}
+			return $change();
+		} finally {
+			$this->held = false;
+			flock( $lock, LOCK_UN );
+			fclose( $lock );
+		}
 	}
 
 	/**

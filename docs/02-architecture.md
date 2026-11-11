@@ -300,7 +300,10 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   two requests at the same moment cannot both find no job and create one each. What a job
   needs from its caller, such as the share of packs that `check --read-data-subset` asks
   for, is passed to `create()` and is part of the first document; the caller does not write
-  the job a second time.
+  the job a second time. The setup takes the same lock (`JobStore::while_idle()`) around its
+  check for an active job and what it then changes: the server address, a password, the
+  cached key, a new repository, the unlock job. No job can start in between and find the
+  address or the key changed under it.
 - **Cancelling** (`Runner::cancel()`) never changes the document of a running job. It writes
   the marker `<private>/jobs/<id>/cancel-requested`. `JobStore::get()` reports the marker
   with the job, and a tick looks for it before every step: the job then leaves the regular
@@ -685,7 +688,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
-├── jobs/create.lock                       flock target while a job is created (§4.4)
+├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
@@ -702,8 +705,9 @@ append-only probes, the retention switch and proposal, the handled schedule slot
 repository that the first five belong to, the probe from the browser, the last twenty
 deliveries of the recovery kit, and the number and size of the repository's packs as a
 backup or a prune last listed them) and
-`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker and the
-outbox of unsent notices). A fifth name, `backups_for_restic_schema_version`, is reserved:
+`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
+repository both are counted for, and the outbox of unsent notices; streaks and marker start
+anew when the jobs turn to another repository). A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
 
 ## 11. Settings model
@@ -914,7 +918,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | --- | --- |
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
-| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's URL (null if the directory is outside the web root); then the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (no probe pending, older than five minutes, or a failed request) |
+| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
@@ -979,8 +983,10 @@ because jobs derive it again) and that all eight salt constants are defined, loo
 HTTP probe could not run is reported as `unverified` with the status `recommended`; only a
 probe that read the file back is `critical`. In that case the admin page lets the browser
 make the request (`Storage\BrowserProbe`): it asks `POST /environment/probe` for a probe
-file, requests the file's URL without credentials and reports status and body to
-`POST /environment/probe/report`. A report with the file's content is the finding
+file, requests the file's URL without credentials, waits at most ten seconds for the answer
+and reports status and body under the probe's name to `POST /environment/probe/report`. A
+report on another probe than the pending one, as from a second tab, changes nothing. A
+report with the file's content is the finding
 `exposed`; any other answer counts as protected. The site's own probe, where it gets an
 answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
 compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
@@ -1166,7 +1172,9 @@ and schedules are slots in the site's time zone.
   or invalid stored settings fall back to their defaults field by field.
 - Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active
   job (`Cron::stop()`, `Runner::stop()`): it asks the job to cancel and runs its cleanup
-  steps for at most ten seconds, which releases the repository lock. A job that another
+  steps, which releases the repository lock. The budget of ten seconds holds back regular
+  steps only; a cleanup step is not cut short by it and ends with its own requests' time
+  limits. A job that another
   tick is working on at that moment is cancelled by that tick after its current step.
   Deactivation never fails over this. If the cleanup could not finish, for example because
   the server did not answer, the job stays in `jobs/` and is cleaned up by the first tick

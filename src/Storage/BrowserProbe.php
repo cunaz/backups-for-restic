@@ -72,14 +72,21 @@ final class BrowserProbe {
 	/**
 	 * Takes the browser's report on the probe file and removes the file.
 	 *
+	 * A report on another probe than the pending one changes nothing: a second tab may have
+	 * begun a probe of its own in the meantime, and that one still waits for its report.
+	 *
+	 * @param string $probe  Name of the probe file the report is about, as begin() returned it.
 	 * @param int    $status HTTP status the browser got, or 0 if its request failed.
 	 * @param string $body   What it received.
 	 * @return bool|null True if the directory is served, false if not, null if the report says
-	 *                   nothing: no probe was pending, it was too old, or the request failed.
+	 *                   nothing: no such probe was pending, it was too old, or the request failed.
 	 */
-	public function finish( int $status, string $body ): ?bool {
+	public function finish( string $probe, int $status, string $body ): ?bool {
 		$entry   = $this->state->get( self::ENTRY );
 		$pending = is_array( $entry['pending'] ?? null ) ? $entry['pending'] : null;
+		if ( null !== $pending && ( $pending['file'] ?? null ) !== $probe ) {
+			return null;
+		}
 		$this->remove( $entry );
 		unset( $entry['pending'] );
 		$now   = $this->clock->now()[0];

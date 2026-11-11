@@ -83,8 +83,11 @@ final class MultisiteTest extends TestCase {
 			self::assertFalse( $seen['container'], 'No tick handler.' );
 			self::assertStringContainsString( 'inactive because multisite networks are not supported yet', $seen['notice'] );
 
-			[ $status, $output ] = self::wp( [ 'backups-for-restic', 'status' ] );
-			self::assertNotSame( 0, $status, 'No WP-CLI command: ' . $output );
+			// Asked after WordPress loaded; a command that exists but fails would answer 0 here.
+			[ $status, $output ] = self::wp( [ 'cli', 'has-command', 'backups-for-restic' ] );
+			self::assertSame( 1, $status, 'No WP-CLI command: ' . $output );
+			[ $status, $output ] = self::wp( [ 'cli', 'has-command', 'plugin' ] );
+			self::assertSame( 0, $status, 'WP-CLI itself works here: ' . $output );
 		} finally {
 			self::wp( [ 'eval', self::INACTIVE ] );
 		}

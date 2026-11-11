@@ -129,7 +129,24 @@ final class Setup {
 	 * @throws JobConflict If a job is active.
 	 */
 	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
-		$this->refuse_during_a_job();
+		$this->jobs->while_idle(
+			function () use ( $server, $report, $username, $password ): void {
+				$this->store_server( $server, $report, $username, $password );
+			}
+		);
+	}
+
+	/**
+	 * What save_server() does once no job can be in the way.
+	 *
+	 * @param string           $server   Server address as entered.
+	 * @param ConnectionReport $report   Report of the connection test.
+	 * @param string           $username REST user name.
+	 * @param Secret|null      $password REST password, or null for the stored one.
+	 * @throws ValidationFailed If a setting is rejected.
+	 * @throws InvalidArgument With the code password_required.
+	 */
+	private function store_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
 		$append_only = match ( $report->append_only ) {
 			AppendOnlyStatus::AppendOnly       => 'yes',
 			AppendOnlyStatus::DeletionsAllowed => 'no',
@@ -190,7 +207,18 @@ final class Setup {
 	 * @throws \Throwable Whatever else stopped the creation, after the stored password was put back.
 	 */
 	public function create( ?Secret $password ): Secret {
-		$this->refuse_during_a_job();
+		return $this->jobs->while_idle( fn (): Secret => $this->create_repository( $password ) );
+	}
+
+	/**
+	 * What create() does once no job can be in the way.
+	 *
+	 * @param Secret|null $password Password to use; a new one is generated if null.
+	 * @return Secret The repository password.
+	 * @throws PluginException If the password cannot be stored, or the repository cannot be created.
+	 * @throws \Throwable Whatever else stopped the creation.
+	 */
+	private function create_repository( ?Secret $password ): Secret {
 		$overridden = $this->secrets->is_overridden( SecretName::RepositoryPassword );
 		if ( $overridden ) {
 			$password = $this->secrets->get( SecretName::RepositoryPassword );
@@ -280,18 +308,6 @@ final class Setup {
 	}
 
 	/**
-	 * Refuses while a job is active.
-	 *
-	 * @throws JobConflict If a job is active.
-	 */
-	private function refuse_during_a_job(): void {
-		$active = $this->jobs->active();
-		if ( null !== $active ) {
-			JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
-		}
-	}
-
-	/**
 	 * Stores the password of an existing repository and queues the unlock job that derives its
 	 * key, because the derivation can take longer than one request.
 	 *
@@ -309,13 +325,16 @@ final class Setup {
 		if ( null === $password && null === $this->stored_password() ) {
 			InvalidArgument::raise( 'No repository password was given.', [ 'code' => 'no_password' ] );
 		}
-		$this->refuse_during_a_job();
-		if ( null !== $password ) {
-			if ( ! $overridden ) {
-				$this->secrets->set( SecretName::RepositoryPassword, $password );
+		return $this->jobs->while_idle(
+			function () use ( $password, $overridden, $now ): Job {
+				if ( null !== $password ) {
+					if ( ! $overridden ) {
+						$this->secrets->set( SecretName::RepositoryPassword, $password );
+					}
+					$this->secrets->delete( SecretName::MasterKey );
+				}
+				return $this->jobs->create( JobType::Unlock, 'setup', $now );
 			}
-			$this->secrets->delete( SecretName::MasterKey );
-		}
-		return $this->jobs->create( JobType::Unlock, 'setup', $now );
+		);
 	}
 }

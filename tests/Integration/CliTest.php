@@ -105,16 +105,28 @@ final class CliTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
-	public function test_forget_prune_and_check_report_what_they_did(): void {
+	public function test_forget_reports_how_many_snapshots_it_removed_and_kept(): void {
 		TestSite::idle( 600 );
 
 		[ $status, $output ] = self::command( [ 'forget', '--wait' ] );
+
 		self::assertSame( 0, $status, $output );
 		self::assertMatchesRegularExpression( '/^Success: Forget finished: \d+ snapshots removed, \d+ kept\.$/m', $output );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_prune_reports_what_it_deleted_and_freed(): void {
+		TestSite::idle( 600 );
 
 		[ $status, $output ] = self::command( [ 'prune', '--wait' ] );
+
 		self::assertSame( 0, $status, $output );
 		self::assertMatchesRegularExpression( '/^Success: Prune finished: \d+ packs deleted, .+ freed\.$/m', $output );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_check_reports_what_it_read_and_found(): void {
+		TestSite::idle( 600 );
 
 		[ $status, $output ] = self::command( [ 'check', '--read-data-subset=100', '--wait' ] );
 		self::assertSame( 0, $status, $output );
