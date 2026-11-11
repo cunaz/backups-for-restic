@@ -317,7 +317,8 @@ final class JobControlTest extends TestCase {
 				]
 			);
 			self::assertSame( 200, $status, $raw );
-			self::assertNull( $report['exposed'] ?? 'missing', $raw );
+			self::assertArrayHasKey( 'exposed', $report, $raw );
+			self::assertNull( $report['exposed'], $raw );
 			self::assertSame( [ 'critical', 'exposed', true ], self::private_directory( false ), 'It cannot talk the finding away either.' );
 
 			file_put_contents( $deny, $rules );
