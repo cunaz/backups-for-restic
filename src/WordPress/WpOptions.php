@@ -56,8 +56,13 @@ final class WpOptions implements Options {
 			return true;
 		}
 		// update_option() answers false for a refused write and for a value that is stored
-		// already, and it tells the two apart by this very comparison. What the option holds
-		// now decides: after a refused write that is still the old value.
+		// already, and it compares in this way to tell that the value is there. What the
+		// database holds now decides, not what this request has cached: another request may
+		// have stored the same value a moment ago, and then the database changed no row for
+		// this one, which WordPress answers with false as well.
+		wp_cache_delete( $name, 'options' );
+		wp_cache_delete( 'notoptions', 'options' );
+		wp_cache_delete( 'alloptions', 'options' );
 		return maybe_serialize( get_option( $name, null ) ) === maybe_serialize( $value );
 	}
 

@@ -80,5 +80,5 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   when the listing fails.
 - Since 2026-11-11 notices are handed to the mailer by one request at a time
   (`notify.lock`, [ADR 0014](0014-file-based-job-store.md)). A request that finds another
-  one sending leaves its notice in the outbox; it goes out with the next heartbeat, at most
-  five minutes later, instead of at once.
+  one sending leaves its notice in the outbox; a later heartbeat tries it, instead of this
+  request at once. How soon that is depends on WP-Cron like every heartbeat.
