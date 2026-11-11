@@ -21,7 +21,7 @@ suites already run against rest-server.
     for self-signed TLS, used only for requests to that server. The wizard sends the
     certificate along with the connection test: the test runs on the site's server, which
     could not verify the repository server without it. A test uses it from a file of
-    its own in the private directory, removed after the test, and stores nothing; it becomes the server's certificate when the server is saved,
+    its own in the private directory, removed after the test, and stores nothing; it becomes the server's certificate when the server is saved, under the same lock and put back as it was if the save fails,
     so a test that fails never leaves the saved server with a certificate that is not its
     own. Saving a server of the preset removes a stored certificate.
 - **Weighting**: BorgBase is a convenience preset that is simply selectable, not a headline
