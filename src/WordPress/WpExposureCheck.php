@@ -109,7 +109,7 @@ final class WpExposureCheck implements ExposureCheck {
 				]
 			);
 			wp_delete_file( $probe['file'] );
-			$exposed = is_wp_error( $response ) ? null : ( 200 === (int) wp_remote_retrieve_response_code( $response ) && str_contains( wp_remote_retrieve_body( $response ), $probe['token'] ) );
+			$exposed = is_wp_error( $response ) ? null : str_contains( wp_remote_retrieve_body( $response ), $probe['token'] );
 		}
 		$this->state->set(
 			'exposure',

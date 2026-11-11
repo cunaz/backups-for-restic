@@ -251,6 +251,14 @@ final class JobControlTest extends TestCase {
 		$rules = (string) file_get_contents( $deny );
 		try {
 			TestSite::no_loopback( true );
+			// What a browser reported in an earlier run of this test does not count here.
+			TestSite::state(
+				'exposure_browser',
+				[
+					'result'  => null,
+					'pending' => null,
+				]
+			);
 			self::assertSame( [ 'recommended', 'unverified', true ], self::private_directory( true ), 'The site\'s own probe gets no answer.' );
 
 			self::assertSame( [ 403, false ], self::probe_as_a_browser() );

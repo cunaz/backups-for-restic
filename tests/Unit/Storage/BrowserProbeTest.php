@@ -79,11 +79,11 @@ final class BrowserProbeTest extends TestCase {
 		}
 	}
 
-	public function test_the_content_under_another_status_is_not_a_page_that_serves_it(): void {
+	public function test_the_content_under_any_status_means_that_the_file_was_read(): void {
 		$name  = $this->begin();
 		$token = (string) file_get_contents( $this->file( $name ) );
 
-		self::assertFalse( $this->finish( 403, $token ), 'As the probe of the server itself judges it.' );
+		self::assertTrue( $this->finish( 403, $token ), 'A status does not take back what the body gave away.' );
 	}
 
 	public function test_a_request_that_failed_says_nothing_and_keeps_the_last_result(): void {
@@ -147,7 +147,8 @@ final class BrowserProbeTest extends TestCase {
 		$state['exposure_browser']['pending']['file'] = '../jobs/keep.txt';
 		$this->options->values[ SiteState::OPTION ]   = $state;
 
-		$this->finish( 404, '' );
+		// The next probe gives up the pending one and deletes its file by the stored name.
+		$this->begin();
 
 		self::assertFileExists( $outside );
 	}
