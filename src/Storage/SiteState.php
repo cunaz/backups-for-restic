@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Storage;
 
+use BackupsForRestic\Exception\StorageFailed;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -103,10 +105,11 @@ final class SiteState {
 	 * @param int    $now        Unix time.
 	 * @param string $known      Repository ID the settings held until now, or '' if none.
 	 * @return bool True if the state now describes another repository than before.
+	 * @throws StorageFailed If the options table did not take the change.
 	 */
 	public function bind( string $repository, int $now, string $known = '' ): bool {
 		$rebound = false;
-		$this->change(
+		$stored  = $this->change(
 			static function ( array $state ) use ( $repository, $now, $known, &$rebound ): ?array {
 				$bound = is_array( $state['repository'] ?? null ) ? $state['repository'] : null;
 				if ( null !== $bound && ( $bound['id'] ?? null ) === $repository ) {
@@ -127,6 +130,10 @@ final class SiteState {
 				return $state;
 			}
 		);
+		if ( ! $stored ) {
+			// Results of the repository before would pass for facts about this one.
+			StorageFailed::raise( 'The remembered results could not be bound to the repository.', [ 'option' => self::OPTION ] );
+		}
 		return $rebound;
 	}
 
@@ -137,20 +144,17 @@ final class SiteState {
 	 * lock keeps two changes from crossing.
 	 *
 	 * @param \Closure(array<mixed>): (array<mixed>|null) $change Gets the document and returns what to store; null to store nothing.
+	 * @return bool False if the options table did not take the document. Most entries are
+	 *              facts for the dashboard, and a job that did its work is not failed over
+	 *              one of them; bind() is the caller that cannot go on.
 	 */
-	private function change( \Closure $change ): void {
-		$apply = function () use ( $change ): void {
+	private function change( \Closure $change ): bool {
+		$apply = function () use ( $change ): bool {
 			$stored = $this->options->fresh( self::OPTION );
 			$next   = $change( is_array( $stored ) ? $stored : [] );
-			if ( null !== $next ) {
-				$this->options->set( self::OPTION, $next, false );
-			}
+			return null === $next || $this->options->set( self::OPTION, $next, false );
 		};
-		if ( null === $this->lock ) {
-			$apply();
-		} else {
-			$this->lock->hold( $apply );
-		}
+		return null === $this->lock ? $apply() : $this->lock->hold( $apply );
 	}
 
 	/**

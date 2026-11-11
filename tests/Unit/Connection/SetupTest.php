@@ -18,6 +18,7 @@ use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\Unauthorized;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
@@ -496,23 +497,30 @@ final class SetupTest extends TestCase {
 	}
 
 	/**
-	 * @return iterable<string, array{string, int}> Option whose write is refused, and which of its writes.
+	 * @return iterable<string, array{string, int, bool}> Option whose write is refused, which of its writes, and whether
+	 *                                                    the refusal comes as WordPress gives it: an answer of false, no exception.
 	 */
 	public static function refused_writes(): iterable {
-		yield 'the settings with the new address' => [ SettingsStore::OPTION, 1 ];
-		yield 'the settings without the repository ID' => [ SettingsStore::OPTION, 2 ];
-		yield 'the remembered results' => [ SiteState::OPTION, 1 ];
+		foreach ( [
+			'with an exception'      => false,
+			'with nothing but false' => true,
+		] as $how => $quietly ) {
+			yield 'the settings with the new address, ' . $how => [ SettingsStore::OPTION, 1, $quietly ];
+			yield 'the settings without the repository ID, ' . $how => [ SettingsStore::OPTION, 2, $quietly ];
+			yield 'the remembered results, ' . $how => [ SiteState::OPTION, 1, $quietly ];
+		}
 	}
 
 	#[DataProvider( 'refused_writes' )]
-	public function test_a_server_whose_save_fails_half_way_leaves_the_site_with_the_server_it_had( string $option, int $number ): void {
+	public function test_a_server_whose_save_fails_half_way_leaves_the_site_with_the_server_it_had( string $option, int $number, bool $quietly ): void {
 		$this->backing_up();
 		$this->refuse_write( $option, $number );
+		$this->options->refuses_quietly = $quietly;
 
 		try {
 			$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'someone-else', new Secret( 'password of the new server' ) );
 			self::fail( 'The database refused a write.' );
-		} catch ( \RuntimeException ) {
+		} catch ( \RuntimeException | StorageFailed ) {
 			$this->assert_unchanged( 'The new address with the old password, or the old address without its key, would end the backups.' );
 		}
 	}

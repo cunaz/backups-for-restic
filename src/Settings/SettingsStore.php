@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Settings;
 
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Storage\Options;
 
@@ -54,10 +55,13 @@ final class SettingsStore {
 	 * @param array<string, mixed> $changes New values by dotted path.
 	 * @return Settings The saved settings.
 	 * @throws ValidationFailed If a value is invalid; nothing is saved then.
+	 * @throws StorageFailed If the options table did not take the settings: who saves them goes on only with what is stored.
 	 */
 	public function update( array $changes ): Settings {
 		$settings = $this->load()->with( $changes );
-		$this->options->set( self::OPTION, $settings->to_stored(), true );
+		if ( ! $this->options->set( self::OPTION, $settings->to_stored(), true ) ) {
+			StorageFailed::raise( 'The settings could not be saved.', [ 'option' => self::OPTION ] );
+		}
 		return $settings;
 	}
 }

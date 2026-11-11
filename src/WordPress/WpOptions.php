@@ -49,9 +49,16 @@ final class WpOptions implements Options {
 	 * @param string $name     Option name.
 	 * @param mixed  $value    Value.
 	 * @param bool   $autoload Whether WordPress loads it on every request.
+	 * @return bool False if the database refused the write.
 	 */
-	public function set( string $name, mixed $value, bool $autoload ): void {
-		update_option( $name, $value, $autoload );
+	public function set( string $name, mixed $value, bool $autoload ): bool {
+		if ( update_option( $name, $value, $autoload ) ) {
+			return true;
+		}
+		// update_option() answers false for a refused write and for a value that is stored
+		// already, and it tells the two apart by this very comparison. What the option holds
+		// now decides: after a refused write that is still the old value.
+		return maybe_serialize( get_option( $name, null ) ) === maybe_serialize( $value );
 	}
 
 	/**

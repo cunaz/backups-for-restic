@@ -79,14 +79,15 @@ final class SecretStoresTest extends TestCase {
 				return $this->value;
 			}
 
-			public function set( string $name, mixed $value, bool $autoload ): void {
+			public function set( string $name, mixed $value, bool $autoload ): bool {
 				if ( $this->read_only ) {
-					return;
+					return false;
 				}
 				if ( $this->truncating && is_array( $value ) && is_array( $value['secrets'] ?? null ) ) {
 					$value['secrets'] = array_map( static fn ( string $box ): string => substr( $box, 0, -4 ), $value['secrets'] );
 				}
 				$this->value = $value;
+				return true;
 			}
 
 			public function delete( string $name ): void {

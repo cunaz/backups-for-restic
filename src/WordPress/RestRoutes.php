@@ -75,11 +75,27 @@ final class RestRoutes {
 			foreach ( array_chunk( $methods, 2 ) as [ $method, $callback ] ) {
 				$endpoints[] = [
 					'methods'             => $method,
-					'callback'            => [ $this, $callback ],
+					'callback'            => fn ( \WP_REST_Request $request ): mixed => $this->answer( \Closure::fromCallable( [ $this, $callback ] ), $request ),
 					'permission_callback' => [ self::class, 'allowed' ],
 				];
 			}
 			register_rest_route( self::NAMESPACE, $path, $endpoints );
+		}
+	}
+
+	/**
+	 * Runs the method of a route. What a method does not answer itself, such as settings that
+	 * the database refused to store, becomes an error response instead of a fatal error.
+	 *
+	 * @param \Closure                               $route   The method.
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return mixed What the method answers, or the error.
+	 */
+	private function answer( \Closure $route, \WP_REST_Request $request ): mixed {
+		try {
+			return $route( $request );
+		} catch ( PluginException $e ) {
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
 	}
 

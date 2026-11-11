@@ -71,17 +71,27 @@ final class InMemoryOptions implements Options {
 	 */
 	public ?\Closure $refuses = null;
 
-	public function set( string $name, mixed $value, bool $autoload ): void {
+	/**
+	 * Whether a refused write is answered as WordPress answers it: with false and without an
+	 * exception, and with the old value left in place.
+	 */
+	public bool $refuses_quietly = false;
+
+	public function set( string $name, mixed $value, bool $autoload ): bool {
 		if ( null !== $this->failure ) {
 			throw $this->failure;
 		}
 		if ( null !== $this->refuses && ( $this->refuses )( $name ) ) {
+			if ( $this->refuses_quietly ) {
+				return false;
+			}
 			throw new \RuntimeException( 'The database refused the write.' );
 		}
 		++$this->writes;
 		$this->values[ $name ]   = $value;
 		$this->read[ $name ]     = $value;
 		$this->autoload[ $name ] = $autoload;
+		return true;
 	}
 
 	public function delete( string $name ): void {
