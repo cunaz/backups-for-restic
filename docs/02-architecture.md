@@ -314,7 +314,7 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   may not come. The tick's deadline holds back regular steps only: once a job is in its
   cleanup steps, the same tick runs them all. A request that arrives when the work is done
   (the snapshot written, the packs deleted) no longer stops the job: the step `recording`
-  runs, and the job ends as `succeeded` (`JobType::cancels_before()`). A job that is still `queued` is cancelled at once and without cleanup
+  runs, in the tick that finds the request even if its deadline has passed, and the job ends as `succeeded` (`JobType::cancels_before()`). A job that is still `queued` is cancelled at once and without cleanup
   steps, because nothing ran: by `cancel()` itself if it gets the runner lock, otherwise by
   the next tick. `Runner::stop()` is both in one call, for the deactivation (§18): it asks
   the active job to cancel and runs one tick, which is the cleanup.

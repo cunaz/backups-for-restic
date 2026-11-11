@@ -216,6 +216,9 @@ final class MaintenanceSteps implements StepProvider {
 			$result['stats']
 		);
 		if ( $done ) {
+			// Kept with the job: recording then needs neither the checkpoint nor the server, and
+			// so also works in the last tick before the plugin is switched off.
+			$job->data['check_details'] = self::details( $result );
 			$log->write(
 				$result['errors'] > 0 ? 'error' : 'info',
 				$result['errors'] > 0 ? 'The check found damage.' : 'The check found no errors.',
@@ -239,7 +242,7 @@ final class MaintenanceSteps implements StepProvider {
 	public function record( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services->common;
 		$now      = $services->clock->now()[0];
-		$details  = JobType::Check === $job->type ? $this->check_details( $job ) : null;
+		$details  = JobType::Check === $job->type ? ( self::kept_details( $job ) ?? $this->check_details( $job ) ) : null;
 		$services->state->set(
 			'last_' . $job->type->value,
 			[
@@ -270,9 +273,40 @@ final class MaintenanceSteps implements StepProvider {
 	}
 
 	/**
-	 * Counts and the first findings of a finished check, read from its checkpoint. Errors come
-	 * before warnings, each in the order found: the alert announces errors, and warnings from
-	 * an earlier phase, such as packs that no index lists, must not take their places.
+	 * Counts and the first findings of a finished check, as the checking step kept them with
+	 * the job.
+	 *
+	 * @param Job $job Check job.
+	 * @return array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>}|null Details, or null if the job carries none.
+	 */
+	private static function kept_details( Job $job ): ?array {
+		$kept = $job->data['check_details'] ?? null;
+		if ( ! is_array( $kept ) || ! is_array( $kept['counts'] ?? null ) || ! is_array( $kept['findings'] ?? null ) ) {
+			return null;
+		}
+		$counts = [];
+		foreach ( $kept['counts'] as $code => $count ) {
+			$counts[ (string) $code ] = Decoded::int( $count );
+		}
+		$findings = [];
+		foreach ( Decoded::arrays( $kept['findings'] ) as $finding ) {
+			$findings[] = [
+				'severity' => Decoded::string( $finding['severity'] ?? null ),
+				'code'     => Decoded::string( $finding['code'] ?? null ),
+				'object'   => Decoded::string( $finding['object'] ?? null ),
+				'message'  => Decoded::string( $finding['message'] ?? null ),
+			];
+		}
+		return [
+			'errors'   => Decoded::int( $kept['errors'] ?? null ),
+			'counts'   => $counts,
+			'findings' => $findings,
+		];
+	}
+
+	/**
+	 * Counts and the first findings of a finished check, read from its checkpoint: for a job
+	 * whose checking step ended before the details were kept with the job.
 	 *
 	 * @param Job $job Check job.
 	 * @return array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>}|null Details, or null if the check did not run.
@@ -283,7 +317,19 @@ final class MaintenanceSteps implements StepProvider {
 		if ( ! is_file( $work . '/state.json' ) ) {
 			return null;
 		}
-		$result   = CheckRun::resume( $this->repository(), $work, $services->identity, $services->clock )->result();
+		return self::details( CheckRun::resume( $this->repository(), $work, $services->identity, $services->clock )->result() );
+	}
+
+	/**
+	 * What the dashboard and the alert show of a check's result. Errors come before warnings,
+	 * each in the order found: the alert announces errors, and warnings from an earlier phase,
+	 * such as packs that no index lists, must not take their places.
+	 *
+	 * @param array<string, mixed> $result Result of the check.
+	 * @phpstan-param array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>, ...} $result
+	 * @return array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>} Details.
+	 */
+	private static function details( array $result ): array {
 		$findings = $result['findings'];
 		// usort() is stable, so each severity keeps the order in which the check found it.
 		usort( $findings, static fn ( array $a, array $b ): int => ( 'error' === $b['severity'] ) <=> ( 'error' === $a['severity'] ) );

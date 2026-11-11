@@ -318,8 +318,10 @@ final class Runner {
 			// release the lock in the repository, and the tick that could run them may be the
 			// last one for a long time, for example when the plugin is being deactivated.
 			// Nor a request to cancel that came while the last step ran: the loop turns it into
-			// the cleanup now.
-			if ( microtime( true ) >= $deadline && ! $job->type->is_cleanup( $next ) && ! ( $job->type->cancels_before( $next ) && $this->store->cancel_requested( $job ) ) ) {
+			// the cleanup now, or, where the work is done and only its result is left to record,
+			// records it and cleans up. Recording is short and asks the server for nothing that
+			// it could not do without.
+			if ( microtime( true ) >= $deadline && ! $job->type->is_cleanup( $next ) && ! $this->store->cancel_requested( $job ) ) {
 				return;
 			}
 		}
