@@ -195,6 +195,7 @@ final class JobControlTest extends TestCase {
 			$job = TestSite::wait_for( (string) $answer['job']['id'], 600 );
 			self::assertSame( 'failed', $job['state'], (string) json_encode( $job ) );
 			self::assertSame( 'wrong_password', $job['error']['code'] ?? null, (string) json_encode( $job ) );
+			self::assertStringNotContainsString( 'not the password of this repository', (string) json_encode( $job ), 'What was entered is a secret like the stored one.' );
 			// The password that works and the key stay: the site's backups do not depend on what
 			// somebody typed into the form.
 			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
