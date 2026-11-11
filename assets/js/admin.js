@@ -1095,8 +1095,21 @@
 			};
 			// The certificate has to be there before the first request to the server: the
 			// connection test of a server with a certificate of its own authority fails without it.
+			// A certificate that this wizard uploaded is for the server it was entered with. For
+			// another choice it is taken back: BorgBase's certificate would not verify against it.
+			let uploaded = false;
 			const upload = function () {
-				return own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
+				if ( own.checked && ca.value.trim() ) {
+					return api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ).then( function () {
+						uploaded = true;
+					} );
+				}
+				if ( uploaded ) {
+					return api( '/repository/ca-certificate', { method: 'DELETE' } ).then( function () {
+						uploaded = false;
+					} );
+				}
+				return Promise.resolve();
 			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
