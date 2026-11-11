@@ -96,7 +96,8 @@ final class BrowserProbe {
 			$this->state->set( self::ENTRY, $entry );
 			return null;
 		}
-		$exposed         = 200 === $status && str_contains( $body, $token );
+		// Whatever the status says: who got the content has read the file.
+		$exposed         = str_contains( $body, $token );
 		$entry['result'] = [
 			'exposed' => $exposed,
 			'at'      => $now,
