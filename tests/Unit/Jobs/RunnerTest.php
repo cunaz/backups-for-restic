@@ -242,6 +242,39 @@ final class RunnerTest extends TestCase {
 		self::assertStringContainsString( '"reason":"deactivation"', (string) file_get_contents( $this->directory . '/jobs/' . $job->id . '/events.log' ) );
 	}
 
+	public function test_the_deadline_holds_back_regular_steps_but_not_the_cleanup(): void {
+		$store  = $this->store();
+		$job    = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		$runner = $this->runner( $store );
+
+		// No time at all: every tick runs the one step it is at.
+		$runner->tick( 0 );
+		$runner->tick( 0 );
+		self::assertSame( [ 'preflight', 'unlocking' ], $this->calls );
+		self::assertSame( 'backing_up', $store->get( $job->id )?->step );
+
+		// A cancelled job is cleaned up in one go, with the deadline long past.
+		$stopped = $runner->stop( 0 );
+		self::assertSame( JobState::Cancelled, $stopped?->state, 'A job left between its cleanup steps would stay active with nobody to finish it.' );
+		self::assertSame( [ 'preflight', 'unlocking', 'releasing', 'cleaning_up' ], $this->calls );
+	}
+
+	public function test_a_job_that_ends_at_the_deadline_is_cleaned_up_by_the_same_tick(): void {
+		$store  = $this->store();
+		$job    = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		$runner = $this->runner( $store );
+		foreach ( [ 'preflight', 'unlocking', 'backing_up' ] as $step ) {
+			$runner->tick( 0 );
+			self::assertSame( JobState::Running, $store->get( $job->id )?->state, $step );
+		}
+
+		// The last regular step, and the cleanup after it.
+		$runner->tick( 0 );
+
+		self::assertSame( JobState::Succeeded, $store->get( $job->id )?->state );
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'recording', 'releasing', 'cleaning_up' ], $this->calls );
+	}
+
 	public function test_stopping_ends_a_queued_job_at_once_and_does_nothing_without_a_job(): void {
 		$store  = $this->store();
 		$runner = $this->runner( $store );
