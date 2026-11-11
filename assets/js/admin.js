@@ -703,7 +703,15 @@
 							save.disabled = false;
 						} );
 				}, true );
-				const kit = recoveryKitForm();
+				// The record of who saw the kit, kept current without touching the form above it.
+				const views = el( 'div', {}, [ kitViews( response.kit_views ) ] );
+				const kit = recoveryKitForm( function () {
+					api( '/settings' )
+						.then( function ( fresh ) {
+							replace( views, [ kitViews( fresh.kit_views ) ] );
+						} )
+						.catch( function () {} );
+				} );
 				replace( root, [
 					...groups,
 					el( 'fieldset', { className: 'bfr-group' }, [
@@ -716,7 +724,7 @@
 						] ),
 						cacheControl( response.cache_bytes ),
 						kit.box,
-						kitViews( response.kit_views ),
+						views,
 					] ),
 					message,
 					save,
@@ -935,9 +943,10 @@
 	 * kit that is on the screen: after a password or the certificate changed, that kit is no
 	 * longer the one to keep.
 	 *
+	 * @param {() => void} shown Called after the server delivered the kit.
 	 * @return {Object} The form's element as `box`, and `reset()`.
 	 */
-	function recoveryKitForm() {
+	function recoveryKitForm( shown ) {
 		const box = el( 'div' );
 		// Counts the changes: a kit that was asked for before the last one is not shown.
 		let changes = 0;
@@ -951,6 +960,7 @@
 						if ( asked === changes ) {
 							replace( box, [ kitView( response.recovery_kit ) ] );
 						}
+						shown();
 					} )
 					.catch( function ( error ) {
 						if ( asked === changes ) {

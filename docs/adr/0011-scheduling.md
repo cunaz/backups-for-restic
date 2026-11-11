@@ -60,5 +60,9 @@ loopback requests. The native engine needs many short slices of work (ticks) per
 - The heartbeat runs the append-only probe when it is due, starts the jobs that are due,
   runs one tick when a job is active and hands waiting notices to the mailer. It refreshes
   no repository lock.
-- The wizard says that the first backup uploads everything once. It names no expected
-  duration; estimates are planned for Milestone 3.
+- The wizard says that the first backup uploads everything once and names no expected
+  duration: the plugin does not know the size of a site before it has walked it. From the
+  second backup on the progress is measured against the bytes the last backup of the
+  repository went through, and the admin page shows a bar and the minutes left at the
+  speed so far (since 2026-11-11). A walk of the site before the first backup, only to
+  have an estimate, was rejected: on shared hosting it costs ticks that the backup needs.

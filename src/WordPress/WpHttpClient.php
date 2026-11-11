@@ -29,6 +29,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class WpHttpClient implements HttpClient {
 
+	/** Bytes allowed on top of a response limit for the framing of a chunked answer. */
+	private const int FRAMING_BYTES = 4096;
+
 	/**
 	 * Creates the client.
 	 *
@@ -67,8 +70,10 @@ final class WpHttpClient implements HttpClient {
 		];
 		$arguments['headers']['Accept-Encoding'] = 'identity';
 		if ( $limit > 0 ) {
-			// One byte more than accepted: the caller sees that the body was longer.
-			$arguments['limit_response_size'] = $limit + 1;
+			// One byte more than accepted: the caller sees that the body was longer. And room
+			// for the framing of a chunked answer, which one of WordPress' transports counts
+			// before it removes it; without it a valid answer in chunks would be cut short.
+			$arguments['limit_response_size'] = $limit + 1 + self::FRAMING_BYTES + intdiv( $limit, 64 );
 		}
 		// Without an uploaded certificate, the bundle that WordPress itself uses by default.
 		$bundle                       = null !== $this->ca_file && '' !== $this->ca_file ? $this->ca_file : ABSPATH . 'wp-includes/certificates/ca-bundle.crt';

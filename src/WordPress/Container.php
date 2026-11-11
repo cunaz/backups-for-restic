@@ -28,6 +28,7 @@ use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\Unauthorized;
@@ -612,7 +613,8 @@ final class Container {
 		try {
 			$this->access()->probe_backend( $this->http( self::PROBE_SECONDS ) )->size( ObjectType::Config, 'config' );
 			$reached = true;
-		} catch ( SecretsUndecryptable ) {
+		} catch ( SecretsUndecryptable | InvalidArgument ) {
+			// Nothing was sent: the password cannot be read, or the address is none to ask.
 			return null;
 		} catch ( BackendException $e ) {
 			// A refusal of the credentials is an answer, and so is every other status; without
