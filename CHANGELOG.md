@@ -109,6 +109,11 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Saving a server that fails half way, for example because the database refuses a write,
+  leaves the site with the server, the REST password and the key it had. Before, the new
+  address could stay with the old password or without the certificate that belongs to it.
+- Where `wp-config.php` defines the repository address, testing another address with a
+  certificate of its own no longer replaces the stored certificate.
 - What the plugin remembers between requests (last results, handled schedule slots, who
   looked at the recovery kit, waiting notices) is no longer overwritten when two requests
   change it at the same time, for example a running backup and the admin page. A notice is

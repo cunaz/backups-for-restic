@@ -119,18 +119,20 @@ final class Setup {
 	/**
 	 * Saves a server after a successful connection test.
 	 *
-	 * @param string                      $server   borgbase or rest-server.
-	 * @param ConnectionReport            $report   Test result with the normalized URL.
-	 * @param string                      $username REST username.
-	 * @param Secret|null                 $password REST password; null keeps the stored one, which must be
-	 *                                              stored for this server and user name.
-	 * @param (\Closure(): \Closure)|null $with What belongs to the server and has to change with it, such as its CA
-	 *                                             certificate: called once the server is accepted, under the
-	 *                                             same lock, and returns what undoes it should the save fail.
+	 * @param string                            $server   borgbase or rest-server.
+	 * @param ConnectionReport                  $report   Test result with the normalized URL.
+	 * @param string                            $username REST username.
+	 * @param Secret|null                       $password REST password; null keeps the stored one, which must be
+	 *                                                    stored for this server and user name.
+	 * @param (\Closure(string): \Closure)|null $with What belongs to the server and has to change with it, such as its CA
+	 *                                                   certificate: called once the server is accepted, under the
+	 *                                                   same lock, with the address the jobs will use, which is
+	 *                                                   another one than the tested one if wp-config.php defines
+	 *                                                   it. Returns what undoes the change should the save fail.
 	 * @throws ValidationFailed If a setting is rejected.
 	 * @throws InvalidArgument With the code password_required if the stored REST password would end up with another server or user name.
 	 * @throws JobConflict If a job is active.
-	 * @throws \Throwable Whatever stopped the save or the companion change, after the companion change was undone.
+	 * @throws \Throwable Whatever stopped the save or the companion change, after everything that was changed was put back.
 	 */
 	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password, ?\Closure $with = null ): void {
 		$this->jobs->while_idle(
@@ -143,14 +145,14 @@ final class Setup {
 	/**
 	 * What save_server() does once no job can be in the way.
 	 *
-	 * @param string                      $server   Server address as entered.
-	 * @param ConnectionReport            $report   Report of the connection test.
-	 * @param string                      $username REST user name.
-	 * @param Secret|null                 $password REST password, or null for the stored one.
-	 * @param (\Closure(): \Closure)|null $with The companion change of save_server().
+	 * @param string                            $server   Server address as entered.
+	 * @param ConnectionReport                  $report   Report of the connection test.
+	 * @param string                            $username REST user name.
+	 * @param Secret|null                       $password REST password, or null for the stored one.
+	 * @param (\Closure(string): \Closure)|null $with The companion change of save_server().
 	 * @throws ValidationFailed If a setting is rejected.
 	 * @throws InvalidArgument With the code password_required.
-	 * @throws \Throwable Whatever stopped the save, after the companion change was undone.
+	 * @throws \Throwable Whatever stopped the save, after what was changed was put back.
 	 */
 	private function store_server( string $server, ConnectionReport $report, string $username, ?Secret $password, ?\Closure $with = null ): void {
 		$append_only = match ( $report->append_only ) {
@@ -178,7 +180,13 @@ final class Setup {
 		$url      = $next->string( 'repository.url' );
 		$username = $next->string( 'repository.rest_username' );
 		$this->rest_password( ServerProfile::detect( $url ), $url, $username, $password );
-		$undo = null === $with ? null : $with();
+		// What the save can put back should it fail half way: the settings it writes, the REST
+		// password and the cached key. A secret that cannot be read cannot be put back either.
+		$fixed    = $this->secrets->is_overridden( SecretName::RestPassword );
+		$before   = array_intersect_key( $current->to_stored(), $changes + array_fill_keys( [ 'repository.id', 'repository.format_version' ], true ) );
+		$previous = $fixed ? null : $this->readable( SecretName::RestPassword );
+		$key      = $this->readable( SecretName::MasterKey );
+		$undo     = null === $with ? null : $with( $url );
 		try {
 			// The password first: should storing it fail, the settings still name the server that
 			// the stored password is for.
@@ -198,10 +206,73 @@ final class Setup {
 				$this->record->moved();
 			}
 		} catch ( \Throwable $failure ) {
-			if ( null !== $undo ) {
-				$undo();
-			}
+			$this->put_back( $before, $previous, $key, $undo );
 			throw $failure;
+		}
+	}
+
+	/**
+	 * A stored secret as it is before a change, to be put back should the change fail.
+	 *
+	 * @param SecretName $name Secret.
+	 * @return array{Secret|null}|null The secret, or null in the array if none is stored; null if it cannot be read, and so cannot be put back.
+	 */
+	private function readable( SecretName $name ): ?array {
+		try {
+			return [ $this->secrets->get( $name ) ];
+		} catch ( SecretsUndecryptable ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Puts back what a failed save of a server changed. Every part is tried, whatever happens
+	 * to the others: the reason of the failure is what the caller reports, and a database that
+	 * is gone will refuse all of them alike.
+	 *
+	 * @param array<string, mixed>    $settings Values the settings had, by dotted path.
+	 * @param array{Secret|null}|null $password REST password stored before; null to leave it alone.
+	 * @param array{Secret|null}|null $key      Cached key stored before; null to leave it alone.
+	 * @param \Closure|null           $undo     What undoes the companion change.
+	 */
+	private function put_back( array $settings, ?array $password, ?array $key, ?\Closure $undo ): void {
+		$steps = [
+			function () use ( $settings ): void {
+				$this->settings->update( $settings );
+			},
+			function () use ( $password ): void {
+				$this->restore( SecretName::RestPassword, $password );
+			},
+			function () use ( $key ): void {
+				$this->restore( SecretName::MasterKey, $key );
+			},
+			$undo,
+		];
+		foreach ( $steps as $step ) {
+			try {
+				if ( null !== $step ) {
+					$step();
+				}
+			} catch ( \Throwable ) {
+				continue;
+			}
+		}
+	}
+
+	/**
+	 * Stores a secret as readable() found it.
+	 *
+	 * @param SecretName              $name   Secret.
+	 * @param array{Secret|null}|null $before What readable() returned.
+	 */
+	private function restore( SecretName $name, ?array $before ): void {
+		if ( null === $before ) {
+			return;
+		}
+		if ( null === $before[0] ) {
+			$this->secrets->delete( $name );
+		} else {
+			$this->secrets->set( $name, $before[0] );
 		}
 	}
 

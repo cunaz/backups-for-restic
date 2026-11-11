@@ -59,7 +59,6 @@ final class RepositoryRecord {
 	 * shows when it is opened, and what was remembered belongs to the old one.
 	 */
 	public function moved(): void {
-		$this->state->bind( '', $this->clock->now()[0] );
 		$this->write(
 			[
 				'repository.id'             => '',
@@ -67,6 +66,9 @@ final class RepositoryRecord {
 				'repository.format_version' => 1,
 			]
 		);
+		// Last: the settings can be put back should saving the server fail, the remembered
+		// results of the old repository cannot.
+		$this->state->bind( '', $this->clock->now()[0] );
 	}
 
 	/**
