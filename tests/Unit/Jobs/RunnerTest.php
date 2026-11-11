@@ -433,6 +433,28 @@ final class RunnerTest extends TestCase {
 		self::assertTrue( $ended->cancel_requested, 'The request is not hidden.' );
 	}
 
+	public function test_a_cancel_request_when_the_work_ends_at_the_deadline_still_gets_the_result_recorded(): void {
+		$store                      = $this->store();
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$this->script['backing_up'] = [
+			static function ( Job $running ) use ( $store ): bool {
+				// The plugin is being switched off while the snapshot is written: no tick comes after this one.
+				$store->request_cancel( $running );
+				return true;
+			},
+		];
+		$runner                     = $this->runner( $store );
+		// Without time left, every tick runs one step.
+		$runner->tick( 0 );
+		$runner->tick( 0 );
+		self::assertSame( [ 'preflight', 'unlocking' ], $this->calls );
+
+		$runner->tick( 0 );
+
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'recording', 'releasing', 'cleaning_up' ], $this->calls, 'Left before recording, the job would stay active and its lock in the repository.' );
+		self::assertSame( JobState::Succeeded, $store->get( $job->id )?->state );
+	}
+
 	public function test_a_cancel_request_during_a_tick_is_honoured_by_that_tick_and_does_not_touch_its_document(): void {
 		$store                      = $this->store();
 		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );

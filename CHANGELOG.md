@@ -109,6 +109,9 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Deactivating the plugin just as a backup or a check finishes no longer leaves the job
+  active and its lock in the repository: the result is recorded and the job cleaned up in
+  the same request, and recording the result of a check no longer needs the server.
 - The setup wizard sends the CA certificate along with the connection test. Before, the
   test ran without it and a server with a certificate of its own authority could not be
   set up. The test stores nothing; the certificate is kept when the server is saved.

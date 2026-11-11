@@ -73,4 +73,8 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   the job to cancel and no later tick comes, so a job left between its cleanup steps would
   keep its lock in the repository for half an hour and stay active with nobody to finish
   it. The price is a request that can outlast its budget by the time limits of the
-  cleanup's own requests.
+  cleanup's own requests. The same holds when the request finds the work done and only the
+  result left to record: the tick records it and cleans up, also past the deadline.
+  Recording asks the server for nothing it could not do without: a check keeps its counts
+  and first findings with the job when it ends, and the size of the repository is left out
+  when the listing fails.
