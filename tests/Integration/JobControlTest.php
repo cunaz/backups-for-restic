@@ -288,23 +288,6 @@ final class JobControlTest extends TestCase {
 	}
 
 	/**
-	 * Enters the repository password again, as the Settings tab does, and waits for the unlock.
-	 *
-	 * @return array<mixed> The unlock job, or an empty array if none was created.
-	 */
-	private static function unlock_again(): array {
-		[ $status, $answer ] = TestSite::api(
-			'POST',
-			'/repository/connect',
-			[
-				'user_password' => TestSite::ADMIN_PASSWORD,
-				'password'      => TestSite::$repository_password,
-			]
-		);
-		return 201 === $status ? TestSite::wait_for( (string) ( $answer['job']['id'] ?? '' ), 600 ) : [];
-	}
-
-	/**
 	 * The Doctor's finding about the private directory, and whether the admin page is asked to
 	 * let the browser look.
 	 *
