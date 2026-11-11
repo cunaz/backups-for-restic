@@ -44,6 +44,16 @@ final class SiteStateTest extends TestCase {
 		);
 	}
 
+	public function test_another_address_drops_the_results_also_when_nothing_was_recorded_yet(): void {
+		$this->remember_results();
+
+		self::assertTrue( $this->state->bind( '', self::NOW ), 'Saved by a version without the record: the results still are the old repository\'s.' );
+
+		self::assertSame( [], $this->state->get( 'last_backup' ) );
+		self::assertSame( [ 'backup_slot' => 12 ], $this->state->get( 'schedule' ) );
+		self::assertSame( self::NOW, $this->state->get( 'repository' )['since'] ?? null );
+	}
+
 	public function test_the_same_repository_again_changes_nothing(): void {
 		$this->state->bind( 'first', self::NOW );
 		$this->remember_results();

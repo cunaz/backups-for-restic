@@ -70,8 +70,8 @@ final class SiteState {
 	 * than before, the results of the old one are dropped: a damaged repository's alert or the
 	 * last backup's time must not pass for facts about the new one.
 	 *
-	 * State from before this record existed is taken to describe the repository that is named
-	 * first, so an update of the plugin drops nothing.
+	 * State from before this record existed is taken to describe the repository that is
+	 * opened first, so an update of the plugin drops nothing.
 	 *
 	 * @param string $repository Repository ID, or '' while the settings name a repository that was never opened.
 	 * @param int    $now        Unix time.
@@ -83,7 +83,8 @@ final class SiteState {
 		if ( null !== $bound && ( $bound['id'] ?? null ) === $repository ) {
 			return false;
 		}
-		if ( null !== $bound ) {
+		$adopted = null === $bound && '' !== $repository;
+		if ( ! $adopted ) {
 			foreach ( self::OF_THE_REPOSITORY as $key ) {
 				unset( $state[ $key ] );
 			}
@@ -91,10 +92,10 @@ final class SiteState {
 		$state['repository'] = [
 			'id'    => $repository,
 			// Since when: without a backup yet, the stale notice counts from here.
-			'since' => null === $bound ? 0 : $now,
+			'since' => $adopted ? 0 : $now,
 		];
 		$this->options->set( self::OPTION, $state, false );
-		return null !== $bound;
+		return ! $adopted;
 	}
 
 	/**
