@@ -276,6 +276,24 @@ final class RunnerTest extends TestCase {
 		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
 	}
 
+	public function test_a_cancel_request_during_a_step_that_fails_is_not_kept_waiting_for_the_retry(): void {
+		$store                      = $this->store();
+		$job                        = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		$this->script['backing_up'] = [
+			static function ( Job $running ) use ( $store ): bool {
+				$store->request_cancel( $running );
+				throw new BackendException( 'The server did not answer.' );
+			},
+		];
+
+		$this->runner( $store )->tick( 10 );
+
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'releasing', 'cleaning_up' ], $this->calls );
+		$ended = $store->get( $job->id );
+		self::assertSame( JobState::Cancelled, $ended?->state );
+		self::assertSame( 0, $ended->not_before );
+	}
+
 	public function test_a_change_that_no_job_may_see_runs_only_without_a_job_and_may_create_one(): void {
 		$store = $this->store();
 
