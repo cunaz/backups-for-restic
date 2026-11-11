@@ -78,3 +78,7 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   Recording asks the server for nothing it could not do without: a check keeps its counts
   and first findings with the job when it ends, and the size of the repository is left out
   when the listing fails.
+- Since 2026-11-11 notices are handed to the mailer by one request at a time
+  (`notify.lock`, [ADR 0014](0014-file-based-job-store.md)). A request that finds another
+  one sending leaves its notice in the outbox; a later heartbeat tries it, instead of this
+  request at once. How soon that is depends on WP-Cron like every heartbeat.

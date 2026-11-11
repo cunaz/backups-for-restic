@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Storage;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -176,6 +177,26 @@ final class SiteStateTest extends TestCase {
 		self::assertFalse( $state->bind( 'first', self::NOW + 60 ) );
 
 		self::assertSame( $writes, $options->writes );
+	}
+
+	public function test_a_repository_that_could_not_be_bound_is_not_taken_for_bound(): void {
+		$options = new InMemoryOptions();
+		$state   = new SiteState( $options );
+		$state->bind( 'first', self::NOW );
+		$state->set( 'last_backup', [ 'job' => 'a job of the first repository' ] );
+		$options->refuses         = static fn ( string $name ): bool => SiteState::OPTION === $name;
+		$options->refuses_quietly = true;
+
+		try {
+			$state->bind( 'second', self::NOW + 60 );
+			self::fail( 'The results of the first repository would pass for facts about the second.' );
+		} catch ( StorageFailed ) {
+			self::assertSame( 'first', $state->get( 'repository' )['id'] ?? null );
+		}
+
+		// A fact for the dashboard that cannot be stored does not stop the job that found it.
+		$state->set( 'usage', [ 'bytes' => 42 ] );
+		self::assertSame( [], $state->get( 'usage' ) );
 	}
 
 	public function test_a_change_holds_the_lock_from_reading_to_writing(): void {

@@ -109,6 +109,9 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Settings that the database refused to store no longer pass for saved: the request answers
+  with an error, and saving a server puts back what it had changed. WordPress reports such a
+  refusal the same way as an unchanged value, so it went unnoticed before.
 - Saving a server that fails half way, for example because the database refuses a write,
   leaves the site with the server, the REST password and the key it had. Before, the new
   address could stay with the old password or without the certificate that belongs to it.

@@ -41,8 +41,10 @@ interface Options {
 	 * @param string $name     Option name.
 	 * @param mixed  $value    Value; arrays and scalars only.
 	 * @param bool   $autoload Whether WordPress loads the option on every request.
+	 * @return bool False if the options table did not take the value: it holds another one
+	 *              afterwards. A value that was there already counts as written.
 	 */
-	public function set( string $name, mixed $value, bool $autoload ): void;
+	public function set( string $name, mixed $value, bool $autoload ): bool;
 
 	/**
 	 * Deletes an option.

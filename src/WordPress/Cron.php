@@ -216,7 +216,14 @@ final class Cron {
 			// Wrong credentials or no repository: the next job reports that with a hint.
 			$status = AppendOnlyStatus::Unknown;
 		}
-		if ( $guard->detected( $status ) ) {
+		try {
+			$switched = $guard->detected( $status );
+		} catch ( PluginException ) {
+			// The switch could not be stored; the heartbeat goes on, and the next probe finds
+			// the same and tries again.
+			return;
+		}
+		if ( $switched ) {
 			$container->notifier()->retention_switched( $now );
 		}
 	}
