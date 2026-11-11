@@ -475,8 +475,9 @@ final class RestRoutes {
 		try {
 			// The certificate the test just used becomes the saved server's with the server, under
 			// the same lock, and is put back as it was should the save fail: a saved server
-			// never has a certificate that is not its own.
-			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ), fn (): \Closure => $this->keep_candidate_ca( $request ) );
+			// never has a certificate that is not its own. Nor does a server that wp-config.php
+			// names get the certificate of another address that was tested.
+			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ), fn ( string $url ): \Closure => $this->keep_candidate_ca( $request, $url === $report->url ) );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( ValidationFailed $e ) {
@@ -523,10 +524,17 @@ final class RestRoutes {
 	 * certificate.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $tested  Whether the address the jobs will use is the one the request tested. With an
+	 *                                                        address from wp-config.php it may not be; then the stored certificate
+	 *                                                        belongs to that address and stays as it is.
 	 * @return \Closure(): void What puts certificate and setting back as they were.
 	 * @throws PluginException If the certificate cannot be written.
+	 * @throws \Throwable Whatever else stopped the change, after the certificate was put back.
 	 */
-	private function keep_candidate_ca( \WP_REST_Request $request ): \Closure {
+	private function keep_candidate_ca( \WP_REST_Request $request, bool $tested ): \Closure {
+		if ( ! $tested ) {
+			return static function (): void {};
+		}
 		$pem       = $this->candidate_ca( $request );
 		$directory = $this->container->private_dir();
 		$file      = $directory->path . '/ca.pem';
@@ -545,13 +553,23 @@ final class RestRoutes {
 			}
 			$store->update( [ 'repository.ca_certificate' => $setting ] );
 		};
-		if ( is_string( $pem ) ) {
-			$directory->ensure();
-			Files::write_atomic( $file, $pem );
-			$store->update( [ 'repository.ca_certificate' => 'uploaded' ] );
-		} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $setting ) {
-			wp_delete_file( $file );
-			$store->update( [ 'repository.ca_certificate' => 'none' ] );
+		try {
+			if ( is_string( $pem ) ) {
+				$directory->ensure();
+				Files::write_atomic( $file, $pem );
+				$store->update( [ 'repository.ca_certificate' => 'uploaded' ] );
+			} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $setting ) {
+				wp_delete_file( $file );
+				$store->update( [ 'repository.ca_certificate' => 'none' ] );
+			}
+		} catch ( \Throwable $failure ) {
+			// Nobody else can: the caller gets the undo only from a change that was made.
+			try {
+				$undo();
+			} catch ( \Throwable ) {
+				throw $failure;
+			}
+			throw $failure;
 		}
 		return $undo;
 	}

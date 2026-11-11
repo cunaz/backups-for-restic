@@ -32,9 +32,19 @@ final class InMemoryOptions implements Options {
 	/** What set() throws instead of writing, as a database that went away does. */
 	public ?\Throwable $failure = null;
 
+	/**
+	 * Decides for each write whether the database refuses it, from the name of the option.
+	 *
+	 * @var (\Closure(string): bool)|null
+	 */
+	public ?\Closure $refuses = null;
+
 	public function set( string $name, mixed $value, bool $autoload ): void {
 		if ( null !== $this->failure ) {
 			throw $this->failure;
+		}
+		if ( null !== $this->refuses && ( $this->refuses )( $name ) ) {
+			throw new \RuntimeException( 'The database refused the write.' );
 		}
 		++$this->writes;
 		$this->values[ $name ]   = $value;

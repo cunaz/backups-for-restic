@@ -436,6 +436,78 @@ final class SetupTest extends TestCase {
 		}
 	}
 
+	/**
+	 * Lets the database refuse one write: the one with the given number among the writes of an option.
+	 */
+	private function refuse_write( string $option, int $number ): void {
+		$count                  = 0;
+		$this->options->refuses = static function ( string $name ) use ( $option, $number, &$count ): bool {
+			return $name === $option && ++$count === $number;
+		};
+	}
+
+	/**
+	 * A site that backs up to a repository: server, REST password, cached key and repository ID.
+	 */
+	private function backing_up(): void {
+		$this->connected();
+		( new SettingsStore( $this->options ) )->update( [ 'repository.id' => str_repeat( 'ab', 32 ) ] );
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"of the repository in use"}' ) );
+		( new SiteState( $this->options ) )->bind( str_repeat( 'ab', 32 ), self::NOW - 86400 );
+		( new SiteState( $this->options ) )->set( 'last_backup', [ 'job' => 'last night' ] );
+	}
+
+	/**
+	 * Asserts that the site still backs up to the repository of backing_up().
+	 */
+	private function assert_unchanged( string $why ): void {
+		$settings = ( new SettingsStore( $this->options ) )->load();
+		self::assertSame(
+			[ self::URL, 'backup', str_repeat( 'ab', 32 ) ],
+			[ $settings->string( 'repository.url' ), $settings->string( 'repository.rest_username' ), $settings->string( 'repository.id' ) ],
+			$why
+		);
+		self::assertSame( 'stored REST password', $this->stored->get( SecretName::RestPassword )?->reveal(), $why );
+		self::assertSame( '{"key":"of the repository in use"}', $this->stored->get( SecretName::MasterKey )?->reveal(), $why );
+		self::assertSame( [ 'job' => 'last night' ], ( new SiteState( $this->options ) )->get( 'last_backup' ), $why );
+	}
+
+	/**
+	 * @return iterable<string, array{string, int}> Option whose write is refused, and which of its writes.
+	 */
+	public static function refused_writes(): iterable {
+		yield 'the settings with the new address' => [ SettingsStore::OPTION, 1 ];
+		yield 'the settings without the repository ID' => [ SettingsStore::OPTION, 2 ];
+		yield 'the remembered results' => [ SiteState::OPTION, 1 ];
+	}
+
+	#[DataProvider( 'refused_writes' )]
+	public function test_a_server_whose_save_fails_half_way_leaves_the_site_with_the_server_it_had( string $option, int $number ): void {
+		$this->backing_up();
+		$this->refuse_write( $option, $number );
+
+		try {
+			$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'someone-else', new Secret( 'password of the new server' ) );
+			self::fail( 'The database refused a write.' );
+		} catch ( \RuntimeException ) {
+			$this->assert_unchanged( 'The new address with the old password, or the old address without its key, would end the backups.' );
+		}
+	}
+
+	public function test_what_belongs_to_a_server_learns_which_address_the_jobs_will_use(): void {
+		$this->connected();
+		$seen = [];
+		$with = static function ( string $url ) use ( &$seen ): \Closure {
+			$seen[] = $url;
+			return static function (): void {};
+		};
+
+		$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'backup', new Secret( 'password' ), $with );
+		$this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_URL' => 'https://fixed.example.net/' ] )->save_server( 'rest-server', self::report( 'https://tested.example.net/' ), 'backup', new Secret( 'password' ), $with );
+
+		self::assertSame( [ 'https://new.example.net/', 'https://fixed.example.net/' ], $seen, 'The address from wp-config.php stays in force: a certificate of the tested one is not its own.' );
+	}
+
 	public function test_what_belongs_to_a_server_is_left_alone_while_a_job_is_active(): void {
 		$this->connected();
 		$this->jobs()->create( JobType::Backup, 'schedule', self::NOW );

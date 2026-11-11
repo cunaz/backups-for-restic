@@ -41,7 +41,8 @@ Keep this kit away from the website, for example in a password manager.
 
 For a rest-server with its own certificate authority, the kit also contains the CA
 certificate: save it as `ca.pem` and add `--cacert ca.pem` to every restic command, as the
-kit's recipe does.
+kit's recipe does. The kit carries the certificate of the saved server; one that was only
+used for a connection test is not in it until that server is saved.
 
 | Lost item | Recoverable? | How |
 | --- | --- | --- |
