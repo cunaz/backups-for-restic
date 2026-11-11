@@ -127,7 +127,18 @@ final class Runner {
 			return null;
 		}
 		$this->cancel( $job->id, $context );
-		$this->tick( $budget );
+		// A tick that is about to end may have looked for the request a moment before it was
+		// recorded. For that case the lock is asked for again for a second: either that tick
+		// is gone by then and this call cleans up, or it is in a step and finds the request
+		// before its next one.
+		$patience = microtime( true ) + min( $budget, 1.0 );
+		do {
+			$report = $this->tick( $budget );
+			if ( 'busy' !== $report->status || null !== $report->job ) {
+				break;
+			}
+			usleep( 100000 );
+		} while ( microtime( true ) < $patience );
 		return $this->store->get( $job->id ) ?? $job;
 	}
 
@@ -260,9 +271,10 @@ final class Runner {
 					$job->outcome ??= JobState::Failed;
 					$job->error   ??= $error;
 					$done           = true;
-				} elseif ( null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
-					// Asked to cancel while the step failed: no retry is waited for, the cleanup
-					// starts now. After a deactivation no later tick would come to start it.
+				} elseif ( $error->retryable && null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
+					// Asked to cancel while the step failed with what would be tried again: no
+					// retry is waited for, the cleanup starts now. After a deactivation no later
+					// tick would come to start it. An error that ends the job stays the outcome.
 					$job->cancel_requested = true;
 					continue;
 				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES ) {
