@@ -880,48 +880,29 @@
 			borgbase.addEventListener( 'change', sync );
 			own.addEventListener( 'change', sync );
 			sync();
+			// The certificate travels with the request. A test uses it for that test only; it
+			// becomes the server's certificate when the server is saved.
 			const data = function () {
-				return { server: state.server, url: url.value, username: username.value, password: password.value };
-			};
-			// The certificate has to be there before the first request to the server: the
-			// connection test of a server with a certificate of its own authority fails without it.
-			// A certificate that this wizard uploaded is for the server it was entered with. For
-			// another choice it is taken back: BorgBase's certificate would not verify against it.
-			let uploaded = false;
-			const upload = function () {
-				if ( own.checked && ca.value.trim() ) {
-					return api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ).then( function () {
-						uploaded = true;
-					} );
-				}
-				if ( uploaded ) {
-					return api( '/repository/ca-certificate', { method: 'DELETE' } ).then( function () {
-						uploaded = false;
-					} );
-				}
-				return Promise.resolve();
+				return { server: state.server, url: url.value, username: username.value, password: password.value, ca_certificate: own.checked ? ca.value.trim() : '' };
 			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
-				upload()
-					.then( function () {
-						return api( '/repository/save', { method: 'POST', data: data() } );
-					} )
+				test.disabled = true;
+				api( '/repository/save', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						state.report = response.report;
 						stepPassword();
 					} )
 					.catch( function ( error ) {
 						save.disabled = false;
+						test.disabled = false;
 						replace( result, [ notice( 'error', errorText( error ) ) ] );
 					} );
 			}, true );
 			const test = button( __( 'Test connection', 'backups-for-restic' ), function () {
 				test.disabled = true;
-				upload()
-					.then( function () {
-						return api( '/repository/test', { method: 'POST', data: data() } );
-					} )
+				save.disabled = true;
+				api( '/repository/test', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						const report = response.report;
 						const parts = [ report.exists ? __( 'Connected. A repository exists at this address.', 'backups-for-restic' ) : __( 'Connected. The address is empty; a new repository will be created.', 'backups-for-restic' ) ];
@@ -937,6 +918,7 @@
 					} )
 					.finally( function () {
 						test.disabled = false;
+						save.disabled = false;
 					} );
 			}, true );
 			show( 1, [

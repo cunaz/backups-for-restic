@@ -293,10 +293,11 @@ final class Container {
 	/**
 	 * Connection tester for the wizard.
 	 *
+	 * @param HttpClient|null $http Client to test with; null for the one the jobs use, with the uploaded CA certificate if any.
 	 * @return ConnectionTester Tester.
 	 */
-	public function tester(): ConnectionTester {
-		return new ConnectionTester( $this->http(), $this->random(), $this->user_agent() );
+	public function tester( ?HttpClient $http = null ): ConnectionTester {
+		return new ConnectionTester( $http ?? $this->http(), $this->random(), $this->user_agent() );
 	}
 
 	/**
