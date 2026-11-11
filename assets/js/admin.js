@@ -918,8 +918,13 @@
 				if ( ! probe.url ) {
 					return null;
 				}
+				// A server that accepts the request and never answers must not hold the page up.
+				const patience = new window.AbortController();
+				const timer = window.setTimeout( function () {
+					patience.abort();
+				}, 10000 );
 				return window
-					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual' } )
+					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal } )
 					.then( function ( answer ) {
 						return answer.text().then( function ( body ) {
 							return { status: answer.status, body: body.slice( 0, 1024 ) };
@@ -929,6 +934,8 @@
 						return { status: 0, body: '' };
 					} )
 					.then( function ( seen ) {
+						window.clearTimeout( timer );
+						seen.probe = probe.probe;
 						return api( '/environment/probe/report', { method: 'POST', data: seen } );
 					} );
 			} )

@@ -208,7 +208,7 @@ final class RestRoutes {
 	/**
 	 * Writes a probe file into the private directory for the browser to request (ADR 0007).
 	 *
-	 * @return \WP_REST_Response|\WP_Error Response with the URL, or null as URL if the directory has none.
+	 * @return \WP_REST_Response|\WP_Error Response with the probe's name and URL, or null as URL if the directory has none.
 	 */
 	public function begin_probe(): \WP_REST_Response|\WP_Error {
 		try {
@@ -216,7 +216,13 @@ final class RestRoutes {
 			if ( null === $exposure->probe_url( 'x' ) ) {
 				return $this->respond( [ 'url' => null ] );
 			}
-			return $this->respond( [ 'url' => $exposure->probe_url( $this->container->browser_probe()->begin() ) ] );
+			$probe = $this->container->browser_probe()->begin();
+			return $this->respond(
+				[
+					'url'   => $exposure->probe_url( $probe ),
+					'probe' => $probe,
+				]
+			);
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
@@ -225,14 +231,14 @@ final class RestRoutes {
 	/**
 	 * Takes what the browser got for the probe file.
 	 *
-	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the HTTP status (0 if the request failed) and the body.
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the probe's name, the HTTP status (0 if the request failed) and the body.
 	 * @return \WP_REST_Response Response: exposed is true, false, or null if the report says nothing.
 	 */
 	public function report_probe( \WP_REST_Request $request ): \WP_REST_Response {
 		$status = $request->get_param( 'status' );
 		// The token has 32 characters; a page that serves the file starts with it.
 		$body = substr( self::text( $request, 'body' ), 0, 4096 );
-		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( is_numeric( $status ) ? (int) $status : 0, $body ) ] );
+		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( self::text( $request, 'probe' ), is_numeric( $status ) ? (int) $status : 0, $body ) ] );
 	}
 
 	/**

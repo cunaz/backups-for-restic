@@ -277,6 +277,7 @@ final class JobControlTest extends TestCase {
 			'POST',
 			'/environment/probe/report',
 			[
+				'probe'  => $probe['probe'] ?? '',
 				'status' => $seen,
 				'body'   => substr( $body, 0, 1024 ),
 			]
@@ -330,6 +331,41 @@ final class JobControlTest extends TestCase {
 			TestSite::api( 'GET', '/environment&fresh=1' );
 		}
 		self::assertSame( [ 'recommended', 'protected_inside_web_root', false ], self::private_directory( false ), 'With requests to itself the site needs no browser.' );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_repository_requests_verify_the_host_name_whatever_the_sites_filters_say(): void {
+		TestSite::idle( 600 );
+		// The server's certificate names 127.0.0.1 only. Under the name localhost the same
+		// server answers, with a certificate that is trusted but is not for that name.
+		$connection = TestSite::connection();
+		$other      = str_replace( '//127.0.0.1:', '//localhost:', $connection['url'] );
+		self::assertNotSame( $connection['url'], $other );
+		$handle = curl_init( $other );
+		self::assertNotFalse( $handle );
+		// The name check is off for this one request of the test itself: it shows that the
+		// server is reached under this name and that only the name stands in the way.
+		curl_setopt_array(
+			$handle,
+			[
+				CURLOPT_CAINFO         => TestSite::server()->certificate,
+				CURLOPT_SSL_VERIFYHOST => 0,
+				CURLOPT_NOBODY         => true,
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_TIMEOUT        => 10,
+			]
+		);
+		curl_exec( $handle );
+		self::assertSame( 0, curl_errno( $handle ), 'The server is not reached as localhost: ' . curl_error( $handle ) );
+
+		try {
+			TestSite::hostile_filters( true );
+			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', [ 'url' => $other ] + $connection );
+			self::assertSame( 502, $status, 'A certificate for another name was accepted: ' . $raw );
+			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
+		} finally {
+			TestSite::hostile_filters( false );
+		}
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
