@@ -180,8 +180,13 @@ final class BackupStepsTest extends TestCase {
 		$this->repository();
 		$this->unlock();
 		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'entered before the security keys changed' ) );
+		$key           = $this->secrets->get( SecretName::MasterKey );
 		$this->secrets = new EncryptedOptionStore( $this->options, new Secret( 'other salts' ), new SystemRandom() );
-		$job           = new Job( '20270115T030100Z-abcdef', JobType::Unlock, 'setup', 1_800_000_000 );
+		// Everything else can be read: only the entered password stands in the way.
+		$this->secrets->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
+		self::assertNotNull( $key );
+		$this->secrets->set( SecretName::MasterKey, $key );
+		$job = new Job( '20270115T030100Z-abcdef', JobType::Unlock, 'setup', 1_800_000_000 );
 
 		$this->expectException( SecretsUndecryptable::class );
 
