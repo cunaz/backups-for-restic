@@ -248,6 +248,57 @@ final class JobControlTest extends TestCase {
 		}
 	}
 
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_changed_salts_are_repaired_by_entering_the_two_passwords_again(): void {
+		TestSite::idle( 600 );
+		$before = TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] );
+
+		// Somebody replaces a security key in wp-config.php: nothing that is stored decrypts any more.
+		$config   = TestSite::root() . '/wp-config.php';
+		$original = (string) file_get_contents( $config );
+		$changed  = preg_replace( "/(define\\(\\s*'NONCE_SALT',\\s*')[^']*('\\s*\\);)/", '${1}' . bin2hex( random_bytes( 32 ) ) . '${2}', $original, 1, $count );
+		self::assertSame( 1, $count );
+		file_put_contents( $config, (string) $changed );
+		try {
+			// The web server's opcode cache looks at the file again after two seconds.
+			sleep( 3 );
+
+			[ , $environment, $raw ] = TestSite::api( 'GET', '/environment' );
+			$secrets                 = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'secrets' === ( $check['id'] ?? null ) ) );
+			self::assertSame( [ 'critical', 'undecryptable' ], [ $secrets[0]['status'] ?? null, $secrets[0]['code'] ?? null ], $raw );
+			$job = TestSite::wait_for( TestSite::start(), 300 );
+			self::assertSame( [ 'failed', 'secrets_undecryptable' ], [ $job['state'], $job['error']['code'] ?? null ], (string) json_encode( $job ) );
+
+			// What the forms of the Settings tab send: the REST password first, then the repository password.
+			[ $status, , $raw ] = TestSite::api( 'POST', '/repository/save', TestSite::connection() );
+			self::assertSame( 200, $status, $raw );
+			$unlock = self::unlock_again();
+			self::assertSame( 'succeeded', $unlock['state'] ?? null, (string) json_encode( $unlock ) );
+
+			[ , $environment, $raw ] = TestSite::api( 'GET', '/environment' );
+			$secrets                 = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && 'secrets' === ( $check['id'] ?? null ) ) );
+			self::assertSame( 'good', $secrets[0]['status'] ?? null, $raw );
+			$backup = TestSite::wait_for( TestSite::start(), 1800 );
+			self::assertSame( 'succeeded', $backup['state'], (string) json_encode( $backup ) );
+			TestSite::idle( 600 );
+			self::assertCount( count( (array) json_decode( $before, true ) ) + 1, (array) json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true ), 'The repository is the same, with one snapshot more.' );
+		} catch ( \Throwable $failure ) {
+			// The later tests need a site whose passwords can be read: the old key back, and
+			// both passwords stored once more under it, whatever this test got done.
+			file_put_contents( $config, $original );
+			sleep( 3 );
+			try {
+				TestSite::idle( 600 );
+				TestSite::api( 'POST', '/repository/save', TestSite::connection() );
+				self::unlock_again();
+			} catch ( \Throwable $second ) {
+				// The failure that counts is the first one; it is thrown below.
+				fwrite( STDERR, 'The test site could not be repaired: ' . $second->getMessage() . "\n" );
+			}
+			throw $failure;
+		}
+	}
+
 	/**
 	 * The Doctor's finding about the private directory, and whether the admin page is asked to
 	 * let the browser look.
