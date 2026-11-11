@@ -15,16 +15,21 @@ use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
+use BackupsForRestic\Exception\UnsupportedRepository;
+use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Storage\Files;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -107,27 +112,46 @@ final class BackupSteps implements StepProvider {
 	}
 
 	/**
-	 * Gets the master key: from the cache, or with the resumable key derivation.
+	 * Gets the master key: from the cache, or with the resumable key derivation. Every job
+	 * comes through here, so this is also where the plugin records which repository it works
+	 * with, and where a repository that it cannot read is refused (ADR 0019).
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool True once the key is cached.
+	 * @throws UnsupportedRepository If the repository has format version 2 and PHP lacks the zstd extension.
 	 */
 	public function unlock( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services;
-		if ( null !== $services->access->open_cached() ) {
-			return true;
+		// A password that somebody entered is what the unlock job is there to try; a cached key
+		// would say nothing about it. Every other job works with what is confirmed.
+		$candidate  = JobType::Unlock === $job->type ? $services->access->candidate_password() : null;
+		$repository = null === $candidate ? $services->access->open_cached() : null;
+		if ( null === $repository ) {
+			$unlock = new KeyUnlock( $services->access->backend(), $candidate ?? $services->access->password(), $services->unlock_dir( $job ), $services->random );
+			$key    = $unlock->run( $deadline );
+			if ( null === $key ) {
+				$job->progress['unlock_percent'] = (int) round( 100 * $unlock->progress() );
+				return false;
+			}
+			$repository = $services->access->open( $key );
+			if ( null !== $candidate ) {
+				// The password before the key: a key without the password it came from could not
+				// be derived again once the cache is lost.
+				$services->access->confirm_password( $candidate );
+			}
+			$services->access->cache_master_key( $repository->config(), $key );
+			$log->write( 'info', 'Repository unlocked.', [ 'format' => $repository->config()->version ] );
 		}
-		$unlock = new KeyUnlock( $services->access->backend(), $services->access->password(), $services->unlock_dir( $job ), $services->random );
-		$key    = $unlock->run( $deadline );
-		if ( null === $key ) {
-			$job->progress['unlock_percent'] = (int) round( 100 * $unlock->progress() );
-			return false;
+		$config = $repository->config();
+		// Recorded before the refusal: the Doctor then names the missing extension.
+		if ( null !== $services->opened ) {
+			( $services->opened )( $config );
 		}
-		$repository = $services->access->open( $key );
-		$services->access->cache_master_key( $repository->config(), $key );
-		$log->write( 'info', 'Repository unlocked.', [ 'format' => $repository->config()->version ] );
+		if ( $config->version >= 2 && ! Compression::available() ) {
+			UnsupportedRepository::raise( 'The repository has format version 2, which needs the zstd PHP extension.', [ 'version' => $config->version ] );
+		}
 		return true;
 	}
 
@@ -175,6 +199,13 @@ final class BackupSteps implements StepProvider {
 				]
 			);
 		}
+		// How much the last backup of this repository went through: the measure for a
+		// progress bar and an estimate, since this backup knows its own total only at the end.
+		$last     = $services->state->get( 'last_backup' )['progress'] ?? null;
+		$expected = Decoded::int( is_array( $last ) ? ( $last['total_bytes_processed'] ?? null ) : null );
+		if ( $expected > 0 ) {
+			$job->progress['expected_bytes'] = $expected;
+		}
 		foreach ( array_slice( $run->warnings(), count( $job->warnings ) ) as $warning ) {
 			$job->warn( $warning );
 		}
@@ -204,7 +235,50 @@ final class BackupSteps implements StepProvider {
 				'warnings' => count( $job->warnings ),
 			]
 		);
+		$this->measure( $job, $log );
 		return true;
+	}
+
+	/**
+	 * Remembers how much the repository holds, for the dashboard: the number and total size of
+	 * its packs, from one listing. A listing that fails or names no sizes changes nothing; the
+	 * job that asked has done its work either way.
+	 *
+	 * A job asks once. Should the listing take so long that the host ends the request, the
+	 * next tick repeats the step that asked, and without this it would ask again, and again
+	 * with every tick: a backup that is done could not finish over a number on the dashboard.
+	 *
+	 * @param Job      $job Job that asks.
+	 * @param EventLog $log Log.
+	 */
+	public function measure( Job $job, EventLog $log ): void {
+		if ( ( $this->services->state->get( 'usage_asked' )['job'] ?? null ) === $job->id ) {
+			$log->write( 'warning', 'The size of the repository was not read: an earlier attempt of this job did not come back.' );
+			return;
+		}
+		$this->services->state->set( 'usage_asked', [ 'job' => $job->id ] );
+		try {
+			$repository = $this->services->access->open_cached();
+			if ( null === $repository ) {
+				return;
+			}
+			$sizes = $repository->backend()->list( ObjectType::Data );
+		} catch ( PluginException $e ) {
+			$log->write( 'warning', 'The size of the repository could not be read.', [ 'code' => JobError::from_throwable( $e )->code ] );
+			return;
+		}
+		if ( [] !== $sizes && min( $sizes ) < 0 ) {
+			// A server that lists names only.
+			return;
+		}
+		$this->services->state->set(
+			'usage',
+			[
+				'bytes' => array_sum( $sizes ),
+				'packs' => count( $sizes ),
+				'at'    => $this->services->clock->now()[0],
+			]
+		);
 	}
 
 	/**
@@ -241,6 +315,9 @@ final class BackupSteps implements StepProvider {
 		$services = $this->services;
 		Files::remove_tree( $services->unlock_dir( $job ) );
 		Files::remove_tree( $services->work_dir( $job ) );
+		// A password that did not open the repository, or whose unlock was cancelled; after any
+		// other job, one that an unlock which never ended left behind.
+		$services->access->forget_candidate_password();
 		$services->jobs->prune( $services->settings->int( 'advanced.keep_jobs' ) );
 		// The repository in use is the one whose key is cached. Without a cached key nothing is
 		// removed: better an old cache too many than the current one deleted after every job.

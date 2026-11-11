@@ -31,6 +31,9 @@ final class Cron {
 	public const string HEARTBEAT = 'backups_for_restic_heartbeat';
 	public const string INTERVAL  = 'backups_for_restic_five_minutes';
 
+	/** Seconds the deactivation may spend on ending the active job. */
+	private const float STOP_SECONDS = 10.0;
+
 	/**
 	 * Registers the hooks.
 	 *
@@ -82,6 +85,23 @@ final class Cron {
 	public static function unschedule(): void {
 		wp_clear_scheduled_hook( self::HEARTBEAT );
 		wp_clear_scheduled_hook( self::TICK );
+	}
+
+	/**
+	 * Ends the active job when the plugin is deactivated: no tick will come to finish it, and
+	 * its lock would keep other clients of the repository waiting until it is stale. Nothing
+	 * is chained. What does not get done in this request is done by the first tick after the
+	 * plugin is activated again.
+	 *
+	 * @param Container $container Services.
+	 */
+	public static function stop( Container $container ): void {
+		if ( ! is_dir( $container->private_dir()->subdirectory( 'jobs' ) ) ) {
+			// Never set up: no job, and no reason to create the private directory now.
+			return;
+		}
+		ignore_user_abort( true );
+		$container->runner()->stop( $container->tick_budget( self::STOP_SECONDS ), [ 'reason' => 'deactivation' ] );
 	}
 
 	/**
@@ -196,7 +216,14 @@ final class Cron {
 			// Wrong credentials or no repository: the next job reports that with a hint.
 			$status = AppendOnlyStatus::Unknown;
 		}
-		if ( $guard->detected( $status ) ) {
+		try {
+			$switched = $guard->detected( $status );
+		} catch ( PluginException ) {
+			// The switch could not be stored; the heartbeat goes on, and the next probe finds
+			// the same and tries again.
+			return;
+		}
+		if ( $switched ) {
 			$container->notifier()->retention_switched( $now );
 		}
 	}
@@ -221,8 +248,7 @@ final class Cron {
 		if ( null !== $slot && $slot > $handled ) {
 			// The first slot after setup is only recorded: the wizard ran the first backup.
 			if ( 0 === $handled || self::start( $container, JobType::Backup, 'schedule', $now ) ) {
-				$schedule['backup_slot'] = $slot;
-				$state->set( 'schedule', $schedule );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ 'backup_slot' => max( $slot, Decoded::int( $stored['backup_slot'] ?? null ) ) ] + $stored );
 			}
 			return;
 		}
@@ -230,8 +256,7 @@ final class Cron {
 		$last_backup = Decoded::string( $state->get( 'last_backup' )['job'] ?? null );
 		if ( $plugin && $settings->bool( 'retention.run_forget_after_backup' ) && '' !== $last_backup && Decoded::string( $schedule['forget_for'] ?? null ) !== $last_backup ) {
 			if ( self::start( $container, JobType::Forget, 'after_backup', $now ) ) {
-				$schedule['forget_for'] = $last_backup;
-				$state->set( 'schedule', $schedule );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ 'forget_for' => $last_backup ] + $stored );
 			}
 			return;
 		}
@@ -247,8 +272,7 @@ final class Cron {
 				continue;
 			}
 			if ( 0 === $handled || self::start( $container, $type, 'schedule', $now ) ) {
-				$schedule[ $key ] = $slot;
-				$state->set( 'schedule', $schedule );
+				$state->update( 'schedule', static fn ( array $stored ): array => [ $key => max( $slot, Decoded::int( $stored[ $key ] ?? null ) ) ] + $stored );
 			}
 			return;
 		}

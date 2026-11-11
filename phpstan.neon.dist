@@ -17,6 +17,8 @@ parameters:
 rules:
     # docs/02-architecture.md §3: Support, Crypto, Format, Backend, Engine call no WordPress code.
     - BackupsForRestic\Tests\PHPStan\WordPressFreeCoreRule
+    # docs/02-architecture.md §3: Engine and the layers below it use only what lies below them.
+    - BackupsForRestic\Tests\PHPStan\EngineDependencyRule
     # docs/03-security-and-threat-model.md §5.3: Secret::reveal() only at reviewed places.
     - BackupsForRestic\Tests\PHPStan\SecretRevealRule
 

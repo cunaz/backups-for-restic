@@ -37,7 +37,25 @@ final class SecretStoresTest extends TestCase {
 		self::assertStringNotContainsString( 'repository password', $raw );
 		self::assertStringNotContainsString( 'rest password', $raw );
 		self::assertMatchesRegularExpression( '/^v1\.[A-Za-z0-9_-]{32}\.[A-Za-z0-9_-]+$/', $options->values[ EncryptedOptionStore::OPTION ]['secrets']['repository_password'] );
-		self::assertTrue( $store->readable() );
+	}
+
+	public function test_storing_a_secret_keeps_one_that_another_request_stored_since_this_one_read(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$tick                   = new EncryptedOptionStore( $options, new Secret( 'salts' ), new SystemRandom() );
+		$tick->set( SecretName::RepositoryPassword, new Secret( 'repository password' ) );
+		// While the tick derives the key, the administrator saves a new REST password.
+		$admin         = new InMemoryOptions();
+		$admin->values = $options->values;
+		( new EncryptedOptionStore( $admin, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RestPassword, new Secret( 'rest password' ) );
+		$options->values = $admin->values;
+
+		$tick->set( SecretName::MasterKey, new Secret( '{"key":"derived"}' ) );
+
+		$after         = new EncryptedOptionStore( $admin, new Secret( 'salts' ), new SystemRandom() );
+		$admin->values = $options->values;
+		self::assertSame( 'rest password', $after->get( SecretName::RestPassword )?->reveal() );
+		self::assertSame( '{"key":"derived"}', $after->get( SecretName::MasterKey )?->reveal() );
 	}
 
 	/**
@@ -57,14 +75,19 @@ final class SecretStoresTest extends TestCase {
 				return $this->value;
 			}
 
-			public function set( string $name, mixed $value, bool $autoload ): void {
+			public function fresh( string $name ): mixed {
+				return $this->value;
+			}
+
+			public function set( string $name, mixed $value, bool $autoload ): bool {
 				if ( $this->read_only ) {
-					return;
+					return false;
 				}
 				if ( $this->truncating && is_array( $value ) && is_array( $value['secrets'] ?? null ) ) {
 					$value['secrets'] = array_map( static fn ( string $box ): string => substr( $box, 0, -4 ), $value['secrets'] );
 				}
 				$this->value = $value;
+				return true;
 			}
 
 			public function delete( string $name ): void {
@@ -107,7 +130,6 @@ final class SecretStoresTest extends TestCase {
 		$this->store( $options )->set( SecretName::MasterKey, new Secret( '{"key":1}' ) );
 
 		$rotated = $this->store( $options, 'new salts' );
-		self::assertFalse( $rotated->readable() );
 		$this->expectException( SecretsUndecryptable::class );
 		$rotated->get( SecretName::MasterKey );
 	}
@@ -140,7 +162,8 @@ final class SecretStoresTest extends TestCase {
 		$options = new InMemoryOptions();
 		$this->store( $options, '' )->set( SecretName::RestPassword, new Secret( 'x' ) );
 		self::assertSame( 'x', $this->store( $options, '' )->get( SecretName::RestPassword )?->reveal() );
-		self::assertFalse( $this->store( $options )->readable() );
+		$this->expectException( SecretsUndecryptable::class );
+		$this->store( $options )->get( SecretName::RestPassword );
 	}
 
 	public function test_constants_win_and_are_read_only(): void {

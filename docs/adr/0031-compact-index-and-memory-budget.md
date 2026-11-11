@@ -72,10 +72,12 @@ ends the same way.
 ## Consequences
 - Measured after the change: 33 MB for 500 000 blobs, 61 MB for a million, 115 MB for two
   million; loading from the cache peaks 4 MB above that and takes 0.5, 0.9 and 1.7 seconds.
-  Under 128 MB a backup now works up to roughly a million blobs, with small packs near that
-  end, where it failed at 300 000 before.
-- Above that a job fails on its first tick with a message an administrator can act on,
-  instead of dying in every tick.
+  The [repeat measurement](../benchmarks/2026-11-12-index-memory.md) agrees on memory use.
+  With a WordPress baseline of 30 to 40 MiB, the estimated capacity under 128 MiB is roughly
+  a million blobs with small packs. Full-job measurements at that count remain open.
+- An accumulated index beyond the budget ends the job with a message an administrator can
+  act on. Raw index JSON and the entries of one pack are still decoded before the budget
+  is checked, so a large individual object can exhaust memory before that check.
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.
 - NFR-03 is worded with these numbers. They hold for backups. Prune and check still decode

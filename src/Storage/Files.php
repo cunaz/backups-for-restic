@@ -54,39 +54,39 @@ final class Files {
 		if ( false === $handle ) {
 			StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
 		}
-		chmod( $temporary, 0600 );
-		$written = 0;
-		$fits    = true;
-		$failed  = false;
+		$complete = false;
 		try {
+			if ( ! chmod( $temporary, 0600 ) ) {
+				StorageFailed::raise( 'A temporary file could not be made private.', [ 'file' => basename( $file ) ] );
+			}
+			$written = 0;
 			foreach ( $pieces as $piece ) {
 				$written += strlen( $piece );
 				if ( $written > $limit ) {
-					$fits = false;
-					break;
+					return false;
 				}
 				if ( strlen( $piece ) !== fwrite( $handle, $piece ) ) {
-					$failed = true;
-					break;
+					StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
 				}
 			}
+			$closed = fclose( $handle );
+			$handle = null;
+			if ( ! $closed ) {
+				StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
+			}
+			if ( ! rename( $temporary, $file ) ) {
+				StorageFailed::raise( 'A file in the private directory could not be replaced.', [ 'file' => basename( $file ) ] );
+			}
+			$complete = true;
+			return true;
 		} finally {
-			$failed = ! fclose( $handle ) || $failed;
-			if ( $failed || ! $fits ) {
+			if ( is_resource( $handle ) ) {
+				fclose( $handle );
+			}
+			if ( ! $complete ) {
 				unlink( $temporary );
 			}
 		}
-		if ( $failed ) {
-			StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
-		}
-		if ( ! $fits ) {
-			return false;
-		}
-		if ( ! rename( $temporary, $file ) ) {
-			unlink( $temporary );
-			StorageFailed::raise( 'A file in the private directory could not be replaced.', [ 'file' => basename( $file ) ] );
-		}
-		return true;
 	}
 
 	/**

@@ -8,11 +8,17 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Connection\ConnectionReport;
 use BackupsForRestic\Connection\RepositoryAccess;
+use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Connection\Setup;
 use BackupsForRestic\Crypto\SystemRandom;
+use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Exception\AlreadyExists;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\Unauthorized;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
@@ -22,8 +28,11 @@ use BackupsForRestic\Secrets\EncryptedOptionStore;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Redactor;
+use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
+use BackupsForRestic\Tests\Support\InMemoryRestServer;
 use BackupsForRestic\Tests\Support\TempDir;
 
 /**
@@ -63,7 +72,28 @@ final class SetupTest extends TestCase {
 				self::fail( 'Nothing here may reach the repository server.' );
 			},
 			new SystemRandom(),
-			new Identity( 'example.com', 'www-data' )
+			new Identity( 'example.com', 'www-data' ),
+			new RepositoryRecord( new SettingsStore( $this->options, $constants ), new SiteState( $this->options ), new FrozenClock( self::NOW ) ),
+			$this->jobs()
+		);
+	}
+
+	/**
+	 * A wizard whose repository server is in memory, with the server saved in the settings.
+	 *
+	 * @param array<string, string> $constants Secrets defined in wp-config.php, by constant name.
+	 */
+	private function wizard_with( InMemoryRestServer $server, array $constants = [] ): Setup {
+		( new SettingsStore( $this->options ) )->update(
+			[
+				'repository.server' => 'rest-server',
+				'repository.url'    => self::URL,
+			]
+		);
+		$secrets = new ConstantOverrideStore( $this->stored, $constants );
+		return $this->wizard(
+			$constants,
+			fn (): RepositoryAccess => new RepositoryAccess( ( new SettingsStore( $this->options ) )->load(), $secrets, $server, new SystemRandom(), 'backups-for-restic-tests' )
 		);
 	}
 
@@ -201,7 +231,9 @@ final class SetupTest extends TestCase {
 			new EncryptedOptionStore( $this->options, new Secret( 'other salts' ), new SystemRandom() ),
 			static fn () => self::fail( 'Nothing here may reach the repository server.' ),
 			new SystemRandom(),
-			new Identity( 'example.com', 'www-data' )
+			new Identity( 'example.com', 'www-data' ),
+			new RepositoryRecord( new SettingsStore( $this->options ), new SiteState( $this->options ), new FrozenClock( self::NOW ) ),
+			$this->jobs()
 		);
 		self::assert_password_required( static fn () => $rotated->rest_password( 'rest-server', self::URL, 'backup', null ) );
 	}
@@ -303,17 +335,39 @@ final class SetupTest extends TestCase {
 		self::assertNull( $this->stored->get( SecretName::RestPassword ), 'It was the password of another server.' );
 	}
 
-	public function test_connecting_stores_the_password_forgets_the_cached_key_and_queues_the_unlock_job(): void {
-		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'password of another repository' ) );
-		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"of another repository"}' ) );
+	public function test_connecting_keeps_the_entered_password_apart_until_the_unlock_job_confirms_it(): void {
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'password the backups run with' ) );
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"the backups run with"}' ) );
 
-		$job = $this->wizard()->connect( new Secret( 'the right password' ), $this->jobs(), self::NOW );
+		$job = $this->wizard()->connect( new Secret( 'the entered password' ), self::NOW );
 
 		self::assertSame( JobType::Unlock, $job->type );
 		self::assertSame( 'setup', $job->trigger );
 		self::assertSame( JobState::Queued, $this->jobs()->active()?->state );
-		self::assertSame( 'the right password', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
-		self::assertNull( $this->stored->get( SecretName::MasterKey ), 'The unlock job has to derive the key from the new password.' );
+		self::assertSame( 'the entered password', $this->stored->get( SecretName::RepositoryPasswordCandidate )?->reveal() );
+		self::assertSame( 'password the backups run with', $this->stored->get( SecretName::RepositoryPassword )?->reveal(), 'Nobody knows yet whether the entered one is right.' );
+		self::assertSame( '{"key":"the backups run with"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
+	}
+
+	public function test_connecting_with_the_stored_password_drops_one_that_an_earlier_attempt_left_behind(): void {
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'the stored password' ) );
+		$this->stored->set( SecretName::RepositoryPasswordCandidate, new Secret( 'entered before the site went down' ) );
+
+		$this->wizard()->connect( null, self::NOW );
+
+		self::assertNull( $this->stored->get( SecretName::RepositoryPasswordCandidate ), 'This unlock is about the stored password.' );
+		self::assertSame( 'the stored password', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+	}
+
+	public function test_a_password_from_wp_config_stays_in_force_whatever_is_entered(): void {
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"cached"}' ) );
+
+		$job = $this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'from wp-config' ] )->connect( new Secret( 'entered all the same' ), self::NOW );
+
+		self::assertSame( JobType::Unlock, $job->type );
+		self::assertNull( $this->stored->get( SecretName::RepositoryPasswordCandidate ) );
+		self::assertNull( $this->stored->get( SecretName::RepositoryPassword ) );
+		self::assertSame( '{"key":"cached"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
 	}
 
 	public function test_connecting_while_a_job_is_active_stores_nothing(): void {
@@ -322,19 +376,20 @@ final class SetupTest extends TestCase {
 		$running = $this->jobs()->create( JobType::Backup, 'schedule', self::NOW );
 
 		try {
-			$this->wizard()->connect( new Secret( 'any other password' ), $this->jobs(), self::NOW + 60 );
+			$this->wizard()->connect( new Secret( 'any other password' ), self::NOW + 60 );
 			self::fail( 'A second job must be refused.' );
 		} catch ( JobConflict ) {
 			self::assertSame( 'password the running backup needs', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+			self::assertNull( $this->stored->get( SecretName::RepositoryPasswordCandidate ) );
 			self::assertSame( '{"key":"the running backup works with"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
 			self::assertSame( $running->id, $this->jobs()->active()?->id );
 			self::assertCount( 1, $this->jobs()->latest( 10 ) );
 		}
 	}
 
-	public function test_connecting_without_a_password_needs_the_one_from_wp_config(): void {
+	public function test_connecting_without_a_password_needs_one_from_wp_config_or_a_stored_one(): void {
 		try {
-			$this->wizard()->connect( null, $this->jobs(), self::NOW );
+			$this->wizard()->connect( null, self::NOW );
 			self::fail( 'There is no password to unlock with.' );
 		} catch ( InvalidArgument $e ) {
 			self::assertSame( 'no_password', $e->context()['code'] ?? null );
@@ -342,10 +397,298 @@ final class SetupTest extends TestCase {
 		}
 
 		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"cached"}' ) );
-		$job = $this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'from wp-config' ] )->connect( null, $this->jobs(), self::NOW );
+		$job = $this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'from wp-config' ] )->connect( null, self::NOW );
 
 		self::assertSame( JobType::Unlock, $job->type );
 		self::assertNull( $this->stored->get( SecretName::RepositoryPassword ), 'A password from wp-config.php never reaches the database.' );
 		self::assertSame( '{"key":"cached"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
+	}
+
+	public function test_connecting_without_a_password_unlocks_with_the_stored_one(): void {
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'stored when the repository was created' ) );
+
+		$job = $this->wizard()->connect( null, self::NOW );
+
+		self::assertSame( JobType::Unlock, $job->type );
+		self::assertSame( 'stored when the repository was created', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+	}
+
+	public function test_a_server_is_not_saved_while_a_job_is_active(): void {
+		$this->connected();
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"the running backup works with"}' ) );
+		$this->jobs()->create( JobType::Backup, 'schedule', self::NOW );
+
+		try {
+			$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'someone-else', new Secret( 'password of the new server' ) );
+			self::fail( 'The running backup would go on with another server.' );
+		} catch ( JobConflict ) {
+			self::assertSame( self::URL, ( new SettingsStore( $this->options ) )->load()->string( 'repository.url' ) );
+			self::assertSame( 'stored REST password', $this->stored->get( SecretName::RestPassword )?->reveal() );
+			self::assertSame( '{"key":"the running backup works with"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
+		}
+	}
+
+	public function test_what_belongs_to_a_server_changes_with_it_and_is_undone_when_the_save_fails(): void {
+		$this->connected();
+		$seen    = [];
+		$options = $this->options;
+		$with    = static function () use ( &$seen ): \Closure {
+			$seen[] = 'changed';
+			return static function () use ( &$seen ): void {
+				$seen[] = 'undone';
+			};
+		};
+
+		$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'someone-else', new Secret( 'password of the new server' ), $with );
+		self::assertSame( [ 'changed' ], $seen, 'For example the certificate of the server, stored under the same lock.' );
+
+		// The database goes away between the companion change and the server's own.
+		$failing = static function () use ( &$seen, $options ): \Closure {
+			$seen[]           = 'changed';
+			$options->failure = new \RuntimeException( 'The database has gone away.' );
+			return static function () use ( &$seen, $options ): void {
+				$options->failure = null;
+				$seen[]           = 'undone';
+			};
+		};
+		try {
+			$this->wizard()->save_server( 'rest-server', self::report( 'https://other.example.net/' ), 'someone-else', new Secret( 'another password' ), $failing );
+			self::fail( 'Nothing could be stored.' );
+		} catch ( \RuntimeException ) {
+			self::assertSame( [ 'changed', 'changed', 'undone' ], $seen );
+			self::assertSame( 'https://new.example.net/', ( new SettingsStore( $this->options ) )->load()->string( 'repository.url' ) );
+		}
+	}
+
+	/**
+	 * Lets the database refuse one write: the one with the given number among the writes of an option.
+	 */
+	private function refuse_write( string $option, int $number ): void {
+		$count                  = 0;
+		$this->options->refuses = static function ( string $name ) use ( $option, $number, &$count ): bool {
+			return $name === $option && ++$count === $number;
+		};
+	}
+
+	/**
+	 * A site that backs up to a repository: server, REST password, cached key and repository ID.
+	 */
+	private function backing_up(): void {
+		$this->connected();
+		( new SettingsStore( $this->options ) )->update( [ 'repository.id' => str_repeat( 'ab', 32 ) ] );
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"of the repository in use"}' ) );
+		( new SiteState( $this->options ) )->bind( str_repeat( 'ab', 32 ), self::NOW - 86400 );
+		( new SiteState( $this->options ) )->set( 'last_backup', [ 'job' => 'last night' ] );
+	}
+
+	/**
+	 * Asserts that the site still backs up to the repository of backing_up().
+	 */
+	private function assert_unchanged( string $why ): void {
+		$settings = ( new SettingsStore( $this->options ) )->load();
+		self::assertSame(
+			[ self::URL, 'backup', str_repeat( 'ab', 32 ) ],
+			[ $settings->string( 'repository.url' ), $settings->string( 'repository.rest_username' ), $settings->string( 'repository.id' ) ],
+			$why
+		);
+		self::assertSame( 'stored REST password', $this->stored->get( SecretName::RestPassword )?->reveal(), $why );
+		self::assertSame( '{"key":"of the repository in use"}', $this->stored->get( SecretName::MasterKey )?->reveal(), $why );
+		self::assertSame( [ 'job' => 'last night' ], ( new SiteState( $this->options ) )->get( 'last_backup' ), $why );
+	}
+
+	/**
+	 * @return iterable<string, array{string, int, bool}> Option whose write is refused, which of its writes, and whether
+	 *                                                    the refusal comes as WordPress gives it: an answer of false, no exception.
+	 */
+	public static function refused_writes(): iterable {
+		foreach ( [
+			'with an exception'      => false,
+			'with nothing but false' => true,
+		] as $how => $quietly ) {
+			yield 'the settings with the new address, ' . $how => [ SettingsStore::OPTION, 1, $quietly ];
+			yield 'the settings without the repository ID, ' . $how => [ SettingsStore::OPTION, 2, $quietly ];
+			yield 'the remembered results, ' . $how => [ SiteState::OPTION, 1, $quietly ];
+		}
+	}
+
+	#[DataProvider( 'refused_writes' )]
+	public function test_a_server_whose_save_fails_half_way_leaves_the_site_with_the_server_it_had( string $option, int $number, bool $quietly ): void {
+		$this->backing_up();
+		$this->refuse_write( $option, $number );
+		$this->options->refuses_quietly = $quietly;
+
+		try {
+			$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'someone-else', new Secret( 'password of the new server' ) );
+			self::fail( 'The database refused a write.' );
+		} catch ( \RuntimeException | StorageFailed ) {
+			$this->assert_unchanged( 'The new address with the old password, or the old address without its key, would end the backups.' );
+		}
+	}
+
+	public function test_what_belongs_to_a_server_learns_which_address_the_jobs_will_use(): void {
+		$this->connected();
+		$seen = [];
+		$with = static function ( string $url ) use ( &$seen ): \Closure {
+			$seen[] = $url;
+			return static function (): void {};
+		};
+
+		$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'backup', new Secret( 'password' ), $with );
+		$this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_URL' => 'https://fixed.example.net/' ] )->save_server( 'rest-server', self::report( 'https://tested.example.net/' ), 'backup', new Secret( 'password' ), $with );
+
+		self::assertSame( [ 'https://new.example.net/', 'https://fixed.example.net/' ], $seen, 'The address from wp-config.php stays in force: a certificate of the tested one is not its own.' );
+	}
+
+	public function test_what_belongs_to_a_server_is_left_alone_while_a_job_is_active(): void {
+		$this->connected();
+		$this->jobs()->create( JobType::Backup, 'schedule', self::NOW );
+		$called = false;
+
+		try {
+			$this->wizard()->save_server(
+				'rest-server',
+				self::report( 'https://new.example.net/' ),
+				'someone-else',
+				new Secret( 'password of the new server' ),
+				static function () use ( &$called ): \Closure {
+					$called = true;
+					return static function (): void {};
+				}
+			);
+			self::fail( 'A job is active.' );
+		} catch ( JobConflict ) {
+			self::assertFalse( $called );
+		}
+	}
+
+	public function test_saving_another_address_drops_what_was_remembered_about_the_old_repository(): void {
+		$this->connected();
+		$state = new SiteState( $this->options );
+		( new SettingsStore( $this->options ) )->update( [ 'repository.id' => str_repeat( 'ab', 32 ) ] );
+		$state->bind( str_repeat( 'ab', 32 ), self::NOW - 3600 );
+		$state->set( 'check_alert', [ 'errors' => 2 ] );
+		$state->set( 'last_backup', [ 'job' => 'in the old repository' ] );
+
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"of the repository at this address"}' ) );
+		$this->wizard()->save_server( 'rest-server', self::report( self::URL ), 'backup', new Secret( 'a new REST password for the same address' ) );
+		self::assertSame( [ 'errors' => 2 ], $state->get( 'check_alert' ), 'The same address is the same repository.' );
+		self::assertSame( 'a new REST password for the same address', $this->stored->get( SecretName::RestPassword )?->reveal() );
+		self::assertSame( '{"key":"of the repository at this address"}', $this->stored->get( SecretName::MasterKey )?->reveal(), 'A new REST password does not cost the key that took minutes to derive.' );
+		self::assertSame( str_repeat( 'ab', 32 ), ( new SettingsStore( $this->options ) )->load()->string( 'repository.id' ) );
+
+		$this->wizard()->save_server( 'rest-server', self::report( 'https://backup.example.net:8000/another-site/' ), 'backup', null );
+
+		self::assertSame( [], $state->get( 'check_alert' ) );
+		self::assertSame( [], $state->get( 'last_backup' ) );
+		self::assertSame( '', ( new SettingsStore( $this->options ) )->load()->string( 'repository.id' ), 'Which repository is there shows when a job opens it.' );
+	}
+
+	public function test_a_repository_is_not_created_while_a_job_is_active(): void {
+		$server = new InMemoryRestServer();
+		$this->jobs()->create( JobType::Backup, 'schedule', self::NOW );
+
+		try {
+			$this->wizard_with( $server )->create( null );
+			self::fail( 'The running job would lose its password and its key.' );
+		} catch ( JobConflict ) {
+			self::assertSame( [], $server->requests );
+			self::assertNull( $this->stored->get( SecretName::RepositoryPassword ) );
+		}
+	}
+
+	public function test_creating_stores_the_password_before_the_repository_exists_and_records_the_repository(): void {
+		$server = new InMemoryRestServer();
+		$stored = null;
+		// The config is what makes a repository exist.
+		$server->before = function ( string $method, string $path ) use ( &$stored ): ?HttpResponse {
+			if ( 'POST' === $method && '/site/config' === $path ) {
+				$stored = $this->stored->get( SecretName::RepositoryPassword )?->reveal();
+			}
+			return null;
+		};
+
+		$password = $this->wizard_with( $server )->create( null );
+
+		self::assertSame( $password->reveal(), $stored, 'A repository whose password did not reach the database could be opened by nobody.' );
+		self::assertSame( $password->reveal(), $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+		self::assertArrayHasKey( '/site/config', $server->objects );
+
+		$settings = ( new SettingsStore( $this->options ) )->load();
+		$cached   = json_decode( (string) $this->stored->get( SecretName::MasterKey )?->reveal(), true );
+		self::assertIsArray( $cached );
+		self::assertSame( 1, $settings->int( 'repository.format_version' ) );
+		self::assertSame( 64, strlen( $settings->string( 'repository.id' ) ) );
+		self::assertSame( $settings->string( 'repository.id' ), $cached['repository'] ?? null );
+		self::assertSame( $settings->string( 'repository.id' ), ( new SiteState( $this->options ) )->get( 'repository' )['id'] ?? null );
+	}
+
+	public function test_a_repository_that_exists_leaves_the_stored_password_alone(): void {
+		$server                          = new InMemoryRestServer();
+		$server->objects['/site/config'] = 'the config of a repository that is in use';
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'the only copy of its password' ) );
+
+		try {
+			$this->wizard_with( $server )->create( null );
+			self::fail( 'There is a repository at this address.' );
+		} catch ( AlreadyExists ) {
+			self::assertSame( 'the only copy of its password', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+			self::assertSame( [ 'HEAD /site/config' ], $server->requests );
+		}
+	}
+
+	public function test_a_repository_that_does_not_come_to_exist_gives_the_stored_password_back(): void {
+		$server         = new InMemoryRestServer();
+		$server->before = static fn ( string $method, string $path ): ?HttpResponse => 'POST' === $method ? new HttpResponse( 403, [], '' ) : null;
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'password of the repository at the other address' ) );
+
+		try {
+			$this->wizard_with( $server )->create( null );
+			self::fail( 'The server refuses every upload.' );
+		} catch ( Unauthorized ) {
+			self::assertSame( 'password of the repository at the other address', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+		}
+
+		$this->stored->delete( SecretName::RepositoryPassword );
+		try {
+			$this->wizard_with( $server )->create( null );
+			self::fail( 'The server refuses every upload.' );
+		} catch ( Unauthorized ) {
+			self::assertNull( $this->stored->get( SecretName::RepositoryPassword ), 'A password for no repository is not left behind.' );
+		}
+	}
+
+	public function test_the_new_password_stays_when_the_repository_may_exist_after_a_failure(): void {
+		$server        = new InMemoryRestServer();
+		$server->after = static function ( string $method, string $path ): ?HttpResponse {
+			if ( 'POST' === $method && '/site/config' === $path ) {
+				throw new BackendException( 'The answer got lost.' );
+			}
+			return null;
+		};
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'password of the repository at the other address' ) );
+
+		try {
+			$this->wizard_with( $server )->create( new Secret( 'chosen for the new repository' ) );
+			self::fail( 'The request failed.' );
+		} catch ( BackendException ) {
+			self::assertArrayHasKey( '/site/config', $server->objects, 'The server did store the config.' );
+			self::assertSame( 'chosen for the new repository', $this->stored->get( SecretName::RepositoryPassword )?->reveal(), 'It is the only password that opens the repository.' );
+		}
+
+		$server->after = null;
+		self::assertSame( JobType::Unlock, $this->wizard_with( $server )->connect( null, self::NOW )->type, 'The repository is then unlocked with the stored password.' );
+	}
+
+	public function test_a_password_from_wp_config_is_never_stored_when_a_repository_is_created(): void {
+		$server         = new InMemoryRestServer();
+		$server->before = static fn ( string $method, string $path ): ?HttpResponse => 'POST' === $method ? new HttpResponse( 403, [], '' ) : null;
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'stored before the constant was defined' ) );
+
+		try {
+			$this->wizard_with( $server, [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'long enough for a repository' ] )->create( null );
+			self::fail( 'The server refuses every upload.' );
+		} catch ( Unauthorized ) {
+			self::assertSame( 'stored before the constant was defined', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+		}
 	}
 }

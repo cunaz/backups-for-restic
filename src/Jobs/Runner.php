@@ -112,6 +112,37 @@ final class Runner {
 	}
 
 	/**
+	 * Ends the active job as far as one call can, for the moment the plugin is switched off:
+	 * asks it to stop and runs its cleanup steps, which release the repository lock, for at
+	 * most the budget. A job that another tick is working on right now stops there, after the
+	 * step that is running.
+	 *
+	 * @param float                      $budget  Seconds the cleanup may spend.
+	 * @param array<string, scalar|null> $context Why, for the job's log.
+	 * @return Job|null The job as it is now, or null if none was active.
+	 */
+	public function stop( float $budget, array $context = [] ): ?Job {
+		$job = $this->store->active();
+		if ( null === $job ) {
+			return null;
+		}
+		$this->cancel( $job->id, $context );
+		// A tick that is about to end may have looked for the request a moment before it was
+		// recorded. For that case the lock is asked for again for a second: either that tick
+		// is gone by then and this call cleans up, or it is in a step and finds the request
+		// before its next one.
+		$patience = microtime( true ) + min( $budget, 1.0 );
+		do {
+			$report = $this->tick( $budget );
+			if ( 'busy' !== $report->status || null !== $report->job ) {
+				break;
+			}
+			usleep( 100000 );
+		} while ( microtime( true ) < $patience );
+		return $this->store->get( $job->id ) ?? $job;
+	}
+
+	/**
 	 * Advances the job while holding the runner lock.
 	 *
 	 * @param float $budget Seconds.
@@ -215,7 +246,7 @@ final class Runner {
 		while ( true ) {
 			// A request to cancel may have arrived while the last step ran.
 			$job->cancel_requested = $job->cancel_requested || $this->store->cancel_requested( $job );
-			if ( $job->cancel_requested && null === $job->outcome && ! $job->type->is_cleanup( $job->step ) ) {
+			if ( $job->cancel_requested && null === $job->outcome && $job->type->cancels_before( $job->step ) ) {
 				$job->outcome = JobState::Cancelled;
 				$job->step    = $job->type->cleanup_steps()[0];
 				$log->write( 'info', 'Cancelled; cleaning up.' );
@@ -240,6 +271,13 @@ final class Runner {
 					$job->outcome ??= JobState::Failed;
 					$job->error   ??= $error;
 					$done           = true;
+				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES && null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
+					// Asked to cancel while the step failed with what would be tried again: no
+					// retry is waited for, the cleanup starts now. After a deactivation no later
+					// tick would come to start it. An error that ends the job stays the outcome, also the
+					// last of too many attempts.
+					$job->cancel_requested = true;
+					continue;
 				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES ) {
 					++$job->consecutive_failures;
 					$job->not_before = $this->now() + 30 * ( 2 ** ( $job->consecutive_failures - 1 ) );
@@ -261,6 +299,11 @@ final class Runner {
 			}
 
 			if ( ! $done ) {
+				// A step that wants another tick, and a request to cancel that came while it ran:
+				// the cleanup starts in this tick. After a deactivation no other tick comes.
+				if ( null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
+					continue;
+				}
 				return;
 			}
 			$next = $job->type->next_step( $job->step );
@@ -271,7 +314,14 @@ final class Runner {
 				return;
 			}
 			$job->step = $next;
-			if ( microtime( true ) >= $deadline ) {
+			// The deadline holds back regular steps only. The cleanup steps are short, they
+			// release the lock in the repository, and the tick that could run them may be the
+			// last one for a long time, for example when the plugin is being deactivated.
+			// Nor a request to cancel that came while the last step ran: the loop turns it into
+			// the cleanup now, or, where the work is done and only its result is left to record,
+			// records it and cleans up. Recording is short and asks the server for nothing that
+			// it could not do without.
+			if ( microtime( true ) >= $deadline && ! $job->type->is_cleanup( $next ) && ! $this->store->cancel_requested( $job ) ) {
 				return;
 			}
 		}

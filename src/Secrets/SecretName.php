@@ -21,8 +21,15 @@ enum SecretName: string {
 	case MasterKey          = 'master_key';
 
 	/**
+	 * A repository password that somebody entered and no unlock has confirmed yet. It replaces
+	 * the repository password once it opened the repository, and is dropped if it did not.
+	 */
+	case RepositoryPasswordCandidate = 'repository_password_candidate';
+
+	/**
 	 * The wp-config.php constant that overrides this secret, if any. The cached master key has
-	 * none: it is derived from the password.
+	 * none: it is derived from the password. Neither has a password that is still to be
+	 * confirmed: somebody entered it.
 	 *
 	 * @return string|null Constant name.
 	 */
@@ -30,7 +37,8 @@ enum SecretName: string {
 		return match ( $this ) {
 			self::RepositoryPassword => 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD',
 			self::RestPassword       => 'BACKUPS_FOR_RESTIC_REST_PASSWORD',
-			self::MasterKey          => null,
+			self::MasterKey,
+			self::RepositoryPasswordCandidate => null,
 		};
 	}
 }

@@ -50,13 +50,17 @@ plugins from WordPress.org only) and double the release testing.
 - **WordPress.org only, source private**: contradicts the goal of public, reviewable code.
 
 ## As built (2026-11)
-- Nothing is released yet, and the release pipeline does not exist: no
-  `bin/build-package.sh`, no deployment workflow, no `.wordpress-org/` assets. Testers link
-  or copy a checkout of the repository into `wp-content/plugins/`; the plugin runs without
-  a build step. The submission package is planned for Milestone 3 and the deployment
-  workflow for Milestone 4 ([roadmap](../05-roadmap.md)).
-- Plugin Check does not run in CI yet; it is planned for Milestone 3. Until then PHPCS with
-  the WordPress rules (prefixes, escaping, translation calls) is the only automatic check
+- Nothing is released yet, and of the release pipeline only its first step exists:
+  `bin/build-package.sh` builds the package from `.distignore`. There is no deployment
+  workflow and there are no `.wordpress-org/` assets. Testers copy the built directory into
+  `wp-content/plugins/` or link a checkout of the repository there; the plugin runs without
+  a build step. The listing assets are planned for Milestone 3 and the deployment workflow
+  for Milestone 4 ([roadmap](../05-roadmap.md)).
+- Since 2026-11-10 Plugin Check runs in CI on the built package, for every pull request.
+  Its errors about native file functions in the WordPress-free core are set aside in the
+  workflow, with the reason; the reviewers will see them
+  ([development guide](../04-development-and-quality.md) §5.8). Before that, PHPCS with the
+  WordPress rules (prefixes, escaping, translation calls) was the only automatic check
   that concerns the guidelines.
 - Two items of the guideline list were corrected in place. "Graceful failure without
   restic" was removed, because the plugin needs no restic program

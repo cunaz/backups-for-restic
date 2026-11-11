@@ -60,5 +60,25 @@ loopback requests. The native engine needs many short slices of work (ticks) per
 - The heartbeat runs the append-only probe when it is due, starts the jobs that are due,
   runs one tick when a job is active and hands waiting notices to the mailer. It refreshes
   no repository lock.
-- The wizard says that the first backup uploads everything once. It names no expected
-  duration; estimates are planned for Milestone 3.
+- The wizard says that the first backup uploads everything once and names no expected
+  duration: the plugin does not know the size of a site before it has walked it. From the
+  second backup on the progress is measured against the bytes the last backup of the
+  repository went through, and the admin page shows a bar and the minutes left at the
+  speed so far (since 2026-11-11). A walk of the site before the first backup, only to
+  have an estimate, was rejected: on shared hosting it costs ticks that the backup needs.
+- Since 2026-11-11 the tick deadline holds back regular steps only. The cleanup steps of a
+  job (release the repository lock, remove working files) run in the tick that reaches
+  them, also past the deadline, and a request to cancel that arrives while a step ends or
+  fails is turned into the cleanup by the same tick. The reason is deactivation: it asks
+  the job to cancel and no later tick comes, so a job left between its cleanup steps would
+  keep its lock in the repository for half an hour and stay active with nobody to finish
+  it. The price is a request that can outlast its budget by the time limits of the
+  cleanup's own requests. The same holds when the request finds the work done and only the
+  result left to record: the tick records it and cleans up, also past the deadline.
+  Recording asks the server for nothing it could not do without: a check keeps its counts
+  and first findings with the job when it ends, and the size of the repository is left out
+  when the listing fails.
+- Since 2026-11-11 notices are handed to the mailer by one request at a time
+  (`notify.lock`, [ADR 0014](0014-file-based-job-store.md)). A request that finds another
+  one sending leaves its notice in the outbox; a later heartbeat tries it, instead of this
+  request at once. How soon that is depends on WP-Cron like every heartbeat.

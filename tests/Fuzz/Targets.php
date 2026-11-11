@@ -260,9 +260,10 @@ final class Targets {
 			 * @param string                $url     URL.
 			 * @param array<string, string> $headers Headers.
 			 * @param string                $body    Body.
+			 * @param int                   $limit   Most bytes of response body.
 			 * @return HttpResponse Response.
 			 */
-			public function request( string $method, string $url, array $headers = [], string $body = '' ): HttpResponse {
+			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
 				return new HttpResponse( 200, [ 'content-type' => 'application/vnd.x.restic.rest.v2' ], $this->body );
 			}
 		};

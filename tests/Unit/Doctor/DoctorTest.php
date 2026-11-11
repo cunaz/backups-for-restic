@@ -27,6 +27,8 @@ final class DoctorTest extends TestCase {
 			'loopback'           => true,
 			'secrets_readable'   => true,
 			'repository_format'  => 1,
+			'jit'                => false,
+			'repository_reached' => true,
 		];
 		return new Environment( ...$values );
 	}
@@ -63,6 +65,25 @@ final class DoctorTest extends TestCase {
 			self::assertTrue( Doctor::blocked( $checks ), $id );
 			self::assertStringStartsWith( Check::CRITICAL . ':', self::statuses( self::environment( $changes ) )[ $id ], $id );
 		}
+	}
+
+	public function test_an_enabled_jit_and_a_silent_repository_server_are_hints_that_block_nothing(): void {
+		$statuses = self::statuses( self::environment() );
+		self::assertSame( 'good:off', $statuses['jit'] );
+		self::assertSame( 'good:reached', $statuses['repository_server'] );
+
+		$hinted   = self::environment(
+			[
+				'jit'                => true,
+				'repository_reached' => false,
+			]
+		);
+		$statuses = self::statuses( $hinted );
+		self::assertSame( 'recommended:enabled', $statuses['jit'] );
+		self::assertSame( 'recommended:unreachable', $statuses['repository_server'] );
+		self::assertFalse( Doctor::blocked( Doctor::check( $hinted ) ), 'A server that is down for a moment must not stop the setup, and the JIT is the host\'s choice.' );
+
+		self::assertSame( 'good:not_tested', self::statuses( self::environment( [ 'repository_reached' => null ] ) )['repository_server'], 'Before a repository is configured there is nothing to ask.' );
 	}
 
 	public function test_recommendations(): void {

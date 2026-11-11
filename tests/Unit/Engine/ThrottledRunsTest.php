@@ -13,6 +13,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Support\Throttle;
+use BackupsForRestic\Tests\Support\FixedRandom;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -48,10 +49,12 @@ final class ThrottledRunsTest extends TestCase {
 
 	public function test_a_large_file_rests_between_its_chunks(): void {
 		$this->cleanup[] = $site = TempDir::create( 'large' );
-		file_put_contents( $site . '/large.bin', random_bytes( 12 * 1048576 ) );
+		// The same content and the same chunker polynomial in every run: where the chunks end
+		// depends on both, and with random ones the file now and then had too few chunks.
+		file_put_contents( $site . '/large.bin', ( new FixedRandom( 'large file' ) )->bytes( 12 * 1048576 ) );
 		$this->cleanup[] = $work = TempDir::create( 'work' );
 		$identity        = new Identity( 'example.com', 'www-data' );
-		$repository      = Repository::initialize( new InMemoryBackend(), 'throttle password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$repository      = Repository::initialize( new InMemoryBackend(), 'throttle password', $identity, new FixedRandom( 'repository' ), new ScryptParameters( 1024, 8, 1 ) );
 
 		$backup = BackupRun::start( $repository, new BackupPlan( [ $site ], [ 'backups-for-restic' ] ), $work . '/backup', $identity, new SystemClock() );
 		while ( ! $backup->advance( INF, $this->throttle() ) ) {

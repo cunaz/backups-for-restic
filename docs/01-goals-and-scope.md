@@ -104,12 +104,12 @@ the milestone.
 | --- | --- |
 | NFR-01 | Every operation runs in slices that fit a 30-second PHP request; no step assumes a long-lived process except WP-CLI `--wait` |
 | NFR-02 | A killed request, a lost WP-Cron run or a host restart loses at most one slice of work and never leaves an inconsistent repository |
-| NFR-03 | Peak memory of the plugin's code does not grow with the size of files or tables. It does grow with the number of blobs in the repository: the index takes 60 to 80 bytes per blob, 33 MB for half a million and 61 MB for a million (measured, [benchmark](benchmarks/2026-11-index-memory.md)), and a backup needs about 20 MiB and three packs besides it. Under a `memory_limit` of 128 MB backups work up to roughly a million blobs, with packs smaller than configured near that end; beyond it the job ends on its first tick with the error `index_too_large` instead of running out of memory ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)). The checkpoints of prune and check still grow by about 150 bytes per tree and pack |
+| NFR-03 | Peak memory of the plugin's code does not grow with the size of files or tables. It does grow with the number of blobs in the repository: the index takes 60 to 80 bytes per blob, 33 MB for half a million and 61 MB for a million (measured, [benchmark](benchmarks/2026-11-index-memory.md)), and a backup needs about 20 MiB and three packs besides it. These measurements suggest capacity for roughly a million blobs under `memory_limit=128M`, depending on the WordPress baseline; full-job measurements at that count remain open. The budget reduces pack sizes and refuses an accumulated index that is too large with `index_too_large` ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)). The checkpoints of prune and check still grow by about 150 bytes per tree and pack |
 | NFR-04 | No secret ever appears in process arguments (there are none), URLs, logs, notices, e-mails, HTML or REST responses |
 | NFR-05 | All admin actions require `manage_options` and a nonce or REST authentication |
 | NFR-06 | 100 % of strings translatable; English source strings, German translation maintained on translate.wordpress.org. Not met yet for three kinds of text that the admin page shows in English: job log lines, job warnings and byte units; closing that gap is not planned yet |
 | NFR-07 | Admin UI accessible (keyboard, screen readers, admin colour schemes) |
-| NFR-08 | PHPStan at maximum level and WordPress Coding Standards pass in CI; Plugin Check joins them in Milestone 3; unit tests run without WordPress or a database; the conformance suite passes against the restic CLI; the mutation gate holds for `Crypto`, `Format` and `Engine\Forget`, and every parser of server data is fuzzed |
+| NFR-08 | PHPStan at maximum level and WordPress Coding Standards pass in CI, for the admin script through ESLint; Plugin Check passes on the built package; unit tests run without WordPress or a database; the conformance suite passes against the restic CLI; the mutation gate holds for `Crypto`, `Format` and `Engine\Forget`, and every parser of server data is fuzzed. Plugin Check is met with a reservation: CI sets aside 61 of its errors, 59 for native file functions in the WordPress-free core and 2 for `mb_chr()` and `mb_ord()`. The reviewers at WordPress.org will see them; the answer belongs to the submission package of Milestone 3 ([development guide](04-development-and-quality.md) §5.8) |
 | NFR-09 | A release is reproducible from a tagged commit by CI and deployed to WordPress.org by CI only |
 | NFR-10 | Throughput gates measured on PHP 8.3 without JIT (see architecture §16) hold on every release |
 
@@ -123,7 +123,7 @@ the milestone.
   four characters; disclosure of the external service (the repository server the user
   configures, with BorgBase named as the preset) in `readme.txt`;
   human-readable code; graceful failure when requirements are missing; translations through
-  translate.wordpress.org; a clean Plugin Check run.
+  translate.wordpress.org; a clean Plugin Check run (what CI sets aside today is in NFR-08).
 - **Shared hosting** ([ADR 0018](adr/0018-native-php-engine.md)): no processes, bounded
   slices, outbound HTTPS only, disk quotas respected.
 - **restic compatibility**: the plugin writes only what `restic check --read-data` accepts
