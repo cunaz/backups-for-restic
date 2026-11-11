@@ -139,34 +139,38 @@ final class WordPressSiteTest extends TestCase {
 	public function test_a_tick_killed_in_the_middle_of_a_backup_leaves_a_resumable_job(): void {
 		// Enough new data that the backup step is still at work when the server is stopped.
 		TestSite::add_upload( 'changed.bin', 256 );
-		TestSite::idle( 600 );
-		$id = TestSite::start();
-		// Creating the job chained a tick; this request starts one where loopback requests fail.
-		TestSite::cron( 3 );
-		$caught = TestSite::wait_for_backup_tick( $id, 120 );
-
 		try {
-			TestSite::kill_server();
+			TestSite::idle( 600 );
+			$id = TestSite::start();
+			// Creating the job chained a tick; this request starts one where loopback requests fail.
+			TestSite::cron( 3 );
+			$caught = TestSite::wait_for_backup_tick( $id, 120 );
 
-			$left = TestSite::job_document( $id );
-			self::assertSame( 'running', $left['state'] ?? null );
-			self::assertSame( $caught['lease_owner'], $left['lease_owner'] ?? null, 'The tick died holding its lease: it never came to save the job again.' );
-			self::assertSame( $caught['ticks'], $left['ticks'] ?? null );
-			$log = TestSite::job_log( $id );
-			self::assertSame( 1, substr_count( $log, 'Backup started.' ), $log );
-			self::assertStringNotContainsString( 'Snapshot saved.', $log, 'It was killed in the backup step.' );
+			try {
+				TestSite::kill_server();
+
+				$left = TestSite::job_document( $id );
+				self::assertSame( 'running', $left['state'] ?? null );
+				self::assertSame( $caught['lease_owner'], $left['lease_owner'] ?? null, 'The tick died holding its lease: it never came to save the job again.' );
+				self::assertSame( $caught['ticks'], $left['ticks'] ?? null );
+				$log = TestSite::job_log( $id );
+				self::assertSame( 1, substr_count( $log, 'Backup started.' ), $log );
+				self::assertStringNotContainsString( 'Snapshot saved.', $log, 'It was killed in the backup step.' );
+			} finally {
+				// Whatever the assertions say, the later tests need the site.
+				TestSite::start_server();
+			}
+			$job = TestSite::wait_for( $id, 1800 );
+			self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
+			self::assertSame( 1, substr_count( TestSite::job_log( $id ), 'Backup started.' ), 'The backup went on from its checkpoint; it did not start over.' );
+			TestSite::idle( 600 );
+			$cli = TestSite::restic();
+			self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
+			self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock remains.' );
 		} finally {
-			// Whatever the assertions say, the later tests need the site.
-			TestSite::start_server();
+			// Left behind, the file would be part of every later test's backup.
+			TestSite::remove_upload( 'changed.bin' );
 		}
-		$job = TestSite::wait_for( $id, 1800 );
-		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
-		self::assertSame( 1, substr_count( TestSite::job_log( $id ), 'Backup started.' ), 'The backup went on from its checkpoint; it did not start over.' );
-		TestSite::idle( 600 );
-		$cli = TestSite::restic();
-		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check' ] ) );
-		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock remains.' );
-		TestSite::remove_upload( 'changed.bin' );
 	}
 
 	public function test_invalid_settings_are_refused_with_an_error_for_each_field(): void {

@@ -181,8 +181,8 @@ final class Notifier {
 	/**
 	 * The stale notice that is due now, if any.
 	 *
-	 * @param array{failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
-	 * @param int                                                                        $now  Unix time.
+	 * @param array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
+	 * @param int                                                                                                 $now  Unix time.
 	 * @return Notice|null Notice.
 	 */
 	private function stale_notice( array $data, int $now ): ?Notice {
@@ -239,7 +239,7 @@ final class Notifier {
 	/**
 	 * The stored state.
 	 *
-	 * @return array{failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State.
+	 * @return array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State.
 	 */
 	private function load(): array {
 		$stored  = $this->options->get( self::OPTION );
@@ -250,17 +250,28 @@ final class Notifier {
 				$failing[ $type ] = $since;
 			}
 		}
+		$stale = Decoded::int( $stored['stale'] ?? null );
+		// What is being counted belongs to one repository. Once the jobs turn to another one,
+		// its first stale notice is not held back by the old one's, and its first success ends
+		// no failure streak of the old one. Notices that wait to be sent stay true and go out.
+		$bound = $this->state->get( 'repository' )['id'] ?? null;
+		$known = $stored['repository'] ?? null;
+		if ( is_string( $bound ) && is_string( $known ) && $bound !== $known ) {
+			$failing = [];
+			$stale   = 0;
+		}
 		return [
-			'failing' => $failing,
-			'stale'   => Decoded::int( $stored['stale'] ?? null ),
-			'outbox'  => Decoded::arrays( $stored['outbox'] ?? null ),
+			'repository' => is_string( $bound ) ? $bound : ( is_string( $known ) ? $known : null ),
+			'failing'    => $failing,
+			'stale'      => $stale,
+			'outbox'     => Decoded::arrays( $stored['outbox'] ?? null ),
 		];
 	}
 
 	/**
 	 * Stores the state; not autoloaded.
 	 *
-	 * @param array{failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
+	 * @param array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
 	 */
 	private function save( array $data ): void {
 		$this->options->set( self::OPTION, $data, false );

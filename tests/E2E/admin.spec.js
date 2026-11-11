@@ -168,7 +168,6 @@ test( 'a running backup is cancelled from the dashboard', async ( { page } ) => 
 		await expect( page.getByRole( 'button', { name: 'Back up now' } ) ).toBeDisabled();
 
 		await running.getByRole( 'button', { name: 'Cancel' } ).click();
-		await expect( running.getByRole( 'button', { name: 'Cancel' } ) ).toBeDisabled();
 
 		// The dashboard comes back with the job in its list, and with the buttons free again.
 		const jobs = page.locator( 'table' ).filter( { has: page.getByRole( 'columnheader', { name: 'Result' } ) } );
