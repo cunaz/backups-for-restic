@@ -396,7 +396,70 @@ final class TestSite {
 			',
 			[ $login, $role ]
 		);
-		// The last line: whatever WordPress printed before it is not part of the answer.
+		return self::last_line( $printed );
+	}
+
+	/**
+	 * Lets the plugin's heartbeat run now instead of at its next five minutes: makes its cron
+	 * event due and requests wp-cron.php. A cron run that is under way keeps the lock of
+	 * WordPress for a moment and this request then does nothing, so callers repeat it until
+	 * they see what the heartbeat was to do.
+	 */
+	public static function heartbeat(): void {
+		self::php( 'wp_clear_scheduled_hook( "backups_for_restic_heartbeat" ); wp_schedule_event( time() - 1, "backups_for_restic_five_minutes", "backups_for_restic_heartbeat" );' );
+		self::cron();
+	}
+
+	/**
+	 * Reads one entry of the plugin's state option after writing the given fields into it. A
+	 * field given as null is removed.
+	 *
+	 * @param string               $entry   Entry, such as schedule or append_only.
+	 * @param array<string, mixed> $changes Fields to write.
+	 * @return array<string, mixed> The entry afterwards.
+	 */
+	public static function state( string $entry, array $changes = [] ): array {
+		$printed = self::php(
+			'
+			$state   = get_option( "backups_for_restic_state" );
+			$state   = is_array( $state ) ? $state : [];
+			$fields  = is_array( $state[ $arguments[0] ] ?? null ) ? $state[ $arguments[0] ] : [];
+			$changes = json_decode( $arguments[1], true );
+			foreach ( $changes as $name => $value ) {
+				if ( null === $value ) {
+					unset( $fields[ $name ] );
+				} else {
+					$fields[ $name ] = $value;
+				}
+			}
+			if ( [] !== $changes ) {
+				$state[ $arguments[0] ] = $fields;
+				update_option( "backups_for_restic_state", $state, false );
+			}
+			echo "\n", json_encode( (object) $fields );
+			',
+			[ $entry, (string) json_encode( (object) $changes ) ]
+		);
+		$fields  = json_decode( self::last_line( $printed ), true );
+		Assert::assertIsArray( $fields, $printed );
+		return $fields;
+	}
+
+	/**
+	 * The schedule slots that the heartbeat has handled, after writing the given ones.
+	 *
+	 * @param array<string, int|string|null> $changes Slots to write; null removes one.
+	 * @return array<string, mixed> The slots afterwards.
+	 */
+	public static function schedule_state( array $changes = [] ): array {
+		return self::state( 'schedule', $changes );
+	}
+
+	/**
+	 * The last line of what a PHP program printed: whatever WordPress printed before it is
+	 * not part of the answer.
+	 */
+	public static function last_line( string $printed ): string {
 		return trim( (string) substr( $printed, (int) strrpos( "\n" . $printed, "\n" ) ) );
 	}
 

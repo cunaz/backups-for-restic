@@ -35,7 +35,7 @@ final class RestServer {
 	 * @param bool $append_only Whether deletions are refused (--append-only).
 	 * @param int  $max_size    Repository size limit in bytes (--max-size), 0 for none.
 	 */
-	public function __construct( public readonly bool $append_only = false, public readonly int $max_size = 0 ) {
+	public function __construct( public bool $append_only = false, public readonly int $max_size = 0 ) {
 		$this->directory   = TempDir::create( 'rest-server' );
 		$this->certificate = $this->directory . '/cert.pem';
 		$key               = $this->directory . '/key.pem';
@@ -61,13 +61,26 @@ final class RestServer {
 		if ( false !== $socket ) {
 			fclose( $socket );
 		}
+		$this->start();
+	}
 
-		$command = [ self::binary( 'rest-server' ), '--path', $data, '--listen', '127.0.0.1:' . $this->port, '--tls', '--tls-cert', $this->certificate, '--tls-key', $key ];
-		if ( $append_only ) {
+	/**
+	 * Stops the server and starts it again on the same address with the same data, as an
+	 * operator does who turns append-only mode on or off.
+	 */
+	public function restart( bool $append_only ): void {
+		$this->halt();
+		$this->append_only = $append_only;
+		$this->start();
+	}
+
+	private function start(): void {
+		$command = [ self::binary( 'rest-server' ), '--path', $this->directory . '/data', '--listen', '127.0.0.1:' . $this->port, '--tls', '--tls-cert', $this->certificate, '--tls-key', $this->directory . '/key.pem' ];
+		if ( $this->append_only ) {
 			$command[] = '--append-only';
 		}
-		if ( $max_size > 0 ) {
-			array_push( $command, '--max-size', (string) $max_size );
+		if ( $this->max_size > 0 ) {
+			array_push( $command, '--max-size', (string) $this->max_size );
 		}
 		$process = proc_open( $command, [ [ 'pipe', 'r' ], [ 'file', $this->directory . '/server.log', 'a' ], [ 'file', $this->directory . '/server.log', 'a' ] ], $pipes );
 		if ( false === $process ) {
@@ -86,12 +99,16 @@ final class RestServer {
 		throw new \RuntimeException( 'rest-server did not start.' );
 	}
 
-	public function stop(): void {
+	private function halt(): void {
 		if ( null !== $this->process ) {
 			proc_terminate( $this->process );
 			proc_close( $this->process );
 			$this->process = null;
 		}
+	}
+
+	public function stop(): void {
+		$this->halt();
 		TempDir::remove( $this->directory );
 	}
 
