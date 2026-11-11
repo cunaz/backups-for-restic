@@ -70,7 +70,10 @@ final class JobControlTest extends TestCase {
 		self::assertCount( min( 5, $recorded + 1 ), $views, $raw );
 		self::assertSame( [ 'admin', 'settings' ], [ $views[0]['login'] ?? null, $views[0]['via'] ?? null ], $raw );
 		self::assertGreaterThanOrEqual( $asked, $views[0]['at'] ?? 0, $raw );
-		self::assertSame( 'create', $views[ count( $views ) - 1 ]['via'] ?? null, 'The wizard showed it first: ' . $raw );
+		if ( $recorded < 5 ) {
+			// Only the latest five are listed; as long as all are, the first is the wizard's.
+			self::assertSame( 'create', $views[ count( $views ) - 1 ]['via'] ?? null, 'The wizard showed it first: ' . $raw );
+		}
 		self::assertStringNotContainsString( TestSite::$repository_password, $raw );
 	}
 

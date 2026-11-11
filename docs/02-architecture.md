@@ -894,8 +894,9 @@ repository is connected → Recovery kit → Schedule → First backup). The rep
 offers an own restic REST server, which is preselected, and the BorgBase preset as the
 second option, takes the credentials and, for an own server, an optional CA certificate,
 tests authentication, listing and a ranged read, and detects append-only
-([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows no repository
-usage or growth yet; that is planned for Milestone 3.
+([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows how much
+the repository holds, as measured after the last backup or prune; how that grows over time
+is not shown yet and is planned for Milestone 3.
 
 The whole UI is one classic script, `assets/js/admin.js`, on core's `wp-api-fetch`,
 `wp-i18n` and `wp-dom-ready`. The server renders only the frame of the page, and every view
