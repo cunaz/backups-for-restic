@@ -14,6 +14,7 @@ namespace BackupsForRestic\WordPress;
 defined( 'ABSPATH' ) || exit;
 
 use BackupsForRestic\Backend\Http\HttpClient;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Backup\SitePaths;
 use BackupsForRestic\Connection\ConnectionTester;
@@ -26,6 +27,7 @@ use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
@@ -35,6 +37,7 @@ use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
 use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
@@ -540,8 +543,53 @@ final class Container {
 			defined( 'DISABLE_WP_CRON' ) && true === constant( 'DISABLE_WP_CRON' ),
 			Cron::loopback_works( $fresh ),
 			$this->access()->passwords_readable(),
-			$this->settings()->int( 'repository.format_version' )
+			$this->settings()->int( 'repository.format_version' ),
+			self::jit_enabled(),
+			$this->repository_reached( $fresh )
 		);
+	}
+
+	/**
+	 * Whether PHP's JIT compiler is switched on for this request.
+	 *
+	 * @return bool True if OPcache is on and its JIT has a buffer and is not disabled.
+	 */
+	private static function jit_enabled(): bool {
+		$mode = strtolower( trim( (string) ini_get( 'opcache.jit' ) ) );
+		return extension_loaded( 'Zend OPcache' )
+			&& filter_var( ini_get( 'opcache.enable' ), FILTER_VALIDATE_BOOLEAN )
+			&& ! in_array( $mode, [ '', '0', 'off', 'no', 'false', 'disable' ], true )
+			&& self::bytes( (string) ini_get( 'opcache.jit_buffer_size' ) ) > 0;
+	}
+
+	/**
+	 * Whether the repository server answers, cached for a day like the other probes. Any
+	 * answer counts, also a refusal of the credentials: the question is whether this host
+	 * lets the request out at all.
+	 *
+	 * @param bool $fresh Ask the server now.
+	 * @return bool|null True if it answered, false if not, null if no repository is configured or none was asked yet.
+	 */
+	private function repository_reached( bool $fresh ): ?bool {
+		if ( '' === $this->settings()->string( 'repository.url' ) ) {
+			return null;
+		}
+		$cached = get_transient( 'backups_for_restic_reachable' );
+		if ( ! $fresh ) {
+			return in_array( $cached, [ 'yes', 'no' ], true ) ? 'yes' === $cached : null;
+		}
+		try {
+			$this->access()->backend()->size( ObjectType::Config, 'config' );
+			$reached = true;
+		} catch ( PluginException $e ) {
+			$code = JobError::from_throwable( $e )->code;
+			if ( 'secrets_undecryptable' === $code ) {
+				return null;
+			}
+			$reached = 'repository_unreachable' !== $code;
+		}
+		set_transient( 'backups_for_restic_reachable', $reached ? 'yes' : 'no', DAY_IN_SECONDS );
+		return $reached;
 	}
 
 	/**

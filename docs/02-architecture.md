@@ -976,9 +976,13 @@ make the request (`Storage\BrowserProbe`): it asks `POST /environment/probe` for
 file, requests the file's URL without credentials and reports status and body to
 `POST /environment/probe/report`. A report with the file's content is the finding
 `exposed`; any other answer counts as protected. The site's own probe, where it gets an
-answer, comes first. The Doctor has no check of the PHP version and
-none of outbound HTTPS; the wizard's connection test is what shows that the repository
-server can be reached. An outbound HTTPS check is planned for Milestone 3. Debug information:
+answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
+compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
+when the repository server did not answer a request from this host. The latter is asked
+only when the checks are run afresh and cached for a day; any answer counts, also a
+refusal of the credentials. The Doctor has no check of the PHP version, and before a
+repository is configured none of outbound HTTPS: it asks no third party, and the wizard's
+connection test is what shows that the repository server can be reached. Debug information:
 plugin version, repository host and format version, append-only status, cache size, working
 directory and the time of the last backup; it does not list the last jobs.
 

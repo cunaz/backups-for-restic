@@ -7,6 +7,8 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The environment checks and Site Health point out a JIT compiler that is switched on,
+  and a repository server that does not answer from this host.
 - Settings → Repository: forms to enter the REST password and the repository password
   again, for example after the security keys in `wp-config.php` changed, and to upload or
   remove the CA certificate of the server. Values that `wp-config.php` defines are marked.

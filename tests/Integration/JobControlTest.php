@@ -188,6 +188,9 @@ final class JobControlTest extends TestCase {
 			self::assertSame( 502, $status, $raw );
 			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
 
+			// The Doctor says so as well, as a hint: a server may be down for a moment.
+			self::assertSame( [ 'recommended', 'unreachable' ], self::finding( 'repository_server', true ) );
+
 			// A snippet that switches verification off for the whole site does not reach these requests.
 			TestSite::hostile_filters( true );
 			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', TestSite::connection() );
@@ -204,6 +207,20 @@ final class JobControlTest extends TestCase {
 			TestSite::hostile_filters( false );
 			TestSite::api( 'POST', '/repository/ca-certificate', [ 'pem' => $certificate ] );
 		}
+		self::assertSame( [ 'good', 'reached' ], self::finding( 'repository_server', true ) );
+		self::assertSame( [ 'good', 'off' ], self::finding( 'jit', false ), 'The test site runs without the JIT compiler.' );
+	}
+
+	/**
+	 * One finding of the Doctor.
+	 *
+	 * @return array{string, string} Status and code.
+	 */
+	private static function finding( string $id, bool $fresh ): array {
+		[ $status, $environment, $raw ] = TestSite::api( 'GET', '/environment' . ( $fresh ? '&fresh=1' : '' ) );
+		self::assertSame( 200, $status, $raw );
+		$found = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && $id === ( $check['id'] ?? null ) ) );
+		return [ (string) ( $found[0]['status'] ?? '' ), (string) ( $found[0]['code'] ?? '' ) ];
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
