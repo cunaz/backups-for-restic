@@ -45,7 +45,7 @@ final class RepositoryRecord {
 	 * @return bool True if anything was written.
 	 */
 	public function opened( Config $config ): bool {
-		$rebound = $this->state->bind( $config->id, $this->clock->now()[0] );
+		$rebound = $this->state->bind( $config->id, $this->clock->now()[0], $this->settings->load()->string( 'repository.id' ) );
 		return $this->write(
 			[
 				'repository.id'             => $config->id,
