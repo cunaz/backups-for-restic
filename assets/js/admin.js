@@ -465,6 +465,16 @@
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
 							el( 'p', {}, [ status.repository.host ] ),
+							status.repository.usage && status.repository.usage.at
+								? el( 'p', { className: 'bfr-usage' }, [
+									sprintf(
+										/* translators: 1: amount of data such as 1.2 GB, 2: date and time. */
+										__( '%1$s stored, measured on %2$s', 'backups-for-restic' ),
+										formatBytes( status.repository.usage.bytes ),
+										formatTime( status.repository.usage.at ),
+									),
+								] )
+								: null,
 							el( 'p', { className: 'description' }, [ appendOnly[ status.repository.append_only ] || '' ] ),
 						] ),
 					] ),

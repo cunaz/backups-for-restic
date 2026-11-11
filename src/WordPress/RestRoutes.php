@@ -115,6 +115,11 @@ final class RestRoutes {
 					'server'      => $settings->string( 'repository.server' ),
 					'host'        => (string) wp_parse_url( $settings->string( 'repository.url' ), PHP_URL_HOST ),
 					'append_only' => $this->container->append_only(),
+					'usage'       => [
+						'bytes' => Decoded::int( $state->get( 'usage' )['bytes'] ?? null ),
+						'packs' => Decoded::int( $state->get( 'usage' )['packs'] ?? null ),
+						'at'    => Decoded::int( $state->get( 'usage' )['at'] ?? null ),
+					],
 				],
 				'last_backup'     => $state->get( 'last_backup' ),
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),

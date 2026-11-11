@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\Cipher;
@@ -154,6 +155,43 @@ final class BackupStepsTest extends TestCase {
 		self::assertNotSame( $first->config()->id, $second->config()->id );
 		self::assertSame( [ $second->config()->id, 1 ], $this->recorded() );
 		self::assertSame( [], $state->get( 'check_alert' ), 'The damage was in the repository that is gone.' );
+	}
+
+	public function test_recording_a_backup_measures_what_the_repository_holds(): void {
+		$this->repository();
+		$this->unlock();
+		$state = new SiteState( $this->options );
+		foreach ( [ 'a pack', 'another, larger pack' ] as $content ) {
+			$this->server->objects[ '/site/data/' . hash( 'sha256', $content ) ] = $content;
+		}
+		$job = new Job( '20270115T030000Z-abcdef', JobType::Backup, 'manual', 1_800_000_000 );
+
+		self::assertTrue( $this->steps()->record( $job, $this->jobs->log( $job ), microtime( true ) + 5 ) );
+
+		self::assertSame( $job->id, $state->get( 'last_backup' )['job'] ?? null );
+		self::assertSame(
+			[
+				'bytes' => strlen( 'a pack' ) + strlen( 'another, larger pack' ),
+				'packs' => 2,
+				'at'    => ( new FrozenClock() )->seconds,
+			],
+			$state->get( 'usage' )
+		);
+	}
+
+	public function test_a_listing_that_fails_does_not_fail_the_backup_and_keeps_the_last_measure(): void {
+		$this->repository();
+		$this->unlock();
+		$state = new SiteState( $this->options );
+		$state->set( 'usage', [ 'bytes' => 42 ] );
+		$this->server->before = static fn ( string $method, string $path ): ?HttpResponse => str_ends_with( $path, '/data/' ) ? new HttpResponse( 403, [], '' ) : null;
+		$job                  = new Job( '20270115T030000Z-abcdef', JobType::Backup, 'manual', 1_800_000_000 );
+
+		self::assertTrue( $this->steps()->record( $job, $this->jobs->log( $job ), microtime( true ) + 5 ) );
+
+		self::assertSame( $job->id, $state->get( 'last_backup' )['job'] ?? null, 'The backup is recorded.' );
+		self::assertSame( [ 'bytes' => 42 ], $state->get( 'usage' ) );
+		self::assertStringContainsString( 'The size of the repository could not be read.', (string) file_get_contents( $this->directory . '/private/jobs/' . $job->id . '/events.log' ) );
 	}
 
 	public function test_a_repository_of_format_2_is_refused_without_zstd_and_recorded_for_the_doctor(): void {

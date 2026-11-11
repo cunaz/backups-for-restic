@@ -201,6 +201,10 @@ final class WordPressSiteTest extends TestCase {
 		[ $status, $dashboard, $raw ] = TestSite::api( 'GET', '/status' );
 		self::assertSame( 200, $status, $raw );
 		self::assertSame( 'plugin', $dashboard['retention']['mode'] ?? null, $raw );
+		// Measured after the backups and again after the prune: what restic finds in the repository's data directory.
+		$packs = array_filter( explode( "\n", TestSite::restic()->must( [ 'list', 'packs', '--no-lock' ] ) ) );
+		self::assertSame( count( $packs ), $dashboard['repository']['usage']['packs'] ?? null, $raw );
+		self::assertGreaterThan( 1048576, $dashboard['repository']['usage']['bytes'] ?? 0, $raw );
 		self::assertGreaterThan( 0, $dashboard['maintenance']['prune']['finished'] ?? 0, $raw );
 		self::assertIsInt( $dashboard['maintenance']['prune']['reclaimable_bytes'] ?? null, $raw );
 		self::assertSame( 0, $dashboard['maintenance']['check']['errors'] ?? null, $raw );

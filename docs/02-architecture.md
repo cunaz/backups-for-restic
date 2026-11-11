@@ -699,8 +699,9 @@ database holds four options:
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
 last backup and the last forget, prune and check, the check alert, the exposure and
 append-only probes, the retention switch and proposal, the handled schedule slots, the
-repository that the first five belong to, the probe from the browser and the last twenty
-deliveries of the recovery kit) and
+repository that the first five belong to, the probe from the browser, the last twenty
+deliveries of the recovery kit, and the number and size of the repository's packs as a
+backup or a prune last listed them) and
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker and the
 outbox of unsent notices). A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
@@ -911,7 +912,7 @@ first backup; time estimates are planned for Milestone 3.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
+| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
 | `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's URL (null if the directory is outside the web root); then the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (no probe pending, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |

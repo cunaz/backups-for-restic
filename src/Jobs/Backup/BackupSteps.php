@@ -15,6 +15,7 @@ use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\Compression;
@@ -23,6 +24,7 @@ use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
@@ -206,7 +208,40 @@ final class BackupSteps implements StepProvider {
 				'warnings' => count( $job->warnings ),
 			]
 		);
+		$this->measure( $log );
 		return true;
+	}
+
+	/**
+	 * Remembers how much the repository holds, for the dashboard: the number and total size of
+	 * its packs, from one listing. A listing that fails or names no sizes changes nothing; the
+	 * job that asked has done its work either way.
+	 *
+	 * @param EventLog $log Log.
+	 */
+	public function measure( EventLog $log ): void {
+		try {
+			$repository = $this->services->access->open_cached();
+			if ( null === $repository ) {
+				return;
+			}
+			$sizes = $repository->backend()->list( ObjectType::Data );
+		} catch ( PluginException $e ) {
+			$log->write( 'warning', 'The size of the repository could not be read.', [ 'code' => JobError::from_throwable( $e )->code ] );
+			return;
+		}
+		if ( [] !== $sizes && min( $sizes ) < 0 ) {
+			// A server that lists names only.
+			return;
+		}
+		$this->services->state->set(
+			'usage',
+			[
+				'bytes' => array_sum( $sizes ),
+				'packs' => count( $sizes ),
+				'at'    => $this->services->clock->now()[0],
+			]
+		);
 	}
 
 	/**

@@ -112,6 +112,7 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	await expect( last ).toContainText( /Snapshot [0-9a-f]{8}/ );
 	const snapshot = ( await last.textContent() ).match( /Snapshot ([0-9a-f]{8})/ )[ 1 ];
 	await expect( card( page, 'Repository' ) ).toContainText( '127.0.0.1' );
+	await expect( card( page, 'Repository' ).locator( '.bfr-usage' ) ).toContainText( /^[\d.,]+ [KMG]?B stored, measured on / );
 
 	// The wizard's backup is in the list of recent jobs.
 	const jobs = page.locator( 'table' ).filter( { has: page.getByRole( 'columnheader', { name: 'Result' } ) } );
