@@ -45,8 +45,8 @@ CPU on shared hosting, far beyond one request.
   1 GiB, not 128 MiB.
 - The interface shows the progress of an unlock as a bar and no estimate of the remaining
   time; estimates are planned for Milestone 3.
-- A cached master key that no longer decrypts does not invalidate the cache: jobs fail with
-  `secrets_undecryptable` ([ADR 0006](0006-secrets-at-rest.md), As built).
+- A cached master key that no longer decrypts is forgotten and derived again from the
+  repository password ([ADR 0006](0006-secrets-at-rest.md), As built).
 - Vectors as built: the RFC 7914 vectors and the key file of the recorded restic 0.19.1
   repository in the unit suite, and a key that restic 0.19.1 calibrated in the conformance
   suite. There is not one key file per restic version of the matrix.

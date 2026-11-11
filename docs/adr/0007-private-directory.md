@@ -49,8 +49,10 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
   the preflight of a backup fails. An answer that shows the directory protected is reported
   as `protected_inside_web_root`. A probe that cannot run, because the site cannot request
   itself, is reported as `unverified` with the status "recommended" and blocks nothing: on
-  such hosts the protection is assumed, not verified. Treating that as a blocker is planned
-  for Milestone 3.
-- Only the wizard's script stops at a critical finding; the REST routes of the setup do not
-  check it. Of the jobs, only the backup asks the probe before it starts; forget, prune and
-  check do not. A check on the server side is planned for Milestone 3.
+  such hosts the protection is assumed, not verified. Blocking there would shut out the
+  hosts the plugin is made for; instead a probe from the administrator's browser, which can
+  reach the site where the site cannot reach itself, is planned with the wizard's browser
+  tests (phase 0.6 of Milestone 3).
+- The wizard's script stops at a critical finding, and `POST /setup/complete` refuses with
+  `environment_blocked` while the Doctor has one; the routes before it do not ask. Of the
+  jobs, only the backup asks the probe before it starts; forget, prune and check do not.
