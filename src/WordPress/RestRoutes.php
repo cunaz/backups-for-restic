@@ -805,14 +805,18 @@ final class RestRoutes {
 			return $pem;
 		}
 		// A certificate that comes with the request is used for this test only, from a
-		// temporary file. A server of the preset is tested against the public authorities,
+		// file of its own in the private directory. A server of the preset is tested against the public authorities,
 		// whatever certificate is stored for the server that was saved before.
 		$file = null;
 		$http = null;
 		try {
 			if ( is_string( $pem ) ) {
-				$file = (string) tempnam( get_temp_dir(), 'bfr' );
+				// In the private directory like every file the plugin writes; a certificate is
+				// no secret, and the name is of this request alone.
+				$directory = $this->container->private_dir();
 				try {
+					$directory->ensure();
+					$file = $directory->subdirectory( 'tmp' ) . '/ca-' . bin2hex( $this->container->random()->bytes( 8 ) ) . '.pem';
 					Files::write_atomic( $file, $pem );
 				} catch ( PluginException $e ) {
 					return $this->error( JobError::from_throwable( $e )->code, 500 );
