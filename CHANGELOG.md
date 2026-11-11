@@ -109,6 +109,10 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- What the plugin remembers between requests (last results, handled schedule slots, who
+  looked at the recovery kit, waiting notices) is no longer overwritten when two requests
+  change it at the same time, for example a running backup and the admin page. A notice is
+  not sent twice when two requests try to deliver it at once.
 - Deactivating the plugin just as a backup or a check finishes no longer leaves the job
   active and its lock in the repository: the result is recorded and the job cleaned up in
   the same request, and recording the result of a check no longer needs the server.

@@ -25,8 +25,40 @@ final class InMemoryOptions implements Options {
 	/** Number of calls of set(). */
 	public int $writes = 0;
 
+	/**
+	 * Whether get() answers like WordPress within one request: with what it read first, even
+	 * though another request stored something else since.
+	 */
+	public bool $request_cache = false;
+
+	/** @var array<string, mixed> */
+	private array $read = [];
+
 	public function get( string $name ): mixed {
-		return $this->values[ $name ] ?? null;
+		if ( ! $this->request_cache ) {
+			return $this->values[ $name ] ?? null;
+		}
+		if ( ! array_key_exists( $name, $this->read ) ) {
+			$this->read[ $name ] = $this->values[ $name ] ?? null;
+		}
+		return $this->read[ $name ];
+	}
+
+	/** Number of calls of fresh(). */
+	public int $fresh = 0;
+
+	/** Runs before fresh() answers: what another request wrote since this one read. */
+	public ?\Closure $meanwhile = null;
+
+	public function fresh( string $name ): mixed {
+		++$this->fresh;
+		if ( null !== $this->meanwhile ) {
+			$meanwhile       = $this->meanwhile;
+			$this->meanwhile = null;
+			$meanwhile( $this );
+		}
+		$this->read[ $name ] = $this->values[ $name ] ?? null;
+		return $this->read[ $name ];
 	}
 
 	/** What set() throws instead of writing, as a database that went away does. */
@@ -38,10 +70,11 @@ final class InMemoryOptions implements Options {
 		}
 		++$this->writes;
 		$this->values[ $name ]   = $value;
+		$this->read[ $name ]     = $value;
 		$this->autoload[ $name ] = $autoload;
 	}
 
 	public function delete( string $name ): void {
-		unset( $this->values[ $name ], $this->autoload[ $name ] );
+		unset( $this->values[ $name ], $this->autoload[ $name ], $this->read[ $name ] );
 	}
 }

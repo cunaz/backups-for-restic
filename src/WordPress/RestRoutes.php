@@ -721,17 +721,14 @@ final class RestRoutes {
 		$kit   = RecoveryKit::text( $this->container, 'connect' === $via );
 		$user  = wp_get_current_user();
 		$state = $this->container->state();
-		$views = Decoded::arrays( $state->get( 'recovery_kit' )['views'] ?? null );
-		array_unshift(
-			$views,
-			[
-				'at'    => time(),
-				'user'  => $user->ID,
-				'login' => $user->user_login,
-				'via'   => $via,
-			]
-		);
-		$state->set( 'recovery_kit', [ 'views' => array_slice( $views, 0, self::KIT_VIEWS ) ] );
+		$view  = [
+			'at'    => time(),
+			'user'  => $user->ID,
+			'login' => $user->user_login,
+			'via'   => $via,
+		];
+		// Added to what is stored now: two administrators may look at the kit at the same time.
+		$state->update( 'recovery_kit', static fn ( array $entry ): array => [ 'views' => array_slice( [ $view, ...Decoded::arrays( $entry['views'] ?? null ) ], 0, self::KIT_VIEWS ) ] );
 		/**
 		 * Fires when the recovery kit, which contains the repository password, was put into a
 		 * response for an administrator.
