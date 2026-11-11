@@ -111,6 +111,38 @@ final class RepositoryAccess {
 	}
 
 	/**
+	 * A repository password that was entered and is still to be confirmed by an unlock, if
+	 * there is one.
+	 *
+	 * @return Secret|null Password.
+	 * @throws SecretsUndecryptable If it cannot be decrypted: an unlock that went on without it would confirm a password nobody tried.
+	 */
+	public function candidate_password(): ?Secret {
+		$candidate = $this->secrets->get( SecretName::RepositoryPasswordCandidate );
+		return null === $candidate || $candidate->is_empty() ? null : $candidate;
+	}
+
+	/**
+	 * Makes a password that opened the repository the repository password. A password defined
+	 * in wp-config.php stays in force; none is stored beside it.
+	 *
+	 * @param Secret $password Confirmed password.
+	 */
+	public function confirm_password( Secret $password ): void {
+		if ( ! $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
+			$this->secrets->set( SecretName::RepositoryPassword, $password );
+		}
+		$this->forget_candidate_password();
+	}
+
+	/**
+	 * Drops a password that was entered, whether or not it was confirmed.
+	 */
+	public function forget_candidate_password(): void {
+		$this->secrets->delete( SecretName::RepositoryPasswordCandidate );
+	}
+
+	/**
 	 * Whether the two passwords can be read, for the Doctor: one defined in wp-config.php
 	 * always can, a stored one if it decrypts with the current salts. A stored value that a
 	 * constant overrides does not count, and neither does the cached key, which open_cached()

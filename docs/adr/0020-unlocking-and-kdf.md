@@ -16,7 +16,9 @@ CPU on shared hosting, far beyond one request.
   job checkpoints `(phase, i, X)` at the end of each tick and continues in the next one.
 - The derivation runs **once** per repository password. The resulting master key is cached
   in the encrypted secret store (ADR 0006); later operations skip the KDF entirely. The cache
-  is invalidated when the password changes or becomes undecryptable.
+  is replaced when another password has opened the repository, and forgotten when it becomes
+  undecryptable. A password that somebody enters is tried by an unlock job first; until it
+  has opened the repository, the stored password and the cached key stay in force.
 - Repositories created by the plugin use `N = 16384, r = 8, p = 1` (restic's own defaults
   when calibration is unavailable; accepted by restic). Existing repositories keep their
   parameters; the UI shows unlock progress and an estimate.

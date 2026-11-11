@@ -123,16 +123,24 @@ final class BackupSteps implements StepProvider {
 	 * @throws UnsupportedRepository If the repository has format version 2 and PHP lacks the zstd extension.
 	 */
 	public function unlock( Job $job, EventLog $log, float $deadline ): bool {
-		$services   = $this->services;
-		$repository = $services->access->open_cached();
+		$services = $this->services;
+		// A password that somebody entered is what the unlock job is there to try; a cached key
+		// would say nothing about it. Every other job works with what is confirmed.
+		$candidate  = JobType::Unlock === $job->type ? $services->access->candidate_password() : null;
+		$repository = null === $candidate ? $services->access->open_cached() : null;
 		if ( null === $repository ) {
-			$unlock = new KeyUnlock( $services->access->backend(), $services->access->password(), $services->unlock_dir( $job ), $services->random );
+			$unlock = new KeyUnlock( $services->access->backend(), $candidate ?? $services->access->password(), $services->unlock_dir( $job ), $services->random );
 			$key    = $unlock->run( $deadline );
 			if ( null === $key ) {
 				$job->progress['unlock_percent'] = (int) round( 100 * $unlock->progress() );
 				return false;
 			}
 			$repository = $services->access->open( $key );
+			if ( null !== $candidate ) {
+				// The password before the key: a key without the password it came from could not
+				// be derived again once the cache is lost.
+				$services->access->confirm_password( $candidate );
+			}
 			$services->access->cache_master_key( $repository->config(), $key );
 			$log->write( 'info', 'Repository unlocked.', [ 'format' => $repository->config()->version ] );
 		}
@@ -296,6 +304,9 @@ final class BackupSteps implements StepProvider {
 		$services = $this->services;
 		Files::remove_tree( $services->unlock_dir( $job ) );
 		Files::remove_tree( $services->work_dir( $job ) );
+		// A password that did not open the repository, or whose unlock was cancelled; after any
+		// other job, one that an unlock which never ended left behind.
+		$services->access->forget_candidate_password();
 		$services->jobs->prune( $services->settings->int( 'advanced.keep_jobs' ) );
 		// The repository in use is the one whose key is cached. Without a cached key nothing is
 		// removed: better an old cache too many than the current one deleted after every job.

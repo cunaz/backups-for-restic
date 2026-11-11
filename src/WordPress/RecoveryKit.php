@@ -39,14 +39,17 @@ final class RecoveryKit {
 	 * Builds the kit.
 	 *
 	 * @param Container $container Services.
+	 * @param bool      $entered   Whether the kit is for a repository password that was just entered and
+	 *                             that the unlock job is still to confirm: the kit then carries that one.
 	 * @return string Plain text.
 	 * @throws SecretsUndecryptable If the stored secrets cannot be decrypted.
 	 * @throws StorageFailed If the uploaded CA certificate is missing.
 	 */
-	public static function text( Container $container ): string {
+	public static function text( Container $container, bool $entered = false ): string {
 		$settings = $container->settings();
 		$secrets  = $container->secrets();
-		$password = $secrets->get( SecretName::RepositoryPassword )?->reveal() ?? '';
+		$password = $entered ? $secrets->get( SecretName::RepositoryPasswordCandidate ) : null;
+		$password = ( $password ?? $secrets->get( SecretName::RepositoryPassword ) )?->reveal() ?? '';
 		$rest     = $secrets->get( SecretName::RestPassword )?->reveal() ?? '';
 		$url      = $settings->string( 'repository.url' );
 		$username = $settings->string( 'repository.rest_username' );

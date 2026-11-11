@@ -254,8 +254,9 @@ final class Container {
 	}
 
 	/**
-	 * Removes every known secret from logs and job files: the passwords, and the REST user name
-	 * and password together as the Authorization header of repository requests carries them.
+	 * Removes every known secret from logs and job files: the passwords, among them a
+	 * repository password that was entered and is not confirmed yet, and the REST user name and
+	 * password together as the Authorization header of repository requests carries them.
 	 *
 	 * @return Redactor Redactor.
 	 */
@@ -263,7 +264,7 @@ final class Container {
 		if ( null === $this->redactor ) {
 			$this->redactor = new Redactor();
 			$username       = $this->settings()->string( 'repository.rest_username' );
-			foreach ( [ SecretName::RepositoryPassword, SecretName::RestPassword ] as $name ) {
+			foreach ( [ SecretName::RepositoryPassword, SecretName::RepositoryPasswordCandidate, SecretName::RestPassword ] as $name ) {
 				try {
 					$secret = $this->secrets()->get( $name );
 				} catch ( SecretsUndecryptable ) {
