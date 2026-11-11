@@ -718,7 +718,7 @@ final class RestRoutes {
 	 * @throws PluginException If the kit cannot be complete.
 	 */
 	private function kit( string $via ): string {
-		$kit   = RecoveryKit::text( $this->container );
+		$kit   = RecoveryKit::text( $this->container, 'connect' === $via );
 		$user  = wp_get_current_user();
 		$state = $this->container->state();
 		$views = Decoded::arrays( $state->get( 'recovery_kit' )['views'] ?? null );

@@ -169,9 +169,10 @@ ways back:
   the kit's REST password under "REST password" and choose "Test and save". Then enter the
   kit's repository password and your WordPress password under "Repository password" and
   choose "Unlock with this password"; the plugin derives the key in the background, which
-  can take a few minutes on shared hosting. Schedule, retention and exclusions stay as they
-  are. A password that `wp-config.php` defines has no field to fill in: the form says so,
-  that password was never lost, and only the other one is entered.
+  can take a few minutes on shared hosting. A password that does not open the repository
+  changes nothing: the plugin goes on with what it had. Schedule, retention and exclusions
+  stay as they are. A password that `wp-config.php` defines has no field to fill in: the
+  form says so, that password was never lost, and only the other one is entered.
 - **In `wp-config.php`**: define both passwords from the kit there,
 
   ```php
