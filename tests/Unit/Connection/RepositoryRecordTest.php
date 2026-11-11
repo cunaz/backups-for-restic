@@ -88,7 +88,7 @@ final class RepositoryRecordTest extends TestCase {
 
 		$this->record()->moved();
 
-		self::assertSame( '', $this->settings()[0] );
+		self::assertSame( [ '', 1 ], $this->settings(), 'Nor a format: the Doctor would hold format 2 against an address where nothing was opened yet.' );
 		self::assertSame( [], $state->get( 'last_backup' ) );
 		self::assertSame(
 			[

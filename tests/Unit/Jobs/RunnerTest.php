@@ -259,6 +259,62 @@ final class RunnerTest extends TestCase {
 		self::assertSame( [ 'preflight', 'unlocking', 'releasing', 'cleaning_up' ], $this->calls );
 	}
 
+	public function test_a_cancel_request_during_a_step_that_ends_at_the_deadline_is_honoured_by_the_same_tick(): void {
+		$store                     = $this->store();
+		$job                       = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		$this->script['preflight'] = [
+			static function ( Job $running ) use ( $store ): bool {
+				// A deactivation asks while this step runs; no other tick comes after it.
+				$store->request_cancel( $running );
+				return true;
+			},
+		];
+
+		$this->runner( $store )->tick( 0 );
+
+		self::assertSame( [ 'preflight', 'releasing', 'cleaning_up' ], $this->calls );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+	}
+
+	public function test_a_change_that_no_job_may_see_runs_only_without_a_job_and_may_create_one(): void {
+		$store = $this->store();
+
+		$job = $store->while_idle( fn (): Job => $store->create( JobType::Unlock, 'setup', $this->clock->seconds ) );
+
+		self::assertSame( $job->id, $store->active()?->id );
+		$ran = false;
+		try {
+			$store->while_idle(
+				static function () use ( &$ran ): void {
+					$ran = true;
+				}
+			);
+			self::fail( 'A job is active.' );
+		} catch ( JobConflict $conflict ) {
+			self::assertSame( $job->id, $conflict->context()['job'] ?? null );
+		}
+		self::assertFalse( $ran );
+	}
+
+	public function test_no_job_comes_to_exist_while_such_a_change_runs(): void {
+		$store = $this->store();
+		$other = $this->store();
+
+		$store->while_idle(
+			function () use ( $other ): void {
+				// Another request, with a file handle of its own, finds the lock taken.
+				$lock = fopen( $this->directory . '/jobs/' . JobStore::CREATE_LOCK, 'c' );
+				self::assertIsResource( $lock );
+				self::assertFalse( flock( $lock, LOCK_EX | LOCK_NB ), 'create() of another request waits here.' );
+				fclose( $lock );
+				self::assertNull( $other->active() );
+			}
+		);
+
+		$other->create( JobType::Backup, 'manual', $this->clock->seconds );
+		self::assertNotNull( $store->active(), 'The lock is free again.' );
+	}
+
 	public function test_a_job_that_ends_at_the_deadline_is_cleaned_up_by_the_same_tick(): void {
 		$store  = $this->store();
 		$job    = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
