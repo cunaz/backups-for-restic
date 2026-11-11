@@ -31,6 +31,9 @@ final class Cron {
 	public const string HEARTBEAT = 'backups_for_restic_heartbeat';
 	public const string INTERVAL  = 'backups_for_restic_five_minutes';
 
+	/** Seconds the deactivation may spend on ending the active job. */
+	private const float STOP_SECONDS = 10.0;
+
 	/**
 	 * Registers the hooks.
 	 *
@@ -82,6 +85,23 @@ final class Cron {
 	public static function unschedule(): void {
 		wp_clear_scheduled_hook( self::HEARTBEAT );
 		wp_clear_scheduled_hook( self::TICK );
+	}
+
+	/**
+	 * Ends the active job when the plugin is deactivated: no tick will come to finish it, and
+	 * its lock would keep other clients of the repository waiting until it is stale. Nothing
+	 * is chained. What does not get done in this request is done by the first tick after the
+	 * plugin is activated again.
+	 *
+	 * @param Container $container Services.
+	 */
+	public static function stop( Container $container ): void {
+		if ( ! is_dir( $container->private_dir()->subdirectory( 'jobs' ) ) ) {
+			// Never set up: no job, and no reason to create the private directory now.
+			return;
+		}
+		ignore_user_abort( true );
+		$container->runner()->stop( $container->tick_budget( self::STOP_SECONDS ), [ 'reason' => 'deactivation' ] );
 	}
 
 	/**

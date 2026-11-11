@@ -112,6 +112,26 @@ final class Runner {
 	}
 
 	/**
+	 * Ends the active job as far as one call can, for the moment the plugin is switched off:
+	 * asks it to stop and runs its cleanup steps, which release the repository lock, for at
+	 * most the budget. A job that another tick is working on right now stops there, after the
+	 * step that is running.
+	 *
+	 * @param float                      $budget  Seconds the cleanup may spend.
+	 * @param array<string, scalar|null> $context Why, for the job's log.
+	 * @return Job|null The job as it is now, or null if none was active.
+	 */
+	public function stop( float $budget, array $context = [] ): ?Job {
+		$job = $this->store->active();
+		if ( null === $job ) {
+			return null;
+		}
+		$this->cancel( $job->id, $context );
+		$this->tick( $budget );
+		return $this->store->get( $job->id ) ?? $job;
+	}
+
+	/**
 	 * Advances the job while holding the runner lock.
 	 *
 	 * @param float $budget Seconds.
@@ -261,6 +281,11 @@ final class Runner {
 			}
 
 			if ( ! $done ) {
+				// A step that wants another tick, and a request to cancel that came while it ran:
+				// the cleanup starts in this tick. After a deactivation no other tick comes.
+				if ( null === $job->outcome && ! $job->type->is_cleanup( $job->step ) && $this->store->cancel_requested( $job ) ) {
+					continue;
+				}
 				return;
 			}
 			$next = $job->type->next_step( $job->step );

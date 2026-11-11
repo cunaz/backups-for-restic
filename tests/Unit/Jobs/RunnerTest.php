@@ -226,6 +226,52 @@ final class RunnerTest extends TestCase {
 		self::assertSame( [ 'releasing', 'cleaning_up' ], array_slice( $this->calls, -2 ) );
 	}
 
+	public function test_stopping_cancels_the_active_job_and_cleans_up_in_the_same_call(): void {
+		$store                      = $this->store();
+		$this->script['backing_up'] = [ false, false ];
+		$job                        = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		$runner                     = $this->runner( $store );
+		$runner->tick( 10 );
+
+		$stopped = $runner->stop( 10, [ 'reason' => 'deactivation' ] );
+
+		self::assertSame( $job->id, $stopped?->id );
+		self::assertSame( JobState::Cancelled, $stopped->state );
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'releasing', 'cleaning_up' ], $this->calls, 'The lock in the repository is released, and no other step runs.' );
+		self::assertNull( $store->active() );
+		self::assertStringContainsString( '"reason":"deactivation"', (string) file_get_contents( $this->directory . '/jobs/' . $job->id . '/events.log' ) );
+	}
+
+	public function test_stopping_ends_a_queued_job_at_once_and_does_nothing_without_a_job(): void {
+		$store  = $this->store();
+		$runner = $this->runner( $store );
+		self::assertNull( $runner->stop( 10 ) );
+
+		$job = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		self::assertSame( JobState::Cancelled, $runner->stop( 10 )?->state );
+		self::assertSame( [], $this->calls, 'Nothing ran, so there is nothing to clean up.' );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+	}
+
+	public function test_stopping_a_job_that_another_tick_works_on_leaves_the_cleanup_to_that_tick(): void {
+		$store                      = $this->store();
+		$job                        = $store->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		$stopped                    = null;
+		$this->script['backing_up'] = [
+			function () use ( $store, &$stopped ): bool {
+				// The plugin is deactivated while this step runs.
+				$stopped = $this->runner( $store )->stop( 10 );
+				return false;
+			},
+		];
+
+		$this->runner( $store )->tick( 10 );
+
+		self::assertSame( JobState::Running, $stopped?->state, 'The other tick holds the lock.' );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'releasing', 'cleaning_up' ], $this->calls );
+	}
+
 	public function test_a_cancel_request_during_a_step_is_honoured_before_the_next_step(): void {
 		$store                     = $this->store();
 		$job                       = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
@@ -244,7 +290,7 @@ final class RunnerTest extends TestCase {
 		self::assertTrue( $this->document( $ended )['cancel_requested'], 'The runner wrote the request into its own document.' );
 	}
 
-	public function test_a_cancel_request_during_a_tick_is_honoured_and_survives_the_ticks_own_save(): void {
+	public function test_a_cancel_request_during_a_tick_is_honoured_by_that_tick_and_does_not_touch_its_document(): void {
 		$store                      = $this->store();
 		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
 		$during                     = [];
@@ -259,22 +305,35 @@ final class RunnerTest extends TestCase {
 		];
 		$runner                     = $this->runner( $store );
 
-		self::assertTrue( $runner->tick( 10 )->has_more_work() );
+		self::assertFalse( $runner->tick( 10 )->has_more_work(), 'The step wanted another tick, but the cleanup does not wait for one.' );
 
 		self::assertTrue( $during[0], 'The answer shows the request.' );
 		self::assertFalse( $during[1]['cancel_requested'], 'The request did not touch the document of the running tick.' );
 		self::assertNotSame( '', $during[1]['lease_owner'] );
 		$saved = $this->document( $job );
-		self::assertSame( 'running', $saved['state'] );
-		self::assertSame( 'backing_up', $saved['step'], 'The tick saved its own result.' );
+		self::assertSame( 'cancelled', $saved['state'] );
+		self::assertTrue( $saved['cancel_requested'], 'The tick wrote the request into its own document.' );
 		self::assertSame( 1, $saved['ticks'] );
-		self::assertTrue( $store->get( $job->id )?->cancel_requested, 'The request outlived the save of the tick.' );
-
-		self::assertFalse( $runner->tick( 10 )->has_more_work() );
 		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'releasing', 'cleaning_up' ], $this->calls, 'The backup step did not run again.' );
-		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
 		$requests = array_filter( $store->log( $job )->read(), static fn ( array $entry ): bool => 'Cancellation requested.' === $entry['message'] );
 		self::assertSame( [ [ 'user' => 7 ] ], array_column( $requests, 'context' ) );
+	}
+
+	public function test_a_cancel_request_that_arrives_as_a_tick_ends_is_honoured_by_the_next_tick(): void {
+		$store                      = $this->store();
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$this->script['backing_up'] = [ false, false ];
+		$runner                     = $this->runner( $store );
+		self::assertTrue( $runner->tick( 10 )->has_more_work() );
+
+		// Between two ticks nobody holds the lock, but the job is not queued: only the marker is written.
+		$runner->cancel( $job->id );
+		self::assertSame( 'running', $this->document( $job )['state'] );
+		self::assertTrue( $store->get( $job->id )?->cancel_requested, 'The request is part of what is loaded.' );
+
+		self::assertFalse( $runner->tick( 10 )->has_more_work() );
+		self::assertSame( [ 'preflight', 'unlocking', 'backing_up', 'releasing', 'cleaning_up' ], $this->calls );
+		self::assertSame( JobState::Cancelled, $store->get( $job->id )?->state );
 	}
 
 	public function test_a_queued_job_is_cancelled_at_once(): void {
