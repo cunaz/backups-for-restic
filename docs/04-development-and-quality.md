@@ -32,16 +32,16 @@ backups-for-restic/
 │   ├── PHPStan/                     PHPStan extensions for the analysis of src/
 │   ├── Database/                    the dump against a real MySQL or MariaDB, imported with the mariadb client
 │   ├── Integration/                 a real WordPress from bin/test-site.sh: who may call the routes, wizard over REST, backups through wp-cron.php, a killed tick, cancelling, deactivation, schedules, an append-only server, WP-CLI, the multisite refusal, uninstall
-│   ├── E2E/                         (M3) browser tests with Playwright
+│   ├── E2E/                         browser tests with Playwright against the test site: wizard, first backup, dashboard, settings, recovery kit, cancel
 │   └── Fixtures/                    restic vectors per version, Go and libsodium vectors, fuzz regressions
 ├── bin/                             install-test-tools.sh, test-site.sh with its router, diagnostics and the filters that switch TLS verification off for a test, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php, build-package.sh
 ├── docs/                            design documents, ADRs, guides/, benchmarks/
-└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; ISSUE_TEMPLATE/bug_report.md; (M3) live-servers.yml, e2e.yml, codeql.yml; (release) deploy-wordpress-org.yml
+└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; ISSUE_TEMPLATE/bug_report.md; (M3) live-servers.yml, codeql.yml; (release) deploy-wordpress-org.yml
 ```
 
 Entries marked (M3) are not in the repository yet; they are planned for Milestone 3
-([roadmap](05-roadmap.md)): `.wordpress-org/`, `tests/E2E/` and the workflows
-`live-servers.yml`, `e2e.yml` and `codeql.yml`. `deploy-wordpress-org.yml` comes with the
+([roadmap](05-roadmap.md)): `.wordpress-org/` and the workflows `live-servers.yml` and
+`codeql.yml`. `deploy-wordpress-org.yml` comes with the
 first release.
 
 ## 2. Toolchain (development only)
@@ -62,7 +62,7 @@ first release.
 | WordPress 7.1.4 (pinned and checksum-verified by `bin/test-site.sh`) | the real WordPress of the integration suite, served by PHP's built-in server. The project uses no WordPress test library, no function mocking and no `@wordpress/env`: the adapters are tested against a running WordPress or not at all ([ADR 0029](adr/0029-wordpress-free-core.md)) |
 | Plugin Check through `wordpress/plugin-check-action` (pinned SHA) | the WordPress.org review team's scanner, in CI on the built package (§5.8). The action installs the current Plugin Check and the current WordPress, so a new check can fail a pull request that did not cause it |
 | WP-CLI 2.12.0 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh wp-cli`) | `wp i18n make-pot` for the translation template (§5.8); it needs no WordPress for that |
-| (M3) `@playwright/test` | browser tests; not set up yet |
+| `@playwright/test` 1.63.0 (pinned in `package.json`) | the browser tests of §5.5; its browser is installed in CI by the same version |
 | (M3) CodeQL | JavaScript analysis; not set up yet |
 | (release) `10up/action-wordpress-plugin-deploy` (pinned SHA) | SVN deployment of tagged releases |
 
@@ -273,9 +273,9 @@ installed is skipped:
 the nightly CI run uses 2048 and 300. The tests that catch a backup in the middle add
 256 or 512 MiB of random data of their own.
 
-What the suite does not reach yet: Site Health, the admin page itself (browser tests,
-phase 0.6), and the loopback chain as such, because the tests request `wp-cron.php`
-themselves.
+What the suite does not reach: Site Health, and the loopback chain as such, because the
+tests request `wp-cron.php` themselves. The admin page itself has the browser tests of
+§5.5.
 
 ### 5.4 Benchmarks
 
@@ -295,11 +295,26 @@ to a rest-server and times nothing.
 
 ### 5.5 End-to-end (Playwright)
 
-Planned for Milestone 3; no browser test exists and Playwright is not set up. The admin
-script is linted but never run by a test (§3), and the integration suite calls the REST API
-without loading a page (§5.3). The planned tests: wizard completion, backup with visible
-progress to "succeeded", snapshot browsing, single-file restore and download, settings
-changes, Site Health entries.
+`tests/E2E/admin.spec.js` drives the admin page in Chromium against the test site of §5.3,
+on a WordPress that was just installed (`npm run test:e2e`; in CI the job "Admin page in a
+browser" of `integration.yml`). The tests click and read what an administrator clicks and
+reads, and send no request of their own. `tests/E2E/global-setup.js` starts a TLS
+rest-server with a certificate of its own authority for them. They run one after the other
+on one site, without retries:
+
+- the setup wizard: the environment checks; a connection test that fails until the
+  server's CA certificate is entered; a new repository and its recovery kit, which has to
+  be acknowledged; the schedule; the first backup with its progress to "Finished
+  successfully";
+- the dashboard with the last backup, the repository and the recent jobs, and the snapshot
+  list with that one snapshot;
+- settings that are saved and still there after a reload, an invalid retention window that
+  is refused with a message at its field, and the recovery kit, which needs the WordPress
+  password;
+- a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.
+
+Still to come with the restore of Milestone 3: snapshot browsing, single-file restore and
+download, and the acceptance test of that milestone. Site Health has no browser test.
 
 ### 5.6 Mutation testing and fuzzing
 
@@ -390,12 +405,11 @@ copy would only go stale.
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js`; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
 | `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
-| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1.4 on PHP 8.3; nightly and on request with the acceptance sizes; records with `strace` and core dumps how the server's PHP processes ended. WordPress latest-1 and PHP 8.5 are acceptance criteria of Milestone 4 and not in the matrix yet |
+| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1.4 on PHP 8.3; nightly and on request with the acceptance sizes; records with `strace` and core dumps how the server's PHP processes ended. A second job runs the browser tests (§5.5) on a site of its own. WordPress latest-1 and PHP 8.5 are acceptance criteria of Milestone 4 and not in the matrix yet |
 | (M3) `live-servers.yml` | weekly, manual dispatch, before every release | live smoke tests against a TLS rest-server and BorgBase repositories (§5.7) |
-| (M3) `e2e.yml` | UI changes, nightly | Playwright |
 | (M3) `codeql.yml` | push, weekly | JavaScript analysis |
 | (release) `deploy-wordpress-org.yml` | tag `v*` | build with `.distignore`, Plugin Check, manual approval, SVN deploy (`trunk`, `tags/x.y.z`, `assets/`), post-deploy diff, GitHub release notes only |
 

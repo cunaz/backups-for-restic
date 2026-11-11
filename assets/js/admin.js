@@ -880,27 +880,28 @@
 			borgbase.addEventListener( 'change', sync );
 			own.addEventListener( 'change', sync );
 			sync();
+			// The certificate travels with the request. A test uses it for that test only; it
+			// becomes the server's certificate when the server is saved.
 			const data = function () {
-				return { server: state.server, url: url.value, username: username.value, password: password.value };
+				return { server: state.server, url: url.value, username: username.value, password: password.value, ca_certificate: own.checked ? ca.value.trim() : '' };
 			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
-				const upload = own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
-				upload
-					.then( function () {
-						return api( '/repository/save', { method: 'POST', data: data() } );
-					} )
+				test.disabled = true;
+				api( '/repository/save', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						state.report = response.report;
 						stepPassword();
 					} )
 					.catch( function ( error ) {
 						save.disabled = false;
+						test.disabled = false;
 						replace( result, [ notice( 'error', errorText( error ) ) ] );
 					} );
 			}, true );
 			const test = button( __( 'Test connection', 'backups-for-restic' ), function () {
 				test.disabled = true;
+				save.disabled = true;
 				api( '/repository/test', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						const report = response.report;
@@ -917,6 +918,7 @@
 					} )
 					.finally( function () {
 						test.disabled = false;
+						save.disabled = false;
 					} );
 			}, true );
 			show( 1, [

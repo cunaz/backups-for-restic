@@ -119,19 +119,23 @@ final class Setup {
 	/**
 	 * Saves a server after a successful connection test.
 	 *
-	 * @param string           $server   borgbase or rest-server.
-	 * @param ConnectionReport $report   Test result with the normalized URL.
-	 * @param string           $username REST username.
-	 * @param Secret|null      $password REST password; null keeps the stored one, which must be
-	 *                                   stored for this server and user name.
+	 * @param string                      $server   borgbase or rest-server.
+	 * @param ConnectionReport            $report   Test result with the normalized URL.
+	 * @param string                      $username REST username.
+	 * @param Secret|null                 $password REST password; null keeps the stored one, which must be
+	 *                                              stored for this server and user name.
+	 * @param (\Closure(): \Closure)|null $with What belongs to the server and has to change with it, such as its CA
+	 *                                             certificate: called once the server is accepted, under the
+	 *                                             same lock, and returns what undoes it should the save fail.
 	 * @throws ValidationFailed If a setting is rejected.
 	 * @throws InvalidArgument With the code password_required if the stored REST password would end up with another server or user name.
 	 * @throws JobConflict If a job is active.
+	 * @throws \Throwable Whatever stopped the save or the companion change, after the companion change was undone.
 	 */
-	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
+	public function save_server( string $server, ConnectionReport $report, string $username, ?Secret $password, ?\Closure $with = null ): void {
 		$this->jobs->while_idle(
-			function () use ( $server, $report, $username, $password ): void {
-				$this->store_server( $server, $report, $username, $password );
+			function () use ( $server, $report, $username, $password, $with ): void {
+				$this->store_server( $server, $report, $username, $password, $with );
 			}
 		);
 	}
@@ -139,14 +143,16 @@ final class Setup {
 	/**
 	 * What save_server() does once no job can be in the way.
 	 *
-	 * @param string           $server   Server address as entered.
-	 * @param ConnectionReport $report   Report of the connection test.
-	 * @param string           $username REST user name.
-	 * @param Secret|null      $password REST password, or null for the stored one.
+	 * @param string                      $server   Server address as entered.
+	 * @param ConnectionReport            $report   Report of the connection test.
+	 * @param string                      $username REST user name.
+	 * @param Secret|null                 $password REST password, or null for the stored one.
+	 * @param (\Closure(): \Closure)|null $with The companion change of save_server().
 	 * @throws ValidationFailed If a setting is rejected.
 	 * @throws InvalidArgument With the code password_required.
+	 * @throws \Throwable Whatever stopped the save, after the companion change was undone.
 	 */
-	private function store_server( string $server, ConnectionReport $report, string $username, ?Secret $password ): void {
+	private function store_server( string $server, ConnectionReport $report, string $username, ?Secret $password, ?\Closure $with = null ): void {
 		$append_only = match ( $report->append_only ) {
 			AppendOnlyStatus::AppendOnly       => 'yes',
 			AppendOnlyStatus::DeletionsAllowed => 'no',
@@ -172,20 +178,28 @@ final class Setup {
 		$url      = $next->string( 'repository.url' );
 		$username = $next->string( 'repository.rest_username' );
 		$this->rest_password( ServerProfile::detect( $url ), $url, $username, $password );
-		// The password first: should storing it fail, the settings still name the server that
-		// the stored password is for.
-		if ( ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
-			if ( null !== $password ) {
-				$this->secrets->set( SecretName::RestPassword, $password );
-			} elseif ( '' === $username ) {
-				// The server takes no credentials: a password kept from before belongs to none.
-				$this->secrets->delete( SecretName::RestPassword );
+		$undo = null === $with ? null : $with();
+		try {
+			// The password first: should storing it fail, the settings still name the server that
+			// the stored password is for.
+			if ( ! $this->secrets->is_overridden( SecretName::RestPassword ) ) {
+				if ( null !== $password ) {
+					$this->secrets->set( SecretName::RestPassword, $password );
+				} elseif ( '' === $username ) {
+					// The server takes no credentials: a password kept from before belongs to none.
+					$this->secrets->delete( SecretName::RestPassword );
+				}
 			}
-		}
-		$this->settings->update( $changes );
-		$this->secrets->delete( SecretName::MasterKey );
-		if ( $url !== $current->string( 'repository.url' ) ) {
-			$this->record->moved();
+			$this->settings->update( $changes );
+			$this->secrets->delete( SecretName::MasterKey );
+			if ( $url !== $current->string( 'repository.url' ) ) {
+				$this->record->moved();
+			}
+		} catch ( \Throwable $failure ) {
+			if ( null !== $undo ) {
+				$undo();
+			}
+			throw $failure;
 		}
 	}
 

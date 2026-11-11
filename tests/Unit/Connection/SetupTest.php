@@ -404,6 +404,60 @@ final class SetupTest extends TestCase {
 		}
 	}
 
+	public function test_what_belongs_to_a_server_changes_with_it_and_is_undone_when_the_save_fails(): void {
+		$this->connected();
+		$seen    = [];
+		$options = $this->options;
+		$with    = static function () use ( &$seen ): \Closure {
+			$seen[] = 'changed';
+			return static function () use ( &$seen ): void {
+				$seen[] = 'undone';
+			};
+		};
+
+		$this->wizard()->save_server( 'rest-server', self::report( 'https://new.example.net/' ), 'someone-else', new Secret( 'password of the new server' ), $with );
+		self::assertSame( [ 'changed' ], $seen, 'For example the certificate of the server, stored under the same lock.' );
+
+		// The database goes away between the companion change and the server's own.
+		$failing = static function () use ( &$seen, $options ): \Closure {
+			$seen[]           = 'changed';
+			$options->failure = new \RuntimeException( 'The database has gone away.' );
+			return static function () use ( &$seen, $options ): void {
+				$options->failure = null;
+				$seen[]           = 'undone';
+			};
+		};
+		try {
+			$this->wizard()->save_server( 'rest-server', self::report( 'https://other.example.net/' ), 'someone-else', new Secret( 'another password' ), $failing );
+			self::fail( 'Nothing could be stored.' );
+		} catch ( \RuntimeException ) {
+			self::assertSame( [ 'changed', 'changed', 'undone' ], $seen );
+			self::assertSame( 'https://new.example.net/', ( new SettingsStore( $this->options ) )->load()->string( 'repository.url' ) );
+		}
+	}
+
+	public function test_what_belongs_to_a_server_is_left_alone_while_a_job_is_active(): void {
+		$this->connected();
+		$this->jobs()->create( JobType::Backup, 'schedule', self::NOW );
+		$called = false;
+
+		try {
+			$this->wizard()->save_server(
+				'rest-server',
+				self::report( 'https://new.example.net/' ),
+				'someone-else',
+				new Secret( 'password of the new server' ),
+				static function () use ( &$called ): \Closure {
+					$called = true;
+					return static function (): void {};
+				}
+			);
+			self::fail( 'A job is active.' );
+		} catch ( JobConflict ) {
+			self::assertFalse( $called );
+		}
+	}
+
 	public function test_saving_another_address_drops_what_was_remembered_about_the_old_repository(): void {
 		$this->connected();
 		$state = new SiteState( $this->options );

@@ -91,6 +91,9 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- The setup wizard sends the CA certificate along with the connection test. Before, the
+  test ran without it and a server with a certificate of its own authority could not be
+  set up. The test stores nothing; the certificate is kept when the server is saved.
 - Connecting to an existing repository now records its ID and format version. Before, the
   settings kept format 1, so the Doctor did not ask for the zstd extension, and the recovery
   kit and the site manifest named the wrong format.

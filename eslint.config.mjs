@@ -51,4 +51,27 @@ export default [
 			],
 		},
 	},
+	{
+		// The browser tests and their configuration: CommonJS modules that run in Node.js
+		// (docs/04-development-and-quality.md §5.5). They are development tooling and ship
+		// with nothing.
+		files: [ 'tests/E2E/**/*.js', 'playwright.config.js' ],
+		languageOptions: {
+			ecmaVersion: 2022,
+			sourceType: 'commonjs',
+			globals: {
+				__dirname: 'readonly',
+				module: 'writable',
+				process: 'readonly',
+				require: 'readonly',
+				setTimeout: 'readonly',
+			},
+		},
+		rules: {
+			'space-before-function-paren': [
+				'error',
+				{ anonymous: 'always', named: 'never', asyncArrow: 'always' },
+			],
+		},
+	},
 ];

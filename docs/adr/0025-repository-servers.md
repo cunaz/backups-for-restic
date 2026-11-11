@@ -18,7 +18,12 @@ suites already run against rest-server.
   - **Own restic REST server**: any `https://` URL with host, port and path (for example
     rest-server with `--private-repos`); username and password optional; an optional CA
     certificate (PEM, validated with `openssl_x509_parse`, stored in the private directory)
-    for self-signed TLS, used only for requests to that server.
+    for self-signed TLS, used only for requests to that server. The wizard sends the
+    certificate along with the connection test: the test runs on the site's server, which
+    could not verify the repository server without it. A test uses it from a file of
+    its own in the private directory, removed after the test, and stores nothing; it becomes the server's certificate when the server is saved, under the same lock and put back as it was if the save fails,
+    so a test that fails never leaves the saved server with a certificate that is not its
+    own. Saving a server of the preset removes a stored certificate.
 - **Weighting**: BorgBase is a convenience preset that is simply selectable, not a headline
   feature. If the preset does not fit, the user pastes any repository URL into the generic
   option. Positioning leads with restic-compatible, encrypted backups in pure PHP on shared
