@@ -193,11 +193,12 @@ final class JobStore {
 	 *
 	 * @param Job $job Job.
 	 * @return string Absolute path.
+	 * @throws StorageFailed If the directory cannot be created.
 	 */
 	public function directory( Job $job ): string {
 		$path = $this->directory . '/' . $job->id;
-		if ( ! is_dir( $path ) ) {
-			mkdir( $path, 0700, true );
+		if ( ! is_dir( $path ) && ! mkdir( $path, 0700, true ) && ! is_dir( $path ) ) {
+			StorageFailed::raise( 'A job directory could not be created in the private directory.', [ 'job' => $job->id ] );
 		}
 		return $path;
 	}
