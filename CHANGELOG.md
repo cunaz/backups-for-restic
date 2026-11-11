@@ -105,6 +105,8 @@ All notable changes are documented here. The format follows
 - Deactivating the plugin ends the running job and releases its lock in the repository.
 - The setup cannot be completed by a request while the Doctor reports a critical finding.
 - A request to cancel that arrives while a step is running is honoured by the same tick.
+- A request to cancel that arrives just after a backup wrote its snapshot no longer ends
+  the job as cancelled with the snapshot left unrecorded; the job ends as succeeded.
 - A CA certificate that could not be written to disk is no longer announced as uploaded.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
