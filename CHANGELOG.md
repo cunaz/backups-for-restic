@@ -7,6 +7,8 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A running backup shows a progress bar and the minutes left, measured against the last
+  backup.
 - The dashboard shows how much the repository holds, measured after every backup and
   every prune.
 - WP-CLI: `settings list`, `settings get` and `settings set`, `cancel` and `logs`.

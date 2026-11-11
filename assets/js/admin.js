@@ -112,6 +112,24 @@
 				] ),
 			);
 		}
+		if ( 'number' === typeof progress.total_bytes_processed && progress.expected_bytes > 0 ) {
+			// Measured against the last backup: this one knows its own total only at the end.
+			const processed = Math.min( progress.total_bytes_processed, progress.expected_bytes );
+			const elapsed = ( Date.now() / 1000 ) - job.started_at;
+			lines.push( el( 'progress', { max: progress.expected_bytes, value: processed } ) );
+			if ( job.started_at > 0 && elapsed >= 30 && processed > 0 && processed < progress.expected_bytes ) {
+				const minutes = Math.ceil( ( ( progress.expected_bytes - processed ) / ( processed / elapsed ) ) / 60 );
+				lines.push(
+					el( 'p', { className: 'description bfr-estimate' }, [
+						sprintf(
+							/* translators: %d: number of minutes. */
+							_n( 'About %d minute left, judging by the last backup.', 'About %d minutes left, judging by the last backup.', minutes, 'backups-for-restic' ),
+							minutes,
+						),
+					] ),
+				);
+			}
+		}
 		if ( 'number' === typeof progress.data_added ) {
 			lines.push(
 				el( 'p', {}, [

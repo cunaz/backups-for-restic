@@ -29,6 +29,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Storage\Files;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -179,6 +180,13 @@ final class BackupSteps implements StepProvider {
 
 		$done          = $run->advance( $deadline, $services->throttle() );
 		$job->progress = $run->progress();
+		// How much the last backup of this repository went through: the measure for a
+		// progress bar and an estimate, since this backup knows its own total only at the end.
+		$last     = $services->state->get( 'last_backup' )['progress'] ?? null;
+		$expected = Decoded::int( is_array( $last ) ? ( $last['total_bytes_processed'] ?? null ) : null );
+		if ( $expected > 0 ) {
+			$job->progress['expected_bytes'] = $expected;
+		}
 		foreach ( array_slice( $run->warnings(), count( $job->warnings ) ) as $warning ) {
 			$job->warn( $warning );
 		}

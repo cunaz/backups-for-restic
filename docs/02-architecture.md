@@ -906,7 +906,7 @@ kit, that the cached key opens the repository, and that the Doctor has no critic
 (409 `environment_blocked`). The routes before it do not ask the Doctor. A private
 directory whose probe could not run is no critical finding and does not stop the setup
 (§13.4). The step measures nothing about the site and shows no expected duration of the
-first backup; time estimates are planned for Milestone 3.
+first backup: an estimate needs a backup to measure against (§14).
 
 ### 13.2 REST API (`backups-for-restic/v1`)
 
@@ -1061,8 +1061,10 @@ Progress is a set of counters, not a share of a total. A backup reports the file
 processed so far, new, changed and unmodified files and directories, the blobs and bytes
 added, the current directory and the number of warnings; unlocking reports a percentage;
 check and prune report their phase and counts. The plugin does not know the size of the site
-in advance, so it shows no totals and no estimate of the remaining time; both are planned
-for Milestone 3.
+in advance. From the second backup on it measures against the last one: the progress
+carries `expected_bytes`, the bytes that the last backup of this repository went through,
+and the admin page shows a bar and the minutes left at the speed so far. A site that grew
+or shrank since then makes both wrong by that much; the first backup has neither.
 
 Notifications (`Notifications\Notifier`, FR-09) go by e-mail to the configured recipients, or
 to the site's administration address, through the `backups_for_restic_notification_recipients`
