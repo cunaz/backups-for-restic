@@ -490,9 +490,65 @@ final class RestRoutes {
 			// The REST password did not survive being stored.
 			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
+		// The certificate the test just used becomes the saved server's, and only now: a test
+		// that fails must not leave the saved server with a certificate that is not its own.
+		$kept = $this->keep_candidate_ca( $request );
+		if ( $kept instanceof \WP_Error ) {
+			return $kept;
+		}
 		$this->container->refresh();
 		delete_transient( 'backups_for_restic_snapshots' );
 		return $this->respond( [ 'report' => $report->to_array() ] );
+	}
+
+	/**
+	 * The CA certificate a request to test or save a server brings along, for an own server
+	 * with a certificate of its own authority.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return string|\WP_Error|null PEM text, null if the request brings none, or the error for one that is no certificate.
+	 */
+	private function candidate_ca( \WP_REST_Request $request ): string|\WP_Error|null {
+		$pem = trim( self::text( $request, 'ca_certificate' ) );
+		if ( '' === $pem || 'rest-server' !== self::text( $request, 'server' ) ) {
+			return null;
+		}
+		return self::is_certificate( $pem ) ? $pem : $this->error( 'invalid_certificate', 400 );
+	}
+
+	/**
+	 * Whether a text is a certificate in PEM form of a size that one can have.
+	 *
+	 * @param string $pem Text.
+	 * @return bool True if it parses.
+	 */
+	private static function is_certificate( string $pem ): bool {
+		return strlen( $pem ) <= 65536 && str_contains( $pem, '-----BEGIN CERTIFICATE-----' ) && false !== openssl_x509_parse( $pem );
+	}
+
+	/**
+	 * After a server was saved: stores the certificate the request brought as the server's,
+	 * and removes a stored one for a server of the preset, which has a public certificate.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_Error|null Error if the certificate could not be stored.
+	 */
+	private function keep_candidate_ca( \WP_REST_Request $request ): ?\WP_Error {
+		$pem       = $this->candidate_ca( $request );
+		$directory = $this->container->private_dir();
+		if ( is_string( $pem ) ) {
+			try {
+				$directory->ensure();
+				Files::write_atomic( $directory->path . '/ca.pem', $pem );
+			} catch ( PluginException $e ) {
+				return $this->error( JobError::from_throwable( $e )->code, 500 );
+			}
+			$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'uploaded' ] );
+		} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $this->container->settings()->string( 'repository.ca_certificate' ) ) {
+			wp_delete_file( $directory->path . '/ca.pem' );
+			$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'none' ] );
+		}
+		return null;
 	}
 
 	/**
@@ -571,7 +627,7 @@ final class RestRoutes {
 	 */
 	public function upload_ca( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$pem = self::text( $request, 'pem' );
-		if ( strlen( $pem ) > 65536 || ! str_contains( $pem, '-----BEGIN CERTIFICATE-----' ) || false === openssl_x509_parse( $pem ) ) {
+		if ( ! self::is_certificate( $pem ) ) {
 			return $this->error( 'invalid_certificate', 400 );
 		}
 		$directory = $this->container->private_dir();
@@ -695,13 +751,37 @@ final class RestRoutes {
 		$server   = self::text( $request, 'server' );
 		$url      = self::text( $request, 'url' );
 		$username = self::text( $request, 'username' );
+		$pem      = $this->candidate_ca( $request );
+		if ( $pem instanceof \WP_Error ) {
+			return $pem;
+		}
+		// A certificate that comes with the request is used for this test only, from a
+		// temporary file. A server of the preset is tested against the public authorities,
+		// whatever certificate is stored for the server that was saved before.
+		$file = null;
+		$http = null;
 		try {
+			if ( is_string( $pem ) ) {
+				$file = (string) tempnam( get_temp_dir(), 'bfr' );
+				try {
+					Files::write_atomic( $file, $pem );
+				} catch ( PluginException $e ) {
+					return $this->error( JobError::from_throwable( $e )->code, 500 );
+				}
+			}
+			if ( null !== $file || 'rest-server' !== $server ) {
+				$http = new WpHttpClient( $this->container->settings()->int( 'advanced.upload_timeout_seconds' ), $file );
+			}
 			$password = $this->setup()->rest_password( $server, $url, $username, $this->secret_param( $request, 'password' ) );
-			return $this->container->tester()->test( $server, $url, $username, $password );
+			return $this->container->tester( $http )->test( $server, $url, $username, $password );
 		} catch ( InvalidArgument $e ) {
 			return $this->server_error( $e );
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 502 );
+		} finally {
+			if ( is_string( $file ) && is_file( $file ) ) {
+				wp_delete_file( $file );
+			}
 		}
 	}
 
