@@ -206,9 +206,15 @@ carries `Cache-Control: no-store`.
 - If the settings name an uploaded CA certificate that is missing from the private
   directory, the kit is refused with `ca_certificate_missing`: without the certificate
   restic could not reach the server, and the kit would be useless.
-- Not built: a validity of five minutes after the password was entered, and an event that
-  records who viewed the kit and when. Both are planned for Milestone 3; today nothing is
-  logged for a kit request.
+- Every delivery of the kit is recorded: time, user and way (`create`, `connect` or
+  `settings`), the last twenty in the state option, and the action
+  `backups_for_restic_recovery_kit_shown` fires for audit plugins. The Settings tab shows
+  the latest one, so an administrator sees when somebody else looked at the kit. A refused
+  request is not recorded.
+- Not built, on purpose: a validity of five minutes after the WordPress password was
+  entered. The kit's view has copy and download, so no second request is needed, and a
+  window in which a session gets the kit without the password would only help whoever
+  took the session over.
 
 ## 6. Cryptography and format implementation
 

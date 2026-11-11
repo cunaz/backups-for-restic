@@ -7,6 +7,8 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The plugin records when the recovery kit was shown and to whom; the Settings tab shows
+  the latest time, and the action `backups_for_restic_recovery_kit_shown` fires.
 - The environment checks and Site Health point out a JIT compiler that is switched on,
   and a repository server that does not answer from this host.
 - Settings → Repository: forms to enter the REST password and the repository password

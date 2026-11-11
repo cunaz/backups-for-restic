@@ -388,6 +388,7 @@ final class RestRoutes {
 				'secrets'     => $secrets,
 				'private_dir' => $this->container->private_dir()->path,
 				'cache_bytes' => $this->container->cache()->size(),
+				'kit_views'   => $this->kit_views(),
 			]
 		);
 	}
@@ -505,7 +506,7 @@ final class RestRoutes {
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
 			$this->container->refresh();
 			delete_transient( 'backups_for_restic_snapshots' );
-			$kit = RecoveryKit::text( $this->container );
+			$kit = $this->kit( 'create' );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( PluginException $e ) {
@@ -543,7 +544,7 @@ final class RestRoutes {
 		delete_transient( 'backups_for_restic_snapshots' );
 		Cron::chain( $this->container );
 		try {
-			$kit = RecoveryKit::text( $this->container );
+			$kit = $this->kit( 'connect' );
 		} catch ( PluginException $e ) {
 			return $this->kit_error( $e, 409 );
 		}
@@ -631,11 +632,66 @@ final class RestRoutes {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
-			$kit = RecoveryKit::text( $this->container );
+			$kit = $this->kit( 'settings' );
 		} catch ( PluginException $e ) {
 			return $this->kit_error( $e, 409 );
 		}
 		return $this->respond( [ 'recovery_kit' => $kit ], 200, true );
+	}
+
+	/** Deliveries of the recovery kit that are remembered. */
+	private const int KIT_VIEWS = 20;
+
+	/**
+	 * Builds the recovery kit for an answer and records that it was handed out: to whom, when
+	 * and on which way. The kit carries every secret of the backups, so an administrator
+	 * should be able to see who else looked at it.
+	 *
+	 * @param string $via create, connect or settings.
+	 * @return string The kit.
+	 * @throws PluginException If the kit cannot be complete.
+	 */
+	private function kit( string $via ): string {
+		$kit   = RecoveryKit::text( $this->container );
+		$user  = wp_get_current_user();
+		$state = $this->container->state();
+		$views = Decoded::arrays( $state->get( 'recovery_kit' )['views'] ?? null );
+		array_unshift(
+			$views,
+			[
+				'at'    => time(),
+				'user'  => $user->ID,
+				'login' => $user->user_login,
+				'via'   => $via,
+			]
+		);
+		$state->set( 'recovery_kit', [ 'views' => array_slice( $views, 0, self::KIT_VIEWS ) ] );
+		/**
+		 * Fires when the recovery kit, which contains the repository password, was put into a
+		 * response for an administrator.
+		 *
+		 * @param int    $user_id User the kit was shown to.
+		 * @param string $via     create or connect (the setup wizard and the repository forms), or settings (the recovery kit form).
+		 */
+		do_action( 'backups_for_restic_recovery_kit_shown', $user->ID, $via );
+		return $kit;
+	}
+
+	/**
+	 * The latest deliveries of the recovery kit, for the Settings tab.
+	 *
+	 * @return list<array{at: int, login: string, via: string}> Newest first.
+	 */
+	private function kit_views(): array {
+		$views = [];
+		foreach ( Decoded::arrays( $this->container->state()->get( 'recovery_kit' )['views'] ?? null ) as $view ) {
+			$views[] = [
+				'at'    => Decoded::int( $view['at'] ?? null ),
+				'login' => Decoded::string( $view['login'] ?? null ),
+				'via'   => Decoded::string( $view['via'] ?? null ),
+			];
+		}
+		return array_slice( $views, 0, 5 );
 	}
 
 	/**

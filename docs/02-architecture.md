@@ -698,8 +698,9 @@ database holds four options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
 last backup and the last forget, prune and check, the check alert, the exposure and
-append-only probes, the retention switch and proposal, the handled schedule slots, and the
-repository that the first five belong to) and
+append-only probes, the retention switch and proposal, the handled schedule slots, the
+repository that the first five belong to, the probe from the browser and the last twenty
+deliveries of the recovery kit) and
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker and the
 outbox of unsent notices). A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
@@ -990,7 +991,8 @@ directory and the time of the last backup; it does not list the last jobs.
 
 Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous )`,
 `backups_for_restic_backup_succeeded( $job_id, $snapshot_id )`,
-`backups_for_restic_backup_failed( $job_id, $error_code )` and, from Milestone 3,
+`backups_for_restic_backup_failed( $job_id, $error_code )`,
+`backups_for_restic_recovery_kit_shown( $user_id, $via )` and, from Milestone 3,
 `backups_for_restic_restore_applied`; filters `backups_for_restic_capability`,
 `backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
 `backups_for_restic_database_tables_excluded`,

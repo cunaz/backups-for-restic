@@ -151,6 +151,10 @@ test( 'settings are saved, refused when invalid, and the recovery kit needs the 
 	await page.getByLabel( 'Your WordPress password', { exact: true } ).fill( ADMIN.password );
 	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
 	await expect( page.locator( '.bfr-kit textarea' ) ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/ );
+
+	// That it was shown is on record.
+	await page.reload();
+	await expect( page.locator( '.bfr-kit-views' ) ).toContainText( /The recovery kit was last shown on .+ to admin\./ );
 } );
 
 test( 'the passwords and the CA certificate can be entered again in the settings', async ( { page } ) => {

@@ -51,10 +51,24 @@ final class JobControlTest extends TestCase {
 			self::assertStringNotContainsString( TestSite::$repository_password, $raw );
 		}
 
+		// A refused request showed nothing, so nothing is recorded for it.
+		[ , $settings ] = TestSite::api( 'GET', '/settings' );
+		$recorded       = count( (array) ( $settings['kit_views'] ?? [] ) );
+		$asked          = time();
+
 		[ $status, $answer, $raw ] = TestSite::api( 'POST', '/recovery-kit', [ 'user_password' => TestSite::ADMIN_PASSWORD ] );
 		self::assertSame( 200, $status, $raw );
 		self::assertStringContainsString( "RESTIC_PASSWORD='" . TestSite::$repository_password . "'", (string) ( $answer['recovery_kit'] ?? '' ) );
 		self::assertStringContainsString( TestSite::server()->url( 'site' ), (string) $answer['recovery_kit'] );
+
+		// Who saw it, when and on which way.
+		[ , $settings, $raw ] = TestSite::api( 'GET', '/settings' );
+		$views                = (array) ( $settings['kit_views'] ?? [] );
+		self::assertCount( min( 5, $recorded + 1 ), $views, $raw );
+		self::assertSame( [ 'admin', 'settings' ], [ $views[0]['login'] ?? null, $views[0]['via'] ?? null ], $raw );
+		self::assertGreaterThanOrEqual( $asked, $views[0]['at'] ?? 0, $raw );
+		self::assertSame( 'create', $views[ count( $views ) - 1 ]['via'] ?? null, 'The wizard showed it first: ' . $raw );
+		self::assertStringNotContainsString( TestSite::$repository_password, $raw );
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]

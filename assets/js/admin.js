@@ -687,6 +687,7 @@
 						] ),
 						cacheControl( response.cache_bytes ),
 						recoveryKitForm(),
+						kitViews( response.kit_views ),
 					] ),
 					message,
 					save,
@@ -870,6 +871,26 @@
 			} );
 		} );
 		return el( 'div', { className: 'bfr-kit' }, [ text, el( 'p', {}, [ download, ' ', copy ] ) ] );
+	}
+
+	/**
+	 * Who was shown the recovery kit last, and when.
+	 *
+	 * @param {Array} views Latest deliveries of the kit, newest first.
+	 * @return {Element|null} Paragraph, or null if the kit was never shown.
+	 */
+	function kitViews( views ) {
+		if ( ! views || ! views.length ) {
+			return null;
+		}
+		return el( 'p', { className: 'description bfr-kit-views' }, [
+			sprintf(
+				/* translators: 1: date and time, 2: user name. */
+				__( 'The recovery kit was last shown on %1$s to %2$s.', 'backups-for-restic' ),
+				formatTime( views[ 0 ].at ),
+				views[ 0 ].login,
+			),
+		] );
 	}
 
 	function recoveryKitForm() {
