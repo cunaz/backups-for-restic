@@ -33,6 +33,8 @@ final class AccessTest extends TestCase {
 		$routes = [
 			[ 'GET', '/status' ],
 			[ 'GET', '/environment' ],
+			[ 'POST', '/environment/probe' ],
+			[ 'POST', '/environment/probe/report' ],
 			[ 'GET', '/jobs' ],
 			[ 'POST', '/jobs' ],
 			[ 'GET', '/jobs/' . self::JOB ],

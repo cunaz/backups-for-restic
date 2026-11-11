@@ -112,10 +112,11 @@ Participants:
 6. **Secrets flow through one type** (`Secrets\Secret`, redacting, `reveal()` allow-listed).
 7. **Fail closed.** A failed precondition (undecryptable secrets, a private directory that
    the HTTP probe could read, a MAC mismatch, an unsupported repository version) stops the
-   operation with a precise message. One precondition that cannot be verified does not stop
-   it yet: when the HTTP probe of the private directory cannot run, the Doctor reports
-   `unverified` as a recommendation and backups go on (§13.4,
-   [ADR 0007](adr/0007-private-directory.md)); a stricter rule is planned for Milestone 3.
+   operation with a precise message. One precondition can stay unverified without stopping
+   it: where the site cannot request itself, the HTTP probe of the private directory is made
+   by the administrator's browser instead, and until a browser has looked the Doctor
+   reports `unverified` as a recommendation and backups go on (§13.4,
+   [ADR 0007](adr/0007-private-directory.md)).
 8. **Composition root, immutable value objects, `final` by default, `declare(strict_types=1)`.**
 
 ## 3. Module map and dependency rules
@@ -910,7 +911,8 @@ first backup; time estimates are planned for Milestone 3.
 | Route | Purpose |
 | --- | --- |
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
-| `GET /environment?fresh=1` | Doctor results with translated texts |
+| `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
+| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's URL (null if the directory is outside the web root); then the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (no probe pending, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
@@ -969,7 +971,12 @@ be read (a password defined in `wp-config.php` always can; the cached key does n
 because jobs derive it again) and that all eight salt constants are defined, loopback requests and WP-Cron, and
 `zstd` when `repository.format_version` is 2. A private directory inside the web root whose
 HTTP probe could not run is reported as `unverified` with the status `recommended`; only a
-probe that read the file back is `critical`. The Doctor has no check of the PHP version and
+probe that read the file back is `critical`. In that case the admin page lets the browser
+make the request (`Storage\BrowserProbe`): it asks `POST /environment/probe` for a probe
+file, requests the file's URL without credentials and reports status and body to
+`POST /environment/probe/report`. A report with the file's content is the finding
+`exposed`; any other answer counts as protected. The site's own probe, where it gets an
+answer, comes first. The Doctor has no check of the PHP version and
 none of outbound HTTPS; the wizard's connection test is what shows that the repository
 server can be reached. An outbound HTTPS check is planned for Milestone 3. Debug information:
 plugin version, repository host and format version, append-only status, cache size, working

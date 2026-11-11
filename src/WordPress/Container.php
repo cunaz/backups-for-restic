@@ -48,6 +48,7 @@ use BackupsForRestic\Secrets\SecretStore;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\BrowserProbe;
 use BackupsForRestic\Storage\CacheDirectory;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
@@ -471,7 +472,16 @@ final class Container {
 	 * @return WpExposureCheck Check.
 	 */
 	public function exposure(): WpExposureCheck {
-		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random() );
+		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random(), $this->browser_probe() );
+	}
+
+	/**
+	 * The probe of the private directory from the administrator's browser.
+	 *
+	 * @return BrowserProbe Probe.
+	 */
+	public function browser_probe(): BrowserProbe {
+		return new BrowserProbe( $this->private_dir(), $this->state(), $this->random(), $this->clock() );
 	}
 
 	/**

@@ -250,8 +250,10 @@ installed is skipped:
   second job, and is cancelled with its lock released; deactivation, which ends the running
   backup without any further tick; a wrong repository password and its repair; repository
   requests that verify certificates while a must-use plugin switches verification off for
-  the site (`bin/test-site-hostile-filters.php`); a setup that is not completed, and a
-  backup that does not run, while the private directory is served.
+  the site (`bin/test-site-hostile-filters.php`); the probe of the private directory as a
+  browser makes it, on a site that the same file keeps from requesting itself; a setup
+  that is not completed, and a backup that does not run, while the private directory is
+  served.
 - **`ScheduleTest`**: the heartbeat, run through `wp-cron.php`, records the first slot,
   starts a backup whose slot has come and forget after it, prune and check on their slots,
   and nothing for manual schedules.
@@ -311,6 +313,8 @@ on one site, without retries:
 - settings that are saved and still there after a reload, an invalid retention window that
   is refused with a message at its field, and the recovery kit, which needs the WordPress
   password;
+- the Environment tab on a site that cannot request itself: the browser makes the probe
+  of the working directory, and the check says "protected";
 - a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.
 
 Still to come with the restore of Milestone 3: snapshot browsing, single-file restore and

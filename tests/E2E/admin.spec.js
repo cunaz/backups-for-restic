@@ -5,7 +5,7 @@
  * is sent by the tests themselves.
  */
 const { test, expect } = require( '@playwright/test' );
-const { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload } = require( './site' );
+const { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload, noLoopback } = require( './site' );
 
 test.describe.configure( { mode: 'serial' } );
 
@@ -134,6 +134,25 @@ test( 'settings are saved, refused when invalid, and the recovery kit needs the 
 	await page.getByLabel( 'Your WordPress password' ).fill( ADMIN.password );
 	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
 	await expect( page.locator( '.bfr-kit textarea' ) ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/ );
+} );
+
+test( 'the browser checks the working directory where the site cannot request itself', async ( { page } ) => {
+	noLoopback( true );
+	try {
+		const reported = page.waitForResponse( ( response ) => response.url().includes( 'environment%2Fprobe%2Freport' ) || response.url().includes( 'environment/probe/report' ) );
+		await openBackups( page, 'environment' );
+		// The script asked for a probe file, requested it from here and reported the refusal.
+		expect( ( await ( await reported ).json() ).exposed ).toBe( false );
+		const checks = page.locator( '.bfr-checks' );
+		await expect( checks ).toContainText( 'The working directory is protected' );
+		await expect( checks ).not.toContainText( 'could not be verified' );
+		await expect( page.locator( '.bfr-check.bfr-critical' ) ).toHaveCount( 0 );
+	} finally {
+		noLoopback( false );
+	}
+	// With requests to itself the site finds the same on its own.
+	await page.getByRole( 'button', { name: 'Check again' } ).click();
+	await expect( page.locator( '.bfr-checks' ) ).toContainText( 'The working directory is protected' );
 } );
 
 test( 'a running backup is cancelled from the dashboard', async ( { page } ) => {

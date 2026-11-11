@@ -1,11 +1,16 @@
 <?php
 /**
- * Must-use plugin for the test site only (bin/test-site.sh install links it).
+ * Must-use plugin for the test site only (bin/test-site.sh install links it). It makes the
+ * site behave like hosts that the tests have to cover, while a test asks for it with a flag
+ * file. Development tooling.
  *
- * While the file wp-content/bfr-hostile-filters exists, this switches certificate
- * verification off for every HTTP request of the site, in the three ways that snippets found
- * on the web do it. The integration tests use it to show that the plugin's repository
- * requests verify certificates all the same. Development tooling.
+ * While wp-content/bfr-no-loopback exists, the site cannot request its own address, as on
+ * hosts whose firewall blocks such requests. The tests use it for the probe of the private
+ * directory from the browser.
+ *
+ * While wp-content/bfr-hostile-filters exists, certificate verification is switched off for
+ * every HTTP request of the site, in the three ways that snippets found on the web do it. The
+ * tests use it to show that the plugin's repository requests verify certificates all the same.
  *
  * @package BackupsForRestic
  */
@@ -13,6 +18,17 @@
 declare( strict_types=1 );
 
 defined( 'ABSPATH' ) || exit;
+
+if ( is_file( WP_CONTENT_DIR . '/bfr-no-loopback' ) ) {
+	add_filter(
+		'pre_http_request',
+		static function ( $response, $arguments, $url ) {
+			return is_string( $url ) && str_starts_with( $url, home_url() ) ? new WP_Error( 'http_request_failed', 'Requests to the site itself are blocked by a test.' ) : $response;
+		},
+		10,
+		3
+	);
+}
 
 if ( ! is_file( WP_CONTENT_DIR . '/bfr-hostile-filters' ) ) {
 	return;

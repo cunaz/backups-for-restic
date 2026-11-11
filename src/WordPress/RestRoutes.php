@@ -54,6 +54,8 @@ final class RestRoutes {
 		$routes = [
 			'/status'                                    => [ 'GET', 'status' ],
 			'/environment'                               => [ 'GET', 'environment' ],
+			'/environment/probe'                         => [ 'POST', 'begin_probe' ],
+			'/environment/probe/report'                  => [ 'POST', 'report_probe' ],
 			'/jobs'                                      => [ 'GET', 'jobs', 'POST', 'create_job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})'     => [ 'GET', 'job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/cancel' => [ 'POST', 'cancel_job' ],
@@ -189,7 +191,48 @@ final class RestRoutes {
 		foreach ( $this->container->doctor( self::flag( $request, 'fresh' ) ) as $check ) {
 			$checks[] = $check->to_array() + Messages::check( $check );
 		}
-		return $this->respond( [ 'checks' => $checks ] );
+		try {
+			// The site could not request itself: the admin page lets the browser look.
+			$browser = $this->container->exposure()->needs_browser();
+		} catch ( PluginException ) {
+			$browser = false;
+		}
+		return $this->respond(
+			[
+				'checks'        => $checks,
+				'browser_probe' => $browser,
+			]
+		);
+	}
+
+	/**
+	 * Writes a probe file into the private directory for the browser to request (ADR 0007).
+	 *
+	 * @return \WP_REST_Response|\WP_Error Response with the URL, or null as URL if the directory has none.
+	 */
+	public function begin_probe(): \WP_REST_Response|\WP_Error {
+		try {
+			$exposure = $this->container->exposure();
+			if ( null === $exposure->probe_url( 'x' ) ) {
+				return $this->respond( [ 'url' => null ] );
+			}
+			return $this->respond( [ 'url' => $exposure->probe_url( $this->container->browser_probe()->begin() ) ] );
+		} catch ( PluginException $e ) {
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
+		}
+	}
+
+	/**
+	 * Takes what the browser got for the probe file.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the HTTP status (0 if the request failed) and the body.
+	 * @return \WP_REST_Response Response: exposed is true, false, or null if the report says nothing.
+	 */
+	public function report_probe( \WP_REST_Request $request ): \WP_REST_Response {
+		$status = $request->get_param( 'status' );
+		// The token has 32 characters; a page that serves the file starts with it.
+		$body = substr( self::text( $request, 'body' ), 0, 4096 );
+		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( is_numeric( $status ) ? (int) $status : 0, $body ) ] );
 	}
 
 	/**

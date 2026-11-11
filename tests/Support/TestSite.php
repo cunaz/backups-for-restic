@@ -345,6 +345,37 @@ final class TestSite {
 	}
 
 	/**
+	 * Blocks the site's requests to its own address, as the firewall of many shared hosts
+	 * does (bin/test-site-hostile-filters.php), or stops doing so.
+	 */
+	public static function no_loopback( bool $active ): void {
+		$flag = self::root() . '/wp-content/bfr-no-loopback';
+		if ( $active ) {
+			file_put_contents( $flag, '' );
+		} elseif ( is_file( $flag ) ) {
+			unlink( $flag );
+		}
+	}
+
+	/**
+	 * Requests a URL of the site as a visitor's browser does: without credentials.
+	 *
+	 * @return array{int, string} Status and body.
+	 */
+	public static function visit( string $url ): array {
+		$handle = curl_init( $url );
+		curl_setopt_array(
+			$handle,
+			[
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_TIMEOUT        => 30,
+			]
+		);
+		$body = curl_exec( $handle );
+		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), is_string( $body ) ? $body : '' ];
+	}
+
+	/**
 	 * Starts the web server again.
 	 */
 	public static function start_server(): void {
