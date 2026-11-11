@@ -216,7 +216,7 @@ final class BackupSteps implements StepProvider {
 				'warnings' => count( $job->warnings ),
 			]
 		);
-		$this->measure( $log );
+		$this->measure( $job, $log );
 		return true;
 	}
 
@@ -225,9 +225,19 @@ final class BackupSteps implements StepProvider {
 	 * its packs, from one listing. A listing that fails or names no sizes changes nothing; the
 	 * job that asked has done its work either way.
 	 *
+	 * A job asks once. Should the listing take so long that the host ends the request, the
+	 * next tick repeats the step that asked, and without this it would ask again, and again
+	 * with every tick: a backup that is done could not finish over a number on the dashboard.
+	 *
+	 * @param Job      $job Job that asks.
 	 * @param EventLog $log Log.
 	 */
-	public function measure( EventLog $log ): void {
+	public function measure( Job $job, EventLog $log ): void {
+		if ( ( $this->services->state->get( 'usage_asked' )['job'] ?? null ) === $job->id ) {
+			$log->write( 'warning', 'The size of the repository was not read: an earlier attempt of this job did not come back.' );
+			return;
+		}
+		$this->services->state->set( 'usage_asked', [ 'job' => $job->id ] );
 		try {
 			$repository = $this->services->access->open_cached();
 			if ( null === $repository ) {

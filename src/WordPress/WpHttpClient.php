@@ -61,7 +61,11 @@ final class WpHttpClient implements HttpClient {
 			'sslverify'   => true,
 			'user-agent'  => $user_agent,
 			'cookies'     => [],
+			// A repository's objects are encrypted and do not compress; nothing is gained by
+			// a compressed answer, and unpacking one is not held back by the limit below.
+			'decompress'  => false,
 		];
+		$arguments['headers']['Accept-Encoding'] = 'identity';
 		if ( $limit > 0 ) {
 			// One byte more than accepted: the caller sees that the body was longer.
 			$arguments['limit_response_size'] = $limit + 1;

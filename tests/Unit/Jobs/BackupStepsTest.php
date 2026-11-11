@@ -179,6 +179,39 @@ final class BackupStepsTest extends TestCase {
 		);
 	}
 
+	public function test_a_job_whose_listing_never_came_back_does_not_ask_again(): void {
+		$this->repository();
+		$this->unlock();
+		$state = new SiteState( $this->options );
+		$job   = new Job( '20270115T030000Z-abcdef', JobType::Backup, 'manual', 1_800_000_000 );
+		// The host ended the request in the middle of the listing; nothing caught that.
+		$this->server->before = static function ( string $method, string $path ): ?HttpResponse {
+			if ( str_ends_with( $path, '/data/' ) ) {
+				throw new \Error( 'Maximum execution time exceeded' );
+			}
+			return null;
+		};
+		try {
+			$this->steps()->record( $job, $this->jobs->log( $job ), microtime( true ) + 5 );
+			self::fail( 'The request was ended.' );
+		} catch ( \Error ) {
+			self::assertSame( [], $state->get( 'usage' ) );
+		}
+
+		// The next tick repeats the step.
+		$listings = count( array_filter( $this->server->requests, static fn ( string $request ): bool => str_ends_with( $request, '/data/' ) ) );
+		self::assertTrue( $this->steps()->record( $job, $this->jobs->log( $job ), microtime( true ) + 5 ) );
+
+		self::assertCount( $listings, array_filter( $this->server->requests, static fn ( string $request ): bool => str_ends_with( $request, '/data/' ) ), 'No second listing.' );
+		self::assertSame( $job->id, $state->get( 'last_backup' )['job'] ?? null );
+
+		// The next job asks again.
+		$this->server->before = null;
+		$next                 = new Job( '20270116T030000Z-abcdef', JobType::Backup, 'manual', 1_800_086_400 );
+		self::assertTrue( $this->steps()->record( $next, $this->jobs->log( $next ), microtime( true ) + 5 ) );
+		self::assertSame( 0, $state->get( 'usage' )['packs'] ?? null );
+	}
+
 	public function test_a_listing_that_fails_does_not_fail_the_backup_and_keeps_the_last_measure(): void {
 		$this->repository();
 		$this->unlock();

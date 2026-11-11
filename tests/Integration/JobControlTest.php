@@ -44,6 +44,8 @@ final class JobControlTest extends TestCase {
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_the_recovery_kit_needs_the_wordpress_password_of_the_administrator(): void {
+		[ , $settings ] = TestSite::api( 'GET', '/settings' );
+		$before         = (array) ( $settings['kit_views'] ?? [] );
 		foreach ( [ [], [ 'user_password' => 'not the password' ], [ 'user_password' => TestSite::$repository_password ] ] as $proof ) {
 			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/recovery-kit', $proof );
 			self::assertSame( 403, $status, $raw );
@@ -53,8 +55,9 @@ final class JobControlTest extends TestCase {
 
 		// A refused request showed nothing, so nothing is recorded for it.
 		[ , $settings ] = TestSite::api( 'GET', '/settings' );
-		$recorded       = count( (array) ( $settings['kit_views'] ?? [] ) );
-		$asked          = time();
+		self::assertSame( $before, (array) ( $settings['kit_views'] ?? [] ) );
+		$recorded = count( $before );
+		$asked    = time();
 
 		[ $status, $answer, $raw ] = TestSite::api( 'POST', '/recovery-kit', [ 'user_password' => TestSite::ADMIN_PASSWORD ] );
 		self::assertSame( 200, $status, $raw );

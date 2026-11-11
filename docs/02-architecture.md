@@ -916,7 +916,7 @@ first backup: an estimate needs a backup to measure against (§14).
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
+| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune; a job asks for that listing once, so a listing that outlasts the request cannot keep a finished job from ending), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
 | `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
@@ -991,8 +991,9 @@ report with the file's content is the finding
 answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
 compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
 when the repository server did not answer a request from this host. The latter is asked
-only when the checks are run afresh and cached for a day; any answer counts, also a
-refusal of the credentials. The Doctor has no check of the PHP version, and before a
+only when the checks are run afresh, with one request that waits ten seconds at most, and
+is cached for a day for the address it was asked of; any answer counts, also a refusal of
+the credentials or an error status. The Doctor has no check of the PHP version, and before a
 repository is configured none of outbound HTTPS: it asks no third party, and the wizard's
 connection test is what shows that the repository server can be reached. Debug information:
 plugin version, repository host and format version, append-only status, cache size, working
