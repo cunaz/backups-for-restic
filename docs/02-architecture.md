@@ -314,7 +314,7 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   may not come. The tick's deadline holds back regular steps only: once a job is in its
   cleanup steps, the same tick runs them all. A request that arrives when the work is done
   (the snapshot written, the packs deleted) no longer stops the job: the step `recording`
-  runs, and the job ends as `succeeded` (`JobType::cancels_before()`). A job that is still `queued` is cancelled at once and without cleanup
+  runs, in the tick that finds the request even if its deadline has passed, and the job ends as `succeeded` (`JobType::cancels_before()`). A job that is still `queued` is cancelled at once and without cleanup
   steps, because nothing ran: by `cancel()` itself if it gets the runner lock, otherwise by
   the next tick. `Runner::stop()` is both in one call, for the deactivation (§18): it asks
   the active job to cancel and runs one tick, which is the cleanup.
@@ -685,6 +685,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── .htaccess, web.config, index.php       deny rules / empty index
 ├── probe/<random>.txt                     HTTP exposure check, deleted after the request
 ├── runner.lock                            flock target
+├── state.lock, notify.lock                flock targets for changes to the state and for sending notices
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
@@ -707,7 +708,14 @@ deliveries of the recovery kit, and the number and size of the repository's pack
 backup or a prune last listed them) and
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
 repository both are counted for, and the outbox of unsent notices; streaks and marker start
-anew when the jobs turn to another repository). A fifth name, `backups_for_restic_schema_version`, is reserved:
+anew when the jobs turn to another repository). The last two are documents that several
+requests change: a job's tick, the heartbeat and a request of the admin page. A change
+therefore reads the document from the database, past what the request read before
+(`Options::fresh()`), and holds `flock()` on `<private>/state.lock` until it is written
+back (`Storage\FileLock`), so that no request stores a copy from before another one's
+change. Notices are handed to the mailer by one request at a time (`<private>/notify.lock`,
+not waited for); the state is not locked while a mail is on its way, and what is queued in
+that time goes out with the next heartbeat. A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
 
 ## 11. Settings model
@@ -927,7 +935,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
 | `POST /repository/test`, `POST /repository/save` | connection test; test and save. For an own server both take an optional `ca_certificate` (PEM): the test uses it from a file of its own under `tmp/` in the private directory, removed after the test, `save` stores it as the server's certificate once the server is saved, and saving a server of the preset removes a stored one. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent. `save` changes nothing while a job is active (409 `job_conflict`). A save that fails half way puts back what it changed: the settings, the REST password, the cached key and the certificate. Where `wp-config.php` defines the address, the certificate of a tested address that is another one is not stored; saving another address empties `repository.id` and drops the results remembered for the old repository |
-| `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; neither stores anything while a job is active (409 `job_conflict`). `create` stores the repository password before the repository exists and puts the earlier one back if the repository does not come to exist; `connect` without a password unlocks with the stored one. Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
+| `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; neither stores anything while a job is active (409 `job_conflict`). `create` stores the repository password before the repository exists and puts the earlier one back if the repository does not come to exist; `connect` keeps an entered password apart until the unlock job has opened the repository with it, and only then replaces the stored password and the cached key; a wrong password leaves both in place, and the kit in its answer names the entered one. `connect` without a password unlocks with the stored one. Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
 | `POST`/`DELETE /repository/ca-certificate` | CA certificate of a self-hosted server |
 | `POST /setup/complete` | finish the wizard after the recovery kit is acknowledged; 409 `environment_blocked` while the Doctor has a critical finding |
 | `POST /recovery-kit` | the recovery kit, only with the administrator's WordPress password as `user_password` (403 `wrong_user_password`); 409 `ca_certificate_missing` as above |

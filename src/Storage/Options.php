@@ -27,6 +27,15 @@ interface Options {
 	public function get( string $name ): mixed;
 
 	/**
+	 * Reads an option as the database holds it now. get() may answer with what this request
+	 * read before; who changes a value that other requests change as well starts from this.
+	 *
+	 * @param string $name Option name.
+	 * @return mixed Stored value, or null if the option does not exist.
+	 */
+	public function fresh( string $name ): mixed;
+
+	/**
 	 * Writes an option.
 	 *
 	 * @param string $name     Option name.

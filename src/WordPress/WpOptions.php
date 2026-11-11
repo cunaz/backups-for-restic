@@ -29,6 +29,21 @@ final class WpOptions implements Options {
 	}
 
 	/**
+	 * Reads an option from the database, past what this request has cached.
+	 *
+	 * @param string $name Option name.
+	 * @return mixed Value, or null if missing.
+	 */
+	public function fresh( string $name ): mixed {
+		// Where get_option() keeps an option that is not autoloaded, and where it remembers
+		// that an option did not exist. With a persistent object cache other requests read the
+		// database once more; nothing is lost.
+		wp_cache_delete( $name, 'options' );
+		wp_cache_delete( 'notoptions', 'options' );
+		return get_option( $name, null );
+	}
+
+	/**
 	 * Writes an option.
 	 *
 	 * @param string $name     Option name.

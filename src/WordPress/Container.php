@@ -57,6 +57,7 @@ use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
 use BackupsForRestic\Storage\BrowserProbe;
 use BackupsForRestic\Storage\CacheDirectory;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
@@ -109,6 +110,13 @@ final class Container {
 	 * @var ?Redactor
 	 */
 	private ?Redactor $redactor = null;
+
+	/**
+	 * Lock for changes to the state, shared by everything in this request.
+	 *
+	 * @var FileLock|null
+	 */
+	private ?FileLock $state_lock = null;
 
 	/**
 	 * Randomness.
@@ -204,7 +212,7 @@ final class Container {
 		foreach ( self::SALT_CONSTANTS as $constant ) {
 			$material .= self::constant_string( $constant );
 		}
-		return $this->stored_secrets ??= new EncryptedOptionStore( $this->options(), new Secret( $material ), $this->random() );
+		return $this->stored_secrets ??= new EncryptedOptionStore( $this->options(), new Secret( $material ), $this->random(), $this->state_lock() );
 	}
 
 	/**
@@ -246,8 +254,9 @@ final class Container {
 	}
 
 	/**
-	 * Removes every known secret from logs and job files: the passwords, and the REST user name
-	 * and password together as the Authorization header of repository requests carries them.
+	 * Removes every known secret from logs and job files: the passwords, among them a
+	 * repository password that was entered and is not confirmed yet, and the REST user name and
+	 * password together as the Authorization header of repository requests carries them.
 	 *
 	 * @return Redactor Redactor.
 	 */
@@ -255,7 +264,7 @@ final class Container {
 		if ( null === $this->redactor ) {
 			$this->redactor = new Redactor();
 			$username       = $this->settings()->string( 'repository.rest_username' );
-			foreach ( [ SecretName::RepositoryPassword, SecretName::RestPassword ] as $name ) {
+			foreach ( [ SecretName::RepositoryPassword, SecretName::RepositoryPasswordCandidate, SecretName::RestPassword ] as $name ) {
 				try {
 					$secret = $this->secrets()->get( $name );
 				} catch ( SecretsUndecryptable ) {
@@ -297,7 +306,17 @@ final class Container {
 	 * @return SiteState State.
 	 */
 	public function state(): SiteState {
-		return new SiteState( $this->options() );
+		return new SiteState( $this->options(), $this->state_lock() );
+	}
+
+	/**
+	 * The lock for changes to the remembered results and to the notifications. One object for
+	 * the request: a change that leads to another one takes the lock only once.
+	 *
+	 * @return FileLock Lock.
+	 */
+	private function state_lock(): FileLock {
+		return $this->state_lock ??= new FileLock( $this->private_dir()->path . '/state.lock' );
 	}
 
 	/**
@@ -494,7 +513,7 @@ final class Container {
 	 * @return Notifier Notifier.
 	 */
 	public function notifier(): Notifier {
-		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ) );
+		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ), $this->state_lock(), new FileLock( $this->private_dir()->path . '/notify.lock' ) );
 	}
 
 	/**

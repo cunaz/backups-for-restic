@@ -40,7 +40,7 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 - What the directory holds today: `jobs/` with job state, event logs and the engine's
   checkpoints (the ledger is gone, [ADR 0014](0014-file-based-job-store.md)), `cache/` with
   the encrypted merged index, `kdf/` with the scrypt table and its checkpoint during an
-  unlock, `probe/`, the uploaded CA certificate and the runner lock. Trees are not cached,
+  unlock, `probe/`, the uploaded CA certificate, the runner lock and, since 2026-11-11, `state.lock` and `notify.lock`: empty files that serialise changes to the state, the notifications and the secrets in the database, and the sending of notices ([ADR 0014](0014-file-based-job-store.md), As built). Trees are not cached,
   and a pack under construction is held in memory, so there is no pack temp file. `tmp/`,
   `logs/` and `restores/` are created and still empty; restore staging and import files
   come with Milestone 3.

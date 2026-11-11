@@ -114,6 +114,18 @@ All notable changes are documented here. The format follows
   address could stay with the old password or without the certificate that belongs to it.
 - Where `wp-config.php` defines the repository address, testing another address with a
   certificate of its own no longer replaces the stored certificate.
+- What the plugin remembers between requests (last results, handled schedule slots, who
+  looked at the recovery kit, waiting notices) is no longer overwritten when two requests
+  change it at the same time, for example a running backup and the admin page. A notice is
+  not sent twice when two requests try to deliver it at once.
+- Deactivating the plugin just as a backup or a check finishes no longer leaves the job
+  active and its lock in the repository: the result is recorded and the job cleaned up in
+  the same request, and recording the result of a check no longer needs the server.
+- A wrong repository password entered under Settings → Repository no longer replaces the
+  stored one. Before, the stored password and the cached key were gone as soon as the form
+  was sent, and backups failed until the right password was entered. Now the entered
+  password is kept apart and takes effect only once the unlock job has opened the
+  repository with it.
 - The setup wizard sends the CA certificate along with the connection test. Before, the
   test ran without it and a server with a certificate of its own authority could not be
   set up. The test stores nothing; the certificate is kept when the server is saved.

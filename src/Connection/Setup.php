@@ -33,8 +33,8 @@ use BackupsForRestic\Support\Bytes;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Saves a tested server, creates a new repository with a generated password, or stores the
- * password of an existing repository whose key is then derived by an unlock job.
+ * Saves a tested server, creates a new repository with a generated password, or takes the
+ * password of an existing repository, which an unlock job then confirms by deriving the key.
  *
  * None of the three happens while a job is active: the job would go on with another server,
  * another password or without its key in the middle of its work.
@@ -393,30 +393,36 @@ final class Setup {
 	}
 
 	/**
-	 * Stores the password of an existing repository and queues the unlock job that derives its
+	 * Takes the password of an existing repository and queues the unlock job that derives its
 	 * key, because the derivation can take longer than one request.
 	 *
-	 * Nothing is stored while another job is active: that job would lose the cached key in the
-	 * middle of its work, and no unlock job could tell whether the new password is right.
+	 * A password that is given is kept apart until the unlock job has opened the repository
+	 * with it; only then does it replace the stored password and the cached key. A wrong one
+	 * leaves both as they are, and so the backups of a site that is set up keep running.
 	 *
-	 * @param Secret|null $password Repository password; null for the one defined in wp-config.php, or else the stored one.
+	 * Nothing happens while another job is active: no unlock job could then say whether the
+	 * password is right.
+	 *
+	 * @param Secret|null $password Repository password; null for the one defined in wp-config.php, or else the stored one. One defined in wp-config.php stays in force whatever is given.
 	 * @param int         $now      Unix time.
 	 * @return Job The unlock job.
 	 * @throws InvalidArgument If there is no password: none given, none in wp-config.php and none stored.
 	 * @throws JobConflict If another job is active.
 	 */
 	public function connect( ?Secret $password, int $now ): Job {
-		$overridden = $this->secrets->is_overridden( SecretName::RepositoryPassword );
+		if ( $this->secrets->is_overridden( SecretName::RepositoryPassword ) ) {
+			$password = null;
+		}
 		if ( null === $password && null === $this->stored_password() ) {
 			InvalidArgument::raise( 'No repository password was given.', [ 'code' => 'no_password' ] );
 		}
 		return $this->jobs->while_idle(
-			function () use ( $password, $overridden, $now ): Job {
+			function () use ( $password, $now ): Job {
+				// Also without a password: one left behind by a job that never ended is not what
+				// this unlock is about.
+				$this->secrets->delete( SecretName::RepositoryPasswordCandidate );
 				if ( null !== $password ) {
-					if ( ! $overridden ) {
-						$this->secrets->set( SecretName::RepositoryPassword, $password );
-					}
-					$this->secrets->delete( SecretName::MasterKey );
+					$this->secrets->set( SecretName::RepositoryPasswordCandidate, $password );
 				}
 				return $this->jobs->create( JobType::Unlock, 'setup', $now );
 			}

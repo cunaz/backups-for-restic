@@ -12,7 +12,9 @@ use BackupsForRestic\Notifications\Notice;
 use BackupsForRestic\Notifications\NoticeKind;
 use BackupsForRestic\Notifications\Notifier;
 use BackupsForRestic\Settings\Settings;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\SiteState;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 use BackupsForRestic\Tests\Support\RecordingMailer;
 
@@ -369,5 +371,38 @@ final class NotifierTest extends TestCase {
 		$notice = new Notice( NoticeKind::Recovery, 5, 'prune', 'job', 'code', 4, 3 );
 		self::assertEquals( $notice, Notice::from_array( $notice->to_array() ) );
 		self::assertNull( Notice::from_array( [ 'kind' => 'gossip' ] ) );
+	}
+
+	/**
+	 * A notifier as a request on a site has it: with the locks in the private directory.
+	 */
+	private function request( string $directory ): Notifier {
+		$settings = [
+			'setup.completed'              => true,
+			'notifications.email.on_stale' => false,
+		];
+		return new Notifier( $this->options, new SiteState( $this->options ), Settings::from_stored( $settings ), $this->mailer, new FileLock( $directory . '/state.lock' ), new FileLock( $directory . '/notify.lock' ) );
+	}
+
+	public function test_a_notice_queued_while_a_mail_goes_out_is_not_lost_and_not_sent_twice(): void {
+		$directory = TempDir::create( 'notify' );
+		try {
+			$notifier = $this->request( $directory );
+			$failed   = self::SETUP + 10;
+			// The mail server is slow; meanwhile the tick of another request ends a check that found damage.
+			$this->mailer->meanwhile = function () use ( $directory, $failed ): void {
+				$this->request( $directory )->job_finished( $this->job( JobType::Check, JobState::Succeeded, $failed + 5, '', [ 'errors' => 2 ] ), $failed + 5 );
+			};
+
+			$notifier->job_finished( $this->job( JobType::Backup, JobState::Failed, $failed, 'internal' ), $failed );
+
+			self::assertSame( [ 'failure' ], $this->mailer->kinds(), 'The other request left the sending to the one that was at it.' );
+			self::assertSame( 1, $notifier->pending(), 'The notice about the damage waits for the next heartbeat.' );
+			$notifier->heartbeat( $failed + 300 );
+			self::assertSame( [ 'failure', 'check_findings' ], $this->mailer->kinds() );
+			self::assertSame( 0, $notifier->pending() );
+		} finally {
+			TempDir::remove( $directory );
+		}
 	}
 }

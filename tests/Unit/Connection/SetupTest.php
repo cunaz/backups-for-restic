@@ -334,17 +334,39 @@ final class SetupTest extends TestCase {
 		self::assertNull( $this->stored->get( SecretName::RestPassword ), 'It was the password of another server.' );
 	}
 
-	public function test_connecting_stores_the_password_forgets_the_cached_key_and_queues_the_unlock_job(): void {
-		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'password of another repository' ) );
-		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"of another repository"}' ) );
+	public function test_connecting_keeps_the_entered_password_apart_until_the_unlock_job_confirms_it(): void {
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'password the backups run with' ) );
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"the backups run with"}' ) );
 
-		$job = $this->wizard()->connect( new Secret( 'the right password' ), self::NOW );
+		$job = $this->wizard()->connect( new Secret( 'the entered password' ), self::NOW );
 
 		self::assertSame( JobType::Unlock, $job->type );
 		self::assertSame( 'setup', $job->trigger );
 		self::assertSame( JobState::Queued, $this->jobs()->active()?->state );
-		self::assertSame( 'the right password', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
-		self::assertNull( $this->stored->get( SecretName::MasterKey ), 'The unlock job has to derive the key from the new password.' );
+		self::assertSame( 'the entered password', $this->stored->get( SecretName::RepositoryPasswordCandidate )?->reveal() );
+		self::assertSame( 'password the backups run with', $this->stored->get( SecretName::RepositoryPassword )?->reveal(), 'Nobody knows yet whether the entered one is right.' );
+		self::assertSame( '{"key":"the backups run with"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
+	}
+
+	public function test_connecting_with_the_stored_password_drops_one_that_an_earlier_attempt_left_behind(): void {
+		$this->stored->set( SecretName::RepositoryPassword, new Secret( 'the stored password' ) );
+		$this->stored->set( SecretName::RepositoryPasswordCandidate, new Secret( 'entered before the site went down' ) );
+
+		$this->wizard()->connect( null, self::NOW );
+
+		self::assertNull( $this->stored->get( SecretName::RepositoryPasswordCandidate ), 'This unlock is about the stored password.' );
+		self::assertSame( 'the stored password', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+	}
+
+	public function test_a_password_from_wp_config_stays_in_force_whatever_is_entered(): void {
+		$this->stored->set( SecretName::MasterKey, new Secret( '{"key":"cached"}' ) );
+
+		$job = $this->wizard( [ 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD' => 'from wp-config' ] )->connect( new Secret( 'entered all the same' ), self::NOW );
+
+		self::assertSame( JobType::Unlock, $job->type );
+		self::assertNull( $this->stored->get( SecretName::RepositoryPasswordCandidate ) );
+		self::assertNull( $this->stored->get( SecretName::RepositoryPassword ) );
+		self::assertSame( '{"key":"cached"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
 	}
 
 	public function test_connecting_while_a_job_is_active_stores_nothing(): void {
@@ -357,6 +379,7 @@ final class SetupTest extends TestCase {
 			self::fail( 'A second job must be refused.' );
 		} catch ( JobConflict ) {
 			self::assertSame( 'password the running backup needs', $this->stored->get( SecretName::RepositoryPassword )?->reveal() );
+			self::assertNull( $this->stored->get( SecretName::RepositoryPasswordCandidate ) );
 			self::assertSame( '{"key":"the running backup works with"}', $this->stored->get( SecretName::MasterKey )?->reveal() );
 			self::assertSame( $running->id, $this->jobs()->active()?->id );
 			self::assertCount( 1, $this->jobs()->latest( 10 ) );

@@ -146,7 +146,7 @@ final readonly class PrivateDirectory {
 		foreach ( [ ...self::SUBDIRECTORIES, 'spool' ] as $name ) {
 			Files::remove_tree( $this->path . '/' . $name );
 		}
-		foreach ( [ '.htaccess', 'web.config', 'index.php', 'runner.lock', 'ca.pem' ] as $name ) {
+		foreach ( [ '.htaccess', 'web.config', 'index.php', 'runner.lock', 'state.lock', 'notify.lock', 'ca.pem' ] as $name ) {
 			if ( is_file( $this->path . '/' . $name ) ) {
 				unlink( $this->path . '/' . $name );
 			}
