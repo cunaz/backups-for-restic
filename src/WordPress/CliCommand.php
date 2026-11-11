@@ -365,7 +365,9 @@ final class CliCommand {
 	}
 
 	/**
-	 * Ticks until no job is left.
+	 * Ticks until no job is left. While another tick is at work, for example one that a
+	 * request to wp-cron.php started, this waits for it: that tick's report names no job, and
+	 * the job is not done because somebody else is working on it.
 	 *
 	 * @param float $budget Seconds per tick.
 	 */
@@ -378,7 +380,7 @@ final class CliCommand {
 			if ( 'waiting' === $report->status || 'busy' === $report->status ) {
 				sleep( 5 );
 			}
-		} while ( $report->has_more_work() );
+		} while ( $report->has_more_work() || 'busy' === $report->status );
 	}
 
 	/**
