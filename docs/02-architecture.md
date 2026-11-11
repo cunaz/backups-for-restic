@@ -701,8 +701,10 @@ database holds four options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
 last backup and the last forget, prune and check, the check alert, the exposure and
-append-only probes, the retention switch and proposal, the handled schedule slots, and the
-repository that the first five belong to) and
+append-only probes, the retention switch and proposal, the handled schedule slots, the
+repository that the first five belong to, the probe from the browser, the last twenty
+deliveries of the recovery kit, and the number and size of the repository's packs as a
+backup or a prune last listed them) and
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
 repository both are counted for, and the outbox of unsent notices; streaks and marker start
 anew when the jobs turn to another repository). A fifth name, `backups_for_restic_schema_version`, is reserved:
@@ -892,8 +894,9 @@ repository is connected → Recovery kit → Schedule → First backup). The rep
 offers an own restic REST server, which is preselected, and the BorgBase preset as the
 second option, takes the credentials and, for an own server, an optional CA certificate,
 tests authentication, listing and a ranged read, and detects append-only
-([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows no repository
-usage or growth yet; that is planned for Milestone 3.
+([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows how much
+the repository holds, as measured after the last backup or prune; how that grows over time
+is not shown yet and is planned for Milestone 3.
 
 The whole UI is one classic script, `assets/js/admin.js`, on core's `wp-api-fetch`,
 `wp-i18n` and `wp-dom-ready`. The server renders only the frame of the page, and every view
@@ -908,13 +911,13 @@ kit, that the cached key opens the repository, and that the Doctor has no critic
 (409 `environment_blocked`). The routes before it do not ask the Doctor. A private
 directory whose probe could not run is no critical finding and does not stop the setup
 (§13.4). The step measures nothing about the site and shows no expected duration of the
-first backup; time estimates are planned for Milestone 3.
+first backup: an estimate needs a backup to measure against (§14).
 
 ### 13.2 REST API (`backups-for-restic/v1`)
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
+| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune; a job asks for that listing once, so a listing that outlasts the request cannot keep a finished job from ending), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
 | `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
@@ -953,17 +956,21 @@ Milestone 3. Errors of the routes carry the codes of §14 with the prefix
 
 Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
 `forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
-`tick [--until-idle]`, `status` and `snapshots`. The four commands that start a job end
+`tick [--until-idle]`, `status`, `snapshots`, `settings list|get|set`, `cancel [<job>]` and
+`logs [<job>] [--lines=<number>]`. `settings set` changes what the settings page can change
+(`Settings\Schema::editable()`), with the same validation; `cancel` asks the active or the
+named job to stop and runs one tick for its cleanup; `logs` prints a job's event log,
+which is redacted when it is written. The four commands that start a job end
 with an error under the same conditions as `POST /jobs` (§13.2): before the setup is
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. `status` prints the last backup and the active job only.
 
 Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
-cancelling a job, job logs, `settings get|set` and `recovery-kit` (parity with the admin
-area beyond starting jobs is planned for Milestone 3); `ls <snapshot> [<path>]`, `restore …`
-and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove
-stale locks of other hosts, stays on the list without a milestone. Nothing requires
-WP-CLI: setup, settings, cancelling and the recovery kit are in the admin area.
+`ls <snapshot> [<path>]`, `restore …` and `apply …`, which arrive with restore in
+Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
+list without a milestone. There is no command for the setup or for the recovery kit: both
+are in the admin area, where the kit asks for the WordPress password. Nothing requires
+WP-CLI.
 
 ### 13.4 Site Health
 
@@ -982,9 +989,14 @@ and reports status and body under the probe's name to `POST /environment/probe/r
 report on another probe than the pending one, as from a second tab, changes nothing. A
 report with the file's content is the finding
 `exposed`; any other answer counts as protected. The site's own probe, where it gets an
-answer, comes first. The Doctor has no check of the PHP version and
-none of outbound HTTPS; the wizard's connection test is what shows that the repository
-server can be reached. An outbound HTTPS check is planned for Milestone 3. Debug information:
+answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
+compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
+when the repository server did not answer a request from this host. The latter is asked
+only when the checks are run afresh, with one request that waits ten seconds at most, and
+is cached for a day for the address it was asked of; any answer counts, also a refusal of
+the credentials or an error status. The Doctor has no check of the PHP version, and before a
+repository is configured none of outbound HTTPS: it asks no third party, and the wizard's
+connection test is what shows that the repository server can be reached. Debug information:
 plugin version, repository host and format version, append-only status, cache size, working
 directory and the time of the last backup; it does not list the last jobs.
 
@@ -992,7 +1004,8 @@ directory and the time of the last backup; it does not list the last jobs.
 
 Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous )`,
 `backups_for_restic_backup_succeeded( $job_id, $snapshot_id )`,
-`backups_for_restic_backup_failed( $job_id, $error_code )` and, from Milestone 3,
+`backups_for_restic_backup_failed( $job_id, $error_code )`,
+`backups_for_restic_recovery_kit_shown( $user_id, $via )` and, from Milestone 3,
 `backups_for_restic_restore_applied`; filters `backups_for_restic_capability`,
 `backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
 `backups_for_restic_database_tables_excluded`,
@@ -1056,8 +1069,10 @@ Progress is a set of counters, not a share of a total. A backup reports the file
 processed so far, new, changed and unmodified files and directories, the blobs and bytes
 added, the current directory and the number of warnings; unlocking reports a percentage;
 check and prune report their phase and counts. The plugin does not know the size of the site
-in advance, so it shows no totals and no estimate of the remaining time; both are planned
-for Milestone 3.
+in advance. From the second backup on it measures against the last one: the progress
+carries `expected_bytes`, the bytes that the last backup of this repository went through,
+and the admin page shows a bar and the minutes left at the speed so far. A site that grew
+or shrank since then makes both wrong by that much; the first backup has neither.
 
 Notifications (`Notifications\Notifier`, FR-09) go by e-mail to the configured recipients, or
 to the site's administration address, through the `backups_for_restic_notification_recipients`

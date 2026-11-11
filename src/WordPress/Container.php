@@ -14,6 +14,7 @@ namespace BackupsForRestic\WordPress;
 defined( 'ABSPATH' ) || exit;
 
 use BackupsForRestic\Backend\Http\HttpClient;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Backup\SitePaths;
 use BackupsForRestic\Connection\ConnectionTester;
@@ -26,7 +27,12 @@ use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Exception\Unauthorized;
+use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
@@ -35,6 +41,7 @@ use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
 use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
@@ -63,6 +70,9 @@ use BackupsForRestic\Support\SystemClock;
 final class Container {
 
 	/** The eight salt constants of wp-config.php that protect the stored secrets (ADR 0006). */
+	/** Seconds the Doctor waits for the repository server. */
+	private const int PROBE_SECONDS = 10;
+
 	public const array SALT_CONSTANTS = [ 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ];
 
 	/**
@@ -140,6 +150,25 @@ final class Container {
 	 */
 	public function settings(): Settings {
 		return $this->settings ??= $this->settings_store()->load();
+	}
+
+	/**
+	 * Saves what an administrator changed, on the settings page or with WP-CLI.
+	 *
+	 * @param array<string, mixed> $changes New values by dotted path.
+	 * @return Settings The saved settings.
+	 * @throws ValidationFailed If a value is invalid; nothing is saved then.
+	 */
+	public function save_settings( array $changes ): Settings {
+		$mode  = $this->settings()->string( 'retention.mode' );
+		$saved = $this->settings_store()->update( $changes );
+		if ( $saved->string( 'retention.mode' ) !== $mode ) {
+			// An administrator chose the mode: that answers the proposal and the switch notice.
+			$this->state()->set( 'retention_proposal', [] );
+			$this->state()->set( 'retention_switch', [] );
+		}
+		$this->refresh();
+		return $saved;
 	}
 
 	/**
@@ -274,12 +303,13 @@ final class Container {
 	/**
 	 * HTTP client for the repository server, with the uploaded CA certificate if any.
 	 *
+	 * @param int|null $timeout Seconds per request; null for the setting that the jobs use.
 	 * @return HttpClient Client.
 	 */
-	public function http(): HttpClient {
+	public function http( ?int $timeout = null ): HttpClient {
 		$ca = $this->private_dir()->path . '/ca.pem';
 		$ca = 'uploaded' === $this->settings()->string( 'repository.ca_certificate' ) && is_file( $ca ) ? $ca : null;
-		return new WpHttpClient( $this->settings()->int( 'advanced.upload_timeout_seconds' ), $ca );
+		return new WpHttpClient( $timeout ?? $this->settings()->int( 'advanced.upload_timeout_seconds' ), $ca );
 	}
 
 	/**
@@ -541,8 +571,80 @@ final class Container {
 			defined( 'DISABLE_WP_CRON' ) && true === constant( 'DISABLE_WP_CRON' ),
 			Cron::loopback_works( $fresh ),
 			$this->access()->passwords_readable(),
-			$this->settings()->int( 'repository.format_version' )
+			$this->settings()->int( 'repository.format_version' ),
+			self::jit_enabled(),
+			$this->repository_reached( $fresh )
 		);
+	}
+
+	/**
+	 * Whether PHP's JIT compiler is at work in this request.
+	 *
+	 * OPcache says so itself where it may be asked. Where it may not, the settings are read:
+	 * a mode of four digits whose last one is 0 compiles nothing, and on the command line
+	 * OPcache is off unless it is switched on for it.
+	 *
+	 * @return bool True if the JIT compiles code of this request.
+	 */
+	private static function jit_enabled(): bool {
+		if ( ! extension_loaded( 'Zend OPcache' ) ) {
+			return false;
+		}
+		$status = function_exists( 'opcache_get_status' ) ? @opcache_get_status( false ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Warns where opcache.restrict_api forbids the question; the settings answer it then.
+		if ( is_array( $status ) && is_array( $status['jit'] ?? null ) && is_bool( $status['jit']['on'] ?? null ) ) {
+			return $status['jit']['on'];
+		}
+		$mode = strtolower( trim( (string) ini_get( 'opcache.jit' ) ) );
+		return filter_var( ini_get( 'opcache.enable' ), FILTER_VALIDATE_BOOLEAN )
+			&& ( 'cli' !== PHP_SAPI || filter_var( ini_get( 'opcache.enable_cli' ), FILTER_VALIDATE_BOOLEAN ) )
+			&& ! in_array( $mode, [ '', '0', 'off', 'no', 'false', 'disable' ], true )
+			&& 1 !== preg_match( '/\A\d{3}0\z/', $mode )
+			&& self::bytes( (string) ini_get( 'opcache.jit_buffer_size' ) ) > 0;
+	}
+
+	/**
+	 * Whether the repository server answers, cached for a day like the other probes. Any
+	 * answer counts, also a refusal of the credentials or an error of the server: the question
+	 * is whether this host lets the request out at all.
+	 *
+	 * The probe is one request with a short time limit of its own. With the time limit and
+	 * the repetitions of the jobs, the page that is to explain an outage would wait minutes
+	 * for it. What was found is kept for the address it was found for.
+	 *
+	 * @param bool $fresh Ask the server now.
+	 * @return bool|null True if it answered, false if not, null if no repository is configured or none was asked yet.
+	 */
+	private function repository_reached( bool $fresh ): ?bool {
+		$url = $this->settings()->string( 'repository.url' );
+		if ( '' === $url ) {
+			return null;
+		}
+		if ( ! $fresh ) {
+			$cached = get_transient( 'backups_for_restic_reachable' );
+			return is_array( $cached ) && $url === ( $cached['url'] ?? null ) && is_bool( $cached['reached'] ?? null ) ? $cached['reached'] : null;
+		}
+		try {
+			$this->access()->probe_backend( $this->http( self::PROBE_SECONDS ) )->size( ObjectType::Config, 'config' );
+			$reached = true;
+		} catch ( SecretsUndecryptable | InvalidArgument ) {
+			// Nothing was sent: the password cannot be read, or the address is none to ask.
+			return null;
+		} catch ( BackendException $e ) {
+			// A refusal of the credentials is an answer, and so is every other status; without
+			// one the request did not get there.
+			$reached = $e instanceof Unauthorized || isset( $e->context()['status'] );
+		} catch ( PluginException ) {
+			$reached = true;
+		}
+		set_transient(
+			'backups_for_restic_reachable',
+			[
+				'url'     => $url,
+				'reached' => $reached,
+			],
+			DAY_IN_SECONDS
+		);
+		return $reached;
 	}
 
 	/**

@@ -166,6 +166,9 @@ final class BackupJobTest extends TestCase {
 		// cuts that were depends on the machine's speed, so the bound is the dump itself plus a
 		// margin for the changed file and the trees.
 		self::assertGreaterThan( 0, (int) ( $second->progress['files_unmodified'] ?? 0 ) );
+		// The first backup is the measure for the second one's progress bar and estimate.
+		self::assertArrayNotHasKey( 'expected_bytes', $first->progress );
+		self::assertSame( $first->progress['total_bytes_processed'] ?? null, $second->progress['expected_bytes'] ?? null );
 		$dump_bytes = array_sum( array_map( static fn ( mixed $file ): int => (int) filesize( (string) $file ), $sql ) );
 		self::assertLessThan( $dump_bytes + 1048576, (int) ( $second->progress['data_added'] ?? PHP_INT_MAX ) );
 		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock is left behind.' );

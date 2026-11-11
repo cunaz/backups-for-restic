@@ -112,6 +112,7 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	await expect( last ).toContainText( /Snapshot [0-9a-f]{8}/ );
 	const snapshot = ( await last.textContent() ).match( /Snapshot ([0-9a-f]{8})/ )[ 1 ];
 	await expect( card( page, 'Repository' ) ).toContainText( '127.0.0.1' );
+	await expect( card( page, 'Repository' ).locator( '.bfr-usage' ) ).toContainText( /^[\d.,]+ [KMG]?B stored, measured on / );
 
 	// The wizard's backup is in the list of recent jobs.
 	const jobs = page.locator( 'table' ).filter( { has: page.getByRole( 'columnheader', { name: 'Result' } ) } );
@@ -151,6 +152,10 @@ test( 'settings are saved, refused when invalid, and the recovery kit needs the 
 	await page.getByLabel( 'Your WordPress password', { exact: true } ).fill( ADMIN.password );
 	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
 	await expect( page.locator( '.bfr-kit textarea' ) ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/ );
+
+	// That it was shown is on record.
+	await page.reload();
+	await expect( page.locator( '.bfr-kit-views' ) ).toContainText( /The recovery kit was last shown on .+ to admin\./ );
 } );
 
 test( 'the passwords and the CA certificate can be entered again in the settings', async ( { page } ) => {

@@ -112,6 +112,24 @@
 				] ),
 			);
 		}
+		if ( 'number' === typeof progress.total_bytes_processed && progress.expected_bytes > 0 ) {
+			// Measured against the last backup: this one knows its own total only at the end.
+			const processed = Math.min( progress.total_bytes_processed, progress.expected_bytes );
+			const elapsed = ( Date.now() / 1000 ) - job.started_at;
+			lines.push( el( 'progress', { max: progress.expected_bytes, value: processed } ) );
+			if ( job.started_at > 0 && elapsed >= 30 && processed > 0 && processed < progress.expected_bytes ) {
+				const minutes = Math.ceil( ( ( progress.expected_bytes - processed ) / ( processed / elapsed ) ) / 60 );
+				lines.push(
+					el( 'p', { className: 'description bfr-estimate' }, [
+						sprintf(
+							/* translators: %d: number of minutes. */
+							_n( 'About %d minute left, judging by the last backup.', 'About %d minutes left, judging by the last backup.', minutes, 'backups-for-restic' ),
+							minutes,
+						),
+					] ),
+				);
+			}
+		}
 		if ( 'number' === typeof progress.data_added ) {
 			lines.push(
 				el( 'p', {}, [
@@ -465,6 +483,16 @@
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
 							el( 'p', {}, [ status.repository.host ] ),
+							status.repository.usage && status.repository.usage.at
+								? el( 'p', { className: 'bfr-usage' }, [
+									sprintf(
+										/* translators: 1: amount of data such as 1.2 GB, 2: date and time. */
+										__( '%1$s stored, measured on %2$s', 'backups-for-restic' ),
+										formatBytes( status.repository.usage.bytes ),
+										formatTime( status.repository.usage.at ),
+									),
+								] )
+								: null,
 							el( 'p', { className: 'description' }, [ appendOnly[ status.repository.append_only ] || '' ] ),
 						] ),
 					] ),
@@ -675,7 +703,15 @@
 							save.disabled = false;
 						} );
 				}, true );
-				const kit = recoveryKitForm();
+				// The record of who saw the kit, kept current without touching the form above it.
+				const views = el( 'div', {}, [ kitViews( response.kit_views ) ] );
+				const kit = recoveryKitForm( function () {
+					api( '/settings' )
+						.then( function ( fresh ) {
+							replace( views, [ kitViews( fresh.kit_views ) ] );
+						} )
+						.catch( function () {} );
+				} );
 				replace( root, [
 					...groups,
 					el( 'fieldset', { className: 'bfr-group' }, [
@@ -688,6 +724,7 @@
 						] ),
 						cacheControl( response.cache_bytes ),
 						kit.box,
+						views,
 					] ),
 					message,
 					save,
@@ -882,13 +919,34 @@
 	}
 
 	/**
+	 * Who was shown the recovery kit last, and when.
+	 *
+	 * @param {Array} views Latest deliveries of the kit, newest first.
+	 * @return {Element|null} Paragraph, or null if the kit was never shown.
+	 */
+	function kitViews( views ) {
+		if ( ! views || ! views.length ) {
+			return null;
+		}
+		return el( 'p', { className: 'description bfr-kit-views' }, [
+			sprintf(
+				/* translators: 1: date and time, 2: user name. */
+				__( 'The recovery kit was last shown on %1$s to %2$s.', 'backups-for-restic' ),
+				formatTime( views[ 0 ].at ),
+				views[ 0 ].login,
+			),
+		] );
+	}
+
+	/**
 	 * The form that shows the recovery kit. Its second part puts the form back in place of a
 	 * kit that is on the screen: after a password or the certificate changed, that kit is no
 	 * longer the one to keep.
 	 *
+	 * @param {() => void} shown Called after the server delivered the kit.
 	 * @return {Object} The form's element as `box`, and `reset()`.
 	 */
-	function recoveryKitForm() {
+	function recoveryKitForm( shown ) {
 		const box = el( 'div' );
 		// Counts the changes: a kit that was asked for before the last one is not shown.
 		let changes = 0;
@@ -902,6 +960,7 @@
 						if ( asked === changes ) {
 							replace( box, [ kitView( response.recovery_kit ) ] );
 						}
+						shown();
 					} )
 					.catch( function ( error ) {
 						if ( asked === changes ) {

@@ -167,6 +167,90 @@ final class CliTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_settings_are_listed_read_and_changed_with_the_rules_of_the_settings_page(): void {
+		[ $status, $output ] = self::command( [ 'settings', 'list' ] );
+		self::assertSame( 0, $status, $output );
+		self::assertMatchesRegularExpression( '/^retention\.keep\.daily = \d+$/m', $output );
+		self::assertMatchesRegularExpression( '/^setup\.completed = true$/m', $output );
+		self::assertStringNotContainsString( TestSite::$repository_password, $output, 'Secrets are no settings.' );
+
+		[ $status, $before ] = self::command( [ 'settings', 'get', 'retention.keep.daily' ] );
+		self::assertSame( 0, $status, $before );
+		try {
+			[ $status, $output ] = self::command( [ 'settings', 'set', 'retention.keep.daily', '14' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Success: retention.keep.daily = 14', $output );
+			[ , $settings ] = TestSite::api( 'GET', '/settings' );
+			self::assertSame( 14, $settings['values']['retention.keep.daily'] ?? null, 'The settings page sees the change.' );
+
+			[ $status, $output ] = self::command( [ 'settings', 'set', 'backup.extra_roots', '/srv/one', '/srv/two' ] );
+			self::assertSame( 0, $status, $output );
+			[ , $output ] = self::command( [ 'settings', 'get', 'backup.extra_roots' ] );
+			self::assertSame( '/srv/one, /srv/two', TestSite::last_line( $output ) );
+
+			// The same refusals as on the settings page.
+			[ $status, $output ] = self::command( [ 'settings', 'set', 'retention.keep.within', '0d' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringStartsWith( 'Error:', TestSite::last_line( $output ) );
+			[ $status, $output ] = self::command( [ 'settings', 'set', 'repository.url', 'https://collector.example.org/' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: This setting cannot be changed here.', $output );
+			[ $status, $output ] = self::command( [ 'settings', 'get', 'no.such.setting' ] );
+			self::assertSame( 1, $status, $output );
+			[ , $settings ] = TestSite::api( 'GET', '/settings' );
+			self::assertSame( '2d', $settings['values']['retention.keep.within'] ?? null );
+			self::assertStringStartsWith( 'https://127.0.0.1:', (string) ( $settings['values']['repository.url'] ?? '' ) );
+		} finally {
+			self::command( [ 'settings', 'set', 'retention.keep.daily', TestSite::last_line( $before ) ] );
+			TestSite::api( 'PUT', '/settings', [ 'values' => [ 'backup.extra_roots' => [] ] ] );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_logs_prints_what_a_job_did_and_cancel_stops_one(): void {
+		TestSite::idle( 600 );
+		[ $status, $output ] = self::command( [ 'cancel' ] );
+		self::assertSame( 0, $status, $output );
+		self::assertStringContainsString( 'No job is active.', $output );
+
+		// More data than the first tick gets through, so that the request finds the job at work.
+		TestSite::add_upload( 'cli-cancelled.bin', 1024 );
+		try {
+			[ $status, $output ] = self::command( [ 'backup' ] );
+			self::assertSame( 0, $status, $output );
+			$id = self::created( $output );
+
+			[ $status, $output ] = self::command( [ 'cancel' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Success: ' . $id, $output );
+			[ $status, $output ] = self::command( [ 'tick', '--until-idle' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertSame( 'cancelled', TestSite::job( $id )['state'] ?? null, $output );
+			self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ) );
+
+			[ $status, $output ] = self::command( [ 'logs', $id ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringStartsWith( $id . ' Backup Cancelled', $output );
+			self::assertMatchesRegularExpression( '/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d info +Job created\./m', $output );
+			self::assertStringContainsString( 'Cancellation requested. {"user":"wp-cli"}', $output );
+			self::assertStringContainsString( 'Job finished. {"state":"cancelled"}', $output );
+			[ $status, $latest ] = self::command( [ 'logs', '--lines=2' ] );
+			self::assertSame( 0, $status, $latest );
+			self::assertStringStartsWith( $id, $latest, 'Without an ID it is the latest job.' );
+			self::assertCount( 3, explode( "\n", trim( $latest ) ), 'The heading and two entries.' );
+
+			[ $status, $output ] = self::command( [ 'logs', '20200101T000000Z-abcdef' ] );
+			self::assertSame( 1, $status, $output );
+			[ $status, $output ] = self::command( [ 'cancel', '20200101T000000Z-abcdef' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The job does not exist.', $output );
+		} finally {
+			TestSite::remove_upload( 'cli-cancelled.bin' );
+		}
+		TestSite::idle( 600 );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_forget_and_prune_are_refused_in_retention_mode_external(): void {
 		TestSite::idle( 600 );
 		try {

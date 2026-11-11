@@ -262,6 +262,10 @@ final class MaintenanceSteps implements StepProvider {
 				]
 			);
 		}
+		if ( JobType::Prune === $job->type && ! isset( $job->result['skipped'] ) ) {
+			// Prune is the job that makes the repository smaller.
+			$this->common->measure( $job, $log );
+		}
 		return true;
 	}
 

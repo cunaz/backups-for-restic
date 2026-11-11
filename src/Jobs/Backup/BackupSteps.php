@@ -15,6 +15,7 @@ use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\Compression;
@@ -23,10 +24,12 @@ use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Storage\Files;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -177,6 +180,13 @@ final class BackupSteps implements StepProvider {
 
 		$done          = $run->advance( $deadline, $services->throttle() );
 		$job->progress = $run->progress();
+		// How much the last backup of this repository went through: the measure for a
+		// progress bar and an estimate, since this backup knows its own total only at the end.
+		$last     = $services->state->get( 'last_backup' )['progress'] ?? null;
+		$expected = Decoded::int( is_array( $last ) ? ( $last['total_bytes_processed'] ?? null ) : null );
+		if ( $expected > 0 ) {
+			$job->progress['expected_bytes'] = $expected;
+		}
 		foreach ( array_slice( $run->warnings(), count( $job->warnings ) ) as $warning ) {
 			$job->warn( $warning );
 		}
@@ -206,7 +216,50 @@ final class BackupSteps implements StepProvider {
 				'warnings' => count( $job->warnings ),
 			]
 		);
+		$this->measure( $job, $log );
 		return true;
+	}
+
+	/**
+	 * Remembers how much the repository holds, for the dashboard: the number and total size of
+	 * its packs, from one listing. A listing that fails or names no sizes changes nothing; the
+	 * job that asked has done its work either way.
+	 *
+	 * A job asks once. Should the listing take so long that the host ends the request, the
+	 * next tick repeats the step that asked, and without this it would ask again, and again
+	 * with every tick: a backup that is done could not finish over a number on the dashboard.
+	 *
+	 * @param Job      $job Job that asks.
+	 * @param EventLog $log Log.
+	 */
+	public function measure( Job $job, EventLog $log ): void {
+		if ( ( $this->services->state->get( 'usage_asked' )['job'] ?? null ) === $job->id ) {
+			$log->write( 'warning', 'The size of the repository was not read: an earlier attempt of this job did not come back.' );
+			return;
+		}
+		$this->services->state->set( 'usage_asked', [ 'job' => $job->id ] );
+		try {
+			$repository = $this->services->access->open_cached();
+			if ( null === $repository ) {
+				return;
+			}
+			$sizes = $repository->backend()->list( ObjectType::Data );
+		} catch ( PluginException $e ) {
+			$log->write( 'warning', 'The size of the repository could not be read.', [ 'code' => JobError::from_throwable( $e )->code ] );
+			return;
+		}
+		if ( [] !== $sizes && min( $sizes ) < 0 ) {
+			// A server that lists names only.
+			return;
+		}
+		$this->services->state->set(
+			'usage',
+			[
+				'bytes' => array_sum( $sizes ),
+				'packs' => count( $sizes ),
+				'at'    => $this->services->clock->now()[0],
+			]
+		);
 	}
 
 	/**

@@ -67,6 +67,8 @@ final class JobControlTest extends TestCase {
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_the_recovery_kit_needs_the_wordpress_password_of_the_administrator(): void {
+		[ , $settings ] = TestSite::api( 'GET', '/settings' );
+		$before         = (array) ( $settings['kit_views'] ?? [] );
 		foreach ( [ [], [ 'user_password' => 'not the password' ], [ 'user_password' => TestSite::$repository_password ] ] as $proof ) {
 			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/recovery-kit', $proof );
 			self::assertSame( 403, $status, $raw );
@@ -74,10 +76,28 @@ final class JobControlTest extends TestCase {
 			self::assertStringNotContainsString( TestSite::$repository_password, $raw );
 		}
 
+		// A refused request showed nothing, so nothing is recorded for it.
+		[ , $settings ] = TestSite::api( 'GET', '/settings' );
+		self::assertSame( $before, (array) ( $settings['kit_views'] ?? [] ) );
+		$recorded = count( $before );
+		$asked    = time();
+
 		[ $status, $answer, $raw ] = TestSite::api( 'POST', '/recovery-kit', [ 'user_password' => TestSite::ADMIN_PASSWORD ] );
 		self::assertSame( 200, $status, $raw );
 		self::assertStringContainsString( "RESTIC_PASSWORD='" . TestSite::$repository_password . "'", (string) ( $answer['recovery_kit'] ?? '' ) );
 		self::assertStringContainsString( TestSite::server()->url( 'site' ), (string) $answer['recovery_kit'] );
+
+		// Who saw it, when and on which way.
+		[ , $settings, $raw ] = TestSite::api( 'GET', '/settings' );
+		$views                = (array) ( $settings['kit_views'] ?? [] );
+		self::assertCount( min( 5, $recorded + 1 ), $views, $raw );
+		self::assertSame( [ 'admin', 'settings' ], [ $views[0]['login'] ?? null, $views[0]['via'] ?? null ], $raw );
+		self::assertGreaterThanOrEqual( $asked, $views[0]['at'] ?? 0, $raw );
+		if ( $recorded < 5 ) {
+			// Only the latest five are listed; as long as all are, the first is the wizard's.
+			self::assertSame( 'create', $views[ count( $views ) - 1 ]['via'] ?? null, 'The wizard showed it first: ' . $raw );
+		}
+		self::assertStringNotContainsString( TestSite::$repository_password, $raw );
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
@@ -218,6 +238,9 @@ final class JobControlTest extends TestCase {
 			self::assertSame( 502, $status, $raw );
 			self::assertSame( 'backups_for_restic_repository_unreachable', $refused['code'] ?? null, $raw );
 
+			// The Doctor says so as well, as a hint: a server may be down for a moment.
+			self::assertSame( [ 'recommended', 'unreachable' ], self::finding( 'repository_server', true ) );
+
 			// A certificate that comes with the test is used for that test, and for nothing after it.
 			[ $status, $refused, $raw ] = TestSite::api( 'POST', '/repository/test', [ 'ca_certificate' => 'not a certificate' ] + TestSite::connection() );
 			self::assertSame( 400, $status, $raw );
@@ -246,6 +269,20 @@ final class JobControlTest extends TestCase {
 			TestSite::hostile_filters( false );
 			TestSite::api( 'POST', '/repository/ca-certificate', [ 'pem' => $certificate ] );
 		}
+		self::assertSame( [ 'good', 'reached' ], self::finding( 'repository_server', true ) );
+		self::assertSame( [ 'good', 'off' ], self::finding( 'jit', false ), 'The test site runs without the JIT compiler.' );
+	}
+
+	/**
+	 * One finding of the Doctor.
+	 *
+	 * @return array{string, string} Status and code.
+	 */
+	private static function finding( string $id, bool $fresh ): array {
+		[ $status, $environment, $raw ] = TestSite::api( 'GET', '/environment' . ( $fresh ? '&fresh=1' : '' ) );
+		self::assertSame( 200, $status, $raw );
+		$found = array_values( array_filter( $environment['checks'] ?? [], static fn ( mixed $check ): bool => is_array( $check ) && $id === ( $check['id'] ?? null ) ) );
+		return [ (string) ( $found[0]['status'] ?? '' ), (string) ( $found[0]['code'] ?? '' ) ];
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]

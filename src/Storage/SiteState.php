@@ -21,10 +21,10 @@ final class SiteState {
 
 	/**
 	 * Entries that describe one repository: the last backup and the last forget, prune and
-	 * check, and the alert of a check that found damage. They are dropped when the jobs turn
-	 * to another repository.
+	 * check, the alert of a check that found damage, and how much the repository holds. They
+	 * are dropped when the jobs turn to another repository.
 	 */
-	public const array OF_THE_REPOSITORY = [ 'last_backup', 'last_forget', 'last_prune', 'last_check', 'check_alert' ];
+	public const array OF_THE_REPOSITORY = [ 'last_backup', 'last_forget', 'last_prune', 'last_check', 'check_alert', 'usage' ];
 
 	/**
 	 * Uses the options table.

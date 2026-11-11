@@ -7,6 +7,15 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A running backup shows a progress bar and the minutes left, measured against the last
+  backup.
+- The dashboard shows how much the repository holds, measured after every backup and
+  every prune.
+- WP-CLI: `settings list`, `settings get` and `settings set`, `cancel` and `logs`.
+- The plugin records when the recovery kit was shown and to whom; the Settings tab shows
+  the latest time, and the action `backups_for_restic_recovery_kit_shown` fires.
+- The environment checks and Site Health point out a JIT compiler that is switched on,
+  and a repository server that does not answer from this host.
 - Settings → Repository: forms to enter the REST password and the repository password
   again, for example after the security keys in `wp-config.php` changed, and to upload or
   remove the CA certificate of the server. Values that `wp-config.php` defines are marked.
@@ -76,6 +85,9 @@ All notable changes are documented here. The format follows
   the heartbeat and an open admin page advance the job.
 
 ### Security
+- The plugin reads no more of a server's answer than a repository file of that kind can
+  hold. Before, a broken or malicious server could answer the request for a lock or a
+  snapshot with a body larger than PHP's memory.
 - Repository requests verify the server's certificate even when other code on the site
   switches certificate verification off for all requests (a filter on `https_ssl_verify` or
   on the request arguments, or the `http_api_curl` action).
@@ -121,6 +133,8 @@ All notable changes are documented here. The format follows
 - A request to cancel that arrives just after a backup wrote its snapshot no longer ends
   the job as cancelled with the snapshot left unrecorded; the job ends as succeeded.
 - A CA certificate that could not be written to disk is no longer announced as uploaded.
+- `wp backups-for-restic tick --until-idle` and the commands with `--wait` returned at once
+  when another tick was working on the job. They now wait for it.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
   job. A cancel request is now a marker file that the runner reads before every step, and

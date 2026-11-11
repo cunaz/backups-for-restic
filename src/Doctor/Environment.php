@@ -32,6 +32,8 @@ final readonly class Environment {
 	 * @param bool|null    $loopback           Whether a loopback request worked; null if not tested.
 	 * @param bool         $secrets_readable   Whether the two passwords can be read (RepositoryAccess::passwords_readable()).
 	 * @param int          $repository_format  Format version of the connected repository, 0 if none.
+	 * @param bool         $jit                Whether PHP's JIT compiler is switched on.
+	 * @param bool|null    $repository_reached Whether the repository server answered a request; null if none is configured or none was sent yet.
 	 */
 	public function __construct(
 		public array $missing_extensions,
@@ -45,7 +47,9 @@ final readonly class Environment {
 		public bool $cron_disabled,
 		public ?bool $loopback,
 		public bool $secrets_readable,
-		public int $repository_format
+		public int $repository_format,
+		public bool $jit = false,
+		public ?bool $repository_reached = null
 	) {
 	}
 }

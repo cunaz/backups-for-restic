@@ -60,13 +60,39 @@ final class RepositoryAccess {
 	 * @throws SecretsUndecryptable If the REST password cannot be decrypted.
 	 */
 	public function backend(): RestBackend {
+		return $this->backend_through( $this->http, 5 );
+	}
+
+	/**
+	 * A backend for one question to the server, as the Doctor asks it: with a client of its
+	 * own time limit, and without the repetitions that a job can afford.
+	 *
+	 * @param HttpClient $http Client.
+	 * @return RestBackend Backend that sends every request once.
+	 * @throws InvalidArgument If no repository URL is configured.
+	 * @throws SecretsUndecryptable If the REST password cannot be decrypted.
+	 */
+	public function probe_backend( HttpClient $http ): RestBackend {
+		return $this->backend_through( $http, 1 );
+	}
+
+	/**
+	 * The backend of the configured repository.
+	 *
+	 * @param HttpClient $http     Client.
+	 * @param int        $attempts How often a request that may be repeated is sent at most.
+	 * @return RestBackend Backend.
+	 * @throws InvalidArgument If no repository URL is configured.
+	 * @throws SecretsUndecryptable If the REST password cannot be decrypted.
+	 */
+	private function backend_through( HttpClient $http, int $attempts ): RestBackend {
 		$url = $this->settings->string( 'repository.url' );
 		if ( '' === $url ) {
 			InvalidArgument::raise( 'No repository is configured.', [ 'code' => 'no_repository' ] );
 		}
 		$username = $this->settings->string( 'repository.rest_username' );
 		$password = $this->secrets->get( SecretName::RestPassword );
-		return new RestBackend( $this->http, $url, '' === $username ? null : $username, $password?->reveal(), $this->user_agent );
+		return new RestBackend( $http, $url, '' === $username ? null : $username, $password?->reveal(), $this->user_agent, $attempts );
 	}
 
 	/**
