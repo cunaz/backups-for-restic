@@ -30,12 +30,35 @@ final class JobControlTest extends TestCase {
 	 */
 	private static function backup_in_progress( string $file ): string {
 		TestSite::add_upload( $file, 512 );
-		TestSite::idle( 600 );
-		$id = TestSite::start();
-		// Creating the job chained a tick; this request starts one where loopback requests fail.
-		TestSite::cron( 3 );
-		TestSite::wait_for_backup_tick( $id, 120 );
-		return $id;
+		try {
+			TestSite::idle( 600 );
+			$id = TestSite::start();
+			// Creating the job chained a tick; this request starts one where loopback requests fail.
+			TestSite::cron( 3 );
+			TestSite::wait_for_backup_tick( $id, 120 );
+			return $id;
+		} catch ( \Throwable $failure ) {
+			// The caller's cleanup is not reached; left behind, the file would be in every later backup.
+			TestSite::remove_upload( $file );
+			throw $failure;
+		}
+	}
+
+	/**
+	 * Enters the repository password again, as the Settings tab does, and waits for the unlock.
+	 *
+	 * @return array<mixed> The unlock job, or an empty array if none was created.
+	 */
+	private static function unlock_again(): array {
+		[ $status, $answer ] = TestSite::api(
+			'POST',
+			'/repository/connect',
+			[
+				'user_password' => TestSite::ADMIN_PASSWORD,
+				'password'      => TestSite::$repository_password,
+			]
+		);
+		return 201 === $status ? TestSite::wait_for( (string) ( $answer['job']['id'] ?? '' ), 600 ) : [];
 	}
 
 	private static function locks(): string {
@@ -166,13 +189,20 @@ final class JobControlTest extends TestCase {
 				'password'      => 'not the password of this repository',
 			]
 		);
-		self::assertSame( 201, $status, $raw );
-		self::assertSame( 'unlock', $answer['job']['type'] ?? null, $raw );
-		$job = TestSite::wait_for( (string) $answer['job']['id'], 600 );
-		self::assertSame( 'failed', $job['state'], (string) json_encode( $job ) );
-		self::assertSame( 'wrong_password', $job['error']['code'] ?? null, (string) json_encode( $job ) );
-		[ $status, , $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
-		self::assertSame( 409, $status, 'Without the key there is nothing to list: ' . $raw );
+		try {
+			self::assertSame( 201, $status, $raw );
+			self::assertSame( 'unlock', $answer['job']['type'] ?? null, $raw );
+			$job = TestSite::wait_for( (string) $answer['job']['id'], 600 );
+			self::assertSame( 'failed', $job['state'], (string) json_encode( $job ) );
+			self::assertSame( 'wrong_password', $job['error']['code'] ?? null, (string) json_encode( $job ) );
+			[ $status, , $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
+			self::assertSame( 409, $status, 'Without the key there is nothing to list: ' . $raw );
+		} catch ( \Throwable $failure ) {
+			// The later tests need the repository: the right password back, whatever went wrong here.
+			TestSite::idle( 600 );
+			self::unlock_again();
+			throw $failure;
+		}
 
 		[ $status, $answer, $raw ] = TestSite::api(
 			'POST',
@@ -292,23 +322,6 @@ final class JobControlTest extends TestCase {
 			}
 			throw $failure;
 		}
-	}
-
-	/**
-	 * Enters the repository password again, as the Settings tab does, and waits for the unlock.
-	 *
-	 * @return array<mixed> The unlock job, or an empty array if none was created.
-	 */
-	private static function unlock_again(): array {
-		[ $status, $answer ] = TestSite::api(
-			'POST',
-			'/repository/connect',
-			[
-				'user_password' => TestSite::ADMIN_PASSWORD,
-				'password'      => TestSite::$repository_password,
-			]
-		);
-		return 201 === $status ? TestSite::wait_for( (string) ( $answer['job']['id'] ?? '' ), 600 ) : [];
 	}
 
 	/**
