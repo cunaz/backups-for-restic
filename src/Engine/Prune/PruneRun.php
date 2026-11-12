@@ -11,6 +11,7 @@ namespace BackupsForRestic\Engine\Prune;
 
 use BackupsForRestic\Backend\AppendOnlyProbe;
 use BackupsForRestic\Backend\AppendOnlyStatus;
+use BackupsForRestic\Backend\ListingFile;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
@@ -22,6 +23,8 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\RepositoryChanged;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -31,28 +34,41 @@ use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\Decoded;
 use BackupsForRestic\Support\Throttle;
+use BackupsForRestic\Support\WorkFile;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
  * Deletes the packs that no snapshot uses, as restic's prune does for completely unused packs
- * (ADR 0022). A pack that still holds one used blob stays, so nothing is downloaded or
- * rewritten; `restic prune` on another computer reclaims the rest.
+ * (ADR 0022), and the packs that no index file lists. A pack that still holds one used blob
+ * stays, so nothing is downloaded or rewritten; `restic prune` on another computer reclaims
+ * the rest.
  *
  * The run works in phases, each resumable in short ticks:
  *
  * 1. mark: walks the trees of all snapshots and records every pack that holds a used blob.
  * 2. plan: reads the index files and records the unused packs and the index files that list
  *    them.
- * 3. rewrite: writes each of those index files again without the unused packs.
- * 4. delete_indexes: deletes the old index files.
- * 5. delete_packs: deletes the unused packs.
+ * 3. download, parse_listing, classify: streams the pack listing to disk, validates bounded
+ *    batches and records unindexed packs in a disk-backed table (ADR 0033).
+ * 4. rewrite: writes each of those index files again without the unused packs.
+ * 5. delete_indexes: deletes the old index files.
+ * 6. delete_packs, delete_unindexed: deletes indexed unused packs, then unindexed packs.
+ *
+ * A pack that no index file lists is what an interrupted backup left behind: it uploaded the
+ * pack and never wrote the index file for it. No snapshot can use it, because marking ends
+ * with an error when a snapshot uses a blob the index does not lead to, and every used pack
+ * must be among the listed ones before anything is deleted. Under the exclusive lock nobody
+ * is uploading packs either. restic's prune removes such packs in the same way.
  *
  * Every state between two requests is a repository restic accepts: new index files are written
  * before the old ones go, and packs go last. The run holds an exclusive lock from the first tree
  * it reads to the last pack it deletes. If the lock disappeared or was not refreshed in time,
- * another client may have added snapshots that use an unused pack, so the run starts again with
- * marking; until then it had deleted only packs that no snapshot could use.
+ * another client may have written in the meantime. The run then takes the lock again and
+ * looks: if the snapshots are the ones it marked, and the index files are the ones it read
+ * apart from those it has written or deleted itself, nothing it found has changed and it goes
+ * on where it was. Otherwise it starts again with marking, at most MAX_RESTARTS times; until
+ * then it had deleted only packs that no snapshot could use (ADR 0030).
  *
  * The checkpoint is written before the lock is taken, at every change of phase and at the end of
  * every call. A request that ends at any point therefore leaves a run that resume() continues
@@ -67,7 +83,10 @@ defined( 'ABSPATH' ) || exit;
  */
 final class PruneRun {
 
-	public const int STATE_VERSION = 1;
+	public const int STATE_VERSION = 4;
+
+	/** How often marking starts over because other clients changed the repository meanwhile. */
+	public const int MAX_RESTARTS = 3;
 
 	/** Locks older than 30 minutes are stale for restic; the run refreshes well before. */
 	public const int CONTINUITY_SECONDS = 1500;
@@ -81,7 +100,7 @@ final class PruneRun {
 	private const int FILTER_MAX_BITS = 67108864;
 
 	/** The phases in their order. */
-	private const array PHASES = [ 'mark', 'plan', 'rewrite', 'delete_indexes', 'delete_packs', 'done' ];
+	private const array PHASES = [ 'mark', 'plan', 'download', 'parse_listing', 'classify', 'rewrite', 'delete_indexes', 'delete_packs', 'delete_unindexed', 'done' ];
 
 	/**
 	 * Lock handling.
@@ -112,7 +131,7 @@ final class PruneRun {
 	private int $locked_at;
 
 	/**
-	 * Current phase: mark, plan, rewrite, delete_indexes, delete_packs or done.
+	 * Current phase, one of PHASES.
 	 *
 	 * @var string
 	 */
@@ -217,6 +236,42 @@ final class PruneRun {
 	private array $index_files;
 
 	/**
+	 * Hex names of the snapshots when marking started, in order.
+	 *
+	 * @var list<string>
+	 */
+	private array $snapshot_names;
+
+	/**
+	 * Hex names of the index files the run takes the repository to have, in order: those
+	 * listed when marking started, and from the plan phase on those the plan reads.
+	 *
+	 * @var list<string>
+	 */
+	private array $index_names;
+
+	/**
+	 * Hex names of the index files this run wrote without the unused packs.
+	 *
+	 * @var list<string>
+	 */
+	private array $written;
+
+	/**
+	 * Number of packs found that no index file lists.
+	 *
+	 * @var int
+	 */
+	private int $unindexed;
+
+	/**
+	 * Distinct live packs found in the fully parsed server listing so far.
+	 *
+	 * @var int
+	 */
+	private int $present_live;
+
+	/**
 	 * Position within the list of the current phase.
 	 *
 	 * @var int
@@ -309,6 +364,11 @@ final class PruneRun {
 		$this->missing_examples    = Decoded::strings( $state['missing_examples'] ?? [] );
 		$this->snapshots           = Decoded::count( $state['snapshots'] ?? null );
 		$this->index_files         = Decoded::strings( $state['index_files'] ?? [] );
+		$this->snapshot_names      = Decoded::strings( $state['snapshot_names'] ?? [] );
+		$this->index_names         = Decoded::strings( $state['index_names'] ?? [] );
+		$this->written             = Decoded::strings( $state['written'] ?? [] );
+		$this->unindexed           = Decoded::count( $state['unindexed'] ?? null );
+		$this->present_live        = Decoded::count( $state['present_live'] ?? null );
 		$this->position            = Decoded::count( $state['position'] ?? null );
 		$this->unused              = [];
 		$this->affected            = Decoded::strings( $state['affected'] ?? [] );
@@ -401,6 +461,8 @@ final class PruneRun {
 	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when finished and the lock is released.
 	 * @throws FormatException If a snapshot uses a blob that is missing from the index.
+	 * @throws RepositoryChanged If other clients changed the repository again and again while
+	 *                           the run could not hold its lock.
 	 */
 	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( 'done' === $this->phase ) {
@@ -412,8 +474,7 @@ final class PruneRun {
 			$this->step();
 			if ( $phase !== $this->phase && 'done' !== $this->phase ) {
 				// A request that ends while it deletes must not leave the checkpoint of an
-				// earlier phase: planning again would look for index files that are gone, and
-				// the packs it had planned would stay for good.
+				// earlier phase: planning again would look for index files that are gone.
 				$this->persist();
 			}
 			$throttle?->pause();
@@ -451,7 +512,7 @@ final class PruneRun {
 			'snapshots'     => $this->snapshots,
 			'trees'         => count( $this->seen ),
 			'pending_trees' => count( $this->frontier ),
-			'unused_packs'  => count( $this->unused ),
+			'unused_packs'  => count( $this->unused ) + $this->unindexed,
 			'packs_deleted' => $this->packs_deleted,
 			'bytes_deleted' => $this->bytes_deleted,
 		];
@@ -461,13 +522,14 @@ final class PruneRun {
 	 * Outcome once finished. reclaimable_bytes estimates the unused space in kept packs that
 	 * only a full prune with repacking frees; -1 if unknown.
 	 *
-	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, reclaimable_bytes: int, index_files_written: int, restarts: int} Result.
+	 * @return array{packs_deleted: int, bytes_deleted: int, packs_kept: int, unindexed_packs: int, reclaimable_bytes: int, index_files_written: int, restarts: int} Result.
 	 */
 	public function result(): array {
 		return [
 			'packs_deleted'       => $this->packs_deleted,
 			'bytes_deleted'       => $this->bytes_deleted,
 			'packs_kept'          => count( $this->live ),
+			'unindexed_packs'     => $this->unindexed,
 			'reclaimable_bytes'   => '' === $this->filter ? -1 : max( 0, $this->kept_bytes - $this->used_bytes ),
 			'index_files_written' => $this->index_files_written,
 			'restarts'            => $this->restarts,
@@ -513,8 +575,17 @@ final class PruneRun {
 			$roots[ $snapshot->tree->hex() ] = true;
 		}
 
+		$snapshot_names = array_map( 'strval', array_keys( $snapshots ) );
+		sort( $snapshot_names, SORT_STRING );
+		$index_names = $this->repository->names( ObjectType::Index );
+
 		$this->phase               = 'mark';
 		$this->snapshots           = count( $snapshots );
+		$this->snapshot_names      = $snapshot_names;
+		$this->index_names         = $index_names;
+		$this->written             = [];
+		$this->unindexed           = 0;
+		$this->present_live        = 0;
 		$this->frontier            = array_keys( $roots );
 		$this->seen                = [];
 		$this->live                = [];
@@ -550,8 +621,14 @@ final class PruneRun {
 	}
 
 	/**
-	 * Refreshes the lock, or starts over with marking if it was lost or not refreshed in time.
-	 * A run whose start did not get as far as marking begins here.
+	 * Refreshes the lock. If it was lost or not refreshed in time, takes it again, which fails
+	 * while another client holds a lock, and goes on only if the repository still is what the
+	 * run takes it for; otherwise marking starts over. A run whose start did not get as far as
+	 * marking begins here.
+	 *
+	 * @throws RepositoryChanged If marking already started over MAX_RESTARTS times.
+	 * @throws \Throwable Whatever taking the lock, listing or reading the snapshots throws; the
+	 *                    lock is released before the error is passed on.
 	 */
 	private function keep_lock(): void {
 		$now  = $this->clock->now()[0];
@@ -568,12 +645,65 @@ final class PruneRun {
 		}
 		$this->lock  = '';
 		$this->index = null;
-		// A run that has not marked anything yet begins; it does not start over.
-		$again = $this->snapshots > 0;
-		$this->begin();
-		if ( $again ) {
-			++$this->restarts;
+		if ( 0 === $this->snapshots ) {
+			// A run that has not marked anything yet begins; it does not start over.
+			$this->begin();
+			return;
 		}
+		$this->locking->remove_own_stale();
+		$fresh = $this->locking->acquire( true );
+		$taken = $this->clock->now()[0];
+		// The run holds the new lock from here on, but its checkpoint names it only once the
+		// run has looked or marking has started over. A request that ends before that leaves
+		// a checkpoint without a lock, so the next one takes the lock again and looks again:
+		// a lock written a moment ago says nothing about the time before it. The lock written
+		// here is then a leftover of the run, which taking the lock removes.
+		try {
+			$untouched = $this->untouched();
+			if ( ! $untouched ) {
+				if ( $this->restarts >= self::MAX_RESTARTS ) {
+					RepositoryChanged::raise( 'Other clients changed the repository again and again while prune ran; prune gave up.', [ 'restarts' => $this->restarts ] );
+				}
+				$this->remarked = false;
+				$this->start_marking();
+				++$this->restarts;
+			}
+		} catch ( \Throwable $failure ) {
+			$this->locking->release( $fresh );
+			throw $failure;
+		}
+		$this->lock      = $fresh->hex();
+		$this->locked_at = $taken;
+		$this->persist();
+	}
+
+	/**
+	 * Whether the repository still is what this run takes it for, after a time in which other
+	 * clients could write: the snapshots are the ones marking started from, and the index
+	 * files are the ones the run read, apart from those it has written or deleted itself.
+	 *
+	 * Then nothing the run found has changed. A new snapshot could use a pack the run takes
+	 * for unused. A changed index means that another client repacked or pruned, so that the
+	 * packs marked as used may be gone and others hold their blobs. Packs that an interrupted
+	 * backup uploaded meanwhile without an index file change neither listing and concern
+	 * nothing: the run deletes only what its plan recorded.
+	 *
+	 * A request of this run that ended between writing or deleting an index file and the next
+	 * checkpoint also makes the listings differ. Marking then starts over needlessly, which is
+	 * safe.
+	 *
+	 * @return bool True if the run may go on where it was.
+	 */
+	private function untouched(): bool {
+		$deleted = match ( $this->phase ) {
+			'delete_indexes' => array_slice( $this->affected, 0, $this->position ),
+			'delete_packs', 'delete_unindexed' => $this->affected,
+			default          => [],
+		};
+		$expected = array_values( array_unique( array_merge( array_diff( $this->index_names, $deleted ), $this->written ) ) );
+		sort( $expected, SORT_STRING );
+		return $this->repository->names( ObjectType::Snapshots ) === $this->snapshot_names
+			&& $this->repository->names( ObjectType::Index ) === $expected;
 	}
 
 	/**
@@ -585,9 +715,13 @@ final class PruneRun {
 		match ( $this->phase ) {
 			'mark'           => $this->mark_one(),
 			'plan'           => $this->plan_one(),
+			'download'       => $this->download_listing(),
+			'parse_listing'  => $this->parse_listing(),
+			'classify'       => $this->classify_packs(),
 			'rewrite'        => $this->rewrite_one(),
 			'delete_indexes' => $this->delete_index_one(),
 			'delete_packs'   => $this->delete_pack_one(),
+			'delete_unindexed' => $this->delete_unindexed(),
 			default          => $this->finish(),
 		};
 	}
@@ -611,9 +745,9 @@ final class PruneRun {
 				);
 				return;
 			}
-			$index_files = array_keys( $this->repository->backend()->list( ObjectType::Index ) );
-			sort( $index_files );
-			$this->index_files = $index_files;
+			// From here on the run takes the repository to have the index files it reads now.
+			$this->index_files = $this->repository->names( ObjectType::Index );
+			$this->index_names = $this->index_files;
 			$this->position    = 0;
 			$this->phase       = 'plan';
 			return;
@@ -761,16 +895,78 @@ final class PruneRun {
 			$this->mark_again( 'Snapshots use packs that no index file lists; prune stopped without deleting anything.', [ 'packs' => count( $unlisted ) ] );
 			return;
 		}
-		if ( [] === $this->unused ) {
-			$this->finish();
-			return;
-		}
-		$sizes = $this->repository->backend()->list( ObjectType::Data );
-		foreach ( array_keys( $this->unused ) as $pack ) {
-			$this->unused[ $pack ] = $sizes[ $pack ] ?? -1;
-		}
-		$this->phase    = 'rewrite';
+		// Persist this phase before touching either working file. A restarted plan must never
+		// pair an earlier parse/classification cursor with a newly downloaded listing or table.
+		$this->phase    = 'download';
 		$this->position = 0;
+	}
+
+	/** Downloads the raw listing and prepares its disk-backed set before parsing begins. */
+	private function download_listing(): void {
+		$this->repository->backend()->list_to_file( ObjectType::Data, $this->work_dir . '/packs.json' );
+		$file = new WorkFile( $this->work_dir . '/packs.json' );
+		$size = $file->size();
+		$file->close();
+		PackTable::create( $this->work_dir . '/packs.table', $size );
+		$this->phase    = 'parse_listing';
+		$this->position = 0;
+	}
+
+	/** Validates a bounded batch and stores its packs before checkpointing the byte cursor. */
+	private function parse_listing(): void {
+		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->position );
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		try {
+			foreach ( $batch['entries'] as [ $name, $size ] ) {
+				$table->put( $name, $size );
+			}
+		} finally {
+			$table->close();
+		}
+		$this->position = $batch['done'] ? 0 : $batch['offset'];
+		if ( $batch['done'] ) {
+			$this->phase = 'classify';
+		}
+	}
+
+	/** Classifies a bounded set of slots only after the entire JSON listing was validated. */
+	private function classify_packs(): void {
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		$count = 0;
+		$live  = 0;
+		try {
+			$batch = $table->batch( $this->position );
+			foreach ( $batch['entries'] as $entry ) {
+				$name = $entry['name'];
+				if ( isset( $this->live[ $name ] ) ) {
+					++$live;
+				}
+				if ( isset( $this->unused[ $name ] ) ) {
+					$this->unused[ $name ] = $entry['size'];
+				}
+				if ( ! isset( $this->listed[ $name ] ) ) {
+					$table->mark_unindexed( $entry['slot'] );
+					++$count;
+				}
+			}
+		} finally {
+			$table->close();
+		}
+		// Each name occupies one slot, so counting their intersection is equivalent to
+		// testing every live name for membership, without another set or an unbounded pass.
+		// An unindexed pack could hold the remaining copy of data from a missing live pack.
+		if ( $batch['done'] && $this->present_live + $live !== count( $this->live ) ) {
+			FormatException::raise(
+				'The server does not list every pack that snapshots use; prune stopped without deleting anything.',
+				[ 'code' => 'repository_damaged' ]
+			);
+		}
+		$this->present_live += $live;
+		$this->unindexed    += $count;
+		$this->position      = $batch['done'] ? 0 : $batch['position'];
+		if ( $batch['done'] ) {
+			$this->phase = 'rewrite';
+		}
 	}
 
 	/**
@@ -814,7 +1010,7 @@ final class PruneRun {
 			}
 		}
 		if ( [] !== $kept ) {
-			$this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( $kept ) );
+			$this->written[] = $this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( $kept ) )->hex();
 			++$this->index_files_written;
 		}
 		++$this->position;
@@ -841,13 +1037,41 @@ final class PruneRun {
 		$this->deletion_order ??= array_map( 'strval', array_keys( $this->unused ) );
 		$pack                   = $this->deletion_order[ $this->position ] ?? null;
 		if ( null === $pack ) {
-			$this->finish();
+			$this->phase    = 'delete_unindexed';
+			$this->position = 0;
 			return;
 		}
 		$this->repository->backend()->delete( ObjectType::Data, $pack );
 		++$this->packs_deleted;
 		$this->bytes_deleted += max( 0, $this->unused[ $pack ] );
 		++$this->position;
+	}
+
+	/** Deletes at most one unindexed pack, scanning a bounded number of empty slots per step. */
+	private function delete_unindexed(): void {
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		try {
+			$batch = $table->batch( $this->position );
+		} finally {
+			$table->close();
+		}
+		foreach ( $batch['entries'] as $entry ) {
+			if ( ! $entry['unindexed'] ) {
+				continue;
+			}
+			if ( isset( $this->listed[ $entry['name'] ] ) || isset( $this->live[ $entry['name'] ] ) ) {
+				StorageFailed::raise( 'The pack working table marks an indexed pack for deletion.' );
+			}
+			$this->repository->backend()->delete( ObjectType::Data, $entry['name'] );
+			++$this->packs_deleted;
+			$this->bytes_deleted += max( 0, $entry['size'] );
+			$this->position       = $entry['slot'] + 1;
+			return;
+		}
+		$this->position = $batch['position'];
+		if ( $batch['done'] ) {
+			$this->finish();
+		}
 	}
 
 	/**
@@ -899,6 +1123,11 @@ final class PruneRun {
 					'missing_examples'    => $this->missing_examples,
 					'snapshots'           => $this->snapshots,
 					'index_files'         => $this->index_files,
+					'snapshot_names'      => $this->snapshot_names,
+					'index_names'         => $this->index_names,
+					'written'             => $this->written,
+					'unindexed'           => $this->unindexed,
+					'present_live'        => $this->present_live,
 					'position'            => $this->position,
 					'unused'              => $this->unused,
 					'affected'            => $this->affected,

@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
@@ -84,6 +85,7 @@ final class JobTypeAndErrorTest extends TestCase {
 	 */
 	public static function errors(): iterable {
 		yield 'append-only' => [ new AppendOnlyRefused( 'refused' ), 'repository_append_only' ];
+		yield 'an index beyond the memory limit' => [ new IndexTooLarge( 'too large' ), 'index_too_large' ];
 		yield 'damage' => [ new FormatException( 'damaged', [ 'code' => 'repository_damaged' ] ), 'repository_damaged' ];
 		yield 'no snapshots' => [ new InvalidArgument( 'empty', [ 'code' => 'no_snapshots' ] ), 'no_snapshots' ];
 		yield 'other context codes do not override' => [ new InvalidArgument( 'bad', [ 'code' => 'something_else' ] ), 'configuration' ];

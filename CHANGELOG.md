@@ -84,6 +84,12 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Changed
+- The list of everything in the repository takes less than half the memory it took, and
+  reading it from the local cache a fifth. Index-only measurements suggest that roughly a
+  million stored pieces could fit under a PHP memory limit of 128 MB, depending on the
+  site's baseline memory use; complete WordPress backups at that size remain to be
+  measured. When memory is tight, the backup uploads smaller packs than configured. A
+  repository that is still too large ends the job with a clear message.
 - The setup wizard lists an own restic REST server first and preselects it; BorgBase is the
   second option, and `repository.server` defaults to `rest-server`.
 - Retention needs `keep.within` of at least one day or `keep.last` of at least 1. The
@@ -94,6 +100,14 @@ All notable changes are documented here. The format follows
   after two days.
 - With `advanced.loopback_chaining` off, creating a job no longer requests `wp-cron.php`;
   the heartbeat and an open admin page advance the job.
+- Prune streams its pack listing to a private file and processes it in resumable batches.
+  Unindexed pack IDs stay on disk, so a large listing cannot exhaust PHP memory by itself.
+  The complete listing is validated before any index rewrite or deletion begins.
+  A live pack missing from that listing stops prune before it can remove an unindexed
+  recovery copy of the missing data.
+- Prune also deletes the data that a cancelled or failed backup left on the server without
+  ever listing it, as `restic prune` does. Until now only a prune from another computer
+  removed it.
 
 ### Security
 - The plugin reads no more of a server's answer than a repository file of that kind can
@@ -142,6 +156,12 @@ All notable changes are documented here. The format follows
 - A request that ended at the very start of a backup, check or forget could leave a
   repository lock that blocked other programs for 30 minutes. Every run now records its
   number first and removes such a lock itself.
+- On a site whose scheduled requests were more than 25 minutes apart, a prune that needed
+  more than one request started from the beginning every time and never finished. It now
+  goes on where it was unless another program changed the repository in the meantime, and
+  gives up with `repository_changed` after starting over three times.
+- A prune that had to start over while it was deleting left data behind that nothing
+  removed later. The next pass now finds and deletes it.
 - Settings that the database refused to store no longer pass for saved: the request answers
   with an error, and saving a server puts back what it had changed. WordPress reports such a
   refusal the same way as an unchanged value, so it went unnoticed before.

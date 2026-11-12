@@ -5,17 +5,20 @@ namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
-use BackupsForRestic\Backend\ObjectType;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use BackupsForRestic\Backend\Http\HttpResponse;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
+use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\UnsupportedRepository;
@@ -149,6 +152,75 @@ final class BackupStepsTest extends TestCase {
 		self::assertSame( [ $repository->config()->id, 1 ], $this->recorded() );
 		self::assertSame( $repository->config()->id, $this->access()->cached_repository_id() );
 		self::assertSame( $repository->config()->id, ( new SiteState( $this->options ) )->get( 'repository' )['id'] ?? null );
+	}
+
+	/** @return iterable<string, array{bool}> */
+	public static function cleanup_plans(): iterable {
+		yield 'plan cannot be rebuilt' => [ false ];
+		yield 'plan exists, saved node entries are missing' => [ true ];
+	}
+
+	#[DataProvider( 'cleanup_plans' )]
+	#[RunInSeparateProcess]
+	public function test_cleanup_after_an_index_memory_refusal_needs_no_plan_nodes_or_index( bool $resume_plan ): void {
+		$repository = $this->repository();
+		$site       = $this->directory . '/site';
+		mkdir( $site );
+		file_put_contents( $site . '/hello.txt', 'The next backup must load a real index under its lock.' );
+		$backup = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $this->directory . '/first-backup', new Identity( 'example.com', 'www-data' ), new FrozenClock() );
+		while ( ! $backup->advance( INF ) ) {
+			continue;
+		}
+		$indexes = array_keys( $repository->backend()->list( ObjectType::Index ) );
+		self::assertCount( 1, $indexes );
+		$job                    = $this->unlock( JobType::Backup );
+		$plan_available         = true;
+		$steps                  = $this->steps(
+			static function ( Job $job ) use ( $site, &$plan_available ): BackupPlan {
+				self::assertTrue( $plan_available, 'Cleanup cannot depend on rebuilding a backup plan.' );
+				return new BackupPlan( [ $site ] );
+			}
+		);
+		$log                    = $this->jobs->log( $job );
+		$this->server->requests = [];
+		gc_mem_caches();
+		$previous = ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 8 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This isolated process exercises cleanup under the same low limit as the failed job.
+		self::assertNotFalse( $previous );
+		try {
+			try {
+				$steps->back_up( $job, $log, INF );
+				self::fail( 'Loading the index must refuse before running out of memory.' );
+			} catch ( IndexTooLarge $error ) {
+				self::assertSame( 'index_too_large', JobError::from_throwable( $error )->code );
+			}
+			self::assertCount( 1, $repository->backend()->list( ObjectType::Locks ) );
+			$index_request = 'GET /site/index/' . $indexes[0];
+			self::assertCount( 1, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ) );
+
+			// The failure leaves ownership in the checkpoint. Neither the rest of that
+			// checkpoint nor unreadable repository data should be needed to release it.
+			$work  = $this->jobs->directory( $job ) . '/backup';
+			$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true, 512, JSON_THROW_ON_ERROR );
+			self::assertIsArray( $state );
+			$state['stack'] = [
+				[
+					'sequence'    => 0,
+					'nodes_bytes' => 1,
+				],
+			];
+			file_put_contents( $work . '/state.json', json_encode( $state, JSON_THROW_ON_ERROR ) );
+			file_put_contents( $work . '/nodes-0.jsonl', '' );
+			$this->server->objects[ '/site/index/' . $indexes[0] ] = 'damaged index';
+			$plan_available                                        = $resume_plan;
+
+			self::assertTrue( $steps->release( $job, $log, INF ) );
+			self::assertTrue( $steps->clean_up( $job, $log, INF ) );
+			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
+			self::assertDirectoryDoesNotExist( $work );
+			self::assertCount( 1, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'Cleanup must not read the index again.' );
+		} finally {
+			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the process limit after checking cleanup.
+		}
 	}
 
 	public function test_cleanup_needs_no_plan_index_or_supported_checkpoint_version(): void {

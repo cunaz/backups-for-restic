@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\Attributes\DataProvider;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backend\Http\HttpResponse;
@@ -15,6 +16,7 @@ use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
@@ -130,6 +132,39 @@ final class MaintenanceStepsTest extends TestCase {
 		self::assertSame( $job->id, $last['job'] ?? null );
 		self::assertSame( $found, array_sum( (array) ( $last['counts'] ?? [] ) ), 'The dashboard shows what the check found.' );
 		self::assertCount( $found, (array) ( $last['findings'] ?? [] ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_memory_refusal_does_not_fall_back_to_a_check_without_the_cache(): void {
+		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
+		$repository = Repository::initialize( $this->access()->backend(), self::PASSWORD, new Identity( 'example.com', 'www-data' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$site       = $this->directory . '/site';
+		mkdir( $site );
+		file_put_contents( $site . '/hello.txt', 'A real snapshot makes the check load its index under the lock.' );
+		$backup = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $this->directory . '/backup', new Identity( 'example.com', 'www-data' ), new FrozenClock() );
+		while ( ! $backup->advance( INF ) ) {
+			continue;
+		}
+		$indexes = array_keys( $repository->backend()->list( ObjectType::Index ) );
+		self::assertCount( 1, $indexes );
+		$index_request = 'GET /site/index/' . $indexes[0];
+		$job           = new Job( '20270115T030000Z-abcdef', JobType::Check, 'manual', 1_800_000_000 );
+		$this->run_step( $job, 'unlocking' );
+		$this->server->requests = [];
+		gc_mem_caches();
+		$previous = ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 8 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This isolated test simulates a host's limit without WordPress.
+		self::assertNotFalse( $previous );
+		try {
+			$this->run_step( $job, 'checking' );
+			self::fail( 'The memory refusal must stop the check before it reads the snapshot trees.' );
+		} catch ( IndexTooLarge ) {
+			self::assertCount( 2, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'The index phase and cache each read the index once; no uncached fallback may read it again.' );
+			self::assertCount( 1, $repository->backend()->list( ObjectType::Locks ) );
+			$this->run_step( $job, 'releasing' );
+			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
+		} finally {
+			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the test process's original limit.
+		}
 	}
 
 	public function test_a_refused_maintenance_removal_does_not_skip_common_cleanup(): void {

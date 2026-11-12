@@ -21,10 +21,12 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
+use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
@@ -34,7 +36,8 @@ use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\Vectors;
 
 /**
- * Prune without repacking deletes exactly the packs that no snapshot uses (ADR 0022).
+ * Prune without repacking deletes exactly the packs that no snapshot uses (ADR 0022), and the
+ * packs that no index file lists.
  */
 final class PruneTest extends TestCase {
 
@@ -272,6 +275,51 @@ final class PruneTest extends TestCase {
 			self::assertLessThan( 100000, ++$ticks );
 		}
 		return $run;
+	}
+
+	/**
+	 * Lets a backup upload packs and gives it up: the packs stay on the server, and no index
+	 * file lists them.
+	 *
+	 * @return list<string> Names of the packs it left.
+	 */
+	private function packs_of_an_interrupted_backup(): array {
+		file_put_contents( $this->site . '/abandoned.bin', Vectors::hash_stream( 'never in a snapshot', 3000000 ) );
+		$before = $this->repository->names( ObjectType::Data );
+		$run    = BackupRun::start( $this->repository, new BackupPlan( [ $this->site ], [ 'backups-for-restic' ] ), $this->work_dir(), $this->identity, new SystemClock(), null, self::PACK_SIZE );
+		$calls  = 0;
+		do {
+			self::assertFalse( $run->advance( 0.0 ), 'The backup must not finish.' );
+			$left   = array_values( array_diff( $this->repository->names( ObjectType::Data ), $before ) );
+			$enough = count( $left ) >= 2;
+			self::assertLessThan( 1000, ++$calls );
+		} while ( ! $enough );
+		$run->abort();
+		unlink( $this->site . '/abandoned.bin' );
+
+		$indexed = array_map( static fn ( Id $pack ): string => $pack->hex(), $this->repository->load_index()->pack_ids() );
+		self::assertSame( [], array_values( array_intersect( $left, $indexed ) ), 'No index file lists what the backup left.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		return $left;
+	}
+
+	/**
+	 * Saves a snapshot again under a new name, as a backup on another computer that found
+	 * nothing new would add one: the same trees, one more snapshot file.
+	 */
+	private function another_snapshot(): Id {
+		$names = $this->repository->names( ObjectType::Snapshots );
+		return $this->repository->save_unpacked( ObjectType::Snapshots, $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $names[0] ) ) );
+	}
+
+	/**
+	 * Writes an index file again under a new name and deletes the old one, as a prune on
+	 * another computer does with every index file it changes. The content stays the same.
+	 */
+	private function rewrite_an_index_file(): void {
+		$name = $this->repository->names( ObjectType::Index )[0];
+		$this->repository->save_unpacked( ObjectType::Index, $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) );
+		$this->backend->delete( ObjectType::Index, $name );
 	}
 
 	public function test_deletes_exactly_the_packs_no_snapshot_uses(): void {
@@ -572,7 +620,7 @@ final class PruneTest extends TestCase {
 		$this->read_everything();
 	}
 
-	public function test_starts_over_when_another_client_removed_its_lock(): void {
+	public function test_goes_on_when_another_client_removed_its_lock_and_changed_nothing_else(): void {
 		$this->history_with_a_forgotten_snapshot();
 		$work  = $this->work_dir();
 		$clock = new FrozenClock( time() );
@@ -581,16 +629,452 @@ final class PruneTest extends TestCase {
 			$run->advance( 0.0 );
 		}
 		self::assertSame( 'plan', $run->progress()['phase'] );
+		$trees = $run->progress()['trees'];
 		foreach ( array_keys( $this->backend->list( ObjectType::Locks ) ) as $lock ) {
 			$this->backend->delete( ObjectType::Locks, $lock );
 		}
 
 		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		self::assertFalse( $run->advance( 0.0 ) );
+		self::assertSame( 'plan', $run->progress()['phase'], 'The run went on where it was.' );
+		self::assertSame( $trees, $run->progress()['trees'], 'No tree was walked again.' );
+		self::assertCount( 1, $this->backend->list( ObjectType::Locks ), 'It took its lock again.' );
 		while ( ! $run->advance( INF ) ) {
 			continue;
 		}
-		self::assertSame( 1, $run->result()['restarts'] );
+		self::assertSame( 0, $run->result()['restarts'], 'The same snapshots and the same index files: nothing it found had changed.' );
 		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$this->read_everything();
+	}
+
+	public function test_goes_on_after_a_pause_before_every_step_when_nobody_else_wrote(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$left   = $this->packs_of_an_interrupted_backup();
+		$used   = array_keys( $this->used_packs() );
+		$work   = $this->work_dir();
+		$clock  = new FrozenClock( time() );
+		$run    = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		$phases = [];
+		$ticks  = 0;
+		do {
+			$phases[ $run->progress()['phase'] ] = true;
+			// Longer than the lock lasts, before every single step of every phase.
+			$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+			$run  = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			$done = $run->advance( 0.0 );
+			self::assertLessThan( 100000, ++$ticks );
+		} while ( ! $done );
+
+		self::assertSame( [ 'mark', 'plan', 'download', 'parse_listing', 'classify', 'rewrite', 'delete_indexes', 'delete_packs', 'delete_unindexed' ], array_keys( $phases ) );
+		self::assertSame( 0, $run->result()['restarts'], 'Nobody else wrote, so marking never started over, although the lock was taken again every time.' );
+		self::assertSame( count( $left ), $run->result()['unindexed_packs'] );
+		$actual = $this->repository->names( ObjectType::Data );
+		sort( $used );
+		self::assertSame( $used, $actual, 'The same packs are left as after a prune without pauses.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$this->read_everything();
+	}
+
+	public function test_starts_over_when_an_index_file_was_written_anew_during_a_pause(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$used  = array_keys( $this->used_packs() );
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		$run   = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( 'mark' === $run->progress()['phase'] ) {
+			$run->advance( 0.0 );
+		}
+		self::assertSame( 'plan', $run->progress()['phase'] );
+
+		$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+		$this->rewrite_an_index_file();
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		self::assertFalse( $run->advance( 0.0 ) );
+		self::assertSame( 'mark', $run->progress()['phase'], 'Another client may have repacked: what was marked no longer counts.' );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertSame( 1, $run->result()['restarts'] );
+		sort( $used );
+		self::assertSame( $used, $this->repository->names( ObjectType::Data ) );
+		$this->read_everything();
+	}
+
+	public function test_a_request_that_ends_before_it_has_looked_does_not_spare_the_next_one_the_look(): void {
+		$unique = $this->history_with_a_forgotten_snapshot();
+		$work   = $this->work_dir();
+		$clock  = new FrozenClock( time() );
+		$run    = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( in_array( $run->progress()['phase'], [ 'mark', 'plan' ], true ) ) {
+			$run->advance( 0.0 );
+		}
+		self::assertGreaterThan( 0, $run->progress()['unused_packs'], 'The plan found the unique file unused.' );
+
+		// A long pause in which the forgotten snapshot comes back, as another client could write
+		// one that uses what the plan takes for unused.
+		$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+		$this->repository->save_unpacked( ObjectType::Snapshots, $this->forgotten );
+		$used = array_keys( $this->used_packs() );
+
+		// The first request after the pause takes the lock again and ends at the listing it
+		// compares with.
+		$ended      = false;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$ended ): void {
+				if ( ! $ended && 'list' === $method && ObjectType::Snapshots === $type ) {
+					$ended = true;
+					throw new \RuntimeException( 'The request ended.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		try {
+			PruneRun::resume( $repository, $work, $this->identity, $clock )->advance( INF );
+			self::fail( 'The request must end while the run compares.' );
+		} catch ( \RuntimeException $failure ) {
+			self::assertSame( 'The request ended.', $failure->getMessage() );
+		}
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock it had taken again is released.' );
+
+		// A lock written a moment ago proves nothing about the time before it.
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 1, $run->result()['restarts'], 'The next request looked, found the new snapshot and marked again.' );
+		sort( $used );
+		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'The packs of the new snapshot are kept.' );
+		$index = $this->repository->load_index();
+		foreach ( $unique as $blob ) {
+			self::assertTrue( $index->has( $blob, BlobType::Data ) );
+		}
+		$this->read_everything();
+	}
+
+	public function test_gives_up_when_the_repository_changes_during_every_pause(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$packs = $this->backend->list( ObjectType::Data );
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		$run   = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		self::assertFalse( $run->advance( 0.0 ) );
+
+		for ( $restart = 1; $restart <= PruneRun::MAX_RESTARTS; $restart++ ) {
+			$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+			$this->another_snapshot();
+			$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			self::assertFalse( $run->advance( 0.0 ) );
+			self::assertSame( $restart, $run->result()['restarts'] );
+		}
+
+		$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+		$this->another_snapshot();
+		$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		try {
+			$run->advance( 0.0 );
+			self::fail( 'Marking must not start over a fourth time.' );
+		} catch ( RepositoryChanged $changed ) {
+			self::assertSame( [ 'restarts' => PruneRun::MAX_RESTARTS ], $changed->context() );
+		}
+		self::assertSame( $packs, $this->backend->list( ObjectType::Data ), 'Nothing was deleted.' );
+		PruneRun::resume( $this->repository, $work, $this->identity, $clock )->abort();
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		self::assertDirectoryDoesNotExist( $work );
+	}
+
+	public function test_deletes_the_packs_that_no_index_file_lists(): void {
+		$this->back_up();
+		$used = array_keys( $this->used_packs() );
+		$left = $this->packs_of_an_interrupted_backup();
+		$size = 0;
+		foreach ( $left as $pack ) {
+			$size += (int) $this->backend->size( ObjectType::Data, $pack );
+		}
+		$index_files = $this->repository->names( ObjectType::Index );
+
+		$result = $this->prune()->result();
+
+		sort( $used );
+		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'Only the packs of the snapshot are left.' );
+		self::assertSame( count( $left ), $result['unindexed_packs'] );
+		self::assertSame( count( $left ), $result['packs_deleted'] );
+		self::assertSame( $size, $result['bytes_deleted'] );
+		self::assertSame( 0, $result['index_files_written'] );
+		self::assertSame( $index_files, $this->repository->names( ObjectType::Index ), 'No index file listed them, so none had to change.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$this->read_everything();
+	}
+
+	#[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+	#[\PHPUnit\Framework\Attributes\PreserveGlobalState( false )]
+	public function test_large_unindexed_listing_is_planned_and_resumed_with_bounded_memory(): void {
+		$this->back_up();
+		$packs                       = $this->backend->list( ObjectType::Data );
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $packs ): void {
+			self::assertSame( ObjectType::Data, $type );
+			$file = new \BackupsForRestic\Support\WorkFile( $path, true );
+			$file->write( '[' );
+			foreach ( $packs as $name => $size ) {
+				$file->write(
+					json_encode(
+						[
+							'name' => (string) $name,
+							'size' => $size,
+						],
+						JSON_THROW_ON_ERROR
+					) . ','
+				);
+			}
+			for ( $i = 0; $i < 200000; ++$i ) {
+				$file->write( ( $i > 0 ? ',' : '' ) . '{"name":"' . hash( 'sha256', 'unindexed:' . $i ) . '","size":1}' );
+			}
+			$file->write( ']' );
+			$file->close();
+		};
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		$original                    = ini_get( 'memory_limit' );
+		$baseline                    = memory_get_usage( true );
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- A real low-memory regression in an isolated PHP process, outside WordPress.
+		self::assertNotFalse( ini_set( 'memory_limit', (string) ( $baseline + 12 * 1048576 ) ) );
+		try {
+			$steps = 0;
+			while ( 'rewrite' !== $run->progress()['phase'] ) {
+				self::assertLessThan( 10000, ++$steps );
+				self::assertFalse( $run->advance( 0.0 ) );
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::assertGreaterThan( 1000, $steps, 'Parsing and classification yield repeatedly.' );
+			self::assertSame( 200000, $run->progress()['unused_packs'] );
+			self::assertSame( 200000, $run->result()['unindexed_packs'] );
+			self::assertSame( 0, $run->result()['packs_deleted'] );
+			self::assertLessThan( 131072, filesize( $work . '/state.json' ), 'Unindexed IDs never enter the checkpoint.' );
+			while ( $run->result()['packs_deleted'] < 3 ) {
+				$run->advance( 0.0 );
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::assertSame( 3, $run->result()['packs_deleted'] );
+			self::assertSame( $packs, $this->backend->list( ObjectType::Data ), 'Indexed live packs survive the on-disk deletion plan.' );
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the isolated test process's original limit.
+			ini_set( 'memory_limit', $original );
+			$run->abort();
+		}
+	}
+
+	public function test_replayed_parse_and_classification_batches_deduplicate_before_deletion(): void {
+		$this->back_up();
+		$kept    = $this->backend->list( ObjectType::Data );
+		$entries = [];
+		foreach ( $kept as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		$bytes = 0;
+		for ( $i = 0; $i < 500; ++$i ) {
+			$content = 'left by an interrupted backup ' . $i;
+			$name    = hash( 'sha256', $content );
+			$this->backend->save( ObjectType::Data, $name, $content );
+			$entries[] = [
+				'name' => $name,
+				'size' => 1,
+			];
+			$entries[] = [
+				'name' => $name,
+				'size' => strlen( $content ),
+			];
+			$bytes    += strlen( $content );
+		}
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $entries ): void {
+			\BackupsForRestic\Storage\Files::write_atomic( $path, json_encode( $entries, JSON_THROW_ON_ERROR ) );
+		};
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		foreach ( [ 'parse_listing', 'classify', 'delete_unindexed' ] as $phase ) {
+			while ( $phase !== $run->progress()['phase'] ) {
+				self::assertFalse( $run->advance( 0.0 ) );
+			}
+			$before = file_get_contents( $work . '/state.json' );
+			$run->advance( 0.0 );
+			// The working table (or remote DELETE) persisted, but the request died before
+			// saving its checkpoint. The next request replays that exact same batch.
+			file_put_contents( $work . '/state.json', $before );
+			$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		}
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( 500, $run->result()['unindexed_packs'] );
+		self::assertSame( 500, $run->result()['packs_deleted'] );
+		self::assertSame( $bytes, $run->result()['bytes_deleted'], 'The last duplicate entry determines the size.' );
+		self::assertSame( $kept, $this->backend->list( ObjectType::Data ) );
+	}
+
+	public function test_unwritable_pack_table_stops_before_any_deletion(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$before = $this->backend->objects;
+		$clock  = new FrozenClock( time() );
+		$work   = $this->work_dir();
+		$run    = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( 'classify' !== $run->progress()['phase'] ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+		}
+		chmod( $work . '/packs.table', 0400 );
+		try {
+			if ( is_writable( $work . '/packs.table' ) ) {
+				self::markTestSkipped( 'This user bypasses file permissions.' );
+			}
+			try {
+				@$run->advance( 0.0 );
+				self::fail( 'A local I/O failure must stop classification.' );
+			} catch ( \BackupsForRestic\Exception\StorageFailed $error ) {
+				self::assertSame( 'environment', \BackupsForRestic\Jobs\JobError::from_throwable( $error )->code );
+				self::assertSame( 0, $run->result()['packs_deleted'] );
+				self::assertSame( 0, $run->result()['index_files_written'] );
+				foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
+					self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
+				}
+			}
+		} finally {
+			chmod( $work . '/packs.table', 0600 );
+			$run->abort();
+		}
+	}
+
+	public function test_malformed_final_listing_entry_prevents_all_repository_mutations(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ): void {
+			$file = new \BackupsForRestic\Support\WorkFile( $path, true );
+			$file->write( '[' );
+			for ( $i = 0; $i < 300; ++$i ) {
+				$file->write( '"' . hash( 'sha256', 'abandoned:' . $i ) . '",' );
+			}
+			$file->write( '{"name":"incomplete' );
+			$file->close();
+		};
+		$before                      = $this->backend->objects;
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		try {
+			while ( ! $run->advance( 0.0 ) ) {
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::fail( 'The malformed tail must be examined before any deletion.' );
+		} catch ( BackendException ) {
+			self::assertSame( 'parse_listing', $run->progress()['phase'] );
+			self::assertSame( 0, $run->result()['packs_deleted'] );
+			self::assertSame( 0, $run->result()['index_files_written'] );
+			foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
+				self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
+			}
+		} finally {
+			$run->abort();
+		}
+	}
+
+	public function test_a_missing_live_pack_keeps_unindexed_recovery_data_and_refuses_all_mutations(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$snapshots = $this->repository->snapshots();
+		$snapshot  = Id::from_hex( (string) array_key_first( $snapshots ) );
+		$blob      = $this->content_of( $snapshot, 'index.php' )[0];
+		$index     = $this->repository->load_index();
+		$entry     = $index->find( $blob, BlobType::Data );
+		self::assertNotNull( $entry );
+		$writer = new PackWriter( $this->repository->cipher() );
+		$writer->add( BlobType::Data, $blob, $this->repository->load_blob( $index, BlobType::Data, $blob ) );
+		$recovery = $writer->finish();
+		$this->backend->save( ObjectType::Data, $recovery->id->hex(), $recovery->bytes );
+		$this->backend->delete( ObjectType::Data, $entry->pack->hex() );
+		$tree_pack = $index->find( $snapshots[ $snapshot->hex() ]->tree, BlobType::Tree )?->pack->hex();
+		self::assertNotNull( $tree_pack );
+		$entries = [];
+		foreach ( $this->backend->list( ObjectType::Data ) as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		// Repeated live names across parse batches must not hide the missing live name.
+		$entries                     = array_merge(
+			$entries,
+			array_fill(
+				0,
+				600,
+				[
+					'name' => $tree_pack,
+					'size' => strlen( $this->backend->objects['data'][ $tree_pack ] ),
+				]
+			)
+		);
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $entries ): void {
+			\BackupsForRestic\Storage\Files::write_atomic( $path, json_encode( $entries, JSON_THROW_ON_ERROR ) );
+		};
+		$before                      = $this->backend->objects;
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		try {
+			while ( ! $run->advance( 0.0 ) ) {
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::fail( 'A missing live pack must stop prune before deleting a possible recovery copy.' );
+		} catch ( FormatException $error ) {
+			self::assertSame( 'repository_damaged', $error->context()['code'] ?? null );
+			self::assertSame( 'classify', $run->progress()['phase'] );
+			self::assertSame( 0, $run->result()['packs_deleted'] );
+			self::assertSame( 0, $run->result()['index_files_written'] );
+			foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
+				self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
+			}
+			self::assertSame( $recovery->bytes, $this->backend->objects['data'][ $recovery->id->hex() ] );
+		} finally {
+			$run->abort();
+		}
+	}
+
+	public function test_a_repository_without_waste_keeps_every_pack_and_reports_none_unindexed(): void {
+		$this->back_up();
+		$packs = $this->backend->list( ObjectType::Data );
+
+		$result = $this->prune()->result();
+
+		self::assertSame( 0, $result['unindexed_packs'] );
+		self::assertSame( 0, $result['packs_deleted'] );
+		self::assertSame( $packs, $this->backend->list( ObjectType::Data ) );
+	}
+
+	public function test_starting_over_while_deleting_leaves_no_pack_behind(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$work  = $this->work_dir();
+		$clock = new FrozenClock( time() );
+		$run   = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( 'delete_packs' !== $run->progress()['phase'] ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+		}
+		self::assertFalse( $run->advance( 0.0 ) );
+		$deleted = $run->progress()['packs_deleted'];
+		self::assertGreaterThan( 0, $deleted );
+		self::assertLessThan( $run->progress()['unused_packs'], $deleted, 'Packs of the plan are still there, and no index file lists them any more.' );
+
+		// A long pause in which another computer adds a snapshot.
+		$clock->advance( PruneRun::CONTINUITY_SECONDS + 1 );
+		$this->another_snapshot();
+		$used = array_keys( $this->used_packs() );
+		$run  = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertSame( 1, $run->result()['restarts'] );
+		self::assertGreaterThan( 0, $run->result()['unindexed_packs'], 'The second plan found the rest of the first as packs that no index file lists.' );
+		sort( $used );
+		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'Nothing unused is left behind.' );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 		$this->read_everything();
 	}

@@ -57,12 +57,16 @@ final class Messages {
 				'hint'    => __( 'The plugin tries again automatically. If nothing else uses the repository, stale locks expire after 30 minutes.', 'backups-for-restic' ),
 			],
 			'repository_changed'             => [
-				'message' => __( 'Another program kept removing data from the repository that this job relied on.', 'backups-for-restic' ),
-				'hint'    => __( 'The job started over three times and then stopped. If another computer cleans up this repository, let it run at a time when no backup is running, and make sure the scheduled jobs of this site are not paused for long.', 'backups-for-restic' ),
+				'message' => __( 'Another program kept changing the repository while this job worked on it.', 'backups-for-restic' ),
+				'hint'    => __( 'The job started over three times and then stopped. If other computers use this repository, let them work at a time when no job of this site is running, and make sure the scheduled jobs of this site are not paused for long.', 'backups-for-restic' ),
 			],
 			'repository_append_only'         => [
 				'message' => __( 'The server refused to delete data because the repository is append-only.', 'backups-for-restic' ),
 				'hint'    => __( 'That protects your backups. Clean up old snapshots from another computer.', 'backups-for-restic' ),
+			],
+			'index_too_large'                => [
+				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
+				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),
 			],
 			'quota_exceeded'                 => [
 				'message' => __( 'The repository server has no space left.', 'backups-for-restic' ),

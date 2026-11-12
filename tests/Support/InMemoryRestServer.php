@@ -41,7 +41,7 @@ final class InMemoryRestServer implements HttpClient {
 	 */
 	public ?\Closure $after = null;
 
-	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
+	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0, ?string $file = null ): HttpResponse {
 		$path             = (string) parse_url( $url, PHP_URL_PATH );
 		$query            = (string) parse_url( $url, PHP_URL_QUERY );
 		$this->requests[] = $method . ' ' . $path . ( '' === $query ? '' : '?' . $query );
@@ -51,7 +51,12 @@ final class InMemoryRestServer implements HttpClient {
 		$replaced = null === $this->after ? null : ( $this->after )( $method, $path );
 		$answer   = $replaced ?? $answer;
 		// As a client has to: nothing beyond one byte more than the caller accepts.
-		return $limit > 0 && strlen( $answer->body ) > $limit + 1 ? new HttpResponse( $answer->status, $answer->headers, substr( $answer->body, 0, $limit + 1 ) ) : $answer;
+		$answer = $limit > 0 && strlen( $answer->body ) > $limit + 1 ? new HttpResponse( $answer->status, $answer->headers, substr( $answer->body, 0, $limit + 1 ) ) : $answer;
+		if ( null !== $file ) {
+			file_put_contents( $file, $answer->body );
+			return new HttpResponse( $answer->status, $answer->headers, '' );
+		}
+		return $answer;
 	}
 
 	/**

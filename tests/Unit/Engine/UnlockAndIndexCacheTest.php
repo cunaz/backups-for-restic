@@ -15,6 +15,7 @@ use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\WrongPassword;
+use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\CountingBackend;
@@ -95,10 +96,10 @@ final class UnlockAndIndexCacheTest extends TestCase {
 
 		$cache = new IndexCache( $this->directory() . '/cache' );
 		$full  = $repository->load_index();
-		self::assertSame( $full->to_binary(), $cache->load( $repository )->to_binary() );
+		self::assertSame( self::blobs( $full ), self::blobs( $cache->load( $repository ) ) );
 
 		$backend->loads = [];
-		self::assertSame( $full->to_binary(), $cache->load( $repository )->to_binary() );
+		self::assertSame( self::blobs( $full ), self::blobs( $cache->load( $repository ) ) );
 		self::assertArrayNotHasKey( 'index', $backend->loads, 'Nothing new on the server, nothing downloaded.' );
 
 		file_put_contents( $site . '/new.txt', 'new content' );
@@ -110,7 +111,7 @@ final class UnlockAndIndexCacheTest extends TestCase {
 
 		$names = array_keys( $backend->list( ObjectType::Index ) );
 		$backend->delete( ObjectType::Index, (string) $names[0] );
-		self::assertSame( $repository->load_index()->to_binary(), $cache->load( $repository )->to_binary(), 'A removed index file forces a rebuild.' );
+		self::assertSame( self::blobs( $repository->load_index() ), self::blobs( $cache->load( $repository ) ), 'A removed index file forces a rebuild.' );
 	}
 
 	public function test_an_index_cache_whose_directory_cannot_be_created_says_so(): void {
@@ -142,20 +143,36 @@ final class UnlockAndIndexCacheTest extends TestCase {
 		$full      = $repository->load_index();
 
 		$small = new IndexCache( $directory, 64 );
-		self::assertSame( $full->to_binary(), $small->load( $repository )->to_binary(), 'The index is still complete.' );
+		self::assertSame( self::blobs( $full ), self::blobs( $small->load( $repository ) ), 'The index is still complete.' );
 		self::assertFileDoesNotExist( $directory . '/index.bin' );
 
 		$roomy = new IndexCache( $directory, 1048576 );
 		$roomy->load( $repository );
 		self::assertFileExists( $directory . '/index.bin' );
-		self::assertSame( $full->to_binary(), $small->load( $repository )->to_binary() );
+		self::assertSame( self::blobs( $full ), self::blobs( $small->load( $repository ) ) );
 		self::assertFileDoesNotExist( $directory . '/index.bin', 'A cache written under a higher limit goes when read under a lower one.' );
 
 		$roomy->load( $repository );
 		file_put_contents( $site . '/new.txt', 'new content' );
 		$this->back_up( $repository, $site );
-		self::assertSame( $repository->load_index()->to_binary(), $roomy->load( $repository )->to_binary() );
+		self::assertSame( self::blobs( $repository->load_index() ), self::blobs( $roomy->load( $repository ) ) );
 		self::assertFileExists( $directory . '/index.bin', 'Within the limit, the cache grows with the repository.' );
+	}
+
+	/**
+	 * Every blob of an index as one line, sorted: what two indexes with the same content share
+	 * whatever their buckets are.
+	 *
+	 * @return list<string>
+	 */
+	private static function blobs( IndexSet $index ): array {
+		$lines = [];
+		foreach ( $index->locations() as $location ) {
+			$entry   = $location->entry;
+			$lines[] = implode( ' ', [ $entry->type->value, $entry->id->hex(), $location->pack->hex(), $entry->offset, $entry->length, $entry->uncompressed_length ] );
+		}
+		sort( $lines );
+		return $lines;
 	}
 
 	private function back_up( Repository $repository, string $site ): void {
