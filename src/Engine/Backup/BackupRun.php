@@ -20,6 +20,7 @@ use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\RepositoryChanged;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\ChunkReader;
 use BackupsForRestic\Format\Chunker\RabinChunker;
@@ -250,15 +251,19 @@ final class BackupRun {
 		// Drop node lines written after the checkpoint.
 		foreach ( $run->frames() as $frame ) {
 			$file = $run->nodes_file( Decoded::int( $frame['sequence'] ) );
-			$size = is_file( $file ) ? (int) filesize( $file ) : 0;
-			if ( $size < Decoded::int( $frame['nodes_bytes'] ) ) {
-				throw new FormatException( 'The backup checkpoint lost entries.' );
+			$size = is_file( $file ) ? filesize( $file ) : false;
+			if ( false === $size || $size < Decoded::int( $frame['nodes_bytes'] ) ) {
+				StorageFailed::raise( 'The backup checkpoint lost entries.', [ 'file' => basename( $file ) ] );
 			}
 			if ( $size > Decoded::int( $frame['nodes_bytes'] ) ) {
 				$handle = fopen( $file, 'c' );
-				if ( false !== $handle ) {
-					ftruncate( $handle, max( 0, Decoded::int( $frame['nodes_bytes'] ) ) );
-					fclose( $handle );
+				if ( false === $handle ) {
+					StorageFailed::raise( 'Uncommitted backup entries could not be removed.', [ 'file' => basename( $file ) ] );
+				}
+				$truncated = ftruncate( $handle, max( 0, Decoded::int( $frame['nodes_bytes'] ) ) );
+				$closed    = fclose( $handle );
+				if ( ! $truncated || ! $closed ) {
+					StorageFailed::raise( 'Uncommitted backup entries could not be removed.', [ 'file' => basename( $file ) ] );
 				}
 			}
 		}
@@ -603,7 +608,12 @@ final class BackupRun {
 		$frame = $this->frames()[ $depth ];
 		$lines = '';
 		if ( Decoded::int( $frame['nodes_bytes'] ) > 0 ) {
-			$lines = (string) file_get_contents( $this->nodes_file( Decoded::int( $frame['sequence'] ) ), false, null, 0, Decoded::int( $frame['nodes_bytes'] ) );
+			$file  = $this->nodes_file( Decoded::int( $frame['sequence'] ) );
+			$bytes = Decoded::int( $frame['nodes_bytes'] );
+			$lines = file_get_contents( $file, false, null, 0, $bytes );
+			if ( false === $lines || strlen( $lines ) !== $bytes ) {
+				StorageFailed::raise( 'The saved backup entries could not be read completely.', [ 'file' => basename( $file ) ] );
+			}
 		}
 		$nodes = '' === $lines ? [] : explode( "\n", rtrim( $lines, "\n" ) );
 		$tree  = $this->store()->save( BlobType::Tree, '{"nodes":[' . implode( ',', $nodes ) . "]}\n" );
@@ -980,7 +990,7 @@ final class BackupRun {
 		$entries                 = 'target' === $kind ? $this->list_directory( $path, $virtual ) : $this->leading_entries( $path );
 		$this->state['sequence'] = Decoded::int( $this->state['sequence'] ) + 1;
 		$sequence                = Decoded::int( $this->state['sequence'] );
-		file_put_contents( $this->nodes_file( $sequence ), '' );
+		$this->write_file( $this->nodes_file( $sequence ), '' );
 
 		$stack                = $this->frames();
 		$stack[]              = [
@@ -1040,14 +1050,12 @@ final class BackupRun {
 	 *
 	 * @param int  $depth Frame depth.
 	 * @param Node $node  Node.
-	 * @throws FormatException If the node file cannot be written.
+	 * @throws StorageFailed If the node file cannot be written completely.
 	 */
 	private function append_node( int $depth, Node $node ): void {
 		$frame = $this->frames()[ $depth ];
 		$line  = $node->to_json() . "\n";
-		if ( false === file_put_contents( $this->nodes_file( Decoded::int( $frame['sequence'] ) ), $line, FILE_APPEND ) ) {
-			throw new FormatException( 'The backup checkpoint cannot be written.' );
-		}
+		$this->write_file( $this->nodes_file( Decoded::int( $frame['sequence'] ) ), $line, true );
 		$stack                          = $this->frames();
 		$stack[ $depth ]['nodes_bytes'] = Decoded::int( $frame['nodes_bytes'] ) + strlen( $line );
 		$stack[ $depth ]['next']        = Decoded::int( $frame['next'] ) + 1;
@@ -1157,12 +1165,48 @@ final class BackupRun {
 	/**
 	 * Writes the checkpoint atomically.
 	 *
-	 * @throws FormatException If it cannot be written.
+	 * @throws StorageFailed If it cannot be written completely or replaced.
 	 */
 	private function persist(): void {
 		$temporary = $this->work_dir . '/state.json.tmp';
-		if ( false === file_put_contents( $temporary, GoJson::encode( $this->state ) ) || ! rename( $temporary, $this->work_dir . '/state.json' ) ) {
-			throw new FormatException( 'The backup checkpoint cannot be written.' );
+		$this->write_file( $temporary, GoJson::encode( $this->state ) );
+		if ( ! rename( $temporary, $this->work_dir . '/state.json' ) ) {
+			StorageFailed::raise( 'The backup checkpoint could not be replaced.', [ 'file' => 'state.json' ] );
+		}
+	}
+
+	/**
+	 * Writes every byte before a checkpoint may refer to it. A short write is retried; a
+	 * refused write leaves the prior checkpoint intact and is reported as a local failure.
+	 *
+	 * @param string $file    Working file.
+	 * @param string $content Complete bytes to write.
+	 * @param bool   $append  Append to an existing node file.
+	 * @throws StorageFailed If opening, restricting, writing or closing the file fails.
+	 * @throws \Throwable If writing fails unexpectedly; the handle is still closed.
+	 */
+	private function write_file( string $file, string $content, bool $append = false ): void {
+		$handle = fopen( $file, $append ? 'ab' : 'wb' );
+		if ( false === $handle ) {
+			StorageFailed::raise( 'A backup working file could not be opened for writing.', [ 'file' => basename( $file ) ] );
+		}
+		try {
+			if ( ! chmod( $file, 0600 ) ) {
+				StorageFailed::raise( 'A backup working file could not be made private.', [ 'file' => basename( $file ) ] );
+			}
+			$length = strlen( $content );
+			for ( $offset = 0; $offset < $length; $offset += $written ) {
+				$written = fwrite( $handle, substr( $content, $offset ) );
+				if ( false === $written || 0 === $written ) {
+					StorageFailed::raise( 'A backup working file could not be written completely.', [ 'file' => basename( $file ) ] );
+				}
+			}
+		} catch ( \Throwable $error ) {
+			fclose( $handle );
+			throw $error;
+		}
+		if ( ! fclose( $handle ) ) {
+			StorageFailed::raise( 'A backup working file could not be closed after writing.', [ 'file' => basename( $file ) ] );
 		}
 	}
 
@@ -1177,17 +1221,32 @@ final class BackupRun {
 			$live[ $this->nodes_file( Decoded::int( $frame['sequence'] ) ) ] = true;
 		}
 		$files = glob( $this->work_dir . '/nodes-*.jsonl' );
-		foreach ( false === $files ? [] : $files as $file ) {
+		if ( false === $files ) {
+			StorageFailed::raise( 'The backup working files could not be listed.' );
+		}
+		foreach ( $files as $file ) {
 			if ( $everything || ! isset( $live[ $file ] ) ) {
-				unlink( $file );
+				$this->remove_file( $file );
 			}
 		}
 		if ( $everything ) {
 			foreach ( [ 'state.json', 'state.json.tmp' ] as $name ) {
 				if ( is_file( $this->work_dir . '/' . $name ) ) {
-					unlink( $this->work_dir . '/' . $name );
+					$this->remove_file( $this->work_dir . '/' . $name );
 				}
 			}
+		}
+	}
+
+	/**
+	 * Removes one obsolete working file, reporting a refused cleanup.
+	 *
+	 * @param string $file Working file.
+	 * @throws StorageFailed If removal fails.
+	 */
+	private function remove_file( string $file ): void {
+		if ( ! unlink( $file ) ) {
+			StorageFailed::raise( 'A backup working file could not be removed.', [ 'file' => basename( $file ) ] );
 		}
 	}
 }

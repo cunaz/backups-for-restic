@@ -93,21 +93,29 @@ final class Files {
 	 * Deletes a directory with everything in it. Symbolic links are removed, not followed.
 	 *
 	 * @param string $path Directory or file.
+	 * @throws StorageFailed If listing or removing an entry fails. Earlier removals are not undone.
 	 */
 	public static function remove_tree( string $path ): void {
 		if ( is_link( $path ) || is_file( $path ) ) {
-			unlink( $path );
+			if ( ! unlink( $path ) ) {
+				StorageFailed::raise( 'A file in the private directory could not be removed.', [ 'file' => basename( $path ) ] );
+			}
 			return;
 		}
 		if ( ! is_dir( $path ) ) {
 			return;
 		}
 		$entries = scandir( $path );
-		foreach ( false === $entries ? [] : $entries as $entry ) {
+		if ( false === $entries ) {
+			StorageFailed::raise( 'A directory in the private directory could not be listed.', [ 'file' => basename( $path ) ] );
+		}
+		foreach ( $entries as $entry ) {
 			if ( '.' !== $entry && '..' !== $entry ) {
 				self::remove_tree( $path . '/' . $entry );
 			}
 		}
-		rmdir( $path );
+		if ( ! rmdir( $path ) ) {
+			StorageFailed::raise( 'A directory in the private directory could not be removed.', [ 'file' => basename( $path ) ] );
+		}
 	}
 }

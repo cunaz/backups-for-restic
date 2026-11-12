@@ -11,6 +11,7 @@ namespace BackupsForRestic\Jobs\Backup;
 
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Engine\Backup\BackupRun;
+use BackupsForRestic\Engine\CheckpointLock;
 use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
@@ -22,6 +23,7 @@ use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
+use BackupsForRestic\Jobs\Cleanup;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
@@ -325,7 +327,8 @@ final class BackupSteps implements StepProvider {
 		}
 		$repository = $services->access->open_cached();
 		if ( null !== $repository ) {
-			BackupRun::resume( $repository, ( $services->plan )( $job ), $work, $services->identity, $services->clock, $services->pack_size() )->abort();
+			CheckpointLock::release( $repository, $work . '/state.json', $services->identity, $services->clock );
+			Files::remove_tree( $work );
 			$log->write( 'info', 'Repository lock released.' );
 		}
 		return true;
@@ -341,15 +344,17 @@ final class BackupSteps implements StepProvider {
 	 */
 	public function clean_up( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services;
-		Files::remove_tree( $services->unlock_dir( $job ) );
-		Files::remove_tree( $services->work_dir( $job ) );
-		// A password that did not open the repository, or whose unlock was cancelled; after any
-		// other job, one that an unlock which never ended left behind.
-		$services->access->forget_candidate_password();
-		$services->jobs->prune( $services->settings->int( 'advanced.keep_jobs' ) );
-		// The repository in use is the one whose key is cached. Without a cached key nothing is
-		// removed: better an old cache too many than the current one deleted after every job.
-		$services->cache()->remove_others( $services->access->cached_repository_id() );
+		Cleanup::run(
+			static fn () => Files::remove_tree( $services->unlock_dir( $job ) ),
+			static fn () => Files::remove_tree( $services->work_dir( $job ) ),
+			// A password that did not open the repository, or whose unlock was cancelled; after
+			// any other job, one that an unlock which never ended left behind.
+			static fn () => $services->access->forget_candidate_password(),
+			static fn () => $services->jobs->prune( $services->settings->int( 'advanced.keep_jobs' ) ),
+			// Keep the current cache. Without a cached key nothing is removed: better an old
+			// cache too many than the current one deleted after every job.
+			static fn () => $services->cache()->remove_others( $services->access->cached_repository_id() )
+		);
 		return true;
 	}
 

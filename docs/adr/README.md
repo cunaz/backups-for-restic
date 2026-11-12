@@ -51,3 +51,4 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0029](0029-wordpress-free-core.md) | A WordPress-free core behind adapters in one namespace |
 | [0030](0030-lock-continuity.md) | A run trusts the repository only while its lock holds |
 | [0031](0031-compact-index-and-memory-budget.md) | A compact index and a memory budget |
+| [0032](0032-run-checkpoint-files-and-cleanup.md) | Complete working-file writes and cleanup by run ownership |

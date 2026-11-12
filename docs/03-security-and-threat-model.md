@@ -290,8 +290,9 @@ carries `Cache-Control: no-store`.
   the plugin sets them: `Files::write_atomic()` (a temporary file in the same directory,
   `chmod 0600`, then `rename`) writes `job.json`, the dump state, the index cache and the
   checkpoints of unlock, forget, prune and check, and the CA certificate gets `0600` after it
-  is written. The backup checkpoint with its node files and the event log are created with
-  the mode that the process umask gives; they rely on their `0700` directories. Nothing is
+  is written. Backup checkpoints and node files get `0600` before their content is written
+  ([ADR 0032](adr/0032-run-checkpoint-files-and-cleanup.md)). The event log is created with
+  the mode that the process umask gives; it relies on its `0700` directory. Nothing is
   written to the system temp directory.
 - The cache holds one file per repository, the merged index, sealed with the master key
   (encrypted and authenticated). A cache that fails authentication is ignored and rebuilt

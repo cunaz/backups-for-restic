@@ -16,6 +16,7 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\SecretsUndecryptable;
@@ -29,6 +30,7 @@ use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
+use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
@@ -218,6 +220,110 @@ final class BackupStepsTest extends TestCase {
 			self::assertCount( 1, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'Cleanup must not read the index again.' );
 		} finally {
 			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the process limit after checking cleanup.
+		}
+	}
+
+	public function test_cleanup_needs_no_plan_index_or_supported_checkpoint_version(): void {
+		$repository = $this->repository();
+		$job        = $this->unlock( JobType::Backup );
+		$identity   = new Identity( 'example.com', 'www-data' );
+		$clock      = new FrozenClock();
+		( new Locking( $repository, $identity, $clock, 424242 ) )->acquire( false );
+		$foreign = ( new Locking( $repository, $identity, $clock, 787878 ) )->acquire( false );
+		$work    = $this->jobs->directory( $job ) . '/backup';
+		mkdir( $work );
+		file_put_contents(
+			$work . '/state.json',
+			(string) json_encode(
+				[
+					'version' => 99999,
+					'pid'     => 424242,
+					'lock'    => $foreign->hex(),
+				]
+			)
+		);
+		$this->server->objects[ '/site/index/' . hash( 'sha256', 'unreadable index' ) ] = 'unreadable index';
+
+		self::assertTrue( $this->steps()->release( $job, $this->jobs->log( $job ), INF ) );
+
+		self::assertSame( [ $foreign->hex() ], array_keys( $repository->backend()->list( ObjectType::Locks ) ) );
+		self::assertFileDoesNotExist( $work . '/state.json' );
+	}
+
+	public function test_cleanup_reports_refused_file_removal_after_releasing_its_lock(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root ignores the permissions used to refuse removal.' );
+		}
+		$repository = $this->repository();
+		$job        = $this->unlock( JobType::Backup );
+		$identity   = new Identity( 'example.com', 'www-data' );
+		( new Locking( $repository, $identity, new FrozenClock(), 424242 ) )->acquire( false );
+		$work = $this->jobs->directory( $job ) . '/backup';
+		mkdir( $work );
+		file_put_contents( $work . '/state.json', '{"pid":424242}' );
+		chmod( $work, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$this->steps()->release( $job, $this->jobs->log( $job ), INF );
+			self::fail( 'Refused local cleanup must not pass silently.' );
+		} catch ( StorageFailed $error ) {
+			self::assertSame( 'environment', JobError::from_throwable( $error )->code );
+			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ), 'Local removal happens after the repository lock is released.' );
+			self::assertFileExists( $work . '/state.json' );
+		} finally {
+			restore_error_handler();
+			chmod( $work, 0700 );
+		}
+	}
+
+	/** @return iterable<string, array{bool}> */
+	public static function refused_cleanup_directories(): iterable {
+		yield 'unlock' => [ true ];
+		yield 'backup' => [ false ];
+	}
+
+	#[DataProvider( 'refused_cleanup_directories' )]
+	public function test_a_refused_removal_does_not_skip_other_cleanup_actions( bool $refuse_unlock ): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root ignores the permissions used to refuse removal.' );
+		}
+		$this->repository();
+		$job = $this->unlock( JobType::Backup );
+		( new SettingsStore( $this->options ) )->update( [ 'advanced.keep_jobs' => 5 ] );
+		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'a cancelled attempt' ) );
+		$unlock = $this->directory . '/private/kdf/' . $job->id;
+		$work   = $this->jobs->directory( $job ) . '/backup';
+		$cache  = $this->directory . '/private/cache/' . str_repeat( 'a', 64 );
+		foreach ( [ $unlock, $work, $cache ] as $path ) {
+			if ( ! is_dir( $path ) ) {
+				mkdir( $path, 0700, true );
+			}
+			file_put_contents( $path . '/leftover', 'private working data' );
+		}
+		$oldest = '';
+		for ( $number = 0; $number < 6; ++$number ) {
+			$old        = $this->jobs->create( JobType::Check, 'manual', 1_700_000_000 + $number );
+			$old->state = JobState::Succeeded;
+			$this->jobs->save( $old );
+			if ( 0 === $number ) {
+				$oldest = $this->jobs->directory( $old );
+			}
+		}
+		$blocked = $refuse_unlock ? $unlock : $work;
+		chmod( $blocked, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$this->steps()->clean_up( $job, $this->jobs->log( $job ), INF );
+			self::fail( 'Refused cleanup must still be reported.' );
+		} catch ( StorageFailed ) {
+			self::assertNull( $this->secrets->get( SecretName::RepositoryPasswordCandidate ) );
+			self::assertDirectoryDoesNotExist( $refuse_unlock ? $work : $unlock );
+			self::assertDirectoryDoesNotExist( $oldest, 'Job pruning still runs.' );
+			self::assertDirectoryDoesNotExist( $cache, 'Cache cleanup still runs.' );
+			self::assertFileExists( $blocked . '/leftover' );
+		} finally {
+			restore_error_handler();
+			chmod( $blocked, 0700 );
 		}
 	}
 

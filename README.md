@@ -135,6 +135,11 @@ or pack can still exhaust PHP memory before that check. Backups can reduce their
 to 4 MiB, and record the reduction in the job log. This helps the buffers fit; it does not
 remove the index's memory cost. See [memory-limit recovery](docs/06-disaster-recovery.md#index-memory-limit).
 
+Backup checkpoints and saved directory entries need a writable private working directory.
+If a local read or write fails, the job stops with an environment error instead of
+publishing incomplete directory contents. Fix the local storage problem before starting
+another backup; see [working-file failures](docs/06-disaster-recovery.md#local-backup-working-file-failures).
+
 ## Installation (once published)
 
 Install from the WordPress.org plugin directory (Plugins → Add New). No server software is

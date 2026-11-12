@@ -211,6 +211,25 @@ fails with the error `repository_changed`; the next scheduled backup runs normal
 avoid it, do not prune from another computer while the dashboard shows a backup in
 progress ([ADR 0030](adr/0030-lock-continuity.md)).
 
+The plugin can release its own run's lock even when an upgrade makes that run's checkpoint
+version unreadable or its saved directory entries are damaged. Cleanup reads the stable
+run number, without loading the repository index or resuming the backup. It does not
+remove another run's or another host's locks. If the ownership record itself is unreadable
+or the server is unreachable, the stale-lock procedure above still applies.
+
+### Local backup working-file failures
+
+An environment error naming a backup working file means that PHP could not create, read,
+write, truncate or remove a file in the plugin's private directory. Check free disk space,
+the hosting account's quota and the directory's ownership and permissions; the PHP process
+must be able to write there. Keep the directory private and do not make it world-writable.
+After correcting the cause, start a new backup and confirm that it succeeds. A partial
+checkpoint or an unreadable saved directory is refused, so missing bytes cannot silently
+become an empty directory in a successful snapshot. This local failure alone is not a
+reason to repair or prune the repository ([ADR 0032](adr/0032-run-checkpoint-files-and-cleanup.md)).
+Cleanup of a job or an old cache reports the same local storage error if its files cannot
+be removed. The job records the error and continues its remaining cleanup steps.
+
 ## Scenario G — reclaiming space (full prune)
 
 The plugin deletes snapshots according to the retention policy and removes packs that no
