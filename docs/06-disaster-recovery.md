@@ -283,6 +283,21 @@ the cause is clear.
    what it was in step 1. Leave it at *Another computer* if that was your choice or if the
    server is append-only.
 
+## Index memory limit
+
+`index_too_large` means the repository index and the job's working buffers do not fit in
+the memory available to PHP. It is a local capacity limit, not a finding that the repository
+is damaged. A backup first tries smaller packs, down to 4 MiB, and records that adjustment
+in the job log. If the budget still does not fit, the job stops.
+
+Ask the host to increase PHP's `memory_limit`, then confirm the effective value under
+**Backups → Environment** and start the job again. WordPress and other active plugins also
+use that allowance, so a given limit does not guarantee a fixed number of blobs. If the
+host cannot supply enough memory, use restic and the recovery kit on another computer to
+check and restore the repository. Do not prune or repair it merely because of this error.
+The index measurements and their limits are documented in
+[ADR 0031](adr/0031-compact-index-and-memory-budget.md).
+
 ## Restore drills
 
 Quarterly, restore the latest snapshot to a scratch directory on any computer and open the
