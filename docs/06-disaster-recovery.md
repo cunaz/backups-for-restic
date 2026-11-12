@@ -258,10 +258,8 @@ An error with code `tree_unreadable` can mean that a directory's entry names are
 or out of order, even when the encrypted data authenticates correctly. The plugin refuses
 that directory because its listing is ambiguous. The full restic check below helps find
 other damage, but restic 0.19.1 does not check this ordering or uniqueness: a clean result
-does not clear this finding. Do not assume that rebuilding the index repairs malformed
-tree contents. Keep automatic deletion paused while investigating and recover from a
-snapshot whose directory listings the plugin accepts; verify the recovered files before
-considering any removal of the affected snapshot.
+does not clear this finding. Use the [separate tree-name recovery path](#duplicate-or-unordered-tree-names)
+for this case; rebuilding the index cannot repair malformed tree contents.
 
 1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
    snapshots** to *Another computer*, so that this site starts no forget or prune, and pause
@@ -280,6 +278,12 @@ considering any removal of the affected snapshot.
    ```bash
    restic check --read-data
    ```
+
+   If this check is clean but the plugin still reports `tree_unreadable`, use the
+   [tree-name recovery path below](#duplicate-or-unordered-tree-names) instead of steps 3
+   to 5. Do not repair the index or disable append-only protection to try to clear that
+   finding. If restic reports separate pack or index damage, the following steps address
+   that damage only.
 
 3. Follow restic's [troubleshooting guide](https://restic.readthedocs.io/en/stable/077_troubleshooting.html)
    and repair the index first. In short: `restic repair packs <pack-id>` saves what is
@@ -302,6 +306,35 @@ considering any removal of the affected snapshot.
    does not report. Start **Check now** on the dashboard and confirm that it clears the
    error notice. Then set retention back to what it was in step 1. Leave it at *Another
    computer* if that was your choice or if the server is append-only.
+
+### Duplicate or unordered tree names
+
+Keep automatic deletion paused as in step 1 above. A tree with duplicate names cannot tell
+the plugin unambiguously which file belongs at a path. Index repair does not change tree
+contents, and this guide provides no automatic lossless repair for that ambiguity.
+
+1. Take the tree ID shown beside the `tree_unreadable` finding on the dashboard and locate
+   the snapshots that reference it:
+
+   ```bash
+   restic find --tree <tree-id>
+   ```
+
+   Repeat for each reported tree. This lists matching paths and snapshots; it does not
+   repair them. `restic cat tree <tree-id>` shows the tree's stored entries for diagnosis.
+   If the cause is unclear, keep the repository unchanged and seek help with that report.
+2. Preserve the original repository and recovery kit. Recover required files to a separate
+   empty directory from unaffected snapshots or another backup, and verify their contents.
+   Do not rely on a restore of duplicate entries to preserve every version of a file.
+3. If an affected snapshot contains data you still need, leave it in place and keep automatic
+   deletion paused. Only after the required data is independently recovered and verified,
+   and you accept losing those snapshot records, remove the specifically identified
+   snapshots with `restic forget <snapshot-id>` **without `--prune`**. On an append-only
+   server, leave them in place unless you have deliberately arranged that maintenance
+   exception; a clean restic check alone is no reason to allow deletions.
+4. Run the full restic check and the plugin check again. Other affected snapshots can keep
+   the finding active, and resolving one tree can expose further findings. Repeat the
+   diagnosis as needed. Resume automatic retention only when both checks pass, as in step 6.
 
 ## Restore drills
 
