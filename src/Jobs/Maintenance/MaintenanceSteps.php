@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\AppendOnlyProbe;
 use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Engine\Check\CheckRun;
+use BackupsForRestic\Engine\CheckpointLock;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Engine\Forget\ForgetRun;
 use BackupsForRestic\Engine\Forget\RetentionPolicy;
@@ -23,6 +24,7 @@ use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
+use BackupsForRestic\Jobs\Cleanup;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
@@ -130,8 +132,10 @@ final class MaintenanceSteps implements StepProvider {
 				: ForgetRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $policy, $this->services->retention_tags() );
 			$done = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
-			$this->abandon( $job );
-			$this->switch_to_external( $job, $log );
+			Cleanup::run(
+				fn () => $this->switch_to_external( $job, $log ),
+				fn () => $this->abandon( $job )
+			);
 			return true;
 		}
 		$job->result = array_merge( $job->result, $run->result() );
@@ -164,8 +168,10 @@ final class MaintenanceSteps implements StepProvider {
 			$restarts = $run->result()['restarts'];
 			$done     = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
-			$this->abandon( $job );
-			$this->switch_to_external( $job, $log );
+			Cleanup::run(
+				fn () => $this->switch_to_external( $job, $log ),
+				fn () => $this->abandon( $job )
+			);
 			return true;
 		}
 		if ( $run->result()['restarts'] > $restarts ) {
@@ -365,8 +371,11 @@ final class MaintenanceSteps implements StepProvider {
 	 * @return bool Always true.
 	 */
 	public function clean_up( Job $job, EventLog $log, float $deadline ): bool {
-		Files::remove_tree( $this->services->work_dir( $job ) );
-		return $this->common->clean_up( $job, $log, $deadline );
+		Cleanup::run(
+			fn () => Files::remove_tree( $this->services->work_dir( $job ) ),
+			fn () => $this->common->clean_up( $job, $log, $deadline )
+		);
+		return true;
 	}
 
 	/**
@@ -388,15 +397,12 @@ final class MaintenanceSteps implements StepProvider {
 			return false;
 		}
 		try {
-			match ( $job->type ) {
-				JobType::Forget => ForgetRun::resume( $repository, $work, $services->identity, $services->clock, new RetentionPolicy(), $this->services->retention_tags() )->abort(), // Aborting needs no policy, and the settings may no longer give one.
-				JobType::Prune  => PruneRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
-				default         => CheckRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
-			};
+			CheckpointLock::release( $repository, $work . '/state.json', $services->identity, $services->clock );
 		} catch ( PluginException ) {
 			Files::remove_tree( $work );
 			return false;
 		}
+		Files::remove_tree( $work );
 		return true;
 	}
 

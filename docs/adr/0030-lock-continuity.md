@@ -111,11 +111,12 @@ minutes ahead.
   keeps this cheap.
 - The checkpoints of backup, check and forget have a new version. A job that is active
   while the plugin is updated fails once with its old checkpoint; the next one runs. The
-  lock of that job is not released, because a checkpoint of another version is not read:
-  it stays until it is stale, 30 minutes at most. No released version has written the old
-  checkpoints. Releasing the lock of a checkpoint the plugin cannot continue belongs to the
-  handling of upgrades and is on the list of phase 0.8 of the
-  [plan for Milestone 3](../07-milestone-3-plan.md).
+  initial implementation left that job's lock until it became stale. Cleanup now reads the
+  stable run number independently of the checkpoint version and releases authenticated
+  locks belonging to that run without resuming it
+  ([ADR 0032](0032-run-checkpoint-files-and-cleanup.md)). If the ownership record itself is
+  unreadable, the lock stays until it is stale, 30 minutes at most. No released version has
+  written the old checkpoints.
 - A lock left by a killed first request no longer blocks other clients for 30 minutes.
 - Prune reads the index files under its exclusive lock when it plans and compares them
   with what marking found. After a gap it compares the snapshots and the index files with

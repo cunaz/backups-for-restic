@@ -128,6 +128,11 @@ explains how to proceed.
 | Repository server | a restic REST server with TLS, one repository per site: self-hosted rest-server or a hosted service | append-only mode enabled |
 | restic CLI | not needed on the server; to restore on another computer, restic 0.16.1 or newer, which the recovery kit's commands need (the repository format itself is readable since 0.9) | current release |
 
+Backup checkpoints and saved directory entries need a writable private working directory.
+If a local read or write fails, the job stops with an environment error instead of
+publishing incomplete directory contents. Fix the local storage problem before starting
+another backup; see [working-file failures](docs/06-disaster-recovery.md#local-backup-working-file-failures).
+
 ## Installation (once published)
 
 Install from the WordPress.org plugin directory (Plugins → Add New). No server software is
