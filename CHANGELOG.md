@@ -109,6 +109,12 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Local backup working-file failures now stop the job with an environment error. Refused
+  creation, incomplete writes and failed truncation cannot advance a checkpoint, and an
+  unreadable saved directory cannot silently become empty in a snapshot.
+- Job cleanup releases locks by the checkpoint's run number without resuming the engine.
+  It works with unknown checkpoint versions and damaged node files, and needs no backup
+  plan or repository index. Other hosts' and other runs' locks are kept.
 - Settings that the database refused to store no longer pass for saved: the request answers
   with an error, and saving a server puts back what it had changed. WordPress reports such a
   refusal the same way as an unchanged value, so it went unnoticed before.

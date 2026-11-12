@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Connection\RepositoryRecord;
@@ -12,6 +13,7 @@ use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\UnsupportedRepository;
@@ -141,6 +143,33 @@ final class BackupStepsTest extends TestCase {
 		self::assertSame( [ $repository->config()->id, 1 ], $this->recorded() );
 		self::assertSame( $repository->config()->id, $this->access()->cached_repository_id() );
 		self::assertSame( $repository->config()->id, ( new SiteState( $this->options ) )->get( 'repository' )['id'] ?? null );
+	}
+
+	public function test_cleanup_needs_no_plan_index_or_supported_checkpoint_version(): void {
+		$repository = $this->repository();
+		$job        = $this->unlock( JobType::Backup );
+		$identity   = new Identity( 'example.com', 'www-data' );
+		$clock      = new FrozenClock();
+		( new Locking( $repository, $identity, $clock, 424242 ) )->acquire( false );
+		$foreign = ( new Locking( $repository, $identity, $clock, 787878 ) )->acquire( false );
+		$work    = $this->jobs->directory( $job ) . '/backup';
+		mkdir( $work );
+		file_put_contents(
+			$work . '/state.json',
+			(string) json_encode(
+				[
+					'version' => 99999,
+					'pid'     => 424242,
+					'lock'    => $foreign->hex(),
+				]
+			)
+		);
+		$this->server->objects[ '/site/index/' . hash( 'sha256', 'unreadable index' ) ] = 'unreadable index';
+
+		self::assertTrue( $this->steps()->release( $job, $this->jobs->log( $job ), INF ) );
+
+		self::assertSame( [ $foreign->hex() ], array_keys( $repository->backend()->list( ObjectType::Locks ) ) );
+		self::assertFileDoesNotExist( $work . '/state.json' );
 	}
 
 	public function test_an_entered_password_that_opens_the_repository_becomes_the_repository_password(): void {

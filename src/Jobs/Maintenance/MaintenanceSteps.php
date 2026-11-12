@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\AppendOnlyProbe;
 use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Backup\PlanFactory;
 use BackupsForRestic\Engine\Check\CheckRun;
+use BackupsForRestic\Engine\CheckpointLock;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Engine\Forget\ForgetRun;
 use BackupsForRestic\Engine\Forget\RetentionPolicy;
@@ -389,15 +390,12 @@ final class MaintenanceSteps implements StepProvider {
 			return false;
 		}
 		try {
-			match ( $job->type ) {
-				JobType::Forget => ForgetRun::resume( $repository, $work, $services->identity, $services->clock, new RetentionPolicy(), $this->services->retention_tags() )->abort(), // Aborting needs no policy, and the settings may no longer give one.
-				JobType::Prune  => PruneRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
-				default         => CheckRun::resume( $repository, $work, $services->identity, $services->clock )->abort(),
-			};
+			CheckpointLock::release( $repository, $work . '/state.json', $services->identity, $services->clock );
 		} catch ( PluginException ) {
 			Files::remove_tree( $work );
 			return false;
 		}
+		Files::remove_tree( $work );
 		return true;
 	}
 

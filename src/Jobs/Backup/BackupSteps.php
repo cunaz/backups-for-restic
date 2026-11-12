@@ -11,6 +11,7 @@ namespace BackupsForRestic\Jobs\Backup;
 
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Engine\Backup\BackupRun;
+use BackupsForRestic\Engine\CheckpointLock;
 use BackupsForRestic\Engine\KeyUnlock;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\InvalidArgument;
@@ -286,7 +287,8 @@ final class BackupSteps implements StepProvider {
 		}
 		$repository = $services->access->open_cached();
 		if ( null !== $repository ) {
-			BackupRun::resume( $repository, ( $services->plan )( $job ), $work, $services->identity, $services->clock, $services->pack_size() )->abort();
+			CheckpointLock::release( $repository, $work . '/state.json', $services->identity, $services->clock );
+			Files::remove_tree( $work );
 			$log->write( 'info', 'Repository lock released.' );
 		}
 		return true;

@@ -332,6 +332,18 @@ the work since its last checkpoint. Memory per tick is bounded by the directory 
 the walk, one page of rows and one pack buffer per blob type, plus the merged index, which
 grows with the number of blobs in the repository (§2, principle 3).
 
+Backup working files are created with mode `0600`; every write must finish and close before
+the checkpoint can refer to its bytes. Resume refuses a failed truncation of an uncommitted
+tail. Completing a directory requires reading its exact committed byte count, so an
+unreadable node file cannot turn into an empty directory. These are local storage errors,
+not evidence of repository damage ([ADR 0032](adr/0032-run-checkpoint-files-and-cleanup.md)).
+
+The positive integer `pid` is a stable ownership field across engine checkpoint versions.
+Cleanup reads it through `Engine\CheckpointLock` and releases authenticated locks belonging
+to this host and that run number, without resuming the run or loading its index. The
+checkpoint's recorded lock ID is not used for this decision. An unknown version may be
+cleaned up even though it cannot be resumed; invalid ownership data authorizes no deletion.
+
 ## 5. The restic repository format as implemented
 
 Everything below is verified against the restic source (version 0.19) and the restic

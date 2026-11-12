@@ -4,12 +4,15 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
@@ -124,5 +127,41 @@ final class MaintenanceStepsTest extends TestCase {
 		self::assertSame( $job->id, $last['job'] ?? null );
 		self::assertSame( $found, array_sum( (array) ( $last['counts'] ?? [] ) ), 'The dashboard shows what the check found.' );
 		self::assertCount( $found, (array) ( $last['findings'] ?? [] ) );
+	}
+
+	/** @return iterable<string, array{JobType}> */
+	public static function maintenance_jobs(): iterable {
+		yield 'forget' => [ JobType::Forget ];
+		yield 'prune' => [ JobType::Prune ];
+		yield 'check' => [ JobType::Check ];
+	}
+
+	#[DataProvider( 'maintenance_jobs' )]
+	public function test_cleanup_releases_only_its_run_when_the_checkpoint_version_is_unknown( JobType $type ): void {
+		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
+		$identity   = new Identity( 'example.com', 'www-data' );
+		$clock      = new FrozenClock();
+		$repository = Repository::initialize( $this->access()->backend(), self::PASSWORD, $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$job        = new Job( '20270115T030000Z-abcdef', $type, 'manual', 1_800_000_000 );
+		$this->run_step( $job, 'unlocking' );
+		( new Locking( $repository, $identity, $clock, 424242 ) )->acquire( false );
+		$foreign = ( new Locking( $repository, $identity, $clock, 787878 ) )->acquire( false );
+		$work    = $this->jobs->directory( $job ) . '/maintenance';
+		mkdir( $work );
+		file_put_contents(
+			$work . '/state.json',
+			(string) json_encode(
+				[
+					'version' => 99999,
+					'pid'     => 424242,
+					'lock'    => $foreign->hex(),
+				]
+			)
+		);
+
+		$this->run_step( $job, 'releasing' );
+
+		self::assertSame( [ $foreign->hex() ], array_keys( $repository->backend()->list( ObjectType::Locks ) ), 'The run number identifies ownership; an unfamiliar lock field is not trusted.' );
+		self::assertFileDoesNotExist( $work . '/state.json' );
 	}
 }
