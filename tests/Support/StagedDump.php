@@ -20,6 +20,16 @@ final class StagedDump {
 		return $sql . '-- end table rows=4 bytes=' . strlen( $sql ) . "\n";
 	}
 
+
+	/** Rebuilds only the terminal byte offset after a fixture's SQL has been changed. */
+	public static function with_updated_trailer( string $sql, int $rows = 4 ): string {
+		$offset = strrpos( $sql, '-- end table rows=' );
+		if ( false === $offset ) {
+			throw new \LogicException( 'The table fixture has no trailer.' );
+		}
+		return substr( $sql, 0, $offset ) . '-- end table rows=' . $rows . ' bytes=' . $offset . "\n";
+	}
+
 	public static function write( string $directory, ?string $sql = null, int $rows = 4 ): Manifest {
 		$sql ??= self::table();
 		file_put_contents( $directory . '/010-wp_rows.sql', $sql );

@@ -81,6 +81,14 @@ The transactional shadow omits engine-specific physical options: `ROW_FORMAT=FIX
 `PAGE`, MyISAM's `CHECKSUM` and `DELAY_KEY_WRITE`, and `KEY_BLOCK_SIZE` from non-InnoDB
 tables. Compatible InnoDB row formats are retained. This component preserves logical data,
 the original engine and table comment, not a guarantee of identical physical storage.
+The catalog temporarily enables `sql_quote_show_create` for each SHOW CREATE TABLE/VIEW,
+then restores the connection's original value even when the read fails. Otherwise a server
+with quoting disabled can produce a complete dump the strict importer cannot read. Both
+adapters already return an empty row list for session SET statements; the dump port now
+documents that scoped use. It still makes no data changes. This follows the
+[SHOW CREATE contract](https://dev.mysql.com/doc/refman/8.4/en/show-create-table.html).
+An existing unquoted dump remains outside the strict import grammar.
+
 Session cleanup writes `foreign_key_checks` and `unique_checks` as validated numeric 0/1;
 binary string literals containing those characters are not accepted boolean settings.
 
@@ -96,7 +104,10 @@ CI runs the existing manual dump/import tests and new shadow tests on MySQL 8.4 
 timestamps and duplicates, while checking unchanged live tables. Across different storage
 engines, they compare ordered rows: [MySQL's checksum depends on row format](https://dev.mysql.com/doc/refman/8.4/en/checksum-table.html).
 Generated-only tables, a fixed-format MyISAM source and an unchanged completed retry also
-have database tests. A parent sends SIGKILL
+have database tests, as does dumping/importing with identifier quoting disabled. The
+unexpected INSERT-target fixture recomputes its trailer and asserts the precise refusal,
+an empty shadow and an unchanged progress row, so a later trailer failure cannot satisfy it.
+A parent sends SIGKILL
 after ledger creation, shadow creation, INSERT, progress UPDATE, before COMMIT and after
 COMMIT. Resume must preserve duplicate rows exactly once. Other cases refuse foreign
 collisions, active transactions, truncation and INSERTs aimed at a live table. Database

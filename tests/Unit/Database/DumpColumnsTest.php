@@ -16,6 +16,9 @@ final class DumpColumnsTest extends TestCase {
 	public function test_a_default_expression_is_not_a_generated_column(): void {
 		$db = new class() implements Connection {
 			public function rows( string $sql ): array {
+				if ( 'SELECT @@SESSION.sql_quote_show_create AS quote_names' === $sql ) {
+					return [ [ 'quote_names' => '1' ] ];
+				}
 				if ( str_starts_with( $sql, 'SHOW CREATE' ) ) {
 					return [ [ 'Create Table' => 'CREATE TABLE `wp_rows` (`id` int)' ] ];
 				}

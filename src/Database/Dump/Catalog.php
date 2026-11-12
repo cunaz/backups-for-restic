@@ -58,7 +58,7 @@ final class Catalog {
 	 */
 	public function table( string $name ): Table {
 		$quoted = SqlFormatter::identifier( $name );
-		$create = $this->connection->rows( 'SHOW CREATE TABLE ' . $quoted );
+		$create = $this->show_create( 'TABLE', $name );
 		if ( ! isset( $create[0]['Create Table'] ) ) {
 			DatabaseFailed::raise( 'The table structure cannot be read.', [ 'table' => $name ] );
 		}
@@ -88,13 +88,40 @@ final class Catalog {
 	 * @throws DatabaseFailed If the view cannot be read.
 	 */
 	public function view( string $name ): string {
-		$rows = $this->connection->rows( 'SHOW CREATE VIEW ' . SqlFormatter::identifier( $name ) );
+		$rows = $this->show_create( 'VIEW', $name );
 		if ( ! isset( $rows[0]['Create View'] ) ) {
 			DatabaseFailed::raise( 'The view cannot be read.', [ 'view' => $name ] );
 		}
 		$create = SqlFormatter::one_line( $rows[0]['Create View'] );
 		$create = (string) preg_replace( '/\ACREATE\s+(ALGORITHM=\S+\s+)?DEFINER=\S+\s+/i', 'CREATE $1', $create );
 		return (string) preg_replace( '/\ACREATE\s+/i', 'CREATE OR REPLACE ', $create, 1 );
+	}
+
+
+	/**
+	 * Requests quoted identifiers without changing the site's session setting permanently.
+	 *
+	 * @param string $type TABLE or VIEW, selected by the catalog itself.
+	 * @param string $name Quoted object name.
+	 * @return list<array<string, string|null>> SHOW CREATE rows.
+	 * @throws DatabaseFailed If the session setting cannot be read, set or restored.
+	 */
+	private function show_create( string $type, string $name ): array {
+		$setting = $this->connection->rows( 'SELECT @@SESSION.sql_quote_show_create AS quote_names' );
+		$quoted  = $setting[0]['quote_names'] ?? null;
+		if ( '0' !== $quoted && '1' !== $quoted ) {
+			throw new DatabaseFailed( 'The identifier quoting setting cannot be read.' );
+		}
+		$sql = 'SHOW CREATE ' . $type . ' ' . SqlFormatter::identifier( $name );
+		if ( '1' === $quoted ) {
+			return $this->connection->rows( $sql );
+		}
+		try {
+			$this->connection->rows( 'SET SESSION sql_quote_show_create = 1' );
+			return $this->connection->rows( $sql );
+		} finally {
+			$this->connection->rows( 'SET SESSION sql_quote_show_create = 0' );
+		}
 	}
 
 	/**

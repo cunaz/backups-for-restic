@@ -7,6 +7,8 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The dump catalog temporarily requests quoted table/view definitions, including when the
+  server disables `sql_quote_show_create`, and restores the site's session setting afterwards.
 - The first database restore component imports staged table data into separate InnoDB
   tables, with checked SQL and resumable transactions. It is not yet exposed in the admin
   page; the schema/apply/undo workflows remain in development.

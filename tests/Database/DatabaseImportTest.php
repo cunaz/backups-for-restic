@@ -211,14 +211,32 @@ final class DatabaseImportTest extends TestCase {
 		}
 	}
 
+
+	public function test_dump_with_identifier_quoting_disabled_imports_and_restores_the_session_setting(): void {
+		$this->db->execute( 'CREATE TABLE wp_rows (a INT, b TEXT)' );
+		$this->db->execute( "INSERT INTO wp_rows VALUES (42,'kept')" );
+		$this->db->execute( 'SET SESSION sql_quote_show_create = 0' );
+		self::assertStringStartsWith( 'CREATE TABLE wp_rows', $this->db->rows( 'SHOW CREATE TABLE wp_rows' )[0]['Create Table'] );
+		$manifest = $this->stage_dump();
+		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_quote_show_create AS quoted' )[0]['quoted'] );
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		self::assertSame( $this->db->rows( 'SELECT * FROM wp_rows' ), $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_quote_show_create AS quoted' )[0]['quoted'] );
+	}
+
 	public function test_an_insert_cannot_target_a_live_table(): void {
 		$this->db->execute( 'CREATE TABLE wp_rows (a INT, b TEXT)' );
 		$this->db->execute( "INSERT INTO wp_rows VALUES (42,'live')" );
-		$sql = str_replace( 'INSERT INTO `wp_rows`', 'INSERT INTO `wp_users`', StagedDump::table() );
+		$sql      = StagedDump::with_updated_trailer( str_replace( 'INSERT INTO `wp_rows`', 'INSERT INTO `wp_users`', StagedDump::table() ) );
+		$importer = $this->importer( StagedDump::write( $this->directory, $sql ) );
 		try {
-			$this->importer( StagedDump::write( $this->directory, $sql ) )->tick();
+			$importer->tick();
 			self::fail( 'An unexpected INSERT destination must be refused.' );
 		} catch ( FormatException $expected ) {
+			self::assertSame( 'A database dump INSERT names an unexpected table.', $expected->getMessage() );
+			self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+			self::assertSame( '0', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
 			self::assertSame(
 				[
 					[
