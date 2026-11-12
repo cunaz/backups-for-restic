@@ -432,7 +432,7 @@ final class Container {
 			 */
 			$exclude  = apply_filters( 'backups_for_restic_database_tables_excluded', $settings->list( 'backup.database.exclude_tables' ) );
 			$prefix   = 'all' === $settings->string( 'backup.database.table_scope' ) ? '' : $wpdb->prefix;
-			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), $this->jobs()->directory( $job ) . '/database.json', $prefix, self::strings( $exclude ), $job->created_at );
+			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, self::strings( $exclude ), $job->created_at );
 			$database = $dump->files( ... );
 		}
 		return ( new PlanFactory( $this->site(), $settings, $this->private_dir(), self::strings( $roots ), self::strings( $excludes ), $database, $job->id, $job->created_at ) )->plan();

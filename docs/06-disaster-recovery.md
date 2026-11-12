@@ -201,6 +201,16 @@ restic unlock
 
 Lock removal works even on append-only repositories.
 
+A backup of the plugin that is paused between two steps holds a lock as well, and after 30
+minutes without a step restic calls that lock stale. If you remove it and then run `restic
+prune`, the prune deletes what the unfinished backup has uploaded so far, because no
+snapshot uses it yet. The plugin notices this when the backup goes on: it starts the backup
+over, says so in the job's log, and uploads again what is missing. Nothing is lost, the
+backup only takes longer. If this happens more than three times in one backup, the job
+fails with the error `repository_changed`; the next scheduled backup runs normally. To
+avoid it, do not prune from another computer while the dashboard shows a backup in
+progress ([ADR 0030](adr/0030-lock-continuity.md)).
+
 ## Scenario G — reclaiming space (full prune)
 
 The plugin deletes snapshots according to the retention policy and removes packs that no
@@ -283,7 +293,7 @@ the cause is clear.
    what it was in step 1. Leave it at *Another computer* if that was your choice or if the
    server is append-only.
 
-## Scenario I — the plugin is inactive after a downgrade
+## Scenario J — the plugin is inactive after a downgrade
 
 An older plugin can find settings written in a layout it does not understand. It then
 shows an update notice and registers no backup page, REST route, scheduled callback or

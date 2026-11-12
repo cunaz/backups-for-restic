@@ -455,19 +455,33 @@ Lock: `{"time","exclusive","hostname","username","pid","uid","gid"}`. Backup and
 a non-exclusive lock; forget and prune take an exclusive lock (as restic does). A lock
 older than 30 minutes is stale for every restic client, so every tick of the job that holds
 a lock **refreshes** it (write new, delete old) when it is older than 5 minutes; nothing
-refreshes the lock of a job between its ticks. A backup, check or forget that finds its
-lock older than 30 minutes, or gone, takes it again (`Locking::acquire()`), which fails
-with `repository_locked` while another client holds a conflicting lock. What another
-client did during such a pause is not examined: a `restic prune` that ran entirely within
-it can have removed data the paused backup refers to, which the next check reports;
-verifying this before a snapshot is written is planned for Milestone 3. Prune is stricter:
-if its lock was lost or not refreshed for 25 minutes it starts its marking again, because
-another client may have written snapshots in the meantime
-([ADR 0022](adr/0022-maintenance-scope.md)). Every lock carries the number of the run that
-wrote it, so a lock left by a request that died is recognised and removed by that run. Only
-a request that dies between taking the lock and writing the first checkpoint of a backup,
-check or forget leaves a lock nothing recognises; it is stale after 30 minutes. Locks are
-deletable even in append-only mode.
+refreshes the lock of a job between its ticks. Every call of a run deals with its lock
+first and loads the index after that ([ADR 0030](adr/0030-lock-continuity.md)). A run
+trusts its lock for 25 minutes, five less than other clients honour it, because they judge
+by their own clocks. A backup, check or forget that finds its lock older, or gone, takes it
+again (`Locking::acquire()`), which fails with `repository_locked` while another client
+holds a conflicting lock. Then it looks at what other clients did in the meantime:
+
+- A **backup** keeps a record of the index files it has read its index from or written, and
+  of the packs it uploaded that no index file lists yet, and compares it with the server.
+  If all are still there, nothing it uploaded or reused was removed, and it continues. If
+  one is gone, as after `restic unlock` and `restic prune` on another computer, the run is
+  given up and the job starts a new one, at most three times; a snapshot built on the old
+  run could refer to data that no longer exists. The backup looks at its lock not only at
+  the start of a call but also in every checkpoint and at the end, before it writes an
+  index file or the snapshot, so a lock lost in the middle of a call is noticed in time.
+- A **check** compares the index files and snapshots it listed. If one is gone it starts
+  over with a new listing, at most three times, instead of reporting as damage what a prune
+  or forget removed. It looks once more before it ends.
+- A **forget** needs no comparison: what others wrote in the meantime can only make its
+  policy remove more.
+- **Prune** starts its marking again, because another client may have written snapshots
+  ([ADR 0022](adr/0022-maintenance-scope.md)).
+
+Every lock carries the number of the run that wrote it, and every run writes its checkpoint
+with that number before it takes its first lock. A lock left by a request that died, at any
+point, is therefore recognised and removed by the next request of the run or when the job
+gives the run up. Locks are deletable even in append-only mode.
 
 ### 5.10 REST protocol
 
@@ -512,10 +526,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
    settings and binds the remembered results to that repository (§10), and where a
    repository of format version 2 is refused with `repository_unsupported_version` when PHP
    lacks `ext-zstd` (ADR 0019).
-3. **Backing up**: the engine's `BackupRun`, resumed every tick from its checkpoint, with the
-   index from the local cache. On its first tick it removes this site's stale locks, takes a
-   shared lock and picks the parent: the newest snapshot of the same host with the same
-   paths. It walks the roots from `Backup\PlanFactory` (distinct, non-nested set of
+3. **Backing up**: the engine's `BackupRun`, resumed every tick from its checkpoint. In
+   every tick the run takes or refreshes the shared lock before it loads the index through
+   the local cache (§5.9). The first tick also removes this site's stale locks. It chooses
+   the parent, the newest snapshot of the same host with the same paths, before the run
+   exists and so before the lock; a parent that another client removes in between is done
+   without. It walks the roots from `Backup\PlanFactory` (distinct, non-nested set of
    `ABSPATH`, `WP_CONTENT_DIR`, the uploads directory and extra roots; excludes from the
    defaults, the settings and the `backups_for_restic_backup_excludes` filter; `CACHEDIR.TAG`
    and `.nobackup` markers). A file whose size, mtime, ctime and inode match the parent
@@ -1034,6 +1050,7 @@ translated message and a hint. The codes:
 | `repository_damaged` | an object that does not match its name or cannot be parsed (`FormatException`) |
 | `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
 | `repository_locked` | a conflicting lock of another client; retryable |
+| `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
 | `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
 | `repository_unreachable` | a network error or an unexpected status; retryable |

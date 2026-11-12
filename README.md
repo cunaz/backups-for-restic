@@ -69,7 +69,7 @@ notice. Its admin page, commands, REST routes and scheduled callbacks are unavai
 Install a version compatible with those settings; do not lower their stored layout number.
 Deactivation removes scheduled events but leaves jobs and their repository locks alone.
 An unreadable job document also blocks new jobs and repository changes and is kept for a
-compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-i--the-plugin-is-inactive-after-a-downgrade)
+compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
 explains how to proceed.
 
 ## Documents
