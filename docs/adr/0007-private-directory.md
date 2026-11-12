@@ -1,10 +1,10 @@
 # 0007 · Private working directory, preferably outside the web root, verified actively
-Status: accepted (revised for 0018)
+Status: accepted (revised for 0018 and 0034)
 Date: 2026-11-09
 
 ## Context
 The engine needs a writable directory for job state and the backup ledger, encrypted caches
-(index set, tree packs), the pack under construction, the scrypt table during an unlock,
+(index set, tree blobs), the pack under construction, the scrypt table during an unlock,
 restore staging and logs. WordPress' writable locations (`wp-content`, `uploads`) are
 web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 
@@ -22,14 +22,17 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
   scrypt table during an unlock (deleted immediately afterwards).
 - The directory is excluded from backups except the virtual `spool/` paths of the database
   stream and the manifest.
-- Size is bounded: cache cap (default 256 MiB), one pack temp file, job history by count;
-  preflight checks free space.
+- Published index and tree files share a per-repository cache cap
+  (`advanced.cache_limit_mib`, default 256 MiB); index bytes take priority. Temporary
+  ciphertext and concurrent writes can require space beyond that cap. Job history is
+  bounded by count, and preflight checks free space.
 
 ## Consequences
 - Works out of the box on Apache; on nginx the probe turns the recommendation into a
   requirement.
 - All plugin writes are concentrated in one place that `uninstall.php` can remove.
-- Disk quota on shared hosting is respected by design.
+- The shared cache cap limits retained cache files; other working data and temporary files
+  still need space within the host's disk quota.
 
 ## Alternatives considered
 - **System temp directory**: shared with other users and periodically cleaned.
@@ -38,10 +41,15 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 
 ## As built (2026-11)
 - What the directory holds today: `jobs/` with job state, event logs and the engine's
-  checkpoints (the ledger is gone, [ADR 0014](0014-file-based-job-store.md)), `cache/` with
-  the encrypted merged index, `kdf/` with the scrypt table and its checkpoint during an
-  unlock, `probe/`, the uploaded CA certificate, the runner lock and, since 2026-11-11, `state.lock` and `notify.lock`: empty files that serialise changes to the state, the notifications and the secrets in the database, and the sending of notices ([ADR 0014](0014-file-based-job-store.md), As built). Trees are not cached,
-  and a pack under construction is held in memory, so there is no pack temp file. `tmp/`,
+  checkpoints (the ledger is gone, [ADR 0014](0014-file-based-job-store.md)),
+  `cache/<repo-id>/index.bin` with the encrypted merged index and
+  `cache/<repo-id>/trees/<tree-id>.bin` with encrypted tree blobs for snapshot browsing
+  ([ADR 0034](0034-snapshot-reader.md)), `kdf/` with the scrypt table and its checkpoint
+  during an unlock, `probe/`, the uploaded CA certificate, the runner lock and, since
+  2026-11-11, `state.lock` and `notify.lock`: empty files that serialise changes to the
+  state, the notifications and the secrets in the database, and the sending of notices
+  ([ADR 0014](0014-file-based-job-store.md), As built). A pack under construction is held
+  in memory, so there is no pack temp file. `tmp/`,
   `logs/` and `restores/` are created and still empty; restore staging and import files
   come with Milestone 3.
 - The probe has three results for a directory inside the web root. An answer of 200 with

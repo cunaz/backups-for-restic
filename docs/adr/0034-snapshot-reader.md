@@ -31,7 +31,8 @@ retain a stale in-memory index between requests or write plaintext site metadata
   further cache hits in that instance do not rescan the directory. File authentication,
   size checks and symbolic-directory refusal still apply to each read.
   Temporary ciphertext can require additional disk space
-  during replacement, as for the existing index cache.
+  during replacement, as for the existing index cache. This amends the cache contents and
+  shared limit recorded in [ADR 0007](0007-private-directory.md).
 - New backup plans add a `backups-for-restic-manifest:<base64 path>` tag, naming the
   manifest's absolute path inside that snapshot. The tag is part of the encrypted snapshot.
   The existing plugin/site/run tags remain; the locator is not a retention grouping key.
