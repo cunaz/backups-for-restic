@@ -272,9 +272,10 @@ final class Repository {
 	/**
 	 * Loads index files.
 	 *
-	 * @param list<string>|null $names The index files to read, for a caller that has to know
-	 *                                 which they were; all that the server lists otherwise, in
-	 *                                 the order of its listing.
+	 * @param list<string>|null       $names The index files to read, for a caller that has to know
+	 *                                       which they were; all that the server lists otherwise, in
+	 *                                       the order of its listing.
+	 * @param (\Closure(): void)|null $keep_lock Optional lease check between repository reads.
 	 * @return IndexSet Merged index.
 	 * @throws BackendException If an index file disappears or a server request fails.
 	 * @throws AuthenticationFailed If an index file does not authenticate.
@@ -283,14 +284,18 @@ final class Repository {
 	 * @throws UnsupportedRepository If an index file needs unavailable decompression.
 	 * @throws IndexTooLarge If the index does not fit into the memory budget.
 	 */
-	public function load_index( ?array $names = null ): IndexSet {
+	public function load_index( ?array $names = null, ?\Closure $keep_lock = null ): IndexSet {
+		$keep_lock?->__invoke();
 		$index = new IndexSet();
 		foreach ( $names ?? array_map( 'strval', array_keys( $this->backend->list( ObjectType::Index ) ) ) as $name ) {
+			$keep_lock?->__invoke();
 			foreach ( IndexFile::packs( $this->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
 				$this->memory?->check_index();
 			}
+			$keep_lock?->__invoke();
 		}
+		$keep_lock?->__invoke();
 		$this->memory?->check_loaded_index();
 		return $index;
 	}

@@ -41,6 +41,7 @@ use BackupsForRestic\Tests\Support\RestServer;
 use BackupsForRestic\Tests\Support\ResticCli;
 use BackupsForRestic\Tests\Support\SqlDumpSource;
 use BackupsForRestic\Tests\Support\TempDir;
+use BackupsForRestic\Tests\Support\StagedTree;
 
 /**
  * The restic CLI is the oracle (ADR 0023): what the plugin writes must pass restic check
@@ -59,6 +60,9 @@ final class ResticConformanceTest extends TestCase {
 
 	/** @var list<string> */
 	private array $cleanup = [];
+
+	/** @var array<string, string> */
+	private array $restore_work = [];
 
 	public static function setUpBeforeClass(): void {
 		if ( ! RestServer::available() ) {
@@ -110,6 +114,7 @@ final class ResticConformanceTest extends TestCase {
 		while ( ! $run->advance( microtime( true ) + 20 ) ) {
 			continue;
 		}
+		$this->restore_work[ $target ] = $work;
 		return $target;
 	}
 
@@ -375,13 +380,49 @@ final class ResticConformanceTest extends TestCase {
 		$snapshots  = $repository->snapshots();
 		self::assertCount( 1, $snapshots );
 		$restored = $this->restore( $repository, Id::from_hex( (string) array_key_first( $snapshots ) ) );
-		self::assertSame( TempDir::describe( self::$site ), TempDir::describe( $restored . self::$site ) );
+		self::assertSame( TempDir::describe( self::$site ), StagedTree::describe( $restored, self::$site, $this->restore_work[ $restored ] ) );
 
 		// Same chunker, same polynomial: the plugin's backup of the same files adds no data.
 		$ours    = $this->backup( $repository, self::$site );
 		$summary = Snapshot::from_json( $repository->load_unpacked( ObjectType::Snapshots, $ours ) )->summary;
 		self::assertNotNull( $summary );
 		self::assertSame( 0, $summary->data_blobs, 'Every chunk the plugin cut already existed in the restic repository.' );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
+	}
+
+
+	#[DataProvider( 'restic_versions' )]
+	public function test_selected_paths_from_restic_resume_with_original_layout_and_link_report( string $version ): void {
+		$name = 'selected-' . str_replace( '.', '-', $version );
+		$cli  = new ResticCli( $this->server(), $name, self::PASSWORD, $version );
+		$cli->must( [ 'init', '--repository-version', '1' ] );
+		$cli->must( [ 'backup', self::$site ] );
+		$repository = Repository::open( $this->server()->backend( $name ), $this->master_key( $cli ), new SystemRandom() );
+		$snapshots  = $repository->snapshots();
+		self::assertCount( 1, $snapshots );
+		$this->cleanup[] = $target = TempDir::create( 'selected-target' );
+		$this->cleanup[] = $work = TempDir::create( 'selected-work' );
+		$run             = RestoreRun::start(
+			$repository,
+			Id::from_hex( (string) array_key_first( $snapshots ) ),
+			$target,
+			$work,
+			[
+				self::$site . '/wp-config.php',
+				self::$site . '/wp-content/plugins',
+				self::$site . '/wp-content/plugins/plugin.php',
+				self::$site . '/wp-content/link-to-index',
+				self::$site . "/latin1-\xe9.txt",
+			]
+		);
+		$slices          = 0;
+		while ( ! $run->advance( 0.0 ) ) {
+			self::assertLessThan( 1000, ++$slices );
+			$run = RestoreRun::resume( $repository, $work );
+		}
+		$expected = array_filter( TempDir::describe( self::$site ), static fn ( string $path ): bool => in_array( $path, [ 'wp-config.php', 'wp-content', 'wp-content/plugins', 'wp-content/link-to-index', "latin1-\xe9.txt" ], true ) || str_starts_with( $path, 'wp-content/plugins/' ), ARRAY_FILTER_USE_KEY );
+		self::assertSame( $expected, StagedTree::describe( $target, self::$site, $work ) );
+		self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
 	}
 
@@ -448,7 +489,7 @@ final class ResticConformanceTest extends TestCase {
 		$snapshots = $repository->snapshots();
 		self::assertCount( 1, $snapshots );
 		$restored = $this->restore( $repository, Id::from_hex( (string) array_key_first( $snapshots ) ) );
-		self::assertSame( TempDir::describe( self::$site ), TempDir::describe( $restored . self::$site ) );
+		self::assertSame( TempDir::describe( self::$site ), StagedTree::describe( $restored, self::$site, $this->restore_work[ $restored ] ) );
 
 		// The plugin writes plain JSON and uncompressed blobs into format 2; restic accepts both.
 		$this->cleanup[] = $site = TempDir::create( 'site-v2' );
