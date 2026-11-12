@@ -41,7 +41,7 @@ conformance, integration and mutation runs were green on each pull request.
 | Part | State |
 |---|---|
 | `Engine\Restore\RestoreRun` | Restores one subpath of a snapshot into a directory, resumable in the middle of a file, with verified content and safe names. It takes no repository lock, has no totals, no throttle and no free-space check, requests one blob at a time and does not require an empty target. |
-| Database dump (`Database\Dump`) | One file per table with a header and a trailer of rows and bytes ([ADR 0021](adr/0021-database-streaming.md)). There is **no importer** in `src/`; the tests import with a helper. |
+| Database dump/import | The dump writes one file per table with completion counts ([ADR 0021](adr/0021-database-streaming.md)). `Database\Restore\TableImporter` prepares InnoDB shadow data with transactional progress ([ADR 0035](adr/0035-transactional-shadow-import.md)); schema mapping, cleanup, job integration and live apply remain open. |
 | Jobs | Types backup, unlock, forget, prune, check. A job is created without parameters and gets them afterwards, so a tick can pick it up without them. One job is active at a time. |
 | REST and UI | `GET /snapshots` lists every snapshot of the repository. No route reads a tree. Re-authentication with the WordPress password exists for the recovery kit. |
 | Restore safety | Decided in [ADR 0013](adr/0013-restore-safety.md): staging first, apply as a separate job with a dry-run report, typed confirmation for the database. |
@@ -106,7 +106,7 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 3.1 | `Database\Restore\Importer` | L | Reads the dump files of a staging directory, checks header and trailer, and executes only `CREATE TABLE` and `INSERT` for the table a file belongs to. It imports into **shadow tables** with short temporary names, resumable per table and row batch, while the site keeps running on its own tables. |
+| 3.1 | `Database\Restore\Importer` | L, in progress | First component implemented, CI pending: bounded manifest/CREATE/INSERT grammar, exact file/trailer checks, owned InnoDB shadows, and rows/progress in one transaction (ADR 0035). Kill tests cover six DDL/transaction boundaries on MySQL and MariaDB. This is the base-table phase only: mapped foreign keys/views, bounded cleanup and integration remain open; the package is not complete. |
 | 3.2 | Report before the swap | S | Tables that will be replaced, added or left, rows now and in the snapshot, prefix, character sets the server lacks, the site address in the snapshot. |
 | 3.3 | Swap and state | M | One `RENAME TABLE` statement exchanges live and shadow tables; maintenance mode lasts for that statement. Before it, the plugin's own options and its cron events are copied into the shadow options table (`PluginStatePreserver`), and, if chosen, this site's address and the current administrator's account. Afterwards the object cache is flushed and the events are scheduled again. |
 | 3.4 | Undo | S | The replaced tables stay under temporary names for 24 hours; one job swaps them back; the heartbeat removes them afterwards. |

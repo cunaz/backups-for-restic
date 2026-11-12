@@ -58,14 +58,15 @@ final class Catalog {
 	 */
 	public function table( string $name ): Table {
 		$quoted = SqlFormatter::identifier( $name );
-		$create = $this->connection->rows( 'SHOW CREATE TABLE ' . $quoted );
+		$create = $this->show_create( 'TABLE', $name );
 		if ( ! isset( $create[0]['Create Table'] ) ) {
 			DatabaseFailed::raise( 'The table structure cannot be read.', [ 'table' => $name ] );
 		}
 		$columns = [];
 		foreach ( $this->connection->rows( 'SHOW COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
-			if ( ! str_contains( strtoupper( $column['Extra'] ?? '' ), 'GENERATED' ) ) {
+			$extra = strtoupper( $column['Extra'] ?? '' );
+			if ( ! str_contains( $extra, 'VIRTUAL GENERATED' ) && ! str_contains( $extra, 'STORED GENERATED' ) ) {
 				$columns[ (string) $column['Field'] ] = SqlFormatter::kind( (string) $column['Type'] );
 			}
 		}
@@ -87,13 +88,43 @@ final class Catalog {
 	 * @throws DatabaseFailed If the view cannot be read.
 	 */
 	public function view( string $name ): string {
-		$rows = $this->connection->rows( 'SHOW CREATE VIEW ' . SqlFormatter::identifier( $name ) );
+		$rows = $this->show_create( 'VIEW', $name );
 		if ( ! isset( $rows[0]['Create View'] ) ) {
 			DatabaseFailed::raise( 'The view cannot be read.', [ 'view' => $name ] );
 		}
 		$create = SqlFormatter::one_line( $rows[0]['Create View'] );
 		$create = (string) preg_replace( '/\ACREATE\s+(ALGORITHM=\S+\s+)?DEFINER=\S+\s+/i', 'CREATE $1', $create );
 		return (string) preg_replace( '/\ACREATE\s+/i', 'CREATE OR REPLACE ', $create, 1 );
+	}
+
+
+	/**
+	 * Reads quoted, complete schema under the dump's SQL mode, restoring the site session.
+	 *
+	 * @param string $type TABLE or VIEW, selected by the catalog itself.
+	 * @param string $name Quoted object name.
+	 * @return list<array<string, string|null>> SHOW CREATE rows.
+	 * @throws DatabaseFailed If the session setting cannot be read, set or restored.
+	 */
+	private function show_create( string $type, string $name ): array {
+		$setting = $this->connection->rows( 'SELECT @@SESSION.sql_quote_show_create AS quote_names, @@SESSION.sql_mode AS mode' );
+		$quoted  = $setting[0]['quote_names'] ?? null;
+		$mode    = $setting[0]['mode'] ?? null;
+		if ( ( '0' !== $quoted && '1' !== $quoted ) || ! is_string( $mode ) ) {
+			throw new DatabaseFailed( 'The schema quoting setting or SQL mode cannot be read.' );
+		}
+		$sql = 'SHOW CREATE ' . $type . ' ' . SqlFormatter::identifier( $name );
+		if ( '1' === $quoted && 'NO_AUTO_VALUE_ON_ZERO' === $mode ) {
+			return $this->connection->rows( $sql );
+		}
+		try {
+			$this->connection->rows( "SET SESSION sql_quote_show_create = 1, sql_mode = 'NO_AUTO_VALUE_ON_ZERO'" );
+			return $this->connection->rows( $sql );
+		} finally {
+			// A binary literal preserves the saved mode even under NO_BACKSLASH_ESCAPES.
+			$previous = '' === $mode ? "''" : '0x' . bin2hex( $mode );
+			$this->connection->rows( 'SET SESSION sql_quote_show_create = ' . $quoted . ', sql_mode = ' . $previous );
+		}
 	}
 
 	/**

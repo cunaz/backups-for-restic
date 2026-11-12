@@ -53,3 +53,4 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0031](0031-compact-index-and-memory-budget.md) | A compact index and a memory budget |
 | [0032](0032-run-checkpoint-files-and-cleanup.md) | Complete working-file writes and cleanup by run ownership |
 | [0033](0033-prune-listing-on-disk.md) | Prune validates the server pack listing on disk before deleting |
+| [0035](0035-transactional-shadow-import.md) | Import database batches and their progress in one transaction |

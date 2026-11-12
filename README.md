@@ -72,6 +72,11 @@ An unreadable job document also blocks new jobs and repository changes and is ke
 compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
 explains how to proceed.
 
+Database backups limit each encoded SQL statement to 16 MiB. A single row that exceeds
+that limit stops the backup with a database error; binary and escaped values can be larger
+in SQL than in the source table. Use an external database export for such tables rather
+than expecting an incomplete backup to count as successful.
+
 ## Documents
 
 | Document | What it answers |
