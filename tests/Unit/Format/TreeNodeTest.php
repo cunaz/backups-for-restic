@@ -96,6 +96,42 @@ final class TreeNodeTest extends TestCase {
 	}
 
 	/**
+	 * @return iterable<string, array{list<string>}>
+	 */
+	public static function unordered_names(): iterable {
+		yield 'reverse order' => [ [ 'b', 'a' ] ];
+		yield 'disorder after a valid prefix' => [ [ 'a', 'c', 'b' ] ];
+		yield 'duplicate' => [ [ 'a', 'a' ] ];
+		yield 'duplicate after a valid prefix' => [ [ 'a', 'b', 'b' ] ];
+		yield 'numeric names use byte order' => [ [ '2', '10' ] ];
+		yield 'case sensitive' => [ [ 'a', 'Z' ] ];
+		yield 'raw bytes, not their escapes' => [ [ "\xff", 'a' ] ];
+	}
+
+	/**
+	 * @param list<string> $names Names as raw bytes.
+	 */
+	#[DataProvider( 'unordered_names' )]
+	public function test_reading_refuses_unordered_or_duplicate_node_names( array $names ): void {
+		$nodes = array_map( static fn ( string $name ): string => ( new Node( $name, NodeType::File, content: [] ) )->to_json(), $names );
+		$this->expectException( FormatException::class );
+		$this->expectExceptionMessage( 'Tree nodes must be sorted by name and unique.' );
+		TreeCodec::decode( '{"nodes":[' . implode( ',', $nodes ) . ']}' );
+	}
+
+	public function test_order_is_checked_after_decoding_the_name(): void {
+		$this->expectException( FormatException::class );
+		TreeCodec::decode( '{"nodes":[{"name":"a","type":"file"},{"name":"\\\\x61","type":"file"}]}' );
+	}
+
+	public function test_reading_accepts_byte_order_including_escaped_and_non_utf8_names(): void {
+		$names = [ "\x01", '10', '2', 'Z', '\\', 'a', "\x7f", "\x80", "\xff" ];
+		$nodes = array_map( static fn ( string $name ): string => ( new Node( $name, NodeType::File, content: [] ) )->to_json(), $names );
+		$read  = TreeCodec::decode( '{"nodes":[' . implode( ',', $nodes ) . ']}' );
+		self::assertSame( $names, array_map( static fn ( Node $node ): string => $node->name, $read ) );
+	}
+
+	/**
 	 * Go's os.FileMode from a stat() mode as os.Lstat() builds it on Linux, the node type restic
 	 * derives from it, and the permissions to restore. A file type that stat() does not define
 	 * gets no type bits, as in Go; the plugin records such an entry as irregular.

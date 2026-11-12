@@ -46,7 +46,7 @@ final class TreeCodec {
 	 *
 	 * @param string $blob Tree blob.
 	 * @return list<Node> Nodes.
-	 * @throws FormatException If the blob is not a tree.
+	 * @throws FormatException If the blob is not a tree or its names are not strictly ordered.
 	 */
 	public static function decode( string $blob ): array {
 		$data  = GoJson::decode_object( $blob );
@@ -55,12 +55,18 @@ final class TreeCodec {
 			throw new FormatException( 'Tree blob has no node list.' );
 		}
 
-		$result = [];
+		$result   = [];
+		$previous = null;
 		foreach ( $nodes as $node ) {
 			if ( ! is_array( $node ) ) {
 				throw new FormatException( 'Tree blob contains an invalid node.' );
 			}
-			$result[] = Node::from_array( $node );
+			$decoded = Node::from_array( $node );
+			if ( null !== $previous && strcmp( $decoded->name, $previous ) <= 0 ) {
+				throw new FormatException( 'Tree nodes must be sorted by name and unique.' );
+			}
+			$previous = $decoded->name;
+			$result[] = $decoded;
 		}
 		return $result;
 	}
