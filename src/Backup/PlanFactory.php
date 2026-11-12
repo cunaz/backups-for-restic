@@ -11,6 +11,7 @@ namespace BackupsForRestic\Backup;
 
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\VirtualFile;
+use BackupsForRestic\Engine\Snapshot\Manifest;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Storage\PrivateDirectory;
@@ -113,7 +114,7 @@ final class PlanFactory {
 			return $directory === $database && null !== $files ? $files() : [];
 		};
 
-		return new BackupPlan( $roots, [ self::TAG, $this->site->site_tag(), 'run:' . $this->job_id ], $exclude, $virtual );
+		return new BackupPlan( $roots, [ self::TAG, $this->site->site_tag(), 'run:' . $this->job_id, Manifest::tag( $spool . '/manifest.json' ) ], $exclude, $virtual );
 	}
 
 	/**
@@ -169,7 +170,7 @@ final class PlanFactory {
 	private function manifest( array $roots, array $excludes ): string {
 		return (string) json_encode(
 			[
-				'format'     => 'backups-for-restic-site/1',
+				'format'     => Manifest::FORMAT,
 				'created'    => Rfc3339::format( $this->time ),
 				'home_url'   => $this->site->home_url,
 				'abspath'    => $this->site->abspath,

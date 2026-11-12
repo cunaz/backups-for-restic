@@ -296,16 +296,25 @@ final class Repository {
 	}
 
 	/**
-	 * Loads all snapshots, newest first.
+	 * Loads matching snapshots, newest first, with a callback between repository reads.
 	 *
+	 * @param (\Closure(): void)|null         $keep_lock Check and refresh the caller's lock.
+	 * @param (\Closure(Snapshot): bool)|null $filter    Retain only matching metadata, or all.
 	 * @return array<string, Snapshot> Snapshots by hex ID.
 	 */
-	public function snapshots(): array {
+	public function snapshots( ?\Closure $keep_lock = null, ?\Closure $filter = null ): array {
 		$snapshots = [];
+		$keep_lock?->__invoke();
 		foreach ( array_keys( $this->backend->list( ObjectType::Snapshots ) ) as $name ) {
-			$snapshots[ $name ] = Snapshot::from_json( $this->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) );
+			$keep_lock?->__invoke();
+			$snapshot = Snapshot::from_json( $this->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) );
+			$keep_lock?->__invoke();
+			if ( null === $filter || $filter( $snapshot ) ) {
+				$snapshots[ $name ] = $snapshot;
+			}
 		}
 		uasort( $snapshots, static fn ( Snapshot $a, Snapshot $b ): int => Rfc3339::parse( $b->time ) <=> Rfc3339::parse( $a->time ) );
+		$keep_lock?->__invoke();
 		return $snapshots;
 	}
 

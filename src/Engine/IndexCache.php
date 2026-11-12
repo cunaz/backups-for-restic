@@ -96,6 +96,7 @@ final class IndexCache {
 		if ( [] !== $new || ! $readable || count( $covered ) !== count( $listed ) ) {
 			$this->write( $repository, $index, $listed );
 		}
+		( new TreeCache( $this->directory, $this->limit ) )->trim();
 		// After the cache is written: an index that leaves no room is at least not read from
 		// the index files again when the job is tried with more memory.
 		$repository->memory()?->check_loaded_index();
