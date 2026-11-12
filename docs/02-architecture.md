@@ -1245,17 +1245,29 @@ and schedules are slots in the site's time zone.
   carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 1 today). A number is raised with
   every change that a version without the change would misread. Options without a number
   and job documents without the field have the first layout; the plugin records the number
-  on its first request. If the database refuses that write, the plugin stays inert and
-  shows administrators a notice. No conversion exists yet, because no layout has changed.
+  on its first request. This first recording is an atomic insert that never changes an
+  existing row or its autoload flag. After an insertion race the stored value is read
+  again, including invalidation of WordPress' autoloaded and missing-option caches; only
+  the supported number allows startup. If the database refuses that write, the plugin
+  stays inert and shows administrators a notice. No conversion exists yet, because no
+  layout has changed. Initialization does not serialize a future migration against
+  requests already running under an older version; such a migration must stop those
+  requests before changing the layout.
 - A version that finds a higher number than its own was installed over a newer one. It
   stays inert: it registers no REST route, no cron callback, no admin page and no command,
   and it shows administrators a notice that asks them to update the plugin. It could misread
   the settings, and retention deletes snapshots by what it reads. Deactivation unschedules
   events but leaves jobs and their repository locks alone when the options have a newer
-  layout. A job document with a higher number, or with one that is not a number, is not
-  loaded. Any existing job document that cannot be read blocks `create()` and `while_idle()`
-  under the creation lock with `job_unreadable`; its raw state is not trusted, and pruning
-  job history leaves it alone. A directory without a job document does not block changes.
+  or malformed layout number. A missing option is the only legacy case: zero, negative,
+  empty and non-numeric values are unknown layouts, preserved without starting the plugin.
+  `WpOptions::initialize()` uses a prepared insert with a no-op duplicate-key clause,
+  because WordPress' `add_option()` can update an existing row after a stale existence
+  check. This operation does not use the `add_option()` or `update_option()` hooks; normal
+  option writes still do. A job document with a higher number, or with one that is not a
+  number, is not loaded. Any existing job document that cannot be read blocks `create()`
+  and `while_idle()` under the creation lock with `job_unreadable`; its raw state is not
+  trusted, and pruning job history leaves it alone. A directory without a job document does
+  not block changes.
   Unknown or invalid stored settings of the same layout fall back to their defaults field
   by field.
 - Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active

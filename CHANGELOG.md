@@ -128,6 +128,10 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Initial layout recording no longer overwrites a number another request has inserted.
+  Newer and malformed settings layout numbers are preserved and keep the plugin inactive;
+  deactivation leaves their jobs and repository locks alone. Only a missing layout option
+  is treated as a legacy installation.
 - Reading a snapshot now refuses directory listings with duplicate or out-of-order names,
   including differently escaped copies of the same name. The repository check reports
   these trees as damaged before a restore can use their entries.

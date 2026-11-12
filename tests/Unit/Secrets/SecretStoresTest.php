@@ -79,6 +79,10 @@ final class SecretStoresTest extends TestCase {
 				return $this->value;
 			}
 
+			public function initialize( string $name, mixed $value, bool $autoload ): bool {
+				throw new \LogicException( 'The secret store never initializes layout numbers.' );
+			}
+
 			public function set( string $name, mixed $value, bool $autoload ): bool {
 				if ( $this->read_only ) {
 					return false;
