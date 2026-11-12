@@ -74,7 +74,10 @@ final class HttpStreamingTest extends TestCase {
 					BackupsForRestic\Storage\Files::remove_tree( $directory );
 				}
 				',
-				[ $server->url( 'streaming' ), $server->certificate, $transport ]
+				// Requests' Fsockopen transport checks DNS SANs only, and its CN fallback
+				// rejects the zero components of 127.0.0.1. Use the fixture's DNS SAN with
+				// full peer/name verification, through the actual transport class.
+				[ $server->url( 'streaming', 'localhost' ), $server->certificate, $transport ]
 			);
 			$result   = json_decode( TestSite::last_line( $output ), true );
 			$expected = $backend->list( ObjectType::Data );
