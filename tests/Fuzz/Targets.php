@@ -102,7 +102,13 @@ final class Targets {
 				[ Vectors::restic( 'root-tree.bin' ), ...$packs['trees'] ],
 				true,
 				static function ( string $input ): void {
-					TreeCodec::decode( $input );
+					$previous = null;
+					foreach ( TreeCodec::decode( $input ) as $node ) {
+						if ( null !== $previous && strcmp( $node->name, $previous ) <= 0 ) {
+							throw new \LogicException( 'An accepted tree has unordered or duplicate names.' );
+						}
+						$previous = $node->name;
+					}
 				}
 			),
 			new Target(

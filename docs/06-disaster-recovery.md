@@ -280,6 +280,13 @@ The dashboard, Site Health and an e-mail report that the repository check found 
 snapshots may then not restore completely. **Do not delete anything and do not prune** until
 the cause is clear.
 
+An error with code `tree_unreadable` can mean that a directory's entry names are duplicated
+or out of order, even when the encrypted data authenticates correctly. The plugin refuses
+that directory because its listing is ambiguous. The full restic check below helps find
+other damage, but restic 0.19.1 does not check this ordering or uniqueness: a clean result
+does not clear this finding. Use the [separate tree-name recovery path](#duplicate-or-unordered-tree-names)
+for this case; rebuilding the index cannot repair malformed tree contents.
+
 1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
    snapshots** to *Another computer*, so that this site starts no forget or prune, and pause
    maintenance jobs on any other computer that uses the repository. Note what the setting
@@ -298,6 +305,12 @@ the cause is clear.
    restic check --read-data
    ```
 
+   If this check is clean but the plugin still reports `tree_unreadable`, use the
+   [tree-name recovery path below](#duplicate-or-unordered-tree-names) instead of steps 3
+   to 5. Do not repair the index or disable append-only protection to try to clear that
+   finding. If restic reports separate pack or index damage, the following steps address
+   that damage only.
+
 3. Follow restic's [troubleshooting guide](https://restic.readthedocs.io/en/stable/077_troubleshooting.html)
    and repair the index first. In short: `restic repair packs <pack-id>` saves what is
    intact in a damaged pack that the check names and removes the pack; `restic repair index`
@@ -313,11 +326,80 @@ the cause is clear.
    data, that data no longer exists on the site. Only then run
    `restic repair snapshots --forget`: it replaces those snapshots with copies without the
    damaged files and directories, which is a loss that cannot be undone. Check once more.
-6. Only when `restic check --read-data` finds no errors is the repository healthy; the
-   plugin's check reads a sample of the data (2 % by default) and cannot prove that. Then
-   start **Check now** on the dashboard to clear the warning, and set retention back to
-   what it was in step 1. Leave it at *Another computer* if that was your choice or if the
-   server is append-only.
+6. Require both a clean `restic check --read-data` and a clean plugin check before resuming
+   automatic deletion. The full restic check verifies all data; the plugin reads a sample
+   (2 % by default) and also rejects duplicate or unordered tree names, which restic 0.19.1
+   does not report. Start **Check now** on the dashboard and confirm that it clears the
+   error notice. Then set retention back to what it was in step 1. Leave it at *Another
+   computer* if that was your choice or if the server is append-only.
+
+### Duplicate or unordered tree names
+
+Keep automatic deletion paused as in step 1 above. A tree with duplicate names cannot tell
+the plugin unambiguously which file belongs at a path. Index repair does not change tree
+contents, and this guide provides no automatic lossless repair for that ambiguity.
+
+1. Obtain the **full 64-character tree ID** from the saved check report. The dashboard shows
+   only its first eight characters, which are not sufficient for the commands below. On
+   the WordPress installation, in its directory, run:
+
+   ```bash
+   wp option get backups_for_restic_state --format=json
+   ```
+
+   In `check_alert.findings`, find each entry whose `code` is `tree_unreadable` and copy its
+   complete `object` value. Check `check_alert.job` and `check_alert.at` to make sure this is
+   the check you are investigating; `last_check.findings` also retains the full IDs from the
+   latest check. The option stores the check's original IDs; only the dashboard response
+   truncates them. If the report is absent or no longer matches, run a new plugin check
+   before continuing. Do not guess missing ID characters or derive them from a short match.
+
+   Use each complete ID to locate candidate snapshots:
+
+   ```bash
+   restic find --tree <tree-id>
+   ```
+
+   Repeat for each reported tree. This identifies candidate snapshots, but restic 0.19.1
+   stops at the first matching path in each snapshot. Do not treat that output as a complete
+   list of affected directories. To inspect the stored entries directly, use
+   `restic cat blob <tree-id>`. Alternatively, `restic cat tree '<snapshot-id>:<path>'`
+   reads the tree at a snapshot path; it does not accept a tree ID.
+
+   Before deciding that data is recovered, inventory every reference to each reported tree.
+   This read-only walk also covers trees reused at several paths:
+
+   ```bash
+   restic snapshots --json
+   restic cat snapshot <snapshot-id>
+   restic cat blob <root-tree-id>
+   ```
+
+   For **every** snapshot in the first output, take its `tree` field from `cat snapshot`
+   as the root tree at `/`. Record a match if this ID is the reported tree ID. Read its
+   `nodes` array with `cat blob`; for each entry whose `type` is `dir`, append its `name`
+   to the current path, record a match if its `subtree` is the reported ID, and read that
+   subtree with `restic cat blob <subtree-id>`. Repeat until every directory entry has been
+   visited. Visit a reused subtree at **each** path, even if its ID was seen before. Keep
+   duplicate names as separate entries, recording their positions in the parent `nodes`
+   array; collapsing them into a map would hide data. Record the snapshot ID with every
+   matching path, including `/` when the snapshot root matches.
+
+   Do not proceed to forgetting snapshots if any tree cannot be read, the inventory is
+   incomplete, or duplicate entries remain unclear. Keep the repository unchanged and seek
+   help with the report. These commands diagnose the contents; they do not repair them.
+2. Preserve the original repository and recovery kit. Recover required files to a separate
+   empty directory from unaffected snapshots or another backup, and verify their contents.
+   Do not rely on a restore of duplicate entries to preserve every version of a file.
+3. If an affected snapshot contains data you still need, leave it in place and keep automatic
+   deletion paused. Only after the required data is independently recovered and verified,
+   and you accept losing those snapshot records, remove the specifically identified
+   snapshots with `restic forget <snapshot-id>` **without `--prune`**. On an append-only
+   server, leave them in place unless you have deliberately arranged that maintenance
+   exception; a clean restic check alone is no reason to allow deletions.
+4. Run the full restic check and the plugin check again. Other affected snapshots can keep
+   the finding active, and resolving one tree can expose further findings. Repeat the
+   diagnosis as needed. Resume automatic retention only when both checks pass, as in step 6.
 
 ## Scenario J — the plugin is inactive after a downgrade
 

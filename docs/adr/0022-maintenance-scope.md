@@ -63,6 +63,13 @@ a state every restic tool understands.
 - **No retention at all in the plugin**: leaves every user with unbounded growth.
 
 ## As built (2026-11)
+- The check reports a tree with duplicate or out-of-order entry names as the error
+  `tree_unreadable`. Both encoding and decoding require strictly increasing raw filename
+  bytes, including names represented with Go escapes. An ambiguous directory is rejected
+  before any caller receives its entries. This adds a stricter finding than restic 0.19.1:
+  its [tree iterator](https://github.com/restic/restic/blob/v0.19.1/internal/data/tree.go)
+  and [checker](https://github.com/restic/restic/blob/v0.19.1/internal/checker/checker.go)
+  do not compare adjacent names. A clean restic check therefore does not clear this error.
 - The check has no finding for a blob id that occurs twice. Duplicates are legal in a restic
   repository, and the index keeps the first location. What the check reports is a whole
   pack that more than one index file lists, as the warning `pack_in_several_indexes`.

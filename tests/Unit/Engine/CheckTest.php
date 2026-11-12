@@ -25,6 +25,7 @@ use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Format\Pack\PackWriter;
+use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\HookedBackend;
@@ -187,6 +188,24 @@ final class CheckTest extends TestCase {
 
 		self::assertSame( [ 'error:blob_corrupt' ], self::codes( $result ) );
 		self::assertSame( $claimed->hex(), $result['findings'][0]['object'] );
+	}
+
+	public function test_a_tree_with_unordered_names_is_reported_as_damaged(): void {
+		$tree   = '{"nodes":[{"name":"b","type":"file"},{"name":"a","type":"file"}]}';
+		$id     = Id::of( $tree );
+		$writer = new PackWriter( $this->repository->cipher() );
+		$writer->add( BlobType::Tree, $id, $tree );
+		$pack = $writer->finish();
+		$this->backend->save( ObjectType::Data, $pack->id->hex(), $pack->bytes );
+		$this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( [ $pack->id->hex() => $pack->entries ] ) );
+		$this->repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( '2026-11-12T00:00:00Z', $id, [ '/site' ] ) )->to_json() );
+
+		$result = $this->check();
+
+		self::assertContains( 'error:tree_unreadable', self::codes( $result ) );
+		$findings = array_values( array_filter( $result['findings'], static fn ( array $finding ): bool => 'tree_unreadable' === $finding['code'] ) );
+		self::assertSame( $id->hex(), $findings[0]['object'] );
+		self::assertSame( 'Tree nodes must be sorted by name and unique.', $findings[0]['message'] );
 	}
 
 	public function test_finds_blobs_missing_from_the_index_and_unindexed_packs(): void {
