@@ -27,6 +27,9 @@ final class InMemoryBackend implements Backend {
 
 	public int $requests = 0;
 
+	/** @var (\Closure(ObjectType, string): void)|null Override for large file-backed fixtures. */
+	public ?\Closure $listing_file = null;
+
 	public function __construct( public bool $append_only = false ) {
 	}
 
@@ -75,6 +78,21 @@ final class InMemoryBackend implements Backend {
 	public function list( ObjectType $type ): array {
 		++$this->requests;
 		return array_map( 'strlen', $this->objects[ $type->value ] ?? [] );
+	}
+
+	public function list_to_file( ObjectType $type, string $file ): void {
+		if ( null !== $this->listing_file ) {
+			( $this->listing_file )( $type, $file );
+			return;
+		}
+		$entries = [];
+		foreach ( $this->list( $type ) as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		\BackupsForRestic\Storage\Files::write_atomic( $file, json_encode( $entries, JSON_THROW_ON_ERROR ) );
 	}
 
 	private function key( ObjectType $type, string $name ): string {

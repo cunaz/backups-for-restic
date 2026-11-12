@@ -105,7 +105,7 @@ explains how to proceed.
 | Secrets | libsodium-encrypted at rest, key derived from WordPress salts, `wp-config.php` overrides | [0006](docs/adr/0006-secrets-at-rest.md) |
 | Working directory | Private directory, preferably outside the web root, protection verified actively, caches encrypted | [0007](docs/adr/0007-private-directory.md) |
 | Snapshot layout | One snapshot per run: files + database directory + manifest; stable host and tags | [0009](docs/adr/0009-snapshot-layout.md) |
-| Maintenance | Forget with restic's semantics, prune without repacking, structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
+| Maintenance | Forget with restic's semantics; prune without repacking, including unindexed packs left by interrupted backups; structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
 | Conformance | The restic CLI is the oracle in CI; every release passes `restic check --read-data` and restore parity | [0023](docs/adr/0023-restic-cli-as-conformance-oracle.md) |
 | Admin UI | Vanilla JavaScript, no build step, REST API as the only data channel | [0012](docs/adr/0012-admin-ui-without-build-step.md) |
 | Restore (Milestone 3, not built yet) | Staging first; applying to the live site is a separate, guarded step | [0013](docs/adr/0013-restore-safety.md) |

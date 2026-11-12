@@ -233,7 +233,14 @@ be removed. The job records the error and continues its remaining cleanup steps.
 ## Scenario G — reclaiming space (full prune)
 
 The plugin deletes snapshots according to the retention policy and removes packs that no
-snapshot references. Packs that still contain some live data are not repacked by the plugin.
+snapshot references, and packs that an interrupted backup left behind. Packs that still
+contain some live data are not repacked by the plugin.
+
+A plugin prune paused for more than 25 minutes takes its lock again and checks whether the
+snapshots or indexes changed. If they did, it starts its scan over; otherwise it continues
+from its saved position. After three restarts, another change ends the job with
+`repository_changed`. Let other computers finish using the repository before retrying.
+
 Run a full prune from any computer when the dashboard shows a large reclaimable amount:
 
 ```bash

@@ -18,11 +18,13 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\QuotaExceeded;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\Unauthorized;
 use BackupsForRestic\Exception\UploadRejected;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\GoJson;
+use BackupsForRestic\Support\WorkFile;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -270,6 +272,38 @@ final class RestBackend implements Backend {
 	}
 
 	/**
+	 * Downloads a listing directly to a private file, publishing it only after HTTP success.
+	 * A retry truncates the temporary file; a failed request preserves the previous listing.
+	 *
+	 * @param ObjectType $type Object type.
+	 * @param string     $file Destination.
+	 * @throws BackendException If the response is too large or the request fails.
+	 * @throws StorageFailed If local file operations fail.
+	 */
+	public function list_to_file( ObjectType $type, string $file ): void {
+		$temporary = $file . '.' . bin2hex( random_bytes( 8 ) ) . '.tmp';
+		try {
+			$destination = new WorkFile( $temporary, true );
+			$destination->close();
+			$response = $this->send( 'GET', $this->base_url . $type->value . '/', [ 'Accept' => self::LIST_V2 ], '', true, self::MAX_LISTING_BYTES, $temporary );
+			$this->expect_success( $response, 'list' );
+			$download = new WorkFile( $temporary );
+			$size     = $download->size();
+			$download->close();
+			if ( $size > self::MAX_LISTING_BYTES ) {
+				BackendException::raise( 'The listing is larger than the plugin can read.', [ 'type' => $type->value ] );
+			}
+			if ( ! rename( $temporary, $file ) ) {
+				StorageFailed::raise( 'The downloaded listing could not be replaced.' );
+			}
+		} finally {
+			if ( is_file( $temporary ) && ! unlink( $temporary ) ) {
+				StorageFailed::raise( 'An incomplete listing download could not be removed.' );
+			}
+		}
+	}
+
+	/**
 	 * Builds the URL of an object.
 	 *
 	 * @param ObjectType $type Object type.
@@ -296,10 +330,11 @@ final class RestBackend implements Backend {
 	 * @param string                $body       Body.
 	 * @param bool                  $idempotent Whether retries are safe.
 	 * @param int                   $limit      Most bytes of response body to read.
+	 * @param string|null           $file       Private destination for a streamed response.
 	 * @return HttpResponse Response.
 	 * @throws BackendException When all attempts fail without a response.
 	 */
-	private function send( string $method, string $url, array $headers, string $body, bool $idempotent, int $limit = self::MAX_ANSWER_BYTES ): HttpResponse {
+	private function send( string $method, string $url, array $headers, string $body, bool $idempotent, int $limit = self::MAX_ANSWER_BYTES, ?string $file = null ): HttpResponse {
 		$headers['User-Agent'] = $this->user_agent;
 		if ( null !== $this->username && '' !== $this->username ) {
 			$headers['Authorization'] = 'Basic ' . Bytes::base64_encode( $this->username . ':' . ( $this->password?->reveal() ?? '' ) );
@@ -308,7 +343,7 @@ final class RestBackend implements Backend {
 		$attempts = $idempotent ? $this->max_attempts : 1;
 		for ( $attempt = 1; ; $attempt++ ) {
 			try {
-				$response = $this->http->request( $method, $url, $headers, $body, $limit );
+				$response = $this->http->request( $method, $url, $headers, $body, $limit, $file );
 				if ( 401 === $response->status ) {
 					Unauthorized::raise( 'The server rejected the repository credentials.' );
 				}

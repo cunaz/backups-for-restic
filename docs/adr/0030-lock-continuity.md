@@ -118,9 +118,11 @@ minutes ahead.
   unreadable, the lock stays until it is stale, 30 minutes at most. No released version has
   written the old checkpoints.
 - A lock left by a killed first request no longer blocks other clients for 30 minutes.
-- Prune keeps its own rule: it reads the index files under its exclusive lock when it
-  plans, compares them with what marking found, and starts marking again after a gap
-  ([ADR 0022](0022-maintenance-scope.md)). Its restarts are not limited yet.
+- Prune reads the index files under its exclusive lock when it plans and compares them
+  with what marking found. After a gap it compares the snapshots and the index files with
+  those it marked and read, goes on if they are the same, and starts marking again if not,
+  at most three times ([ADR 0022](0022-maintenance-scope.md)). It deletes the packs that no
+  index file lists, which is why decision 4 names the unindexed packs of a backup.
 
 ## Alternatives considered
 - **Start over after every gap.** Simple, but a site with long pauses between ticks would

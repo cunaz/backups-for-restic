@@ -34,17 +34,21 @@ final class RestServer {
 	 *
 	 * @param bool $append_only Whether deletions are refused (--append-only).
 	 * @param int  $max_size    Repository size limit in bytes (--max-size), 0 for none.
+	 * @param bool $localhost_certificate Whether the positive socket-transport fixture needs a DNS SAN.
 	 */
-	public function __construct( public bool $append_only = false, public readonly int $max_size = 0 ) {
+	public function __construct( public bool $append_only = false, public readonly int $max_size = 0, bool $localhost_certificate = false ) {
 		$this->directory   = TempDir::create( 'rest-server' );
 		$this->certificate = $this->directory . '/cert.pem';
 		$key               = $this->directory . '/key.pem';
 		$data              = $this->directory . '/data';
 		mkdir( $data );
 
+		$names = $localhost_certificate
+			? ' -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1'
+			: ' -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1';
 		exec(
 			'openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2'
-			. ' -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1'
+			. $names
 			. ' -keyout ' . escapeshellarg( $key ) . ' -out ' . escapeshellarg( $this->certificate ) . ' 2>/dev/null',
 			$output,
 			$status
@@ -112,8 +116,8 @@ final class RestServer {
 		TempDir::remove( $this->directory );
 	}
 
-	public function url( string $repository ): string {
-		return 'https://127.0.0.1:' . $this->port . '/' . $repository . '/';
+	public function url( string $repository, string $hostname = '127.0.0.1' ): string {
+		return 'https://' . $hostname . ':' . $this->port . '/' . $repository . '/';
 	}
 
 	public function backend( string $repository, string $password = self::PASSWORD ): RestBackend {
