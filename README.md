@@ -62,6 +62,16 @@ other hand, assume a server you control. This plugin closes the gap:
    directory, rotated salts, unsupported repository version, failed authentication tag), the
    plugin refuses to proceed and says exactly what to do.
 
+## After installing an older plugin version
+
+If the stored settings have a newer layout, the plugin stays inactive and shows an update
+notice. Its admin page, commands, REST routes and scheduled callbacks are unavailable.
+Install a version compatible with those settings; do not lower their stored layout number.
+Deactivation removes scheduled events but leaves jobs and their repository locks alone.
+An unreadable job document also blocks new jobs and repository changes and is kept for a
+compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
+explains how to proceed.
+
 ## Documents
 
 | Document | What it answers |

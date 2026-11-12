@@ -137,7 +137,7 @@ src/
 ├── Exception/                     PluginException and one subclass per failure the UI explains
 ├── Settings/                      Schema (every field once), Field, Settings (immutable), SettingsStore (option + wp-config.php overrides)
 ├── Secrets/                       Secret (value hidden in a closure), SecretName, SecretStore, EncryptedOptionStore (HKDF over the salts + secretbox), ConstantOverrideStore
-├── Storage/                       Options port, PrivateDirectory, SiteState, Files, CacheDirectory, ExposureCheck port
+├── Storage/                       Options port, PrivateDirectory, SiteState, SchemaVersion (layout number of the options, §18), Files, CacheDirectory, ExposureCheck port
 ├── Crypto/                        restic primitives
 │   ├── Cipher.php                 seal()/open(): nonce ‖ AES-256-CTR ‖ Poly1305-AES tag
 │   ├── Poly1305.php               pure-PHP Poly1305 (ADR 0027)
@@ -729,25 +729,26 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 
 No plaintext site data is written to the private directory except restore staging and
 database import files, both explicit admin actions that arrive with Milestone 3. The
-database holds four options:
+database holds five options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
 last backup and the last forget, prune and check, the check alert, the exposure and
 append-only probes, the retention switch and proposal, the handled schedule slots, the
 repository that the first five belong to, the probe from the browser, the last twenty
 deliveries of the recovery kit, and the number and size of the repository's packs as a
-backup or a prune last listed them) and
+backup or a prune last listed them),
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
 repository both are counted for, and the outbox of unsent notices; streaks and marker start
-anew when the jobs turn to another repository). The last two are documents that several
-requests change: a job's tick, the heartbeat and a request of the admin page. A change
-therefore reads the document from the database, past what the request read before
+anew when the jobs turn to another repository), and `backups_for_restic_schema_version`
+(autoload yes: the layout number of the other options, §18). State and notifications are
+documents that several requests change: a job's tick, the heartbeat and a request of the
+admin page. A change therefore reads the document from the database, past what the request
+read before
 (`Options::fresh()`), and holds `flock()` on `<private>/state.lock` until it is written
 back (`Storage\FileLock`), so that no request stores a copy from before another one's
 change. Notices are handed to the mailer by one request at a time (`<private>/notify.lock`,
 not waited for); the state is not locked while a mail is on its way, and what is queued in
-that time goes out with the next heartbeat. A fifth name, `backups_for_restic_schema_version`, is reserved:
-nothing writes or reads it, and uninstall deletes it (§18).
+that time goes out with the next heartbeat.
 
 ## 11. Settings model
 
@@ -1065,6 +1066,7 @@ translated message and a hint. The codes:
 | `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
 | `repository_locked` | a conflicting lock of another client; retryable |
 | `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
+| `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
@@ -1208,10 +1210,25 @@ and schedules are slots in the site's time zone.
 - Semantic versioning. What carries a version today: the dump format id
   (`backups-for-restic-dump/1`), the site manifest (`backups-for-restic-site/1`), the engine
   checkpoints (`STATE_VERSION`, a checkpoint of another version is refused), the stored
-  secrets (`v1.` prefix) and the cached index (its magic line). Settings and `job.json` carry
-  no version: `backups_for_restic_schema_version` is reserved but never written or read, and
-  a settings schema version with migrations is planned for Milestone 3, before 1.0. Unknown
-  or invalid stored settings fall back to their defaults field by field.
+  secrets (`v1.` prefix), the cached index (its magic line), the options and `job.json`.
+- The options carry one layout number for settings, state and notifications in
+  `backups_for_restic_schema_version` (`Storage\SchemaVersion`, 1 today), and every `job.json`
+  carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 1 today). A number is raised with
+  every change that a version without the change would misread. Options without a number
+  and job documents without the field have the first layout; the plugin records the number
+  on its first request. If the database refuses that write, the plugin stays inert and
+  shows administrators a notice. No conversion exists yet, because no layout has changed.
+- A version that finds a higher number than its own was installed over a newer one. It
+  stays inert: it registers no REST route, no cron callback, no admin page and no command,
+  and it shows administrators a notice that asks them to update the plugin. It could misread
+  the settings, and retention deletes snapshots by what it reads. Deactivation unschedules
+  events but leaves jobs and their repository locks alone when the options have a newer
+  layout. A job document with a higher number, or with one that is not a number, is not
+  loaded. Any existing job document that cannot be read blocks `create()` and `while_idle()`
+  under the creation lock with `job_unreadable`; its raw state is not trusted, and pruning
+  job history leaves it alone. A directory without a job document does not block changes.
+  Unknown or invalid stored settings of the same layout fall back to their defaults field
+  by field.
 - Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active
   job (`Cron::stop()`, `Runner::stop()`): it asks the job to cancel and runs its cleanup
   steps, which releases the repository lock. The budget of ten seconds holds back regular
