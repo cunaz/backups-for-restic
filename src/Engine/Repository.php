@@ -242,18 +242,23 @@ final class Repository {
 	/**
 	 * Loads index files.
 	 *
-	 * @param list<string>|null $names The index files to read, for a caller that has to know
-	 *                                 which they were; all that the server lists otherwise, in
-	 *                                 the order of its listing.
+	 * @param list<string>|null       $names The index files to read, for a caller that has to know
+	 *                                       which they were; all that the server lists otherwise, in
+	 *                                       the order of its listing.
+	 * @param (\Closure(): void)|null $keep_lock Optional lease check between repository reads.
 	 * @return IndexSet Merged index.
 	 */
-	public function load_index( ?array $names = null ): IndexSet {
+	public function load_index( ?array $names = null, ?\Closure $keep_lock = null ): IndexSet {
+		$keep_lock?->__invoke();
 		$index = new IndexSet();
 		foreach ( $names ?? array_map( 'strval', array_keys( $this->backend->list( ObjectType::Index ) ) ) as $name ) {
+			$keep_lock?->__invoke();
 			foreach ( IndexFile::decode( $this->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
 			}
+			$keep_lock?->__invoke();
 		}
+		$keep_lock?->__invoke();
 		return $index;
 	}
 

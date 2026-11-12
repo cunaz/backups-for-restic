@@ -301,11 +301,14 @@ carries `Cache-Control: no-store`.
   and is deleted when the derivation finishes.
 - From Milestone 3: restore staging and database import files are plaintext by necessity:
   `0600`, expire after 24 hours, deleted after a successful apply/import.
-- From Milestone 3: symlinks are never followed when applying restores; `realpath`
-  containment on every destination; `lstat` to detect links in staging. The engine's
-  `RestoreRun`, which the tests use today, already validates every name from the repository
-  (not empty, not `.` or `..`, no `/` or NUL) and removes an existing symlink at a
-  destination instead of writing through it.
+- The version 2 restore engine validates selected paths in a first pass, requires empty
+  private staging, binds directory/file identities and checks parent components. It
+  refuses existing symbolic/hard links and unexpected entries; snapshot links and special
+  nodes are recorded outside the payload, never created. Local flock, creation intents and
+  committed file/report offsets make interrupted ticks repeatable (ADR 0036). These checks
+  rely on the caller keeping staging private; portable PHP cannot eliminate races with a
+  local process that controls those directories. The later apply planner must also enforce
+  live-root containment; no apply or public staging-download route exists yet.
 - The private directory is excluded from backups except the virtual `spool/` paths.
 
 ## 9. WordPress layer

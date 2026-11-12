@@ -96,7 +96,7 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 2.1 | `RestoreRun`, second version | L | Several selected paths; a first pass over the trees that counts files and bytes for the progress display and the free-space check; a shared repository lock kept as backups keep theirs; throttle; neighbouring blobs of one pack fetched with one ranged request; names that are valid on Windows too; the target is a directory the job created; links are recorded, not created. |
+| 2.1 | `RestoreRun`, second version | L, in progress | The version 2 engine and interruption tests are implemented ([ADR 0036](adr/0036-selected-file-staging.md)); review and final-head CI remain. Several selected paths; a first pass over the trees that counts files and bytes for the progress display and the free-space check; a shared repository lock kept as backups keep theirs; throttle; neighbouring blobs of one pack fetched with one ranged request; names that are valid on Windows too; the target is a directory the job created; links are recorded, not created. |
 | 2.2 | Job type `restore` | M | Steps preflight, unlocking, planning, restoring, recording; cleanup releases the lock on every path. A third step provider beside backup and maintenance. A running restore keeps scheduled jobs waiting. |
 | 2.3 | Staging | M | `<private>/restores/<job>/` with the files and a report; expiry after 24 hours by default; size shown; removal by the administrator or the heartbeat. |
 | 2.4 | Download | M | One file through a route that streams it with a one-time token; a selection as a zip file written by the plugin itself (stored, not compressed, so it needs no extension and no memory), built by a resumable step. |

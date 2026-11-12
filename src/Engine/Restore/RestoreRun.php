@@ -1,6 +1,6 @@
 <?php
 /**
- * Resumable restore.
+ * Resumable selected-file restore into private staging.
  *
  * @package BackupsForRestic
  */
@@ -10,420 +10,721 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Engine\Restore;
 
 use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Crypto\Cipher;
+use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Format\Tree\FileMode;
 use BackupsForRestic\Format\Tree\Node;
 use BackupsForRestic\Format\Tree\NodeType;
-use BackupsForRestic\Support\Decoded;
+use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\GoJson;
 use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Rfc3339;
+use BackupsForRestic\Support\SystemClock;
+use BackupsForRestic\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Restores a snapshot or a part of it into a staging directory, in bounded slices (ADR 0013).
- *
- * Names come from the repository and are validated before use: a name must not be empty, "."
- * or "..", and must not contain "/" or NUL. Existing symlinks at a destination are removed
- * instead of being written through. Permissions are restored without setuid, setgid and
- * sticky bits.
+ * Plans before writing, preserves selected paths, and records links instead of creating them.
+ * A private caller-owned target and work directory are required (ADR 0036).
  */
 final class RestoreRun {
 
-	private const int STATE_VERSION = 1;
-
 	/**
-	 * Checkpointed state.
+	 * Index loaded under the current lease.
 	 *
-	 * @var array<string, mixed>
+	 * @var IndexSet|null
 	 */
-	private array $state;
-
+	private ?IndexSet $index = null;
 	/**
-	 * Trees loaded in this slice.
+	 * ID of the one cached directory.
 	 *
-	 * @var array<string, list<Node>>
+	 * @var string|null
 	 */
-	private array $trees = [];
+	private ?string $tree_id = null;
 
 	/**
-	 * End of the current slice.
+	 * Path for which the cached directory was validated.
 	 *
-	 * @var float
+	 * @var string|null
 	 */
-	private float $deadline = INF;
+	private ?string $tree_dir = null;
 
 	/**
-	 * Creates the run.
+	 * Only one decoded directory is retained.
 	 *
-	 * @param Repository           $repository Repository.
-	 * @param IndexSet             $index      Index.
-	 * @param string               $work_dir   Directory for the checkpoint.
-	 * @param array<string, mixed> $state      State.
+	 * @var list<Node>
+	 */
+	private array $nodes = [];
+
+	/**
+	 * Repository lock owner for this run.
+	 *
+	 * @var Locking
+	 */
+	private readonly Locking $locking;
+
+	/**
+	 * Reports available space without allocating a payload-sized buffer.
+	 *
+	 * @var \Closure(string): (float|false)
+	 */
+	private readonly \Closure $free_space;
+
+	/**
+	 * Creates an instance without contacting the repository.
+	 *
+	 * @param Repository                             $repository Opened repository.
+	 * @param State                                  $state Checkpoint.
+	 * @param Clock                                  $clock Lease clock.
+	 * @param Throttle|null                          $throttle Optional CPU pacing.
+	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe; native by default.
 	 */
 	private function __construct(
 		private readonly Repository $repository,
-		private readonly IndexSet $index,
-		private readonly string $work_dir,
-		array $state
+		private State $state,
+		private readonly Clock $clock,
+		private readonly ?Throttle $throttle,
+		?\Closure $free_space
 	) {
-		$this->state = $state;
+		$this->locking    = new Locking( $repository, new Identity( $state->hostname ), $clock, $state->pid );
+		$this->free_space = $free_space ?? disk_free_space( ... );
+		$this->verify_state();
 	}
 
 	/**
-	 * Starts a restore.
+	 * Records the identity locally before taking a repository lock on the first advance().
 	 *
-	 * @param Repository $repository Repository.
-	 * @param Id         $snapshot   Snapshot.
-	 * @param string     $target     Existing, empty staging directory.
-	 * @param string     $work_dir   Directory for the checkpoint.
-	 * @param string     $subpath    Absolute path inside the snapshot to restore, or "/" for all.
-	 * @return self Run.
-	 * @throws InvalidArgument If the target is not a directory or the path does not exist.
+	 * @param Repository                             $repository Opened repository.
+	 * @param Id                                     $snapshot Snapshot to restore.
+	 * @param string                                 $target Existing empty, private staging directory.
+	 * @param string                                 $work_dir Separate private directory for checkpoints and the report.
+	 * @param string|list<string>                    $selection Absolute snapshot paths, or one path for compatibility.
+	 * @param Identity|null                          $identity Site identity for repository locks.
+	 * @param Clock|null                             $clock Lease clock.
+	 * @param Throttle|null                          $throttle Optional CPU pacing.
+	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
+	 * @return self New run; no file has been restored yet.
+	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
 	 */
-	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string $subpath = '/' ): self {
-		$real_target = realpath( $target );
-		if ( false === $real_target || ! is_dir( $real_target ) ) {
-			throw new InvalidArgument( 'The restore target must be an existing directory.' );
+	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string|array $selection = '/', ?Identity $identity = null, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
+		$selected    = new Selection( is_string( $selection ) ? [ $selection ] : $selection );
+		$destination = Files::bind( $target );
+		if ( ! Files::exists( $work_dir ) && ! mkdir( $work_dir, 0700, true ) ) {
+			throw new InvalidArgument( 'The restore working directory cannot be created.' );
 		}
-		if ( ! is_dir( $work_dir ) && ! mkdir( $work_dir, 0700, true ) ) {
-			throw new InvalidArgument( 'The working directory cannot be created.' );
+		$work       = Files::bind( $work_dir );
+		$target_key = Names::key( '\\' === DIRECTORY_SEPARATOR ? str_replace( '\\', '/', $destination['path'] ) : $destination['path'] );
+		$work_key   = Names::key( '\\' === DIRECTORY_SEPARATOR ? str_replace( '\\', '/', $work['path'] ) : $work['path'] );
+		if ( $target_key === $work_key || str_starts_with( $target_key . '/', $work_key . '/' ) || str_starts_with( $work_key . '/', $target_key . '/' ) ) {
+			throw new InvalidArgument( 'Restore staging and working directories must be separate.' );
 		}
-
-		$index = $repository->load_index();
-		$tree  = Snapshot::from_json( $repository->load_unpacked( ObjectType::Snapshots, $snapshot ) )->tree;
-		$only  = null;
-		$parts = array_values( array_filter( explode( '/', $subpath ), static fn ( string $part ): bool => '' !== $part ) );
-		foreach ( $parts as $position => $part ) {
-			$node = self::find( $repository->load_tree( $index, $tree ), $part );
-			if ( null === $node ) {
-				throw new InvalidArgument( 'The path does not exist in the snapshot.' );
-			}
-			if ( NodeType::Dir === $node->type && null !== $node->subtree ) {
-				$tree = $node->subtree;
-				continue;
-			}
-			if ( count( $parts ) - 1 !== $position ) {
-				throw new InvalidArgument( 'The path does not exist in the snapshot.' );
-			}
-			$only = $part;
+		$handle = Files::lock( $work['path'] );
+		try {
+			Files::empty_directory( $destination['path'] );
+			Files::empty_directory( $work['path'], true );
+			$state = new State( $repository->config()->id, $snapshot, $selected, $destination, $work, ( $identity ?? new Identity( 'backups-for-restic-restore' ) )->hostname, random_int( 1, 2147483647 ) );
+			$run   = new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
+			Files::persist( $state );
+			return $run;
+		} finally {
+			Files::close( $handle );
 		}
-
-		$state = [
-			'version' => self::STATE_VERSION,
-			'target'  => $real_target,
-			'stack'   => [
-				[
-					'tree' => $tree->hex(),
-					'dir'  => '',
-					'next' => 0,
-					'only' => null === $only ? null : GoQuote::quote( $only ),
-				],
-			],
-			'file'    => null,
-			'files'   => 0,
-			'bytes'   => 0,
-		];
-		$run   = new self( $repository, $index, $work_dir, $state );
-		$run->persist();
-		return $run;
 	}
 
 	/**
-	 * Continues a restore from its checkpoint.
+	 * Reads only local state; repository data is read under the next tick's shared lock.
 	 *
-	 * @param Repository $repository Repository.
-	 * @param string     $work_dir   Directory with the checkpoint.
-	 * @return self Run.
-	 * @throws FormatException If the checkpoint is unusable.
+	 * @param Repository                             $repository Opened repository.
+	 * @param string                                 $work_dir Private working directory.
+	 * @param Clock|null                             $clock Lease clock.
+	 * @param Throttle|null                          $throttle Optional CPU pacing.
+	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
+	 * @return self Resumed run.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	public static function resume( Repository $repository, string $work_dir ): self {
-		$json  = @file_get_contents( $work_dir . '/restore.json' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A missing checkpoint is reported below.
-		$state = false === $json ? null : GoJson::decode( $json );
-		if ( ! is_array( $state ) || self::STATE_VERSION !== ( $state['version'] ?? null ) ) {
-			throw new FormatException( 'The restore checkpoint is missing or from another version.' );
+	public static function resume( Repository $repository, string $work_dir, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
+		$work  = Files::bind( $work_dir );
+		$state = Files::read( $work['path'] );
+		if ( $work !== $state->work ) {
+			throw new FormatException( 'The restore checkpoint belongs to another working directory.' );
 		}
-		/**
-		 * Validated above to be an array.
-		 *
-		 * @var array<string, mixed> $state
-		 */
-		return new self( $repository, $repository->load_index(), $work_dir, $state );
+		return new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
 	}
 
 	/**
-	 * Works until everything is restored or the deadline has passed.
+	 * Performs at least one resumable unit, then stops at the next boundary after the deadline.
 	 *
 	 * @param float $deadline Unix time (microtime(true)) at which to stop.
-	 * @return bool True when finished.
+	 * @return bool Whether the complete selected payload has been staged.
+	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws \Throwable Preserves the original failure after releasing owned resources.
 	 */
 	public function advance( float $deadline ): bool {
-		$this->deadline = $deadline;
-		// At least one step per slice, so that progress is guaranteed even on a slow host.
-		if ( [] !== $this->stack() ) {
+		Files::verify( $this->state->work );
+		$handle = Files::lock( $this->state->work['path'] );
+		try {
+			$this->reload();
+			Files::verify( $this->state->target );
+			if ( 'aborted' === $this->state->phase ) {
+				throw new InvalidArgument( 'An aborted restore cannot continue.' );
+			}
+			if ( 'complete' === $this->state->phase ) {
+				$this->release();
+				return true;
+			}
+			$this->keep_lock( true );
+			$this->prepare();
+			$this->rewind_report();
 			do {
+				$this->keep_lock();
 				$this->step();
-			} while ( [] !== $this->stack() && microtime( true ) < $deadline );
+				Files::persist( $this->state );
+				$this->throttle?->pause();
+			} while ( 'complete' !== $this->state->phase && microtime( true ) < $deadline );
+			if ( 'complete' === $this->state->phase ) {
+				$this->release();
+			}
+			return 'complete' === $this->state->phase;
+		} catch ( \Throwable $error ) {
+			// Keep the last committed cursors. A failed cleanup can still be retried by pid.
+			try {
+				$this->locking->release( null === $this->state->lock ? null : Id::from_hex( $this->state->lock ) );
+			} catch ( \Throwable ) {
+				// The checkpoint retains ownership; abort() retries even an unrecorded lock.
+				$this->index = null;
+				throw $error;
+			}
+			$this->index = null;
+			throw $error;
+		} finally {
+			Files::close( $handle );
 		}
-		$this->persist();
-		return [] === $this->stack();
 	}
 
 	/**
-	 * Returns restored files and bytes.
+	 * Ends the run and releases even a lock left by a killed acquire/refresh. No index needed.
+	 */
+	public function abort(): void {
+		Files::verify( $this->state->work );
+		$handle = Files::lock( $this->state->work['path'] );
+		try {
+			$this->reload();
+			if ( 'complete' !== $this->state->phase ) {
+				$this->state->phase = 'aborted';
+				Files::persist( $this->state );
+			}
+			$this->release();
+		} finally {
+			Files::close( $handle );
+		}
+	}
+
+	/**
+	 * Returns committed progress and totals once planning has finished.
 	 *
-	 * @return array{files: int, bytes: int} Counters.
+	 * @return array{phase: string, files: int, bytes: int, total_files: int, total_bytes: int, skipped: int} Progress.
 	 */
 	public function progress(): array {
 		return [
-			'files' => Decoded::int( $this->state['files'] ),
-			'bytes' => Decoded::int( $this->state['bytes'] ),
+			'phase'       => $this->state->phase,
+			'files'       => $this->state->files,
+			'bytes'       => $this->state->bytes,
+			'total_files' => $this->state->planned_files,
+			'total_bytes' => $this->state->planned_bytes,
+			'skipped'     => $this->state->skipped,
 		];
 	}
 
 	/**
-	 * Handles one entry of the top frame.
+	 * Rereads state under the local lock, so an older object cannot overwrite a newer tick.
+	 *
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function reload(): void {
+		$latest = Files::read( $this->state->work['path'] );
+		if ( $latest->pid !== $this->state->pid || $latest->hostname !== $this->state->hostname || $latest->work !== $this->state->work || $latest->target !== $this->state->target || ! $latest->snapshot->equals( $this->state->snapshot ) || $latest->selection->paths !== $this->state->selection->paths ) {
+			throw new FormatException( 'The restore checkpoint identity has changed.' );
+		}
+		if ( $latest->lock !== $this->state->lock ) {
+			$this->index   = null;
+			$this->tree_id = null;
+		}
+		$this->state = $latest;
+		$this->verify_state();
+	}
+
+	/**
+	 * Rejects a checkpoint supplied to a different repository.
+	 *
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function verify_state(): void {
+		if ( $this->state->repository !== $this->repository->config()->id ) {
+			throw new FormatException( 'The restore checkpoint belongs to another repository.' );
+		}
+		Files::verify( $this->state->work );
+	}
+
+	/**
+	 * Refreshes a continuous lease, or reacquires it only at a tick boundary.
+	 *
+	 * @param bool $allow_gap Whether old in-memory repository locations may be discarded.
+	 * @throws RepositoryChanged If the selected snapshot or trusted lease has been lost.
+	 */
+	private function keep_lock( bool $allow_gap = false ): void {
+		$lock = $this->state->lock;
+		if ( null !== $lock && ! $this->locking->lapsed( $this->state->locked_at ) && null !== $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+			if ( $this->locking->lapsed( $this->state->locked_at ) ) {
+				throw new RepositoryChanged( 'A restore lock check exceeded the trusted lease.' );
+			}
+			if ( $this->locking->due( $this->state->locked_at ) ) {
+				$taken                  = $this->clock->now()[0];
+				$this->state->lock      = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
+				$this->state->locked_at = $taken;
+				Files::persist( $this->state );
+				if ( $this->locking->lapsed( $taken ) ) {
+					throw new RepositoryChanged( 'Refreshing the restore lock exceeded the trusted lease.' );
+				}
+			}
+			return;
+		}
+		if ( ! $allow_gap ) {
+			throw new RepositoryChanged( 'The restore repository lock was lost during a read; resume the run to revalidate it.' );
+		}
+		$taken                  = $this->clock->now()[0];
+		$this->state->lock      = $this->locking->acquire( false )->hex();
+		$this->state->locked_at = $taken;
+		Files::persist( $this->state );
+		$this->index   = null;
+		$this->tree_id = null;
+		$this->nodes   = [];
+		if ( null === $this->repository->backend()->size( ObjectType::Snapshots, $this->state->snapshot->hex() ) ) {
+			throw new RepositoryChanged( 'The selected snapshot no longer exists.' );
+		}
+		$this->keep_lock();
+	}
+
+	/** Loads the index and root tree only after taking a lock. */
+	private function prepare(): void {
+		$this->index ??= $this->repository->load_index( keep_lock: $this->keep_lock( ... ) );
+		$this->keep_lock();
+		if ( null === $this->state->tree ) {
+			$snapshot = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, $this->state->snapshot ) );
+			$this->keep_lock();
+			$this->state->tree = $snapshot->tree->hex();
+			$this->reset_stack();
+			if ( in_array( '/', $this->state->selection->paths, true ) ) {
+				$this->state->found = [ '/' ];
+			}
+			Files::persist( $this->state );
+		}
+	}
+
+	/** Releases ownership before clearing the checkpoint's lock reference. */
+	private function release(): void {
+		$this->locking->release( null === $this->state->lock ? null : Id::from_hex( $this->state->lock ) );
+		$this->state->lock = null;
+		$this->index       = null;
+		$this->tree_id     = null;
+		$this->nodes       = [];
+		Files::persist( $this->state );
+	}
+
+	/**
+	 * Handles one entry or finishes one directory, without an unbounded in-memory plan.
+	 *
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
 	private function step(): void {
-		$stack = $this->stack();
-		$depth = count( $stack ) - 1;
-		$frame = $stack[ $depth ];
-		$nodes = $this->tree( Decoded::string( $frame['tree'] ) );
-		$next  = Decoded::int( $frame['next'] );
-		$dir   = GoQuote::unquote( Decoded::string( $frame['dir'] ) );
-
-		if ( $next >= count( $nodes ) ) {
-			$this->finish_directory( $depth, $dir );
+		$depth = count( $this->state->stack ) - 1;
+		if ( $depth < 0 ) {
+			$this->finish_pass();
 			return;
 		}
-
-		$node = $nodes[ $next ];
-		if ( null !== $frame['only'] && GoQuote::quote( $node->name ) !== $frame['only'] ) {
-			$this->advance_frame( $depth );
-			return;
+		$frame = $this->state->stack[ $depth ];
+		$nodes = $this->tree( $frame['tree'], $frame['dir'] );
+		if ( $frame['next'] > count( $nodes ) ) {
+			throw new FormatException( 'The restore directory cursor is outside its tree.' );
 		}
-
-		self::validate_name( $node->name );
-		$relative = '' === $dir ? $node->name : $dir . '/' . $node->name;
-		$path     = $this->target() . '/' . $relative;
-
-		switch ( $node->type ) {
-			case NodeType::Dir:
-				$this->remove_link( $path );
-				if ( ! is_dir( $path ) && ! mkdir( $path, 0700 ) ) {
-					FormatException::raise( 'A directory cannot be created in the restore target.' );
-				}
-				$this->advance_frame( $depth );
-				$this->push( (string) $node->subtree?->hex(), $relative, $node );
-				break;
-			case NodeType::File:
-				$this->restore_file( $depth, $node, $path );
-				break;
-			case NodeType::Symlink:
-				$this->remove_link( $path );
-				if ( ! file_exists( $path ) ) {
-					symlink( $node->link_target, $path );
-				}
-				$this->advance_frame( $depth );
-				break;
-			default:
-				$this->advance_frame( $depth );
-		}
-	}
-
-	/**
-	 * Writes a file blob by blob; continues where the last slice stopped.
-	 *
-	 * @param int    $depth Frame depth.
-	 * @param Node   $node  File node.
-	 * @param string $path  Destination.
-	 * @throws FormatException If the destination cannot be written.
-	 */
-	private function restore_file( int $depth, Node $node, string $path ): void {
-		$progress = is_array( $this->state['file'] ) ? $this->state['file'] : [
-			'blob'    => 0,
-			'written' => 0,
-		];
-		$blob     = Decoded::count( $progress['blob'] ?? 0 );
-		$written  = Decoded::count( $progress['written'] ?? 0 );
-
-		if ( 0 === $blob ) {
-			$this->remove_link( $path );
-		}
-		$handle = fopen( $path, 0 === $blob ? 'wb' : 'cb' );
-		if ( false === $handle ) {
-			FormatException::raise( 'A file cannot be written in the restore target.' );
-		}
-		ftruncate( $handle, $written );
-		fseek( $handle, $written );
-
-		$content = $node->content ?? [];
-		$count   = count( $content );
-		while ( $blob < $count ) {
-			$data = $this->repository->load_blob( $this->index, BlobType::Data, $content[ $blob ] );
-			if ( fwrite( $handle, $data ) !== strlen( $data ) ) {
-				fclose( $handle );
-				FormatException::raise( 'A file cannot be written in the restore target.' );
+		if ( $frame['next'] === count( $nodes ) ) {
+			if ( 'restore' === $this->state->phase && '' !== $frame['dir'] ) {
+				$path = Files::destination( $this->state, $frame['dir'] );
+				$this->metadata( $path, $frame['mode'], $frame['mtime'], true );
 			}
-			++$blob;
-			$written += strlen( $data );
-			if ( $blob < $count && microtime( true ) >= $this->deadline ) {
-				fclose( $handle );
-				$this->state['file'] = [
-					'blob'    => $blob,
-					'written' => $written,
-				];
+			array_pop( $this->state->stack );
+			return;
+		}
+		$node     = $nodes[ $frame['next'] ];
+		$relative = '' === $frame['dir'] ? $node->name : $frame['dir'] . '/' . $node->name;
+		if ( ! $this->state->selection->visits( '/' . $relative ) ) {
+			++$this->state->stack[ $depth ]['next'];
+			return;
+		}
+		if ( 'plan' === $this->state->phase ) {
+			$this->plan_node( $node, $relative );
+		} else {
+			if ( NodeType::File === $node->type ) {
+				$this->restore_file( $node, $relative, $depth );
 				return;
 			}
+			if ( NodeType::Dir === $node->type ) {
+				$this->create_directory( $relative );
+			} else {
+				++$this->state->skipped;
+			}
+			$this->report( $relative, $node );
 		}
-		fclose( $handle );
-
-		chmod( $path, FileMode::to_posix_permissions( $node->mode ) & 0777 );
-		touch( $path, Rfc3339::parse( $node->mtime )[0] );
-		$this->state['file']  = null;
-		$this->state['files'] = Decoded::int( $this->state['files'] ) + 1;
-		$this->state['bytes'] = Decoded::int( $this->state['bytes'] ) + $written;
-		$this->advance_frame( $depth );
+		++$this->state->stack[ $depth ]['next'];
+		if ( NodeType::Dir === $node->type ) {
+			if ( null === $node->subtree || count( $this->state->stack ) >= 257 ) {
+				throw new FormatException( 'A selected directory lacks a tree or exceeds the restore depth limit.' );
+			}
+			$this->state->stack[] = [
+				'tree'  => $node->subtree->hex(),
+				'dir'   => $relative,
+				'next'  => 0,
+				'mode'  => $node->mode,
+				'mtime' => $node->mtime,
+			];
+		}
 	}
 
 	/**
-	 * Applies a directory's metadata once its children are restored, then pops it.
+	 * Counts a selected node and checks indexed file sizes before any payload is written.
 	 *
-	 * @param int    $depth Frame depth.
-	 * @param string $dir   Relative path of the directory.
+	 * @param Node   $node Selected node.
+	 * @param string $relative Original relative path.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	private function finish_directory( int $depth, string $dir ): void {
-		$stack = $this->stack();
-		$frame = $stack[ $depth ];
-		if ( '' !== $dir && is_int( $frame['mode'] ?? null ) && is_string( $frame['mtime'] ?? null ) ) {
-			$path = $this->target() . '/' . $dir;
-			chmod( $path, FileMode::to_posix_permissions( $frame['mode'] ) & 0777 );
-			touch( $path, Rfc3339::parse( $frame['mtime'] )[0] );
+	private function plan_node( Node $node, string $relative ): void {
+		if ( '' !== $node->error ) {
+			throw new FormatException( 'A selected snapshot entry records a backup error.' );
 		}
-		array_pop( $stack );
-		$this->state['stack'] = $stack;
+		Rfc3339::parse( $node->mtime );
+		$size    = 0;
+		$content = NodeType::File === $node->type ? ( $node->content ?? [] ) : [];
+		foreach ( $content as $number => $id ) {
+			$entry = $this->current_index()->find( $id, BlobType::Data )?->entry;
+			if ( null === $entry || $entry->length < Cipher::OVERHEAD || $entry->length > RabinChunker::MAX_SIZE + Cipher::OVERHEAD || $entry->uncompressed_length > RabinChunker::MAX_SIZE ) {
+				throw new FormatException( 'A selected file references an absent or oversized blob.' );
+			}
+			$size = self::add( $size, 0 === $entry->uncompressed_length ? $entry->length - Cipher::OVERHEAD : $entry->uncompressed_length );
+			$this->throttle?->pause();
+			if ( 0 === $number % 128 ) {
+				$this->keep_lock();
+			}
+		}
+		if ( NodeType::File === $node->type && $size !== $node->size ) {
+			throw new FormatException( 'A selected file size does not match its indexed content.' );
+		}
+		// No lease callback may publish partially counted entries above this boundary.
+		if ( in_array( '/' . $relative, $this->state->selection->paths, true ) ) {
+			$this->state->found[] = '/' . $relative;
+		}
+		$this->state->planned_entries = self::add( $this->state->planned_entries, 1 );
+		if ( NodeType::File === $node->type ) {
+			$this->state->planned_files = self::add( $this->state->planned_files, 1 );
+			$this->state->planned_bytes = self::add( $this->state->planned_bytes, $size );
+		}
 	}
 
 	/**
-	 * Pushes a directory frame.
+	 * Finishes preflight before writing; completion checks actual bytes against the plan.
 	 *
-	 * @param string $tree     Tree ID.
-	 * @param string $relative Relative path.
-	 * @param Node   $node     Directory node.
+	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	private function push( string $tree, string $relative, Node $node ): void {
-		$stack                = $this->stack();
-		$stack[]              = [
-			'tree'  => $tree,
-			'dir'   => GoQuote::quote( $relative ),
-			'next'  => 0,
-			'only'  => null,
-			'mode'  => $node->mode,
-			'mtime' => $node->mtime,
+	private function finish_pass(): void {
+		if ( 'plan' === $this->state->phase ) {
+			if ( [] !== array_diff( $this->state->selection->paths, $this->state->found ) ) {
+				throw new InvalidArgument( 'A selected path does not exist in the snapshot.' );
+			}
+			Files::empty_directory( $this->state->target['path'] );
+			$free = ( $this->free_space )( $this->state->target['path'] );
+			// Round each entry up generously and reserve room for the report/checkpoint.
+			$needed = $this->state->planned_bytes + (float) $this->state->planned_entries * 8192 + 16777216;
+			if ( false === $free || ! is_finite( $free ) || $free < $needed ) {
+				throw new FormatException( 'The staging filesystem has insufficient or unknown free space for this restore.' );
+			}
+			$work_free = ( $this->free_space )( $this->state->work['path'] );
+			if ( false === $work_free || ! is_finite( $work_free ) || $work_free < (float) $this->state->planned_entries * 8192 + 16777216 ) {
+				throw new FormatException( 'The working filesystem has insufficient or unknown free space for the restore report.' );
+			}
+			$this->state->phase = 'restore';
+			$this->reset_stack();
+			return;
+		}
+		if ( $this->state->files !== $this->state->planned_files || $this->state->bytes !== $this->state->planned_bytes || null !== $this->state->file || null !== $this->state->creating ) {
+			throw new FormatException( 'The restored payload does not match its planned totals.' );
+		}
+		$this->state->phase = 'complete';
+	}
+
+	/**
+	 * Starts the next traversal from the immutable root tree.
+	 *
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function reset_stack(): void {
+		if ( null === $this->state->tree ) {
+			throw new FormatException( 'The restore has no snapshot tree.' );
+		}
+		$this->state->stack = [
+			[
+				'tree'  => $this->state->tree,
+				'dir'   => '',
+				'next'  => 0,
+				'mode'  => 0,
+				'mtime' => Node::ZERO_TIME,
+			],
 		];
-		$this->state['stack'] = $stack;
 	}
 
 	/**
-	 * Advances the frame at a depth.
-	 *
-	 * @param int $depth Frame depth.
-	 */
-	private function advance_frame( int $depth ): void {
-		$stack                   = $this->stack();
-		$stack[ $depth ]['next'] = Decoded::int( $stack[ $depth ]['next'] ) + 1;
-		$this->state['stack']    = $stack;
-	}
-
-	/**
-	 * Loads a tree once per slice.
+	 * Loads and validates one directory; a different tree evicts the previous one.
 	 *
 	 * @param string $hex Tree ID.
-	 * @return list<Node> Nodes.
+	 * @param string $dir Raw parent path.
+	 * @return list<Node> Validated nodes.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	private function tree( string $hex ): array {
-		if ( ! isset( $this->trees[ $hex ] ) ) {
-			if ( count( $this->trees ) > 64 ) {
-				$this->trees = [];
+	private function tree( string $hex, string $dir ): array {
+		if ( $this->tree_id === $hex && $this->tree_dir === $dir ) {
+			return $this->nodes;
+		}
+		if ( $this->tree_id !== $hex ) {
+			$this->nodes    = [];
+			$this->tree_id  = null;
+			$this->tree_dir = null;
+			$this->nodes    = $this->repository->load_tree( $this->current_index(), Id::from_hex( $hex ) );
+			$this->keep_lock();
+			$this->tree_id = $hex;
+		}
+		$keys = [];
+		foreach ( $this->nodes as $node ) {
+			Names::validate( $node->name, false );
+			$relative = '' === $dir ? $node->name : $dir . '/' . $node->name;
+			if ( ! $this->state->selection->visits( '/' . $relative ) ) {
+				continue;
 			}
-			$this->trees[ $hex ] = $this->repository->load_tree( $this->index, Id::from_hex( $hex ) );
-		}
-		return $this->trees[ $hex ];
-	}
-
-	/**
-	 * Deletes a symlink at a destination so that nothing is written through it.
-	 *
-	 * @param string $path Destination.
-	 */
-	private function remove_link( string $path ): void {
-		if ( is_link( $path ) ) {
-			unlink( $path );
-		}
-	}
-
-	/**
-	 * Rejects names that could escape the restore target.
-	 *
-	 * @param string $name Name from the repository.
-	 * @throws FormatException If the name is unsafe.
-	 */
-	private static function validate_name( string $name ): void {
-		if ( '' === $name || '.' === $name || '..' === $name || str_contains( $name, '/' ) || str_contains( $name, "\0" ) ) {
-			throw new FormatException( 'The snapshot contains an unsafe file name.' );
-		}
-	}
-
-	/**
-	 * Finds a node by name.
-	 *
-	 * @param list<Node> $nodes Nodes.
-	 * @param string     $name  Name.
-	 * @return Node|null Node.
-	 */
-	private static function find( array $nodes, string $name ): ?Node {
-		foreach ( $nodes as $node ) {
-			if ( $node->name === $name ) {
-				return $node;
+			Names::validate( $node->name );
+			if ( strlen( $relative ) > 4095 || substr_count( $relative, '/' ) >= 256 ) {
+				throw new FormatException( 'A selected snapshot path exceeds the restore path limit.' );
 			}
+			$key = Names::key( $node->name );
+			if ( isset( $keys[ $key ] ) ) {
+				throw new FormatException( 'Selected snapshot names collide on the destination filesystem.' );
+			}
+			$keys[ $key ] = true;
 		}
-		return null;
+		$this->tree_dir = $dir;
+		return $this->nodes;
 	}
 
 	/**
-	 * Returns the frame stack.
+	 * Records intent before creating a directory, allowing only that intent to be replayed.
 	 *
-	 * @return list<array<mixed>> Frames.
+	 * @param string $relative Raw relative destination.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	private function stack(): array {
-		return Decoded::arrays( $this->state['stack'] );
-	}
-
-	/**
-	 * Returns the restore target.
-	 *
-	 * @return string Absolute path.
-	 */
-	private function target(): string {
-		return Decoded::string( $this->state['target'] );
-	}
-
-	/**
-	 * Writes the checkpoint atomically.
-	 *
-	 * @throws FormatException If it cannot be written.
-	 */
-	private function persist(): void {
-		$temporary = $this->work_dir . '/restore.json.tmp';
-		if ( false === file_put_contents( $temporary, GoJson::encode( $this->state ) ) || ! rename( $temporary, $this->work_dir . '/restore.json' ) ) {
-			throw new FormatException( 'The restore checkpoint cannot be written.' );
+	private function create_directory( string $relative ): void {
+		$path = Files::destination( $this->state, $relative );
+		if ( null === $this->state->creating ) {
+			if ( Files::exists( $path ) ) {
+				throw new FormatException( 'An unexpected entry exists at a restore destination.' );
+			}
+			$this->state->creating = $relative;
+			Files::persist( $this->state );
+		} elseif ( $this->state->creating !== $relative ) {
+			throw new FormatException( 'The restore directory intent does not match its traversal.' );
 		}
+		if ( ! Files::exists( $path ) && ! mkdir( $path, 0700 ) ) {
+			throw new FormatException( 'A staging directory cannot be created.' );
+		}
+		if ( ( Files::stat( $path )['mode'] & 0170000 ) !== 0040000 ) {
+			throw new FormatException( 'A staging directory was replaced with a link or file.' );
+		}
+		$this->state->creating = null;
+	}
+
+	/**
+	 * Writes one bounded group and checkpoints only fully flushed, authenticated bytes.
+	 *
+	 * @param Node   $node File node.
+	 * @param string $relative Raw relative destination.
+	 * @param int    $depth Traversal frame.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function restore_file( Node $node, string $relative, int $depth ): void {
+		$path   = Files::destination( $this->state, $relative );
+		$cursor = $this->state->file;
+		if ( null === $cursor ) {
+			if ( Files::exists( $path ) ) {
+				throw new FormatException( 'An unexpected entry exists at a restore file destination.' );
+			}
+			$cursor            = [
+				'path'    => $relative,
+				'blob'    => 0,
+				'written' => 0,
+				'dev'     => null,
+				'ino'     => null,
+			];
+			$this->state->file = $cursor;
+			Files::persist( $this->state );
+		}
+		$committed = $cursor['written'];
+		$content   = $node->content ?? [];
+		if ( $cursor['path'] !== $relative || $cursor['blob'] > count( $content ) || $cursor['written'] > $node->size ) {
+			throw new FormatException( 'The restore file cursor does not match its snapshot entry.' );
+		}
+		$handle = Files::open( $path, ! Files::exists( $path ) && null === $cursor['dev'] );
+		try {
+			$stat = Files::regular( $path );
+			if ( null === $cursor['dev'] ) {
+				if ( 0 !== $stat['size'] || 0 !== $cursor['written'] || 0 !== $cursor['blob'] ) {
+					throw new FormatException( 'A new staging file has unexpected content.' );
+				}
+				$cursor['dev']     = $stat['dev'];
+				$cursor['ino']     = $stat['ino'];
+				$this->state->file = $cursor;
+				Files::persist( $this->state );
+			} elseif ( $stat['dev'] !== $cursor['dev'] || $stat['ino'] !== $cursor['ino'] ) {
+				throw new FormatException( 'The partial restore file was replaced.' );
+			}
+			Files::rewind( $handle, $cursor['written'] );
+			if ( $cursor['blob'] < count( $content ) ) {
+				foreach ( BlobBatch::read( $this->repository, $this->current_index(), $content, $cursor['blob'] ) as $number => $plain ) {
+					$this->keep_lock();
+					if ( strlen( $plain ) > $node->size - $cursor['written'] ) {
+						throw new FormatException( 'Restored bytes exceed the snapshot file size.' );
+					}
+					Files::write( $handle, $plain );
+					$cursor['written'] += strlen( $plain );
+					$cursor['blob']     = $number + 1;
+					$this->throttle?->pause();
+				}
+			}
+			Files::flush( $handle );
+		} finally {
+			Files::close( $handle );
+		}
+		$this->state->bytes = self::add( $this->state->bytes, $cursor['written'] - $committed );
+		$this->state->file  = $cursor;
+		Files::persist( $this->state );
+		if ( $cursor['blob'] === count( $content ) ) {
+			if ( $cursor['written'] !== $node->size ) {
+				throw new FormatException( 'The restored file size differs from its snapshot entry.' );
+			}
+			$this->metadata( $path, $node->mode, $node->mtime, false );
+			$this->report( $relative, $node );
+			$this->state->file = null;
+			++$this->state->files;
+			++$this->state->stack[ $depth ]['next'];
+		}
+	}
+
+	/**
+	 * Keeps owner access for later downloads/apply; original metadata remains in the report.
+	 *
+	 * @param string $path Verified destination.
+	 * @param int    $mode Snapshot Go mode.
+	 * @param string $mtime Snapshot timestamp.
+	 * @param bool   $directory Whether this is a directory.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function metadata( string $path, int $mode, string $mtime, bool $directory ): void {
+		$stat = Files::stat( $path );
+		if ( ( $stat['mode'] & 0170000 ) !== ( $directory ? 0040000 : 0100000 ) || ( ! $directory && 1 !== $stat['nlink'] ) ) {
+			throw new FormatException( 'A restored entry was replaced before its metadata was applied.' );
+		}
+		$permissions = ( FileMode::to_posix_permissions( $mode ) & 0777 ) | ( $directory ? 0700 : 0600 );
+		if ( ! chmod( $path, $permissions ) || ! touch( $path, Rfc3339::parse( $mtime )[0] ) ) {
+			throw new FormatException( 'Restored entry metadata cannot be applied.' );
+		}
+	}
+
+	/**
+	 * Removes an uncommitted report suffix once at the beginning of a tick.
+	 *
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function rewind_report(): void {
+		$path = $this->state->work['path'] . '/entries.jsonl';
+		if ( ! Files::exists( $path ) && 0 !== $this->state->report_bytes ) {
+			throw new FormatException( 'The committed restore entry report is missing.' );
+		}
+		$handle = Files::open( $path, ! Files::exists( $path ) );
+		try {
+			Files::rewind( $handle, $this->state->report_bytes );
+		} finally {
+			Files::close( $handle );
+		}
+	}
+
+	/**
+	 * Appends bounded metadata outside the payload, with a checkpointed byte offset.
+	 *
+	 * @param string $relative Original path below the snapshot root.
+	 * @param Node   $node Original node, including skipped link/special-file metadata.
+	 */
+	private function report( string $relative, Node $node ): void {
+		$line   = GoJson::encode(
+			[
+				'path'        => GoQuote::quote( '/' . $relative ),
+				'type'        => $node->type->value,
+				'mode'        => $node->mode,
+				'mtime'       => $node->mtime,
+				'size'        => $node->size,
+				'link_target' => GoQuote::quote( $node->link_target ),
+			]
+		) . "\n";
+		$handle = Files::open( $this->state->work['path'] . '/entries.jsonl' );
+		try {
+			Files::rewind( $handle, $this->state->report_bytes );
+			Files::write( $handle, $line );
+			Files::flush( $handle );
+		} finally {
+			Files::close( $handle );
+		}
+		$this->state->report_bytes = self::add( $this->state->report_bytes, strlen( $line ) );
+	}
+
+	/**
+	 * Returns the index only after prepare() acquired and checked the lease.
+	 *
+	 * @return IndexSet Current index.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private function current_index(): IndexSet {
+		if ( null === $this->index ) {
+			throw new FormatException( 'The restore has no index under its current lock.' );
+		}
+		return $this->index;
+	}
+
+	/**
+	 * Prevents an untrusted total from overflowing into a float.
+	 *
+	 * @param int $left Current nonnegative total.
+	 * @param int $right Nonnegative addition.
+	 * @return int Sum.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private static function add( int $left, int $right ): int {
+		if ( $right < 0 || $left > PHP_INT_MAX - $right ) {
+			throw new FormatException( 'The restore exceeds the supported counter range.' );
+		}
+		return $left + $right;
 	}
 }

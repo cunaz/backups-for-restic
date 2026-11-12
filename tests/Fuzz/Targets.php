@@ -16,6 +16,7 @@ use BackupsForRestic\Backend\RestBackend;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\MasterKey;
 use BackupsForRestic\Engine\Forget\Duration;
+use BackupsForRestic\Engine\Restore\Selection;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Format\Id;
@@ -47,6 +48,23 @@ final class Targets {
 		$cipher  = Vectors::cipher();
 		$packs   = self::packs( $cipher );
 		$targets = [
+
+			new Target(
+				'restore-selection',
+				[ '/', "/a\n/a-b\n/a/child", "/raw-\xff\n/other", "/a\n/a", '/wp-content/uploads/' ],
+				false,
+				static function ( string $input ): void {
+					$selection = new Selection( explode( "\n", $input ) );
+					if ( ( new Selection( $selection->paths ) )->paths !== $selection->paths ) {
+						throw new \LogicException( 'Restore selection normalization must be idempotent.' );
+					}
+					foreach ( $selection->paths as $path ) {
+						if ( ! $selection->visits( $path ) ) {
+							throw new \LogicException( 'A selected path must remain selected after normalization.' );
+						}
+					}
+				}
+			),
 			new Target(
 				'config',
 				[ Vectors::restic( 'config.json' ) ],
