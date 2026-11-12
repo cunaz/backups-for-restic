@@ -84,8 +84,10 @@ All notable changes are documented here. The format follows
   private disk table and compares it in resumable batches.
 - Index downloads and cache reads check the space needed for encrypted input before
   allocating it, so the next index file can be refused with `index_too_large` before
-  decryption exhausts the process. The check checkpoint layout is now version 3; an older
-  in-progress check must be cancelled and started again.
+  decryption exhausts the process. Truncated cache pieces are rebuilt instead of causing
+  repeated capacity refusals, and a zero-byte index is rejected before download.
+  The check checkpoint layout is now version 3; an older in-progress check must be cancelled
+  and started again.
 - The list of everything in the repository takes less than half the memory it took, and
   reading it from the local cache a fifth. Index-only measurements suggest that roughly a
   million stored pieces could fit under a PHP memory limit of 128 MB, depending on the

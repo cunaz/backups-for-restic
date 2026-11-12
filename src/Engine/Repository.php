@@ -246,9 +246,12 @@ final class Repository {
 			if ( null === $length ) {
 				NotFound::raise( 'The index file disappeared from the server.' );
 			}
+			if ( 0 === $length ) {
+				FormatException::raise( 'The index file is empty.', [ 'type' => $type->value ] );
+			}
 			$this->memory->check_index_input( $length );
 		}
-		$sealed = $this->backend->load( $type, $id->hex(), 0, 0 === $length ? null : $length );
+		$sealed = $this->backend->load( $type, $id->hex(), 0, $length );
 		if ( ! Id::of( $sealed )->equals( $id ) ) {
 			FormatException::raise( 'Repository file content does not match its name.', [ 'type' => $type->value ] );
 		}

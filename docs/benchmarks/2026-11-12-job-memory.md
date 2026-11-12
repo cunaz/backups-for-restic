@@ -83,6 +83,12 @@ loads the real WordPress and calls `Cron::tick()` in a fresh PHP process with 12
 job steps, including database dump, file backup, cache, recording and cleanup. A coordinator
 with 512M creates the history but never runs a measured job itself.
 
+The memory matrix installs the site with `BFR_DISABLE_WP_CRON=1`, which sets
+`DISABLE_WP_CRON` in its `wp-config.php`. The coordinator refuses to create jobs unless
+that setting is active. Together with disabled plugin loopback chaining, this prevents
+HTTP setup/job requests from spawning heartbeat ticks outside the measured workers.
+Earlier runs without this setting cannot establish a WordPress memory peak.
+
 The fixture and final repository must pass `restic check --read-data`. All three jobs at
 500k must succeed. At 1M and 2M, a job must either succeed or record the explicit
 `index_too_large` failure; crashes, other failures, changed PHP limits, unexpected check

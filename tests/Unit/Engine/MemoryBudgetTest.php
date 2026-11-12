@@ -17,6 +17,7 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
@@ -148,6 +149,22 @@ final class MemoryBudgetTest extends TestCase {
 		} catch ( IndexTooLarge $error ) {
 			self::assertSame( 10 * self::MIB, $error->context()['input_bytes'] );
 			self::assertSame( 0, $backend->loads['index'] ?? 0 );
+		}
+	}
+
+	public function test_an_index_advertised_as_empty_is_refused_without_an_unbounded_load(): void {
+		$backend    = new CountingBackend();
+		$repository = Repository::initialize( $backend, 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$id         = Id::of( '' );
+		$backend->save( ObjectType::Index, $id->hex(), '' );
+		$repository->limit_memory( new MemoryBudget( self::reserved() + self::SMALLEST_JOB + self::MIB ) );
+
+		try {
+			$repository->load_unpacked( ObjectType::Index, $id );
+			self::fail( 'An empty encrypted index is invalid.' );
+		} catch ( FormatException $error ) {
+			self::assertSame( 'The index file is empty.', $error->getMessage() );
+			self::assertSame( 0, $backend->loads['index'] ?? 0, 'A zero size must not select the whole-object download.' );
 		}
 	}
 

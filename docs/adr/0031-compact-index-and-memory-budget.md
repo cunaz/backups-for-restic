@@ -93,10 +93,13 @@ ends the same way.
 - An accumulated index beyond the budget ends the job with a message an administrator can
   act on. Before an index download, the reserved-memory budget is checked again, and the
   object's advertised size must leave room for four input copies and 2 MiB of allocation
-  overhead. The download is bounded to that size. Cache pieces receive the same input
-  check before reading. This prevents the measured failure while opening the next normal
-  index file. An unusually large decoded pack or compressed object still needs separate
-  allocation/decompression bounds; the input check does not establish those bounds.
+  overhead. A zero-byte index is rejected before download; the download is bounded to a
+  positive advertised size. Cache piece lengths must first fit in the remaining file bytes,
+  so a truncated cache is rebuilt instead of producing a persistent capacity refusal.
+  Complete pieces receive the same input check before reading. This prevents the measured
+  failure while opening the next normal index file. An unusually large decoded pack or
+  compressed object still needs separate allocation/decompression bounds; the input check
+  does not establish those bounds.
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.
 - Prune and check now examine and rewrite index files pack by pack. Per-file summaries are

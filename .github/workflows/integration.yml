@@ -121,6 +121,7 @@ jobs:
       BFR_DB_HOST: 127.0.0.1
       BFR_DB_ADMIN_USER: root
       BFR_DB_ADMIN_PASSWORD: root
+      BFR_DISABLE_WP_CRON: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

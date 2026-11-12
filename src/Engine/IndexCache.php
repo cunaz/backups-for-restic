@@ -179,6 +179,11 @@ final class IndexCache {
 			if ( $length < Cipher::OVERHEAD + self::MARK_BYTES + 4 || $length > self::MAX_PIECE ) {
 				throw new FormatException( 'The cached index is damaged.' );
 			}
+			$stat     = fstat( $handle );
+			$position = ftell( $handle );
+			if ( false === $stat || false === $position || $length > $stat['size'] - $position ) {
+				throw new FormatException( 'The cached index is truncated.' );
+			}
 			$memory?->check_index_input( $length );
 			$sealed = '';
 			for ( $missing = $length; $missing > 0; $missing -= strlen( $part ) ) {

@@ -6,6 +6,7 @@
  * Requires the disposable WordPress, restic and rest-server installed by the integration
  * workflow. Only this fixture producer and coordinator use 512M; every measured tick is
  * a new PHP process with 128M and a complete WordPress bootstrap.
+ * Install the site with BFR_DISABLE_WP_CRON=1 so HTTP requests cannot spawn unmeasured ticks.
  *
  * @package BackupsForRestic\Tests
  */
@@ -28,6 +29,9 @@ use BackupsForRestic\Tests\Support\TestSite;
 $blobs = (int) ( $argv[1] ?? 0 );
 if ( ! in_array( $blobs, [ 500000, 1000000, 2000000 ], true ) || ! TestSite::available() ) {
 	throw new RuntimeException( 'Select a fixture size and install/start the integration test site first.' );
+}
+if ( 'disabled' !== TestSite::php( 'echo defined( "DISABLE_WP_CRON" ) && DISABLE_WP_CRON ? "disabled" : "enabled";' ) ) {
+	throw new RuntimeException( 'Install the benchmark site with BFR_DISABLE_WP_CRON=1 before creating jobs.' );
 }
 $root   = dirname( __DIR__ );
 $report = $root . '/.tools/memory-' . $blobs . '.jsonl';

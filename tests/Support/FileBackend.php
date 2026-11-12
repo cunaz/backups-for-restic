@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Support;
 
 use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Format\Id;
 
@@ -56,8 +57,19 @@ final readonly class FileBackend implements Backend {
 		if ( ! is_dir( dirname( $path ) ) && ! mkdir( dirname( $path ), 0700, true ) ) {
 			throw new \RuntimeException( 'Cannot create a fixture data directory.' );
 		}
-		if ( strlen( $body ) !== file_put_contents( $path, $body ) ) {
-			throw new \RuntimeException( 'Cannot write a complete fixture object.' );
+		$handle = @fopen( $path, 'xb' );
+		if ( false === $handle ) {
+			if ( file_exists( $path ) || is_link( $path ) ) {
+				throw new AlreadyExists( 'A fixture object with this name already exists.' );
+			}
+			throw new \RuntimeException( 'Cannot create a fixture object.' );
+		}
+		try {
+			if ( strlen( $body ) !== fwrite( $handle, $body ) ) {
+				throw new \RuntimeException( 'Cannot write a complete fixture object.' );
+			}
+		} finally {
+			fclose( $handle );
 		}
 	}
 
@@ -107,7 +119,7 @@ final readonly class FileBackend implements Backend {
 		}
 		$files = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $path, \FilesystemIterator::SKIP_DOTS ) );
 		foreach ( $files as $file ) {
-			if ( $file->isFile() && ! $file->isLink() ) {
+			if ( $file->isFile() && ! $file->isLink() && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $file->getFilename() ) ) {
 				yield Id::from_hex( $file->getFilename() )->hex() => $file->getSize();
 			}
 		}
