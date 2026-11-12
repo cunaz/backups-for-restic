@@ -225,11 +225,10 @@ All notable changes are documented here. The format follows
   (`restic forget --host <host> --tag backups-for-restic,site:<hash> --group-by host`).
 - Prune stays safe when requests fail or end at the wrong moment: a tree that was missing
   once is still walked when marking could not start over, so its packs are not taken for
-  unused ones; a request that ends while prune deletes is continued in that phase, and the
-  packs it had planned are deleted, as long as the lock was not lost in between (after a
-  lost lock marking starts over, and packs whose index entries are already gone stay until
-  a full `restic prune`); a start that was interrupted no longer leaves an exclusive lock
-  that blocks every client for 30 minutes.
+  unused ones. An interrupted deletion resumes from its saved plan. After a lock gap, prune
+  checks snapshots and indexes and starts marking over only if they changed; the next pass
+  also finds packs whose index entries were already removed. An interrupted start no
+  longer leaves an exclusive lock that blocks every client for 30 minutes.
 - After the site was connected to an existing repository, the cleanup after each job
   removed the index cache of the repository in use, or left the caches of earlier
   repositories, because it went by a setting that only a newly created repository sets. It
