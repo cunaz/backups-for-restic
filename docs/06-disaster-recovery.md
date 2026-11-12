@@ -246,8 +246,12 @@ the cause is clear.
 
 An error with code `tree_unreadable` can mean that a directory's entry names are duplicated
 or out of order, even when the encrypted data authenticates correctly. The plugin refuses
-that directory because its listing is ambiguous. Use the full restic check below to
-investigate; do not assume that rebuilding the index will repair malformed tree contents.
+that directory because its listing is ambiguous. The full restic check below helps find
+other damage, but restic 0.19.1 does not check this ordering or uniqueness: a clean result
+does not clear this finding. Do not assume that rebuilding the index repairs malformed
+tree contents. Keep automatic deletion paused while investigating and recover from a
+snapshot whose directory listings the plugin accepts; verify the recovered files before
+considering any removal of the affected snapshot.
 
 1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
    snapshots** to *Another computer*, so that this site starts no forget or prune, and pause
@@ -282,11 +286,12 @@ investigate; do not assume that rebuilding the index will repair malformed tree 
    data, that data no longer exists on the site. Only then run
    `restic repair snapshots --forget`: it replaces those snapshots with copies without the
    damaged files and directories, which is a loss that cannot be undone. Check once more.
-6. Only when `restic check --read-data` finds no errors is the repository healthy; the
-   plugin's check reads a sample of the data (2 % by default) and cannot prove that. Then
-   start **Check now** on the dashboard to clear the warning, and set retention back to
-   what it was in step 1. Leave it at *Another computer* if that was your choice or if the
-   server is append-only.
+6. Require both a clean `restic check --read-data` and a clean plugin check before resuming
+   automatic deletion. The full restic check verifies all data; the plugin reads a sample
+   (2 % by default) and also rejects duplicate or unordered tree names, which restic 0.19.1
+   does not report. Start **Check now** on the dashboard and confirm that it clears the
+   error notice. Then set retention back to what it was in step 1. Leave it at *Another
+   computer* if that was your choice or if the server is append-only.
 
 ## Restore drills
 
