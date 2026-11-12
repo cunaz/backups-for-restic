@@ -320,9 +320,34 @@ contents, and this guide provides no automatic lossless repair for that ambiguit
    restic find --tree <tree-id>
    ```
 
-   Repeat for each reported tree. This lists matching paths and snapshots; it does not
-   repair them. `restic cat tree <tree-id>` shows the tree's stored entries for diagnosis.
-   If the cause is unclear, keep the repository unchanged and seek help with that report.
+   Repeat for each reported tree. This identifies candidate snapshots, but restic 0.19.1
+   stops at the first matching path in each snapshot. Do not treat that output as a complete
+   list of affected directories. To inspect the stored entries directly, use
+   `restic cat blob <tree-id>`. Alternatively, `restic cat tree '<snapshot-id>:<path>'`
+   reads the tree at a snapshot path; it does not accept a tree ID.
+
+   Before deciding that data is recovered, inventory every reference to each reported tree.
+   This read-only walk also covers trees reused at several paths:
+
+   ```bash
+   restic snapshots --json
+   restic cat snapshot <snapshot-id>
+   restic cat blob <root-tree-id>
+   ```
+
+   For **every** snapshot in the first output, take its `tree` field from `cat snapshot`
+   as the root tree at `/`. Record a match if this ID is the reported tree ID. Read its
+   `nodes` array with `cat blob`; for each entry whose `type` is `dir`, append its `name`
+   to the current path, record a match if its `subtree` is the reported ID, and read that
+   subtree with `restic cat blob <subtree-id>`. Repeat until every directory entry has been
+   visited. Visit a reused subtree at **each** path, even if its ID was seen before. Keep
+   duplicate names as separate entries, recording their positions in the parent `nodes`
+   array; collapsing them into a map would hide data. Record the snapshot ID with every
+   matching path, including `/` when the snapshot root matches.
+
+   Do not proceed to forgetting snapshots if any tree cannot be read, the inventory is
+   incomplete, or duplicate entries remain unclear. Keep the repository unchanged and seek
+   help with the report. These commands diagnose the contents; they do not repair them.
 2. Preserve the original repository and recovery kit. Recover required files to a separate
    empty directory from unaffected snapshots or another backup, and verify their contents.
    Do not rely on a restore of duplicate entries to preserve every version of a file.
