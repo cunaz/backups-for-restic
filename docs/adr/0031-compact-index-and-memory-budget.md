@@ -49,6 +49,9 @@ ends the same way.
    read from the repository again. The covered index names are compared with the current
    listing before any cached entries are imported. If a file disappeared, the stale
    entries cannot consume the budget of the smaller index that replaced them.
+   A replacement that exceeds the disk cap leaves an older in-limit cache intact, so the
+   next load can reuse its valid coverage and download only newer index files. A cache
+   already larger than the configured cap is removed before loading.
 5. **Index files are decoded pack by pack** (`IndexFile::packs()`). The text is cut into
    the elements of its `packs` list by looking only at quotes, backslashes and brackets.
    What is left, with a placeholder for each element, and each element by itself go through

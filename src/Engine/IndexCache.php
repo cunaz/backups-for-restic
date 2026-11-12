@@ -221,7 +221,10 @@ final class IndexCache {
 				yield $seal( $content );
 			}
 		};
-		if ( ! Files::write_atomic_pieces( $this->directory . '/index.bin', $sealed(), $this->limit ) ) {
+		$file   = $this->directory . '/index.bin';
+		if ( ! Files::write_atomic_pieces( $file, $sealed(), $this->limit ) && ! is_file( $file ) ) {
+			// Preserve an older cache; the next load checks its validity and current coverage.
+			// Only a fresh, empty cache directory needs removing here.
 			$this->clear();
 		}
 	}

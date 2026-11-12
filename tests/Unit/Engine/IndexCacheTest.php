@@ -225,6 +225,24 @@ final class IndexCacheTest extends TestCase {
 		self::assertSame( $expected, self::blobs( ( new IndexCache( $this->directory ) )->load( $this->repository ) ), 'Sealed with another key, the file counts for nothing.' );
 	}
 
+	public function test_a_replacement_over_the_limit_keeps_the_smaller_cache(): void {
+		$this->index_file( 'old', 2, 20 );
+		( new IndexCache( $this->directory ) )->load( $this->repository );
+		$file = $this->directory . '/index.bin';
+		$old  = file_get_contents( $file );
+		self::assertIsString( $old );
+		$cache = new IndexCache( $this->directory, strlen( $old ) );
+		$this->index_file( 'new', 2, 20 );
+		self::assertSame( 80, $cache->load( $this->repository )->count() );
+		self::assertFileExists( $file, 'Refusing a replacement must preserve the useful cache.' );
+		self::assertSame( $old, file_get_contents( $file ) );
+		self::assertSame( [ $file ], glob( $this->directory . '/*' ), 'No refused temporary file remains.' );
+		$this->backend->loads = [];
+
+		self::assertSame( 80, $cache->load( $this->repository )->count() );
+		self::assertSame( 1, $this->backend->loads['index'] ?? 0, 'Only the new index file is downloaded again.' );
+	}
+
 	public function test_a_cache_beyond_its_limit_leaves_no_file_behind(): void {
 		$this->index_file( 'a', 10, 300 );
 		$limited = $this->directory . '/limited';

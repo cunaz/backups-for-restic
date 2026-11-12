@@ -65,8 +65,8 @@ final class Messages {
 				'hint'    => __( 'That protects your backups. Clean up old snapshots from another computer.', 'backups-for-restic' ),
 			],
 			'index_too_large'                => [
-				'message' => __( 'The repository holds more data than the memory of this host lets the plugin handle.', 'backups-for-restic' ),
-				'hint'    => __( 'The list of everything in the repository must fit into PHP\'s memory limit. Ask your host for a higher memory_limit, or use a repository of its own for this site if several sites share this one.', 'backups-for-restic' ),
+				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
+				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),
 			],
 			'quota_exceeded'                 => [
 				'message' => __( 'The repository server has no space left.', 'backups-for-restic' ),
