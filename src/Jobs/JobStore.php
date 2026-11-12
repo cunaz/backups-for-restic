@@ -66,16 +66,13 @@ final class JobStore {
 	 * @param int                  $now     Unix time.
 	 * @param array<string, mixed> $data    Step data the job starts with; never secrets.
 	 * @return Job The new job.
-	 * @throws JobConflict If a job is already active.
+	 * @throws JobConflict If a job is active or an existing document cannot be read.
 	 * @throws StorageFailed If the jobs directory cannot be locked or written.
 	 */
 	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
 		$lock = $this->held ? null : $this->lock();
 		try {
-			$active = $this->active();
-			if ( null !== $active ) {
-				JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
-			}
+			$this->require_idle();
 			$job       = new Job( gmdate( 'Ymd\THis\Z', $now ) . '-' . bin2hex( $this->random->bytes( 3 ) ), $type, $trigger, $now );
 			$job->data = $data;
 			$this->save( $job );
@@ -106,17 +103,14 @@ final class JobStore {
 	 * @param \Closure(): T $change The change.
 	 * @param-immediately-invoked-callable $change
 	 * @return T What the change returns.
-	 * @throws JobConflict If a job is active.
+	 * @throws JobConflict If a job is active or an existing document cannot be read.
 	 * @throws StorageFailed If the jobs directory cannot be locked.
 	 */
 	public function while_idle( \Closure $change ): mixed {
 		$lock       = $this->lock();
 		$this->held = true;
 		try {
-			$active = $this->active();
-			if ( null !== $active ) {
-				JobConflict::raise( 'Another job is still running.', [ 'job' => $active->id ] );
-			}
+			$this->require_idle();
 			return $change();
 		} finally {
 			$this->held = false;
@@ -145,7 +139,7 @@ final class JobStore {
 	 * (request_cancel()) is part of what is loaded.
 	 *
 	 * @param string $id Job ID.
-	 * @return Job|null The job, or null if the ID is unknown or invalid.
+	 * @return Job|null The job, or null if the ID is unknown, invalid, or its document is unreadable.
 	 */
 	public function get( string $id ): ?Job {
 		if ( 1 !== preg_match( self::ID_PATTERN, $id ) ) {
@@ -252,7 +246,8 @@ final class JobStore {
 	}
 
 	/**
-	 * Deletes the oldest finished jobs.
+	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
+	 * know whether its job has finished.
 	 *
 	 * @param int $keep Number of jobs to keep.
 	 * @return int Number of deleted jobs.
@@ -261,12 +256,37 @@ final class JobStore {
 		$deleted = 0;
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null === $job || $job->state->is_terminal() ) {
+			if ( null !== $job && $job->state->is_terminal() ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}
 		}
 		return $deleted;
+	}
+
+	/**
+	 * Requires a store with no active job and no unreadable job document. Called while the
+	 * creation lock holds. An unknown layout cannot prove that a job has finished, even if
+	 * its raw state field looks familiar; no part of that layout is interpreted here.
+	 *
+	 * @throws JobConflict If a job is active or its state cannot be established.
+	 */
+	private function require_idle(): void {
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null === $job && is_file( $this->directory . '/' . $id . '/job.json' ) ) {
+				JobConflict::raise(
+					'A stored job cannot be read by this version of the plugin.',
+					[
+						'job'  => $id,
+						'code' => 'job_unreadable',
+					]
+				);
+			}
+			if ( null !== $job && ! $job->state->is_terminal() ) {
+				JobConflict::raise( 'Another job is still running.', [ 'job' => $id ] );
+			}
+		}
 	}
 
 	/**

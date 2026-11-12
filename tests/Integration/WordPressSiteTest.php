@@ -245,4 +245,123 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 200, $status, $raw );
 		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
+
+	/**
+	 * docs/02-architecture.md §18: options that a newer version of the plugin wrote keep this
+	 * version inert, because it could misread them.
+	 */
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_options_of_a_newer_version_keep_the_plugin_inert(): void {
+		TestSite::idle( 600 );
+		$db     = self::site_database();
+		$select = "SELECT option_value FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'";
+		$stored = $db->rows( $select )[0]['option_value'] ?? null;
+		self::assertSame( '1', $stored, 'The plugin recorded the layout of its options on its first request.' );
+
+		try {
+			$db->execute( "UPDATE wp_options SET option_value = '2' WHERE option_name = 'backups_for_restic_schema_version'" );
+			[ $status, $answer, $raw ] = TestSite::api( 'GET', '/status' );
+			self::assertSame( 404, $status, $raw );
+			self::assertSame( 'rest_no_route', $answer['code'] ?? null, 'No route of the plugin is registered: ' . $raw );
+			TestSite::cron();
+			self::assertSame( '2', $db->rows( $select )[0]['option_value'] ?? null, 'An older version never lowers the number.' );
+		} finally {
+			$db->execute( "UPDATE wp_options SET option_value = '1' WHERE option_name = 'backups_for_restic_schema_version'" );
+		}
+
+		[ $status, , $raw ] = TestSite::api( 'GET', '/status' );
+		self::assertSame( 200, $status, 'With its own layout number the plugin works again: ' . $raw );
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_a_refused_schema_write_keeps_the_plugin_inert_until_it_can_be_recorded(): void {
+		TestSite::idle( 600 );
+		$db     = self::site_database();
+		$filter = TestSite::root() . '/wp-content/mu-plugins/bfr-refuse-schema.php';
+		self::assertFileDoesNotExist( $filter );
+		try {
+			file_put_contents(
+				$filter,
+				'<?php add_filter( "pre_update_option_backups_for_restic_schema_version", static fn ( $value, $old ) => $old, 10, 2 );'
+			);
+			$db->execute( "DELETE FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'" );
+
+			[ $status, $answer, $raw ] = TestSite::api( 'GET', '/status' );
+			self::assertSame( 404, $status, $raw );
+			self::assertSame( 'rest_no_route', $answer['code'] ?? null, $raw );
+			self::assertSame( [], $db->rows( "SELECT option_value FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'" ), 'The refused write did not record the layout.' );
+		} finally {
+			unlink( $filter );
+			TestSite::php( 'update_option( "backups_for_restic_schema_version", 1, true );' );
+		}
+
+		[ $status, , $raw ] = TestSite::api( 'GET', '/status' );
+		self::assertSame( 200, $status, $raw );
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_an_unreadable_job_blocks_new_jobs_and_repository_changes_with_an_explanation(): void {
+		TestSite::idle( 600 );
+		$id = '20990101T000000Z-abcdef';
+		try {
+			TestSite::php(
+				'
+				$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/" . $arguments[0] );
+				$store = $container->jobs();
+				$job = new BackupsForRestic\Jobs\Job( $arguments[1], BackupsForRestic\Jobs\JobType::Backup, "manual", time() );
+				$document = $job->to_array();
+				$document["schema"] = BackupsForRestic\Jobs\Job::SCHEMA + 1;
+				$document["state"] = "succeeded";
+				BackupsForRestic\Storage\Files::write_atomic( $store->directory( $job ) . "/job.json", json_encode( $document ) );
+				',
+				[ TestSite::PLUGIN, $id ]
+			);
+			$requests = [
+				'/jobs'            => [],
+				'/repository/save' => TestSite::connection(),
+			];
+			foreach ( $requests as $route => $body ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'POST', $route, $body );
+				self::assertSame( 409, $status, $raw );
+				self::assertSame( 'backups_for_restic_job_unreadable', $answer['code'] ?? null, $raw );
+				self::assertStringContainsString( 'Install a plugin version', $answer['data']['hint'] ?? '', $raw );
+			}
+		} finally {
+			TestSite::php(
+				'$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/" . $arguments[0] ); BackupsForRestic\Storage\Files::remove_tree( $container->private_dir()->path . "/jobs/" . $arguments[1] );',
+				[ TestSite::PLUGIN, $id ]
+			);
+		}
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_deactivation_leaves_jobs_alone_when_the_options_have_a_newer_layout(): void {
+		TestSite::idle( 600 );
+		$output = TestSite::php(
+			'
+			require_once ABSPATH . "wp-admin/includes/plugin.php";
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/" . $arguments[0] );
+			$store = $container->jobs();
+			$job = $store->create( BackupsForRestic\Jobs\JobType::Backup, "manual", time() );
+			$directory = $store->directory( $job );
+			$before = file_get_contents( $directory . "/job.json" );
+			try {
+				update_option( "backups_for_restic_schema_version", 2, true );
+				deactivate_plugins( $arguments[0] );
+				echo "\nnewer-layout=", json_encode( [
+					$before === file_get_contents( $directory . "/job.json" ),
+					is_file( $directory . "/cancel-requested" ),
+					get_option( "backups_for_restic_schema_version" ),
+					wp_next_scheduled( "backups_for_restic_heartbeat" ),
+				] );
+			} finally {
+				BackupsForRestic\Storage\Files::remove_tree( $directory );
+				update_option( "backups_for_restic_schema_version", 1, true );
+				activate_plugin( $arguments[0] );
+			}
+			',
+			[ TestSite::PLUGIN ]
+		);
+		self::assertStringEndsWith( 'newer-layout=[true,false,2,false]', $output, 'Deactivation unschedules events without reading or changing the job.' );
+	}
 }

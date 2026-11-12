@@ -59,6 +59,7 @@ use BackupsForRestic\Storage\BrowserProbe;
 use BackupsForRestic\Storage\CacheDirectory;
 use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Storage\SchemaVersion;
 use BackupsForRestic\Storage\SiteState;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
@@ -140,6 +141,15 @@ final class Container {
 	 */
 	public function options(): WpOptions {
 		return new WpOptions();
+	}
+
+	/**
+	 * The layout version of the stored options.
+	 *
+	 * @return SchemaVersion Version record.
+	 */
+	public function schema_version(): SchemaVersion {
+		return new SchemaVersion( $this->options() );
 	}
 
 	/**
