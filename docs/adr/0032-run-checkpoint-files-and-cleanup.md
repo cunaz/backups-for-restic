@@ -36,6 +36,11 @@ ended a job could therefore prevent it from releasing its lock.
 - An unreadable or malformed checkpoint, or an invalid run number, authorizes no lock
   deletion. Existing cleanup error handling applies; a lock that cannot be identified or
   whose server cannot be reached eventually becomes stale.
+- Shared recursive cleanup also checks directory listing, unlink and directory removal.
+  A failure raises `StorageFailed` instead of passing silently, including during cache and
+  job-history removal. Symbolic links are removed without following them. Earlier removals
+  are not rolled back. The job runner records a cleanup error and proceeds to the next
+  cleanup step, so a retained local file cannot keep a job active indefinitely.
 
 ## Consequences
 - Local storage failures cannot silently publish missing directory contents and are not
@@ -46,6 +51,8 @@ ended a job could therefore prevent it from releasing its lock.
 - Permission tests, a real partial write induced by a POSIX file-size limit, and job-layer
   regressions cover the failure paths. Cleanup tests keep another run's lock, including
   when an unfamiliar checkpoint names it, and a different host's lock with the same number.
+  Separate filesystem regressions cover refused unlink, directory listing and directory
+  removal; a job-layer test verifies that its lock is already released when removal fails.
 
 ## Alternatives considered
 - **Resume and immediately abort:** repeats the failing plan, index or file operation and

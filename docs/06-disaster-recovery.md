@@ -201,6 +201,16 @@ restic unlock
 
 Lock removal works even on append-only repositories.
 
+A backup of the plugin that is paused between two steps holds a lock as well, and after 30
+minutes without a step restic calls that lock stale. If you remove it and then run `restic
+prune`, the prune deletes what the unfinished backup has uploaded so far, because no
+snapshot uses it yet. The plugin notices this when the backup goes on: it starts the backup
+over, says so in the job's log, and uploads again what is missing. Nothing is lost, the
+backup only takes longer. If this happens more than three times in one backup, the job
+fails with the error `repository_changed`; the next scheduled backup runs normally. To
+avoid it, do not prune from another computer while the dashboard shows a backup in
+progress ([ADR 0030](adr/0030-lock-continuity.md)).
+
 The plugin can release its own run's lock even when an upgrade makes that run's checkpoint
 version unreadable or its saved directory entries are damaged. Cleanup reads the stable
 run number, without loading the repository index or resuming the backup. It does not
@@ -217,6 +227,8 @@ After correcting the cause, start a new backup and confirm that it succeeds. A p
 checkpoint or an unreadable saved directory is refused, so missing bytes cannot silently
 become an empty directory in a successful snapshot. This local failure alone is not a
 reason to repair or prune the repository ([ADR 0032](adr/0032-run-checkpoint-files-and-cleanup.md)).
+Cleanup of a job or an old cache reports the same local storage error if its files cannot
+be removed. The job records the error and continues its remaining cleanup steps.
 
 ## Scenario G — reclaiming space (full prune)
 

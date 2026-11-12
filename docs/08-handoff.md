@@ -1,4 +1,4 @@
-# 08 · Handoff (2026-11-11)
+# 08 · Handoff (2026-11-12)
 
 Where the work stands, what is open, and what whoever continues has to know that the code
 and the other documents do not say. The plan itself is in
@@ -27,29 +27,32 @@ Merged on 2026-11-11, each as its own pull request with a merge commit:
 
 ## 2. Open work, in order
 
-1. **Pull request 10, `feat/lock-continuity`** (ADR 0030, phase 0.3). It changes `Engine`,
-   so the 24-hour rule of ADR 0024 applies: the last commit that touches `src/Engine`,
-   `src/Format` or `src/Crypto` is from 2026-11-10 23:42 UTC, the head is a documents-only
-   commit. Before merging: read the whole diff against `main` once more, check that CI is
+1. **Pull request 10, `feat/lock-continuity`** (ADR 0030, phase 0.3). The owner waived
+   ADR 0024's 24-hour wait for the ongoing completion of this handoff (section 4).
+   Before merging: read the whole diff against `main` once more, check that CI is
    green on the head, and bring `main` in if GitHub reports a conflict (then wait for CI
    again).
-2. **Three branches without a pull request**, cut before most of today's merges and far
-   behind `main`:
-   - `feat/schema-numbers` (phase 0.2),
-   - `feat/prune-unindexed` (phase 0.4),
-   - `feat/compact-index` (phase 0.9, first part).
+2. **Pull requests 26 and 27**, both brought up to `main` and opened on 2026-11-12:
+   - **26, `feat/schema-numbers`** (phase 0.2): option and job layout numbers, inert startup
+     on newer options or a refused first layout write, and deactivation that leaves newer
+     data alone. Review corrections also keep unreadable job documents and block new jobs
+     and repository changes; the user-facing recovery instructions explain the refusal.
+   - **27, `feat/compact-index`** (phase 0.9, first part): compact records, a cache in sealed
+     pieces, pack-by-pack decoding, and a memory budget. The repeated index benchmark is in
+     `docs/benchmarks/2026-11-12-index-memory.md`. Full-job memory measurements and the
+     remaining prune/check data structures are still open.
 
-   Bring each up to `main`, run the checks of section 4, open its pull request. Conflicts
-   are to be expected in `src/Jobs/Backup/BackupSteps.php`, `src/Connection/Setup.php`,
-   `src/Storage/SiteState.php`, `src/WordPress/Container.php`,
-   `src/WordPress/RestRoutes.php`, `src/Engine/Repository.php`, `IndexCache.php`,
-   `BackupRun.php`, `docs/02-architecture.md`, `docs/07-milestone-3-plan.md` and
-   `CHANGELOG.md`. `feat/prune-unindexed` and `feat/compact-index` touch `Engine`: the 24
-   hours count from their last engine commit after the merge of `main`.
-3. **Engine items of phase 0** that have no branch yet: the order of tree entries checked
+   Both require green CI and addressed review findings on their final heads. Incorporate
+   later merges from `main` where needed; in particular, combine the compact index's memory
+   budget with PR 10's deferred index loading without loading an index before its lock.
+3. **`feat/prune-unindexed` has no pull request yet** (phase 0.4). It depends on 0.3: merge
+   PR 10 first, then bring this branch up to `main`, run section 4's checks and open its own
+   pull request. The waiting period is waived for this engine change too; the final reread,
+   green CI and addressed findings remain required.
+4. **Engine items of phase 0** that have no branch yet: the order of tree entries checked
    on reading, the unchecked writes in `BackupRun`, a checkpoint written by another
    version, and the second part of 0.9 (memory with many blobs).
-4. **Phases 1 to 5** of Milestone 3 as planned.
+5. **Phases 1 to 5** of Milestone 3 as planned.
 
 Once a package of phase 0 is merged, mark it in the table of
 [07-milestone-3-plan.md](07-milestone-3-plan.md) §4.
@@ -89,8 +92,10 @@ the ones that are easy to get wrong.
   `Merge <branch> (#<n>): <title>`) and push `main`, only when CI is green on the head of
   the pull request and every review finding is fixed or answered. If the merge needed a
   resolution, check the merge commit itself before pushing.
-- A change to `Crypto`, `Format` or `Engine` waits 24 hours after its last commit and is
-  read again before the merge (ADR 0024).
+- **Owner override, 2026-11-12:** the 24-hour cooling-off period of ADR 0024 is waived for
+  the ongoing completion of the work in this handoff. Read the whole diff again before
+  merging, require green CI on the pull request's head, and fix or answer every review
+  finding. The waiver applies to the waiting period only.
 - Before a push: `vendor/bin/phpcs -q`,
   `vendor/bin/phpstan.phar analyse --no-progress --memory-limit=1G`,
   `vendor/bin/phpunit --testsuite unit` (about four minutes), `npm run lint:js` for

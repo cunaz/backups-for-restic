@@ -45,15 +45,17 @@ final class IndexCache {
 	/**
 	 * Returns the current index of the repository.
 	 *
-	 * @param Repository $repository Open repository.
+	 * @param Repository        $repository Open repository.
+	 * @param list<string>|null $listed     The index files to read the index from, for a caller
+	 *                                      that has to know which they were; all that the
+	 *                                      server lists otherwise.
 	 * @return IndexSet Index.
 	 */
-	public function load( Repository $repository ): IndexSet {
-		$listed = array_map( 'strval', array_keys( $repository->backend()->list( ObjectType::Index ) ) );
-		sort( $listed );
-		$cached  = $this->read( $repository );
-		$index   = new IndexSet();
-		$covered = [];
+	public function load( Repository $repository, ?array $listed = null ): IndexSet {
+		$listed ??= $repository->names( ObjectType::Index );
+		$cached   = $this->read( $repository );
+		$index    = new IndexSet();
+		$covered  = [];
 		if ( null !== $cached && [] === array_diff( $cached[1], $listed ) ) {
 			[ $index, $covered ] = $cached;
 		}

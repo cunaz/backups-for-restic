@@ -115,6 +115,17 @@ All notable changes are documented here. The format follows
 - Job cleanup releases locks by the checkpoint's run number without resuming the engine.
   It works with unknown checkpoint versions and damaged node files, and needs no backup
   plan or repository index. Other hosts' and other runs' locks are kept.
+- Failed recursive cleanup of private working files or caches is reported as a local
+  storage error instead of silently leaving files behind.
+- A backup that was paused for longer than its repository lock lasts could end with a
+  snapshot that referred to data a `restic prune` on another computer had removed in the
+  meantime. The backup now checks after such a pause that everything it relies on is still
+  in the repository, and starts over if not. It does the same when its lock is removed
+  while it works, before it writes an index file or the snapshot. A check starts over
+  instead of reporting as damage what another computer pruned or forgot during its pause.
+- A request that ended at the very start of a backup, check or forget could leave a
+  repository lock that blocked other programs for 30 minutes. Every run now records its
+  number first and removes such a lock itself.
 - Settings that the database refused to store no longer pass for saved: the request answers
   with an error, and saving a server puts back what it had changed. WordPress reports such a
   refusal the same way as an unchanged value, so it went unnoticed before.

@@ -16,13 +16,16 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\SecretsUndecryptable;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Config;
+use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
@@ -79,7 +82,8 @@ final class BackupStepsTest extends TestCase {
 		return Repository::initialize( $this->access()->backend(), self::PASSWORD, new Identity( 'example.com', 'www-data' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
 	}
 
-	private function steps(): BackupSteps {
+	/** @param (\Closure(Job): BackupPlan)|null $plan */
+	private function steps( ?\Closure $plan = null ): BackupSteps {
 		$private = new PrivateDirectory( $this->directory . '/private' );
 		$private->ensure();
 		$record = new RepositoryRecord( new SettingsStore( $this->options ), new SiteState( $this->options ), new FrozenClock() );
@@ -93,7 +97,7 @@ final class BackupStepsTest extends TestCase {
 				new FrozenClock(),
 				new SystemRandom(),
 				new Identity( 'example.com', 'www-data' ),
-				static function ( Job $job ): BackupPlan {
+				$plan ?? static function ( Job $job ): BackupPlan {
 					self::fail( 'Unlocking needs no plan.' );
 				},
 				null,
@@ -170,6 +174,32 @@ final class BackupStepsTest extends TestCase {
 
 		self::assertSame( [ $foreign->hex() ], array_keys( $repository->backend()->list( ObjectType::Locks ) ) );
 		self::assertFileDoesNotExist( $work . '/state.json' );
+	}
+
+	public function test_cleanup_reports_refused_file_removal_after_releasing_its_lock(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root ignores the permissions used to refuse removal.' );
+		}
+		$repository = $this->repository();
+		$job        = $this->unlock( JobType::Backup );
+		$identity   = new Identity( 'example.com', 'www-data' );
+		( new Locking( $repository, $identity, new FrozenClock(), 424242 ) )->acquire( false );
+		$work = $this->jobs->directory( $job ) . '/backup';
+		mkdir( $work );
+		file_put_contents( $work . '/state.json', '{"pid":424242}' );
+		chmod( $work, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$this->steps()->release( $job, $this->jobs->log( $job ), INF );
+			self::fail( 'Refused local cleanup must not pass silently.' );
+		} catch ( StorageFailed $error ) {
+			self::assertSame( 'environment', JobError::from_throwable( $error )->code );
+			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ), 'Local removal happens after the repository lock is released.' );
+			self::assertFileExists( $work . '/state.json' );
+		} finally {
+			restore_error_handler();
+			chmod( $work, 0700 );
+		}
 	}
 
 	public function test_an_entered_password_that_opens_the_repository_becomes_the_repository_password(): void {
@@ -319,6 +349,43 @@ final class BackupStepsTest extends TestCase {
 		self::assertSame( $job->id, $state->get( 'last_backup' )['job'] ?? null, 'The backup is recorded.' );
 		self::assertSame( [ 'bytes' => 42 ], $state->get( 'usage' ) );
 		self::assertStringContainsString( 'The size of the repository could not be read.', (string) file_get_contents( $this->directory . '/private/jobs/' . $job->id . '/events.log' ) );
+	}
+
+	public function test_a_restart_refuses_to_reuse_database_state_that_cannot_be_removed(): void {
+		if ( 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root can remove files from a directory without write permission.' );
+		}
+		$repository = $this->repository();
+		$index      = $repository->save_unpacked( ObjectType::Index, IndexFile::encode( [] ) );
+		$this->unlock();
+		$site = $this->directory . '/site';
+		mkdir( $site );
+		file_put_contents( $site . '/example.txt', 'The backup has work left after its first tick.' );
+		$steps = $this->steps( static fn (): BackupPlan => new BackupPlan( [ $site ] ) );
+		$job   = new Job( '20270115T030100Z-abcdef', JobType::Backup, 'manual', 1_800_000_000 );
+		$log   = $this->jobs->log( $job );
+		self::assertFalse( $steps->back_up( $job, $log, 0.0 ) );
+		$repository->backend()->delete( ObjectType::Index, $index->hex() );
+
+		$directory = $this->jobs->directory( $job );
+		$dump      = BackupServices::dump_state( $this->jobs, $job );
+		$old       = '{"tables":["old_table"]}';
+		file_put_contents( $dump, $old );
+		chmod( $directory, 0500 );
+		// unlink() reports the permission failure before the step can classify it.
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$steps->back_up( $job, $log, 0.0 );
+			self::fail( 'A fresh backup must not reuse the previous database state.' );
+		} catch ( StorageFailed $failure ) {
+			self::assertSame( 'database.json', $failure->context()['file'] ?? null );
+			self::assertSame( $old, file_get_contents( $dump ) );
+			self::assertFileDoesNotExist( $directory . '/backup/state.json', 'The invalid engine run was already abandoned.' );
+			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
+		} finally {
+			restore_error_handler();
+			chmod( $directory, 0700 );
+		}
 	}
 
 	public function test_a_repository_of_format_2_is_refused_without_zstd_and_recorded_for_the_doctor(): void {
