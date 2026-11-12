@@ -7,6 +7,11 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The stored settings and every job carry a layout number, so that later versions can
+  convert them. A version installed over a newer one stays inactive and says so instead of
+  acting on settings it may misread. The plugin also stays inactive if the database refuses
+  to record the first layout number. Unreadable job documents are kept and block new jobs
+  and repository changes until a compatible version can read them.
 - A running backup shows a progress bar and the minutes left, measured against the last
   backup.
 - The dashboard shows how much the repository holds, measured after every backup and

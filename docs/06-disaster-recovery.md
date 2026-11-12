@@ -300,6 +300,32 @@ the cause is clear.
    what it was in step 1. Leave it at *Another computer* if that was your choice or if the
    server is append-only.
 
+## Scenario J — the plugin is inactive after a downgrade
+
+An older plugin can find settings written in a layout it does not understand. It then
+shows an update notice and registers no backup page, REST route, scheduled callback or
+WP-CLI command. No plugin backup or maintenance job runs in this state. Install the version
+that wrote the settings, or a newer version that supports them. Do not lower or delete the
+stored layout number to bypass the refusal: an older version could misread retention
+settings and delete snapshots that should be kept.
+
+Deactivating an incompatible version removes its scheduled events but leaves existing jobs
+and repository locks untouched. Install a compatible version to handle them. Repository
+data and the recovery kit remain usable with restic independently of the plugin; the lock
+guidance in Scenario F still applies.
+
+The options and job documents have separate layout numbers. An unreadable job produces
+`job_unreadable` when a new job or a repository change is requested, even if the options
+are compatible. The plugin keeps every unreadable job document, including one whose raw
+status looks finished, because it cannot safely interpret that status. Install a version
+that can read the job. If that version still refuses it, keep a copy of the private job
+directory when investigating damaged files; do not remove the job just to unblock changes
+while it may still be running.
+
+A different notice says that the first settings layout number could not be saved. Check
+the database's write access and storage availability. The plugin retries recording the
+number on the next request and starts normally once that write succeeds.
+
 ## Restore drills
 
 Quarterly, restore the latest snapshot to a scratch directory on any computer and open the
