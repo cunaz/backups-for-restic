@@ -19,6 +19,9 @@ final class RestoreNamesTest extends TestCase {
 		foreach ( [ 'a\\b', 'a:b', 'file:stream', 'a?b', 'a*b', 'a|b', 'a<b', 'a>b', 'a"b', "a\tb", 'trailing.', 'trailing ', 'CON', 'nul.txt', 'NUL.tar.gz', 'COM1', 'lpt9.backup', 'COM¹.txt', 'LPT²', 'CONIN$', 'conout$', 'CONIN$.txt', 'conout$.log', 'LONGFI~1.TXT', 'custom~alias', "raw\xff" ] as $i => $name ) {
 			yield 'windows-only-' . $i => [ $name, true ];
 		}
+		foreach ( [ ' leading', '  Foo.txt', 'CONIN$ .txt', 'conout$  .log', 'NUL .txt', 'COM1 .log', 'LPT² .bak' ] as $i => $name ) {
+			yield 'windows-spaces-' . $i => [ $name, true ];
+		}
 	}
 
 	#[DataProvider( 'invalid' )]
@@ -28,14 +31,14 @@ final class RestoreNamesTest extends TestCase {
 	}
 
 	public function test_unix_preserves_names_that_are_ordinary_on_that_filesystem(): void {
-		foreach ( [ '0', "latin1-\xe9", 'quote"name', 'a\\b', 'a:b', 'NUL.txt' ] as $name ) {
+		foreach ( [ '0', "latin1-\xe9", 'quote"name', 'a\\b', 'a:b', 'NUL.txt', ' leading', 'CONIN$ .txt' ] as $name ) {
 			Names::validate( $name, false );
 			self::assertSame( $name, Names::key( $name, false ) );
 		}
 	}
 
 	public function test_windows_keeps_unicode_and_detects_case_collisions(): void {
-		foreach ( [ '.htaccess', 'COM10', 'convenient.txt', '日本語.txt', 'ümlaut.txt' ] as $name ) {
+		foreach ( [ '.htaccess', 'COM10', 'convenient.txt', '日本語.txt', 'ümlaut.txt', 'with space.txt', 'CONIN$extra .txt', "\u{3000}leading" ] as $name ) {
 			Names::validate( $name, true );
 		}
 		self::assertSame( Names::key( 'ÜMLAUT.TXT', true ), Names::key( 'ümlaut.txt', true ) );

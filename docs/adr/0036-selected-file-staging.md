@@ -40,12 +40,15 @@ collisions, useful progress, and recovery after a killed request.
   `/a` and `/a/child` cannot make the child a second independent restore.
 - `Names` applies destination rules. Unix retains ordinary raw filename bytes, including
   names that Windows cannot represent. Windows rejects invalid characters, alternate data
-  streams, trailing spaces/dots, invalid Unicode, long components and reserved device
-  names, including superscript COM/LPT digits and the `CONIN$`/`CONOUT$`
+  streams, leading ASCII spaces, trailing spaces/dots, invalid Unicode, long components
+  and reserved device names, including superscript COM/LPT digits and the `CONIN$`/`CONOUT$`
   [console handles](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#consoles).
-  Console names with extensions and names containing `~` are conservatively refused
-  on Windows to avoid DOS short-name aliases. A case-folded key supports collision checks.
+  Device names with spaces before an extension, console names with extensions and names
+  containing `~` are conservatively refused on Windows to avoid device/short-name aliases.
+  A case-folded key supports collision checks.
   These rules follow [Microsoft's filename documentation](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
+  Leading ASCII spaces follow [Microsoft's whitespace rules](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/file-folder-name-whitespace-characters);
+  padded devices follow the conservative [CPython reserved-name check](https://github.com/python/cpython/blob/main/Lib/ntpath.py).
   They are unit-tested without claiming a real Windows filesystem acceptance run.
 - `BlobBatch` groups consecutive, contiguous ranges of the same pack in file order,
   limited to 16 MiB and 128 blobs. Repeated, reordered, separated or cross-pack blobs end
@@ -62,8 +65,12 @@ required fields and integer counters and refuses checkpoints above 4 MiB. Raw pa
 are Go-quoted before JSON encoding.
 
 The first traversal also checks each file's declared size against its indexed data blobs,
-refuses recorded backup errors, and finds every selected path. Free-space checks cover the
-target and work filesystems, with per-entry rounding and a 16 MiB reserve. They are an
+refuses recorded backup errors, and finds every selected path. It counts at most 128 blobs
+per step, persisting the current file path, blob ordinal and accumulated size. A file's
+totals and traversal position advance together only after all its blobs are counted. A
+lease refresh cannot publish a half-counted batch, and an interrupted batch replays from
+its last committed ordinal. Free-space checks cover the target and work filesystems,
+with per-entry rounding and a 16 MiB reserve. They are an
 estimate, not a reservation: every later write is still checked. One decoded tree is cached
 at a time and its names are validated once per path, avoiding a directory-wide scan for
 every file. Index loading checks/refreshes the lease between index documents.
@@ -76,6 +83,9 @@ and cannot silently grow missing bytes with a sparse truncate. This relies on a 
 job-owned directory: PHP has no portable openat/no-follow primitive protecting against
 another local process that controls those directories.
 
+Aborting still attempts repository-lock cleanup if publishing the aborted checkpoint fails;
+even a second cleanup failure cannot replace the original checkpoint error.
+
 `entries.jsonl` stays beside `restore.json`, outside the payload. Each selected node has
 its original path, type, mode, mtime, size and raw link target; every entry is committed
 once. Payload modes strip special bits and retain owner read/write (and directory search)
@@ -85,8 +95,9 @@ on resume; the report is never accumulated in checkpoint memory.
 
 Unit tests resume after each unit, replay creation and write gaps, and cover stale objects,
 replaced destinations, lost/repacked repository state, lock gaps during reads, throttling,
-low disk space, exactly-once report entries and cleanup of unrecorded locks. The conformance
-suite compares restic-created full and selected restores, including raw names and links
+low disk space, exactly-once report entries, bounded/interrupted per-file planning and
+cleanup of unrecorded locks or a failed abort checkpoint. The conformance suite compares
+restic-created full and selected restores, including raw names and links
 represented only in the report, for the current and minimum supported restic versions.
 Final-head CI remains the merge gate.
 

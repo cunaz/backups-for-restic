@@ -214,15 +214,27 @@ final class RestoreRun {
 
 	/**
 	 * Ends the run and releases even a lock left by a killed acquire/refresh. No index needed.
+	 *
+	 * @throws \Throwable Preserves a failed abort checkpoint even if lock cleanup fails too.
 	 */
 	public function abort(): void {
 		Files::verify( $this->state->work );
 		$handle = Files::lock( $this->state->work['path'] );
 		try {
 			$this->reload();
-			if ( 'complete' !== $this->state->phase ) {
-				$this->state->phase = 'aborted';
-				Files::persist( $this->state );
+			try {
+				if ( 'complete' !== $this->state->phase ) {
+					$this->state->phase = 'aborted';
+					Files::persist( $this->state );
+				}
+			} catch ( \Throwable $error ) {
+				try {
+					$this->release();
+				} catch ( \Throwable ) {
+					// Preserve the failed abort checkpoint; ownership cleanup can be retried.
+					throw $error;
+				}
+				throw $error;
 			}
 			$this->release();
 		} finally {
@@ -372,7 +384,9 @@ final class RestoreRun {
 			return;
 		}
 		if ( 'plan' === $this->state->phase ) {
-			$this->plan_node( $node, $relative );
+			if ( ! $this->plan_node( $node, $relative ) ) {
+				return;
+			}
 		} else {
 			if ( NodeType::File === $node->type ) {
 				$this->restore_file( $node, $relative, $depth );
@@ -405,38 +419,55 @@ final class RestoreRun {
 	 *
 	 * @param Node   $node Selected node.
 	 * @param string $relative Original relative path.
+	 * @return bool Whether this entry has been completely counted.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	private function plan_node( Node $node, string $relative ): void {
+	private function plan_node( Node $node, string $relative ): bool {
 		if ( '' !== $node->error ) {
 			throw new FormatException( 'A selected snapshot entry records a backup error.' );
 		}
 		Rfc3339::parse( $node->mtime );
-		$size    = 0;
+		$cursor  = $this->state->planning ?? [
+			'path'  => $relative,
+			'blob'  => 0,
+			'bytes' => 0,
+		];
 		$content = NodeType::File === $node->type ? ( $node->content ?? [] ) : [];
-		foreach ( $content as $number => $id ) {
-			$entry = $this->current_index()->find( $id, BlobType::Data )?->entry;
+		if ( $cursor['path'] !== $relative || $cursor['blob'] > count( $content ) || $cursor['bytes'] > $node->size || ( null !== $this->state->planning && NodeType::File !== $node->type ) ) {
+			throw new FormatException( 'The restore planning cursor does not match its snapshot entry.' );
+		}
+		$end = min( count( $content ), $cursor['blob'] + BlobBatch::MAX_BLOBS );
+		for ( $number = $cursor['blob']; $number < $end; ++$number ) {
+			$entry = $this->current_index()->find( $content[ $number ], BlobType::Data )?->entry;
 			if ( null === $entry || $entry->length < Cipher::OVERHEAD || $entry->length > RabinChunker::MAX_SIZE + Cipher::OVERHEAD || $entry->uncompressed_length > RabinChunker::MAX_SIZE ) {
 				throw new FormatException( 'A selected file references an absent or oversized blob.' );
 			}
-			$size = self::add( $size, 0 === $entry->uncompressed_length ? $entry->length - Cipher::OVERHEAD : $entry->uncompressed_length );
+			$cursor['bytes'] = self::add( $cursor['bytes'], 0 === $entry->uncompressed_length ? $entry->length - Cipher::OVERHEAD : $entry->uncompressed_length );
+			$cursor['blob']  = $number + 1;
 			$this->throttle?->pause();
-			if ( 0 === $number % 128 ) {
+			if ( 0 === $number % BlobBatch::MAX_BLOBS ) {
 				$this->keep_lock();
 			}
 		}
-		if ( NodeType::File === $node->type && $size !== $node->size ) {
+		$this->keep_lock();
+		if ( $cursor['blob'] < count( $content ) ) {
+			$this->state->planning = $cursor;
+			return false;
+		}
+		if ( NodeType::File === $node->type && $cursor['bytes'] !== $node->size ) {
 			throw new FormatException( 'A selected file size does not match its indexed content.' );
 		}
 		// No lease callback may publish partially counted entries above this boundary.
+		$this->state->planning = null;
 		if ( in_array( '/' . $relative, $this->state->selection->paths, true ) ) {
 			$this->state->found[] = '/' . $relative;
 		}
 		$this->state->planned_entries = self::add( $this->state->planned_entries, 1 );
 		if ( NodeType::File === $node->type ) {
 			$this->state->planned_files = self::add( $this->state->planned_files, 1 );
-			$this->state->planned_bytes = self::add( $this->state->planned_bytes, $size );
+			$this->state->planned_bytes = self::add( $this->state->planned_bytes, $cursor['bytes'] );
 		}
+		return true;
 	}
 
 	/**
@@ -446,6 +477,9 @@ final class RestoreRun {
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
 	private function finish_pass(): void {
+		if ( null !== $this->state->planning ) {
+			throw new FormatException( 'The restore traversal ended with an incomplete planning cursor.' );
+		}
 		if ( 'plan' === $this->state->phase ) {
 			if ( [] !== array_diff( $this->state->selection->paths, $this->state->found ) ) {
 				throw new InvalidArgument( 'A selected path does not exist in the snapshot.' );

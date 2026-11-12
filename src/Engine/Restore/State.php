@@ -21,6 +21,7 @@ defined( 'ABSPATH' ) || exit;
  *
  * @phpstan-type Directory array{path: string, dev: int, ino: int}
  * @phpstan-type Frame array{tree: string, dir: string, next: int, mode: int, mtime: string}
+ * @phpstan-type Planning array{path: string, blob: int, bytes: int}
  * @phpstan-type File array{path: string, blob: int, written: int, dev: int|null, ino: int|null}
  */
 final class State {
@@ -59,6 +60,13 @@ final class State {
 	 * @var list<Frame>
 	 */
 	public array $stack = [];
+
+	/**
+	 * The one file whose indexed blob sizes are still being counted.
+	 *
+	 * @var Planning|null
+	 */
+	public ?array $planning = null;
 
 	/**
 	 * The one partial file, identified before writing content.
@@ -170,6 +178,9 @@ final class State {
 		if ( null !== $this->file ) {
 			$data['file'] = array_replace( $this->file, [ 'path' => GoQuote::quote( $this->file['path'] ) ] );
 		}
+		if ( null !== $this->planning ) {
+			$data['planning'] = array_replace( $this->planning, [ 'path' => GoQuote::quote( $this->planning['path'] ) ] );
+		}
 		$data['creating'] = null === $this->creating ? null : GoQuote::quote( $this->creating );
 		$json             = GoJson::encode( $data );
 		if ( strlen( $json ) > self::MAX_BYTES ) {
@@ -234,6 +245,19 @@ final class State {
 				'mode'  => self::number( $frame, 'mode' ),
 				'mtime' => self::text( $frame, 'mtime' ),
 			];
+		}
+		if ( ! array_key_exists( 'planning', $data ) || ( null !== $data['planning'] && ! is_array( $data['planning'] ) ) ) {
+			throw new FormatException( 'The restore checkpoint has an invalid planning cursor.' );
+		}
+		if ( null !== $data['planning'] ) {
+			$state->planning = [
+				'path'  => GoQuote::unquote( self::text( $data['planning'], 'path' ) ),
+				'blob'  => self::number( $data['planning'], 'blob' ),
+				'bytes' => self::number( $data['planning'], 'bytes' ),
+			];
+			if ( ! in_array( $state->phase, [ 'plan', 'aborted' ], true ) || [] === $state->stack ) {
+				throw new FormatException( 'The restore checkpoint has a planning cursor outside its traversal.' );
+			}
 		}
 		$file = $data['file'] ?? null;
 		if ( null !== $file ) {

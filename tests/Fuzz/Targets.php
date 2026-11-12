@@ -56,12 +56,21 @@ final class Targets {
 				[ '/', "/a\n/a-b\n/a/child", "/raw-\xff\n/other", "/a\n/a", '/wp-content/uploads/' ],
 				false,
 				static function ( string $input ): void {
-					$selection = new Selection( explode( "\n", $input ) );
+					$paths     = explode( "\n", $input );
+					$selection = new Selection( $paths );
 					if ( ( new Selection( $selection->paths ) )->paths !== $selection->paths ) {
 						throw new \LogicException( 'Restore selection normalization must be idempotent.' );
 					}
-					foreach ( $selection->paths as $path ) {
-						if ( ! $selection->visits( $path ) ) {
+					foreach ( $paths as $path ) {
+						$path    = '/' === $path ? '/' : rtrim( $path, '/' );
+						$covered = false;
+						foreach ( $selection->paths as $retained ) {
+							if ( '/' === $retained || $path === $retained || str_starts_with( $path, $retained . '/' ) ) {
+								$covered = true;
+								break;
+							}
+						}
+						if ( ! $covered ) {
 							throw new \LogicException( 'A selected path must remain selected after normalization.' );
 						}
 					}

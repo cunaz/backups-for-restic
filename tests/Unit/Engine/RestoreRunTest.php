@@ -145,6 +145,87 @@ final class RestoreRunTest extends TestCase {
 		self::assertTrue( RestoreRun::resume( $this->repository, $this->work, $this->clock )->advance( 0.0 ) );
 	}
 
+	public function test_a_large_file_is_planned_in_bounded_ticks_without_publishing_partial_totals(): void {
+		$name     = "large-\xe9";
+		$snapshot = $this->snapshot( [ $this->file( $name, 'abc', 300 ) ] );
+		$pauses   = 0;
+		$throttle = new Throttle(
+			0.0,
+			0.0,
+			static fn (): float => 1.0,
+			static function () use ( &$pauses ): void {
+				if ( ++$pauses > 129 ) {
+					throw new \RuntimeException( 'A planning tick exceeded its bounded work.' );
+				}
+			}
+		);
+		$run      = $this->start( $snapshot, [ '/' . $name ], throttle: $throttle );
+		foreach ( [ 128, 256 ] as $blobs ) {
+			$pauses = 0;
+			self::assertFalse( $run->advance( 0.0 ) );
+			self::assertSame( 0, $run->progress()['total_files'] );
+			self::assertSame( 0, $run->progress()['total_bytes'] );
+			self::assertSame( [], TempDir::describe( $this->target ) );
+			$state = Files::read( $this->work );
+			self::assertSame(
+				[
+					'path'  => $name,
+					'blob'  => $blobs,
+					'bytes' => $blobs * 3,
+				],
+				$state->planning
+			);
+			self::assertSame( 0, $state->planned_entries );
+			self::assertSame( [], $state->found );
+			$run = RestoreRun::resume( $this->repository, $this->work, $this->clock, $throttle );
+		}
+		$pauses = 0;
+		self::assertFalse( $run->advance( 0.0 ) );
+		self::assertNull( Files::read( $this->work )->planning );
+		self::assertSame( 1, $run->progress()['total_files'] );
+		self::assertSame( 900, $run->progress()['total_bytes'] );
+		$run = RestoreRun::resume( $this->repository, $this->work, $this->clock );
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( str_repeat( 'abc', 300 ), file_get_contents( $this->target . '/' . $name ) );
+		self::assertSame( 1, $run->progress()['files'] );
+		self::assertSame( 900, $run->progress()['bytes'] );
+	}
+
+	public function test_interrupted_planning_replays_only_the_uncommitted_blob_batch(): void {
+		$run = $this->start( $this->snapshot( [ $this->file( 'large', 'abc', 300 ) ] ) );
+		$run->advance( 0.0 );
+		$before = Files::read( $this->work )->planning;
+		self::assertNotNull( $before );
+		$pauses   = 0;
+		$throttle = new Throttle(
+			0.0,
+			0.0,
+			static fn (): float => 1.0,
+			function () use ( &$pauses ): void {
+				if ( 1 === ++$pauses ) {
+					$this->clock->advance( Locking::REFRESH_AFTER_SECONDS );
+				}
+				if ( 20 === $pauses ) {
+					throw new \RuntimeException( 'Interrupted a later planning batch.' );
+				}
+			}
+		);
+		$run      = RestoreRun::resume( $this->repository, $this->work, $this->clock, $throttle );
+		try {
+			$run->advance( 0.0 );
+			self::fail( 'The interruption must reach the caller.' );
+		} catch ( \RuntimeException $error ) {
+			self::assertSame( 'Interrupted a later planning batch.', $error->getMessage() );
+		}
+		self::assertSame( $before, Files::read( $this->work )->planning );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$run = RestoreRun::resume( $this->repository, $this->work, $this->clock );
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( 1, $run->progress()['total_files'] );
+		self::assertSame( 900, $run->progress()['total_bytes'] );
+		self::assertSame( str_repeat( 'abc', 300 ), file_get_contents( $this->target . '/large' ) );
+	}
+
 	public function test_missing_later_selection_refuses_all_payload_writes(): void {
 		$run = $this->start( $this->repeated_file(), [ '/repeated.txt', '/z-missing' ] );
 		try {
@@ -444,6 +525,46 @@ final class RestoreRunTest extends TestCase {
 		self::assertSame( 'aborted', Files::read( $this->work )->phase );
 		$this->expectException( InvalidArgument::class );
 		$run->advance( INF );
+	}
+
+	/** @return iterable<string, array{bool}> */
+	public static function abort_cleanup(): iterable {
+		yield 'backend available' => [ false ];
+		yield 'backend fails too' => [ true ];
+	}
+
+	#[DataProvider( 'abort_cleanup' )]
+	public function test_abort_attempts_lock_cleanup_when_its_checkpoint_cannot_be_published( bool $fail ): void {
+		$snapshot   = $this->repeated_file();
+		$deletes    = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$fail, &$deletes ): void {
+				if ( 'delete' === $method && ObjectType::Locks === $type ) {
+					++$deletes;
+					if ( $fail ) {
+						throw new \RuntimeException( 'Lock cleanup failed too.' );
+					}
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = $this->start( $snapshot, repository: $repository );
+		$run->advance( 0.0 );
+		mkdir( $this->work . '/restore.json.tmp' );
+		try {
+			$run->abort();
+			self::fail( 'The checkpoint failure must reach the caller.' );
+		} catch ( FormatException $error ) {
+			self::assertStringContainsString( 'not a regular private file', $error->getMessage() );
+		}
+		self::assertGreaterThan( 0, $deletes );
+		self::assertCount( $fail ? 1 : 0, $this->backend->list( ObjectType::Locks ) );
+		rmdir( $this->work . '/restore.json.tmp' );
+		$fail = false;
+		$run->abort();
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		self::assertSame( 'aborted', Files::read( $this->work )->phase );
 	}
 
 	public function test_an_exclusive_repository_lock_blocks_restore_and_remains_owned_by_its_client(): void {
