@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Storage;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\CacheDirectory;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -40,7 +41,7 @@ final class CacheDirectoryTest extends TestCase {
 		self::assertDirectoryExists( $this->root . '/cache/current' );
 	}
 
-	public function test_a_cache_that_could_not_be_removed_is_not_counted(): void {
+	public function test_a_cache_that_could_not_be_removed_is_reported(): void {
 		if ( ! function_exists( 'posix_mkfifo' ) ) {
 			self::markTestSkipped( 'Needs the posix extension for a named pipe.' );
 		}
@@ -52,15 +53,17 @@ final class CacheDirectoryTest extends TestCase {
 		// rmdir() warns about the directory that is not empty.
 		set_error_handler( static fn (): bool => true, E_WARNING );
 		try {
-			$removed = $cache->remove_others( 'current' );
+			$cache->remove_others( 'current' );
+			self::fail( 'Cleanup must report the directory that could not be removed.' );
+		} catch ( StorageFailed $error ) {
+			self::assertSame( 'old-repository', $error->context()['file'] ?? null );
 		} finally {
 			restore_error_handler();
 			unlink( $stuck );
 		}
 
-		self::assertSame( 1, $removed, 'Only the cache that is gone counts.' );
 		self::assertDirectoryExists( $this->root . '/cache/old-repository' );
-		self::assertDirectoryDoesNotExist( $this->root . '/cache/older-repository' );
+		self::assertDirectoryExists( $this->root . '/cache/current' );
 	}
 
 	public function test_clears_everything(): void {

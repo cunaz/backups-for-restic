@@ -114,6 +114,16 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Local backup working-file failures now stop the job with an environment error. Refused
+  creation, incomplete writes and failed truncation cannot advance a checkpoint, and an
+  unreadable saved directory cannot silently become empty in a snapshot.
+- Job cleanup releases locks by the checkpoint's run number without resuming the engine.
+  It works with unknown checkpoint versions and damaged node files, and needs no backup
+  plan or repository index. Other hosts' and other runs' locks are kept.
+- Failed recursive cleanup of private working files or caches is reported as a local
+  storage error instead of silently leaving files behind. Other cleanup actions still run,
+  including removal of an unconfirmed password. If the server refuses deletion, retention
+  switches to external even when local cleanup fails.
 - A backup that was paused for longer than its repository lock lasts could end with a
   snapshot that referred to data a `restic prune` on another computer had removed in the
   meantime. The backup now checks after such a pause that everything it relies on is still
