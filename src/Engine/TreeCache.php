@@ -28,6 +28,13 @@ final class TreeCache {
 	private const int MAX_PLAIN_BYTES = 4194304;
 
 	/**
+	 * Whether this instance has enforced its configured limit.
+	 *
+	 * @var bool
+	 */
+	private bool $trimmed = false;
+
+	/**
 	 * Uses a per-repository cache directory.
 	 *
 	 * @param string $directory cache/<repository-id>, shared with IndexCache.
@@ -42,9 +49,15 @@ final class TreeCache {
 	 * @param Repository $repository Repository whose key protects the cache.
 	 * @param Id         $id         Plaintext tree ID.
 	 * @return string|null Tree bytes or a cache miss.
+	 * @throws StorageFailed If the cache directory is unsafe or cannot be trimmed.
 	 */
 	public function read( Repository $repository, Id $id ): ?string {
-		$this->trim();
+		if ( is_link( $this->directory . '/trees' ) ) {
+			throw new StorageFailed( 'The tree cache directory is a symbolic link.' );
+		}
+		if ( ! $this->trimmed ) {
+			$this->trim();
+		}
 		$file = $this->directory . '/trees/' . $id->hex() . '.bin';
 		if ( is_link( $file ) || ! is_file( $file ) ) {
 			return null;
@@ -103,6 +116,7 @@ final class TreeCache {
 			throw new StorageFailed( 'The tree cache directory is a symbolic link.' );
 		}
 		if ( ! is_dir( $directory ) ) {
+			$this->trimmed = true;
 			return;
 		}
 		try {
@@ -129,6 +143,7 @@ final class TreeCache {
 		} catch ( \UnexpectedValueException | \RuntimeException $error ) {
 			StorageFailed::raise( 'The tree cache could not be measured or trimmed.', [], $error );
 		}
+		$this->trimmed = true;
 	}
 
 	/**

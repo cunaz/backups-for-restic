@@ -42,9 +42,10 @@ final class SnapshotReaderTest extends TestCase {
 	private BlobStore $store;
 	private FrozenClock $clock;
 	private string $cache;
-	private bool $reading     = false;
-	private int $read_seconds = 0;
-	private int $lock_writes  = 0;
+	private bool $reading         = false;
+	private int $read_seconds     = 0;
+	private int $snapshot_seconds = 0;
+	private int $lock_writes      = 0;
 
 	protected function setUp(): void {
 		$this->backend    = new InMemoryBackend();
@@ -59,6 +60,9 @@ final class SnapshotReaderTest extends TestCase {
 					self::assertContains( $method, [ 'list', 'load' ], 'Browsing must never mutate repository data.' );
 					if ( 'load' === $method && ObjectType::Data === $type ) {
 						$this->clock->seconds += $this->read_seconds;
+					}
+					if ( 'load' === $method && ObjectType::Snapshots === $type ) {
+						$this->clock->seconds += $this->snapshot_seconds;
 					}
 				}
 			}
@@ -137,7 +141,32 @@ final class SnapshotReaderTest extends TestCase {
 		self::assertSame( [], $this->backend->objects['locks'] );
 	}
 
-	public function test_directory_browsing_preserves_raw_names_and_shows_links_without_following_them(): void {
+	public function test_snapshot_enumeration_refreshes_its_lock_even_for_excluded_sites(): void {
+		$tree = $this->tree( [] );
+		$tags = [ 'backups-for-restic', 'site:0123456789ab' ];
+		for ( $i = 0; $i < 12; ++$i ) {
+			$this->snapshot( $tree, $tags, 'other.example.com' );
+		}
+		$wanted                 = $this->snapshot( $tree, $tags );
+		$this->snapshot_seconds = 180;
+
+		self::assertSame( [ $wanted->hex() ], array_keys( $this->reader()->snapshots( 'example.com', $tags ) ) );
+		self::assertGreaterThan( 1, $this->lock_writes, 'A read longer than the lease refreshes the lock between snapshots, including those filtered out.' );
+		self::assertSame( [], $this->backend->objects['locks'] );
+	}
+
+	public function test_a_single_snapshot_read_that_outlasts_the_lease_is_refused(): void {
+		$this->snapshot( $this->tree( [] ) );
+		$this->snapshot_seconds = Locking::TRUSTED_SECONDS + 1;
+		try {
+			$this->reader()->snapshots();
+			self::fail( 'A lapse during one snapshot read must not return a stale result.' );
+		} catch ( LockConflict ) {
+			self::assertSame( [], $this->backend->objects['locks'] );
+		}
+	}
+
+	public function test_directory_browsing_preserves_raw_names_and_displays_links(): void {
 		$leaf     = $this->tree( [ new Node( '0', NodeType::File, content: [] ), new Node( "raw\xff", NodeType::File, content: [] ) ] );
 		$root     = $this->tree( [ new Node( 'dir', NodeType::Dir, subtree: $leaf ), new Node( 'link', NodeType::Symlink, link_target: '/dir' ) ] );
 		$snapshot = $this->snapshot( $root );
@@ -145,6 +174,13 @@ final class SnapshotReaderTest extends TestCase {
 
 		self::assertSame( [ '0', "raw\xff" ], array_map( static fn ( Node $node ): string => $node->name, $reader->directory( $snapshot, '/dir/' ) ) );
 		self::assertSame( NodeType::Symlink, $reader->directory( $snapshot )[1]->type );
+	}
+
+	public function test_directory_browsing_refuses_to_follow_a_link(): void {
+		$leaf     = $this->tree( [] );
+		$root     = $this->tree( [ new Node( 'dir', NodeType::Dir, subtree: $leaf ), new Node( 'link', NodeType::Symlink, link_target: '/dir' ) ] );
+		$snapshot = $this->snapshot( $root );
+		$reader   = $this->reader();
 		try {
 			$reader->directory( $snapshot, '/link' );
 			self::fail( 'A link must not be followed.' );

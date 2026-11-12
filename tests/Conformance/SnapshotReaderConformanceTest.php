@@ -22,7 +22,30 @@ use BackupsForRestic\Tests\Support\Vectors;
 
 final class SnapshotReaderConformanceTest extends TestCase {
 
-	public function test_browses_directories_and_a_legacy_manifest_written_by_restic(): void {
+	public function test_browses_directories_written_by_restic(): void {
+		$this->with_restic_snapshot(
+			static function ( Reader $reader, Id $id, string $site ): void {
+				$nodes = $reader->directory( $id, $site . '/nested' );
+				self::assertCount( 1, $nodes );
+				self::assertSame( 'quote " and ü.txt', $nodes[0]->name );
+				self::assertSame( 5, $nodes[0]->size );
+				self::assertSame( NodeType::Symlink, $reader->directory( $id, $site )[0]->type );
+			}
+		);
+	}
+
+	public function test_reads_a_legacy_manifest_written_by_restic(): void {
+		$this->with_restic_snapshot(
+			static function ( Reader $reader, Id $id, string $site, string $manifest ): void {
+				$read = $reader->manifest( $id );
+				self::assertSame( $site . '/spool/manifest.json', $read['path'] ?? null );
+				self::assertSame( json_decode( $manifest, true, 64, JSON_THROW_ON_ERROR ), $read['data'] ?? null );
+			}
+		);
+	}
+
+	/** @param \Closure(Reader, Id, string, string): void $check Behaviour verified against the fixture. */
+	private function with_restic_snapshot( \Closure $check ): void {
 		if ( ! RestServer::available() ) {
 			self::markTestSkipped( 'The restic and rest-server conformance tools are required.' );
 		}
@@ -45,15 +68,7 @@ final class SnapshotReaderConformanceTest extends TestCase {
 			self::assertCount( 1, $snapshots );
 			$name = array_key_first( $snapshots );
 			self::assertIsString( $name );
-			$id    = Id::from_hex( $name );
-			$nodes = $reader->directory( $id, $site . '/nested' );
-			self::assertCount( 1, $nodes );
-			self::assertSame( 'quote " and ü.txt', $nodes[0]->name );
-			self::assertSame( 5, $nodes[0]->size );
-			self::assertSame( NodeType::Symlink, $reader->directory( $id, $site )[0]->type );
-			$read = $reader->manifest( $id );
-			self::assertSame( $site . '/spool/manifest.json', $read['path'] ?? null );
-			self::assertSame( json_decode( $manifest, true, 64, JSON_THROW_ON_ERROR ), $read['data'] ?? null );
+			$check( $reader, Id::from_hex( $name ), $site, $manifest );
 			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
 			self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
 		} finally {

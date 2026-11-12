@@ -81,8 +81,8 @@ final class Reader {
 	public function snapshots( ?string $hostname = null, array $tags = [] ): array {
 		return $this->locked(
 			function () use ( $hostname, $tags ): array {
-				return array_filter(
-					$this->repository->snapshots(),
+				return $this->repository->snapshots(
+					$this->keep_lock,
 					static fn ( Snapshot $snapshot ): bool => ( null === $hostname || $snapshot->hostname === $hostname ) && $snapshot->has_tags( $tags )
 				);
 			}

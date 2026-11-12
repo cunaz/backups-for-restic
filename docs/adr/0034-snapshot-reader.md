@@ -14,7 +14,9 @@ retain a stale in-memory index between requests or write plaintext site metadata
   and releases it in `finally`. It lists snapshots by an optional host and required tags,
   loads individual snapshot metadata, reads a directory by path and reads the site
   manifest. The index is loaded only on demand, after the lock, and discarded before the
-  lock is released. Longer walks refresh the lock after five minutes; a read that crosses
+  lock is released. Snapshot enumeration checks the lock around each metadata read and
+  filters the host and tags before retaining snapshots for sorting. Longer walks refresh
+  the lock after five minutes; a read that crosses
   the lock's trust interval is refused and must be retried from the beginning. No operation
   changes snapshots, indexes or data packs.
 - Paths name entries inside the snapshot, never paths on the live filesystem. They must
@@ -25,7 +27,10 @@ retain a stale in-memory index between requests or write plaintext site metadata
   repository key. Every cache hit authenticates the ciphertext and verifies the plaintext
   hash. Corruption is a cache miss. Trees larger than 4 MiB are not cached. Published tree
   and index files share `advanced.cache_limit_mib`; index bytes take priority, and either
-  writer evicts trees as needed. Temporary ciphertext can require additional disk space
+  writer evicts trees as needed. A reader enforces a reduced limit on its first read;
+  further cache hits in that instance do not rescan the directory. File authentication,
+  size checks and symbolic-directory refusal still apply to each read.
+  Temporary ciphertext can require additional disk space
   during replacement, as for the existing index cache.
 - New backup plans add a `backups-for-restic-manifest:<base64 path>` tag, naming the
   manifest's absolute path inside that snapshot. The tag is part of the encrypted snapshot.

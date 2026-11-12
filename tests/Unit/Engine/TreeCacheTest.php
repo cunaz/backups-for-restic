@@ -45,7 +45,7 @@ final class TreeCacheTest extends TestCase {
 		return $this->directory . '/trees/' . $id->hex() . '.bin';
 	}
 
-	public function test_only_private_ciphertext_is_kept_and_each_read_authenticates_it(): void {
+	public function test_only_private_ciphertext_is_kept(): void {
 		$plain     = $this->plain();
 		$id        = Id::of( $plain );
 		$cache     = new TreeCache( $this->directory, 4096 );
@@ -61,10 +61,37 @@ final class TreeCacheTest extends TestCase {
 		self::assertStringNotContainsString( 'private-name', $sealed );
 		self::assertSame( $plain, $this->repository->cipher()->open( $sealed ) );
 		self::assertSame( $plain, $cache->read( $this->repository, $id ) );
+	}
+
+	public function test_each_read_authenticates_the_cached_ciphertext(): void {
+		$plain = $this->plain();
+		$id    = Id::of( $plain );
+		$cache = new TreeCache( $this->directory, 4096 );
+		$cache->write( $this->repository, $id, $plain );
+		self::assertSame( $plain, $cache->read( $this->repository, $id ) );
+		$sealed = (string) file_get_contents( $this->file( $id ) );
 
 		$sealed[20] = chr( ord( $sealed[20] ) ^ 1 );
 		file_put_contents( $this->file( $id ), $sealed );
 		self::assertNull( $cache->read( $this->repository, $id ) );
+	}
+
+	public function test_cached_reads_after_the_first_do_not_require_enumerating_the_directory(): void {
+		$plain = $this->plain();
+		$id    = Id::of( $plain );
+		( new TreeCache( $this->directory, 4096 ) )->write( $this->repository, $id, $plain );
+		$cache = new TreeCache( $this->directory, 4096 );
+		self::assertSame( $plain, $cache->read( $this->repository, $id ) );
+		$trees = $this->directory . '/trees';
+		chmod( $trees, 0100 );
+		try {
+			if ( is_readable( $trees ) ) {
+				self::markTestSkipped( 'This user bypasses directory read permissions.' );
+			}
+			self::assertSame( $plain, $cache->read( $this->repository, $id ), 'The known file remains accessible without listing its directory again.' );
+		} finally {
+			chmod( $trees, 0700 );
+		}
 	}
 
 	public function test_a_valid_ciphertext_with_the_wrong_tree_id_is_a_cache_miss(): void {
@@ -72,6 +99,18 @@ final class TreeCacheTest extends TestCase {
 		$cache = new TreeCache( $this->directory );
 		$cache->write( $this->repository, $id, $this->plain( 'other-tree' ) );
 		self::assertNull( $cache->read( $this->repository, $id ) );
+	}
+
+	public function test_a_later_read_still_refuses_a_symbolic_cache_directory(): void {
+		$plain = $this->plain();
+		$id    = Id::of( $plain );
+		$cache = new TreeCache( $this->directory, 4096 );
+		$cache->write( $this->repository, $id, $plain );
+		self::assertSame( $plain, $cache->read( $this->repository, $id ) );
+		rename( $this->directory . '/trees', $this->directory . '/retained' );
+		symlink( $this->directory . '/retained', $this->directory . '/trees' );
+		$this->expectException( StorageFailed::class );
+		$cache->read( $this->repository, $id );
 	}
 
 	public function test_trees_share_the_budget_with_the_published_index(): void {
