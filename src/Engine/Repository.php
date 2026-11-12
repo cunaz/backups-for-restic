@@ -17,7 +17,9 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\Scrypt;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Exception\AlreadyExists;
+use BackupsForRestic\Exception\AuthenticationFailed;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\CryptoException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\NotFound;
@@ -242,14 +244,48 @@ final class Repository {
 	}
 
 	/**
-	 * Loads all index files.
+	 * Lists the files of a type.
 	 *
+	 * @param ObjectType $type Type of the files.
+	 * @return list<string> Hex names in order.
+	 */
+	public function names( ObjectType $type ): array {
+		$names = array_map( 'strval', array_keys( $this->backend->list( $type ) ) );
+		sort( $names, SORT_STRING );
+		return $names;
+	}
+
+	/**
+	 * Tells which of some files the server no longer lists.
+	 *
+	 * @param ObjectType   $type  Type of the files.
+	 * @param list<string> $names Hex names.
+	 * @return list<string> The names that are gone; nothing is requested for an empty list.
+	 */
+	public function missing( ObjectType $type, array $names ): array {
+		if ( [] === $names ) {
+			return [];
+		}
+		return array_values( array_diff( $names, $this->names( $type ) ) );
+	}
+
+	/**
+	 * Loads index files.
+	 *
+	 * @param list<string>|null $names The index files to read, for a caller that has to know
+	 *                                 which they were; all that the server lists otherwise, in
+	 *                                 the order of its listing.
 	 * @return IndexSet Merged index.
+	 * @throws BackendException If an index file disappears or a server request fails.
+	 * @throws AuthenticationFailed If an index file does not authenticate.
+	 * @throws CryptoException If an index file cannot be decrypted.
+	 * @throws FormatException If an index file is malformed or does not match its name.
+	 * @throws UnsupportedRepository If an index file needs unavailable decompression.
 	 * @throws IndexTooLarge If the index does not fit into the memory budget.
 	 */
-	public function load_index(): IndexSet {
+	public function load_index( ?array $names = null ): IndexSet {
 		$index = new IndexSet();
-		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+		foreach ( $names ?? array_map( 'strval', array_keys( $this->backend->list( ObjectType::Index ) ) ) as $name ) {
 			foreach ( IndexFile::packs( $this->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
 				$this->memory?->check_index();

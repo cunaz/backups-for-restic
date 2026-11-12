@@ -119,8 +119,9 @@ other hand, assume a server you control. This plugin closes the gap:
 | restic CLI | not needed on the server; to restore on another computer, restic 0.16.1 or newer, which the recovery kit's commands need (the repository format itself is readable since 0.9) | current release |
 
 The merged repository index also has to fit in PHP's memory limit alongside WordPress and
-the backup buffers. The plugin checks this budget while loading the index and stops with
-`index_too_large` when too little memory remains. Backups can reduce their pack size, down
+the backup buffers. The plugin checks the accumulated index budget after each decoded pack
+and stops with `index_too_large` when too little memory remains. A single large index file
+or pack can still exhaust PHP memory before that check. Backups can reduce their pack size, down
 to 4 MiB, and record the reduction in the job log. This helps the buffers fit; it does not
 remove the index's memory cost. See [memory-limit recovery](docs/06-disaster-recovery.md#index-memory-limit).
 

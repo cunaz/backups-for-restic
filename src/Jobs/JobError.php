@@ -23,6 +23,7 @@ use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\QuotaExceeded;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\Unauthorized;
@@ -65,6 +66,7 @@ final readonly class JobError {
 			$error instanceof CryptoException       => 'authentication_failed',
 			$error instanceof UnsupportedRepository => 'repository_unsupported_version',
 			$error instanceof LockConflict          => 'repository_locked',
+			$error instanceof RepositoryChanged     => 'repository_changed',
 			$error instanceof AppendOnlyRefused     => 'repository_append_only',
 			$error instanceof IndexTooLarge         => 'index_too_large',
 			$error instanceof QuotaExceeded         => 'quota_exceeded',

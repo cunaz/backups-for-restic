@@ -242,6 +242,7 @@ final class MemoryBudgetTest extends TestCase {
 
 		$this->cleanup[] = $work = TempDir::create( 'budget-work' );
 		$run             = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $work . '/run', $identity, new SystemClock(), null, 16 * self::MIB );
+		self::assertFalse( $run->advance( 0.0 ), 'The first tick takes the lock and then chooses the pack size.' );
 		self::assertLessThan( 7 * self::MIB, $run->pack_size() );
 		self::assertGreaterThan( MemoryBudget::SMALLEST_PACK - 1, $run->pack_size() );
 		while ( ! $run->advance( INF ) ) {

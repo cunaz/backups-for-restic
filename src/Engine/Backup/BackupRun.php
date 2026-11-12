@@ -12,12 +12,14 @@ namespace BackupsForRestic\Engine\Backup;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Engine\BlobStore;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
-use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\ChunkReader;
 use BackupsForRestic\Format\Chunker\RabinChunker;
@@ -56,10 +58,23 @@ defined( 'ABSPATH' ) || exit;
  *
  * File names are arbitrary bytes, so the checkpoint stores names and paths Go-quoted, which is
  * lossless and valid JSON.
+ *
+ * Until the snapshot is written, nothing in the repository protects what the run uploaded or
+ * the older blobs it reuses; only its lock keeps other clients from removing them. The run
+ * therefore keeps a record of what it relies on: the index files it has read its index from
+ * or written itself, and the packs it uploaded that no index file lists yet. It makes sure
+ * of its lock at the start of every call, before it reads the index, and again before it
+ * writes an index file or the snapshot. If the lock is gone or too old, it takes the lock
+ * again and checks that everything on the record is still there; if not, the run is given
+ * up, because a snapshot built on it could refer to data that is gone (ADR 0030).
+ *
+ * start() only writes the checkpoint with the run's number; the first advance() takes the
+ * lock. A request that ends between writing a lock and recording it therefore leaves a lock
+ * that the run still recognises as its own.
  */
 final class BackupRun {
 
-	private const int STATE_VERSION          = 1;
+	private const int STATE_VERSION          = 2;
 	private const int INDEX_INTERVAL_SECONDS = 600;
 	private const int MAX_WARNINGS           = 50;
 
@@ -71,11 +86,11 @@ final class BackupRun {
 	private array $state;
 
 	/**
-	 * Blob writer.
+	 * Blob writer; opened by advance() once the lock holds.
 	 *
-	 * @var BlobStore
+	 * @var BlobStore|null
 	 */
-	private BlobStore $store;
+	private ?BlobStore $store = null;
 
 	/**
 	 * Chunker for the repository polynomial.
@@ -120,57 +135,56 @@ final class BackupRun {
 	private ?Throttle $throttle = null;
 
 	/**
-	 * Index shared with the blob store, which adds uploaded packs to it.
+	 * Index shared with the blob store, which adds uploaded packs to it; loaded with the store.
 	 *
-	 * @var IndexSet
+	 * @var IndexSet|null
 	 */
-	private IndexSet $index;
+	private ?IndexSet $index = null;
 
 	/**
 	 * Creates the run.
 	 *
 	 * @param Repository           $repository Repository.
-	 * @param IndexSet             $index      Index.
 	 * @param BackupPlan           $plan       Plan.
 	 * @param string               $work_dir   Private working directory.
 	 * @param Identity             $identity   Writer identity.
 	 * @param Clock                $clock      Time source.
 	 * @param array<string, mixed> $state      State.
 	 * @param int                  $pack_size  Target pack size.
+	 * @param IndexCache|null      $cache      Local index cache; the index files are read from the server without one.
 	 */
 	private function __construct(
 		private readonly Repository $repository,
-		IndexSet $index,
 		private readonly BackupPlan $plan,
 		private readonly string $work_dir,
 		private readonly Identity $identity,
 		private readonly Clock $clock,
 		array $state,
-		int $pack_size
+		private readonly int $pack_size,
+		private readonly ?IndexCache $cache
 	) {
 		$this->state   = $state;
-		$this->index   = $index;
-		$this->store   = new BlobStore( $repository, $index, $pack_size );
 		$this->chunker = new RabinChunker( $repository->config()->chunker_polynomial );
 		$this->factory = new NodeFactory();
 		$this->locking = new Locking( $repository, $identity, $clock, Decoded::int( $state['pid'] ?? 0 ) );
 	}
 
 	/**
-	 * Starts a backup.
+	 * Starts a backup: writes the checkpoint with the run's number. Nothing is sent to the
+	 * server yet; the first advance() takes the lock and reads the index.
 	 *
-	 * @param Repository    $repository Repository.
-	 * @param BackupPlan    $plan       Plan.
-	 * @param string        $work_dir   Empty private directory for the checkpoint.
-	 * @param Identity      $identity   Writer identity.
-	 * @param Clock         $clock      Time source.
-	 * @param Id|null       $parent_id  Parent snapshot whose unchanged files are reused.
-	 * @param int           $pack_size Target pack size.
-	 * @param IndexSet|null $index     Current index, for example from the IndexCache; loaded from the server if null.
+	 * @param Repository      $repository Repository.
+	 * @param BackupPlan      $plan       Plan.
+	 * @param string          $work_dir   Empty private directory for the checkpoint.
+	 * @param Identity        $identity   Writer identity.
+	 * @param Clock           $clock      Time source.
+	 * @param Id|null         $parent_id  Parent snapshot whose unchanged files are reused.
+	 * @param int             $pack_size  Target pack size.
+	 * @param IndexCache|null $cache      Local index cache; the index files are read from the server without one.
 	 * @return self Run.
 	 * @throws InvalidArgument If the directory already holds a backup.
 	 */
-	public static function start( Repository $repository, BackupPlan $plan, string $work_dir, Identity $identity, Clock $clock, ?Id $parent_id = null, int $pack_size = BlobStore::DEFAULT_PACK_SIZE, ?IndexSet $index = null ): self {
+	public static function start( Repository $repository, BackupPlan $plan, string $work_dir, Identity $identity, Clock $clock, ?Id $parent_id = null, int $pack_size = BlobStore::DEFAULT_PACK_SIZE, ?IndexCache $cache = null ): self {
 		if ( ! is_dir( $work_dir ) && ! mkdir( $work_dir, 0700, true ) ) {
 			throw new InvalidArgument( 'The working directory cannot be created.' );
 		}
@@ -188,11 +202,13 @@ final class BackupRun {
 			'pid'              => random_int( 100000, 2147483647 ),
 			'lock'             => '',
 			'locked_at'        => 0,
+			'begun'            => false,
 			'stack'            => [],
 			'sequence'         => 0,
 			'root_tree'        => null,
 			'snapshot'         => null,
 			'unindexed'        => [],
+			'index_files'      => [],
 			'stats'            => [],
 			'counters'         => [],
 			'warnings'         => [],
@@ -200,44 +216,25 @@ final class BackupRun {
 			'index_written_at' => $seconds,
 		];
 
-		$run = new self( $repository, $index ?? $repository->load_index(), $plan, $work_dir, $identity, $clock, $state, $pack_size );
-		$run->locking->remove_own_stale();
-		$run->state['lock']      = $run->locking->acquire( false )->hex();
-		$run->state['locked_at'] = $seconds;
-
-		try {
-			$root_tree = null;
-			if ( null !== $parent_id ) {
-				$root_tree = Snapshot::from_json( $repository->load_unpacked( ObjectType::Snapshots, $parent_id ) )->tree->hex();
-			}
-			$run->push_frame( '', 'root', $root_tree, null );
-			$run->persist();
-		} catch ( \Throwable $failure ) {
-			// No checkpoint names the lock yet, so nothing else would ever release it.
-			try {
-				$run->abort();
-			} catch ( PluginException $unreleased ) {
-				unset( $unreleased ); // Stale after 30 minutes; the first failure is the one to report.
-			}
-			throw $failure;
-		}
+		$run = new self( $repository, $plan, $work_dir, $identity, $clock, $state, $pack_size, $cache );
+		$run->persist();
 		return $run;
 	}
 
 	/**
-	 * Continues a backup from its checkpoint.
+	 * Continues a backup from its checkpoint. Nothing is sent to the server here either.
 	 *
-	 * @param Repository    $repository Repository.
-	 * @param BackupPlan    $plan       Plan (rebuilt from the settings).
-	 * @param string        $work_dir   Directory with the checkpoint.
-	 * @param Identity      $identity   Writer identity.
-	 * @param Clock         $clock      Time source.
-	 * @param int           $pack_size Target pack size.
-	 * @param IndexSet|null $index     Current index, for example from the IndexCache; loaded from the server if null.
+	 * @param Repository      $repository Repository.
+	 * @param BackupPlan      $plan       Plan (rebuilt from the settings).
+	 * @param string          $work_dir   Directory with the checkpoint.
+	 * @param Identity        $identity   Writer identity.
+	 * @param Clock           $clock      Time source.
+	 * @param int             $pack_size Target pack size.
+	 * @param IndexCache|null $cache     Local index cache; the index files are read from the server without one.
 	 * @return self Run.
 	 * @throws FormatException If the checkpoint is unusable.
 	 */
-	public static function resume( Repository $repository, BackupPlan $plan, string $work_dir, Identity $identity, Clock $clock, int $pack_size = BlobStore::DEFAULT_PACK_SIZE, ?IndexSet $index = null ): self {
+	public static function resume( Repository $repository, BackupPlan $plan, string $work_dir, Identity $identity, Clock $clock, int $pack_size = BlobStore::DEFAULT_PACK_SIZE, ?IndexCache $cache = null ): self {
 		$json  = @file_get_contents( $work_dir . '/state.json' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A missing checkpoint is reported below.
 		$state = false === $json ? null : GoJson::decode( $json );
 		if ( ! is_array( $state ) || self::STATE_VERSION !== ( $state['version'] ?? null ) ) {
@@ -248,9 +245,7 @@ final class BackupRun {
 		 *
 		 * @var array<string, mixed> $state
 		 */
-		$run = new self( $repository, $index ?? $repository->load_index(), $plan, $work_dir, $identity, $clock, $state, $pack_size );
-		$run->store->import_unindexed( is_array( $state['unindexed'] ?? null ) ? $state['unindexed'] : [] );
-		$run->store->import_stats( is_array( $state['stats'] ?? null ) ? $state['stats'] : [] );
+		$run = new self( $repository, $plan, $work_dir, $identity, $clock, $state, $pack_size, $cache );
 
 		// Drop node lines written after the checkpoint.
 		foreach ( $run->frames() as $frame ) {
@@ -276,6 +271,9 @@ final class BackupRun {
 	 * @param float         $deadline Unix time (microtime(true)) at which to stop.
 	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when the snapshot has been written.
+	 * @throws LockConflict If another client holds an exclusive lock.
+	 * @throws RepositoryChanged If another client removed what the run relied on while it held
+	 *                           no valid lock. The run is given up then; a new one may start.
 	 */
 	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( null !== $this->state['snapshot'] ) {
@@ -283,13 +281,23 @@ final class BackupRun {
 		}
 		$this->deadline = $deadline;
 		$this->throttle = $throttle;
+		// The lock first, the index after it: what the index lists cannot be removed any more.
 		$this->keep_lock();
+		$this->store();
+		if ( true !== $this->state['begun'] ) {
+			$this->begin();
+		}
 
 		// At least one step per slice, so that progress is guaranteed even on a slow host.
 		if ( [] !== $this->frames() ) {
 			do {
 				$this->step();
 				$throttle?->pause();
+				// A long call, such as one without a deadline, must not outlive its lock: a
+				// checkpoint refreshes it.
+				if ( [] !== $this->frames() && $this->locking->due( Decoded::int( $this->state['locked_at'] ) ) ) {
+					$this->checkpoint();
+				}
 			} while ( [] !== $this->frames() && microtime( true ) < $deadline );
 		}
 
@@ -305,8 +313,12 @@ final class BackupRun {
 	 * Releases the lock and deletes the checkpoint of an abandoned backup.
 	 */
 	public function abort(): void {
-		if ( '' !== $this->state['lock'] ) {
-			$this->locking->release( Id::from_hex( Decoded::string( $this->state['lock'] ) ) );
+		if ( null === $this->state['snapshot'] ) {
+			// Also without a recorded lock: a request that ended between writing a lock and
+			// recording it left one that only the run's number identifies.
+			$lock = Decoded::string( $this->state['lock'] );
+			$this->locking->release( '' === $lock ? null : Id::from_hex( $lock ) );
+			$this->state['lock'] = '';
 		}
 		$this->remove_work_files( true );
 	}
@@ -322,12 +334,13 @@ final class BackupRun {
 
 	/**
 	 * Returns the size at which packs are uploaded, which the memory budget may have made
-	 * smaller than the size asked for (ADR 0031).
+	 * smaller than the size asked for (ADR 0031). Before advance() opens the store, this is
+	 * the requested size; querying it does not load the index before the lock is held.
 	 *
 	 * @return int Bytes.
 	 */
 	public function pack_size(): int {
-		return $this->store->pack_size();
+		return $this->store?->pack_size() ?? $this->pack_size;
 	}
 
 	/**
@@ -340,7 +353,7 @@ final class BackupRun {
 		$current = [] === $frames ? '' : GoQuote::unquote( Decoded::string( end( $frames )['path'] ) );
 		return array_merge(
 			$this->counters(),
-			$this->store->stats(),
+			$this->stats(),
 			[
 				'current'  => $current,
 				'warnings' => Decoded::int( $this->state['warning_count'] ),
@@ -468,10 +481,10 @@ final class BackupRun {
 
 		$reader = new ChunkReader( new StreamByteSource( $handle ), $this->chunker );
 		for ( $chunk = $reader->next(); null !== $chunk; $chunk = $reader->next() ) {
-			$content[] = $this->store->save( BlobType::Data, $chunk )->hex();
+			$content[] = $this->store()->save( BlobType::Data, $chunk )->hex();
 			$offset   += strlen( $chunk );
 			$this->throttle?->pause();
-			if ( microtime( true ) >= $this->deadline ) {
+			if ( $this->must_pause() ) {
 				fclose( $handle );
 				$file['offset']  = $offset;
 				$file['content'] = $content;
@@ -521,10 +534,10 @@ final class BackupRun {
 		$reader   = new ChunkReader( $source, $this->chunker );
 		$stopping = false;
 		for ( $chunk = $reader->next(); null !== $chunk; $chunk = $reader->next() ) {
-			$content[] = $this->store->save( BlobType::Data, $chunk )->hex();
+			$content[] = $this->store()->save( BlobType::Data, $chunk )->hex();
 			$size     += strlen( $chunk );
 			$this->throttle?->pause();
-			if ( ! $stopping && $source instanceof ResumableByteSource && microtime( true ) >= $this->deadline ) {
+			if ( ! $stopping && $source instanceof ResumableByteSource && $this->must_pause() ) {
 				$source->stop_at_boundary();
 				$stopping = true;
 			}
@@ -593,7 +606,7 @@ final class BackupRun {
 			$lines = (string) file_get_contents( $this->nodes_file( Decoded::int( $frame['sequence'] ) ), false, null, 0, Decoded::int( $frame['nodes_bytes'] ) );
 		}
 		$nodes = '' === $lines ? [] : explode( "\n", rtrim( $lines, "\n" ) );
-		$tree  = $this->store->save( BlobType::Tree, '{"nodes":[' . implode( ',', $nodes ) . "]}\n" );
+		$tree  = $this->store()->save( BlobType::Tree, '{"nodes":[' . implode( ',', $nodes ) . "]}\n" );
 
 		$stack = $this->frames();
 		array_pop( $stack );
@@ -618,15 +631,25 @@ final class BackupRun {
 	}
 
 	/**
-	 * Uploads remaining data, writes index and snapshot, releases the lock.
+	 * Uploads remaining data, makes sure of the lock, writes index and snapshot, releases the
+	 * lock. The snapshot refers to everything the run relied on, so the lock is looked at once
+	 * more right before: a run that lost it in this very call must not write the snapshot
+	 * before it knows that nothing was removed.
+	 *
+	 * @throws LockConflict If the lock was lost and another client holds an exclusive lock.
+	 * @throws RepositoryChanged If what the run relied on was removed; the run is given up.
 	 */
 	private function finish(): void {
-		$this->store->flush();
-		$this->store->write_index();
+		$store = $this->store();
+		$store->flush();
+		$this->record( $store );
+		$this->persist();
+		$this->keep_lock();
+		$this->write_index( $store );
 
 		[ $seconds, $nanoseconds ] = $this->clock->now();
 		$counters                  = $this->counters();
-		$stats                     = $this->store->stats();
+		$stats                     = $store->stats();
 		$summary                   = new SnapshotSummary(
 			Decoded::string( $this->state['started'] ),
 			Rfc3339::format( $seconds, $nanoseconds ),
@@ -661,51 +684,235 @@ final class BackupRun {
 
 		$this->state['snapshot'] = $this->repository->save_unpacked( ObjectType::Snapshots, $snapshot->to_json() )->hex();
 		$this->locking->release( Id::from_hex( Decoded::string( $this->state['lock'] ) ) );
-		$this->state['lock']      = '';
-		$this->state['unindexed'] = [];
+		$this->state['lock']        = '';
+		$this->state['unindexed']   = [];
+		$this->state['index_files'] = [];
 		$this->persist();
 		$this->remove_work_files( false );
 	}
 
 	/**
-	 * Uploads packs, writes an index file when due and persists the state.
+	 * Uploads packs, makes sure of the lock, writes an index file when due and persists the
+	 * state. The order matters. What was uploaded is recorded before the lock is looked at, so
+	 * that a call that cannot take the lock again loses nothing. And the lock is looked at
+	 * before an index file is written, because an index file must not list packs that another
+	 * client removed while the lock did not hold.
+	 *
+	 * @throws LockConflict If the lock was lost and another client holds an exclusive lock.
+	 * @throws RepositoryChanged If what the run relied on was removed; the run is given up.
 	 */
 	private function checkpoint(): void {
-		$this->store->flush();
-		$now = $this->clock->now()[0];
-		if ( $this->store->unindexed_blob_count() >= IndexFile::MAX_BLOBS || $now - Decoded::int( $this->state['index_written_at'] ) >= self::INDEX_INTERVAL_SECONDS ) {
-			$this->store->write_index();
-			$this->state['index_written_at'] = $now;
-		}
-		$this->state['unindexed'] = $this->store->export_unindexed();
-		$this->state['stats']     = $this->store->stats();
+		$store = $this->store();
+		$store->flush();
+		$this->record( $store );
 		$this->persist();
+		$this->keep_lock();
+		$now = $this->clock->now()[0];
+		if ( $store->unindexed_blob_count() >= IndexFile::MAX_BLOBS || $now - Decoded::int( $this->state['index_written_at'] ) >= self::INDEX_INTERVAL_SECONDS ) {
+			$this->write_index( $store );
+			$this->state['index_written_at'] = $now;
+			$this->persist();
+		}
 		$this->remove_work_files( false );
 	}
 
 	/**
-	 * Refreshes the lock when due. After a pause of more than 30 minutes, or when the lock is
-	 * gone, the lock is taken again, which waits for a client that holds an exclusive lock by
-	 * now. A client that removed data during such a pause is not noticed here; the next check
-	 * reports what a snapshot then misses.
+	 * Brings the state up to date with the blob store: the packs that no index file lists yet,
+	 * and the counters.
+	 *
+	 * @param BlobStore $store Blob store, flushed.
+	 */
+	private function record( BlobStore $store ): void {
+		$this->state['unindexed'] = $store->export_unindexed();
+		$this->state['stats']     = $store->stats();
+	}
+
+	/**
+	 * Writes index files for the uploaded packs. From here on the run relies on these files
+	 * instead of on the packs themselves: a client that removes one of the packs removes the
+	 * index file first.
+	 *
+	 * @param BlobStore $store Blob store, flushed.
+	 */
+	private function write_index( BlobStore $store ): void {
+		$this->rely_on( array_map( static fn ( Id $id ): string => $id->hex(), $store->write_index() ) );
+		$this->state['unindexed'] = $store->export_unindexed();
+	}
+
+	/**
+	 * Adds index files to those the run relies on. The record only grows: every blob the run
+	 * refers to was found in one of these files or is listed in one the run wrote.
+	 *
+	 * @param list<string> $names Hex names of index files.
+	 */
+	private function rely_on( array $names ): void {
+		$all = array_values( array_unique( array_merge( Decoded::strings( $this->state['index_files'] ), $names ) ) );
+		sort( $all, SORT_STRING );
+		$this->state['index_files'] = $all;
+	}
+
+	/**
+	 * Takes the lock, or refreshes it when due. Called while the state describes everything the
+	 * run relies on: at the start of a call, and in a checkpoint or at the end once the packs
+	 * are uploaded and recorded.
+	 *
+	 * A lock that is gone, or older than other clients are sure to honour, is taken again,
+	 * which waits for a client that holds an exclusive lock by now. Such a client may have
+	 * removed data in the meantime: restic's prune and this plugin's delete an indexed pack
+	 * only after every index file that lists it, and packs that no index lists at any time. So
+	 * if the index files and the unindexed packs on the run's record are all still there,
+	 * nothing the run relies on is gone; otherwise the run is given up.
 	 *
 	 * @throws LockConflict If another client holds an exclusive lock.
+	 * @throws RepositoryChanged If what the run relied on was removed; the run is given up.
 	 */
 	private function keep_lock(): void {
-		$lock = Decoded::string( $this->state['lock'] );
-		if ( '' === $lock ) {
+		$lock      = Decoded::string( $this->state['lock'] );
+		$locked_at = Decoded::int( $this->state['locked_at'] );
+		if ( '' !== $lock && ! $this->locking->lapsed( $locked_at ) && null !== $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+			if ( $this->locking->due( $locked_at ) ) {
+				$this->state['lock']      = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
+				$this->state['locked_at'] = $this->clock->now()[0];
+				$this->persist();
+			}
 			return;
 		}
-		$gone = null === $this->repository->backend()->size( ObjectType::Locks, $lock );
-		if ( $gone || $this->locking->lapsed( Decoded::int( $this->state['locked_at'] ) ) ) {
-			$this->state['lock']      = $this->locking->acquire( false )->hex();
-			$this->state['locked_at'] = $this->clock->now()[0];
-			return;
+
+		$begun = true === $this->state['begun'];
+		if ( ! $begun ) {
+			$this->locking->remove_own_stale();
 		}
-		if ( $this->locking->due( Decoded::int( $this->state['locked_at'] ) ) ) {
-			$this->state['lock']      = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
-			$this->state['locked_at'] = $this->clock->now()[0];
+		$fresh = $this->locking->acquire( false )->hex();
+		$taken = $this->clock->now()[0];
+		if ( $begun ) {
+			$index_files = $this->repository->missing( ObjectType::Index, Decoded::strings( $this->state['index_files'] ) );
+			$unindexed   = array_map( 'strval', array_keys( is_array( $this->state['unindexed'] ) ? $this->state['unindexed'] : [] ) );
+			$packs       = $this->repository->missing( ObjectType::Data, $unindexed );
+			if ( [] !== $index_files || [] !== $packs ) {
+				$this->give_up( count( $index_files ), count( $packs ) );
+			}
 		}
+		// Recorded only now. A checkpoint that names a lock says that everything on the record
+		// was there when that lock was taken. A request that ends before this point, for
+		// example because a listing fails, leaves the old lock in the checkpoint: the next
+		// request takes the lock again and looks again, and the lock written here is a
+		// leftover of the run, which taking the lock removes.
+		$this->state['lock']      = $fresh;
+		$this->state['locked_at'] = $taken;
+		$this->persist();
+	}
+
+	/**
+	 * Gives the run up because another client removed what it relied on.
+	 *
+	 * @param int $index_files Number of index files that are gone.
+	 * @param int $packs       Number of packs that no index file listed and that are gone.
+	 * @throws RepositoryChanged Always.
+	 */
+	private function give_up( int $index_files, int $packs ): never {
+		$this->abort();
+		RepositoryChanged::raise(
+			'Another client removed data from the repository that the backup relied on; the backup starts over.',
+			[
+				'index_files' => $index_files,
+				'packs'       => $packs,
+			]
+		);
+	}
+
+	/**
+	 * Whether a file that is being read should stop at its next boundary: the slice is over, or
+	 * the lock is due for a refresh. advance() then writes a checkpoint, which refreshes the
+	 * lock, and, if time is left, continues the file where it stopped. However long a call
+	 * lasts, the lock is therefore never older than a few minutes plus one upload.
+	 *
+	 * @return bool True if the file should pause.
+	 */
+	private function must_pause(): bool {
+		return microtime( true ) >= $this->deadline || $this->locking->due( Decoded::int( $this->state['locked_at'] ) );
+	}
+
+	/**
+	 * Pushes the root frame; with a parent snapshot, its root tree serves to find unchanged
+	 * files. A parent that another client removed since it was chosen is done without.
+	 */
+	private function begin(): void {
+		$this->state['stack']    = [];
+		$this->state['sequence'] = 0;
+		$root_tree               = null;
+		if ( is_string( $this->state['parent'] ) ) {
+			try {
+				$root_tree = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $this->state['parent'] ) ) )->tree->hex();
+			} catch ( NotFound ) {
+				$this->state['parent'] = null;
+				$this->warn( 'The previous snapshot is gone; every file is read again.' );
+			}
+		}
+		$this->push_frame( '', 'root', $root_tree, null );
+		$this->state['begun'] = true;
+	}
+
+	/**
+	 * Returns the blob store, loading the index first. Only called once the lock holds.
+	 *
+	 * The index is read from the index files that are listed at this moment, and the run relies
+	 * on them from here on, as on those of its earlier calls. These must all be among them:
+	 * while the lock held nobody removed an index file, and after a gap keep_lock() has looked.
+	 * If one is missing all the same, or goes between the listing and the reading, a client
+	 * that does not honour locks removed data, and the run is given up like after a gap. The
+	 * listing is at hand, so this costs no request.
+	 *
+	 * @return BlobStore Store.
+	 * @throws RepositoryChanged If an index file the run relied on is gone; the run is given up.
+	 */
+	private function store(): BlobStore {
+		if ( null === $this->store ) {
+			$names = $this->repository->names( ObjectType::Index );
+			$gone  = array_values( array_diff( Decoded::strings( $this->state['index_files'] ), $names ) );
+			if ( [] !== $gone ) {
+				$this->give_up( count( $gone ), 0 );
+			}
+			try {
+				$index = null === $this->cache ? $this->repository->load_index( $names ) : $this->cache->load( $this->repository, $names );
+			} catch ( NotFound ) {
+				// Listed a moment ago and gone now: the same client at work, a moment later.
+				$this->give_up( 1, 0 );
+			}
+			$this->index = $index;
+			$this->rely_on( $names );
+			$this->store = new BlobStore( $this->repository, $index, $this->pack_size );
+			$this->store->import_unindexed( is_array( $this->state['unindexed'] ) ? $this->state['unindexed'] : [] );
+			$this->store->import_stats( is_array( $this->state['stats'] ) ? $this->state['stats'] : [] );
+		}
+		return $this->store;
+	}
+
+	/**
+	 * Returns the blob counters: those of the open store, or those of the checkpoint.
+	 *
+	 * @return array{data_blobs: int, tree_blobs: int, data_added: int, data_added_packed: int} Counters.
+	 */
+	private function stats(): array {
+		if ( null !== $this->store ) {
+			return $this->store->stats();
+		}
+		$saved = is_array( $this->state['stats'] ) ? $this->state['stats'] : [];
+		return [
+			'data_blobs'        => Decoded::int( $saved['data_blobs'] ?? 0 ),
+			'tree_blobs'        => Decoded::int( $saved['tree_blobs'] ?? 0 ),
+			'data_added'        => Decoded::int( $saved['data_added'] ?? 0 ),
+			'data_added_packed' => Decoded::int( $saved['data_added_packed'] ?? 0 ),
+		];
+	}
+
+	/**
+	 * Returns the index the blob store works with.
+	 *
+	 * @return IndexSet Index.
+	 */
+	private function index(): IndexSet {
+		$this->store();
+		return $this->index ?? new IndexSet();
 	}
 
 	/**
@@ -724,7 +931,7 @@ final class BackupRun {
 			return false;
 		}
 		foreach ( $previous->content as $id ) {
-			if ( ! $this->store->has( BlobType::Data, $id ) ) {
+			if ( ! $this->store()->has( BlobType::Data, $id ) ) {
 				return false;
 			}
 		}
@@ -746,7 +953,7 @@ final class BackupRun {
 		if ( ! isset( $this->parent_trees[ $tree ] ) ) {
 			$nodes = [];
 			try {
-				foreach ( $this->repository->load_tree( $this->index, Id::from_hex( $tree ) ) as $node ) {
+				foreach ( $this->repository->load_tree( $this->index(), Id::from_hex( $tree ) ) as $node ) {
 					$nodes[ $node->name ] = $node;
 				}
 			} catch ( FormatException ) {

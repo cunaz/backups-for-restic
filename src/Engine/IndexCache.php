@@ -12,10 +12,12 @@ namespace BackupsForRestic\Engine;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Exception\AuthenticationFailed;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\CryptoException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\StorageFailed;
+use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
@@ -61,13 +63,21 @@ final class IndexCache {
 	/**
 	 * Returns the current index of the repository.
 	 *
-	 * @param Repository $repository Open repository.
+	 * @param Repository        $repository Open repository.
+	 * @param list<string>|null $listed     The index files to read the index from, for a caller
+	 *                                      that has to know which they were; all that the
+	 *                                      server lists otherwise.
 	 * @return IndexSet Index.
+	 * @throws BackendException If an index file disappears or a server request fails.
+	 * @throws AuthenticationFailed If an index file does not authenticate.
+	 * @throws CryptoException If an index file cannot be decrypted or the cache encrypted.
+	 * @throws FormatException If an index file is malformed or does not match its name.
+	 * @throws UnsupportedRepository If an index file needs unavailable decompression.
+	 * @throws StorageFailed If the cache cannot be written.
 	 * @throws IndexTooLarge If the index does not fit into the repository's memory budget.
 	 */
-	public function load( Repository $repository ): IndexSet {
-		$listed = array_map( 'strval', array_keys( $repository->backend()->list( ObjectType::Index ) ) );
-		sort( $listed );
+	public function load( Repository $repository, ?array $listed = null ): IndexSet {
+		$listed ??= $repository->names( ObjectType::Index );
 		$cached   = $this->read( $repository, $listed );
 		$readable = null !== $cached;
 		$index    = new IndexSet();

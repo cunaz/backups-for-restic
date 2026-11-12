@@ -201,6 +201,16 @@ restic unlock
 
 Lock removal works even on append-only repositories.
 
+A backup of the plugin that is paused between two steps holds a lock as well, and after 30
+minutes without a step restic calls that lock stale. If you remove it and then run `restic
+prune`, the prune deletes what the unfinished backup has uploaded so far, because no
+snapshot uses it yet. The plugin notices this when the backup goes on: it starts the backup
+over, says so in the job's log, and uploads again what is missing. Nothing is lost, the
+backup only takes longer. If this happens more than three times in one backup, the job
+fails with the error `repository_changed`; the next scheduled backup runs normally. To
+avoid it, do not prune from another computer while the dashboard shows a backup in
+progress ([ADR 0030](adr/0030-lock-continuity.md)).
+
 ## Scenario G — reclaiming space (full prune)
 
 The plugin deletes snapshots according to the retention policy and removes packs that no
@@ -289,6 +299,11 @@ the cause is clear.
 the memory available to PHP. It is a local capacity limit, not a finding that the repository
 is damaged. A backup first tries smaller packs, down to 4 MiB, and records that adjustment
 in the job log. If the budget still does not fit, the job stops.
+
+The budget is checked after each pack in an index has been decoded. A single large index
+file or pack can exhaust PHP memory before this check, so a PHP out-of-memory error is
+also possible. The same capacity guidance below applies; neither error proves repository
+damage.
 
 Ask the host to increase PHP's `memory_limit`, then confirm the effective value under
 **Backups → Environment** and start the job again. WordPress and other active plugins also
