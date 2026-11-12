@@ -108,6 +108,10 @@ final class Messages {
 				'message' => __( 'Another backup job is still running.', 'backups-for-restic' ),
 				'hint'    => __( 'Wait for it to finish or cancel it.', 'backups-for-restic' ),
 			],
+			'job_unreadable'                 => [
+				'message' => __( 'A stored job cannot be read by this version of the plugin.', 'backups-for-restic' ),
+				'hint'    => __( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', 'backups-for-restic' ),
+			],
 			'configuration'                  => [
 				'message' => __( 'The backup is not configured completely.', 'backups-for-restic' ),
 				'hint'    => __( 'Finish the setup wizard or check the settings.', 'backups-for-restic' ),

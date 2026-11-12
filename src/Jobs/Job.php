@@ -22,6 +22,13 @@ defined( 'ABSPATH' ) || exit;
 final class Job {
 
 	/**
+	 * The layout of job.json that this version reads and writes. It is raised with every
+	 * change that a version without the change would misread; a document with a higher number
+	 * is not loaded.
+	 */
+	public const int SCHEMA = 1;
+
+	/**
 	 * Where the job is in its life.
 	 *
 	 * @var JobState
@@ -182,6 +189,7 @@ final class Job {
 	 */
 	public function to_array(): array {
 		return [
+			'schema'               => self::SCHEMA,
 			'id'                   => $this->id,
 			'type'                 => $this->type->value,
 			'trigger'              => $this->trigger,
@@ -212,9 +220,15 @@ final class Job {
 	 *
 	 * @param array<mixed> $fields Decoded JSON.
 	 * @return self Job.
-	 * @throws FormatException If required fields are missing.
+	 * @throws FormatException If required fields are missing, or if a newer version of the
+	 *                         plugin wrote the document.
 	 */
 	public static function from_array( array $fields ): self {
+		// Documents written before the number existed have the first layout.
+		$schema = array_key_exists( 'schema', $fields ) ? $fields['schema'] : 1;
+		if ( ! is_int( $schema ) || $schema < 1 || $schema > self::SCHEMA ) {
+			throw new FormatException( 'The job document has a layout this version does not read.' );
+		}
 		$type  = JobType::tryFrom( Decoded::string( $fields['type'] ?? null ) );
 		$state = JobState::tryFrom( Decoded::string( $fields['state'] ?? null ) );
 		if ( null === $type || null === $state || '' === Decoded::string( $fields['id'] ?? null ) ) {

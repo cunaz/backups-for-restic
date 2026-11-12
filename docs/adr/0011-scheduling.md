@@ -82,3 +82,13 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   (`notify.lock`, [ADR 0014](0014-file-based-job-store.md)). A request that finds another
   one sending leaves its notice in the outbox; a later heartbeat tries it, instead of this
   request at once. How soon that is depends on WP-Cron like every heartbeat.
+- Since 2026-11-12 startup first checks the stored options layout number. If it is newer
+  than this plugin understands, or recording the initial number fails, no operational
+  hooks are registered: cron callbacks, heartbeat processing, REST routes and WP-CLI
+  commands remain inactive. An administrator notice explains how to recover. Scheduled
+  events left by an earlier version therefore do not advance jobs through this plugin.
+  Deactivation always unschedules its events; with a newer options layout it then leaves
+  jobs and repository locks alone, because stopping a job would interpret those options.
+  Restoring a compatible plugin version resumes normal startup. This exception to cleanup
+  on deactivation is covered by the WordPress integration tests; see also the layout
+  contract in [architecture §18](../02-architecture.md#18-versioning-upgrades-and-uninstall).

@@ -29,7 +29,8 @@ resumable after any step.
 
 ## Consequences
 - Database restores do not interfere with the running restore job.
-- Job history is capped by count; logs and state live together for downloads and support.
+- Readable finished job history is capped by count; unreadable documents are retained.
+  Logs and state live together for downloads and support.
 - Requires `flock` for the runner lock — a documented limitation on some network
   filesystems.
 
@@ -67,6 +68,12 @@ with the notifications of Milestone 2.
   directory, where the job state lives.
 - Uninstalling deletes it with the other options (`uninstall.php`).
 
-With it the plugin writes four options: settings, secrets, state and notifications.
-`uninstall.php` also deletes a fifth name, `backups_for_restic_schema_version`, which is
-reserved and which nothing writes yet.
+With it the plugin writes four options: settings, secrets, state and notifications. Since
+2026-11 a fifth one, `backups_for_restic_schema_version`, holds the layout number of
+settings, state and notifications, and every `job.json` carries a `schema` field of its
+own; a version that finds a higher number than it knows stays inert or does not load the
+job (docs/02-architecture.md §18). An existing document that cannot be read is retained:
+this version cannot establish that its job has finished, even if a raw state field looks
+terminal. Under the creation lock it blocks both new jobs and `while_idle()` changes with
+`job_unreadable`; pruning history does not remove it. A directory with no document does not
+count as an existing job.

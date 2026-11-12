@@ -288,8 +288,8 @@ final class RestRoutes {
 		}
 		try {
 			$job = $this->container->jobs()->create( $type, 'manual', time() );
-		} catch ( JobConflict ) {
-			return $this->error( 'job_conflict', 409 );
+		} catch ( JobConflict $conflict ) {
+			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
 		}
 		Cron::chain( $this->container );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ], 201 );
@@ -494,8 +494,8 @@ final class RestRoutes {
 			// never has a certificate that is not its own. Nor does a server that wp-config.php
 			// names get the certificate of another address that was tested.
 			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ), fn ( string $url ): \Closure => $this->keep_candidate_ca( $request, $url === $report->url ) );
-		} catch ( JobConflict ) {
-			return $this->error( 'job_conflict', 409 );
+		} catch ( JobConflict $conflict ) {
+			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
 		} catch ( InvalidArgument $e ) {
@@ -607,8 +607,8 @@ final class RestRoutes {
 			$this->container->refresh();
 			delete_transient( 'backups_for_restic_snapshots' );
 			$kit = $this->kit( 'create' );
-		} catch ( JobConflict ) {
-			return $this->error( 'job_conflict', 409 );
+		} catch ( JobConflict $conflict ) {
+			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
 		} catch ( PluginException $e ) {
 			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
 				return $this->error( 'password_too_short', 400 );
@@ -632,8 +632,8 @@ final class RestRoutes {
 			// The answer contains the recovery kit: what the kit needs has to be there first.
 			RecoveryKit::ca_certificate( $this->container );
 			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), time() );
-		} catch ( JobConflict ) {
-			return $this->error( 'job_conflict', 409 );
+		} catch ( JobConflict $conflict ) {
+			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
 		} catch ( InvalidArgument ) {
 			return $this->error( 'configuration', 400 );
 		} catch ( PluginException $e ) {

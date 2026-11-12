@@ -72,8 +72,8 @@ final class CliCommand {
 		$this->check_start( JobType::Backup );
 		try {
 			$job = $this->container->jobs()->create( JobType::Backup, 'cli', time() );
-		} catch ( JobConflict ) {
-			\WP_CLI::error( Messages::job_error( 'job_conflict' )['message'] );
+		} catch ( JobConflict $conflict ) {
+			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $conflict )->code )['message'] );
 		}
 		/* translators: %s: job ID. */
 		\WP_CLI::line( sprintf( __( 'Job %s created.', 'backups-for-restic' ), $job->id ) );
@@ -162,8 +162,8 @@ final class CliCommand {
 		try {
 			// The data is part of the new job document: a later save could meet the job's first tick.
 			$job = $this->container->jobs()->create( $type, 'cli', time(), $data );
-		} catch ( JobConflict ) {
-			\WP_CLI::error( Messages::job_error( 'job_conflict' )['message'] );
+		} catch ( JobConflict $conflict ) {
+			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $conflict )->code )['message'] );
 		}
 		/* translators: %s: job ID. */
 		\WP_CLI::line( sprintf( __( 'Job %s created.', 'backups-for-restic' ), $job->id ) );

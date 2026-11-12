@@ -41,7 +41,7 @@ defined( 'ABSPATH' ) || exit;
 final readonly class JobError {
 
 	/** Context codes that replace the code derived from the exception class. */
-	private const array CONTEXT_CODES = [ 'no_snapshots', 'retention_external' ];
+	private const array CONTEXT_CODES = [ 'no_snapshots', 'retention_external', 'job_unreadable' ];
 
 	/**
 	 * Creates the error.
