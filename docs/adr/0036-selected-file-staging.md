@@ -41,7 +41,9 @@ collisions, useful progress, and recovery after a killed request.
 - `Names` applies destination rules. Unix retains ordinary raw filename bytes, including
   names that Windows cannot represent. Windows rejects invalid characters, alternate data
   streams, trailing spaces/dots, invalid Unicode, long components and reserved device
-  names, including superscript COM/LPT digits. Names containing `~` are conservatively refused
+  names, including superscript COM/LPT digits and the `CONIN$`/`CONOUT$`
+  [console handles](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#consoles).
+  Console names with extensions and names containing `~` are conservatively refused
   on Windows to avoid DOS short-name aliases. A case-folded key supports collision checks.
   These rules follow [Microsoft's filename documentation](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
   They are unit-tested without claiming a real Windows filesystem acceptance run.

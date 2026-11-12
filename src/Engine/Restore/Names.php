@@ -38,7 +38,7 @@ final class Names {
 		if ( ! mb_check_encoding( $name, 'UTF-8' ) || strpbrk( $name, '<>:"\\|?*~' ) !== false || 1 === preg_match( '/[\x01-\x1f]/', $name ) || str_ends_with( $name, '.' ) || str_ends_with( $name, ' ' ) ) {
 			throw new FormatException( 'A snapshot name cannot be represented safely on Windows.' );
 		}
-		if ( strlen( mb_convert_encoding( $name, 'UTF-16LE', 'UTF-8' ) ) > 510 || 1 === preg_match( '/\A(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|\z)/iu', $name ) ) {
+		if ( strlen( mb_convert_encoding( $name, 'UTF-16LE', 'UTF-8' ) ) > 510 || 1 === preg_match( '/\A(?:CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|\z)/iu', $name ) ) {
 			throw new FormatException( 'A snapshot name exceeds the Windows component limit or names a reserved device.' );
 		}
 	}

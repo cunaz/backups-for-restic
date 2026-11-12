@@ -16,7 +16,7 @@ final class RestoreNamesTest extends TestCase {
 			yield 'unix-' . $i => [ $name, false ];
 			yield 'windows-' . $i => [ $name, true ];
 		}
-		foreach ( [ 'a\\b', 'a:b', 'file:stream', 'a?b', 'a*b', 'a|b', 'a<b', 'a>b', 'a"b', "a\tb", 'trailing.', 'trailing ', 'CON', 'nul.txt', 'NUL.tar.gz', 'COM1', 'lpt9.backup', 'COM¹.txt', 'LPT²', 'LONGFI~1.TXT', 'custom~alias', "raw\xff" ] as $i => $name ) {
+		foreach ( [ 'a\\b', 'a:b', 'file:stream', 'a?b', 'a*b', 'a|b', 'a<b', 'a>b', 'a"b', "a\tb", 'trailing.', 'trailing ', 'CON', 'nul.txt', 'NUL.tar.gz', 'COM1', 'lpt9.backup', 'COM¹.txt', 'LPT²', 'CONIN$', 'conout$', 'CONIN$.txt', 'conout$.log', 'LONGFI~1.TXT', 'custom~alias', "raw\xff" ] as $i => $name ) {
 			yield 'windows-only-' . $i => [ $name, true ];
 		}
 	}
