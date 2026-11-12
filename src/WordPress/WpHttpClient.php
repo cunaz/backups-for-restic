@@ -101,11 +101,8 @@ final class WpHttpClient implements HttpClient {
 			$filtered['sslcertificates'] = $bundle;
 			$filtered['redirection']     = 0;
 			$filtered['stream']          = $arguments['stream'];
-			if ( isset( $arguments['filename'] ) ) {
-				$filtered['filename'] = $arguments['filename'];
-			} else {
-				unset( $filtered['filename'] );
-			}
+			// WordPress also reads this key for non-streamed responses.
+			$filtered['filename']            = $arguments['filename'] ?? null;
 			$filtered['decompress']          = false;
 			$filtered['limit_response_size'] = $arguments['limit_response_size'] ?? null;
 			return $filtered;

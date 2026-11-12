@@ -30,8 +30,15 @@ final class HttpStreamingTest extends TestCase {
 			}
 			$output   = TestSite::php(
 				'
-				add_action( "requests-requests.before_request", static function ( &$url, &$headers, &$data, &$method, &$options ) use ( $arguments ) {
+				$selected = [];
+				$chunked = false;
+				add_action( "requests-requests.before_request", static function ( &$url, &$headers, &$data, &$method, &$options ) use ( $arguments, &$selected, &$chunked ) {
 					$options["transport"] = "Curl" === $arguments[2] ? WpOrg\Requests\Transport\Curl::class : WpOrg\Requests\Transport\Fsockopen::class;
+					$options["hooks"]->register( "curl.before_request", static function () use ( &$selected ) { $selected[] = "Curl"; } );
+					$options["hooks"]->register( "fsockopen.before_request", static function () use ( &$selected ) { $selected[] = "Fsockopen"; } );
+					$options["hooks"]->register( "fsockopen.after_request", static function ( $headers ) use ( &$chunked ) {
+						$chunked = 1 === preg_match( "/^transfer-encoding:\\s*chunked\\s*$/mi", $headers );
+					} );
 				}, 10, 5 );
 				// Exercise the socket transport on a chunked answer, not just HTTP/1.0 EOF.
 				add_filter( "http_request_args", static function ( $args ) {
@@ -42,7 +49,13 @@ final class HttpStreamingTest extends TestCase {
 				$backend = new BackupsForRestic\Backend\RestBackend( $http, $arguments[0], "plugin", "rest password" );
 				$directory = sys_get_temp_dir() . "/bfr-http-test-" . bin2hex( random_bytes( 4 ) );
 				mkdir( $directory, 0700 );
+				$warnings = [];
+				set_error_handler( static function ( $severity, $message ) use ( &$warnings ) {
+					if ( 0 !== ( error_reporting() & $severity ) ) { $warnings[] = $message; }
+					return false;
+				}, E_WARNING );
 				try {
+					$plain = $backend->list( BackupsForRestic\Backend\ObjectType::Data );
 					$backend->list_to_file( BackupsForRestic\Backend\ObjectType::Data, $directory . "/listing" );
 					$result = [];
 					$offset = 0;
@@ -52,8 +65,12 @@ final class HttpStreamingTest extends TestCase {
 						$offset = $batch["offset"];
 					} while ( ! $batch["done"] );
 					ksort( $result );
-					echo "\n", json_encode( [ "entries" => $result, "mode" => fileperms( $directory . "/listing" ) & 0777 ] );
+					ksort( $plain );
+					echo "\n", json_encode( [ "entries" => $result, "plain" => $plain, "mode" => fileperms( $directory . "/listing" ) & 0777, "transports" => $selected, "chunked" => $chunked, "warnings" => $warnings ] );
+				} catch ( Throwable $error ) {
+					echo "\n", json_encode( [ "error" => get_class( $error ), "message" => $error->getMessage(), "context" => $error instanceof BackupsForRestic\Exception\PluginException ? $error->context() : [], "transports" => $selected ] );
 				} finally {
+					restore_error_handler();
 					BackupsForRestic\Storage\Files::remove_tree( $directory );
 				}
 				',
@@ -62,7 +79,13 @@ final class HttpStreamingTest extends TestCase {
 			$result   = json_decode( TestSite::last_line( $output ), true );
 			$expected = $backend->list( ObjectType::Data );
 			ksort( $expected );
+			self::assertIsArray( $result, $output );
+			self::assertArrayNotHasKey( 'error', $result, $output );
+			self::assertSame( [ $transport, $transport ], $result['transports'] ?? null, $output );
+			self::assertSame( [], $result['warnings'] ?? null, $output );
+			self::assertSame( 'Fsockopen' === $transport, $result['chunked'] ?? null, $output );
 			self::assertSame( $expected, $result['entries'] ?? null, $output );
+			self::assertSame( $expected, $result['plain'] ?? null, $output );
 			self::assertSame( 0600, $result['mode'] ?? null );
 		} finally {
 			$server->stop();

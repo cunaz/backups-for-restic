@@ -645,8 +645,11 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   and every used pack must be among the listed ones before anything is deleted.
   The server pack listing streams into `packs.json` in the private job directory. Prune
   validates bounded batches and deduplicates names in `packs.table` on disk; no index
-  rewrite or deletion begins before the entire listing is valid. Unindexed packs never
-  enter the JSON checkpoint: classification and deletion resume by table slot. Both files
+  rewrite or deletion begins before the entire listing is valid and includes every live
+  pack. Classification counts distinct live names across batches; a missing pack stops the
+  run as repository damage, preserving unindexed packs that may hold recovery copies.
+  Unindexed packs never enter the JSON checkpoint: classification and deletion resume by
+  table slot. Both files
   have mode 0600 before content is written. This bounds the new listing path, while the
   existing tree/index sets still need the full-job memory work ([ADR 0033](adr/0033-prune-listing-on-disk.md)).
   If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares

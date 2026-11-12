@@ -62,3 +62,13 @@ memory limits. Retrying that same planning step cannot make progress.
 - An append-only deletion file without deduplication could delete a duplicate twice and
   misreport its size. A sorted external merge would work, but adds merge runs and cursors;
   the listing byte cap gives this fixed table a simpler allocation bound.
+
+## As built (2026-11)
+Classification also counts the distinct live packs present in the validated table. Only
+after its final batch may that count be compared with the number of live packs; a mismatch
+stops the run before any index rewrite or deletion. A missing live pack is repository
+damage, and an unindexed pack may hold the remaining recovery copy of its data. Repeated
+listing entries occupy one slot and cannot mask an absent live name. The count is
+checkpointed with the slot cursor, so interrupted batches replay without double counting.
+This adds the `present_live` field and advances the checkpoint to version 4; versions 2 and
+3 were development revisions, never released. Full-job memory limits remain open as above.

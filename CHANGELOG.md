@@ -91,6 +91,8 @@ All notable changes are documented here. The format follows
 - Prune streams its pack listing to a private file and processes it in resumable batches.
   Unindexed pack IDs stay on disk, so a large listing cannot exhaust PHP memory by itself.
   The complete listing is validated before any index rewrite or deletion begins.
+  A live pack missing from that listing stops prune before it can remove an unindexed
+  recovery copy of the missing data.
 - Prune also deletes the data that a cancelled or failed backup left on the server without
   ever listing it, as `restic prune` does. Until now only a prune from another computer
   removed it.

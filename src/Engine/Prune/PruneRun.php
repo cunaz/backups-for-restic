@@ -83,7 +83,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class PruneRun {
 
-	public const int STATE_VERSION = 3;
+	public const int STATE_VERSION = 4;
 
 	/** How often marking starts over because other clients changed the repository meanwhile. */
 	public const int MAX_RESTARTS = 3;
@@ -265,6 +265,13 @@ final class PruneRun {
 	private int $unindexed;
 
 	/**
+	 * Distinct live packs found in the fully parsed server listing so far.
+	 *
+	 * @var int
+	 */
+	private int $present_live;
+
+	/**
 	 * Position within the list of the current phase.
 	 *
 	 * @var int
@@ -361,6 +368,7 @@ final class PruneRun {
 		$this->index_names         = Decoded::strings( $state['index_names'] ?? [] );
 		$this->written             = Decoded::strings( $state['written'] ?? [] );
 		$this->unindexed           = Decoded::count( $state['unindexed'] ?? null );
+		$this->present_live        = Decoded::count( $state['present_live'] ?? null );
 		$this->position            = Decoded::count( $state['position'] ?? null );
 		$this->unused              = [];
 		$this->affected            = Decoded::strings( $state['affected'] ?? [] );
@@ -577,6 +585,7 @@ final class PruneRun {
 		$this->index_names         = $index_names;
 		$this->written             = [];
 		$this->unindexed           = 0;
+		$this->present_live        = 0;
 		$this->frontier            = array_keys( $roots );
 		$this->seen                = [];
 		$this->live                = [];
@@ -924,10 +933,14 @@ final class PruneRun {
 	private function classify_packs(): void {
 		$table = new PackTable( $this->work_dir . '/packs.table' );
 		$count = 0;
+		$live  = 0;
 		try {
 			$batch = $table->batch( $this->position );
 			foreach ( $batch['entries'] as $entry ) {
 				$name = $entry['name'];
+				if ( isset( $this->live[ $name ] ) ) {
+					++$live;
+				}
 				if ( isset( $this->unused[ $name ] ) ) {
 					$this->unused[ $name ] = $entry['size'];
 				}
@@ -939,8 +952,18 @@ final class PruneRun {
 		} finally {
 			$table->close();
 		}
-		$this->unindexed += $count;
-		$this->position   = $batch['done'] ? 0 : $batch['position'];
+		// Each name occupies one slot, so counting their intersection is equivalent to
+		// testing every live name for membership, without another set or an unbounded pass.
+		// An unindexed pack could hold the remaining copy of data from a missing live pack.
+		if ( $batch['done'] && $this->present_live + $live !== count( $this->live ) ) {
+			FormatException::raise(
+				'The server does not list every pack that snapshots use; prune stopped without deleting anything.',
+				[ 'code' => 'repository_damaged' ]
+			);
+		}
+		$this->present_live += $live;
+		$this->unindexed    += $count;
+		$this->position      = $batch['done'] ? 0 : $batch['position'];
 		if ( $batch['done'] ) {
 			$this->phase = 'rewrite';
 		}
@@ -1104,6 +1127,7 @@ final class PruneRun {
 					'index_names'         => $this->index_names,
 					'written'             => $this->written,
 					'unindexed'           => $this->unindexed,
+					'present_live'        => $this->present_live,
 					'position'            => $this->position,
 					'unused'              => $this->unused,
 					'affected'            => $this->affected,

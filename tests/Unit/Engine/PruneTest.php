@@ -26,6 +26,7 @@ use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
+use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
@@ -972,6 +973,66 @@ final class PruneTest extends TestCase {
 			foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
 				self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
 			}
+		} finally {
+			$run->abort();
+		}
+	}
+
+	public function test_a_missing_live_pack_keeps_unindexed_recovery_data_and_refuses_all_mutations(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$snapshots = $this->repository->snapshots();
+		$snapshot  = Id::from_hex( (string) array_key_first( $snapshots ) );
+		$blob      = $this->content_of( $snapshot, 'index.php' )[0];
+		$index     = $this->repository->load_index();
+		$entry     = $index->find( $blob, BlobType::Data );
+		self::assertNotNull( $entry );
+		$writer = new PackWriter( $this->repository->cipher() );
+		$writer->add( BlobType::Data, $blob, $this->repository->load_blob( $index, BlobType::Data, $blob ) );
+		$recovery = $writer->finish();
+		$this->backend->save( ObjectType::Data, $recovery->id->hex(), $recovery->bytes );
+		$this->backend->delete( ObjectType::Data, $entry->pack->hex() );
+		$tree_pack = $index->find( $snapshots[ $snapshot->hex() ]->tree, BlobType::Tree )?->pack->hex();
+		self::assertNotNull( $tree_pack );
+		$entries = [];
+		foreach ( $this->backend->list( ObjectType::Data ) as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		// Repeated live names across parse batches must not hide the missing live name.
+		$entries                     = array_merge(
+			$entries,
+			array_fill(
+				0,
+				600,
+				[
+					'name' => $tree_pack,
+					'size' => strlen( $this->backend->objects['data'][ $tree_pack ] ),
+				]
+			)
+		);
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $entries ): void {
+			\BackupsForRestic\Storage\Files::write_atomic( $path, json_encode( $entries, JSON_THROW_ON_ERROR ) );
+		};
+		$before                      = $this->backend->objects;
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		try {
+			while ( ! $run->advance( 0.0 ) ) {
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::fail( 'A missing live pack must stop prune before deleting a possible recovery copy.' );
+		} catch ( FormatException $error ) {
+			self::assertSame( 'repository_damaged', $error->context()['code'] ?? null );
+			self::assertSame( 'classify', $run->progress()['phase'] );
+			self::assertSame( 0, $run->result()['packs_deleted'] );
+			self::assertSame( 0, $run->result()['index_files_written'] );
+			foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
+				self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
+			}
+			self::assertSame( $recovery->bytes, $this->backend->objects['data'][ $recovery->id->hex() ] );
 		} finally {
 			$run->abort();
 		}
