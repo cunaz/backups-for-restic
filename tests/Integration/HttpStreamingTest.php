@@ -28,7 +28,7 @@ final class HttpStreamingTest extends TestCase {
 				$content = 'a listing entry ' . $i;
 				$backend->save( ObjectType::Data, hash( 'sha256', $content ), $content );
 			}
-			$output   = TestSite::php(
+			$output = TestSite::php(
 				'
 				$selected = [];
 				$chunked = false;
