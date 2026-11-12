@@ -1,0 +1,14 @@
+{
+  "format": "backups-for-restic-site/1",
+  "created": "2026-01-01T00:00:00Z",
+  "home_url": "https://old.example.com",
+  "abspath": "/original/site",
+  "content": "/original/site/wp-content",
+  "uploads": "/original/site/wp-content/uploads",
+  "roots": ["/original/site"],
+  "excludes": [],
+  "prefix": "wp_",
+  "database": false,
+  "versions": {"plugin": "0.3.0", "wordpress": "6.7", "php": "8.3"},
+  "repository": {"format": 1}
+}

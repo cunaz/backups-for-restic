@@ -16,6 +16,8 @@ use BackupsForRestic\Backend\RestBackend;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\MasterKey;
 use BackupsForRestic\Engine\Forget\Duration;
+use BackupsForRestic\Engine\Snapshot\Manifest;
+use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Format\Id;
@@ -47,6 +49,30 @@ final class Targets {
 		$cipher  = Vectors::cipher();
 		$packs   = self::packs( $cipher );
 		$targets = [
+			new Target(
+				'snapshot-path',
+				[ '/', '/site/wp-content/uploads', "/raw\xff/quoted\"name" ],
+				false,
+				static function ( string $input ): void {
+					Path::parts( $input );
+				}
+			),
+			new Target(
+				'manifest-locator',
+				[ Manifest::tag( '/private/spool/manifest.json' ) ],
+				false,
+				static function ( string $input ): void {
+					Manifest::path( [ $input ] );
+				}
+			),
+			new Target(
+				'site-manifest',
+				[ (string) file_get_contents( Vectors::fixtures() . '/site-manifest.json' ) ],
+				true,
+				static function ( string $input ): void {
+					Manifest::decode( $input );
+				}
+			),
 			new Target(
 				'config',
 				[ Vectors::restic( 'config.json' ) ],

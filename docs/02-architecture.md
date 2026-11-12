@@ -685,6 +685,26 @@ until then a restore is done with the recovery kit and the restic CLI
 
 Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs with progress.
 
+The first reader is `Engine\Snapshot\Reader` ([ADR 0034](adr/0034-snapshot-reader.md)):
+snapshot metadata with optional host/tag filters, one directory by snapshot path, and the
+site manifest. Each operation takes a shared repository lock before reading and discards
+its lazy index before releasing the lock. Longer reads refresh the lock; a lapsed lock
+refuses the result and requires a fresh read. It preserves raw name bytes, rejects ambiguous
+path components and never follows a link. The REST and browser integration follows in
+Milestone 3 phases 1.2 and 1.3.
+
+New snapshots record their manifest's original snapshot path in an encrypted locator tag;
+old snapshots use a bounded search for a unique `spool/manifest.json`. An incomplete or
+ambiguous search requires an explicit snapshot path. Manifests are limited to 1 MiB and
+128 blobs, authenticated and checked against their declared file size and schema. Their
+contents describe the old site; later apply/import planning must validate every use.
+
+The reader caches tree ciphertext below `cache/<repo-id>/trees/`, verifying both its
+authentication and tree ID on every hit. Index and published tree files share the configured
+cache limit, with the index taking priority. Either writer evicts trees as needed; clearing
+the cache removes both. Trees over 4 MiB are read without caching. Temporary ciphertext
+needs additional disk space during atomic publication.
+
 | Scenario | Flow |
 | --- | --- |
 | **Single file** | tree walk → blob ids → ranged `GET`s (adjacent blobs of one pack merged into one request) → open → verify → write to `<private>/restores/<job>/`; served through a one-time token; deleted after download or 1 h |
@@ -704,6 +724,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── state.lock, notify.lock                flock targets for changes to the state and for sending notices
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
+├── cache/<repo-id>/trees/<tree-id>.bin    tree blobs for browsing, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)

@@ -7,6 +7,10 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A snapshot reader for the upcoming restore browser: filter by site, read one directory
+  without following links, and read the site's manifest under a shared repository lock.
+  Encrypted tree caches share the existing cache limit with the index. New backups record
+  where their manifest lives so that a different installation can find it after a move.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

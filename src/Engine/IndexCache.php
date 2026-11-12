@@ -68,6 +68,7 @@ final class IndexCache {
 		if ( [] !== $new || null === $cached || count( $covered ) !== count( $listed ) ) {
 			$this->write( $repository, $index, $listed );
 		}
+		( new TreeCache( $this->directory, $this->limit ) )->trim();
 		return $index;
 	}
 
