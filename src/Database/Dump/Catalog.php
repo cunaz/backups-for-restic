@@ -99,7 +99,7 @@ final class Catalog {
 
 
 	/**
-	 * Requests quoted identifiers without changing the site's session setting permanently.
+	 * Reads quoted, complete schema under the dump's SQL mode, restoring the site session.
 	 *
 	 * @param string $type TABLE or VIEW, selected by the catalog itself.
 	 * @param string $name Quoted object name.
@@ -107,20 +107,23 @@ final class Catalog {
 	 * @throws DatabaseFailed If the session setting cannot be read, set or restored.
 	 */
 	private function show_create( string $type, string $name ): array {
-		$setting = $this->connection->rows( 'SELECT @@SESSION.sql_quote_show_create AS quote_names' );
+		$setting = $this->connection->rows( 'SELECT @@SESSION.sql_quote_show_create AS quote_names, @@SESSION.sql_mode AS mode' );
 		$quoted  = $setting[0]['quote_names'] ?? null;
-		if ( '0' !== $quoted && '1' !== $quoted ) {
-			throw new DatabaseFailed( 'The identifier quoting setting cannot be read.' );
+		$mode    = $setting[0]['mode'] ?? null;
+		if ( ( '0' !== $quoted && '1' !== $quoted ) || ! is_string( $mode ) ) {
+			throw new DatabaseFailed( 'The schema quoting setting or SQL mode cannot be read.' );
 		}
 		$sql = 'SHOW CREATE ' . $type . ' ' . SqlFormatter::identifier( $name );
-		if ( '1' === $quoted ) {
+		if ( '1' === $quoted && 'NO_AUTO_VALUE_ON_ZERO' === $mode ) {
 			return $this->connection->rows( $sql );
 		}
 		try {
-			$this->connection->rows( 'SET SESSION sql_quote_show_create = 1' );
+			$this->connection->rows( "SET SESSION sql_quote_show_create = 1, sql_mode = 'NO_AUTO_VALUE_ON_ZERO'" );
 			return $this->connection->rows( $sql );
 		} finally {
-			$this->connection->rows( 'SET SESSION sql_quote_show_create = 0' );
+			// A binary literal preserves the saved mode even under NO_BACKSLASH_ESCAPES.
+			$previous = '' === $mode ? "''" : '0x' . bin2hex( $mode );
+			$this->connection->rows( 'SET SESSION sql_quote_show_create = ' . $quoted . ', sql_mode = ' . $previous );
 		}
 	}
 

@@ -19,8 +19,8 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Session {
 
-	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_mode' ];
-	private const array BOOLEANS  = [ 'foreign_key_checks', 'unique_checks' ];
+	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_mode' ];
+	private const array BOOLEANS  = [ 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create' ];
 
 	/**
 	 * Exact previous session values; SQL mode is restored last.
@@ -67,7 +67,7 @@ final class Session {
 		$connection->execute( 'ROLLBACK' );
 		try {
 			$connection->execute( 'SET NAMES utf8mb4' );
-			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ) . ', foreign_key_checks = 1, unique_checks = 1' );
+			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1' );
 		} catch ( \Throwable $error ) {
 			$this->close();
 			throw $error;

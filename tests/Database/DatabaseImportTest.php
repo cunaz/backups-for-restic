@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Database;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
+use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\MysqliConnection as RestoreConnection;
@@ -212,17 +213,40 @@ final class DatabaseImportTest extends TestCase {
 	}
 
 
-	public function test_dump_with_identifier_quoting_disabled_imports_and_restores_the_session_setting(): void {
-		$this->db->execute( 'CREATE TABLE wp_rows (a INT, b TEXT)' );
-		$this->db->execute( "INSERT INTO wp_rows VALUES (42,'kept')" );
+	public function test_catalog_session_settings_work_through_the_nonreconnecting_adapter(): void {
+		$this->db->execute( 'CREATE TABLE wp_rows (a INT)' );
 		$this->db->execute( 'SET SESSION sql_quote_show_create = 0' );
-		self::assertStringStartsWith( 'CREATE TABLE wp_rows', $this->db->rows( 'SHOW CREATE TABLE wp_rows' )[0]['Create Table'] );
-		$manifest = $this->stage_dump();
+		$catalog = new Catalog( new RestoreConnection( $this->db->mysqli ) );
+		self::assertStringStartsWith( 'CREATE TABLE `wp_rows`', $catalog->table( 'wp_rows' )->create );
 		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_quote_show_create AS quoted' )[0]['quoted'] );
+	}
+
+	/** @return iterable<string, array{string, string}> */
+	public static function dump_sessions(): iterable {
+		yield 'quoting disabled' => [ '0', '' ];
+		yield 'ANSI identifiers' => [ '1', 'ANSI_QUOTES' ];
+		yield 'literal backslashes' => [ '1', 'NO_BACKSLASH_ESCAPES' ];
+		yield 'combined' => [ '0', 'ANSI_QUOTES,NO_BACKSLASH_ESCAPES' ];
+	}
+
+	#[DataProvider( 'dump_sessions' )]
+	public function test_dump_schema_is_portable_across_session_modes_and_restores_site_settings( string $quoted, string $mode ): void {
+		$value = SqlFormatter::value( "quote' \\slash\nline", SqlFormatter::TEXT );
+		$this->db->execute( 'CREATE TABLE wp_rows (a INT, b VARCHAR(255) DEFAULT ' . $value . ' COMMENT ' . $value . ')' );
+		$this->db->execute( 'INSERT INTO wp_rows VALUES (42,DEFAULT)' );
+		if ( str_contains( $this->db->rows( 'SELECT VERSION() AS version' )[0]['version'], 'MariaDB' ) && str_contains( $mode, 'ANSI_QUOTES' ) ) {
+			$mode .= ',NO_TABLE_OPTIONS,NO_FIELD_OPTIONS,NO_KEY_OPTIONS';
+		}
+		$this->db->execute( 'SET SESSION sql_quote_show_create = ' . $quoted . ', sql_mode = ' . SqlFormatter::value( $mode, SqlFormatter::TEXT ) );
+		$query    = 'SELECT @@SESSION.sql_quote_show_create AS quoted, @@SESSION.sql_mode AS mode';
+		$before   = $this->db->rows( $query );
+		$manifest = $this->stage_dump();
+		self::assertSame( $before, $this->db->rows( $query ) );
 		$importer = $this->importer( $manifest );
 		$this->finish( $importer );
 		self::assertSame( $this->db->rows( 'SELECT * FROM wp_rows' ), $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
-		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_quote_show_create AS quoted' )[0]['quoted'] );
+		self::assertSame( $this->db->rows( 'SHOW FULL COLUMNS FROM wp_rows' ), $this->db->rows( 'SHOW FULL COLUMNS FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( $before, $this->db->rows( $query ) );
 	}
 
 	public function test_an_insert_cannot_target_a_live_table(): void {

@@ -16,8 +16,13 @@ final class DumpColumnsTest extends TestCase {
 	public function test_a_default_expression_is_not_a_generated_column(): void {
 		$db = new class() implements Connection {
 			public function rows( string $sql ): array {
-				if ( 'SELECT @@SESSION.sql_quote_show_create AS quote_names' === $sql ) {
-					return [ [ 'quote_names' => '1' ] ];
+				if ( 'SELECT @@SESSION.sql_quote_show_create AS quote_names, @@SESSION.sql_mode AS mode' === $sql ) {
+					return [
+						[
+							'quote_names' => '1',
+							'mode'        => 'NO_AUTO_VALUE_ON_ZERO',
+						],
+					];
 				}
 				if ( str_starts_with( $sql, 'SHOW CREATE' ) ) {
 					return [ [ 'Create Table' => 'CREATE TABLE `wp_rows` (`id` int)' ] ];
@@ -62,11 +67,11 @@ final class DumpColumnsTest extends TestCase {
 		$db     = new class() implements Connection {
 			public int $page = 0;
 			public function rows( string $sql ): array {
+				TestCase::assertStringStartsWith( 'SELECT `id`, `hidden` FROM `wp_rows`', $sql );
 				if ( ++$this->page > 1 ) {
 					return [];
 				}
-				// SELECT * follows the server's real rule: invisible columns are absent.
-				return str_starts_with( $sql, 'SELECT *' ) ? [ [ 'id' => '1' ] ] : [
+				return [
 					[
 						'id'     => '1',
 						'hidden' => '42',

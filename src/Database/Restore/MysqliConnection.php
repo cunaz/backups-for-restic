@@ -28,16 +28,16 @@ final readonly class MysqliConnection implements Connection {
 	}
 
 	/**
-	 * Reads bounded metadata on the same session as the writes.
+	 * Reads bounded metadata or changes scoped settings on the same session as the writes.
 	 *
 	 * @param string $sql Query made by the importer.
-	 * @return list<array<string, string|null>> String-valued metadata.
-	 * @throws DatabaseFailed If the server fails or returns no row set.
+	 * @return list<array<string, string|null>> String-valued metadata, or an empty list for SET.
+	 * @throws DatabaseFailed If the server fails or warns.
 	 */
 	public function rows( string $sql ): array {
 		$result = $this->query( $sql );
 		if ( ! $result instanceof \mysqli_result ) {
-			throw new DatabaseFailed( 'A database restore query did not return its metadata.' );
+			return [];
 		}
 		try {
 			$rows = [];

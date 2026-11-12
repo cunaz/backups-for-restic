@@ -9,6 +9,8 @@ All notable changes are documented here. The format follows
 ### Added
 - The dump catalog temporarily requests quoted table/view definitions, including when the
   server disables `sql_quote_show_create`, and restores the site's session setting afterwards.
+  It reads schema under the dump's SQL mode so compatibility modes cannot omit table options.
+  Database imports also enable quoting for their ownership checks and restore it after each tick.
 - The first database restore component imports staged table data into separate InnoDB
   tables, with checked SQL and resumable transactions. It is not yet exposed in the admin
   page; the schema/apply/undo workflows remain in development.

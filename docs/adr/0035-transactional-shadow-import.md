@@ -61,7 +61,9 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
   refuse that statement inside an active transaction. Its one-transaction setting is
   consumed immediately by an empty transaction. A failed guard never rolls back or commits
   foreign work. Import establishes its SQL mode, UTF-8 connection, numeric time zone and
-  enabled uniqueness/foreign-key checks, then restores prior session values.
+  enabled uniqueness/foreign-key checks and quoted SHOW CREATE identifiers, then restores
+  prior session values. Ownership checks therefore work even when the site normally
+  disables identifier quoting.
 
 ## Scope of this first implementation
 `TableImporter` prepares base-table data only. Its `done` result means that table loading
@@ -81,15 +83,21 @@ The transactional shadow omits engine-specific physical options: `ROW_FORMAT=FIX
 `PAGE`, MyISAM's `CHECKSUM` and `DELAY_KEY_WRITE`, and `KEY_BLOCK_SIZE` from non-InnoDB
 tables. Compatible InnoDB row formats are retained. This component preserves logical data,
 the original engine and table comment, not a guarantee of identical physical storage.
-The catalog temporarily enables `sql_quote_show_create` for each SHOW CREATE TABLE/VIEW,
-then restores the connection's original value even when the read fails. Otherwise a server
+The catalog temporarily enables `sql_quote_show_create` and the dump's SQL mode for each
+SHOW CREATE TABLE/VIEW, then restores both original values even when the read fails. Otherwise a server
 with quoting disabled can produce a complete dump the strict importer cannot read. Both
-adapters already return an empty row list for session SET statements; the dump port now
-documents that scoped use. It still makes no data changes. This follows the
+dump adapters return an empty row list for session SET statements; the shared port now
+documents that scoped use and the non-reconnecting mysqli adapter follows it too.
+The catalog makes no data changes. This follows the
 [SHOW CREATE contract](https://dev.mysql.com/doc/refman/8.4/en/show-create-table.html).
 An existing unquoted dump remains outside the strict import grammar.
+Using the dump mode also retains backtick identifiers and backslash escaping and avoids
+[MariaDB compatibility modes omitting table/column/index options](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/show/show-create-table).
+Database regressions cover ANSI identifiers, literal-backslash mode and disabled quoting,
+including schema defaults/comments and complete restoration of the site's session values.
 
-Session cleanup writes `foreign_key_checks` and `unique_checks` as validated numeric 0/1;
+Session cleanup writes `foreign_key_checks`, `unique_checks` and `sql_quote_show_create`
+as validated numeric 0/1;
 binary string literals containing those characters are not accepted boolean settings.
 
 ## Verification

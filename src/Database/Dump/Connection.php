@@ -15,7 +15,8 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Data reads and scoped session settings for the dump. WordPress\WpdbConnection adapts
- * $wpdb; tests use mysqli. The catalog temporarily enables quoting for SHOW CREATE.
+ * $wpdb; tests use mysqli. The catalog temporarily normalizes quoting and SQL mode for
+ * SHOW CREATE, then restores both settings.
  * Values come back as strings or null, exactly as the server sends them.
  */
 interface Connection {

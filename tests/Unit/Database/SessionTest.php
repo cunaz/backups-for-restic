@@ -54,11 +54,19 @@ final class SessionTest extends TestCase {
 			$session->close();
 			self::fail( 'A failed rollback must be reported.' );
 		} catch ( DatabaseFailed $expected ) {
-			self::assertCount( 9, $db->writes );
+			self::assertCount( 10, $db->writes );
 			self::assertSame( 'ROLLBACK', $db->writes[0] );
 			self::assertContains( 'SET SESSION character_set_results = NULL', $db->writes );
-			self::assertSame( 'SET SESSION sql_mode = ' . Session::literal( 'NO_BACKSLASH_ESCAPES' ), $db->writes[8] );
+			self::assertSame( 'SET SESSION sql_mode = ' . Session::literal( 'NO_BACKSLASH_ESCAPES' ), $db->writes[9] );
 		}
+	}
+
+	public function test_schema_inspection_enables_quoted_identifiers_for_the_import_session(): void {
+		$db      = $this->connection();
+		$session = new Session( $db, StagedDump::write( $this->directory ) );
+		self::assertStringContainsString( 'sql_quote_show_create = 1', implode( "\n", $db->writes ) );
+		$session->close();
+		self::assertContains( 'SET SESSION sql_quote_show_create = 0', $db->writes );
 	}
 
 	/** @return iterable<string, array{string}> */
@@ -76,6 +84,7 @@ final class SessionTest extends TestCase {
 		$session->close();
 		self::assertContains( 'SET SESSION foreign_key_checks = ' . $value, $db->writes );
 		self::assertContains( 'SET SESSION unique_checks = ' . $value, $db->writes );
+		self::assertContains( 'SET SESSION sql_quote_show_create = ' . $value, $db->writes );
 	}
 
 	public function test_unexpected_boolean_metadata_refuses_before_changing_the_session(): void {
@@ -106,6 +115,7 @@ final class SessionTest extends TestCase {
 						'time_zone'                => '+04:00',
 						'foreign_key_checks'       => $this->checks,
 						'unique_checks'            => $this->checks,
+						'sql_quote_show_create'    => $this->checks,
 						'sql_mode'                 => 'NO_BACKSLASH_ESCAPES',
 					],
 				];
