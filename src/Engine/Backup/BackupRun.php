@@ -338,6 +338,17 @@ final class BackupRun {
 	}
 
 	/**
+	 * Returns the size at which packs are uploaded, which the memory budget may have made
+	 * smaller than the size asked for (ADR 0031). Before advance() opens the store, this is
+	 * the requested size; querying it does not load the index before the lock is held.
+	 *
+	 * @return int Bytes.
+	 */
+	public function pack_size(): int {
+		return $this->store?->pack_size() ?? $this->pack_size;
+	}
+
+	/**
 	 * Returns counters for progress display and logs.
 	 *
 	 * @return array<string, int|string> Counters, the current directory and warnings count.

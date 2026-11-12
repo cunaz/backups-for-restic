@@ -11,8 +11,10 @@ namespace BackupsForRestic\Tests\Fuzz;
 
 use BackupsForRestic\Backend\Http\HttpClient;
 use BackupsForRestic\Backend\Http\HttpResponse;
+use BackupsForRestic\Backend\Http\StreamedBody;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backend\RestBackend;
+use BackupsForRestic\Backend\ListingFile;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\MasterKey;
 use BackupsForRestic\Engine\Forget\Duration;
@@ -20,7 +22,6 @@ use BackupsForRestic\Engine\Restore\Selection;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Format\Id;
-use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\KeyFile;
 use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Format\Pack\PackReader;
@@ -32,6 +33,7 @@ use BackupsForRestic\Support\GoJson;
 use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Tests\Support\Vectors;
+use BackupsForRestic\Tests\Support\WholeIndexDecoder;
 
 /**
  * The fuzz targets: one per parser that reads server data. Seeds come from a repository that
@@ -107,10 +109,17 @@ final class Targets {
 			),
 			new Target(
 				'index',
-				[ Vectors::restic( 'index.json' ) ],
+				[
+					Vectors::restic( 'index.json' ),
+					// Shapes that the cutting into packs must not get wrong: a second "packs" member, an
+					// escaped key, the key inside another member, brackets and quotes inside strings.
+					'{"packs":[{"id":"' . str_repeat( 'ab', 32 ) . '","blobs":[]}],"pack\\u0073":[{"id":"' . str_repeat( 'cd', 32 ) . '","blobs":[{"id":"' . str_repeat( 'ef', 32 ) . '","type":"tree","offset":0,"length":9}]}]}',
+					'{"supersedes":[{"packs":[{"x":"]}\\"{["}]}],"packs":[ {"id":"' . str_repeat( '01', 32 ) . '","note":"}]\\\\","blobs":[]} , {"id":"' . str_repeat( '02', 32 ) . '","blobs":[]} ]}',
+				],
 				true,
 				static function ( string $input ): void {
-					IndexFile::decode( $input );
+					// Also a finding: the pack-by-pack decoder and the whole-document one disagree.
+					WholeIndexDecoder::compare( $input );
 				}
 			),
 			new Target(
@@ -176,6 +185,41 @@ final class Targets {
 				static function ( string $input ): void {
 					foreach ( self::server( $input )->list( ObjectType::Snapshots ) as $name => $size ) {
 						Id::from_hex( $name );
+					}
+				}
+			),
+			new Target(
+				'listing-file',
+				[ '[{"name":"' . str_repeat( 'ab', 32 ) . '","size":42}]', '["' . str_repeat( 'cd', 32 ) . '"]', 'null', '[]' ],
+				true,
+				static function ( string $input ): void {
+					$file = tempnam( sys_get_temp_dir(), 'bfr-listing-fuzz-' );
+					try {
+						file_put_contents( $file, $input );
+						$offset = 0;
+						do {
+							$batch = ListingFile::batch( $file, $offset, 1 );
+							if ( $batch['offset'] <= $offset && ! $batch['done'] ) {
+								throw new \LogicException( 'The parser did not advance.' );
+							}
+							$offset = $batch['offset'];
+						} while ( ! $batch['done'] );
+					} finally {
+						unlink( $file );
+					}
+				}
+			),
+			new Target(
+				'chunked-file',
+				[ "2\r\n[]\r\n0\r\n\r\n", "4;ext=yes\r\nnull\r\n0\r\nDigest: ignored\r\n\r\n" ],
+				false,
+				static function ( string $input ): void {
+					$file = tempnam( sys_get_temp_dir(), 'bfr-chunked-fuzz-' );
+					try {
+						file_put_contents( $file, $input );
+						StreamedBody::decode_chunked( $file, 65536 );
+					} finally {
+						unlink( $file );
 					}
 				}
 			),
@@ -280,8 +324,11 @@ final class Targets {
 			 * @param int                   $limit   Most bytes of response body.
 			 * @return HttpResponse Response.
 			 */
-			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
-				return new HttpResponse( 200, [ 'content-type' => 'application/vnd.x.restic.rest.v2' ], $this->body );
+			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0, ?string $file = null ): HttpResponse {
+				if ( null !== $file ) {
+					file_put_contents( $file, $this->body );
+				}
+				return new HttpResponse( 200, [ 'content-type' => 'application/vnd.x.restic.rest.v2' ], null === $file ? $this->body : '' );
 			}
 		};
 		return new RestBackend( $client, 'https://repo.example.com/site/', 'user', 'secret', 'fuzz', 0, static function ( int $ms ): void {} );

@@ -95,11 +95,15 @@ Participants:
    packs are built in memory up to the pack size (16 MiB by default) and uploaded with one
    request each, index files follow restic's limit of 50 000 blobs. A file or a database
    table of any size therefore costs the same memory. What does grow is the index: every run
-   holds the merged index of the whole repository in one PHP array, about 100 bytes per blob
-   (`Format\Index\IndexSet`). By that figure the 64 MB of NFR-03 are reached at roughly
-   640 000 blobs; this is derived, not measured. The plugin does not limit or estimate it
-   yet: measurements with large blob counts and a bound or a preflight estimate are planned
-   for Milestone 3.
+   holds the merged index of the whole repository, as records of 48 bytes in buckets, 60 to
+   80 bytes per blob with the buckets' own cost (`Format\Index\IndexSet`,
+   [ADR 0031](adr/0031-compact-index-and-memory-budget.md)): 33 MB for half a million
+   blobs, 61 MB for a million. A job knows PHP's memory limit (`Engine\MemoryBudget`). The
+   index stops loading with the error `index_too_large` when a backup with the smallest
+   packs would no longer fit beside it, and a backup makes its packs smaller than
+   configured, down to 4 MiB, when three of them do not fit. With a WordPress baseline of
+   30 to 40 MiB, the measurements suggest capacity for roughly a million blobs under
+   `memory_limit=128M`; full-job measurements at that count remain part of phase 0.9.
 4. **Ticks, not long processes.** All work happens in bounded slices (default 20 s) driven
    by WP-Cron, loopback chaining, admin polling or WP-CLI. Every slice ends with a durable
    checkpoint; a killed request loses at most one slice of work.
@@ -147,7 +151,7 @@ src/
 ├── Format/                        restic on-disk/wire structures
 │   ├── Config.php, KeyFile.php, Id.php, BlobType.php, Snapshot.php, SnapshotSummary.php, Lock.php
 │   ├── Pack/                      PackWriter, PackReader, PackEntry, FinishedPack
-│   ├── Index/                     IndexFile (JSON ⇄ entries), IndexSet (lookup, compact binary export), BlobLocation
+│   ├── Index/                     IndexFile (JSON ⇄ entries, decoded pack by pack), IndexSet (lookup in buckets of binary records, export in pieces), BlobLocation
 │   ├── Tree/                      Node, NodeType, FileMode, TreeCodec (ordering, Go quoting, mode bits)
 │   ├── Unpacked.php               non-pack files: plain JSON, or zstd through Compression.php when `ext-zstd` is present
 │   └── Chunker/                   Polynomial (GF(2) ops, irreducibility test), RabinChunker (restic-identical), ChunkReader
@@ -156,7 +160,8 @@ src/
 ├── Engine/                        the restic logic
 │   ├── Repository.php, BlobStore.php, Locking.php, Identity.php
 │   ├── KeyUnlock.php              resumable unlock across key files
-│   ├── IndexCache.php             merged index cached locally, encrypted; fetches only new index files
+│   ├── IndexCache.php             merged index cached locally in sealed pieces; fetches only new index files
+│   ├── MemoryBudget.php           PHP's memory limit: how large the index may be, how large packs are (ADR 0031)
 │   ├── Backup/                    BackupPlan, BackupRun (resumable, also inside virtual files), NodeFactory, VirtualFile
 │   ├── Restore/                   RestoreRun (resumable, refuses paths that leave the target)
 │   ├── Forget/                    Forget, RetentionPolicy, Duration: restic's ApplyPolicy semantics; ForgetRun: the resumable run
@@ -434,8 +439,12 @@ A backup does not write an index file in every tick. At the end of a tick it wri
 index file, and it writes the rest when it finishes (`BackupRun::INDEX_INTERVAL_SECONDS`,
 `IndexFile::MAX_BLOBS`); like restic it starts a new file after 50 000 blobs. Until then
 an uploaded pack is recorded only in the job's checkpoint. Reading merges all index files into an
-`IndexSet`; a per-repository **index cache** in the private directory stores the merged set
-(encrypted with the master key) so later runs load one file instead of all index files.
+`IndexSet`, pack by pack, so that an index file of 50 000 blobs is never decoded as a whole
+(`IndexFile::packs()`); a per-repository **index cache** in the private directory stores the
+merged set so later runs load one file instead of all index files. The cache file is a row
+of pieces of about one megabyte, each sealed with the master key and carrying a mark of its
+file and its number; reading and writing need one piece in memory besides the index, and a
+file whose pieces do not belong together is discarded.
 Prune-lite rewrites index files without the deleted packs.
 
 ### 5.8 Trees and nodes
@@ -492,7 +501,9 @@ holds a conflicting lock. Then it looks at what other clients did in the meantim
   or forget removed. It looks once more before it ends.
 - A **forget** needs no comparison: what others wrote in the meantime can only make its
   policy remove more.
-- **Prune** starts its marking again, because another client may have written snapshots
+- **Prune** compares the snapshots and the index files with those it marked and read. If
+  they are the same it goes on; otherwise it starts its marking again, at most three times,
+  because another client may have written snapshots or repacked
   ([ADR 0022](adr/0022-maintenance-scope.md)).
 
 Every lock carries the number of the run that wrote it, and every run writes its checkpoint
@@ -654,18 +665,33 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   leaves a tree unwalked. The checkpoint is written before the lock is taken, at every
   change of phase and at the end of every tick: a request that ends while it deletes is
   continued in that phase, and a lock it left behind is recognised by the run's number.
-  That holds while the lock is continuous. If the lock was lost, or not refreshed for 25
-  minutes, while prune was deleting, marking starts over, and the packs whose index entries
-  were already removed are no longer found by any plan: they stay on the server as packs
-  that no index lists. The check reports such packs as a warning, a full `restic prune`
-  removes them, and so will prune itself once it deletes unlisted packs (Milestone 3).
+  Prune also deletes the packs on the server that no index file lists, which an
+  interrupted backup leaves behind, as restic's prune does. No snapshot can use such a
+  pack: marking ends with an error when a snapshot uses a blob the index does not lead to,
+  and every used pack must be among the listed ones before anything is deleted.
+  The server pack listing streams into `packs.json` in the private job directory. Prune
+  validates bounded batches and deduplicates names in `packs.table` on disk; no index
+  rewrite or deletion begins before the entire listing is valid and includes every live
+  pack. Classification counts distinct live names across batches; a missing pack stops the
+  run as repository damage, preserving unindexed packs that may hold recovery copies.
+  Unindexed packs never enter the JSON checkpoint: classification and deletion resume by
+  table slot. Both files
+  have mode 0600 before content is written. This bounds the new listing path, while the
+  existing tree/index sets still need the full-job memory work ([ADR 0033](adr/0033-prune-listing-on-disk.md)).
+  If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares
+  the snapshots with those it marked and the index files with those it read, apart from
+  the ones it has written or deleted itself. If they are the same, nothing it found has
+  changed and it goes on where it was, so a site whose ticks are far apart still finishes.
+  Otherwise marking starts over, at most three times, then the job fails with
+  `repository_changed`. Packs whose index entries a first plan had already removed are
+  found by the next plan as packs that no index file lists, so none is left behind.
 - **Check**: structural check (every indexed pack exists with the recorded size, every
   snapshot's tree walk resolves to indexed blobs, every index file can be read). A blob id
   that occurs twice is no finding: duplicates are legal in a restic repository, and the
   index keeps the first location; a whole pack listed in two index files is the warning
   `pack_in_several_indexes`. A pack that no index file lists, as a cancelled or failed
-  backup leaves it behind, is the warning `pack_unindexed`; prune-lite does not delete such
-  packs yet, which is planned for Milestone 3. Then comes **sampled data verification**:
+  backup leaves it behind, is the warning `pack_unindexed`; the next prune deletes such
+  packs. Then comes **sampled data verification**:
   download `schedule.check.read_data_subset_percent` percent of the packs (default 2 %),
   drawn at random anew for every check without regard to earlier checks, and
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
@@ -720,7 +746,7 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── runner.lock                            flock target
 ├── state.lock, notify.lock                flock targets for changes to the state and for sending notices
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
-├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
+├── cache/<repo-id>/index.bin              merged index in pieces, each sealed with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
@@ -1070,6 +1096,7 @@ translated message and a hint. The codes:
 | `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
 | `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
+| `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
 | `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |
