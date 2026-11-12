@@ -26,6 +26,7 @@ use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Format\Pack\PackReader;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
+use BackupsForRestic\Tests\Support\CountingBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 
 /**
@@ -124,6 +125,30 @@ final class MemoryBudgetTest extends TestCase {
 		$budget = new MemoryBudget( self::reserved() + MemoryBudget::WORKING_BYTES + 3 * 16 * self::MIB + 2 * self::BLOCK );
 		self::assertSame( 16 * self::MIB, $budget->pack_size( 16 * self::MIB ) );
 		self::assertSame( 8 * self::MIB, $budget->pack_size( 8 * self::MIB ), 'Never larger than asked for.' );
+	}
+
+	public function test_encrypted_index_input_needs_room_for_transport_and_decryption_copies(): void {
+		$budget = new MemoryBudget( self::reserved() + 20 * self::MIB );
+		$budget->check_index_input( 4 * self::MIB );
+		$this->expectException( IndexTooLarge::class );
+		$budget->check_index_input( 6 * self::MIB );
+	}
+
+	public function test_an_oversized_index_is_refused_before_the_backend_loads_its_body(): void {
+		$backend    = new CountingBackend();
+		$repository = Repository::initialize( $backend, 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$body       = str_repeat( 'x', 10 * self::MIB );
+		$id         = Id::of( $body );
+		$backend->save( ObjectType::Index, $id->hex(), $body );
+		unset( $body );
+		$repository->limit_memory( new MemoryBudget( self::reserved() + self::SMALLEST_JOB + self::MIB ) );
+		try {
+			$repository->load_unpacked( ObjectType::Index, $id );
+			self::fail( 'The input and its decryption copies cannot fit.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertSame( 10 * self::MIB, $error->context()['input_bytes'] );
+			self::assertSame( 0, $backend->loads['index'] ?? 0 );
+		}
 	}
 
 	public function test_packs_shrink_to_a_third_of_what_is_left_after_the_working_memory(): void {

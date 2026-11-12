@@ -93,6 +93,29 @@ final readonly class MemoryBudget {
 	}
 
 	/**
+	 * Reserves room before reading an encrypted index file or cache piece. Decryption keeps
+	 * the response, ciphertext and plaintext at once; the transport may retain another copy.
+	 * Two MiB remain for allocation rounding and reporting the refusal.
+	 *
+	 * @param int $bytes Encrypted input size.
+	 * @throws IndexTooLarge If reading and opening the input could exhaust PHP's limit.
+	 */
+	public function check_index_input( int $bytes ): void {
+		$reserved  = self::reserved();
+		$available = max( 0, $this->limit - $reserved - 2097152 );
+		if ( $bytes < 0 || $bytes > intdiv( $available, 4 ) ) {
+			IndexTooLarge::raise(
+				'The next index file does not fit beside the memory already in use.',
+				[
+					'memory_limit' => $this->limit,
+					'reserved'     => $reserved,
+					'input_bytes'  => $bytes,
+				]
+			);
+		}
+	}
+
+	/**
 	 * The pack size a backup can afford with the memory that is free now.
 	 *
 	 * @param int $wanted Configured pack size in bytes.

@@ -141,6 +141,36 @@ final class PackTable {
 	}
 
 	/**
+	 * Looks up a pack without materializing the listing.
+	 *
+	 * @param string $name Hex pack ID.
+	 * @return int|null Bytes, -1 for a v1 listing, or null when absent.
+	 */
+	public function size( string $name ): ?int {
+		$id     = Id::from_hex( $name )->bytes();
+		$hash   = unpack( 'Vslot', hash_hmac( 'sha256', $id, $this->salt, true ) );
+		$slot   = ( false === $hash ? 0 : $hash['slot'] ) & ( $this->capacity - 1 );
+		$probes = min( 512, $this->capacity );
+		for ( $probe = 0; $probe < $probes; ++$probe ) {
+			$record = $this->record( $slot );
+			if ( "\0" === $record[0] ) {
+				return null;
+			}
+			if ( substr( $record, 1, 32 ) === $id ) {
+				$decoded = unpack( 'Psize', substr( $record, 33, 8 ) );
+				$size    = false === $decoded ? null : $decoded['size'];
+				if ( ! is_int( $size ) || $size < -1 ) {
+					$this->invalid();
+				}
+				return $size;
+			}
+			++$slot;
+			$slot &= $this->capacity - 1;
+		}
+		$this->invalid();
+	}
+
+	/**
 	 * Reads at most a bounded number of slots, including empty ones.
 	 *
 	 * @param int $position Slot cursor.
