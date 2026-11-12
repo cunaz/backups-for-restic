@@ -465,9 +465,11 @@ as restic records it by default, so that reading a file does not change its node
 (`Engine\Backup\NodeFactory`). The plugin writes every time in UTC (`Support\Rfc3339`), the
 snapshot's `time` included. restic's retention rules put a snapshot into the day, week or
 month of its own offset, so for snapshots the plugin wrote these periods begin at midnight
-UTC, not at the site's midnight. Order and uniqueness of the nodes are enforced when a tree
-is written (`TreeCodec::encode()`); a tree read from the repository is not checked for them
-yet, which is planned for Milestone 3.
+UTC, not at the site's midnight. Order and uniqueness of the nodes are enforced both when a
+tree is written (`TreeCodec::encode()`) and when it is read (`TreeCodec::decode()`). The
+comparison uses the decoded name bytes, including non-UTF-8 names, rather than their JSON
+or Go escapes. An unordered or duplicate name makes the whole tree unreadable; the
+repository check reports it and restore refuses it before using its entries.
 
 ### 5.9 Snapshots and locks
 

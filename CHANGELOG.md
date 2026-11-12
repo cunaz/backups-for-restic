@@ -120,6 +120,9 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Reading a snapshot now refuses directory listings with duplicate or out-of-order names,
+  including differently escaped copies of the same name. The repository check reports
+  these trees as damaged before a restore can use their entries.
 - Local backup working-file failures now stop the job with an environment error. Refused
   creation, incomplete writes and failed truncation cannot advance a checkpoint, and an
   unreadable saved directory cannot silently become empty in a snapshot.
