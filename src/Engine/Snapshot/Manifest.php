@@ -32,6 +32,7 @@ final class Manifest {
 	 *
 	 * @param string $path Absolute path inside the snapshot.
 	 * @return string Snapshot tag, independent of retention grouping.
+	 * @throws InvalidArgument If the path cannot name a manifest file.
 	 */
 	public static function tag( string $path ): string {
 		if ( [] === Path::parts( $path ) || str_ends_with( $path, '/' ) ) {
