@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The first database restore component imports staged table data into separate InnoDB
+  tables, with checked SQL and resumable transactions. It is not yet exposed in the admin
+  page; the schema/apply/undo workflows remain in development.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses
@@ -114,6 +117,9 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Database backups preserve invisible columns and columns with expression defaults such
+  as `CURRENT_TIMESTAMP`. They were previously emitted as NULL or omitted from INSERTs;
+  values already missing from old snapshots cannot be recovered by this correction.
 - Local backup working-file failures now stop the job with an environment error. Refused
   creation, incomplete writes and failed truncation cannot advance a checkpoint, and an
   unreadable saved directory cannot silently become empty in a snapshot.

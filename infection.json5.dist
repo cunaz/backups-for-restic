@@ -6,7 +6,8 @@
         "directories": [
             "src/Crypto",
             "src/Format",
-            "src/Engine/Forget"
+            "src/Engine/Forget",
+            "src/Database/Restore"
         ]
     },
     // The source files end the request unless ABSPATH is defined; without this bootstrap,

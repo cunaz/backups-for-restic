@@ -22,6 +22,7 @@
             <directory>../Unit/Format</directory>
             <directory>../Unit/Support</directory>
             <directory>../Unit/Fuzz</directory>
+            <directory>../Unit/Database</directory>
             <file>../Unit/Engine/ForgetTest.php</file>
             <file>../Unit/Engine/ForgetRunTest.php</file>
         </testsuite>

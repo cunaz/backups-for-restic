@@ -55,7 +55,7 @@ first release.
 | `phpunit/phpunit` 12 | unit, database, conformance and integration tests |
 | Node.js 22 with npm | runs ESLint; `node --check assets/js/admin.js` stays as a syntax check that needs no packages |
 | ESLint 10 with `@wordpress/eslint-plugin` 28 (two packages with exact versions in `package.json`; `package-lock.json` pins the about 400 packages they bring) | lints `assets/js` with the rulesets `esnext`, `custom` and `i18n` (§3); development only, nothing from npm ships |
-| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format` and `Engine\Forget`; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
+| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format`, `Engine\Forget` and the database import filter; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
 | Built-in fuzzer (`bin/fuzz.php`, `tests/Fuzz/`) | structure-aware fuzzing of every parser that reads server data ([ADR 0028](adr/0028-built-in-fuzzer.md)) |
 | **restic CLI** 0.19.1, 0.18.1 and 0.14.0 (upstream releases, checksum-verified by `bin/install-test-tools.sh`) | conformance oracle ([ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md)); never shipped |
 | **rest-server** 0.14.0 (upstream release, checksum-verified), with TLS, normal, `--append-only` and `--max-size` | local repository server for conformance and integration tests |
@@ -213,6 +213,13 @@ the files with the `mariadb` client exactly as the disaster-recovery guide says,
 `CHECKSUM TABLE` results. The conformance suite's `BackupJobTest` runs the whole backup job
 without WordPress against a TLS rest-server and the database.
 
+The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
+checksums, including invisible columns and expression defaults, and check that live tables
+stay unchanged. A parent sends SIGKILL at six DDL/transaction boundaries, then resumes the
+import and verifies duplicate rows exactly once. Foreign table collisions, an active
+transaction, session restoration, truncation warnings and wrong INSERT destinations are
+also exercised ([ADR 0035](adr/0035-transactional-shadow-import.md)).
+
 The **integration suite** (`phpunit-integration.xml.dist`) needs a real WordPress:
 `bin/test-site.sh install` downloads a pinned, checksum-verified WordPress, creates its
 database, links the plugin and writes an application password; `bin/test-site.sh start`
@@ -326,11 +333,12 @@ download, and the acceptance test of that milestone. Site Health has no browser 
 
 ### 5.6 Mutation testing and fuzzing
 
-Infection runs on `Crypto`, `Format` and `Engine\Forget`; the covered mutation score
+Infection runs on `Crypto`, `Format`, `Engine\Forget` and covered `Database\Restore` code;
+the covered mutation score
 indicator must stay at or above 90 % (`infection.json5.dist`). The run takes about 40
 minutes. It runs on every push to `main`, and on every pull request that changes a file the
 result can depend on: anything under `src/Crypto`, `src/Format`, `src/Engine`,
-`src/Support`, `src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets` or `tests/`,
+`src/Support`, `src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets`, `src/Database` or `tests/`,
 or one of `infection.json5.dist`, `composer.json`, `composer.lock`, `phpunit.xml.dist`,
 `bin/install-test-tools.sh` and `.github/workflows/ci.yml`. The list is wider than the
 mutated code on purpose. On any other pull request the job says in a notice that it skipped
@@ -339,9 +347,10 @@ files of a pull request, it runs.
 
 The built-in
 fuzzer ([ADR 0028](adr/0028-built-in-fuzzer.md)) drives every parser that reads server data,
-with 17 targets: config, key file, master key, snapshot, lock, index, tree, the JSON decoder,
+with 20 targets: config, key file, master key, snapshot, lock, index, tree, the JSON decoder,
 unpacked files, pack header and its length, the encryption envelope, the REST listing, Go
-string quoting, RFC 3339 times, durations and ids. The unit suite runs 2000 deterministic
+string quoting, RFC 3339 times, durations, ids, dump CREATE, dump INSERT and the dump
+manifest. The unit suite runs 2000 deterministic
 inputs per parser; `fuzz.yml` runs two minutes per parser every night. Every finding is
 saved with a replay command and becomes a regression input in
 `tests/Fixtures/fuzz/<target>/`. Both compensate for the missing second reviewer and
@@ -413,7 +422,7 @@ copy would only go stale.
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL and MariaDB; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
 | `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
 | `integration.yml` | push to `main`, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1.4 on PHP 8.3; nightly and on request with the acceptance sizes; records with `strace` and core dumps how the server's PHP processes ended. A second job runs the browser tests (§5.5) on a site of its own. WordPress latest-1 and PHP 8.5 are acceptance criteria of Milestone 4 and not in the matrix yet |
@@ -562,8 +571,9 @@ for every point that applies, "not affected" for the others.
    test shows what is not deleted.
 5. **Files.** The plugin writes files only inside the private directory, with owner-only
    permissions. A path that comes from the repository, a request or a setting is checked to
-   stay inside its root before it is used. No password and no database content is written
-   to disk in plain text.
+   stay inside its root before it is used. No password is written to disk in plain text,
+   and backups never spool plaintext database content. Restore staging necessarily holds
+   plaintext files under the protected, expiring directory of security §8.
 6. **HTTP.** Requests go to the configured repository server only, over HTTPS with
    certificate verification, with the credentials in the `Authorization` header and never
    in the URL. The requests to the site itself (the tick chain, the loopback test and the
@@ -573,7 +583,8 @@ for every point that applies, "not affected" for the others.
    ([security](03-security-and-threat-model.md) §5.5). Input is validated against
    `Settings\Schema`, output is escaped, and WP-CLI prints no secret.
 8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`
-   or `Engine` the conformance run is green; for `Crypto`, `Format` and `Engine\Forget` the
+   or `Engine` the conformance run is green; for `Crypto`, `Format`, `Engine\Forget` and the
+   database import filter the
    covered mutation score stays at or above 90 %. Documents and decision records say what
    changed.
 9. **Cooling-off.** A change to `Crypto`, `Format` or `Engine` is merged no earlier than 24

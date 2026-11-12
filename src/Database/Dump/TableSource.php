@@ -213,13 +213,15 @@ final class TableSource implements ResumableByteSource {
 	 */
 	private function page(): void {
 		$table = SqlFormatter::identifier( $this->table->name );
+		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
+		$selection = implode( ', ', array_map( SqlFormatter::identifier( ... ), array_keys( $this->table->columns ) ) );
 		if ( null !== $this->table->key ) {
 			$key   = SqlFormatter::identifier( $this->table->key );
 			$where = null === $this->after ? '' : ' WHERE ' . $key . ' > ' . $this->after;
-			$sql   = 'SELECT * FROM ' . $table . $where . ' ORDER BY ' . $key . ' LIMIT ' . $this->page;
+			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $where . ' ORDER BY ' . $key . ' LIMIT ' . $this->page;
 		} else {
 			$order = [] === $this->table->order ? '' : ' ORDER BY ' . implode( ', ', array_map( SqlFormatter::identifier( ... ), $this->table->order ) );
-			$sql   = 'SELECT * FROM ' . $table . $order . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;
+			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $order . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;
 		}
 		$rows = $this->connection->rows( $sql );
 		if ( [] === $rows ) {

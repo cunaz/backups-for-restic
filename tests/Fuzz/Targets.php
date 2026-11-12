@@ -15,6 +15,9 @@ use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backend\RestBackend;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\MasterKey;
+use BackupsForRestic\Database\Restore\CreateStatement;
+use BackupsForRestic\Database\Restore\InsertStatement;
+use BackupsForRestic\Database\Restore\Manifest as DumpManifest;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Config;
@@ -47,6 +50,30 @@ final class Targets {
 		$cipher  = Vectors::cipher();
 		$packs   = self::packs( $cipher );
 		$targets = [
+			new Target(
+				'dump-create',
+				[ "CREATE TABLE `wp_rows` (`id` int, `text` varchar(255) COMMENT 'comma, ; quoted text', `g` int AS (`id` * 2) STORED, KEY `k` (`text`(32)), CONSTRAINT `c` CHECK (`id` >= 0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;" ],
+				false,
+				static function ( string $input ): void {
+					CreateStatement::parse( $input, 'wp_rows', 'shadow', 'owner' );
+				}
+			),
+			new Target(
+				'dump-insert',
+				[ "INSERT INTO `wp_rows` (`id`,`text`) VALUES (0,'a ; comma, and \\n newline'),(-1,NULL),(2,0xff00);" ],
+				false,
+				static function ( string $input ): void {
+					InsertStatement::parse( $input, 'wp_rows', 'shadow' );
+				}
+			),
+			new Target(
+				'dump-manifest',
+				[ '{"format":"backups-for-restic-dump/1","created":"2026-01-01T00:00:00Z","server":"fixture","charset":"utf8mb4","time_zone":"+00:00","prefix":"wp_","tables":[{"name":"wp_rows","file":"010-wp_rows.sql","rows":4,"bytes":500}],"views":[]}' ],
+				true,
+				static function ( string $input ): void {
+					DumpManifest::parse( $input, 'wp_' );
+				}
+			),
 			new Target(
 				'config',
 				[ Vectors::restic( 'config.json' ) ],

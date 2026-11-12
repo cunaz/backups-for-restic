@@ -48,6 +48,17 @@ and makes an interrupted dump start from zero.
   (`restic dump` of the directory, then import in file order).
 - Many tables mean many small blobs; harmless for restic.
 
+## As built during Milestone 3 (2026-11)
+The writer selects every insertable column explicitly, so invisible columns are included.
+An expression default (`DEFAULT_GENERATED`) does not make a column generated; only virtual
+and stored generated columns are omitted from INSERTs.
+
+The first table importer is specified in [ADR 0035](0035-transactional-shadow-import.md).
+It validates the SQL grammar, uses owned InnoDB shadows and commits each row batch together
+with its progress. It uses the existing mysqli session without `$wpdb` retries or filters;
+maintenance and plugin-state preservation belong to the separate confirmed swap. Schema
+mapping, job integration and live apply remain open.
+
 ## Alternatives considered
 - **Single dump file spooled to disk** (ADR 0005): plaintext on disk, restart from zero,
   poorer deduplication.

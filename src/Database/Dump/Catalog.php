@@ -65,7 +65,8 @@ final class Catalog {
 		$columns = [];
 		foreach ( $this->connection->rows( 'SHOW COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
-			if ( ! str_contains( strtoupper( $column['Extra'] ?? '' ), 'GENERATED' ) ) {
+			$extra = strtoupper( $column['Extra'] ?? '' );
+			if ( ! str_contains( $extra, 'VIRTUAL GENERATED' ) && ! str_contains( $extra, 'STORED GENERATED' ) ) {
 				$columns[ (string) $column['Field'] ] = SqlFormatter::kind( (string) $column['Type'] );
 			}
 		}

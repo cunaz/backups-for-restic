@@ -587,7 +587,9 @@ running SHA-256 cannot be carried across ticks ([ADR 0021](adr/0021-database-str
 
 Format `backups-for-restic-dump/1`: one SQL statement per line, escaped values, hex-encoded
 binary, ≈ 1 MiB `INSERT` batches, and a trailer line `-- end table rows=<n> bytes=<n>` per
-file ([ADR 0021](adr/0021-database-streaming.md)). The importer never needs an SQL parser.
+file ([ADR 0021](adr/0021-database-streaming.md)). The importer reads bounded lines and
+validates a constrained CREATE/INSERT grammar; it never executes an arbitrary SQL script
+([ADR 0035](adr/0035-transactional-shadow-import.md)).
 
 Streaming and resumability: a table is produced page by page and fed to the chunker like a
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
@@ -599,10 +601,12 @@ table and the tables themselves are read at different moments. That holds in eve
 WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
 remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
 
-Import in the plugin arrives with restore in Milestone 3: files are restored to
-`<private>/restores/<job>/database/`, each trailer verified, then executed statement by
-statement in time-budgeted batches with maintenance mode on and the plugin's own options
-preserved (`PluginStatePreserver`). The manual path with the restic
+The first Milestone 3 import component, `Database\Restore\TableImporter`, reads completed
+files from `<private>/restores/<job>/database/` into owned InnoDB shadows. Every row batch
+and its progress commit together; table trailers and the manifest must agree before that
+table finishes. Live tables stay unchanged. Job integration, mapped constraints and views,
+cleanup, report, maintenance during the confirmed swap, original-engine finalization and
+plugin-option preservation (`PluginStatePreserver`) are still pending. The manual path with the restic
 CLI exists today: `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` in
 file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
