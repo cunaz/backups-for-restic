@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Database\Restore;
 
+use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Exception\FormatException;
 
 defined( 'ABSPATH' ) || exit;
@@ -21,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 final class SqlLexer {
 
 	/** One oversized row may exceed the writer's usual one MiB statement target. */
-	public const int MAX_BYTES = 16777216;
+	public const int MAX_BYTES = TableSource::MAX_STATEMENT_BYTES;
 
 	/**
 	 * First unread source byte.

@@ -20,6 +20,10 @@ and makes an interrupted dump start from zero.
   table file ends with `-- end table rows=<n> bytes=<n>`. Views lose their `DEFINER`
   clause so that they import on other servers; generated columns are left out of the
   INSERT statements and computed again on import.
+  The writer now enforces the importer's 16 MiB maximum SQL statement size, including
+  escaping, table/column names and the semicolon, excluding LF (ADR 0035). An oversized
+  row fails the backup explicitly. Generated-only tables select a constant to count rows
+  and emit one empty INSERT tuple per row.
 - **Resumable per page.** A table is read in pages: along an integer primary key where one
   exists, otherwise by offset in primary-key order. When a tick's deadline passes, the table
   source finishes the current page, the chunker emits the bytes it holds as a final chunk,

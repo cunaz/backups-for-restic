@@ -20,6 +20,7 @@ defined( 'ABSPATH' ) || exit;
 final class Session {
 
 	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_mode' ];
+	private const array BOOLEANS  = [ 'foreign_key_checks', 'unique_checks' ];
 
 	/**
 	 * Exact previous session values; SQL mode is restored last.
@@ -54,6 +55,9 @@ final class Session {
 				throw new DatabaseFailed( 'A database session setting could not be read before restore.' );
 			}
 			$previous[ $name ] = $rows[0][ $name ];
+			if ( in_array( $name, self::BOOLEANS, true ) && ! in_array( $previous[ $name ], [ '0', '1' ], true ) ) {
+				throw new DatabaseFailed( 'A database boolean setting has an unexpected value.' );
+			}
 		}
 		$this->previous = $previous;
 		// Without SESSION, this fails inside an active transaction (MySQL and MariaDB).
@@ -87,7 +91,10 @@ final class Session {
 		}
 		foreach ( $this->previous as $name => $value ) {
 			try {
-				$this->connection->execute( 'SET SESSION ' . $name . ' = ' . ( null === $value ? 'NULL' : self::literal( $value ) ) );
+				// Boolean variables accept numeric 0/1 or the names OFF/ON. Hex string
+				// literals containing the characters "0"/"1" are not those numbers.
+				$literal = in_array( $name, self::BOOLEANS, true ) ? $value : ( null === $value ? 'NULL' : self::literal( $value ) );
+				$this->connection->execute( 'SET SESSION ' . $name . ' = ' . $literal );
 			} catch ( \Throwable $error ) {
 				$first ??= $error;
 			}

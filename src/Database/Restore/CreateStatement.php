@@ -81,8 +81,8 @@ final readonly class CreateStatement {
 			}
 			$definitions[] = $clause;
 		} while ( $more );
-		if ( [] === $columns ) {
-			throw new FormatException( 'The database table has no insertable columns.' );
+		if ( [] === $seen ) {
+			throw new FormatException( 'The database table has no columns.' );
 		}
 		[ $options, $engine, $comment ] = self::options( $lexer );
 		$lexer->end();
@@ -228,11 +228,21 @@ final readonly class CreateStatement {
 				if ( $word ? SqlToken::WORD !== $value->kind : ( ! ( SqlToken::NUMBER === $value->kind && ctype_digit( $value->text ) ) && ! $value->is( 'DEFAULT' ) ) ) {
 					throw new FormatException( 'The database table option has an unsupported value.' );
 				}
-				$options[] = $name . '=' . $value->text;
+				// These physical layouts cannot describe an InnoDB shadow. The original
+				// engine is retained separately for the later, confirmed finalization.
+				if ( 'ROW_FORMAT' === $name && in_array( $value->value, [ 'FIXED', 'PAGE' ], true ) ) {
+					continue;
+				}
+				if ( ! in_array( $name, [ 'CHECKSUM', 'DELAY_KEY_WRITE' ], true ) ) {
+					$options[ $name ] = $name . '=' . $value->text;
+				}
 			}
 		}
 		if ( null === $engine ) {
 			throw new FormatException( 'The database table does not name its original storage engine.' );
+		}
+		if ( 'INNODB' !== $engine ) {
+			unset( $options['KEY_BLOCK_SIZE'] );
 		}
 		return [ implode( ' ', $options ), $engine, $comment ];
 	}

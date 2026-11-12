@@ -36,6 +36,21 @@ final class CreateStatementTest extends TestCase {
 		self::assertSame( [ 'text', 'enum' ], $read->columns );
 	}
 
+	public function test_engine_specific_row_formats_are_not_copied_to_transactional_shadows(): void {
+		$fixed = CreateStatement::parse( 'CREATE TABLE `wp_posts` (`id` int) ENGINE=MyISAM ROW_FORMAT=FIXED DEFAULT CHARSET=utf8mb4;', 'wp_posts', 'shadow', 'owner' );
+		self::assertStringNotContainsString( 'ROW_FORMAT', $fixed->sql );
+		self::assertStringContainsString( 'CHARSET=utf8mb4', $fixed->sql );
+		self::assertSame( 'MYISAM', $fixed->engine );
+		$dynamic = CreateStatement::parse( 'CREATE TABLE `wp_posts` (`id` int) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;', 'wp_posts', 'shadow', 'owner' );
+		self::assertStringContainsString( 'ROW_FORMAT=DYNAMIC', $dynamic->sql );
+	}
+
+	public function test_a_table_of_generated_columns_has_no_inserted_values(): void {
+		$read = CreateStatement::parse( 'CREATE TABLE `wp_posts` (`g` int GENERATED ALWAYS AS (42) STORED) ENGINE=InnoDB;', 'wp_posts', 'shadow', 'owner' );
+		self::assertSame( [], $read->columns );
+		self::assertStringContainsString( 'AS( 42 ) STORED', $read->sql );
+	}
+
 	public function test_nested_expressions_beyond_the_limit_are_refused(): void {
 		$this->expectException( FormatException::class );
 		CreateStatement::parse( 'CREATE TABLE `wp_posts` (`id` int, CHECK (' . str_repeat( '(', 64 ) . '`id`' . str_repeat( ')', 64 ) . ' > 0)) ENGINE=InnoDB;', 'wp_posts', 'shadow', 'owner' );

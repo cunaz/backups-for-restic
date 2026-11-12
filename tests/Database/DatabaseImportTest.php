@@ -60,7 +60,20 @@ final class DatabaseImportTest extends TestCase {
 		self::fail( 'The bounded import did not complete in 100 units.' );
 	}
 
-	public function test_real_dump_restores_every_table_checksum_in_shadows_and_leaves_live_rows_alone(): void {
+	private function stage_dump(): Manifest {
+		$dump = new DatabaseDump( $this->db, $this->directory . '/dump-state.json', 'wp_', [], 1767225600 );
+		foreach ( $dump->files() as $file ) {
+			$source = ( $file->source )( null );
+			$handle = fopen( $this->directory . '/' . $file->name, 'wb' );
+			for ( $bytes = $source->read( 65536 ); '' !== $bytes; $bytes = $source->read( 65536 ) ) {
+				self::assertSame( strlen( $bytes ), fwrite( $handle, $bytes ) );
+			}
+			fclose( $handle );
+		}
+		return Manifest::parse( file_get_contents( $this->directory . '/manifest.json' ), 'wp_' );
+	}
+
+	public function test_real_dump_restores_table_contents_in_shadows_and_leaves_live_rows_alone(): void {
 		$this->db->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = '+02:00'" );
 		$this->db->execute( "CREATE TABLE wp_posts (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, title VARCHAR(191), body LONGTEXT, data LONGBLOB, flag BIT(1), price DECIMAL(10,2), doubled DECIMAL(12,2) AS (price * 2) STORED, created TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, hidden INT INVISIBLE, CONSTRAINT positive_price CHECK (price >= 0)) ENGINE=InnoDB COMMENT='original comment'" );
 		$values = [];
@@ -74,18 +87,9 @@ final class DatabaseImportTest extends TestCase {
 		$this->db->execute( 'CREATE TABLE wp_nopk (a INT, b LONGTEXT) ENGINE=InnoDB' );
 		$this->db->execute( "INSERT INTO wp_nopk VALUES (1,'duplicate'),(1,'duplicate'),(NULL,NULL)" );
 		$this->db->execute( 'CREATE TABLE wp_empty (id INT PRIMARY KEY) ENGINE=InnoDB' );
-		$this->db->execute( "CREATE TABLE wp_oldengine (id INT, b VARCHAR(20)) ENGINE=MyISAM COMMENT='keep this'" );
+		$this->db->execute( "CREATE TABLE wp_oldengine (id INT, b CHAR(20)) ENGINE=MyISAM ROW_FORMAT=FIXED CHECKSUM=1 DELAY_KEY_WRITE=1 COMMENT='keep this'" );
 		$this->db->execute( "INSERT INTO wp_oldengine VALUES (1,'one'),(2,NULL)" );
-		$dump = new DatabaseDump( $this->db, $this->directory . '/dump-state.json', 'wp_', [], 1767225600 );
-		foreach ( $dump->files() as $file ) {
-			$source = ( $file->source )( null );
-			$handle = fopen( $this->directory . '/' . $file->name, 'wb' );
-			for ( $bytes = $source->read( 65536 ); '' !== $bytes; $bytes = $source->read( 65536 ) ) {
-				self::assertSame( strlen( $bytes ), fwrite( $handle, $bytes ) );
-			}
-			fclose( $handle );
-		}
-		$manifest = Manifest::parse( file_get_contents( $this->directory . '/manifest.json' ), 'wp_' );
+		$manifest = $this->stage_dump();
 		$before   = [];
 		foreach ( $manifest->tables as $table ) {
 			$before[ $table['name'] ] = $this->db->rows( 'CHECKSUM TABLE `' . $table['name'] . '` EXTENDED' )[0]['Checksum'];
@@ -94,7 +98,12 @@ final class DatabaseImportTest extends TestCase {
 		$this->finish( $importer );
 		foreach ( $manifest->tables as $number => $table ) {
 			$shadow = $importer->tables->shadow( $number );
-			self::assertSame( $before[ $table['name'] ], $this->db->rows( 'CHECKSUM TABLE `' . $shadow . '` EXTENDED' )[0]['Checksum'], $table['name'] );
+			if ( 'wp_oldengine' === $table['name'] ) {
+				// CHECKSUM TABLE depends on physical row format, which differs across engines.
+				self::assertSame( $this->db->rows( 'SELECT id,b FROM wp_oldengine ORDER BY id' ), $this->db->rows( 'SELECT id,b FROM `' . $shadow . '` ORDER BY id' ) );
+			} else {
+				self::assertSame( $before[ $table['name'] ], $this->db->rows( 'CHECKSUM TABLE `' . $shadow . '` EXTENDED' )[0]['Checksum'], $table['name'] );
+			}
 			self::assertSame( $before[ $table['name'] ], $this->db->rows( 'CHECKSUM TABLE `' . $table['name'] . '` EXTENDED' )[0]['Checksum'], 'The live table stays unchanged.' );
 			if ( 'wp_posts' === $table['name'] ) {
 				self::assertSame(
@@ -118,7 +127,31 @@ final class DatabaseImportTest extends TestCase {
 			],
 			$ledger
 		);
-		self::assertTrue( $importer->tick()['done'], 'Repeating a completed import changes no data.' );
+	}
+
+	public function test_repeating_a_completed_import_preserves_every_row_and_its_ledger(): void {
+		$manifest = StagedDump::write( $this->directory );
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$rows_query   = 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '` ORDER BY a,b';
+		$ledger_query = 'SELECT * FROM `' . $importer->tables->progress() . '` ORDER BY id';
+		$rows         = $this->db->rows( $rows_query );
+		$ledger       = $this->db->rows( $ledger_query );
+		self::assertCount( 4, $rows );
+		self::assertTrue( $importer->tick()['done'] );
+		self::assertTrue( $this->importer( $manifest )->tick()['done'] );
+		self::assertSame( $rows, $this->db->rows( $rows_query ) );
+		self::assertSame( $ledger, $this->db->rows( $ledger_query ) );
+	}
+
+	public function test_generated_only_tables_restore_empty_tables_and_duplicate_rows(): void {
+		$this->db->execute( 'CREATE TABLE wp_generated (g INT AS (42) STORED) ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE wp_generated_empty (g INT AS (42) STORED) ENGINE=InnoDB' );
+		$this->db->execute( 'INSERT INTO wp_generated () VALUES (),(),()' );
+		$importer = $this->importer( $this->stage_dump() );
+		$this->finish( $importer );
+		self::assertSame( [ [ 'g' => '42' ], [ 'g' => '42' ], [ 'g' => '42' ] ], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 1 ) . '`' ) );
 	}
 
 	public function test_session_settings_are_restored_after_a_tick(): void {

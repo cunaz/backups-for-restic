@@ -52,7 +52,10 @@ final class Targets {
 		$targets = [
 			new Target(
 				'dump-create',
-				[ "CREATE TABLE `wp_rows` (`id` int, `text` varchar(255) COMMENT 'comma, ; quoted text', `g` int AS (`id` * 2) STORED, KEY `k` (`text`(32)), CONSTRAINT `c` CHECK (`id` >= 0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;" ],
+				[
+					"CREATE TABLE `wp_rows` (`id` int, `text` varchar(255) COMMENT 'comma, ; quoted text', `g` int AS (`id` * 2) STORED, KEY `k` (`text`(32)), CONSTRAINT `c` CHECK (`id` >= 0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+					'CREATE TABLE `wp_rows` (`g` int AS (42) STORED) ENGINE=MyISAM ROW_FORMAT=FIXED;',
+				],
 				false,
 				static function ( string $input ): void {
 					CreateStatement::parse( $input, 'wp_rows', 'shadow', 'owner' );
@@ -60,7 +63,7 @@ final class Targets {
 			),
 			new Target(
 				'dump-insert',
-				[ "INSERT INTO `wp_rows` (`id`,`text`) VALUES (0,'a ; comma, and \\n newline'),(-1,NULL),(2,0xff00);" ],
+				[ "INSERT INTO `wp_rows` (`id`,`text`) VALUES (0,'a ; comma, and \\n newline'),(-1,NULL),(2,0xff00);", 'INSERT INTO `wp_rows` () VALUES (),();' ],
 				false,
 				static function ( string $input ): void {
 					InsertStatement::parse( $input, 'wp_rows', 'shadow' );

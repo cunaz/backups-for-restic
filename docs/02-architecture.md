@@ -591,6 +591,12 @@ file ([ADR 0021](adr/0021-database-streaming.md)). The importer reads bounded li
 validates a constrained CREATE/INSERT grammar; it never executes an arbitrary SQL script
 ([ADR 0035](adr/0035-transactional-shadow-import.md)).
 
+The writer and reader share a hard 16 MiB SQL statement limit, including the semicolon
+and excluding LF. An encoded row that cannot fit causes a database error before the dump
+is completed. Binary hex encoding can roughly double the source row size. Generated-only
+tables use empty INSERT tuples to preserve their row counts without assigning generated
+values. These files remain importable by a normal MySQL/MariaDB client.
+
 Streaming and resumability: a table is produced page by page and fed to the chunker like a
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
 yesterday's dump. When a tick's time is up, the table stops after the current page and the

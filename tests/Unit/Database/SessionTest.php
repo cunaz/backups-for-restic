@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Database;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\Session;
 use BackupsForRestic\Exception\DatabaseFailed;
@@ -60,11 +61,40 @@ final class SessionTest extends TestCase {
 		}
 	}
 
+	/** @return iterable<string, array{string}> */
+	public static function booleans(): iterable {
+		yield 'disabled' => [ '0' ];
+		yield 'enabled' => [ '1' ];
+	}
+
+	#[DataProvider( 'booleans' )]
+	public function test_boolean_settings_are_restored_as_numbers_not_binary_strings( string $value ): void {
+		$db         = $this->connection();
+		$db->checks = $value;
+		$session    = new Session( $db, StagedDump::write( $this->directory ) );
+		$db->writes = [];
+		$session->close();
+		self::assertContains( 'SET SESSION foreign_key_checks = ' . $value, $db->writes );
+		self::assertContains( 'SET SESSION unique_checks = ' . $value, $db->writes );
+	}
+
+	public function test_unexpected_boolean_metadata_refuses_before_changing_the_session(): void {
+		$db         = $this->connection();
+		$db->checks = '2';
+		try {
+			new Session( $db, StagedDump::write( $this->directory ) );
+			self::fail( 'Invalid boolean metadata must not become SQL syntax.' );
+		} catch ( DatabaseFailed $expected ) {
+			self::assertSame( [], $db->writes );
+		}
+	}
+
 	private function connection(): object {
 		return new class() implements Connection {
 			public array $writes      = [];
 			public string $refuse     = '';
 			public string $autocommit = '1';
+			public string $checks     = '0';
 			public function rows( string $sql ): array {
 				return [
 					[
@@ -74,8 +104,8 @@ final class SessionTest extends TestCase {
 						'character_set_results'    => null,
 						'collation_connection'     => 'latin1_swedish_ci',
 						'time_zone'                => '+04:00',
-						'foreign_key_checks'       => '0',
-						'unique_checks'            => '0',
+						'foreign_key_checks'       => $this->checks,
+						'unique_checks'            => $this->checks,
 						'sql_mode'                 => 'NO_BACKSLASH_ESCAPES',
 					],
 				];

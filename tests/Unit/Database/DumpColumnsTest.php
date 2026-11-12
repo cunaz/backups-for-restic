@@ -9,6 +9,7 @@ use BackupsForRestic\Database\Dump\Connection;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Dump\Table;
 use BackupsForRestic\Database\Dump\TableSource;
+use BackupsForRestic\Database\Restore\InsertStatement;
 
 final class DumpColumnsTest extends TestCase {
 
@@ -82,5 +83,22 @@ final class DumpColumnsTest extends TestCase {
 		);
 		$source = new TableSource( $db, $table, '', null, static function (): void {} );
 		self::assertStringContainsString( '(`id`,`hidden`) VALUES (1,42);', $source->read( 10000 ) );
+	}
+
+	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {
+		$db     = new class() implements Connection {
+			public function rows( string $sql ): array {
+				TestCase::assertStringStartsWith( 'SELECT 1 FROM `wp_rows` LIMIT ', $sql );
+				return [ [ '1' => '1' ], [ '1' => '1' ] ];
+			}
+		};
+		$table  = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`g` int AS (42) STORED) ENGINE=InnoDB', [], null, [] );
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		$dump   = $source->read( 10000 );
+		self::assertStringContainsString( 'INSERT INTO `wp_rows` () VALUES (),();', $dump );
+		self::assertStringContainsString( '-- end table rows=2 ', $dump );
+		$batch = InsertStatement::parse( 'INSERT INTO `wp_rows` () VALUES (),();', 'wp_rows', 'shadow' );
+		self::assertSame( [], $batch->columns );
+		self::assertSame( 2, $batch->rows );
 	}
 }

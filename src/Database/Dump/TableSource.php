@@ -28,6 +28,9 @@ final class TableSource implements ResumableByteSource {
 
 	public const string FORMAT = 'backups-for-restic-dump/1';
 
+	/** Hard format limit including the semicolon, excluding the physical newline. */
+	public const int MAX_STATEMENT_BYTES = 16777216;
+
 	private const int STATEMENT_BYTES = 1048576;
 
 	private const int TARGET_PAGE_BYTES = 2097152;
@@ -215,6 +218,8 @@ final class TableSource implements ResumableByteSource {
 		$table = SqlFormatter::identifier( $this->table->name );
 		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
 		$selection = implode( ', ', array_map( SqlFormatter::identifier( ... ), array_keys( $this->table->columns ) ) );
+		// A generated-only table still has rows: one empty INSERT tuple recreates each one.
+		$selection = '' === $selection ? '1' : $selection;
 		if ( null !== $this->table->key ) {
 			$key   = SqlFormatter::identifier( $this->table->key );
 			$where = null === $this->after ? '' : ' WHERE ' . $key . ' > ' . $this->after;
@@ -240,6 +245,9 @@ final class TableSource implements ResumableByteSource {
 				$values[] = SqlFormatter::value( $row[ $column ] ?? null, $kind );
 			}
 			$tuple = '(' . implode( ',', $values ) . ')';
+			if ( strlen( $prefix ) + strlen( $tuple ) + 1 > self::MAX_STATEMENT_BYTES ) {
+				DatabaseFailed::raise( 'A database row exceeds the 16 MiB SQL statement limit and cannot be backed up.', [ 'table' => $this->table->name ] );
+			}
 			if ( [] !== $tuples && $length + strlen( $tuple ) > self::STATEMENT_BYTES ) {
 				$size  += $this->emit( $prefix . implode( ',', $tuples ) . ";\n" );
 				$tuples = [];

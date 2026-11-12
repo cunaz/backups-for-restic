@@ -10,6 +10,9 @@ All notable changes are documented here. The format follows
 - The first database restore component imports staged table data into separate InnoDB
   tables, with checked SQL and resumable transactions. It is not yet exposed in the admin
   page; the schema/apply/undo workflows remain in development.
+  It also handles tables containing only generated columns and fixed-format MyISAM
+  sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
+  cannot report success with a row that the bounded importer cannot read.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

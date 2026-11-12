@@ -1,5 +1,5 @@
 # 0035 · Import database batches and their progress in one transaction
-Status: accepted; table-import implementation, apply and job integration pending
+Status: accepted; base-table import implemented, schema mapping, cleanup, apply and job integration pending
 Date: 2026-11-12
 
 ## Context
@@ -29,6 +29,12 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
   function list. Qualified names, unknown functions, external engines, paths and additional
   statements are refused. MySQL's exact `/*!80023 INVISIBLE */` marker becomes the ordinary
   `INVISIBLE` keyword; executable comments are never passed through to the server.
+  The dump writer uses the same 16 MiB statement limit (semicolon included, LF excluded).
+  It refuses an oversized encoded row with a database error before recording a completed
+  dump; it never silently omits that row. Older oversized dumps require an external client.
+  A table with only generated columns uses a constant SELECT projection and one empty
+  INSERT tuple per row. The importer accepts these tuples only with the CREATE's matching
+  empty insertable-column list.
 - The job must persist a random 128-bit ownership token before the first tick. Table names
   derive from it and their ordinal, fit the identifier limit and never start with the site
   prefix. Comments bind objects to the token, import layout version and exact manifest.
@@ -71,6 +77,13 @@ and distinguishes expression defaults (`DEFAULT_GENERATED`) from virtual/stored 
 columns. Otherwise a new importer would reproduce an already incomplete dump. This fixes
 future backups; it cannot recover values omitted from older snapshots.
 
+The transactional shadow omits engine-specific physical options: `ROW_FORMAT=FIXED` or
+`PAGE`, MyISAM's `CHECKSUM` and `DELAY_KEY_WRITE`, and `KEY_BLOCK_SIZE` from non-InnoDB
+tables. Compatible InnoDB row formats are retained. This component preserves logical data,
+the original engine and table comment, not a guarantee of identical physical storage.
+Session cleanup writes `foreign_key_checks` and `unique_checks` as validated numeric 0/1;
+binary string literals containing those characters are not accepted boolean settings.
+
 ## Verification
 Unit tests cover the SQL grammar and limits, unsafe commands, trailer and source replacement
 checks, transaction guard and cleanup errors. Two writer regressions fail before the fix:
@@ -80,7 +93,10 @@ mutation gate.
 
 CI runs the existing manual dump/import tests and new shadow tests on MySQL 8.4 and MariaDB
 11.4. They compare table checksums with binary data, generated values, invisible columns,
-timestamps and duplicates, while checking unchanged live tables. A parent sends SIGKILL
+timestamps and duplicates, while checking unchanged live tables. Across different storage
+engines, they compare ordered rows: [MySQL's checksum depends on row format](https://dev.mysql.com/doc/refman/8.4/en/checksum-table.html).
+Generated-only tables, a fixed-format MyISAM source and an unchanged completed retry also
+have database tests. A parent sends SIGKILL
 after ledger creation, shadow creation, INSERT, progress UPDATE, before COMMIT and after
 COMMIT. Resume must preserve duplicate rows exactly once. Other cases refuse foreign
 collisions, active transactions, truncation and INSERTs aimed at a live table. Database

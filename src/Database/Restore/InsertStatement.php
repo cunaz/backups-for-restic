@@ -53,17 +53,21 @@ final readonly class InsertStatement {
 		$lexer->expect( '(' );
 		$columns = [];
 		$seen    = [];
-		do {
-			$name = $lexer->identifier()->value;
-			if ( isset( $seen[ $name ] ) || count( $columns ) >= 4096 ) {
-				throw new FormatException( 'A database dump INSERT has duplicate or too many columns.' );
+		if ( $lexer->peek()?->is( ')' ) ?? false ) {
+			$lexer->next();
+		} else {
+			do {
+				$name = $lexer->identifier()->value;
+				if ( isset( $seen[ $name ] ) || count( $columns ) >= 4096 ) {
+					throw new FormatException( 'A database dump INSERT has duplicate or too many columns.' );
+				}
+				$seen[ $name ] = true;
+				$columns[]     = $name;
+				$delimiter     = $lexer->next();
+			} while ( $delimiter?->is( ',' ) ?? false );
+			if ( ! ( $delimiter?->is( ')' ) ?? false ) ) {
+				throw new FormatException( 'A database dump INSERT has an invalid column list.' );
 			}
-			$seen[ $name ] = true;
-			$columns[]     = $name;
-			$delimiter     = $lexer->next();
-		} while ( $delimiter?->is( ',' ) ?? false );
-		if ( ! ( $delimiter?->is( ')' ) ?? false ) ) {
-			throw new FormatException( 'A database dump INSERT has an invalid column list.' );
 		}
 		$lexer->expect( 'VALUES' );
 		$rows = 0;
