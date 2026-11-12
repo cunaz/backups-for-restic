@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
@@ -26,6 +27,7 @@ use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
+use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
@@ -199,6 +201,57 @@ final class BackupStepsTest extends TestCase {
 		} finally {
 			restore_error_handler();
 			chmod( $work, 0700 );
+		}
+	}
+
+	/** @return iterable<string, array{bool}> */
+	public static function refused_cleanup_directories(): iterable {
+		yield 'unlock' => [ true ];
+		yield 'backup' => [ false ];
+	}
+
+	#[DataProvider( 'refused_cleanup_directories' )]
+	public function test_a_refused_removal_does_not_skip_other_cleanup_actions( bool $refuse_unlock ): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root ignores the permissions used to refuse removal.' );
+		}
+		$this->repository();
+		$job = $this->unlock( JobType::Backup );
+		( new SettingsStore( $this->options ) )->update( [ 'advanced.keep_jobs' => 5 ] );
+		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'a cancelled attempt' ) );
+		$unlock = $this->directory . '/private/kdf/' . $job->id;
+		$work   = $this->jobs->directory( $job ) . '/backup';
+		$cache  = $this->directory . '/private/cache/' . str_repeat( 'a', 64 );
+		foreach ( [ $unlock, $work, $cache ] as $path ) {
+			if ( ! is_dir( $path ) ) {
+				mkdir( $path, 0700, true );
+			}
+			file_put_contents( $path . '/leftover', 'private working data' );
+		}
+		$oldest = '';
+		for ( $number = 0; $number < 6; ++$number ) {
+			$old        = $this->jobs->create( JobType::Check, 'manual', 1_700_000_000 + $number );
+			$old->state = JobState::Succeeded;
+			$this->jobs->save( $old );
+			if ( 0 === $number ) {
+				$oldest = $this->jobs->directory( $old );
+			}
+		}
+		$blocked = $refuse_unlock ? $unlock : $work;
+		chmod( $blocked, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$this->steps()->clean_up( $job, $this->jobs->log( $job ), INF );
+			self::fail( 'Refused cleanup must still be reported.' );
+		} catch ( StorageFailed ) {
+			self::assertNull( $this->secrets->get( SecretName::RepositoryPasswordCandidate ) );
+			self::assertDirectoryDoesNotExist( $refuse_unlock ? $work : $unlock );
+			self::assertDirectoryDoesNotExist( $oldest, 'Job pruning still runs.' );
+			self::assertDirectoryDoesNotExist( $cache, 'Cache cleanup still runs.' );
+			self::assertFileExists( $blocked . '/leftover' );
+		} finally {
+			restore_error_handler();
+			chmod( $blocked, 0700 );
 		}
 	}
 

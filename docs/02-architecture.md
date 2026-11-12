@@ -279,6 +279,9 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 ```
 
 - The cleanup steps run on every path to the end: success, failure and cancellation.
+- Independent actions within cleanup are all attempted before the first error is reported.
+  A refused local removal cannot skip candidate-password deletion or the other cleanup
+  actions. An append-only refusal switches retention to external before cleanup starts.
 - `unlocking` is the KDF step; it does nothing when a cached master key opens the repository
   ([ADR 0020](adr/0020-unlocking-and-kdf.md)). The `unlock` job exists for the wizard when it
   connects an existing repository.

@@ -41,6 +41,12 @@ ended a job could therefore prevent it from releasing its lock.
   job-history removal. Symbolic links are removed without following them. Earlier removals
   are not rolled back. The job runner records a cleanup error and proceeds to the next
   cleanup step, so a retained local file cannot keep a job active indefinitely.
+- Within a cleanup step, `Jobs\Cleanup` attempts each independent action before propagating
+  the first failure. A refused working-file removal therefore cannot skip candidate-password
+  deletion, job-history pruning or cache cleanup. Maintenance cleanup also attempts the
+  common actions if its own directory cannot be removed. After an append-only refusal,
+  retention switches to external before cleanup; both actions are attempted even if one
+  fails, and the failure is still reported.
 
 ## Consequences
 - Local storage failures cannot silently publish missing directory contents and are not
@@ -53,6 +59,8 @@ ended a job could therefore prevent it from releasing its lock.
   when an unfamiliar checkpoint names it, and a different host's lock with the same number.
   Separate filesystem regressions cover refused unlink, directory listing and directory
   removal; a job-layer test verifies that its lock is already released when removal fails.
+  Additional tests cover independent cleanup after either working-directory removal fails,
+  and forget/prune switching to external retention despite refused local cleanup.
 
 ## Alternatives considered
 - **Resume and immediately abort:** repeats the failing plan, index or file operation and

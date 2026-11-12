@@ -24,6 +24,7 @@ use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
+use BackupsForRestic\Jobs\Cleanup;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
@@ -131,8 +132,10 @@ final class MaintenanceSteps implements StepProvider {
 				: ForgetRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $policy, $this->services->retention_tags() );
 			$done = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
-			$this->abandon( $job );
-			$this->switch_to_external( $job, $log );
+			Cleanup::run(
+				fn () => $this->switch_to_external( $job, $log ),
+				fn () => $this->abandon( $job )
+			);
 			return true;
 		}
 		$job->result = array_merge( $job->result, $run->result() );
@@ -164,8 +167,10 @@ final class MaintenanceSteps implements StepProvider {
 				: PruneRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $index );
 			$done = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
-			$this->abandon( $job );
-			$this->switch_to_external( $job, $log );
+			Cleanup::run(
+				fn () => $this->switch_to_external( $job, $log ),
+				fn () => $this->abandon( $job )
+			);
 			return true;
 		}
 		$job->progress = $run->progress();
@@ -362,8 +367,11 @@ final class MaintenanceSteps implements StepProvider {
 	 * @return bool Always true.
 	 */
 	public function clean_up( Job $job, EventLog $log, float $deadline ): bool {
-		Files::remove_tree( $this->services->work_dir( $job ) );
-		return $this->common->clean_up( $job, $log, $deadline );
+		Cleanup::run(
+			fn () => Files::remove_tree( $this->services->work_dir( $job ) ),
+			fn () => $this->common->clean_up( $job, $log, $deadline )
+		);
+		return true;
 	}
 
 	/**
