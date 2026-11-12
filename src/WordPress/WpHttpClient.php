@@ -11,7 +11,9 @@ namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Backend\Http\HttpClient;
 use BackupsForRestic\Backend\Http\HttpResponse;
+use BackupsForRestic\Backend\Http\StreamedBody;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Support\WorkFile;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -49,10 +51,16 @@ final class WpHttpClient implements HttpClient {
 	 * @param array<string, string> $headers Request headers.
 	 * @param string                $body    Request body.
 	 * @param int                   $limit   Most bytes of response body the caller accepts; 0 for no limit.
+	 * @param string|null           $file    Existing private destination for streaming.
 	 * @return HttpResponse Response, for every HTTP status.
 	 * @throws BackendException On network or TLS errors.
 	 */
-	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
+	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0, ?string $file = null ): HttpResponse {
+		if ( null !== $file ) {
+			$destination = new WorkFile( $file );
+			$destination->truncate( 0 );
+			$destination->close();
+		}
 		$user_agent = $headers['User-Agent'] ?? 'backups-for-restic';
 		unset( $headers['User-Agent'] );
 		$arguments = [
@@ -67,7 +75,11 @@ final class WpHttpClient implements HttpClient {
 			// A repository's objects are encrypted and do not compress; nothing is gained by
 			// a compressed answer, and unpacking one is not held back by the limit below.
 			'decompress'  => false,
+			'stream'      => null !== $file,
 		];
+		if ( null !== $file ) {
+			$arguments['filename'] = $file;
+		}
 		$arguments['headers']['Accept-Encoding'] = 'identity';
 		if ( $limit > 0 ) {
 			// One byte more than accepted: the caller sees that the body was longer. And room
@@ -81,18 +93,26 @@ final class WpHttpClient implements HttpClient {
 
 		// Each callback looks at the URL: a request that other code sends from inside a hook of
 		// this one keeps its own arguments.
-		$keep_arguments = static function ( mixed $filtered, mixed $requested = null ) use ( $bundle, $url ): mixed {
+		$keep_arguments = static function ( mixed $filtered, mixed $requested = null ) use ( $bundle, $url, $arguments ): mixed {
 			if ( $requested !== $url || ! is_array( $filtered ) ) {
 				return $filtered;
 			}
 			$filtered['sslverify']       = true;
 			$filtered['sslcertificates'] = $bundle;
 			$filtered['redirection']     = 0;
+			$filtered['stream']          = $arguments['stream'];
+			if ( isset( $arguments['filename'] ) ) {
+				$filtered['filename'] = $arguments['filename'];
+			} else {
+				unset( $filtered['filename'] );
+			}
+			$filtered['decompress']          = false;
+			$filtered['limit_response_size'] = $arguments['limit_response_size'] ?? null;
 			return $filtered;
 		};
 		// WordPress hands the bundle's path, or false for "do not verify", to this filter.
-		$keep_bundle = static fn ( mixed $verify, mixed $requested = null ): mixed => $requested === $url ? $bundle : $verify;
-		$keep_curl   = static function ( mixed $handle, mixed $parsed = null, mixed $requested = null ) use ( $bundle, $url ): void {
+		$keep_bundle    = static fn ( mixed $verify, mixed $requested = null ): mixed => $requested === $url ? $bundle : $verify;
+		$keep_curl      = static function ( mixed $handle, mixed $parsed = null, mixed $requested = null ) use ( $bundle, $url ): void {
 			if ( $requested === $url && $handle instanceof \CurlHandle ) {
 				// phpcs:disable WordPress.WP.AlternativeFunctions.curl_curl_setopt -- The purpose of the http_api_curl action; these options undo what an earlier callback of it may have set.
 				curl_setopt( $handle, CURLOPT_SSL_VERIFYPEER, true );
@@ -102,10 +122,28 @@ final class WpHttpClient implements HttpClient {
 				// phpcs:enable
 			}
 		};
+		$audit          = null;
+		$chunked        = false;
+		$start_download = static function ( mixed $requested, mixed $request_headers, mixed $data, mixed $type, mixed $options ) use ( $url, $file, &$audit, &$chunked ): void {
+			if ( null === $file || $requested !== $url || ! is_array( $options ) || ( $options['filename'] ?? null ) !== $file || ! ( ( $options['hooks'] ?? null ) instanceof \WpOrg\Requests\Hooks ) ) {
+				return;
+			}
+			$audit = new StreamedBody();
+			// Register on this request's hook manager, not on the global progress action:
+			// nested requests from other plugins must not contribute bytes to this download.
+			$options['hooks']->register( 'request.progress', [ $audit, 'observe' ] );
+			$options['hooks']->register(
+				'fsockopen.after_request',
+				static function ( string $raw_headers ) use ( &$chunked ): void {
+					$chunked = 1 === preg_match( '/^transfer-encoding:\s*chunked\s*$/mi', $raw_headers );
+				}
+			);
+		};
 		add_filter( 'http_request_args', $keep_arguments, PHP_INT_MAX, 2 );
 		add_filter( 'https_ssl_verify', $keep_bundle, PHP_INT_MAX, 2 );
 		add_filter( 'https_local_ssl_verify', $keep_bundle, PHP_INT_MAX, 2 );
 		add_action( 'http_api_curl', $keep_curl, PHP_INT_MAX, 3 );
+		add_action( 'requests-requests.before_request', $start_download, PHP_INT_MAX, 5 );
 		try {
 			$response = wp_remote_request( $url, $arguments );
 		} finally {
@@ -113,6 +151,7 @@ final class WpHttpClient implements HttpClient {
 			remove_filter( 'https_ssl_verify', $keep_bundle, PHP_INT_MAX );
 			remove_filter( 'https_local_ssl_verify', $keep_bundle, PHP_INT_MAX );
 			remove_action( 'http_api_curl', $keep_curl, PHP_INT_MAX );
+			remove_action( 'requests-requests.before_request', $start_download, PHP_INT_MAX );
 		}
 		if ( is_wp_error( $response ) ) {
 			BackendException::raise(
@@ -123,6 +162,15 @@ final class WpHttpClient implements HttpClient {
 				]
 			);
 		}
+		if ( null !== $file ) {
+			if ( null === $audit ) {
+				BackendException::raise( 'The HTTP adapter did not stream the listing to its working file.' );
+			}
+			$audit->verify( $file );
+			if ( $chunked ) {
+				StreamedBody::decode_chunked( $file, $limit );
+			}
+		}
 
 		$headers = [];
 		foreach ( wp_remote_retrieve_headers( $response ) as $name => $value ) {
@@ -131,6 +179,6 @@ final class WpHttpClient implements HttpClient {
 			}
 			$headers[ strtolower( (string) $name ) ] = is_scalar( $value ) ? (string) $value : '';
 		}
-		return new HttpResponse( (int) wp_remote_retrieve_response_code( $response ), $headers, wp_remote_retrieve_body( $response ) );
+		return new HttpResponse( (int) wp_remote_retrieve_response_code( $response ), $headers, null === $file ? wp_remote_retrieve_body( $response ) : '' );
 	}
 }

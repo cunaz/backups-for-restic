@@ -88,3 +88,7 @@ a state every restic tool understands.
   entries were already removed; the next plan now finds them as packs that no index file
   lists.
 - The setting for the sample is `schedule.check.read_data_subset_percent`.
+- The new pack listing is streamed to a private working file, parsed in bounded batches,
+  and deduplicated in a disk-backed table. No index rewrite or deletion starts before the
+  entire listing has been validated. Unindexed IDs stay out of the checkpoint; their
+  deletion resumes by table slot ([ADR 0033](0033-prune-listing-on-disk.md)).

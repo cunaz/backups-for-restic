@@ -643,6 +643,12 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   interrupted backup leaves behind, as restic's prune does. No snapshot can use such a
   pack: marking ends with an error when a snapshot uses a blob the index does not lead to,
   and every used pack must be among the listed ones before anything is deleted.
+  The server pack listing streams into `packs.json` in the private job directory. Prune
+  validates bounded batches and deduplicates names in `packs.table` on disk; no index
+  rewrite or deletion begins before the entire listing is valid. Unindexed packs never
+  enter the JSON checkpoint: classification and deletion resume by table slot. Both files
+  have mode 0600 before content is written. This bounds the new listing path, while the
+  existing tree/index sets still need the full-job memory work ([ADR 0033](adr/0033-prune-listing-on-disk.md)).
   If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares
   the snapshots with those it marked and the index files with those it read, apart from
   the ones it has written or deleted itself. If they are the same, nothing it found has

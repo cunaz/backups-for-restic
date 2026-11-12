@@ -11,6 +11,7 @@ namespace BackupsForRestic\Engine\Prune;
 
 use BackupsForRestic\Backend\AppendOnlyProbe;
 use BackupsForRestic\Backend\AppendOnlyStatus;
+use BackupsForRestic\Backend\ListingFile;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
@@ -23,6 +24,7 @@ use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\RepositoryChanged;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -32,6 +34,7 @@ use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\Decoded;
 use BackupsForRestic\Support\Throttle;
+use BackupsForRestic\Support\WorkFile;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -45,10 +48,12 @@ defined( 'ABSPATH' ) || exit;
  *
  * 1. mark: walks the trees of all snapshots and records every pack that holds a used blob.
  * 2. plan: reads the index files and records the unused packs and the index files that list
- *    them; then lists the packs on the server and records those that no index file lists.
- * 3. rewrite: writes each of those index files again without the unused packs.
- * 4. delete_indexes: deletes the old index files.
- * 5. delete_packs: deletes the unused packs and the packs that no index file lists.
+ *    them.
+ * 3. download, parse_listing, classify: streams the pack listing to disk, validates bounded
+ *    batches and records unindexed packs in a disk-backed table (ADR 0033).
+ * 4. rewrite: writes each of those index files again without the unused packs.
+ * 5. delete_indexes: deletes the old index files.
+ * 6. delete_packs, delete_unindexed: deletes indexed unused packs, then unindexed packs.
  *
  * A pack that no index file lists is what an interrupted backup left behind: it uploaded the
  * pack and never wrote the index file for it. No snapshot can use it, because marking ends
@@ -78,7 +83,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class PruneRun {
 
-	public const int STATE_VERSION = 2;
+	public const int STATE_VERSION = 3;
 
 	/** How often marking starts over because other clients changed the repository meanwhile. */
 	public const int MAX_RESTARTS = 3;
@@ -95,7 +100,7 @@ final class PruneRun {
 	private const int FILTER_MAX_BITS = 67108864;
 
 	/** The phases in their order. */
-	private const array PHASES = [ 'mark', 'plan', 'rewrite', 'delete_indexes', 'delete_packs', 'done' ];
+	private const array PHASES = [ 'mark', 'plan', 'download', 'parse_listing', 'classify', 'rewrite', 'delete_indexes', 'delete_packs', 'delete_unindexed', 'done' ];
 
 	/**
 	 * Lock handling.
@@ -126,7 +131,7 @@ final class PruneRun {
 	private int $locked_at;
 
 	/**
-	 * Current phase: mark, plan, rewrite, delete_indexes, delete_packs or done.
+	 * Current phase, one of PHASES.
 	 *
 	 * @var string
 	 */
@@ -499,7 +504,7 @@ final class PruneRun {
 			'snapshots'     => $this->snapshots,
 			'trees'         => count( $this->seen ),
 			'pending_trees' => count( $this->frontier ),
-			'unused_packs'  => count( $this->unused ),
+			'unused_packs'  => count( $this->unused ) + $this->unindexed,
 			'packs_deleted' => $this->packs_deleted,
 			'bytes_deleted' => $this->bytes_deleted,
 		];
@@ -683,7 +688,7 @@ final class PruneRun {
 	private function untouched(): bool {
 		$deleted = match ( $this->phase ) {
 			'delete_indexes' => array_slice( $this->affected, 0, $this->position ),
-			'delete_packs'   => $this->affected,
+			'delete_packs', 'delete_unindexed' => $this->affected,
 			default          => [],
 		};
 		$expected = array_values( array_unique( array_merge( array_diff( $this->index_names, $deleted ), $this->written ) ) );
@@ -701,9 +706,13 @@ final class PruneRun {
 		match ( $this->phase ) {
 			'mark'           => $this->mark_one(),
 			'plan'           => $this->plan_one(),
+			'download'       => $this->download_listing(),
+			'parse_listing'  => $this->parse_listing(),
+			'classify'       => $this->classify_packs(),
 			'rewrite'        => $this->rewrite_one(),
 			'delete_indexes' => $this->delete_index_one(),
 			'delete_packs'   => $this->delete_pack_one(),
+			'delete_unindexed' => $this->delete_unindexed(),
 			default          => $this->finish(),
 		};
 	}
@@ -877,24 +886,64 @@ final class PruneRun {
 			$this->mark_again( 'Snapshots use packs that no index file lists; prune stopped without deleting anything.', [ 'packs' => count( $unlisted ) ] );
 			return;
 		}
-		$sizes = $this->repository->backend()->list( ObjectType::Data );
-		foreach ( array_keys( $this->unused ) as $pack ) {
-			$this->unused[ $pack ] = $sizes[ $pack ] ?? -1;
-		}
-		// What an interrupted backup left behind. Every used pack is listed, as checked above,
-		// so a pack that no index file lists holds nothing a snapshot uses.
-		foreach ( $sizes as $pack => $size ) {
-			if ( ! isset( $this->listed[ $pack ] ) ) {
-				$this->unused[ $pack ] = $size;
-				++$this->unindexed;
-			}
-		}
-		if ( [] === $this->unused ) {
-			$this->finish();
-			return;
-		}
-		$this->phase    = 'rewrite';
+		// Persist this phase before touching either working file. A restarted plan must never
+		// pair an earlier parse/classification cursor with a newly downloaded listing or table.
+		$this->phase    = 'download';
 		$this->position = 0;
+	}
+
+	/** Downloads the raw listing and prepares its disk-backed set before parsing begins. */
+	private function download_listing(): void {
+		$this->repository->backend()->list_to_file( ObjectType::Data, $this->work_dir . '/packs.json' );
+		$file = new WorkFile( $this->work_dir . '/packs.json' );
+		$size = $file->size();
+		$file->close();
+		PackTable::create( $this->work_dir . '/packs.table', $size );
+		$this->phase    = 'parse_listing';
+		$this->position = 0;
+	}
+
+	/** Validates a bounded batch and stores its packs before checkpointing the byte cursor. */
+	private function parse_listing(): void {
+		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->position );
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		try {
+			foreach ( $batch['entries'] as [ $name, $size ] ) {
+				$table->put( $name, $size );
+			}
+		} finally {
+			$table->close();
+		}
+		$this->position = $batch['done'] ? 0 : $batch['offset'];
+		if ( $batch['done'] ) {
+			$this->phase = 'classify';
+		}
+	}
+
+	/** Classifies a bounded set of slots only after the entire JSON listing was validated. */
+	private function classify_packs(): void {
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		$count = 0;
+		try {
+			$batch = $table->batch( $this->position );
+			foreach ( $batch['entries'] as $entry ) {
+				$name = $entry['name'];
+				if ( isset( $this->unused[ $name ] ) ) {
+					$this->unused[ $name ] = $entry['size'];
+				}
+				if ( ! isset( $this->listed[ $name ] ) ) {
+					$table->mark_unindexed( $entry['slot'] );
+					++$count;
+				}
+			}
+		} finally {
+			$table->close();
+		}
+		$this->unindexed += $count;
+		$this->position   = $batch['done'] ? 0 : $batch['position'];
+		if ( $batch['done'] ) {
+			$this->phase = 'rewrite';
+		}
 	}
 
 	/**
@@ -965,13 +1014,41 @@ final class PruneRun {
 		$this->deletion_order ??= array_map( 'strval', array_keys( $this->unused ) );
 		$pack                   = $this->deletion_order[ $this->position ] ?? null;
 		if ( null === $pack ) {
-			$this->finish();
+			$this->phase    = 'delete_unindexed';
+			$this->position = 0;
 			return;
 		}
 		$this->repository->backend()->delete( ObjectType::Data, $pack );
 		++$this->packs_deleted;
 		$this->bytes_deleted += max( 0, $this->unused[ $pack ] );
 		++$this->position;
+	}
+
+	/** Deletes at most one unindexed pack, scanning a bounded number of empty slots per step. */
+	private function delete_unindexed(): void {
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		try {
+			$batch = $table->batch( $this->position );
+		} finally {
+			$table->close();
+		}
+		foreach ( $batch['entries'] as $entry ) {
+			if ( ! $entry['unindexed'] ) {
+				continue;
+			}
+			if ( isset( $this->listed[ $entry['name'] ] ) || isset( $this->live[ $entry['name'] ] ) ) {
+				StorageFailed::raise( 'The pack working table marks an indexed pack for deletion.' );
+			}
+			$this->repository->backend()->delete( ObjectType::Data, $entry['name'] );
+			++$this->packs_deleted;
+			$this->bytes_deleted += max( 0, $entry['size'] );
+			$this->position       = $entry['slot'] + 1;
+			return;
+		}
+		$this->position = $batch['position'];
+		if ( $batch['done'] ) {
+			$this->finish();
+		}
 	}
 
 	/**

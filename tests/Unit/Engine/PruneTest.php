@@ -665,7 +665,7 @@ final class PruneTest extends TestCase {
 			self::assertLessThan( 100000, ++$ticks );
 		} while ( ! $done );
 
-		self::assertSame( [ 'mark', 'plan', 'rewrite', 'delete_indexes', 'delete_packs' ], array_keys( $phases ) );
+		self::assertSame( [ 'mark', 'plan', 'download', 'parse_listing', 'classify', 'rewrite', 'delete_indexes', 'delete_packs', 'delete_unindexed' ], array_keys( $phases ) );
 		self::assertSame( 0, $run->result()['restarts'], 'Nobody else wrote, so marking never started over, although the lock was taken again every time.' );
 		self::assertSame( count( $left ), $run->result()['unindexed_packs'] );
 		$actual = $this->repository->names( ObjectType::Data );
@@ -805,6 +805,176 @@ final class PruneTest extends TestCase {
 		self::assertSame( $index_files, $this->repository->names( ObjectType::Index ), 'No index file listed them, so none had to change.' );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 		$this->read_everything();
+	}
+
+	#[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+	#[\PHPUnit\Framework\Attributes\PreserveGlobalState( false )]
+	public function test_large_unindexed_listing_is_planned_and_resumed_with_bounded_memory(): void {
+		$this->back_up();
+		$packs                       = $this->backend->list( ObjectType::Data );
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $packs ): void {
+			self::assertSame( ObjectType::Data, $type );
+			$file = new \BackupsForRestic\Support\WorkFile( $path, true );
+			$file->write( '[' );
+			foreach ( $packs as $name => $size ) {
+				$file->write(
+					json_encode(
+						[
+							'name' => (string) $name,
+							'size' => $size,
+						],
+						JSON_THROW_ON_ERROR
+					) . ','
+				);
+			}
+			for ( $i = 0; $i < 200000; ++$i ) {
+				$file->write( ( $i > 0 ? ',' : '' ) . '{"name":"' . hash( 'sha256', 'unindexed:' . $i ) . '","size":1}' );
+			}
+			$file->write( ']' );
+			$file->close();
+		};
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		$original                    = ini_get( 'memory_limit' );
+		$baseline                    = memory_get_usage( true );
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- A real low-memory regression in an isolated PHP process, outside WordPress.
+		self::assertNotFalse( ini_set( 'memory_limit', (string) ( $baseline + 12 * 1048576 ) ) );
+		try {
+			$steps = 0;
+			while ( 'rewrite' !== $run->progress()['phase'] ) {
+				self::assertLessThan( 10000, ++$steps );
+				self::assertFalse( $run->advance( 0.0 ) );
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::assertGreaterThan( 1000, $steps, 'Parsing and classification yield repeatedly.' );
+			self::assertSame( 200000, $run->progress()['unused_packs'] );
+			self::assertSame( 200000, $run->result()['unindexed_packs'] );
+			self::assertSame( 0, $run->result()['packs_deleted'] );
+			self::assertLessThan( 131072, filesize( $work . '/state.json' ), 'Unindexed IDs never enter the checkpoint.' );
+			while ( $run->result()['packs_deleted'] < 3 ) {
+				$run->advance( 0.0 );
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::assertSame( 3, $run->result()['packs_deleted'] );
+			self::assertSame( $packs, $this->backend->list( ObjectType::Data ), 'Indexed live packs survive the on-disk deletion plan.' );
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the isolated test process's original limit.
+			ini_set( 'memory_limit', $original );
+			$run->abort();
+		}
+	}
+
+	public function test_replayed_parse_and_classification_batches_deduplicate_before_deletion(): void {
+		$this->back_up();
+		$kept    = $this->backend->list( ObjectType::Data );
+		$entries = [];
+		foreach ( $kept as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		$bytes = 0;
+		for ( $i = 0; $i < 500; ++$i ) {
+			$content = 'left by an interrupted backup ' . $i;
+			$name    = hash( 'sha256', $content );
+			$this->backend->save( ObjectType::Data, $name, $content );
+			$entries[] = [
+				'name' => $name,
+				'size' => 1,
+			];
+			$entries[] = [
+				'name' => $name,
+				'size' => strlen( $content ),
+			];
+			$bytes    += strlen( $content );
+		}
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $entries ): void {
+			\BackupsForRestic\Storage\Files::write_atomic( $path, json_encode( $entries, JSON_THROW_ON_ERROR ) );
+		};
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		foreach ( [ 'parse_listing', 'classify', 'delete_unindexed' ] as $phase ) {
+			while ( $phase !== $run->progress()['phase'] ) {
+				self::assertFalse( $run->advance( 0.0 ) );
+			}
+			$before = file_get_contents( $work . '/state.json' );
+			$run->advance( 0.0 );
+			// The working table (or remote DELETE) persisted, but the request died before
+			// saving its checkpoint. The next request replays that exact same batch.
+			file_put_contents( $work . '/state.json', $before );
+			$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+		}
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( 500, $run->result()['unindexed_packs'] );
+		self::assertSame( 500, $run->result()['packs_deleted'] );
+		self::assertSame( $bytes, $run->result()['bytes_deleted'], 'The last duplicate entry determines the size.' );
+		self::assertSame( $kept, $this->backend->list( ObjectType::Data ) );
+	}
+
+	public function test_unwritable_pack_table_stops_before_any_deletion(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$before = $this->backend->objects;
+		$clock  = new FrozenClock( time() );
+		$work   = $this->work_dir();
+		$run    = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		while ( 'classify' !== $run->progress()['phase'] ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+		}
+		chmod( $work . '/packs.table', 0400 );
+		try {
+			if ( is_writable( $work . '/packs.table' ) ) {
+				self::markTestSkipped( 'This user bypasses file permissions.' );
+			}
+			try {
+				@$run->advance( 0.0 );
+				self::fail( 'A local I/O failure must stop classification.' );
+			} catch ( \BackupsForRestic\Exception\StorageFailed $error ) {
+				self::assertSame( 'environment', \BackupsForRestic\Jobs\JobError::from_throwable( $error )->code );
+				self::assertSame( 0, $run->result()['packs_deleted'] );
+				self::assertSame( 0, $run->result()['index_files_written'] );
+				foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
+					self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
+				}
+			}
+		} finally {
+			chmod( $work . '/packs.table', 0600 );
+			$run->abort();
+		}
+	}
+
+	public function test_malformed_final_listing_entry_prevents_all_repository_mutations(): void {
+		$this->history_with_a_forgotten_snapshot();
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ): void {
+			$file = new \BackupsForRestic\Support\WorkFile( $path, true );
+			$file->write( '[' );
+			for ( $i = 0; $i < 300; ++$i ) {
+				$file->write( '"' . hash( 'sha256', 'abandoned:' . $i ) . '",' );
+			}
+			$file->write( '{"name":"incomplete' );
+			$file->close();
+		};
+		$before                      = $this->backend->objects;
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		try {
+			while ( ! $run->advance( 0.0 ) ) {
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::fail( 'The malformed tail must be examined before any deletion.' );
+		} catch ( BackendException ) {
+			self::assertSame( 'parse_listing', $run->progress()['phase'] );
+			self::assertSame( 0, $run->result()['packs_deleted'] );
+			self::assertSame( 0, $run->result()['index_files_written'] );
+			foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
+				self::assertSame( $before[ $type ], $this->backend->objects[ $type ] );
+			}
+		} finally {
+			$run->abort();
+		}
 	}
 
 	public function test_a_repository_without_waste_keeps_every_pack_and_reports_none_unindexed(): void {

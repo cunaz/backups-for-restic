@@ -88,6 +88,9 @@ All notable changes are documented here. The format follows
   after two days.
 - With `advanced.loopback_chaining` off, creating a job no longer requests `wp-cron.php`;
   the heartbeat and an open admin page advance the job.
+- Prune streams its pack listing to a private file and processes it in resumable batches.
+  Unindexed pack IDs stay on disk, so a large listing cannot exhaust PHP memory by itself.
+  The complete listing is validated before any index rewrite or deletion begins.
 - Prune also deletes the data that a cancelled or failed backup left on the server without
   ever listing it, as `restic prune` does. Until now only a prune from another computer
   removed it.

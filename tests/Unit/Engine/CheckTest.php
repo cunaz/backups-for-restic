@@ -324,6 +324,11 @@ final class CheckTest extends TestCase {
 			public function list( ObjectType $type ): array {
 				return $this->inner->list( $type );
 			}
+
+			/** Downloads the listing to a file. */
+			public function list_to_file( ObjectType $type, string $file ): void {
+				$this->inner->list_to_file( $type, $file );
+			}
 		};
 		$work  = $this->work_dir();
 		$run   = CheckRun::start( Repository::open( $flaky, $this->repository->master_key(), new SystemRandom() ), $work, $this->identity, new SystemClock(), new SystemRandom(), 100 );

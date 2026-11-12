@@ -94,4 +94,10 @@ final class HookedBackend implements Backend {
 		( $this->hook )( 'list', $type, '', 0, null );
 		return $this->inner->list( $type );
 	}
+
+	/** Downloads the listing to a file. */
+	public function list_to_file( ObjectType $type, string $file ): void {
+		( $this->hook )( 'list', $type, '', 0, null );
+		$this->inner->list_to_file( $type, $file );
+	}
 }

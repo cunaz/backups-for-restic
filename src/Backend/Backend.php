@@ -13,6 +13,7 @@ use BackupsForRestic\Exception\AlreadyExists;
 use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\StorageFailed;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -82,4 +83,16 @@ interface Backend {
 	 * @throws BackendException If the request fails.
 	 */
 	public function list( ObjectType $type ): array;
+
+	/**
+	 * Downloads a listing to a private file without holding the whole answer in memory.
+	 * The file contains a REST v1/v2 JSON listing for ListingFile. It is replaced atomically;
+	 * syntax validation is deliberately deferred to that bounded reader.
+	 *
+	 * @param ObjectType $type Object type.
+	 * @param string     $file Destination in the private working directory.
+	 * @throws BackendException If the request fails or the response exceeds the listing limit.
+	 * @throws StorageFailed If the file cannot be written.
+	 */
+	public function list_to_file( ObjectType $type, string $file ): void;
 }
