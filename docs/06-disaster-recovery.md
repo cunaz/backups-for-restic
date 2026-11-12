@@ -244,6 +244,11 @@ The dashboard, Site Health and an e-mail report that the repository check found 
 snapshots may then not restore completely. **Do not delete anything and do not prune** until
 the cause is clear.
 
+An error with code `tree_unreadable` can mean that a directory's entry names are duplicated
+or out of order, even when the encrypted data authenticates correctly. The plugin refuses
+that directory because its listing is ambiguous. Use the full restic check below to
+investigate; do not assume that rebuilding the index will repair malformed tree contents.
+
 1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
    snapshots** to *Another computer*, so that this site starts no forget or prune, and pause
    maintenance jobs on any other computer that uses the repository. Note what the setting
