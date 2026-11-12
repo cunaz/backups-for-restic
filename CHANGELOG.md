@@ -7,6 +7,21 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A running backup shows a progress bar and the minutes left, measured against the last
+  backup.
+- The dashboard shows how much the repository holds, measured after every backup and
+  every prune.
+- WP-CLI: `settings list`, `settings get` and `settings set`, `cancel` and `logs`.
+- The plugin records when the recovery kit was shown and to whom; the Settings tab shows
+  the latest time, and the action `backups_for_restic_recovery_kit_shown` fires.
+- The environment checks and Site Health point out a JIT compiler that is switched on,
+  and a repository server that does not answer from this host.
+- Settings → Repository: forms to enter the REST password and the repository password
+  again, for example after the security keys in `wp-config.php` changed, and to upload or
+  remove the CA certificate of the server. Values that `wp-config.php` defines are marked.
+- On hosts where a site cannot request its own address, the browser of the administrator
+  checks that the working directory is not served, in the setup wizard and on the
+  Environment tab. Before, the check stayed "could not be verified" on such hosts.
 - E-mail notifications: the first failure of a backup, forget, prune or check, once when
   backups become stale (36 hours by default, at least one and a half backup intervals), once
   when they work again, every check that finds damage, and an automatic switch to retention
@@ -73,6 +88,12 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- The plugin reads no more of a server's answer than a repository file of that kind can
+  hold. Before, a broken or malicious server could answer the request for a lock or a
+  snapshot with a body larger than PHP's memory.
+- Repository requests verify the server's certificate even when other code on the site
+  switches certificate verification off for all requests (a filter on `https_ssl_verify` or
+  on the request arguments, or the `http_api_curl` action).
 - After the setup, `POST /repository/connect` and `POST /repository/create` answer with the
   recovery kit only if the request carries the administrator's WordPress password, like
   the recovery kit route; before, any session with the plugin's capability got the
@@ -106,6 +127,52 @@ All notable changes are documented here. The format follows
   gives up with `repository_changed` after starting over three times.
 - A prune that had to start over while it was deleting left data behind that nothing
   removed later. The next pass now finds and deletes it.
+- Settings that the database refused to store no longer pass for saved: the request answers
+  with an error, and saving a server puts back what it had changed. WordPress reports such a
+  refusal the same way as an unchanged value, so it went unnoticed before.
+- Saving a server that fails half way, for example because the database refuses a write,
+  leaves the site with the server, the REST password and the key it had. Before, the new
+  address could stay with the old password or without the certificate that belongs to it.
+- Where `wp-config.php` defines the repository address, testing another address with a
+  certificate of its own no longer replaces the stored certificate.
+- What the plugin remembers between requests (last results, handled schedule slots, who
+  looked at the recovery kit, waiting notices) is no longer overwritten when two requests
+  change it at the same time, for example a running backup and the admin page. A notice is
+  not sent twice when two requests try to deliver it at once.
+- Deactivating the plugin just as a backup or a check finishes no longer leaves the job
+  active and its lock in the repository: the result is recorded and the job cleaned up in
+  the same request, and recording the result of a check no longer needs the server.
+- A wrong repository password entered under Settings → Repository no longer replaces the
+  stored one. Before, the stored password and the cached key were gone as soon as the form
+  was sent, and backups failed until the right password was entered. Now the entered
+  password is kept apart and takes effect only once the unlock job has opened the
+  repository with it.
+- The setup wizard sends the CA certificate along with the connection test. Before, the
+  test ran without it and a server with a certificate of its own authority could not be
+  set up. The test stores nothing; the certificate is kept when the server is saved.
+- Connecting to an existing repository now records its ID and format version. Before, the
+  settings kept format 1, so the Doctor did not ask for the zstd extension, and the recovery
+  kit and the site manifest named the wrong format.
+- A repository of format version 2 is refused when a job unlocks it on a server without the
+  zstd extension, instead of failing later in the first backup.
+- After a change of the salts in `wp-config.php`, a site that defines both passwords there
+  goes on backing up: the cached repository key is derived again. Before, every job failed
+  until the stored secrets were deleted by hand.
+- Creating a repository stores its password before the repository exists. Before, a failure
+  between the two left a repository that nobody could open.
+- The last backup, the last forget, prune and check and the check alert belong to one
+  repository and are dropped when the jobs turn to another one. The stale notice then counts
+  from that day.
+- Saving another server or creating a repository is refused while a job is running.
+- Saving a new REST password for the same address keeps the cached repository key.
+- Deactivating the plugin ends the running job and releases its lock in the repository.
+- The setup cannot be completed by a request while the Doctor reports a critical finding.
+- A request to cancel that arrives while a step is running is honoured by the same tick.
+- A request to cancel that arrives just after a backup wrote its snapshot no longer ends
+  the job as cancelled with the snapshot left unrecorded; the job ends as succeeded.
+- A CA certificate that could not be written to disk is no longer announced as uploaded.
+- `wp backups-for-restic tick --until-idle` and the commands with `--wait` returned at once
+  when another tick was working on the job. They now wait for it.
 - A cancel request that arrived while a tick was running could be lost, or overwrite the
   progress the tick had just saved, and two requests at the same moment could both start a
   job. A cancel request is now a marker file that the runner reads before every step, and

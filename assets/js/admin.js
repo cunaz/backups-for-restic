@@ -112,6 +112,24 @@
 				] ),
 			);
 		}
+		if ( 'number' === typeof progress.total_bytes_processed && progress.expected_bytes > 0 ) {
+			// Measured against the last backup: this one knows its own total only at the end.
+			const processed = Math.min( progress.total_bytes_processed, progress.expected_bytes );
+			const elapsed = ( Date.now() / 1000 ) - job.started_at;
+			lines.push( el( 'progress', { max: progress.expected_bytes, value: processed } ) );
+			if ( job.started_at > 0 && elapsed >= 30 && processed > 0 && processed < progress.expected_bytes ) {
+				const minutes = Math.ceil( ( ( progress.expected_bytes - processed ) / ( processed / elapsed ) ) / 60 );
+				lines.push(
+					el( 'p', { className: 'description bfr-estimate' }, [
+						sprintf(
+							/* translators: %d: number of minutes. */
+							_n( 'About %d minute left, judging by the last backup.', 'About %d minutes left, judging by the last backup.', minutes, 'backups-for-restic' ),
+							minutes,
+						),
+					] ),
+				);
+			}
+		}
 		if ( 'number' === typeof progress.data_added ) {
 			lines.push(
 				el( 'p', {}, [
@@ -465,6 +483,16 @@
 						el( 'div', { className: 'bfr-card' }, [
 							el( 'h2', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
 							el( 'p', {}, [ status.repository.host ] ),
+							status.repository.usage && status.repository.usage.at
+								? el( 'p', { className: 'bfr-usage' }, [
+									sprintf(
+										/* translators: 1: amount of data such as 1.2 GB, 2: date and time. */
+										__( '%1$s stored, measured on %2$s', 'backups-for-restic' ),
+										formatBytes( status.repository.usage.bytes ),
+										formatTime( status.repository.usage.at ),
+									),
+								] )
+								: null,
 							el( 'p', { className: 'description' }, [ appendOnly[ status.repository.append_only ] || '' ] ),
 						] ),
 					] ),
@@ -675,17 +703,28 @@
 							save.disabled = false;
 						} );
 				}, true );
+				// The record of who saw the kit, kept current without touching the form above it.
+				const views = el( 'div', {}, [ kitViews( response.kit_views ) ] );
+				const kit = recoveryKitForm( function () {
+					api( '/settings' )
+						.then( function ( fresh ) {
+							replace( views, [ kitViews( fresh.kit_views ) ] );
+						} )
+						.catch( function () {} );
+				} );
 				replace( root, [
 					...groups,
 					el( 'fieldset', { className: 'bfr-group' }, [
 						el( 'legend', {}, [ __( 'Repository', 'backups-for-restic' ) ] ),
-						el( 'p', {}, [ response.values[ 'repository.url' ] ] ),
+						...repositoryForms( response, kit.reset ),
+						el( 'h3', {}, [ __( 'Working files and recovery kit', 'backups-for-restic' ) ] ),
 						el( 'p', { className: 'description' }, [
 							/* translators: %s: directory path. */
 							sprintf( __( 'Working directory: %s', 'backups-for-restic' ), response.private_dir ),
 						] ),
 						cacheControl( response.cache_bytes ),
-						recoveryKitForm(),
+						kit.box,
+						views,
 					] ),
 					message,
 					save,
@@ -694,6 +733,144 @@
 			.catch( function ( error ) {
 				replace( root, [ notice( 'error', errorText( error ) ) ] );
 			} );
+	}
+
+	/**
+	 * The repository part of the settings: where the backups go, and the forms to enter the
+	 * two passwords again and to change the server's CA certificate. What wp-config.php
+	 * defines is shown as such and cannot be changed here.
+	 *
+	 * @param {Object}     response Answer of the settings route.
+	 * @param {() => void} changed  Called after a password or the certificate changed.
+	 * @return {Array} Nodes.
+	 */
+	function repositoryForms( response, changed ) {
+		const values = response.values;
+		const secrets = response.secrets || {};
+		const fromConfig = __( 'Defined in wp-config.php; change it there.', 'backups-for-restic' );
+		const overridden = function ( path ) {
+			return ( response.overridden || [] ).includes( path );
+		};
+		const address = function ( label, path ) {
+			return el( 'p', {}, [
+				el( 'strong', {}, [ label + ': ' ] ),
+				values[ path ] || '–',
+				overridden( path ) ? el( 'span', { className: 'description' }, [ ' ', fromConfig ] ) : null,
+			] );
+		};
+
+		// REST password: tested against the server, then saved.
+		const restResult = el( 'div' );
+		const restFixed = !! ( secrets.rest_password && secrets.rest_password.overridden );
+		const restPassword = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'new-password', disabled: restFixed } );
+		const restSave = button( __( 'Test and save', 'backups-for-restic' ), function () {
+			restSave.disabled = true;
+			api( '/repository/save', {
+				method: 'POST',
+				data: { server: values[ 'repository.server' ], url: values[ 'repository.url' ], username: values[ 'repository.rest_username' ], password: restPassword.value },
+			} )
+				.then( function () {
+					restPassword.value = '';
+					changed();
+					replace( restResult, [ notice( 'success', __( 'The server accepted the password. It is saved.', 'backups-for-restic' ) ) ] );
+				} )
+				.catch( function ( error ) {
+					replace( restResult, [ notice( 'error', errorText( error ) ) ] );
+				} )
+				.finally( function () {
+					restSave.disabled = false;
+				} );
+		} );
+		restSave.disabled = restFixed;
+
+		// Repository password: an unlock job derives the key with it.
+		const unlockResult = el( 'div' );
+		const repositoryFixed = !! ( secrets.repository_password && secrets.repository_password.overridden );
+		const repositoryPassword = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'off', disabled: repositoryFixed } );
+		const confirmation = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password', disabled: repositoryFixed } );
+		const unlock = button( __( 'Unlock with this password', 'backups-for-restic' ), function () {
+			unlock.disabled = true;
+			api( '/repository/connect', { method: 'POST', data: { password: repositoryPassword.value, user_password: confirmation.value } } )
+				.then( function ( created ) {
+					repositoryPassword.value = '';
+					confirmation.value = '';
+					follow( created.job.id, unlockResult, function ( job ) {
+						unlock.disabled = false;
+						if ( 'succeeded' === job.state ) {
+							changed();
+							replace( unlockResult, [ notice( 'success', __( 'The repository is unlocked with this password.', 'backups-for-restic' ) ) ] );
+						}
+					} );
+				} )
+				.catch( function ( error ) {
+					unlock.disabled = false;
+					replace( unlockResult, [ notice( 'error', errorText( error ) ) ] );
+				} );
+		} );
+		unlock.disabled = repositoryFixed;
+
+		// CA certificate of a server with a certificate of its own authority.
+		const caBox = el( 'div' );
+		const renderCa = function ( state, message, entered ) {
+			const pem = el( 'textarea', { className: 'large-text code', rows: 4, placeholder: '-----BEGIN CERTIFICATE-----', value: entered || '' } );
+			const upload = button( __( 'Upload certificate', 'backups-for-restic' ), function () {
+				upload.disabled = true;
+				remove.disabled = true;
+				api( '/repository/ca-certificate', { method: 'POST', data: { pem: pem.value } } )
+					.then( function () {
+						changed();
+						renderCa( 'uploaded', notice( 'success', __( 'The certificate is uploaded.', 'backups-for-restic' ) ) );
+					} )
+					.catch( function ( error ) {
+						// What was pasted stays, to be corrected.
+						renderCa( state, notice( 'error', errorText( error ) ), pem.value );
+					} );
+			} );
+			const remove = button( __( 'Remove certificate', 'backups-for-restic' ), function () {
+				upload.disabled = true;
+				remove.disabled = true;
+				api( '/repository/ca-certificate', { method: 'DELETE' } )
+					.then( function () {
+						changed();
+						renderCa( 'none', notice( 'success', __( 'The certificate is removed.', 'backups-for-restic' ) ) );
+					} )
+					.catch( function ( error ) {
+						renderCa( state, notice( 'error', errorText( error ) ) );
+					} );
+			} );
+			replace( caBox, [
+				field(
+					__( 'CA certificate of the server (PEM)', 'backups-for-restic' ),
+					pem,
+					'uploaded' === state
+						? __( 'A certificate is uploaded. Paste another one to replace it.', 'backups-for-restic' )
+						: __( 'Only for a server with a certificate of its own authority.', 'backups-for-restic' ),
+				),
+				el( 'p', {}, [ upload, ' ', 'uploaded' === state ? remove : null ] ),
+				message,
+			] );
+		};
+		renderCa( values[ 'repository.ca_certificate' ], null );
+
+		return [
+			address( __( 'Repository URL', 'backups-for-restic' ), 'repository.url' ),
+			address( __( 'REST username', 'backups-for-restic' ), 'repository.rest_username' ),
+			el( 'h3', {}, [ __( 'REST password', 'backups-for-restic' ) ] ),
+			field( __( 'New REST password', 'backups-for-restic' ), restPassword, restFixed ? fromConfig : __( 'For example after you changed it on the server.', 'backups-for-restic' ) ),
+			el( 'p', {}, [ restSave ] ),
+			restResult,
+			el( 'h3', {}, [ __( 'Repository password', 'backups-for-restic' ) ] ),
+			field(
+				__( 'Repository password', 'backups-for-restic' ),
+				repositoryPassword,
+				repositoryFixed ? fromConfig : __( 'Enter it again if the stored one can no longer be read, or after it was changed with restic.', 'backups-for-restic' ),
+			),
+			field( __( 'Confirm with your WordPress password', 'backups-for-restic' ), confirmation ),
+			el( 'p', {}, [ unlock ] ),
+			unlockResult,
+			el( 'h3', {}, [ __( 'CA certificate', 'backups-for-restic' ) ] ),
+			caBox,
+		];
 	}
 
 	function cacheControl( bytes ) {
@@ -741,22 +918,68 @@
 		return el( 'div', { className: 'bfr-kit' }, [ text, el( 'p', {}, [ download, ' ', copy ] ) ] );
 	}
 
-	function recoveryKitForm() {
+	/**
+	 * Who was shown the recovery kit last, and when.
+	 *
+	 * @param {Array} views Latest deliveries of the kit, newest first.
+	 * @return {Element|null} Paragraph, or null if the kit was never shown.
+	 */
+	function kitViews( views ) {
+		if ( ! views || ! views.length ) {
+			return null;
+		}
+		return el( 'p', { className: 'description bfr-kit-views' }, [
+			sprintf(
+				/* translators: 1: date and time, 2: user name. */
+				__( 'The recovery kit was last shown on %1$s to %2$s.', 'backups-for-restic' ),
+				formatTime( views[ 0 ].at ),
+				views[ 0 ].login,
+			),
+		] );
+	}
+
+	/**
+	 * The form that shows the recovery kit. Its second part puts the form back in place of a
+	 * kit that is on the screen: after a password or the certificate changed, that kit is no
+	 * longer the one to keep.
+	 *
+	 * @param {() => void} shown Called after the server delivered the kit.
+	 * @return {Object} The form's element as `box`, and `reset()`.
+	 */
+	function recoveryKitForm( shown ) {
 		const box = el( 'div' );
-		const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
-		const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
-			show.disabled = true;
-			api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
-				.then( function ( response ) {
-					replace( box, [ kitView( response.recovery_kit ) ] );
-				} )
-				.catch( function ( error ) {
-					show.disabled = false;
-					replace( box, [ notice( 'error', errorText( error ) ), field( __( 'Your WordPress password', 'backups-for-restic' ), password ), show ] );
-				} );
-		} );
-		replace( box, [ field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
-		return box;
+		// Counts the changes: a kit that was asked for before the last one is not shown.
+		let changes = 0;
+		function render( message ) {
+			const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
+			const show = button( __( 'Show recovery kit', 'backups-for-restic' ), function () {
+				const asked = changes;
+				show.disabled = true;
+				api( '/recovery-kit', { method: 'POST', data: { user_password: password.value } } )
+					.then( function ( response ) {
+						if ( asked === changes ) {
+							replace( box, [ kitView( response.recovery_kit ) ] );
+						}
+						shown();
+					} )
+					.catch( function ( error ) {
+						if ( asked === changes ) {
+							render( notice( 'error', errorText( error ) ) );
+						}
+					} );
+			} );
+			replace( box, [ message, field( __( 'Your WordPress password', 'backups-for-restic' ), password, __( 'Needed to show the repository password.', 'backups-for-restic' ) ), show ] );
+		}
+		render( null );
+		return {
+			box,
+			reset() {
+				changes++;
+				if ( box.querySelector( '.bfr-kit' ) || box.querySelector( 'button:disabled' ) ) {
+					render( notice( 'info', __( 'The recovery kit changed. Show it again and replace your copy.', 'backups-for-restic' ) ) );
+				}
+			},
+		};
 	}
 
 	/* ----------------------------------------------------------- Environment */
@@ -774,8 +997,63 @@
 		);
 	}
 
+	/**
+	 * Lets this browser request a probe file in the working directory, where the site could not
+	 * request it from itself, and reports what came back. Never fails: a probe that cannot run
+	 * leaves the check as it was.
+	 *
+	 * @return {Promise} Settled when the report is in.
+	 */
+	function probeFromBrowser() {
+		return api( '/environment/probe', { method: 'POST' } )
+			.then( function ( probe ) {
+				if ( ! probe.url ) {
+					return null;
+				}
+				// A server that accepts the request and never answers must not hold the page up.
+				const patience = new window.AbortController();
+				const timer = window.setTimeout( function () {
+					patience.abort();
+				}, 10000 );
+				return window
+					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal } )
+					.then( function ( answer ) {
+						return answer.text().then( function ( body ) {
+							return { status: answer.status, body: body.slice( 0, 1024 ) };
+						} );
+					} )
+					.catch( function () {
+						return { status: 0, body: '' };
+					} )
+					.then( function ( seen ) {
+						window.clearTimeout( timer );
+						seen.probe = probe.probe;
+						return api( '/environment/probe/report', { method: 'POST', data: seen } );
+					} );
+			} )
+			.catch( function () {
+				return null;
+			} );
+	}
+
+	/**
+	 * The checks of this server, fresh, with the browser's probe where it is needed.
+	 *
+	 * @return {Promise<Object>} Response of the environment route.
+	 */
+	function checkEnvironment() {
+		return api( '/environment?fresh=1' ).then( function ( response ) {
+			if ( ! response.browser_probe ) {
+				return response;
+			}
+			return probeFromBrowser().then( function () {
+				return api( '/environment' );
+			} );
+		} );
+	}
+
 	function environment( root ) {
-		api( '/environment?fresh=1' )
+		checkEnvironment()
 			.then( function ( response ) {
 				replace( root, [
 					checkList( response.checks ),
@@ -844,7 +1122,7 @@
 
 		function stepEnvironment() {
 			show( 0, [ el( 'p', {}, [ __( 'Checking this server…', 'backups-for-restic' ) ] ) ] );
-			api( '/environment?fresh=1' )
+			checkEnvironment()
 				.then( function ( response ) {
 					const blocked = response.checks.some( function ( check ) {
 						return 'critical' === check.status;
@@ -880,27 +1158,28 @@
 			borgbase.addEventListener( 'change', sync );
 			own.addEventListener( 'change', sync );
 			sync();
+			// The certificate travels with the request. A test uses it for that test only; it
+			// becomes the server's certificate when the server is saved.
 			const data = function () {
-				return { server: state.server, url: url.value, username: username.value, password: password.value };
+				return { server: state.server, url: url.value, username: username.value, password: password.value, ca_certificate: own.checked ? ca.value.trim() : '' };
 			};
 			const save = button( __( 'Save and continue', 'backups-for-restic' ), function () {
 				save.disabled = true;
-				const upload = own.checked && ca.value.trim() ? api( '/repository/ca-certificate', { method: 'POST', data: { pem: ca.value } } ) : Promise.resolve();
-				upload
-					.then( function () {
-						return api( '/repository/save', { method: 'POST', data: data() } );
-					} )
+				test.disabled = true;
+				api( '/repository/save', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						state.report = response.report;
 						stepPassword();
 					} )
 					.catch( function ( error ) {
 						save.disabled = false;
+						test.disabled = false;
 						replace( result, [ notice( 'error', errorText( error ) ) ] );
 					} );
 			}, true );
 			const test = button( __( 'Test connection', 'backups-for-restic' ), function () {
 				test.disabled = true;
+				save.disabled = true;
 				api( '/repository/test', { method: 'POST', data: data() } )
 					.then( function ( response ) {
 						const report = response.report;
@@ -917,6 +1196,7 @@
 					} )
 					.finally( function () {
 						test.disabled = false;
+						save.disabled = false;
 					} );
 			}, true );
 			show( 1, [

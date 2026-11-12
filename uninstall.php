@@ -20,7 +20,7 @@ require_once __DIR__ . '/src/autoload.php';
 foreach ( [ 'backups_for_restic_settings', 'backups_for_restic_secrets', 'backups_for_restic_state', 'backups_for_restic_notifications', 'backups_for_restic_schema_version' ] as $backups_for_restic_option ) {
 	delete_option( $backups_for_restic_option );
 }
-foreach ( [ 'backups_for_restic_snapshots', 'backups_for_restic_poll', 'backups_for_restic_loopback' ] as $backups_for_restic_transient ) {
+foreach ( [ 'backups_for_restic_snapshots', 'backups_for_restic_poll', 'backups_for_restic_loopback', 'backups_for_restic_reachable' ] as $backups_for_restic_transient ) {
 	delete_transient( $backups_for_restic_transient );
 }
 wp_clear_scheduled_hook( 'backups_for_restic_heartbeat' );

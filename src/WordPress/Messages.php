@@ -196,6 +196,17 @@ final class Messages {
 				__( 'The zstd PHP extension is missing', 'backups-for-restic' ),
 				__( 'This repository uses compression, which the plugin can only read with zstd.', 'backups-for-restic' )
 			),
+			'jit/enabled'                                => self::pair(
+				__( 'The JIT compiler of PHP is switched on', 'backups-for-restic' ),
+				__( 'With it, PHP has crashed in the middle of backups. If jobs take long or stop for no visible reason, ask your host to set opcache.jit=disable for this site.', 'backups-for-restic' )
+			),
+			'jit/off'                                    => self::pair( __( 'The JIT compiler of PHP is off', 'backups-for-restic' ), '' ),
+			'repository_server/unreachable'              => self::pair(
+				__( 'The repository server did not answer', 'backups-for-restic' ),
+				__( 'Jobs try again by themselves. If this stays, ask your host whether outgoing HTTPS connections to the server and its port are allowed.', 'backups-for-restic' )
+			),
+			'repository_server/reached'                  => self::pair( __( 'The repository server answers', 'backups-for-restic' ), '' ),
+			'repository_server/not_tested'               => self::pair( __( 'The repository server was not tested yet', 'backups-for-restic' ), '' ),
 			default                                      => self::pair( __( 'Compression support is not needed', 'backups-for-restic' ), '' ),
 		};
 	}

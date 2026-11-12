@@ -228,7 +228,8 @@ final class MaintenanceJobTest extends TestCase {
 		$this->history( $repository, $site );
 
 		// A backup that uploads packs and is given up before it writes an index file.
-		file_put_contents( $site . '/abandoned.bin', random_bytes( 9 * 1048576 ) );
+		// Enough for two flushed packs even when an 8 MiB chunk crosses the 4 MiB target.
+		file_put_contents( $site . '/abandoned.bin', random_bytes( 20 * 1048576 ) );
 		$before          = $repository->names( ObjectType::Data );
 		$this->cleanup[] = $work = TempDir::create( 'abandoned' );
 		$run             = BackupRun::start( $repository, new BackupPlan( [ $site ], [ PlanFactory::TAG ] ), $work, $identity, new SystemClock(), null, 4 * 1048576 );

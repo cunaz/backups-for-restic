@@ -42,3 +42,13 @@ with `wp_set_script_translations()`, which works on classic script handles.
   ([development guide](../04-development-and-quality.md) §3). The linter is a development
   tool installed with npm; the script still has no build step and loads no third-party
   code. Until then CI only checked its syntax with `node --check`.
+- Since 2026-11-11 CI also drives the page in a browser (Playwright, a pinned development
+  dependency like the linter, [development guide](../04-development-and-quality.md) §5.5).
+  The tests click through the script as it is shipped; nothing is compiled for them, and
+  the package for WordPress.org contains neither them nor their tool.
+- One request of the script does not go to the plugin's REST API: where the site cannot
+  request its own address, the script fetches a probe file in the private directory
+  directly, without credentials, and reports status and body back
+  ([ADR 0007](0007-private-directory.md)). Only the browser can make that request from
+  outside the server. It goes to the site's own origin, waits ten seconds at most and
+  sends nothing but the URL.

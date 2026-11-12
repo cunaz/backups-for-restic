@@ -41,7 +41,8 @@ Keep this kit away from the website, for example in a password manager.
 
 For a rest-server with its own certificate authority, the kit also contains the CA
 certificate: save it as `ca.pem` and add `--cacert ca.pem` to every restic command, as the
-kit's recipe does.
+kit's recipe does. The kit carries the certificate of the saved server; one that was only
+used for a connection test is not in it until that server is saved.
 
 | Lost item | Recoverable? | How |
 | --- | --- | --- |
@@ -161,30 +162,32 @@ Extract, check the trailer lines, import in name order.
 The security keys (salts) in `wp-config.php` changed, or the database moved to a site with
 other keys. The stored passwords and the cached repository key no longer decrypt, and jobs
 fail with "The stored passwords can no longer be decrypted." Nothing is lost: the repository
-and the recovery kit are not affected. The plugin has no form yet to enter the passwords
-again; one is planned for Milestone 3. Until then there are two ways:
+and the recovery kit are not affected. A site that defines both passwords in `wp-config.php`
+is not affected either: its jobs derive the repository key again and go on. There are two
+ways back:
 
-- **Through the admin area**: deactivate and delete the plugin, install it again and enter
-  the kit's values in the setup wizard, which connects to the existing repository (the last
-  paragraph of Scenario B, step 7). Deleting removes the plugin's settings, passwords and
-  working files, never the repository; schedule, retention and exclusions have to be set
-  again.
-- **Keeping the settings**: define both passwords from the kit in `wp-config.php`,
+- **Through the admin area**: open **Backups → Settings** and go to **Repository**. Enter
+  the kit's REST password under "REST password" and choose "Test and save". Then enter the
+  kit's repository password and your WordPress password under "Repository password" and
+  choose "Unlock with this password"; the plugin derives the key in the background, which
+  can take a few minutes on shared hosting. A password that does not open the repository
+  changes nothing: the plugin goes on with what it had. Schedule, retention and exclusions
+  stay as they are. A password that `wp-config.php` defines has no field to fill in: the
+  form says so, that password was never lost, and only the other one is entered.
+- **In `wp-config.php`**: define both passwords from the kit there,
 
   ```php
   define( 'BACKUPS_FOR_RESTIC_REST_PASSWORD', '…' );
   define( 'BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD', '…' );
   ```
 
-  and delete the option that holds the values that no longer decrypt:
+  The next job derives the key from the repository password again and caches it; that can
+  take a few minutes on shared hosting. The values in the database that no longer decrypt
+  are not used any more. To remove them:
 
   ```bash
   wp option delete backups_for_restic_secrets
   ```
-
-  The constants alone are not enough: the cached key in that option stays unreadable and
-  jobs keep failing. After the option is gone, the next job derives the key from the
-  repository password again and caches it.
 
 ## Scenario F — the repository is locked
 
@@ -213,6 +216,12 @@ progress ([ADR 0030](adr/0030-lock-continuity.md)).
 The plugin deletes snapshots according to the retention policy and removes packs that no
 snapshot references, and packs that an interrupted backup left behind. Packs that still
 contain some live data are not repacked by the plugin.
+
+A plugin prune paused for more than 25 minutes takes its lock again and checks whether the
+snapshots or indexes changed. If they did, it starts its scan over; otherwise it continues
+from its saved position. After three restarts, another change ends the job with
+`repository_changed`. Let other computers finish using the repository before retrying.
+
 Run a full prune from any computer when the dashboard shows a large reclaimable amount:
 
 ```bash
@@ -240,9 +249,11 @@ hours. Where the site can call itself, each slice starts the next one. Where it 
 progress continues while the dashboard tab is open, with every visit to the site, and with a
 control-panel cron that fetches `wp-cron.php`
 ([Running backups with a real cron job](guides/cron.md)). The dashboard shows how many files
-and how much data the backup has processed and how much new data it has uploaded. It shows
-no rate and no estimate of the remaining time; both are planned for Milestone 3. Later
-backups touch only changed files and finish in minutes.
+and how much data the backup has processed and how much new data it has uploaded. The first
+backup shows no estimate of the remaining time, because the plugin does not know the size
+of the site before it has gone through it. Later backups are measured against the last one,
+with a bar and the minutes left at the speed so far; they touch only changed files and
+finish in minutes.
 
 ## Scenario I — the check found damage
 

@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Connection\Setup;
+use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
@@ -20,6 +21,8 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Settings\Schema;
+use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
@@ -35,8 +38,6 @@ final class RestRoutes {
 	public const string NAMESPACE = 'backups-for-restic/v1';
 
 	/** Settings that the settings page may change; repository and setup have their own routes. */
-	private const array EDITABLE = [ 'schedule.', 'retention.', 'backup.', 'notifications.', 'advanced.' ];
-
 	/**
 	 * Creates the routes.
 	 *
@@ -52,6 +53,8 @@ final class RestRoutes {
 		$routes = [
 			'/status'                                    => [ 'GET', 'status' ],
 			'/environment'                               => [ 'GET', 'environment' ],
+			'/environment/probe'                         => [ 'POST', 'begin_probe' ],
+			'/environment/probe/report'                  => [ 'POST', 'report_probe' ],
 			'/jobs'                                      => [ 'GET', 'jobs', 'POST', 'create_job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})'     => [ 'GET', 'job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/cancel' => [ 'POST', 'cancel_job' ],
@@ -72,11 +75,27 @@ final class RestRoutes {
 			foreach ( array_chunk( $methods, 2 ) as [ $method, $callback ] ) {
 				$endpoints[] = [
 					'methods'             => $method,
-					'callback'            => [ $this, $callback ],
+					'callback'            => fn ( \WP_REST_Request $request ): mixed => $this->answer( \Closure::fromCallable( [ $this, $callback ] ), $request ),
 					'permission_callback' => [ self::class, 'allowed' ],
 				];
 			}
 			register_rest_route( self::NAMESPACE, $path, $endpoints );
+		}
+	}
+
+	/**
+	 * Runs the method of a route. What a method does not answer itself, such as settings that
+	 * the database refused to store, becomes an error response instead of a fatal error.
+	 *
+	 * @param \Closure                               $route   The method.
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return mixed What the method answers, or the error.
+	 */
+	private function answer( \Closure $route, \WP_REST_Request $request ): mixed {
+		try {
+			return $route( $request );
+		} catch ( PluginException $e ) {
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
 	}
 
@@ -112,6 +131,11 @@ final class RestRoutes {
 					'server'      => $settings->string( 'repository.server' ),
 					'host'        => (string) wp_parse_url( $settings->string( 'repository.url' ), PHP_URL_HOST ),
 					'append_only' => $this->container->append_only(),
+					'usage'       => [
+						'bytes' => Decoded::int( $state->get( 'usage' )['bytes'] ?? null ),
+						'packs' => Decoded::int( $state->get( 'usage' )['packs'] ?? null ),
+						'at'    => Decoded::int( $state->get( 'usage' )['at'] ?? null ),
+					],
 				],
 				'last_backup'     => $state->get( 'last_backup' ),
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),
@@ -187,7 +211,54 @@ final class RestRoutes {
 		foreach ( $this->container->doctor( self::flag( $request, 'fresh' ) ) as $check ) {
 			$checks[] = $check->to_array() + Messages::check( $check );
 		}
-		return $this->respond( [ 'checks' => $checks ] );
+		try {
+			// The site could not request itself: the admin page lets the browser look.
+			$browser = $this->container->exposure()->needs_browser();
+		} catch ( PluginException ) {
+			$browser = false;
+		}
+		return $this->respond(
+			[
+				'checks'        => $checks,
+				'browser_probe' => $browser,
+			]
+		);
+	}
+
+	/**
+	 * Writes a probe file into the private directory for the browser to request (ADR 0007).
+	 *
+	 * @return \WP_REST_Response|\WP_Error Response with the probe's name and URL, or null as URL if the directory has none.
+	 */
+	public function begin_probe(): \WP_REST_Response|\WP_Error {
+		try {
+			$exposure = $this->container->exposure();
+			if ( null === $exposure->probe_url( 'x' ) ) {
+				return $this->respond( [ 'url' => null ] );
+			}
+			$probe = $this->container->browser_probe()->begin();
+			return $this->respond(
+				[
+					'url'   => $exposure->probe_url( $probe ),
+					'probe' => $probe,
+				]
+			);
+		} catch ( PluginException $e ) {
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
+		}
+	}
+
+	/**
+	 * Takes what the browser got for the probe file.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the probe's name, the HTTP status (0 if the request failed) and the body.
+	 * @return \WP_REST_Response Response: exposed is true, false, or null if the report says nothing.
+	 */
+	public function report_probe( \WP_REST_Request $request ): \WP_REST_Response {
+		$status = $request->get_param( 'status' );
+		// The token has 32 characters; a page that serves the file starts with it.
+		$body = substr( self::text( $request, 'body' ), 0, 4096 );
+		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( self::text( $request, 'probe' ), is_numeric( $status ) ? (int) $status : 0, $body ) ] );
 	}
 
 	/**
@@ -343,6 +414,7 @@ final class RestRoutes {
 				'secrets'     => $secrets,
 				'private_dir' => $this->container->private_dir()->path,
 				'cache_bytes' => $this->container->cache()->size(),
+				'kit_views'   => $this->kit_views(),
 			]
 		);
 	}
@@ -357,28 +429,17 @@ final class RestRoutes {
 		$values  = $request->get_param( 'values' );
 		$changes = [];
 		foreach ( is_array( $values ) ? $values : [] as $path => $value ) {
-			$path    = (string) $path;
-			$allowed = false;
-			foreach ( self::EDITABLE as $prefix ) {
-				$allowed = $allowed || str_starts_with( $path, $prefix );
-			}
-			if ( ! $allowed ) {
+			$path = (string) $path;
+			if ( ! Schema::editable( $path ) ) {
 				return $this->error( 'not_editable', 400 );
 			}
 			$changes[ $path ] = $value;
 		}
-		$mode = $this->container->settings()->string( 'retention.mode' );
 		try {
-			$saved = $this->container->settings_store()->update( $changes );
+			$this->container->save_settings( $changes );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
 		}
-		if ( $saved->string( 'retention.mode' ) !== $mode ) {
-			// An administrator chose the mode: that answers the proposal and the switch notice.
-			$this->container->state()->set( 'retention_proposal', [] );
-			$this->container->state()->set( 'retention_switch', [] );
-		}
-		$this->container->refresh();
 		return $this->settings();
 	}
 
@@ -428,7 +489,13 @@ final class RestRoutes {
 			return $report;
 		}
 		try {
-			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ) );
+			// The certificate the test just used becomes the saved server's with the server, under
+			// the same lock, and is put back as it was should the save fail: a saved server
+			// never has a certificate that is not its own. Nor does a server that wp-config.php
+			// names get the certificate of another address that was tested.
+			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ), fn ( string $url ): \Closure => $this->keep_candidate_ca( $request, $url === $report->url ) );
+		} catch ( JobConflict ) {
+			return $this->error( 'job_conflict', 409 );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
 		} catch ( InvalidArgument $e ) {
@@ -440,6 +507,87 @@ final class RestRoutes {
 		$this->container->refresh();
 		delete_transient( 'backups_for_restic_snapshots' );
 		return $this->respond( [ 'report' => $report->to_array() ] );
+	}
+
+	/**
+	 * The CA certificate a request to test or save a server brings along, for an own server
+	 * with a certificate of its own authority.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return string|\WP_Error|null PEM text, null if the request brings none, or the error for one that is no certificate.
+	 */
+	private function candidate_ca( \WP_REST_Request $request ): string|\WP_Error|null {
+		$pem = trim( self::text( $request, 'ca_certificate' ) );
+		if ( '' === $pem || 'rest-server' !== self::text( $request, 'server' ) ) {
+			return null;
+		}
+		return self::is_certificate( $pem ) ? $pem : $this->error( 'invalid_certificate', 400 );
+	}
+
+	/**
+	 * Whether a text is a certificate in PEM form of a size that one can have.
+	 *
+	 * @param string $pem Text.
+	 * @return bool True if it parses.
+	 */
+	private static function is_certificate( string $pem ): bool {
+		return strlen( $pem ) <= 65536 && str_contains( $pem, '-----BEGIN CERTIFICATE-----' ) && false !== openssl_x509_parse( $pem );
+	}
+
+	/**
+	 * While a server is being saved: stores the certificate the request brought as the
+	 * server's, and removes a stored one for a server of the preset, which has a public
+	 * certificate.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $tested  Whether the address the jobs will use is the one the request tested. With an
+	 *                                                        address from wp-config.php it may not be; then the stored certificate
+	 *                                                        belongs to that address and stays as it is.
+	 * @return \Closure(): void What puts certificate and setting back as they were.
+	 * @throws PluginException If the certificate cannot be written.
+	 * @throws \Throwable Whatever else stopped the change, after the certificate was put back.
+	 */
+	private function keep_candidate_ca( \WP_REST_Request $request, bool $tested ): \Closure {
+		if ( ! $tested ) {
+			return static function (): void {};
+		}
+		$pem       = $this->candidate_ca( $request );
+		$directory = $this->container->private_dir();
+		$file      = $directory->path . '/ca.pem';
+		$store     = $this->container->settings_store();
+		$setting   = $this->container->settings()->string( 'repository.ca_certificate' );
+		try {
+			$stored = $directory->ca_certificate();
+		} catch ( PluginException ) {
+			$stored = null;
+		}
+		$undo = static function () use ( $file, $store, $setting, $stored ): void {
+			if ( null === $stored ) {
+				wp_delete_file( $file );
+			} else {
+				Files::write_atomic( $file, $stored );
+			}
+			$store->update( [ 'repository.ca_certificate' => $setting ] );
+		};
+		try {
+			if ( is_string( $pem ) ) {
+				$directory->ensure();
+				Files::write_atomic( $file, $pem );
+				$store->update( [ 'repository.ca_certificate' => 'uploaded' ] );
+			} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $setting ) {
+				wp_delete_file( $file );
+				$store->update( [ 'repository.ca_certificate' => 'none' ] );
+			}
+		} catch ( \Throwable $failure ) {
+			// Nobody else can: the caller gets the undo only from a change that was made.
+			try {
+				$undo();
+			} catch ( \Throwable ) {
+				throw $failure;
+			}
+			throw $failure;
+		}
+		return $undo;
 	}
 
 	/**
@@ -457,7 +605,10 @@ final class RestRoutes {
 			RecoveryKit::ca_certificate( $this->container );
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
 			$this->container->refresh();
-			$kit = RecoveryKit::text( $this->container );
+			delete_transient( 'backups_for_restic_snapshots' );
+			$kit = $this->kit( 'create' );
+		} catch ( JobConflict ) {
+			return $this->error( 'job_conflict', 409 );
 		} catch ( PluginException $e ) {
 			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
 				return $this->error( 'password_too_short', 400 );
@@ -480,7 +631,7 @@ final class RestRoutes {
 		try {
 			// The answer contains the recovery kit: what the kit needs has to be there first.
 			RecoveryKit::ca_certificate( $this->container );
-			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), $this->container->jobs(), time() );
+			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), time() );
 		} catch ( JobConflict ) {
 			return $this->error( 'job_conflict', 409 );
 		} catch ( InvalidArgument ) {
@@ -490,9 +641,10 @@ final class RestRoutes {
 			return $this->kit_error( $e, 500 );
 		}
 		$this->container->refresh();
+		delete_transient( 'backups_for_restic_snapshots' );
 		Cron::chain( $this->container );
 		try {
-			$kit = RecoveryKit::text( $this->container );
+			$kit = $this->kit( 'connect' );
 		} catch ( PluginException $e ) {
 			return $this->kit_error( $e, 409 );
 		}
@@ -514,13 +666,17 @@ final class RestRoutes {
 	 */
 	public function upload_ca( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$pem = self::text( $request, 'pem' );
-		if ( strlen( $pem ) > 65536 || ! str_contains( $pem, '-----BEGIN CERTIFICATE-----' ) || false === openssl_x509_parse( $pem ) ) {
+		if ( ! self::is_certificate( $pem ) ) {
 			return $this->error( 'invalid_certificate', 400 );
 		}
 		$directory = $this->container->private_dir();
-		$directory->ensure();
-		file_put_contents( $directory->path . '/ca.pem', $pem ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- The private directory is written with native functions (docs/04 §3).
-		chmod( $directory->path . '/ca.pem', 0600 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chmod -- Same.
+		try {
+			$directory->ensure();
+			// Only a certificate that is on disk may be announced in the settings.
+			Files::write_atomic( $directory->path . '/ca.pem', $pem );
+		} catch ( PluginException $e ) {
+			return $this->error( JobError::from_throwable( $e )->code, 500 );
+		}
 		$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'uploaded' ] );
 		$this->container->refresh();
 		return $this->respond( [ 'ca_certificate' => 'uploaded' ] );
@@ -551,6 +707,10 @@ final class RestRoutes {
 		if ( null === $this->container->access()->open_cached() ) {
 			return $this->error( 'configuration', 409 );
 		}
+		// The wizard's script stops at a critical finding of the Doctor; a request must not get past it either.
+		if ( Doctor::blocked( $this->container->doctor() ) ) {
+			return $this->error( 'environment_blocked', 409 );
+		}
 		$this->container->settings_store()->update(
 			[
 				'setup.completed'                    => true,
@@ -572,11 +732,63 @@ final class RestRoutes {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
-			$kit = RecoveryKit::text( $this->container );
+			$kit = $this->kit( 'settings' );
 		} catch ( PluginException $e ) {
 			return $this->kit_error( $e, 409 );
 		}
 		return $this->respond( [ 'recovery_kit' => $kit ], 200, true );
+	}
+
+	/** Deliveries of the recovery kit that are remembered. */
+	private const int KIT_VIEWS = 20;
+
+	/**
+	 * Builds the recovery kit for an answer and records that it was handed out: to whom, when
+	 * and on which way. The kit carries every secret of the backups, so an administrator
+	 * should be able to see who else looked at it.
+	 *
+	 * @param string $via create, connect or settings.
+	 * @return string The kit.
+	 * @throws PluginException If the kit cannot be complete.
+	 */
+	private function kit( string $via ): string {
+		$kit   = RecoveryKit::text( $this->container, 'connect' === $via );
+		$user  = wp_get_current_user();
+		$state = $this->container->state();
+		$view  = [
+			'at'    => time(),
+			'user'  => $user->ID,
+			'login' => $user->user_login,
+			'via'   => $via,
+		];
+		// Added to what is stored now: two administrators may look at the kit at the same time.
+		$state->update( 'recovery_kit', static fn ( array $entry ): array => [ 'views' => array_slice( [ $view, ...Decoded::arrays( $entry['views'] ?? null ) ], 0, self::KIT_VIEWS ) ] );
+		/**
+		 * Fires when the recovery kit, which contains the repository password, was put into a
+		 * response for an administrator.
+		 *
+		 * @param int    $user_id User the kit was shown to.
+		 * @param string $via     create or connect (the setup wizard and the repository forms), or settings (the recovery kit form).
+		 */
+		do_action( 'backups_for_restic_recovery_kit_shown', $user->ID, $via );
+		return $kit;
+	}
+
+	/**
+	 * The latest deliveries of the recovery kit, for the Settings tab.
+	 *
+	 * @return list<array{at: int, login: string, via: string}> Newest first.
+	 */
+	private function kit_views(): array {
+		$views = [];
+		foreach ( Decoded::arrays( $this->container->state()->get( 'recovery_kit' )['views'] ?? null ) as $view ) {
+			$views[] = [
+				'at'    => Decoded::int( $view['at'] ?? null ),
+				'login' => Decoded::string( $view['login'] ?? null ),
+				'via'   => Decoded::string( $view['via'] ?? null ),
+			];
+		}
+		return array_slice( $views, 0, 5 );
 	}
 
 	/**
@@ -630,13 +842,41 @@ final class RestRoutes {
 		$server   = self::text( $request, 'server' );
 		$url      = self::text( $request, 'url' );
 		$username = self::text( $request, 'username' );
+		$pem      = $this->candidate_ca( $request );
+		if ( $pem instanceof \WP_Error ) {
+			return $pem;
+		}
+		// A certificate that comes with the request is used for this test only, from a
+		// file of its own in the private directory. A server of the preset is tested against the public authorities,
+		// whatever certificate is stored for the server that was saved before.
+		$file = null;
+		$http = null;
 		try {
+			if ( is_string( $pem ) ) {
+				// In the private directory like every file the plugin writes; a certificate is
+				// no secret, and the name is of this request alone.
+				$directory = $this->container->private_dir();
+				try {
+					$directory->ensure();
+					$file = $directory->subdirectory( 'tmp' ) . '/ca-' . bin2hex( $this->container->random()->bytes( 8 ) ) . '.pem';
+					Files::write_atomic( $file, $pem );
+				} catch ( PluginException $e ) {
+					return $this->error( JobError::from_throwable( $e )->code, 500 );
+				}
+			}
+			if ( null !== $file || 'rest-server' !== $server ) {
+				$http = new WpHttpClient( $this->container->settings()->int( 'advanced.upload_timeout_seconds' ), $file );
+			}
 			$password = $this->setup()->rest_password( $server, $url, $username, $this->secret_param( $request, 'password' ) );
-			return $this->container->tester()->test( $server, $url, $username, $password );
+			return $this->container->tester( $http )->test( $server, $url, $username, $password );
 		} catch ( InvalidArgument $e ) {
 			return $this->server_error( $e );
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 502 );
+		} finally {
+			if ( is_string( $file ) && is_file( $file ) ) {
+				wp_delete_file( $file );
+			}
 		}
 	}
 
@@ -672,7 +912,9 @@ final class RestRoutes {
 				return $this->container->access();
 			},
 			$this->container->random(),
-			$this->container->identity()
+			$this->container->identity(),
+			$this->container->repository_record(),
+			$this->container->jobs()
 		);
 	}
 
@@ -799,6 +1041,10 @@ final class RestRoutes {
 				/* translators: %d: number of characters. */
 				'message' => sprintf( __( 'The repository password must have at least %d characters.', 'backups-for-restic' ), Setup::MIN_PASSWORD_LENGTH ),
 				'hint'    => __( 'Leave it empty and the plugin creates a strong one. A password set in wp-config.php has to be changed there.', 'backups-for-restic' ),
+			],
+			'environment_blocked'           => [
+				'message' => __( 'This server does not meet a requirement for backups yet.', 'backups-for-restic' ),
+				'hint'    => __( 'Open the first step of the setup again, or the Site Health screen, and fix what is marked as critical.', 'backups-for-restic' ),
 			],
 			'password_required'             => [
 				'message' => __( 'Enter the REST password for this server.', 'backups-for-restic' ),

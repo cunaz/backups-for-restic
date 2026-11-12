@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Settings;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
@@ -28,6 +29,19 @@ final class SettingsTest extends TestCase {
 		self::assertCount( count( Schema::fields() ), $settings->to_array() );
 	}
 
+	public function test_only_what_an_administrator_decides_can_be_changed_after_the_setup(): void {
+		foreach ( [ 'schedule.backup.hour', 'retention.mode', 'backup.extra_roots', 'notifications.email.recipients', 'advanced.cpu_throttle' ] as $path ) {
+			self::assertTrue( Schema::editable( $path ), $path );
+		}
+		// What the setup and the jobs write: an edit would point the backups elsewhere or pass the wizard by.
+		foreach ( [ 'repository.url', 'repository.rest_username', 'repository.id', 'repository.format_version', 'repository.append_only', 'setup.completed', 'retention', 'unknown.setting' ] as $path ) {
+			self::assertFalse( Schema::editable( $path ), $path );
+		}
+		foreach ( array_keys( Schema::fields() ) as $path ) {
+			self::assertSame( ! str_starts_with( $path, 'repository.' ) && ! str_starts_with( $path, 'setup.' ), Schema::editable( $path ), $path );
+		}
+	}
+
 	public function test_updates_are_normalized_and_saved_in_an_autoloaded_option(): void {
 		$options = new InMemoryOptions();
 		$store   = new SettingsStore( $options );
@@ -44,6 +58,22 @@ final class SettingsTest extends TestCase {
 		self::assertFalse( $saved->bool( 'backup.exclude_caches' ) );
 		self::assertTrue( $options->autoload[ SettingsStore::OPTION ] );
 		self::assertEquals( $saved, $store->load() );
+	}
+
+	public function test_settings_that_the_options_table_refused_do_not_pass_for_saved(): void {
+		$options = new InMemoryOptions();
+		$store   = new SettingsStore( $options );
+		$store->update( [ 'advanced.tick_budget_seconds' => 20 ] );
+		// As WordPress answers when the database refuses the write: false, and nothing else.
+		$options->refuses         = static fn ( string $name ): bool => SettingsStore::OPTION === $name;
+		$options->refuses_quietly = true;
+
+		try {
+			$store->update( [ 'advanced.tick_budget_seconds' => 25 ] );
+			self::fail( 'Whoever saves settings goes on as if they were stored.' );
+		} catch ( StorageFailed ) {
+			self::assertSame( 20, $store->load()->int( 'advanced.tick_budget_seconds' ) );
+		}
 	}
 
 	public function test_durations_and_e_mail_addresses_are_normalized(): void {

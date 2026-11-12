@@ -1,6 +1,7 @@
 # Milestone 1 acceptance against a real WordPress (tests/Integration): setup through the REST
 # API, backups driven by wp-cron.php with max_execution_time = 30 and memory_limit = 128M, a
 # killed tick, restic check and restore, and a database import with identical checksums.
+# A second job drives the admin page in a browser (tests/E2E), on a site of its own.
 name: Integration
 
 on:
@@ -60,8 +61,9 @@ jobs:
           path: .tools/bin
           key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: bin/install-test-tools.sh restic rest-server
+      - run: bin/install-test-tools.sh restic rest-server wp-cli
       - run: bin/test-site.sh install
+      - run: bin/test-site.sh install-multisite
       - run: ulimit -c "$(ulimit -Hc)" && bin/test-site.sh start
       - name: Integration tests
         env:
@@ -104,5 +106,60 @@ jobs:
         if: failure()
         with:
           name: integration-logs
+          path: logs/
+          retention-days: 14
+
+  browser:
+    name: Admin page in a browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BFR_DB_HOST: 127.0.0.1
+      BFR_DB_ADMIN_USER: root
+      BFR_DB_ADMIN_PASSWORD: root
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, mysqli, curl
+          ini-values: opcache.enable_cli=0
+          coverage: none
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Start MySQL
+        run: sudo systemctl start mysql.service
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
+      - run: bin/install-test-tools.sh rest-server
+      # A WordPress that was just installed: the tests begin with the setup wizard.
+      - run: bin/test-site.sh install
+      - run: bin/test-site.sh start
+      # Exactly the packages of package-lock.json, without their install scripts; the browser
+      # is then fetched by the Playwright version that the lock file names.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      # Without --with-deps: the runner image has the libraries Chromium needs, and the fonts
+      # that option adds through apt are not worth a job that fails whenever the package
+      # mirror cannot be reached.
+      - run: npx playwright install chromium
+      - name: Browser tests
+        run: npm run test:e2e
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p logs
+          cp -r .tools/e2e-results logs/ 2>/dev/null || true
+          cp .tools/site-server.log .tools/php-errors.log .tools/requests.log logs/ 2>/dev/null || true
+          cp .tools/site/wp-content/debug.log logs/ 2>/dev/null || true
+          cp -r .tools/site/wp-content/backups-for-restic/jobs logs/jobs 2>/dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: browser-logs
           path: logs/
           retention-days: 14

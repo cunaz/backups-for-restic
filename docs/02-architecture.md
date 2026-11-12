@@ -112,10 +112,11 @@ Participants:
 6. **Secrets flow through one type** (`Secrets\Secret`, redacting, `reveal()` allow-listed).
 7. **Fail closed.** A failed precondition (undecryptable secrets, a private directory that
    the HTTP probe could read, a MAC mismatch, an unsupported repository version) stops the
-   operation with a precise message. One precondition that cannot be verified does not stop
-   it yet: when the HTTP probe of the private directory cannot run, the Doctor reports
-   `unverified` as a recommendation and backups go on (§13.4,
-   [ADR 0007](adr/0007-private-directory.md)); a stricter rule is planned for Milestone 3.
+   operation with a precise message. One precondition can stay unverified without stopping
+   it: where the site cannot request itself, the HTTP probe of the private directory is made
+   by the administrator's browser instead, and until a browser has looked the Doctor
+   reports `unverified` as a recommendation and backups go on (§13.4,
+   [ADR 0007](adr/0007-private-directory.md)).
 8. **Composition root, immutable value objects, `final` by default, `declare(strict_types=1)`.**
 
 ## 3. Module map and dependency rules
@@ -151,7 +152,7 @@ src/
 │   ├── Unpacked.php               non-pack files: plain JSON, or zstd through Compression.php when `ext-zstd` is present
 │   └── Chunker/                   Polynomial (GF(2) ops, irreducibility test), RabinChunker (restic-identical), ChunkReader
 ├── Backend/                       Backend interface, ObjectType, RestBackend (restic REST over an HttpClient), AppendOnlyProbe, AppendOnlyStatus, Http/ (HttpClient port, HttpResponse)
-├── Connection/                    ServerProfile (URL rules), ConnectionTester, ConnectionReport, RepositoryAccess (backend + master key cache), Setup (wizard: save, create, connect)
+├── Connection/                    ServerProfile (URL rules), ConnectionTester, ConnectionReport, RepositoryAccess (backend + master key cache), RepositoryRecord (which repository the jobs open), Setup (wizard: save, create, connect)
 ├── Engine/                        the restic logic
 │   ├── Repository.php, BlobStore.php, Locking.php, Identity.php
 │   ├── KeyUnlock.php              resumable unlock across key files
@@ -299,15 +300,24 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   two requests at the same moment cannot both find no job and create one each. What a job
   needs from its caller, such as the share of packs that `check --read-data-subset` asks
   for, is passed to `create()` and is part of the first document; the caller does not write
-  the job a second time.
+  the job a second time. The setup takes the same lock (`JobStore::while_idle()`) around its
+  check for an active job and what it then changes: the server address, a password, the
+  cached key, a new repository, the unlock job. No job can start in between and find the
+  address or the key changed under it.
 - **Cancelling** (`Runner::cancel()`) never changes the document of a running job. It writes
   the marker `<private>/jobs/<id>/cancel-requested`. `JobStore::get()` reports the marker
   with the job, and a tick looks for it before every step: the job then leaves the regular
   steps and goes through its cleanup steps to `cancelled`, also while it waits out a
   back-off. A request that arrives during a tick can therefore neither be lost nor overwrite
-  what the tick saves. A job that is still `queued` is cancelled at once and without cleanup
+  what the tick saves. When the step that was running wants another tick, the tick looks for
+  the marker once more and starts the cleanup itself instead of leaving it to a tick that
+  may not come. The tick's deadline holds back regular steps only: once a job is in its
+  cleanup steps, the same tick runs them all. A request that arrives when the work is done
+  (the snapshot written, the packs deleted) no longer stops the job: the step `recording`
+  runs, in the tick that finds the request even if its deadline has passed, and the job ends as `succeeded` (`JobType::cancels_before()`). A job that is still `queued` is cancelled at once and without cleanup
   steps, because nothing ran: by `cancel()` itself if it gets the runner lock, otherwise by
-  the next tick.
+  the next tick. `Runner::stop()` is both in one call, for the deactivation (§18): it asks
+  the active job to cancel and runs one tick, which is the cleanup.
 
 ### 4.5 Checkpoints
 
@@ -512,7 +522,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
    backup), and the repository's `config` present.
 2. **Unlocking**: open the repository with the cached master key, which counts only if it
    decrypts the config; otherwise derive it with the resumable scrypt across ticks and cache
-   it (ADR 0020).
+   it (ADR 0020). A cached key that no longer decrypts, as after a change of the salts, is
+   forgotten and derived again. Every job comes through this step, so it is also where
+   `Connection\RepositoryRecord` writes the repository's ID and format version into the
+   settings and binds the remembered results to that repository (§10), and where a
+   repository of format version 2 is refused with `repository_unsupported_version` when PHP
+   lacks `ext-zstd` (ADR 0019).
 3. **Backing up**: the engine's `BackupRun`, resumed every tick from its checkpoint. In
    every tick the run takes or refreshes the shared lock before it loads the index through
    the local cache (§5.9). The first tick also removes this site's stale locks. It chooses
@@ -694,10 +709,11 @@ Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs wi
 ├── .htaccess, web.config, index.php       deny rules / empty index
 ├── probe/<random>.txt                     HTTP exposure check, deleted after the request
 ├── runner.lock                            flock target
+├── state.lock, notify.lock                flock targets for changes to the state and for sending notices
 ├── ca.pem                                 uploaded CA certificate of a self-hosted server, if any
 ├── cache/<repo-id>/index.bin              merged index, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
-├── jobs/create.lock                       flock target while a job is created (§4.4)
+├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
@@ -710,9 +726,20 @@ database holds four options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
 last backup and the last forget, prune and check, the check alert, the exposure and
-append-only probes, the retention switch and proposal, the handled schedule slots) and
-`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker and the
-outbox of unsent notices). A fifth name, `backups_for_restic_schema_version`, is reserved:
+append-only probes, the retention switch and proposal, the handled schedule slots, the
+repository that the first five belong to, the probe from the browser, the last twenty
+deliveries of the recovery kit, and the number and size of the repository's packs as a
+backup or a prune last listed them) and
+`backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
+repository both are counted for, and the outbox of unsent notices; streaks and marker start
+anew when the jobs turn to another repository). The last two are documents that several
+requests change: a job's tick, the heartbeat and a request of the admin page. A change
+therefore reads the document from the database, past what the request read before
+(`Options::fresh()`), and holds `flock()` on `<private>/state.lock` until it is written
+back (`Storage\FileLock`), so that no request stores a copy from before another one's
+change. Notices are handed to the mailer by one request at a time (`<private>/notify.lock`,
+not waited for); the state is not locked while a mail is on its way, and what is queued in
+that time goes out with the next heartbeat. A fifth name, `backups_for_restic_schema_version`, is reserved:
 nothing writes or reads it, and uninstall deletes it (§18).
 
 ## 11. Settings model
@@ -729,8 +756,8 @@ repository:
   rest_username: "mysite"                # optional for rest-server without authentication
   ca_certificate: none                   # none | uploaded: whether ca.pem in the private directory is trusted for this server (self-signed TLS)
   append_only: unknown                   # what the wizard's connection test found: yes | no | unknown; the dashboard prefers the latest conclusive probe (§8, ADR 0010)
-  format_version: 1                      # written when the plugin creates the repository; not updated when the wizard connects an existing one
-  id: ""                                 # repository id (64 hex), written when the plugin creates the repository
+  format_version: 1                      # of the repository that the jobs opened last: written when the plugin creates it, and by the unlock step of every job
+  id: ""                                 # repository id (64 hex), written like the format version; empty from the moment another address is saved until a job has opened what is there
 schedule:
   backup: { frequency: daily, weekday: 0, hour: 3, minute: 17 }                  # manual | twice_daily | daily | weekly
   prune:  { frequency: weekly, weekday: 0, hour: 4 }                             # manual | weekly | monthly
@@ -899,8 +926,9 @@ repository is connected → Recovery kit → Schedule → First backup). The rep
 offers an own restic REST server, which is preselected, and the BorgBase preset as the
 second option, takes the credentials and, for an own server, an optional CA certificate,
 tests authentication, listing and a ranged read, and detects append-only
-([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows no repository
-usage or growth yet; that is planned for Milestone 3.
+([ADR 0010](adr/0010-retention-and-append-only.md)). The dashboard shows how much
+the repository holds, as measured after the last backup or prune; how that grows over time
+is not shown yet and is planned for Milestone 3.
 
 The whole UI is one classic script, `assets/js/admin.js`, on core's `wp-api-fetch`,
 `wp-i18n` and `wp-dom-ready`. The server renders only the frame of the page, and every view
@@ -909,28 +937,31 @@ else: there are no server-rendered fallbacks
 ([ADR 0012](adr/0012-admin-ui-without-build-step.md)).
 
 The wizard's environment step shows the Doctor's checks (§13.4), each with a label and a
-hint. A critical finding keeps the Continue button away in the browser; the server does not
-enforce it, because `POST /setup/complete` checks only the acknowledgement of the recovery
-kit and that the cached key opens the repository. A server-side gate is planned for
-Milestone 3. The step measures nothing about the site and shows no expected duration of the
-first backup; time estimates are planned for Milestone 3.
+hint. A critical finding keeps the Continue button away in the browser, and the server
+enforces it at the end: `POST /setup/complete` checks the acknowledgement of the recovery
+kit, that the cached key opens the repository, and that the Doctor has no critical finding
+(409 `environment_blocked`). The routes before it do not ask the Doctor. A private
+directory whose probe could not run is no critical finding and does not stop the setup
+(§13.4). The step measures nothing about the site and shows no expected duration of the
+first backup: an estimate needs a backup to measure against (§14).
 
 ### 13.2 REST API (`backups-for-restic/v1`)
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host, retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
-| `GET /environment?fresh=1` | Doctor results with translated texts |
+| `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune; a job asks for that listing once, so a listing that outlasts the request cannot keep a finished job from ending), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
+| `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
+| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
 | `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
-| `POST /repository/test`, `POST /repository/save` | connection test; test and save. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent |
-| `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; `connect` stores nothing while another job is active (409 `job_conflict`). Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
+| `POST /repository/test`, `POST /repository/save` | connection test; test and save. For an own server both take an optional `ca_certificate` (PEM): the test uses it from a file of its own under `tmp/` in the private directory, removed after the test, `save` stores it as the server's certificate once the server is saved, and saving a server of the preset removes a stored one. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent. `save` changes nothing while a job is active (409 `job_conflict`). A save that fails half way, also because the options table refused a write without an error (`Options::set()` answers false, `SettingsStore::update()` and `SiteState::bind()` raise `StorageFailed`), tries to put back what it changed: the settings, the REST password, the cached key and the certificate. Each part is tried on its own; while the database keeps refusing writes, a part can stay as the failed save left it, and the request answers with the error either way. Where `wp-config.php` defines the address, the certificate of a tested address that is another one is not stored; saving another address empties `repository.id` and drops the results remembered for the old repository |
+| `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; neither stores anything while a job is active (409 `job_conflict`). `create` stores the repository password before the repository exists and puts the earlier one back if the repository does not come to exist; `connect` keeps an entered password apart until the unlock job has opened the repository with it, and only then replaces the stored password and the cached key; a wrong password leaves both in place, and the kit in its answer names the entered one. `connect` without a password unlocks with the stored one. Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
 | `POST`/`DELETE /repository/ca-certificate` | CA certificate of a self-hosted server |
-| `POST /setup/complete` | finish the wizard after the recovery kit is acknowledged |
+| `POST /setup/complete` | finish the wizard after the recovery kit is acknowledged; 409 `environment_blocked` while the Doctor has a critical finding |
 | `POST /recovery-kit` | the recovery kit, only with the administrator's WordPress password as `user_password` (403 `wrong_user_password`); 409 `ca_certificate_missing` as above |
 
 All routes: capability check in `permission_callback` (`backups_for_restic_capability`,
@@ -957,30 +988,47 @@ Milestone 3. Errors of the routes carry the codes of §14 with the prefix
 
 Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
 `forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
-`tick [--until-idle]`, `status` and `snapshots`. The four commands that start a job end
+`tick [--until-idle]`, `status`, `snapshots`, `settings list|get|set`, `cancel [<job>]` and
+`logs [<job>] [--lines=<number>]`. `settings set` changes what the settings page can change
+(`Settings\Schema::editable()`), with the same validation; `cancel` asks the active or the
+named job to stop and runs one tick for its cleanup; `logs` prints a job's event log,
+which is redacted when it is written. The four commands that start a job end
 with an error under the same conditions as `POST /jobs` (§13.2): before the setup is
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. `status` prints the last backup and the active job only.
 
 Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
-cancelling a job, job logs, `settings get|set` and `recovery-kit` (parity with the admin
-area beyond starting jobs is planned for Milestone 3); `ls <snapshot> [<path>]`, `restore …`
-and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove
-stale locks of other hosts, stays on the list without a milestone. Nothing requires
-WP-CLI: setup, settings, cancelling and the recovery kit are in the admin area.
+`ls <snapshot> [<path>]`, `restore …` and `apply …`, which arrive with restore in
+Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
+list without a milestone. There is no command for the setup or for the recovery kit: both
+are in the admin area, where the kit asks for the WordPress password. Nothing requires
+WP-CLI.
 
 ### 13.4 Site Health
 
 Three tests (`WordPress\SiteHealth`): backup freshness; the environment, which is the
 Doctor's result from cached probes; and the last check result. The Doctor (`Doctor\Doctor`)
 checks the required extensions (OpenSSL, JSON, mbstring, hash), the memory limit, the time
-limit, free disk space, the protection of the private directory, that the stored secrets
-decrypt and that all eight salt constants are defined, loopback requests and WP-Cron, and
+limit, free disk space, the protection of the private directory, that the two passwords can
+be read (a password defined in `wp-config.php` always can; the cached key does not count,
+because jobs derive it again) and that all eight salt constants are defined, loopback requests and WP-Cron, and
 `zstd` when `repository.format_version` is 2. A private directory inside the web root whose
 HTTP probe could not run is reported as `unverified` with the status `recommended`; only a
-probe that read the file back is `critical`. The Doctor has no check of the PHP version and
-none of outbound HTTPS; the wizard's connection test is what shows that the repository
-server can be reached. An outbound HTTPS check is planned for Milestone 3. Debug information:
+probe that read the file back is `critical`. In that case the admin page lets the browser
+make the request (`Storage\BrowserProbe`): it asks `POST /environment/probe` for a probe
+file, requests the file's URL without credentials, waits at most ten seconds for the answer
+and reports status and body under the probe's name to `POST /environment/probe/report`. A
+report on another probe than the pending one, as from a second tab, changes nothing. A
+report with the file's content is the finding
+`exposed`; any other answer counts as protected. The site's own probe, where it gets an
+answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
+compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
+when the repository server did not answer a request from this host. The latter is asked
+only when the checks are run afresh, with one request that waits ten seconds at most, and
+is cached for a day for the address it was asked of; any answer counts, also a refusal of
+the credentials or an error status. The Doctor has no check of the PHP version, and before a
+repository is configured none of outbound HTTPS: it asks no third party, and the wizard's
+connection test is what shows that the repository server can be reached. Debug information:
 plugin version, repository host and format version, append-only status, cache size, working
 directory and the time of the last backup; it does not list the last jobs.
 
@@ -988,7 +1036,8 @@ directory and the time of the last backup; it does not list the last jobs.
 
 Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous )`,
 `backups_for_restic_backup_succeeded( $job_id, $snapshot_id )`,
-`backups_for_restic_backup_failed( $job_id, $error_code )` and, from Milestone 3,
+`backups_for_restic_backup_failed( $job_id, $error_code )`,
+`backups_for_restic_recovery_kit_shown( $user_id, $via )` and, from Milestone 3,
 `backups_for_restic_restore_applied`; filters `backups_for_restic_capability`,
 `backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
 `backups_for_restic_database_tables_excluded`,
@@ -1035,7 +1084,8 @@ kit was asked for without the right WordPress password), `password_required` (a 
 names a server or user name that the stored REST password is not for and carries no
 password), `password_too_short` (a chosen repository password of fewer than 12 characters),
 `ca_certificate_missing` (the settings name an uploaded CA certificate that is not there, so
-a recovery kit would be incomplete), `invalid_settings` (with one message per field) and
+a recovery kit would be incomplete), `environment_blocked` (the setup cannot be completed
+while the Doctor has a critical finding), `invalid_settings` (with one message per field) and
 `invalid_url` for the connection test, which also covers a server without ranged reads
 (`server_incompatible`). The messages of `invalid_settings` come from the validation codes
 of the settings (`Settings::with()`), among them `retention_floor`: `retention.keep.within`
@@ -1052,8 +1102,10 @@ Progress is a set of counters, not a share of a total. A backup reports the file
 processed so far, new, changed and unmodified files and directories, the blobs and bytes
 added, the current directory and the number of warnings; unlocking reports a percentage;
 check and prune report their phase and counts. The plugin does not know the size of the site
-in advance, so it shows no totals and no estimate of the remaining time; both are planned
-for Milestone 3.
+in advance. From the second backup on it measures against the last one: the progress
+carries `expected_bytes`, the bytes that the last backup of this repository went through,
+and the admin page shows a bar and the minutes left at the speed so far. A site that grew
+or shrank since then makes both wrong by that much; the first backup has neither.
 
 Notifications (`Notifications\Notifier`, FR-09) go by e-mail to the configured recipients, or
 to the site's administration address, through the `backups_for_restic_notification_recipients`
@@ -1153,11 +1205,16 @@ and schedules are slots in the site's time zone.
   no version: `backups_for_restic_schema_version` is reserved but never written or read, and
   a settings schema version with migrations is planned for Milestone 3, before 1.0. Unknown
   or invalid stored settings fall back to their defaults field by field.
-- Deactivation only unschedules the two cron events (`Cron::unschedule()`). An active job
-  stays in `jobs/`, queued or running, and resumes after reactivation with the next tick, at
-  the latest the one of the first heartbeat; its repository lock stays on the server and is
-  stale for every restic client after 30 minutes. Cancelling the job and releasing the lock
-  on deactivation is planned for Milestone 3. All data is kept.
+- Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active
+  job (`Cron::stop()`, `Runner::stop()`): it asks the job to cancel and runs its cleanup
+  steps, which releases the repository lock. The budget of ten seconds holds back regular
+  steps only; a cleanup step is not cut short by it and ends with its own requests' time
+  limits. A job that another
+  tick is working on at that moment is cancelled by that tick after its current step.
+  Deactivation never fails over this. If the cleanup could not finish, for example because
+  the server did not answer, the job stays in `jobs/` and is cleaned up by the first tick
+  after reactivation, and its lock is stale for every restic client after 30 minutes. All
+  data is kept.
 - Uninstall (`uninstall.php`) deletes the plugin's options, its three transients, both cron
   events and what the plugin put into the private directory; it touches known names only, so
   a directory that also holds other files keeps them. The directory is found as at run time:

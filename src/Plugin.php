@@ -32,7 +32,12 @@ final class Plugin {
 	 */
 	public static function boot( string $plugin_file ): void {
 		register_activation_hook( $plugin_file, [ self::class, 'activate' ] );
-		register_deactivation_hook( $plugin_file, [ Cron::class, 'unschedule' ] );
+		register_deactivation_hook(
+			$plugin_file,
+			static function () use ( $plugin_file ): void {
+				self::deactivate( $plugin_file );
+			}
+		);
 
 		if ( is_multisite() ) {
 			// Activated by other means (must-use plugin, WP-CLI): stay inert and say why.
@@ -64,6 +69,26 @@ final class Plugin {
 	public static function activate(): void {
 		self::refuse_multisite_activation();
 		Cron::ensure_heartbeat();
+	}
+
+	/**
+	 * Deactivation: remove the scheduled events and end the active job, so that its lock does
+	 * not stay in the repository. Deactivation itself never fails over this: a lock that
+	 * could not be released turns stale after half an hour, and what is left of the job is
+	 * cleaned up when the plugin is activated again.
+	 *
+	 * @param string $plugin_file Absolute path of the main plugin file.
+	 */
+	public static function deactivate( string $plugin_file ): void {
+		Cron::unschedule();
+		if ( is_multisite() ) {
+			return;
+		}
+		try {
+			Cron::stop( new Container( $plugin_file ) );
+		} catch ( \Throwable ) {
+			return;
+		}
 	}
 
 	/**

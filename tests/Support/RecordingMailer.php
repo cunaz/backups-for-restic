@@ -25,7 +25,15 @@ final class RecordingMailer implements Mailer {
 
 	public bool $accept = true;
 
+	/** Runs while a notice is on its way: what another request does in that time. */
+	public ?\Closure $meanwhile = null;
+
 	public function send( Notice $notice ): bool {
+		if ( null !== $this->meanwhile ) {
+			$meanwhile       = $this->meanwhile;
+			$this->meanwhile = null;
+			$meanwhile();
+		}
 		if ( ! $this->accept ) {
 			++$this->refused;
 			return false;

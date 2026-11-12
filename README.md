@@ -7,9 +7,8 @@
 > that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
 > mode. The plugin cannot restore yet: that is Milestone 3, and until then every backup is
 > restored with the restic command line ([guide](docs/06-disaster-recovery.md)). Also open
-> and planned for Milestone 3: browser tests and tests of the WordPress layer, a preview of
-> what retention would remove, the size of the repository on the dashboard, and measurements
-> against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
+> and planned for Milestone 3: a preview of what retention would remove, how the repository
+> grows over time, and measurements against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
 > The design documents explain *why* things are built the way they are.
 >
 > **Distribution:** the plugin will be published in the
@@ -73,6 +72,8 @@ other hand, assume a server you control. This plugin closes the gap:
 | [docs/04-development-and-quality.md](docs/04-development-and-quality.md) | Repository layout, standards, tooling, tests incl. the restic conformance oracle, CI, WordPress.org releases |
 | [docs/05-roadmap.md](docs/05-roadmap.md) | Milestones, acceptance criteria, open questions, risks |
 | [docs/06-disaster-recovery.md](docs/06-disaster-recovery.md) | How to get a site back with or without the plugin |
+| [docs/07-milestone-3-plan.md](docs/07-milestone-3-plan.md) | Plan for Milestone 3 (restore): work packages, order, decisions, risks |
+| [docs/08-handoff.md](docs/08-handoff.md) | Where the work stands and what is open, as of the date in its title |
 | [docs/guides/cron.md](docs/guides/cron.md) | Running backups with a real cron job of the hosting panel |
 | [docs/guides/rest-server.md](docs/guides/rest-server.md) | Running your own restic REST server, append-only, and cleaning up from the server |
 | [docs/appendix-a-binary-engine.md](docs/appendix-a-binary-engine.md) | Design of an optional restic-binary engine for VPS users (future option) |
@@ -94,7 +95,7 @@ other hand, assume a server you control. This plugin closes the gap:
 | Secrets | libsodium-encrypted at rest, key derived from WordPress salts, `wp-config.php` overrides | [0006](docs/adr/0006-secrets-at-rest.md) |
 | Working directory | Private directory, preferably outside the web root, protection verified actively, caches encrypted | [0007](docs/adr/0007-private-directory.md) |
 | Snapshot layout | One snapshot per run: files + database directory + manifest; stable host and tags | [0009](docs/adr/0009-snapshot-layout.md) |
-| Maintenance | Forget with restic's semantics, prune without repacking, structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
+| Maintenance | Forget with restic's semantics; prune without repacking, including unindexed packs left by interrupted backups; structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
 | Conformance | The restic CLI is the oracle in CI; every release passes `restic check --read-data` and restore parity | [0023](docs/adr/0023-restic-cli-as-conformance-oracle.md) |
 | Admin UI | Vanilla JavaScript, no build step, REST API as the only data channel | [0012](docs/adr/0012-admin-ui-without-build-step.md) |
 | Restore (Milestone 3, not built yet) | Staging first; applying to the live site is a separate, guarded step | [0013](docs/adr/0013-restore-safety.md) |

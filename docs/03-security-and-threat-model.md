@@ -89,7 +89,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | T-02 | CSRF on destructive actions (restore, apply, prune, unlock) [T] | every state change is a REST request that needs core's REST nonce or an Application Password; the plugin has no forms and no `admin-post` or `admin-ajax` handlers; core `SameSite` cookies. Forget and prune start with one click: typed confirmation words do not exist and are planned with the restore confirmations in Milestone 3 | — |
 | T-03 | Secrets leak through the database (SQL injection elsewhere, leaked DB dump) [I] | repository password, REST password and cached master key encrypted with a key derived from `wp-config.php` salts (§5); `autoload = no`; constants in `wp-config.php` as an alternative | attacker with DB **and** `wp-config.php` |
 | T-04 | Secrets leak via logs, notices, e-mails, REST responses, HTML forms [I] | `Secret` type redacts itself; `Redactor` masks the registered secret values in job files and event lines (§12); REST errors and e-mails are built from codes, not from log lines; secret fields are write-only; after the setup the recovery kit is sent only with the administrator's WordPress password (§5.5); the stored REST password goes only to the server it was saved for (T-28); tests search the files under `jobs/` and four REST responses for both passwords | browser extensions on the admin's machine |
-| T-05 | Web access to the private directory (caches, checkpoints, staging, KDF checkpoint) [I, T] | directory outside the web root recommended and supported; otherwise `.htaccess`, `web.config`, `index.php`, `0700`; **active HTTP probe**: if it reads its file back, the Doctor is critical and backups stop; the cache is encrypted with the master key; from Milestone 3 staging and import files `0600` and short-lived | servers that serve dotfiles and ignore modes, caught by the probe when it can run. A probe that cannot run (the site cannot request itself) is reported as `unverified` and blocks nothing; a directory inside the web root then relies on the deny files alone. A stricter rule is planned for Milestone 3 |
+| T-05 | Web access to the private directory (caches, checkpoints, staging, KDF checkpoint) [I, T] | directory outside the web root recommended and supported; otherwise `.htaccess`, `web.config`, `index.php`, `0700`; **active HTTP probe**: if it reads its file back, the Doctor is critical and backups stop; the cache is encrypted with the master key; from Milestone 3 staging and import files `0600` and short-lived | servers that serve dotfiles and ignore modes, caught by the probe when it can run. Where the site cannot request itself, the administrator's browser makes the request and reports the answer; until one has, the finding is `unverified` and blocks nothing, and a directory inside the web root relies on the deny files alone |
 | T-06 | Nonce reuse or weak randomness breaks confidentiality of AES-CTR [I] | nonces, salts, ids and passwords from `random_bytes()` (CSPRNG) only; one nonce per sealed object; unit test asserts distinct nonces across a batch; no deterministic nonce derivation anywhere | OS CSPRNG failure |
 | T-07 | Tampered or corrupted repository objects accepted (malicious server, MITM, disk error) [T] | Poly1305 tag verified before any decryption (constant time); blob id (SHA-256 of plaintext) verified after decryption; the names of index, snapshot and lock files verified against their content on download, the name of a pack when the check reads the whole pack; index and tree JSON validated against expected shapes; a failed tag aborts the job with `authentication_failed`, a wrong id or shape with `repository_damaged` | — |
 | T-08 | Weak password brute-forced from a leaked key file [I] | generated passwords are 192-bit random; a password that somebody chose for a new repository, in the request or in `wp-config.php`, must have at least 12 characters, which the core enforces (`Connection\Setup::create()` refuses a shorter one with `password_too_short`); scrypt with `N ≥ 16384, r = 8` (restic's default); key files live only on the repository server | weak user passwords remain weak; the password of an existing repository is taken as it is |
@@ -101,9 +101,9 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | T-14 | Malicious or buggy format implementation corrupts the repository [T, D] | no home-made cryptography; differential tests against the restic CLI on every change (`restic check --read-data`, byte-identical restores, chunk boundary parity); known-answer vectors from `restic cat`, RFC 7914, RFC 8439 and libsodium; property tests for pack/index round trips; mutation testing as a merge gate and nightly fuzzing of every parser; self-review checklist and 24-hour cooling-off for `Crypto`, `Format` and `Engine` ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) | **accepted**: no independent review before 1.0; design or side-channel flaws that differential tests cannot see. Safety nets: monthly checks and the plugin-independent CLI recovery path |
 | T-15 | Resource exhaustion: CPU-second quotas, memory limits, disk quotas, request limits [D] | bounded ticks; streaming; packs built in memory up to the pack size (16 MiB by default, one open pack per blob type); cache cap; `cpu_throttle: gentle`; preflight checks free space and memory; one job at a time; sequential uploads | hosts with extreme limits — surfaced by the Doctor. The merged index is held in memory and grows with the number of blobs (about 100 bytes each); it is not bounded yet (planned for Milestone 3) |
 | T-16 | Stale or foreign repository locks block backups [D] | locks refreshed every 5 minutes by the ticks of the job that holds them, and taken again when they are older than 25 minutes or gone; a backup or check then makes sure that no other client removed what it relies on, or starts over ([ADR 0030](adr/0030-lock-continuity.md)); own stale locks removed as restic does; a stale lock of another host blocks nothing, because stale locks are ignored when the plugin looks for conflicts, and it is never removed by the plugin: `restic unlock` from any computer removes it. An admin action for that (`unlock --yes`) is on the list without a milestone | other clients writing to the same repository |
-| T-17 | Secrets undecryptable after salt rotation [D] | detected on load (`undecryptable`); the Doctor and Site Health turn critical and jobs fail with `secrets_undecryptable`. There is no form to enter the passwords again after setup: today the way back is to define both password constants in `wp-config.php` and to delete the option `backups_for_restic_secrets`, whose cached master key would otherwise still fail to decrypt (§5.2). A form in the settings is planned for Milestone 3 | operators without a stored kit — mandatory acknowledgement |
+| T-17 | Secrets undecryptable after salt rotation [D] | detected on load (`undecryptable`); the Doctor and Site Health turn critical and jobs fail with `secrets_undecryptable`. The way back is the Settings tab, where both passwords can be entered again: the REST password is tested against the server and saved, the repository password is checked by an unlock job. A site that defines both passwords in `wp-config.php` goes on by itself, because the cached key is derived again (§5.2) | operators without a stored kit — mandatory acknowledgement |
 | T-18 | Salts not defined as constants (WordPress stores them in the DB) [I] | Doctor warning with instructions | — |
-| T-19 | Malicious data from the server exhausts memory or time (huge index/tree JSON, deep nesting) [D] | limits that exist: JSON depth 64 (`Support\GoJson`), stored blob length ≤ 64 MiB and pack header ≤ 16 MiB (`Format\Pack\PackReader`), decompressed object ≤ 128 MiB (`Format\Compression`), scrypt parameters (`Crypto\ScryptParameters`), listing entries that are not object ids skipped; a parse error aborts with `repository_damaged`. Not built: caps on the size of a downloaded index, snapshot or lock file. Such a file is loaded whole, whatever size the server sends; caps per object type are planned for Milestone 3 | until then a malicious or broken server can answer such a request with a body larger than PHP's memory limit, which ends the request |
+| T-19 | Malicious data from the server exhausts memory or time (huge index/tree JSON, deep nesting) [D] | limits that exist: JSON depth 64 (`Support\GoJson`), stored blob length ≤ 64 MiB and pack header ≤ 16 MiB (`Format\Pack\PackReader`), decompressed object ≤ 128 MiB (`Format\Compression`), scrypt parameters (`Crypto\ScryptParameters`), listing entries that are not object ids skipped; a parse error aborts with `repository_damaged`. The size of every answer is capped before it is read (`Backend\RestBackend`, enforced by the HTTP client): a whole file by its kind (config and key 64 KiB, lock 1 MiB, snapshot 16 MiB, index 128 MiB), a range by the length that was asked for, a listing 128 MiB, any other answer 64 KiB. A longer file is refused with `repository_damaged` | an index of up to 128 MiB is accepted and may still be more than a small host can decode; the memory budget of phase 0.9 answers that. The cap counts bytes as they arrive: the plugin asks for uncompressed answers (`Accept-Encoding: identity`), but WordPress' HTTP library unpacks an answer that is compressed all the same, without a limit of its own. A hostile server can end a tick that way; it can also simply not answer, so it gains nothing beyond that. The library also goes on reading an answer that is longer than the cap and throws the rest away, so the cap bounds the memory for a body, not the time or traffic of such a request, and not the headers, which the library collects before any cap applies. The request's time limit ends a server that stops sending; one that keeps sending a little can hold a request open longer on the transport without cURL |
 | T-20 | Information disclosure to low-privileged users via Site Health or REST [I] | admin-only by core and by capability checks; generic errors elsewhere | — |
 | T-21 | On multisite, a site administrator backs up or restores the whole network [E] | activation refused on multisite in 1.0, network-wide and per site; runtime guard keeps the plugin inert if activated otherwise ([ADR 0026](adr/0026-multisite-deferred.md)) | — |
 | T-22 | Races: two ticks, two jobs, two uploads of the same pack [T, D] | `flock` on `runner.lock` for ticks; lease with expiry; single-active-job invariant: the check for an active job and the write of a new one happen under an exclusive `flock` on `jobs/create.lock`; after its creation only the holder of `runner.lock` writes a job's `job.json`, and a request to cancel is a marker file of its own, `jobs/<id>/cancel-requested`, which a tick reads before every step, so neither can overwrite or lose the other; content-addressed names make duplicate uploads harmless (server answers 403 for an existing object, treated as success after a `HEAD` size check) | NFS without `flock` (documented) |
@@ -120,9 +120,9 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 
 | Secret | Source | Rotation | Where used |
 | --- | --- | --- | --- |
-| Repository password | generated by the wizard (32 chars, CSPRNG, 192 bits) or entered for an existing repository | `restic key add`/`key remove` from any computer. The cached master key keeps working; the stored password, which the recovery kit prints, is then outdated. After setup it can only be replaced through the constant `BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD`; a form is planned for Milestone 3 | scrypt input during unlock; recovery kit |
+| Repository password | generated by the wizard (32 chars, CSPRNG, 192 bits) or entered for an existing repository | `restic key add`/`key remove` from any computer. The cached master key keeps working; the stored password, which the recovery kit prints, is then outdated. After setup it is replaced under Settings → Repository, confirmed with the administrator's WordPress password and checked by an unlock job, or through the constant `BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD`. An entered password is kept apart (`repository_password_candidate`, encrypted like the others) until the unlock job has opened the repository with it; a wrong one is dropped when that job ends, and the stored password and the cached key stay as they were | scrypt input during unlock; recovery kit |
 | Repository master key | derived once from the password via the key file | changes only with `restic copy` to a new repository | every seal/open; cached in the secret store |
-| REST password | the `.htpasswd` of the rest-server, or the BorgBase control panel | change it on the server. After setup the plugin takes the new one only through the constant `BACKUPS_FOR_RESTIC_REST_PASSWORD`; a form is planned for Milestone 3 | `Authorization` header |
+| REST password | the `.htpasswd` of the rest-server, or the BorgBase control panel | change it on the server. After setup the plugin takes the new one under Settings → Repository, where it is tested against the server before it is saved, or through the constant `BACKUPS_FOR_RESTIC_REST_PASSWORD` | `Authorization` header |
 | REST username | the `.htpasswd` of the rest-server, or the BorgBase control panel; stored as a plain setting, not as a secret, and not masked in logs | with the password; after setup through the constant `BACKUPS_FOR_RESTIC_REST_USERNAME` | `Authorization` header |
 | Download tokens (Milestone 3) | random per staged file | one-time, 1 h | download URL |
 
@@ -135,15 +135,15 @@ with `name → ciphertext`. Ciphertext format
 and salt constants read directly (not `wp_salt()`, which silently generates database-stored values)
 and `salt` a random 32-byte value stored next to the ciphertext. `ConstantOverrideStore`
 wins when `BACKUPS_FOR_RESTIC_REPOSITORY_PASSWORD` or `BACKUPS_FOR_RESTIC_REST_PASSWORD` is
-defined. The cached master key is always in the option store (there is no constant for it).
+defined. The cached master key is always in the option store (there is no constant for it),
+and so is a repository password that was entered and is not confirmed yet.
 Decryption failure yields `undecryptable` (`SecretsUndecryptable`), never an empty secret
 ([ADR 0006](adr/0006-secrets-at-rest.md)). After a salt change that also holds for the
-cached master key, and the plugin does not derive it again by itself, even when the password
-constant is defined: `RepositoryAccess::open_cached()` passes the failure on and the job
-ends with `secrets_undecryptable`. The stale entry goes away when the option
-`backups_for_restic_secrets` is deleted; with both password constants defined, the next job
-then derives and caches the key again. Deriving it again automatically, as ADR 0006
-describes, is not planned yet.
+cached master key. It is a cache: `RepositoryAccess::open_cached()` forgets an entry that
+no longer decrypts, and the unlock step derives the key again from the password. With both
+password constants defined the next job therefore goes on by itself. Stored passwords do
+not come back: the job ends with `secrets_undecryptable` until both are entered again under
+Settings → Repository ([disaster-recovery guide](06-disaster-recovery.md)).
 
 ### 5.3 In memory and in code
 
@@ -178,8 +178,9 @@ describes, is not planned yet.
    for it yet; one is planned for Milestone 3 (T-24).
 3. The fields of the setup wizard in which an administrator types the REST password or the
    password of an existing repository, and the requests that carry them to the site. After
-   the setup the admin area has no field for either password; a form to enter them again is
-   planned for Milestone 3.
+   the setup the Settings tab has the same two fields, to enter the passwords again; the
+   repository password is accepted only together with the administrator's WordPress
+   password. Neither field ever shows a stored value.
 4. The `wp-config.php` constants, if the operator chose them.
 
 Anything else that contains a secret is a bug.
@@ -205,9 +206,15 @@ carries `Cache-Control: no-store`.
 - If the settings name an uploaded CA certificate that is missing from the private
   directory, the kit is refused with `ca_certificate_missing`: without the certificate
   restic could not reach the server, and the kit would be useless.
-- Not built: a validity of five minutes after the password was entered, and an event that
-  records who viewed the kit and when. Both are planned for Milestone 3; today nothing is
-  logged for a kit request.
+- Every delivery of the kit is recorded: time, user and way (`create`, `connect` or
+  `settings`), the last twenty in the state option, and the action
+  `backups_for_restic_recovery_kit_shown` fires for audit plugins. The Settings tab shows
+  the latest one, so an administrator sees when somebody else looked at the kit. A refused
+  request is not recorded.
+- Not built, on purpose: a validity of five minutes after the WordPress password was
+  entered. The kit's view has copy and download, so no second request is needed, and a
+  window in which a session gets the kit without the password would only help whoever
+  took the session over.
 
 ## 6. Cryptography and format implementation
 
@@ -256,9 +263,15 @@ carries `Cache-Control: no-store`.
 - WordPress HTTP API with `sslverify => true`, `redirection => 0`, explicit timeouts, basic
   auth via header, plugin User-Agent, no cookies (`WordPress\WpHttpClient`). `sslverify` is
   passed as a request argument on every repository request, and the plugin has no setting
-  that turns it off. It is an argument, not a guarantee: other code on the site can change
-  request arguments through WordPress' HTTP filters, and the plugin does not guard against
-  that yet (planned for Milestone 3).
+  that turns it off. Other code on the site can change request arguments through WordPress'
+  HTTP filters, and snippets that switch certificate verification off for a whole site are
+  common. While a repository request is under way, the client therefore registers its own
+  callbacks last on `http_request_args`, `https_ssl_verify`, `https_local_ssl_verify` and
+  the `http_api_curl` action, for this request's URL only, and puts verification, the
+  certificate bundle and the ban on redirects back. The integration suite switches
+  verification off in all three ways and expects the connection to a server with an
+  unknown certificate to fail. This holds against careless code, not against code that
+  means harm: such code runs in the same process and could read the passwords as well (§3).
 - Reads, listings and deletions are retried on network errors, on 429 and on 5xx other than
   507; uploads on 429 and such 5xx, but not on network errors. Every other 4xx is final and
   mapped to a dedicated error (401/403 → credentials or append-only; 404 → missing; 400 →
@@ -380,12 +393,12 @@ chosen repository password, the read-back of stored secrets and the retention fl
 | HTTPS to the repository server | URL validation: `https://` only, for both server options |
 | Strong repository password | generated (32 characters, 192 bits). Enforced by the core: a password that somebody chose for a new repository, in the request or in `wp-config.php`, must have at least 12 characters, else `Setup::create()` refuses with `password_too_short` |
 | Recovery kit acknowledged | required before the first backup and before enabling the schedule; enforced by the core: jobs are refused with `setup_incomplete` until the setup is completed |
-| Private directory protected | the HTTP probe must not read its file back: then the Doctor is critical, the wizard does not continue and backups stop. A probe that cannot run is reported as `unverified` and blocks nothing (a stricter rule is planned for Milestone 3) |
+| Private directory protected | the HTTP probe must not read its file back: then the Doctor is critical, the wizard does not continue, `POST /setup/complete` refuses with `environment_blocked` and backups stop. Where the site cannot request itself, the wizard's environment step makes the request from the browser; a probe that neither could make is reported as `unverified` and blocks nothing |
 | Secrets decryptable | enforced by the core: `EncryptedOptionStore::set()` reads every secret back after it stored it; if the secret is not there or comes back changed, saving fails with `secrets_undecryptable` |
 | Retention floor | enforced by the core (`Schema::retention_floor()`): `retention.keep.within` of at least one day, or `retention.keep.last` of at least 1. The settings refuse a change below it with `retention_floor`; a forget job that finds such a pair stored fails with `configuration` and deletes nothing |
 | Sensible schedule | daily backup at a randomised minute, weekly prune-lite, monthly check |
 | Notifications on | e-mail on failure to `admin_email` |
-| Supported repository | version 1, or version 2 with `ext-zstd`. The wizard does not check this: without the extension it connects a version 2 repository, and the first job that reads a compressed file fails with `repository_unsupported_version` (a check in the wizard is not planned yet) |
+| Supported repository | version 1, or version 2 with `ext-zstd`. Without the extension a version 2 repository is refused when it is unlocked, in the wizard as in every job, with `repository_unsupported_version`; the Doctor reports the same as a critical finding, which keeps the setup from being completed |
 | Append-only | detected automatically and recommended; retention switches to `external` when present |
 
 ## 14. Disclosure policy
@@ -411,7 +424,7 @@ release. `readme.txt` links to the policy.
       BorgBase free-tier repositories (normal and append-only). These tests do not exist
       yet; they need an account and are planned for Milestone 3.
 - [ ] Nonce-uniqueness and MAC-failure tests green; tests of the size limits green (the
-      limits that exist are in T-19; caps per object type are planned for Milestone 3).
+      limits are in T-19).
 - [ ] Log fixtures from integration runs contain no secret value.
 - [ ] HTTP probe behaves on Apache and nginx fixtures. No such fixtures exist yet: the test
       site is PHP's built-in server with a router that imitates `.htaccess`.
