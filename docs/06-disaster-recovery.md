@@ -394,6 +394,26 @@ contents, and this guide provides no automatic lossless repair for that ambiguit
    the finding active, and resolving one tree can expose further findings. Repeat the
    diagnosis as needed. Resume automatic retention only when both checks pass, as in step 6.
 
+## Index memory limit
+
+`index_too_large` means the repository index and the job's working buffers do not fit in
+the memory available to PHP. It is a local capacity limit, not a finding that the repository
+is damaged. A backup first tries smaller packs, down to 4 MiB, and records that adjustment
+in the job log. If the budget still does not fit, the job stops.
+
+The budget is checked after each pack in an index has been decoded. A single large index
+file or pack can exhaust PHP memory before this check, so a PHP out-of-memory error is
+also possible. The same capacity guidance below applies; neither error proves repository
+damage.
+
+Ask the host to increase PHP's `memory_limit`, then confirm the effective value under
+**Backups → Environment** and start the job again. WordPress and other active plugins also
+use that allowance, so a given limit does not guarantee a fixed number of blobs. If the
+host cannot supply enough memory, use restic and the recovery kit on another computer to
+check and restore the repository. Do not prune or repair it merely because of this error.
+The index measurements and their limits are documented in
+[ADR 0031](adr/0031-compact-index-and-memory-budget.md).
+
 ## Scenario J — the plugin is inactive after a downgrade
 
 An older plugin can find settings written in a layout it does not understand. It then
