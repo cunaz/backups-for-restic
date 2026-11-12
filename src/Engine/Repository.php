@@ -234,9 +234,24 @@ final class Repository {
 	 * @throws BackendException If the request fails.
 	 * @throws FormatException If the content does not match its name.
 	 * @throws UnsupportedRepository If the file is compressed and PHP lacks the zstd extension.
+	 * @throws IndexTooLarge If an index file cannot fit beside the current process state.
 	 */
 	public function load_unpacked( ObjectType $type, Id $id ): string {
-		$sealed = $this->backend->load( $type, $id->hex() );
+		$length = null;
+		if ( ObjectType::Index === $type && null !== $this->memory ) {
+			// A per-pack check alone is too late: the next encrypted file can exhaust the
+			// limit before the decoder yields its first pack. Bound the response as well.
+			$this->memory->check_loaded_index();
+			$length = $this->backend->size( $type, $id->hex() );
+			if ( null === $length ) {
+				NotFound::raise( 'The index file disappeared from the server.' );
+			}
+			if ( 0 === $length ) {
+				FormatException::raise( 'The index file is empty.', [ 'type' => $type->value ] );
+			}
+			$this->memory->check_index_input( $length );
+		}
+		$sealed = $this->backend->load( $type, $id->hex(), 0, $length );
 		if ( ! Id::of( $sealed )->equals( $id ) ) {
 			FormatException::raise( 'Repository file content does not match its name.', [ 'type' => $type->value ] );
 		}

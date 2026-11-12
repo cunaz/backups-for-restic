@@ -12,6 +12,7 @@ use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Repository;
@@ -129,8 +130,11 @@ final class CheckTest extends TestCase {
 
 	public function test_rebuilding_a_readable_index_obeys_the_memory_budget(): void {
 		$this->backend->objects['index'][ hash( 'sha256', 'damaged index' ) ] = 'damaged index';
-		$this->repository->limit_memory( new MemoryBudget( 1 ) );
 		$run = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		while ( 'trees' !== $run->progress()['phase'] ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+		}
+		$this->repository->limit_memory( new MemoryBudget( 1 ) );
 		try {
 			$run->advance( INF );
 			self::fail( 'A check must refuse an index that does not fit.' );
@@ -140,6 +144,35 @@ final class CheckTest extends TestCase {
 			$run->abort();
 		}
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_a_cache_memory_refusal_does_not_start_an_uncached_fallback(): void {
+		$listings   = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$listings ): void {
+				if ( 'list' === $method && ObjectType::Index === $type ) {
+					++$listings;
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$cache      = new IndexCache( $this->work_dir() );
+		$cache->load( $repository );
+		$run = CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0, $cache );
+		while ( 'trees' !== $run->progress()['phase'] ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+		}
+		$before = $listings;
+		$repository->limit_memory( new MemoryBudget( 1 ) );
+		try {
+			$run->advance( INF );
+			self::fail( 'The cache cannot fit.' );
+		} catch ( IndexTooLarge ) {
+			self::assertSame( $before + 1, $listings, 'Only the cache lists the indexes; a fallback would list them again.' );
+		} finally {
+			$run->abort();
+		}
 	}
 
 	public function test_an_empty_rebuilt_index_also_needs_working_memory(): void {
@@ -326,6 +359,133 @@ final class CheckTest extends TestCase {
 			$read = $now;
 		}
 		self::assertSame( $snapshots, $run->result()['stats']['snapshots'] ?? 0 );
+	}
+
+	public function test_repeated_pack_entries_in_one_index_keep_their_combined_size_and_count(): void {
+		$before = $this->check();
+		foreach ( $this->repository->names( ObjectType::Index ) as $name ) {
+			$document = json_decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ), true, flags: JSON_THROW_ON_ERROR );
+			$split    = [];
+			foreach ( $document['packs'] as $pack ) {
+				foreach ( $pack['blobs'] as $blob ) {
+					$split[] = [
+						'id'    => $pack['id'],
+						'blobs' => [ $blob ],
+					];
+				}
+			}
+			$this->repository->save_unpacked( ObjectType::Index, json_encode( [ 'packs' => $split ], JSON_THROW_ON_ERROR ) );
+			$this->backend->delete( ObjectType::Index, $name );
+		}
+		$after = $this->check();
+		self::assertSame( 0, $after['errors'] );
+		self::assertSame( 0, $after['warnings'] );
+		self::assertSame( $before['stats'], $after['stats'] );
+	}
+
+	public function test_a_late_invalid_pack_discards_the_entire_index_in_both_check_phases(): void {
+		$packs = [];
+		foreach ( $this->repository->names( ObjectType::Index ) as $name ) {
+			$document = json_decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ), true, flags: JSON_THROW_ON_ERROR );
+			array_push( $packs, ...$document['packs'] );
+			$this->backend->delete( ObjectType::Index, $name );
+		}
+		$packs[] = [
+			'id'    => Id::of( 'invalid tail' )->hex(),
+			'blobs' => [ [ 'invalid' => true ] ],
+		];
+		$this->repository->save_unpacked( ObjectType::Index, json_encode( [ 'packs' => $packs ], JSON_THROW_ON_ERROR ) );
+		$result = $this->check();
+		self::assertSame( 1, $result['counts']['error:index_unreadable'] );
+		self::assertSame( 0, $result['stats']['packs'], 'The earlier valid packs were not committed.' );
+		self::assertSame( count( $this->repository->snapshots() ), $result['counts']['error:blob_missing'], 'The tree walk must not find roots in the earlier valid part either.' );
+	}
+
+	public function test_a_transport_error_retries_the_same_index_on_the_same_run(): void {
+		$before     = $this->check();
+		$failed     = false;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$failed ): void {
+				if ( ! $failed && 'load' === $method && ObjectType::Index === $type ) {
+					$failed = true;
+					throw new BackendException( 'Temporary index transport failure.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 100 );
+		try {
+			$run->advance( INF );
+			self::fail( 'The first index read must fail.' );
+		} catch ( BackendException $error ) {
+			self::assertSame( 'Temporary index transport failure.', $error->getMessage() );
+		}
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( $before['stats'], $run->result()['stats'] );
+		self::assertSame( 0, $run->result()['errors'] );
+		self::assertSame( 0, $run->result()['warnings'] );
+	}
+
+	#[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+	#[\PHPUnit\Framework\Attributes\PreserveGlobalState( false )]
+	public function test_large_pack_listings_are_resumed_in_bounded_batches_and_duplicates_count_once(): void {
+		$packs                       = $this->backend->list( ObjectType::Data );
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( $packs ): void {
+			self::assertSame( ObjectType::Data, $type );
+			$file = new \BackupsForRestic\Support\WorkFile( $path, true );
+			$file->write( '[' );
+			foreach ( $packs as $name => $size ) {
+				// A later duplicate supplies the actual size.
+				$file->write(
+					json_encode(
+						[
+							'name' => $name,
+							'size' => 0,
+						],
+						JSON_THROW_ON_ERROR
+					) . ','
+				);
+				$file->write(
+					json_encode(
+						[
+							'name' => $name,
+							'size' => $size,
+						],
+						JSON_THROW_ON_ERROR
+					) . ','
+				);
+			}
+			for ( $i = 0; $i < 60000; ++$i ) {
+				$entry = '{"name":"' . hash( 'sha256', 'check-unindexed:' . $i ) . '","size":1}';
+				$file->write( ( $i > 0 ? ',' : '' ) . $entry . ',' . $entry );
+			}
+			$file->write( ']' );
+			$file->close();
+		};
+		$work                        = $this->work_dir();
+		$clock                       = new FrozenClock( time() );
+		$run                         = CheckRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom(), 0 );
+		$original                    = ini_get( 'memory_limit' );
+		$baseline                    = memory_get_usage( true );
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Isolated regression: repository bytes are not part of the downloaded listing.
+		self::assertNotFalse( ini_set( 'memory_limit', (string) ( $baseline + 12 * 1048576 ) ) );
+		try {
+			$steps = 0;
+			while ( ! $run->advance( 0.0 ) ) {
+				self::assertLessThan( 10000, ++$steps );
+				$run = CheckRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::assertGreaterThan( 1000, $steps );
+			self::assertSame( 0, $run->result()['errors'] );
+			self::assertSame( 60000, $run->result()['counts']['warning:pack_unindexed'] );
+			self::assertSame( count( $packs ), $run->result()['stats']['packs'] );
+			self::assertLessThan( 131072, filesize( $work . '/state.json' ) );
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the isolated process's original setting.
+			ini_set( 'memory_limit', $original );
+			$run->abort();
+		}
 	}
 
 	public function test_a_missing_pack_is_not_read_again_when_the_findings_list_is_full(): void {

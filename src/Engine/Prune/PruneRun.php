@@ -15,6 +15,7 @@ use BackupsForRestic\Backend\ListingFile;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
@@ -29,6 +30,7 @@ use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
+use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Bytes;
@@ -329,6 +331,7 @@ final class PruneRun {
 	 * @param Identity             $identity   Written into lock files.
 	 * @param Clock                $clock      Time source.
 	 * @param array<string, mixed> $state      Decoded checkpoint, or [] for a new run.
+	 * @param IndexCache|null      $cache      Cache loaded lazily while the lock holds.
 	 */
 	private function __construct(
 		private readonly Repository $repository,
@@ -336,7 +339,8 @@ final class PruneRun {
 		private readonly string $work_dir,
 		Identity $identity,
 		private readonly Clock $clock,
-		array $state
+		array $state,
+		private readonly ?IndexCache $cache
 	) {
 		$this->pid       = Decoded::int( $state['pid'] ?? null, random_int( 100000, 2147483647 ) );
 		$this->locking   = new Locking( $repository, $identity, $clock, $this->pid );
@@ -385,12 +389,13 @@ final class PruneRun {
 	 * Starts a prune: refuses append-only repositories, takes the exclusive lock and lists the
 	 * snapshots to walk.
 	 *
-	 * @param Repository    $repository Repository.
-	 * @param string        $work_dir   Empty directory for the checkpoint.
-	 * @param Identity      $identity   Written into lock files.
-	 * @param Clock         $clock      Time source.
-	 * @param RandomSource  $random     For the append-only probe.
-	 * @param IndexSet|null $index      Current index, for example from the IndexCache.
+	 * @param Repository      $repository Repository.
+	 * @param string          $work_dir   Empty directory for the checkpoint.
+	 * @param Identity        $identity   Written into lock files.
+	 * @param Clock           $clock      Time source.
+	 * @param RandomSource    $random     For the append-only probe.
+	 * @param IndexSet|null   $index      Current index, for example from the IndexCache.
+	 * @param IndexCache|null $cache      Cache to load after taking the exclusive lock.
 	 * @return self Run.
 	 * @throws InvalidArgument If the directory already holds a run or the repository has no snapshots.
 	 * @throws AppendOnlyRefused If the server refuses deletions.
@@ -398,7 +403,7 @@ final class PruneRun {
 	 * @throws \Throwable Whatever taking the lock or reading the snapshots throws. The checkpoint
 	 *                    then stays: resume() begins again, and abort() gives the run up.
 	 */
-	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, ?IndexSet $index = null ): self {
+	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, ?IndexSet $index = null, ?IndexCache $cache = null ): self {
 		if ( ! is_dir( $work_dir ) && ! mkdir( $work_dir, 0700, true ) && ! is_dir( $work_dir ) ) {
 			InvalidArgument::raise( 'The working directory cannot be created.' );
 		}
@@ -414,7 +419,7 @@ final class PruneRun {
 			// deletions fail, leaving duplicate index files behind.
 			BackendException::raise( 'Whether the server allows deletions could not be determined; prune tries again later.' );
 		}
-		$run = new self( $repository, $index, $work_dir, $identity, $clock, [] );
+		$run = new self( $repository, $index, $work_dir, $identity, $clock, [], $cache );
 		// The run's number is on disk before its lock is on the server: if this request ends in
 		// between, resume() and abort() still recognise the lock, instead of waiting 30 minutes
 		// for a lock that nobody knows.
@@ -432,15 +437,16 @@ final class PruneRun {
 	/**
 	 * Continues a prune from its checkpoint.
 	 *
-	 * @param Repository    $repository Repository.
-	 * @param string        $work_dir   Directory with the checkpoint.
-	 * @param Identity      $identity   Written into lock files.
-	 * @param Clock         $clock      Time source.
-	 * @param IndexSet|null $index      Current index, for example from the IndexCache.
+	 * @param Repository      $repository Repository.
+	 * @param string          $work_dir   Directory with the checkpoint.
+	 * @param Identity        $identity   Written into lock files.
+	 * @param Clock           $clock      Time source.
+	 * @param IndexSet|null   $index      Current index, for example from the IndexCache.
+	 * @param IndexCache|null $cache      Cache used only when marking needs the index.
 	 * @return self Run.
 	 * @throws FormatException If the checkpoint is unusable.
 	 */
-	public static function resume( Repository $repository, string $work_dir, Identity $identity, Clock $clock, ?IndexSet $index = null ): self {
+	public static function resume( Repository $repository, string $work_dir, Identity $identity, Clock $clock, ?IndexSet $index = null, ?IndexCache $cache = null ): self {
 		$json  = is_file( $work_dir . '/state.json' ) ? file_get_contents( $work_dir . '/state.json' ) : false;
 		$state = false === $json ? null : json_decode( $json, true );
 		if ( ! is_array( $state ) || self::STATE_VERSION !== ( $state['version'] ?? null ) ) {
@@ -450,7 +456,7 @@ final class PruneRun {
 		foreach ( $state as $key => $value ) {
 			$fields[ (string) $key ] = $value;
 		}
-		return new self( $repository, $index, $work_dir, $identity, $clock, $fields );
+		return new self( $repository, $index, $work_dir, $identity, $clock, $fields, $cache );
 	}
 
 	/**
@@ -750,6 +756,9 @@ final class PruneRun {
 			$this->index_names = $this->index_files;
 			$this->position    = 0;
 			$this->phase       = 'plan';
+			// Later phases need pack membership only. In particular, rewriting must not
+			// keep the complete blob index beside the input, output and encrypted JSON.
+			$this->index = null;
 			return;
 		}
 		if ( isset( $this->seen[ $hex ] ) ) {
@@ -861,15 +870,22 @@ final class PruneRun {
 			$this->finish_plan();
 			return;
 		}
+		// Validate the entire file before changing the plan. Repeated occurrences of a pack
+		// in this file contribute all their entries, as decode() did, but cost no blob array.
+		$sizes = [];
+		foreach ( IndexFile::packs( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+			$sizes[ $pack ] ??= 0;
+			foreach ( $entries as $entry ) {
+				$sizes[ $pack ] += $entry->length;
+			}
+		}
 		$affected = false;
-		foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+		foreach ( $sizes as $pack => $bytes ) {
 			$this->listed[ $pack ] = true;
 			if ( isset( $this->live[ $pack ] ) ) {
 				if ( ! isset( $this->counted[ $pack ] ) ) {
 					$this->counted[ $pack ] = true;
-					foreach ( $entries as $entry ) {
-						$this->kept_bytes += $entry->length;
-					}
+					$this->kept_bytes      += $bytes;
 				}
 				continue;
 			}
@@ -1003,17 +1019,31 @@ final class PruneRun {
 			$this->position = 0;
 			return;
 		}
-		$kept = [];
-		foreach ( IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
-			if ( ! isset( $this->unused[ $pack ] ) ) {
-				$kept[ $pack ] = $entries;
-			}
-		}
-		if ( [] !== $kept ) {
-			$this->written[] = $this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( $kept ) )->hex();
+		$packs = $this->kept_packs( $name );
+		$json  = IndexFile::encode( $packs );
+		if ( $packs->getReturn() ) {
+			$this->written[] = $this->repository->save_unpacked( ObjectType::Index, $json )->hex();
 			++$this->index_files_written;
 		}
 		++$this->position;
+	}
+
+	/**
+	 * Yields the packs to keep, validating even the entries that will be dropped. Nothing
+	 * is uploaded until the generator finishes: a damaged tail cannot publish half an index.
+	 *
+	 * @param string $name Index file ID.
+	 * @return \Generator<string, list<PackEntry>, mixed, bool> Entries, returning whether any were kept.
+	 */
+	private function kept_packs( string $name ): \Generator {
+		$kept = false;
+		foreach ( IndexFile::packs( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
+			if ( ! isset( $this->unused[ $pack ] ) ) {
+				$kept = true;
+				yield $pack => $entries;
+			}
+		}
+		return $kept;
 	}
 
 	/**
@@ -1086,13 +1116,13 @@ final class PruneRun {
 	}
 
 	/**
-	 * Returns the index, loading it from the server if none was given.
+	 * Returns the index, loading it under the lock and only while marking needs it.
 	 *
 	 * @return IndexSet Index.
 	 */
 	private function index(): IndexSet {
 		if ( null === $this->index ) {
-			$this->index = $this->repository->load_index();
+			$this->index = null === $this->cache ? $this->repository->load_index() : $this->cache->load( $this->repository );
 		}
 		return $this->index;
 	}

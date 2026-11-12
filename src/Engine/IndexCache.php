@@ -128,7 +128,7 @@ final class IndexCache {
 			return null;
 		}
 		try {
-			$pieces = $this->pieces( $handle, $repository->cipher() );
+			$pieces = $this->pieces( $handle, $repository->cipher(), $repository->memory() );
 			$names  = $pieces->valid() ? $pieces->current() : '';
 			if ( 'N' !== ( $names[0] ?? '' ) || 1 !== strlen( $names ) % 32 ) {
 				return null;
@@ -160,13 +160,14 @@ final class IndexCache {
 	/**
 	 * Reads, opens and checks the pieces of a cache file one after another.
 	 *
-	 * @param resource $handle Open cache file.
-	 * @param Cipher   $cipher Cipher with the repository key.
+	 * @param resource          $handle Open cache file.
+	 * @param Cipher            $cipher Cipher with the repository key.
+	 * @param MemoryBudget|null $memory Current process budget, if limited.
 	 * @return \Generator<int, string> The content of each piece, without mark and number.
 	 * @throws FormatException If the file is truncated or its pieces do not belong together.
 	 * @throws AuthenticationFailed If a piece was changed.
 	 */
-	private function pieces( $handle, Cipher $cipher ): \Generator {
+	private function pieces( $handle, Cipher $cipher, ?MemoryBudget $memory ): \Generator {
 		$mark = null;
 		for ( $number = 0; ; $number++ ) {
 			$head = (string) fread( $handle, 4 );
@@ -178,6 +179,12 @@ final class IndexCache {
 			if ( $length < Cipher::OVERHEAD + self::MARK_BYTES + 4 || $length > self::MAX_PIECE ) {
 				throw new FormatException( 'The cached index is damaged.' );
 			}
+			$stat     = fstat( $handle );
+			$position = ftell( $handle );
+			if ( false === $stat || false === $position || $length > $stat['size'] - $position ) {
+				throw new FormatException( 'The cached index is truncated.' );
+			}
+			$memory?->check_index_input( $length );
 			$sealed = '';
 			for ( $missing = $length; $missing > 0; $missing -= strlen( $part ) ) {
 				$part = fread( $handle, $missing );

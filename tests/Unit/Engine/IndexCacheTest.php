@@ -11,7 +11,9 @@ use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
+use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -223,6 +225,45 @@ final class IndexCacheTest extends TestCase {
 		}
 
 		self::assertSame( $expected, self::blobs( ( new IndexCache( $this->directory ) )->load( $this->repository ) ), 'Sealed with another key, the file counts for nothing.' );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_truncated_large_piece_is_rebuilt_under_the_memory_limit(): void {
+		self::assertSame( '128M', ini_get( 'memory_limit' ) );
+		$this->index_file( 'a', 2, 10 );
+		$cache    = new IndexCache( $this->directory );
+		$expected = self::blobs( $cache->load( $this->repository ) );
+		$file     = $this->directory . '/index.bin';
+		file_put_contents( $file, pack( 'V', 64 * 1048576 ) . 'short body' );
+		$this->repository->limit_memory( new MemoryBudget( 128 * 1048576 ) );
+		$this->backend->loads = [];
+
+		self::assertSame( $expected, self::blobs( $cache->load( $this->repository ) ) );
+		self::assertSame( 1, $this->backend->loads['index'] ?? 0, 'A truncated cache is rebuilt from the repository.' );
+		$this->backend->loads = [];
+		self::assertSame( $expected, self::blobs( $cache->load( $this->repository ) ) );
+		self::assertArrayNotHasKey( 'index', $this->backend->loads, 'The repaired cache is reused on the next load.' );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_complete_large_piece_still_refuses_the_memory_budget_before_reading(): void {
+		$file   = $this->directory . '/index.bin';
+		$handle = fopen( $file, 'wb' );
+		self::assertNotFalse( $handle );
+		try {
+			self::assertSame( 4, fwrite( $handle, pack( 'V', 64 * 1048576 ) ) );
+			self::assertTrue( ftruncate( $handle, 4 + 64 * 1048576 ) );
+		} finally {
+			fclose( $handle );
+		}
+		$this->repository->limit_memory( new MemoryBudget( 128 * 1048576 ) );
+		try {
+			( new IndexCache( $this->directory ) )->load( $this->repository );
+			self::fail( 'A complete piece must pass the budget before it can be read or authenticated.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertSame( 64 * 1048576, $error->context()['input_bytes'] );
+			self::assertSame( 4 + 64 * 1048576, filesize( $file ), 'A capacity refusal does not discard the cache.' );
+		}
 	}
 
 	public function test_a_replacement_over_the_limit_keeps_the_smaller_cache(): void {

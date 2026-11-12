@@ -35,11 +35,15 @@ final class IndexFile {
 	/**
 	 * Encodes packs into an index file.
 	 *
-	 * @param array<string, list<PackEntry>> $packs Entries by hex pack ID (keys must be strings).
+	 * Only one pack's decoded JSON is kept beside the output. A generator can therefore
+	 * rewrite an index without keeping every decoded blob in memory.
+	 *
+	 * @param iterable<string, list<PackEntry>> $packs Entries by hex pack ID (keys must be strings).
 	 * @return string JSON.
 	 */
-	public static function encode( array $packs ): string {
-		$list = [];
+	public static function encode( iterable $packs ): string {
+		$json  = '{"packs":[';
+		$comma = '';
 		foreach ( $packs as $pack_id => $entries ) {
 			$blobs = [];
 			foreach ( $entries as $entry ) {
@@ -54,13 +58,16 @@ final class IndexFile {
 				}
 				$blobs[] = $blob;
 			}
-			$list[] = [
-				'id'    => $pack_id,
-				'blobs' => $blobs,
-			];
+			$json .= $comma . GoJson::encode(
+				[
+					'id'    => $pack_id,
+					'blobs' => $blobs,
+				]
+			);
+			$comma = ',';
 		}
 		// restic writes index files with json.Encoder, which appends a newline.
-		return GoJson::encode( [ 'packs' => $list ] ) . "\n";
+		return $json . "]}\n";
 	}
 
 	/**
