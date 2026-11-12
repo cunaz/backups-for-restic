@@ -20,7 +20,7 @@ final class HttpStreamingTest extends TestCase {
 
 	#[DataProvider( 'transports' )]
 	public function test_downloads_private_listings_with_both_wordpress_transports( string $transport ): void {
-		$server = new RestServer();
+		$server = new RestServer( localhost_certificate: true );
 		try {
 			$backend = $server->backend( 'streaming' );
 			$backend->create();
