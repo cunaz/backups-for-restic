@@ -151,6 +151,9 @@ jobs:
         if: always()
         with:
           name: wordpress-memory-${{ matrix.blobs }}
+          # These explicit report/log paths are inside the hidden .tools directory.
+          include-hidden-files: true
+          if-no-files-found: error
           path: |
             .tools/memory-*.jsonl
             .tools/memory-worker-errors.log

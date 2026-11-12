@@ -2,8 +2,8 @@
 
 These measurements exercise valid repository history, traversal, pack reading, actual prune
 deletion and an additional backup. The local results below use the standalone engine, without
-WordPress. The new CI matrix measures WordPress separately; its results are required before
-claiming a capacity for a WordPress installation.
+WordPress. The CI matrix measures WordPress separately. Its observed results below apply to
+this fixture and site configuration; they do not establish a capacity for every installation.
 
 ## Fixture and method
 
@@ -95,8 +95,36 @@ The fixture and final repository must pass `restic check --read-data`. All three
 errors, a prune that deleted nothing, and leftover locks fail CI. Success at the larger sizes
 is recorded as such; a refusal is not counted as a completed backup/check/prune.
 
-Artifacts `wordpress-memory-<size>` contain the absolute used/reserved peaks, bootstrap
-baseline, state, result and elapsed time of every tick, plus one summary per operation and
-worker error logs. This change adds the gate; the local measurements above do not substitute
-for its CI results. Assessment of those results and the remaining checkpoint/decompression
-work stay open in plan package 0.9.
+The workflow uploads `wordpress-memory-<size>` artifacts with the absolute used/reserved
+peaks, bootstrap baseline, state, result and elapsed time of every tick, plus one summary per
+operation and worker error logs. The upload explicitly includes hidden files because these
+listed report/log paths are inside `.tools`; it fails if none of them are found.
+
+## Observed WordPress results
+
+The [integration run on `7ea0b0f`](https://github.com/cunaz/backups-for-restic/actions/runs/43198840915)
+passed all three sizes with automatic WP-Cron and plugin loopback chaining disabled. These
+absolute reserved peaks come from the operation summaries in the job logs, rounded to one
+decimal place. Each row describes the plugin job outcome; a capacity refusal satisfies the
+acceptance gate at the two larger sizes but does not complete the requested operation.
+
+| Initial blobs | Operation | Peak MiB | Outcome |
+| ---: | --- | ---: | --- |
+| 500,000 | Backup | 101.4 | completed |
+| 500,000 | Check | 106.1 | completed |
+| 500,000 | Prune | 88.6 | completed |
+| 1,000,000 | Backup | 111.6 | `index_too_large` |
+| 1,000,000 | Check | 111.6 | `index_too_large` |
+| 1,000,000 | Prune | 111.6 | `index_too_large` |
+| 2,000,000 | Backup | 111.6 | `index_too_large` |
+| 2,000,000 | Check | 111.6 | `index_too_large` |
+| 2,000,000 | Prune | 111.6 | `index_too_large` |
+
+Every operation released its repository lock, and the fixture and final repository passed
+`restic check --read-data`. This run did not publish the detailed artifacts: the upload action
+excluded the hidden `.tools` directory. The summaries remain in the job logs; publication of
+the per-tick reports needs verification after the upload correction.
+
+At 128M this WordPress fixture completes 500k blobs and refuses 1M and 2M. The standalone
+one-million success is not a WordPress capacity claim. Larger in-memory tree/pack sets,
+checkpoints and decoded-object/decompression bounds remain open in plan package 0.9.
