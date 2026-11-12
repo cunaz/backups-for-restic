@@ -430,8 +430,15 @@ that wrote the settings, or a newer version that supports them. Do not lower or 
 stored layout number to bypass the refusal: an older version could misread retention
 settings and delete snapshots that should be kept.
 
-Deactivating an incompatible version removes its scheduled events but leaves existing jobs
-and repository locks untouched. Install a compatible version to handle them. Repository
+A malformed layout number causes the same refusal. Only a missing option is treated as a
+legacy installation; an empty, zero, negative or non-numeric stored value is preserved and
+keeps the plugin inactive. Keep a copy of the database when investigating damaged settings,
+then restore the settings and their layout number together from a verified database backup
+with a compatible plugin version. Do not invent a replacement number. The first recording
+of a missing number never replaces a value another request has inserted in the meantime.
+
+Deactivating with a newer or malformed layout removes scheduled events but leaves existing
+jobs and repository locks untouched. Install a compatible version to handle them. Repository
 data and the recovery kit remain usable with restic independently of the plugin; the lock
 guidance in Scenario F still applies.
 

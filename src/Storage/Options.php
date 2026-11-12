@@ -47,6 +47,18 @@ interface Options {
 	public function set( string $name, mixed $value, bool $autoload ): bool;
 
 	/**
+	 * Inserts an option only if its name is absent, atomically with respect to other writers.
+	 * An existing value and its autoload flag are never changed, even after a stale read.
+	 *
+	 * @param string $name     Option name.
+	 * @param mixed  $value    Initial value; arrays and scalars only.
+	 * @param bool   $autoload Whether WordPress loads the option on every request.
+	 * @return bool True if this value is stored afterwards, including an identical value
+	 *              another writer inserted; false on a different value or a refused write.
+	 */
+	public function initialize( string $name, mixed $value, bool $autoload ): bool;
+
+	/**
 	 * Deletes an option.
 	 *
 	 * @param string $name Option name.

@@ -67,6 +67,47 @@ final class WpOptions implements Options {
 	}
 
 	/**
+	 * Inserts a missing option without ever updating one another request inserted.
+	 *
+	 * @param string $name     Option name.
+	 * @param mixed  $value    Initial value.
+	 * @param bool   $autoload Whether WordPress loads it on every request.
+	 * @return bool True if this value is stored after the insert, or was there already.
+	 */
+	public function initialize( string $name, mixed $value, bool $autoload ): bool {
+		$encoded = maybe_serialize( $value );
+		if ( ! is_scalar( $encoded ) ) {
+			return false;
+		}
+		$wpdb       = Container::wpdb();
+		$suppressed = $wpdb->suppress_errors( true );
+		try {
+			// add_option() also updates on a duplicate key after its cached existence check.
+			// This duplicate-key clause leaves every column of the existing row unchanged.
+			$query = $wpdb->prepare(
+				'INSERT INTO %i (option_name, option_value, autoload) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE option_name = option_name',
+				$wpdb->options,
+				$name,
+				$encoded,
+				$autoload ? 'on' : 'off'
+			);
+			if ( null === $query ) {
+				return false;
+			}
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Prepared above; atomic insertion needs a database constraint and the caches are invalidated below.
+			$result = $wpdb->query( $query );
+		} finally {
+			$wpdb->suppress_errors( $suppressed );
+			wp_cache_delete( $name, 'options' );
+			wp_cache_delete( 'notoptions', 'options' );
+			wp_cache_delete( 'alloptions', 'options' );
+		}
+		// Database scalars are strings; a missing option is not an empty stored value.
+		$stored = maybe_serialize( get_option( $name, null ) );
+		return false !== $result && is_scalar( $stored ) && (string) $stored === (string) $encoded;
+	}
+
+	/**
 	 * Deletes an option.
 	 *
 	 * @param string $name Option name.

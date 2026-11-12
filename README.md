@@ -64,9 +64,10 @@ other hand, assume a server you control. This plugin closes the gap:
 
 ## After installing an older plugin version
 
-If the stored settings have a newer layout, the plugin stays inactive and shows an update
-notice. Its admin page, commands, REST routes and scheduled callbacks are unavailable.
-Install a version compatible with those settings; do not lower their stored layout number.
+If the stored settings have a newer or malformed layout number, the plugin stays inactive
+and shows a notice. Its admin page, commands, REST routes and scheduled callbacks are
+unavailable. Install a version compatible with those settings, or restore damaged settings
+from a verified database backup; do not lower or delete their stored layout number.
 Deactivation removes scheduled events but leaves jobs and their repository locks alone.
 An unreadable job document also blocks new jobs and repository changes and is kept for a
 compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)

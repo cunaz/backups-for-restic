@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Integration;
 
 use PHPUnit\Framework\Attributes\Depends;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\MysqliConnection;
@@ -246,12 +247,18 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
 
-	/**
-	 * docs/02-architecture.md §18: options that a newer version of the plugin wrote keep this
-	 * version inert, because it could misread them.
-	 */
+	/** @return iterable<string, array{string}> */
+	public static function unsupported_layouts(): iterable {
+		yield 'newer' => [ '2' ];
+		yield 'damaged numeral' => [ '2x' ];
+		yield 'empty' => [ '' ];
+		yield 'zero' => [ '0' ];
+		yield 'serialized array' => [ 'a:1:{i:0;i:2;}' ];
+	}
+
+	#[DataProvider( 'unsupported_layouts' )]
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
-	public function test_options_of_a_newer_version_keep_the_plugin_inert(): void {
+	public function test_an_unsupported_options_layout_keeps_the_plugin_inert( string $value ): void {
 		TestSite::idle( 600 );
 		$db     = self::site_database();
 		$select = "SELECT option_value FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'";
@@ -259,12 +266,12 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( '1', $stored, 'The plugin recorded the layout of its options on its first request.' );
 
 		try {
-			$db->execute( "UPDATE wp_options SET option_value = '2' WHERE option_name = 'backups_for_restic_schema_version'" );
+			$db->execute( "UPDATE wp_options SET option_value = '" . $db->mysqli->real_escape_string( $value ) . "' WHERE option_name = 'backups_for_restic_schema_version'" );
 			[ $status, $answer, $raw ] = TestSite::api( 'GET', '/status' );
 			self::assertSame( 404, $status, $raw );
 			self::assertSame( 'rest_no_route', $answer['code'] ?? null, 'No route of the plugin is registered: ' . $raw );
 			TestSite::cron();
-			self::assertSame( '2', $db->rows( $select )[0]['option_value'] ?? null, 'An older version never lowers the number.' );
+			self::assertSame( $value, $db->rows( $select )[0]['option_value'] ?? null, 'An unsupported marker is never overwritten.' );
 		} finally {
 			$db->execute( "UPDATE wp_options SET option_value = '1' WHERE option_name = 'backups_for_restic_schema_version'" );
 		}
@@ -282,7 +289,7 @@ final class WordPressSiteTest extends TestCase {
 		try {
 			file_put_contents(
 				$filter,
-				'<?php add_filter( "pre_update_option_backups_for_restic_schema_version", static fn ( $value, $old ) => $old, 10, 2 );'
+				'<?php add_filter( "query", static fn ( $sql ) => str_starts_with( $sql, "INSERT " ) && str_contains( $sql, "backups_for_restic_schema_version" ) ? "" : $sql );'
 			);
 			$db->execute( "DELETE FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'" );
 
@@ -297,6 +304,63 @@ final class WordPressSiteTest extends TestCase {
 
 		[ $status, , $raw ] = TestSite::api( 'GET', '/status' );
 		self::assertSame( 200, $status, $raw );
+	}
+
+	/** @return iterable<string, array{string, bool, bool}> */
+	public static function racing_layouts(): iterable {
+		yield 'newer, autoloaded' => [ '2', true, false ];
+		yield 'newer, not autoloaded' => [ '2', false, false ];
+		yield 'same, not autoloaded' => [ '1', false, true ];
+		yield 'malformed' => [ '2x', true, false ];
+	}
+
+	#[DataProvider( 'racing_layouts' )]
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_a_layout_written_between_the_read_and_insert_is_preserved( string $value, bool $autoload, bool $supported ): void {
+		TestSite::idle( 600 );
+		$output = TestSite::php(
+			'
+			global $wpdb;
+			$name = "backups_for_restic_schema_version";
+			$version = new BackupsForRestic\Storage\SchemaVersion( new BackupsForRestic\WordPress\WpOptions() );
+			$filter = static function ( $sql ) use ( &$filter, $wpdb, $name, $arguments ) {
+				if ( str_starts_with( $sql, "INSERT " ) && str_contains( $sql, $name ) ) {
+					remove_filter( "query", $filter );
+					// Another request wins after the cached missing read, immediately before INSERT.
+					$wpdb->query( $wpdb->prepare(
+						"INSERT INTO %i (option_name, option_value, autoload) VALUES (%s, %s, %s)",
+						$wpdb->options, $name, $arguments[0], $arguments[1]
+					) );
+				}
+				return $sql;
+			};
+			try {
+				delete_option( $name );
+				$before = $version->stored();
+				add_filter( "query", $filter );
+				$upgraded = $version->upgrade();
+				$row = $wpdb->get_row( $wpdb->prepare( "SELECT option_value, autoload FROM %i WHERE option_name = %s", $wpdb->options, $name ), ARRAY_A );
+				echo "\n", json_encode( [ $before, $upgraded, $version->is_supported(), $row ] );
+			} finally {
+				remove_filter( "query", $filter );
+				update_option( $name, 1, true );
+			}
+			',
+			[ $value, $autoload ? 'on' : 'off' ]
+		);
+		self::assertSame(
+			[
+				0,
+				$supported,
+				$supported,
+				[
+					'option_value' => $value,
+					'autoload'     => $autoload ? 'on' : 'off',
+				],
+			],
+			json_decode( TestSite::last_line( $output ), true ),
+			$output
+		);
 	}
 
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
@@ -334,8 +398,9 @@ final class WordPressSiteTest extends TestCase {
 		}
 	}
 
+	#[DataProvider( 'unsupported_layouts' )]
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
-	public function test_deactivation_leaves_jobs_alone_when_the_options_have_a_newer_layout(): void {
+	public function test_deactivation_leaves_jobs_alone_when_the_options_layout_is_unsupported( string $value ): void {
 		TestSite::idle( 600 );
 		$output = TestSite::php(
 			'
@@ -346,9 +411,9 @@ final class WordPressSiteTest extends TestCase {
 			$directory = $store->directory( $job );
 			$before = file_get_contents( $directory . "/job.json" );
 			try {
-				update_option( "backups_for_restic_schema_version", 2, true );
+				update_option( "backups_for_restic_schema_version", $arguments[1], true );
 				deactivate_plugins( $arguments[0] );
-				echo "\nnewer-layout=", json_encode( [
+				echo "\n", json_encode( [
 					$before === file_get_contents( $directory . "/job.json" ),
 					is_file( $directory . "/cancel-requested" ),
 					get_option( "backups_for_restic_schema_version" ),
@@ -360,8 +425,8 @@ final class WordPressSiteTest extends TestCase {
 				activate_plugin( $arguments[0] );
 			}
 			',
-			[ TestSite::PLUGIN ]
+			[ TestSite::PLUGIN, $value ]
 		);
-		self::assertStringEndsWith( 'newer-layout=[true,false,2,false]', $output, 'Deactivation unschedules events without reading or changing the job.' );
+		self::assertSame( [ true, false, $value, false ], json_decode( TestSite::last_line( $output ), true ), 'Deactivation unschedules events without reading or changing the job: ' . $output );
 	}
 }
