@@ -74,9 +74,10 @@ All notable changes are documented here. The format follows
 
 ### Changed
 - The list of everything in the repository takes less than half the memory it took, and
-  reading it from the local cache a fifth. Under a PHP memory limit of 128 MB, backups now
-  work for repositories of roughly a million stored pieces; before, they stopped at about
-  300 000. When memory is tight, the backup uploads smaller packs than configured. A
+  reading it from the local cache a fifth. Index-only measurements suggest that roughly a
+  million stored pieces could fit under a PHP memory limit of 128 MB, depending on the
+  site's baseline memory use; complete WordPress backups at that size remain to be
+  measured. When memory is tight, the backup uploads smaller packs than configured. A
   repository that is still too large ends the job with a clear message.
 - The setup wizard lists an own restic REST server first and preselects it; BorgBase is the
   second option, and `repository.server` defaults to `rest-server`.

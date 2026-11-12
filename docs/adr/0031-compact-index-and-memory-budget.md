@@ -46,7 +46,9 @@ ends the same way.
    like before, and its plaintext starts with a random mark, the same in all pieces of one
    file, and the number of the piece. A file whose pieces were dropped, repeated, reordered
    or mixed with another file's, or whose totals do not match, is thrown away and the index
-   read from the repository again.
+   read from the repository again. The covered index names are compared with the current
+   listing before any cached entries are imported. If a file disappeared, the stale
+   entries cannot consume the budget of the smaller index that replaced them.
 5. **Index files are decoded pack by pack** (`IndexFile::packs()`). The text is cut into
    the elements of its `packs` list by looking only at quotes, backslashes and brackets.
    What is left, with a placeholder for each element, and each element by itself go through
@@ -57,7 +59,15 @@ ends the same way.
    during the tick). The index stops loading with the error `index_too_large` once it
    leaves less than 20 MiB and three packs of 4 MiB, the smallest pack size. A backup makes
    its packs smaller than configured when three of them do not fit beside the index, down
-   to 4 MiB, and says so in the job's log.
+   to 4 MiB, and says so in the job's log. Before appending another blob, the writer checks
+   the resulting pack size including encryption and the header entry; a nonempty pack is
+   uploaded first when the addition would reach the target. One indivisible blob can be
+   larger than the target and is uploaded alone.
+
+   The backup preflight uses the same limit parser as the budget. A check propagates a
+   memory refusal instead of treating it as index damage and trying again without the
+   cache. Its fallback for genuinely damaged index files enforces the budget too, both
+   after adding each pack and after the readable index has loaded.
 
    PHP holds against its limit the memory it has reserved from the system, not the memory
    in use: it reserves blocks of 2 MiB and keeps a block as long as anything in it is in

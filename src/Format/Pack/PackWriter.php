@@ -82,6 +82,16 @@ final class PackWriter {
 	}
 
 	/**
+	 * The finished pack size after appending one more uncompressed blob.
+	 *
+	 * @param int $plaintext_length Bytes before encryption.
+	 * @return int Bytes including the blob's encryption overhead and header entry.
+	 */
+	public function size_with_blob( int $plaintext_length ): int {
+		return $this->size() + $plaintext_length + Cipher::OVERHEAD + self::ENTRY_SIZE;
+	}
+
+	/**
 	 * Returns the number of blobs.
 	 *
 	 * @return int Count.

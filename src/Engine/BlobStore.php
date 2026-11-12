@@ -114,7 +114,7 @@ final class BlobStore {
 		}
 
 		$writer = $this->writers[ $type->value ] ?? new PackWriter( $this->repository->cipher() );
-		if ( $writer->header_full() ) {
+		if ( $writer->header_full() || ( $writer->count() > 0 && $writer->size_with_blob( strlen( $plaintext ) ) >= $this->pack_size ) ) {
 			$this->upload( $type, $writer );
 			$writer = new PackWriter( $this->repository->cipher() );
 		}

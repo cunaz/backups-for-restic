@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\ScryptParameters;
@@ -11,6 +12,8 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\Job;
@@ -124,5 +127,24 @@ final class MaintenanceStepsTest extends TestCase {
 		self::assertSame( $job->id, $last['job'] ?? null );
 		self::assertSame( $found, array_sum( (array) ( $last['counts'] ?? [] ) ), 'The dashboard shows what the check found.' );
 		self::assertCount( $found, (array) ( $last['findings'] ?? [] ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_memory_refusal_does_not_fall_back_to_a_check_without_the_cache(): void {
+		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
+		$repository = Repository::initialize( $this->access()->backend(), self::PASSWORD, new Identity( 'example.com', 'www-data' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$job        = new Job( '20270115T030000Z-abcdef', JobType::Check, 'manual', 1_800_000_000 );
+		$this->run_step( $job, 'unlocking' );
+		gc_mem_caches();
+		$previous = ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 8 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This isolated test simulates a host's limit without WordPress.
+		self::assertNotFalse( $previous );
+		try {
+			$this->run_step( $job, 'checking' );
+			self::fail( 'The memory refusal must stop the job before it starts a check.' );
+		} catch ( IndexTooLarge ) {
+			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
+		} finally {
+			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the test process's original limit.
+		}
 	}
 }

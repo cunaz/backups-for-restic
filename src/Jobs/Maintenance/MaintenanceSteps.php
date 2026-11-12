@@ -21,6 +21,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
@@ -191,8 +192,8 @@ final class MaintenanceSteps implements StepProvider {
 		$work       = $this->services->work_dir( $job );
 		try {
 			$index = $this->index( $repository );
-		} catch ( BackendException | UnsupportedRepository $exception ) {
-			// Not reachable, or not readable with this PHP: neither is damage for the check to find.
+		} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+			// Unreachable, unsupported or too large: none is damage for the check to find.
 			throw $exception;
 		} catch ( PluginException ) {
 			// A damaged index file must not stop the check that is to find it: the check then

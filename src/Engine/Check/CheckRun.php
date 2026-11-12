@@ -837,8 +837,10 @@ final class CheckRun {
 			}
 			foreach ( $packs as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
+				$this->repository->memory()?->check_index();
 			}
 		}
+		$this->repository->memory()?->check_loaded_index();
 		return $index;
 	}
 

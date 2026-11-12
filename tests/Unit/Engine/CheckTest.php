@@ -13,9 +13,11 @@ use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
+use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
@@ -122,6 +124,35 @@ final class CheckTest extends TestCase {
 		self::assertSame( count( $this->backend->list( ObjectType::Data ) ), $result['stats']['packs_read'] );
 		self::assertSame( 2, $result['stats']['snapshots'] );
 		self::assertGreaterThan( 10, $result['stats']['blobs_verified'] ?? 0 );
+	}
+
+	public function test_rebuilding_a_readable_index_obeys_the_memory_budget(): void {
+		$this->backend->objects['index'][ hash( 'sha256', 'damaged index' ) ] = 'damaged index';
+		$this->repository->limit_memory( new MemoryBudget( 1 ) );
+		$run = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		try {
+			$run->advance( INF );
+			self::fail( 'A check must refuse an index that does not fit.' );
+		} catch ( IndexTooLarge ) {
+			self::assertArrayNotHasKey( 'error:tree_unreadable', $run->result()['counts'], 'Insufficient memory is not repository damage.' );
+		} finally {
+			$run->abort();
+		}
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	public function test_an_empty_rebuilt_index_also_needs_working_memory(): void {
+		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+			$this->backend->delete( ObjectType::Index, $name );
+		}
+		$this->repository->limit_memory( new MemoryBudget( 1 ) );
+		$run = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		try {
+			$this->expectException( IndexTooLarge::class );
+			$run->advance( INF );
+		} finally {
+			$run->abort();
+		}
 	}
 
 	public function test_an_interrupted_check_after_every_tick_gives_the_same_result(): void {

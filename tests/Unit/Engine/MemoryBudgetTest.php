@@ -6,10 +6,12 @@ namespace BackupsForRestic\Tests\Unit\Engine;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
+use BackupsForRestic\Engine\BlobStore;
 use BackupsForRestic\Engine\Check\CheckRun;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
@@ -19,7 +21,9 @@ use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
+use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Format\Pack\PackEntry;
+use BackupsForRestic\Format\Pack\PackReader;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -166,12 +170,12 @@ final class MemoryBudgetTest extends TestCase {
 	}
 
 	/**
-	 * A repository with an index of 60000 blobs in six index files, which takes several megabytes.
+	 * A repository with 1000 blobs per pack and ten packs per index file.
 	 */
-	private function repository(): Repository {
+	private function repository( int $pack_count = 60 ): Repository {
 		$repository = Repository::initialize( new InMemoryBackend(), 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
 		$packs      = [];
-		for ( $pack = 0; $pack < 60; $pack++ ) {
+		for ( $pack = 0; $pack < $pack_count; $pack++ ) {
 			$entries = [];
 			for ( $i = 0; $i < 1000; $i++ ) {
 				$entries[] = new PackEntry( BlobType::Data, Id::from_bytes( hash( 'sha256', $pack . ':' . $i, true ) ), 1000 * $i, 1000 );
@@ -229,7 +233,7 @@ final class MemoryBudgetTest extends TestCase {
 
 	public function test_a_backup_with_little_memory_left_writes_smaller_packs(): void {
 		$this->cleanup[] = $site = TempDir::create( 'budget-site' );
-		file_put_contents( $site . '/large.bin', random_bytes( 3 * self::MIB ) );
+		file_put_contents( $site . '/large.bin', random_bytes( 12 * self::MIB ) );
 		$backend    = new InMemoryBackend();
 		$identity   = new Identity( 'example.com', 'www-data' );
 		$repository = Repository::initialize( $backend, 'budget password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
@@ -243,6 +247,16 @@ final class MemoryBudgetTest extends TestCase {
 		while ( ! $run->advance( INF ) ) {
 			continue;
 		}
+		$data_sizes = [];
+		foreach ( $backend->objects['data'] ?? [] as $bytes ) {
+			$length  = PackReader::header_length( substr( $bytes, -4 ), strlen( $bytes ) );
+			$entries = PackReader::read_header( $repository->cipher(), substr( $bytes, -4 - $length, $length ), strlen( $bytes ) );
+			if ( BlobType::Data === $entries[0]->type ) {
+				$data_sizes[] = strlen( $bytes );
+			}
+		}
+		self::assertGreaterThanOrEqual( 2, count( $data_sizes ), 'A data pack was uploaded before the final flush.' );
+		self::assertLessThan( 16 * self::MIB, max( $data_sizes ), 'The backend received smaller packs, not just a smaller reported target.' );
 
 		$repository->limit_memory( null );
 		$check = CheckRun::start( $repository, $work . '/check', $identity, new SystemClock(), new SystemRandom(), 100 );
@@ -255,5 +269,52 @@ final class MemoryBudgetTest extends TestCase {
 		$plenty          = BackupRun::start( $repository, new BackupPlan( [ $site ] ), $other . '/run', $identity, new SystemClock(), null, 16 * self::MIB );
 		self::assertSame( 16 * self::MIB, $plenty->pack_size(), 'Without a limit the pack size is the one asked for.' );
 		$plenty->abort();
+	}
+
+	public function test_a_stale_cache_is_discarded_before_its_entries_use_the_memory_budget(): void {
+		$repository      = $this->repository( 200 );
+		$this->cleanup[] = $directory = TempDir::create( 'budget-cache' );
+		$cache           = new IndexCache( $directory );
+		self::assertSame( 200000, $cache->load( $repository )->count() );
+		foreach ( array_keys( $repository->backend()->list( ObjectType::Index ) ) as $name ) {
+			$repository->backend()->delete( ObjectType::Index, $name );
+		}
+		gc_collect_cycles();
+		$repository->limit_memory( new MemoryBudget( self::reserved() + self::SMALLEST_JOB ) );
+
+		self::assertSame( 0, $cache->load( $repository )->count(), 'Only the current, empty index must fit.' );
+		self::assertSame( 0, $cache->load( $repository )->count(), 'The stale cache was replaced.' );
+	}
+
+	public function test_a_new_blob_does_not_make_an_open_pack_exceed_the_reduced_target(): void {
+		$backend    = new InMemoryBackend();
+		$repository = Repository::initialize( $backend, 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$index      = new IndexSet();
+		$repository->limit_memory( new MemoryBudget( self::reserved() + self::SMALLEST_JOB ) );
+		$store = new BlobStore( $repository, $index );
+		self::assertLessThan( 5 * self::MIB, $store->pack_size() );
+		$store->save( BlobType::Data, str_repeat( 'a', 3 * self::MIB ) );
+		self::assertSame( [], $backend->list( ObjectType::Data ) );
+		$store->save( BlobType::Data, str_repeat( 'b', 3 * self::MIB ) );
+		$sizes = array_values( $backend->list( ObjectType::Data ) );
+		self::assertCount( 1, $sizes, 'The first pack is uploaded before the second blob is appended.' );
+		self::assertLessThanOrEqual( $store->pack_size(), $sizes[0] );
+		$store->flush();
+		self::assertCount( 2, $backend->list( ObjectType::Data ) );
+	}
+
+	public function test_the_pack_projection_counts_the_sealed_blob_and_header_entry(): void {
+		$backend    = new InMemoryBackend();
+		$repository = Repository::initialize( $backend, 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		// Two one-byte blobs would exceed this target by one byte, including their header.
+		$target = 2 * ( 1 + Cipher::OVERHEAD + 37 ) + Cipher::OVERHEAD + 4 - 1;
+		$store  = new BlobStore( $repository, new IndexSet(), $target );
+		$store->save( BlobType::Data, 'a' );
+		$store->save( BlobType::Data, 'b' );
+		$sizes = array_values( $backend->list( ObjectType::Data ) );
+		self::assertCount( 1, $sizes );
+		self::assertLessThan( $target, $sizes[0] );
+		$store->flush();
+		self::assertCount( 2, $backend->list( ObjectType::Data ) );
 	}
 }

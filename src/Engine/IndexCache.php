@@ -68,14 +68,13 @@ final class IndexCache {
 	public function load( Repository $repository ): IndexSet {
 		$listed = array_map( 'strval', array_keys( $repository->backend()->list( ObjectType::Index ) ) );
 		sort( $listed );
-		$cached   = $this->read( $repository );
+		$cached   = $this->read( $repository, $listed );
 		$readable = null !== $cached;
 		$index    = new IndexSet();
 		$covered  = [];
-		if ( null !== $cached && [] === array_diff( $cached[1], $listed ) ) {
+		if ( null !== $cached ) {
 			[ $index, $covered ] = $cached;
 		}
-		// The only other reference to an index that is not used, if the cache was outdated.
 		unset( $cached );
 		$new = array_values( array_diff( $listed, $covered ) );
 		foreach ( $new as $name ) {
@@ -103,10 +102,11 @@ final class IndexCache {
 	/**
 	 * Reads the cache.
 	 *
-	 * @param Repository $repository Repository whose key encrypts the cache.
+	 * @param Repository   $repository Repository whose key encrypts the cache.
+	 * @param list<string> $listed     Current index files; a missing covered file invalidates the cache.
 	 * @return array{IndexSet, list<string>}|null Index and covered index file names, or null.
 	 */
-	private function read( Repository $repository ): ?array {
+	private function read( Repository $repository, array $listed ): ?array {
 		$file = $this->directory . '/index.bin';
 		if ( is_file( $file ) && (int) filesize( $file ) > $this->limit ) {
 			// Written under a higher limit than the one set now.
@@ -123,6 +123,12 @@ final class IndexCache {
 			if ( 'N' !== ( $names[0] ?? '' ) || 1 !== strlen( $names ) % 32 ) {
 				return null;
 			}
+			$covered = 1 === strlen( $names ) ? [] : array_map( 'bin2hex', str_split( substr( $names, 1 ), 32 ) );
+			if ( [] !== array_diff( $covered, $listed ) ) {
+				// Do not spend memory importing entries that cannot be used after a prune.
+				return null;
+			}
+			unset( $names );
 			$pieces->next();
 			$memory = $repository->memory();
 			$rest   = static function () use ( $pieces, $memory ): \Generator {
@@ -133,7 +139,7 @@ final class IndexCache {
 				}
 			};
 			$index  = IndexSet::import( $rest() );
-			return [ $index, 1 === strlen( $names ) ? [] : array_map( 'bin2hex', str_split( substr( $names, 1 ), 32 ) ) ];
+			return [ $index, $covered ];
 		} catch ( AuthenticationFailed | CryptoException | FormatException ) {
 			return null;
 		} finally {
