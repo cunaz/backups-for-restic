@@ -74,6 +74,17 @@ final readonly class BackupServices {
 	}
 
 	/**
+	 * Where the database dump of a job keeps its table list and results between ticks.
+	 *
+	 * @param JobStore $jobs Jobs.
+	 * @param Job      $job  Job.
+	 * @return string Path of the state file.
+	 */
+	public static function dump_state( JobStore $jobs, Job $job ): string {
+		return $jobs->directory( $job ) . '/database.json';
+	}
+
+	/**
 	 * Working directory of the unlock of a job.
 	 *
 	 * @param Job $job Job.

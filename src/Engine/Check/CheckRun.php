@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
@@ -20,6 +21,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Compression;
@@ -53,10 +55,21 @@ defined( 'ABSPATH' ) || exit;
  * restic check reports as errors; warnings are its hints, such as packs that no index lists.
  * Transport errors end the tick, and the job retries. The check holds a shared lock, so
  * backups may run meanwhile, as with restic.
+ *
+ * A check that was paused for longer than its lock lasts takes the lock again and looks
+ * whether the index files and snapshots it listed are all still there. If one is gone,
+ * another client pruned or forgot in the meantime, and what the check had found may describe
+ * a repository that no longer exists: it starts over, at most MAX_RESTARTS times (ADR 0030).
+ * It looks once more before it ends, so that a lock lost in the last call is noticed too.
+ * As in a backup, the lock comes before the index in every call, and start() only writes the
+ * checkpoint with the run's number.
  */
 final class CheckRun {
 
-	public const int STATE_VERSION = 1;
+	public const int STATE_VERSION = 2;
+
+	/** How often the check starts over because the repository changed while its lock did not hold. */
+	public const int MAX_RESTARTS = 3;
 
 	/** The phases in their order. */
 	private const array PHASES = [ 'index', 'packs', 'snapshots', 'trees', 'read', 'done' ];
@@ -96,6 +109,13 @@ final class CheckRun {
 	private Locking $locking;
 
 	/**
+	 * The index, loaded when a phase first needs it and never before the lock holds.
+	 *
+	 * @var IndexSet|null
+	 */
+	private ?IndexSet $index = null;
+
+	/**
 	 * Pauses for the gentle CPU mode during the current call, if any.
 	 *
 	 * @var Throttle|null
@@ -105,7 +125,7 @@ final class CheckRun {
 	/**
 	 * Checkpoint fields; see persist() for the shape.
 	 *
-	 * @var array{pid: int, lock: string, locked_at: int, phase: string, position: int, percent: int, piece: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
+	 * @var array{pid: int, lock: string, locked_at: int, begun: bool, restarts: int, phase: string, position: int, percent: int, piece: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
 	 */
 	private array $state;
 
@@ -113,7 +133,7 @@ final class CheckRun {
 	 * Creates the run from a state.
 	 *
 	 * @param Repository           $repository Repository.
-	 * @param IndexSet|null        $index      Current index; loaded from the server when needed.
+	 * @param IndexCache|null      $cache      Local index cache; the index files are read from the server without one.
 	 * @param string               $work_dir   Directory for the checkpoint.
 	 * @param Identity             $identity   Written into lock files.
 	 * @param Clock                $clock      Time source.
@@ -121,7 +141,7 @@ final class CheckRun {
 	 */
 	private function __construct(
 		private readonly Repository $repository,
-		private ?IndexSet $index,
+		private readonly ?IndexCache $cache,
 		private readonly string $work_dir,
 		Identity $identity,
 		private readonly Clock $clock,
@@ -145,6 +165,8 @@ final class CheckRun {
 			'pid'            => Decoded::int( $fields['pid'] ?? null, random_int( 100000, 2147483647 ) ),
 			'lock'           => Decoded::string( $fields['lock'] ?? null ),
 			'locked_at'      => Decoded::int( $fields['locked_at'] ?? null ),
+			'begun'          => true === ( $fields['begun'] ?? null ),
+			'restarts'       => Decoded::count( $fields['restarts'] ?? null ),
 			'phase'          => Decoded::string( $fields['phase'] ?? null, 'index' ),
 			'position'       => Decoded::count( $fields['position'] ?? null ),
 			'percent'        => Decoded::count( $fields['percent'] ?? null ),
@@ -170,21 +192,21 @@ final class CheckRun {
 	}
 
 	/**
-	 * Starts a check: takes a shared lock and lists the index files.
+	 * Starts a check: writes the checkpoint with the run's number. Nothing is sent to the
+	 * server yet; the first advance() takes the shared lock and lists the index files.
 	 *
-	 * @param Repository    $repository              Repository.
-	 * @param string        $work_dir                Empty directory for the checkpoint.
-	 * @param Identity      $identity                Written into lock files.
-	 * @param Clock         $clock                   Time source.
-	 * @param RandomSource  $random                  Chooses the packs to read.
-	 * @param int           $read_data_subset_percent Share of packs to download and verify, 0 to 100.
-	 * @param IndexSet|null $index                   Current index, for example from the IndexCache.
-	 * @param int           $read_piece              Bytes to read from a pack at once (blobs are never split).
+	 * @param Repository      $repository              Repository.
+	 * @param string          $work_dir                Empty directory for the checkpoint.
+	 * @param Identity        $identity                Written into lock files.
+	 * @param Clock           $clock                   Time source.
+	 * @param RandomSource    $random                  Chooses the packs to read.
+	 * @param int             $read_data_subset_percent Share of packs to download and verify, 0 to 100.
+	 * @param IndexCache|null $cache                   Local index cache; the index files are read from the server without one.
+	 * @param int             $read_piece              Bytes to read from a pack at once (blobs are never split).
 	 * @return self Run.
 	 * @throws InvalidArgument If the directory already holds a check, the share is out of range or the piece is empty.
-	 * @throws \Throwable Whatever listing the index files or writing the checkpoint throws, after the release.
 	 */
-	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, int $read_data_subset_percent, ?IndexSet $index = null, int $read_piece = self::READ_PIECE ): self {
+	public static function start( Repository $repository, string $work_dir, Identity $identity, Clock $clock, RandomSource $random, int $read_data_subset_percent, ?IndexCache $cache = null, int $read_piece = self::READ_PIECE ): self {
 		if ( $read_data_subset_percent < 0 || $read_data_subset_percent > 100 ) {
 			InvalidArgument::raise( 'The share of packs to read must be between 0 and 100.' );
 		}
@@ -199,7 +221,7 @@ final class CheckRun {
 		}
 		$run = new self(
 			$repository,
-			$index,
+			$cache,
 			$work_dir,
 			$identity,
 			$clock,
@@ -209,33 +231,22 @@ final class CheckRun {
 				'piece'   => $read_piece,
 			]
 		);
-		$run->locking->remove_own_stale();
-		$run->state['lock']      = $run->locking->acquire( false )->hex();
-		$run->state['locked_at'] = $clock->now()[0];
-		try {
-			$run->state['index_files'] = array_keys( $repository->backend()->list( ObjectType::Index ) );
-			sort( $run->state['index_files'] );
-			$run->persist();
-		} catch ( \Throwable $failure ) {
-			// Without a checkpoint no later request would release the lock.
-			$run->locking->release( Id::from_hex( $run->state['lock'] ) );
-			throw $failure;
-		}
+		$run->persist();
 		return $run;
 	}
 
 	/**
-	 * Continues a check from its checkpoint.
+	 * Continues a check from its checkpoint. Nothing is sent to the server here either.
 	 *
-	 * @param Repository    $repository Repository.
-	 * @param string        $work_dir   Directory with the checkpoint.
-	 * @param Identity      $identity   Written into lock files.
-	 * @param Clock         $clock      Time source.
-	 * @param IndexSet|null $index      Current index, for example from the IndexCache.
+	 * @param Repository      $repository Repository.
+	 * @param string          $work_dir   Directory with the checkpoint.
+	 * @param Identity        $identity   Written into lock files.
+	 * @param Clock           $clock      Time source.
+	 * @param IndexCache|null $cache      Local index cache; the index files are read from the server without one.
 	 * @return self Run.
 	 * @throws FormatException If the checkpoint is unusable.
 	 */
-	public static function resume( Repository $repository, string $work_dir, Identity $identity, Clock $clock, ?IndexSet $index = null ): self {
+	public static function resume( Repository $repository, string $work_dir, Identity $identity, Clock $clock, ?IndexCache $cache = null ): self {
 		$json  = is_file( $work_dir . '/state.json' ) ? file_get_contents( $work_dir . '/state.json' ) : false;
 		$state = false === $json ? null : json_decode( $json, true );
 		if ( ! is_array( $state ) || self::STATE_VERSION !== ( $state['version'] ?? null ) ) {
@@ -245,7 +256,7 @@ final class CheckRun {
 		foreach ( $state as $key => $value ) {
 			$fields[ (string) $key ] = $value;
 		}
-		return new self( $repository, $index, $work_dir, $identity, $clock, $fields );
+		return new self( $repository, $cache, $work_dir, $identity, $clock, $fields );
 	}
 
 	/**
@@ -255,6 +266,8 @@ final class CheckRun {
 	 * @param float         $deadline Unix time (microtime(true)) at which to stop.
 	 * @param Throttle|null $throttle Pauses for the gentle CPU mode, if any.
 	 * @return bool True when finished and the lock is released.
+	 * @throws RepositoryChanged If the repository changed during pauses more often than
+	 *                           MAX_RESTARTS allows; nothing the check found so far is reported.
 	 */
 	public function advance( float $deadline, ?Throttle $throttle = null ): bool {
 		if ( 'done' === $this->state['phase'] ) {
@@ -262,6 +275,9 @@ final class CheckRun {
 		}
 		$this->throttle = $throttle;
 		$this->keep_lock();
+		if ( ! $this->state['begun'] ) {
+			$this->begin();
+		}
 		do {
 			$phase = $this->state['phase'];
 			$this->step();
@@ -284,8 +300,10 @@ final class CheckRun {
 	 * Releases the lock and deletes the checkpoint of an abandoned check.
 	 */
 	public function abort(): void {
-		if ( '' !== $this->state['lock'] ) {
-			$this->locking->release( Id::from_hex( $this->state['lock'] ) );
+		if ( 'done' !== $this->state['phase'] ) {
+			// Also without a recorded lock: a request that ended between writing a lock and
+			// recording it left one that only the run's number identifies.
+			$this->locking->release( '' === $this->state['lock'] ? null : Id::from_hex( $this->state['lock'] ) );
 			$this->state['lock'] = '';
 		}
 		Files::remove_tree( $this->work_dir );
@@ -313,7 +331,7 @@ final class CheckRun {
 	/**
 	 * Outcome once finished.
 	 *
-	 * @return array{errors: int, warnings: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>, stats: array<string, int>} Result.
+	 * @return array{errors: int, warnings: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>, stats: array<string, int>, restarts: int} Result.
 	 */
 	public function result(): array {
 		return [
@@ -322,24 +340,71 @@ final class CheckRun {
 			'counts'   => $this->state['counts'],
 			'findings' => $this->state['findings'],
 			'stats'    => $this->state['stats'],
+			'restarts' => $this->state['restarts'],
 		];
 	}
 
 	/**
-	 * Refreshes the shared lock, or takes a new one if it disappeared or is older than 30
-	 * minutes, when other clients no longer honour it. A check only reads, so a gap does no
-	 * harm to the repository; what another client removed during a gap can show up as a finding.
+	 * Takes the shared lock, or refreshes it when due. A lock that is gone, or older than
+	 * other clients are sure to honour, is taken again; if an index file or a snapshot the
+	 * check listed is gone by then, the check starts over.
+	 *
+	 * @throws RepositoryChanged If the check already started over MAX_RESTARTS times.
 	 */
 	private function keep_lock(): void {
 		$lock = $this->state['lock'];
-		if ( '' === $lock || null === $this->repository->backend()->size( ObjectType::Locks, $lock ) || $this->locking->lapsed( $this->state['locked_at'] ) ) {
-			$this->state['lock']      = $this->locking->acquire( false )->hex();
-			$this->state['locked_at'] = $this->clock->now()[0];
+		if ( '' !== $lock && ! $this->locking->lapsed( $this->state['locked_at'] ) && null !== $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
+			if ( $this->locking->due( $this->state['locked_at'] ) ) {
+				$this->state['lock']      = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
+				$this->state['locked_at'] = $this->clock->now()[0];
+			}
 			return;
 		}
-		if ( $this->locking->due( $this->state['locked_at'] ) ) {
-			$this->state['lock']      = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
-			$this->state['locked_at'] = $this->clock->now()[0];
+		if ( ! $this->state['begun'] ) {
+			$this->locking->remove_own_stale();
+		}
+		$fresh = $this->locking->acquire( false )->hex();
+		$taken = $this->clock->now()[0];
+		if ( $this->state['begun'] && ( [] !== $this->repository->missing( ObjectType::Index, $this->state['index_files'] ) || [] !== $this->repository->missing( ObjectType::Snapshots, $this->state['snapshot_names'] ) ) ) {
+			if ( $this->state['restarts'] >= self::MAX_RESTARTS ) {
+				RepositoryChanged::raise( 'Other clients changed the repository again and again while the check ran; the check gave up.', [ 'restarts' => $this->state['restarts'] ] );
+			}
+			++$this->state['restarts'];
+			$this->begin();
+		}
+		// Recorded only now. A checkpoint that names a lock says that the check looked at what
+		// it had listed when that lock was taken. A request that ends before this point leaves
+		// the old lock in the checkpoint: the next request takes the lock again and looks
+		// again, and the lock written here is a leftover of the run, which taking the lock
+		// removes.
+		$this->state['lock']      = $fresh;
+		$this->state['locked_at'] = $taken;
+		$this->persist();
+	}
+
+	/**
+	 * Lists the index files and puts the check at its beginning; whatever an earlier attempt
+	 * found is dropped.
+	 */
+	private function begin(): void {
+		$this->index                   = null;
+		$this->state['index_files']    = $this->repository->names( ObjectType::Index );
+		$this->state['phase']          = 'index';
+		$this->state['position']       = 0;
+		$this->state['packs']          = [];
+		$this->state['missing']        = [];
+		$this->state['snapshot_names'] = [];
+		$this->state['roots']          = [];
+		$this->state['frontier']       = [];
+		$this->state['seen']           = [];
+		$this->state['sample']         = [];
+		$this->state['findings']       = [];
+		$this->state['counts']         = [];
+		$this->state['stats']          = [];
+		$this->state['begun']          = true;
+		$marker                        = $this->work_dir . '/reading.json';
+		if ( is_file( $marker ) ) {
+			unlink( $marker );
 		}
 	}
 
@@ -723,9 +788,18 @@ final class CheckRun {
 	}
 
 	/**
-	 * Releases the lock.
+	 * Makes sure that the lock held to the end, then releases it. What was found while another
+	 * client could remove data may describe damage that is none: if the lock was lost in this
+	 * very call and something the check listed is gone, the check starts over instead of ending.
+	 *
+	 * @throws RepositoryChanged If the check already started over MAX_RESTARTS times.
 	 */
 	private function finish(): void {
+		$restarts = $this->state['restarts'];
+		$this->keep_lock();
+		if ( $restarts !== $this->state['restarts'] ) {
+			return;
+		}
 		if ( '' !== $this->state['lock'] ) {
 			$this->locking->release( Id::from_hex( $this->state['lock'] ) );
 			$this->state['lock'] = '';
@@ -805,13 +879,22 @@ final class CheckRun {
 	}
 
 	/**
-	 * Returns the index; without one given, builds it from the index files that can be read.
+	 * Returns the index, loading it on first use: through the cache if there is one, and from
+	 * the index files that can be read if the cache meets a damaged one. A damaged index file
+	 * is a finding of the index phase; it must not stop the check that is to find it.
 	 *
 	 * @return IndexSet Index.
+	 * @throws BackendException If the server cannot be reached.
 	 */
 	private function index(): IndexSet {
 		if ( null === $this->index ) {
-			$this->index = $this->readable_index();
+			try {
+				$this->index = null === $this->cache ? $this->readable_index() : $this->cache->load( $this->repository );
+			} catch ( BackendException | UnsupportedRepository $exception ) {
+				throw $exception;
+			} catch ( PluginException ) {
+				$this->index = $this->readable_index();
+			}
 		}
 		return $this->index;
 	}

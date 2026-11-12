@@ -22,7 +22,6 @@ use BackupsForRestic\Exception\AppendOnlyRefused;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
-use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
@@ -189,21 +188,16 @@ final class MaintenanceSteps implements StepProvider {
 		$services   = $this->services->common;
 		$repository = $this->repository();
 		$work       = $this->services->work_dir( $job );
-		try {
-			$index = $this->index( $repository );
-		} catch ( BackendException | UnsupportedRepository $exception ) {
-			// Not reachable, or not readable with this PHP: neither is damage for the check to find.
-			throw $exception;
-		} catch ( PluginException ) {
-			// A damaged index file must not stop the check that is to find it: the check then
-			// builds its index from the files it can read and reports the others.
-			$index = null;
+		$cache      = $services->index_cache( $repository );
+		$percent    = Decoded::int( $job->data['read_data_subset_percent'] ?? null, $services->settings->int( 'schedule.check.read_data_subset_percent' ) );
+		$run        = is_file( $work . '/state.json' )
+			? CheckRun::resume( $repository, $work, $services->identity, $services->clock, $cache )
+			: CheckRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $percent, $cache );
+		$restarts   = $run->result()['restarts'];
+		$done       = $run->advance( $deadline, $services->throttle() );
+		if ( $run->result()['restarts'] > $restarts ) {
+			$log->write( 'warning', 'Another program removed snapshots or data from the repository; the check starts over.', [ 'restart' => $run->result()['restarts'] ] );
 		}
-		$percent = Decoded::int( $job->data['read_data_subset_percent'] ?? null, $services->settings->int( 'schedule.check.read_data_subset_percent' ) );
-		$run     = is_file( $work . '/state.json' )
-			? CheckRun::resume( $repository, $work, $services->identity, $services->clock, $index )
-			: CheckRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $percent, $index );
-		$done    = $run->advance( $deadline, $services->throttle() );
 
 		$job->progress = $run->progress();
 		$result        = $run->result();
@@ -212,6 +206,7 @@ final class MaintenanceSteps implements StepProvider {
 			[
 				'errors'   => $result['errors'],
 				'warnings' => $result['warnings'],
+				'restarts' => $result['restarts'],
 			],
 			$result['stats']
 		);

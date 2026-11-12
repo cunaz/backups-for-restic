@@ -13,6 +13,7 @@ use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Format\Lock;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\Job;
@@ -27,9 +28,11 @@ use BackupsForRestic\Secrets\SecretName;
 use BackupsForRestic\Settings\SettingsStore;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Storage\SiteState;
+use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\CurlHttpClient;
+use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\RestServer;
@@ -175,11 +178,77 @@ final class BackupJobTest extends TestCase {
 	}
 
 	/**
+	 * ADR 0030 against the real restic: a backup job pauses for longer than its lock lasts,
+	 * and an administrator runs `restic unlock` and `restic prune` on another computer in the
+	 * meantime. No snapshot uses what the paused backup uploaded, so restic removes it.
+	 */
+	public function test_a_backup_starts_over_when_restic_pruned_during_a_long_pause(): void {
+		$this->cleanup[] = $site = TempDir::create( 'job-site' );
+		TempDir::fixture( $site, 1048576 );
+		$clock = new FrozenClock( time() );
+		Repository::initialize( $this->server()->backend( 'paused' ), self::REPOSITORY_PASSWORD, new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 16384, 8, 1 ) );
+		[ $runner, $store ] = $this->components( $site, 'paused', $clock );
+		$cli                = new ResticCli( $this->server(), 'paused', self::REPOSITORY_PASSWORD );
+		self::assertSame( JobState::Succeeded, $this->run_job( $runner, $store, 5 )->state, 'A first snapshot, so that restic has something to keep.' );
+
+		// The second backup has new files to upload. Its engine clock is 31 minutes behind, so
+		// its lock is as old for restic as after a pause of that length.
+		mkdir( $site . '/wp-content/uploads/2026/12', 0755, true );
+		for ( $i = 0; $i < 12; $i++ ) {
+			file_put_contents( $site . '/wp-content/uploads/2026/12/photo-' . $i . '.jpg', random_bytes( 700000 ) );
+		}
+		$clock->seconds = time() - Lock::STALE_AFTER_SECONDS - 60;
+		$job            = $store->create( JobType::Backup, 'manual', time() );
+		$checkpoint     = $site . '/wp-content/' . PrivateDirectory::NAME . '/jobs/' . $job->id . '/backup/state.json';
+		$uploaded       = static function () use ( $checkpoint ): array {
+			$state = is_file( $checkpoint ) ? json_decode( (string) file_get_contents( $checkpoint ), true ) : null;
+			return is_array( $state ) && is_array( $state['unindexed'] ?? null ) ? array_keys( $state['unindexed'] ) : [];
+		};
+		$ticks          = 0;
+		while ( [] === $uploaded() ) {
+			self::assertTrue( $runner->tick( 0.05 )->has_more_work(), 'The backup must still be running when it pauses.' );
+			self::assertLessThan( 2000, ++$ticks );
+		}
+		$packs = array_map( 'strval', $uploaded() );
+
+		self::assertStringContainsString( 'successfully removed 1 locks', $cli->must( [ 'unlock' ] ), 'The lock of the paused backup is stale for restic.' );
+		$cli->must( [ 'prune' ] );
+		$left = (string) $cli->must( [ 'list', 'packs' ] );
+		foreach ( $packs as $pack ) {
+			self::assertStringNotContainsString( $pack, $left, 'restic removed the pack that no index and no snapshot knew.' );
+		}
+
+		// The pause is over.
+		$clock->seconds = time();
+		$ticks          = 0;
+		while ( $runner->tick( 0.3 )->has_more_work() ) {
+			self::assertLessThan( 2000, ++$ticks );
+		}
+		$finished = $store->get( $job->id );
+		self::assertNotNull( $finished );
+		self::assertSame( JobState::Succeeded, $finished->state, (string) json_encode( $finished->error?->to_array() ) );
+		self::assertSame( 1, $finished->data['restarts'] ?? null, 'The backup noticed the missing packs and started over once.' );
+		$messages = array_column( $store->log( $finished )->read(), 'message' );
+		self::assertContains( 'Another program removed data that the backup relied on; the backup starts over.', $messages );
+		self::assertSame( 2, count( array_keys( $messages, 'Backup started.', true ) ) );
+
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ), 'The snapshot refers to nothing that is gone.' );
+		$snapshots = json_decode( $cli->must( [ 'snapshots', '--json' ] ), true );
+		self::assertIsArray( $snapshots );
+		self::assertCount( 2, $snapshots );
+		$this->cleanup[] = $target = TempDir::create( 'job-restore' );
+		$cli->must( [ 'restore', 'latest', '--target', $target ] );
+		self::assertSame( TempDir::describe( $site . '/wp-content/uploads' ), TempDir::describe( $target . $site . '/wp-content/uploads' ) );
+		self::assertSame( '', trim( $cli->must( [ 'list', 'locks', '--no-lock' ] ) ), 'No lock is left behind.' );
+	}
+
+	/**
 	 * Builds runner and store like the composition root does.
 	 *
+	 * @param Clock|null $clock Time of the engine: what it writes into locks and compares them with.
 	 * @return array{Runner, JobStore}
 	 */
-	private function components( string $site, string $repository ): array {
+	private function components( string $site, string $repository, ?Clock $clock = null ): array {
 		$options = new InMemoryOptions();
 		$random  = new SystemRandom();
 		$secrets = new EncryptedOptionStore( $options, new Secret( 'salts' ), $random );
@@ -204,11 +273,11 @@ final class BackupJobTest extends TestCase {
 		$plan     = static function ( Job $job ) use ( $paths, $settings, $private, $store, $database ): BackupPlan {
 			$connection = MysqliConnection::connect( $database );
 			self::assertNotNull( $connection );
-			$dump = new DatabaseDump( $connection, $store->directory( $job ) . '/database.json', 'wp_', [], $job->created_at );
+			$dump = new DatabaseDump( $connection, BackupServices::dump_state( $store, $job ), 'wp_', [], $job->created_at );
 			return ( new PlanFactory( $paths, $settings, $private, [], [], $dump->files( ... ), $job->id, $job->created_at ) )->plan();
 		};
 		$access   = new RepositoryAccess( $settings, $secrets, new CurlHttpClient( $this->server()->certificate ), $random, 'backups-for-restic-tests' );
-		$services = new BackupServices( $settings, $access, $private, $store, new SiteState( $options ), new SystemClock(), $random, new Identity( 'example.com', 'www-data' ), $plan );
+		$services = new BackupServices( $settings, $access, $private, $store, new SiteState( $options ), $clock ?? new SystemClock(), $random, new Identity( 'example.com', 'www-data' ), $plan );
 		$private->ensure();
 		return [ new Runner( $store, new RunnerLock( $private->path . '/runner.lock' ), new BackupSteps( $services ), new SystemClock(), $random ), $store ];
 	}
