@@ -109,6 +109,9 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- Reading a snapshot now refuses directory listings with duplicate or out-of-order names,
+  including differently escaped copies of the same name. The repository check reports
+  these trees as damaged before a restore can use their entries.
 - Settings that the database refused to store no longer pass for saved: the request answers
   with an error, and saving a server puts back what it had changed. WordPress reports such a
   refusal the same way as an unchanged value, so it went unnoticed before.
