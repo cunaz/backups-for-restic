@@ -320,7 +320,7 @@ final class Reader {
 		$locking         = new Locking( $this->repository, $this->identity, $this->clock, $pid );
 		$locked_at       = $this->clock->now()[0];
 		$lock            = $locking->acquire( false );
-		$this->keep_lock = function () use ( $locking, &$lock, &$locked_at ): void {
+		$keep_lock       = function () use ( $locking, &$lock, &$locked_at ): void {
 			if ( $locking->lapsed( $locked_at ) ) {
 				throw new LockConflict( 'The snapshot read outlasted its repository lock; retry the read.' );
 			}
@@ -329,10 +329,11 @@ final class Reader {
 				$lock      = $locking->refresh( $lock, false );
 			}
 		};
+		$this->keep_lock = $keep_lock;
 		try {
-			( $this->keep_lock )();
+			$keep_lock();
 			$result = $read();
-			( $this->keep_lock )();
+			$keep_lock();
 			return $result;
 		} finally {
 			$this->index     = null;
