@@ -313,8 +313,22 @@ Keep automatic deletion paused as in step 1 above. A tree with duplicate names c
 the plugin unambiguously which file belongs at a path. Index repair does not change tree
 contents, and this guide provides no automatic lossless repair for that ambiguity.
 
-1. Take the tree ID shown beside the `tree_unreadable` finding on the dashboard and locate
-   the snapshots that reference it:
+1. Obtain the **full 64-character tree ID** from the saved check report. The dashboard shows
+   only its first eight characters, which are not sufficient for the commands below. On
+   the WordPress installation, in its directory, run:
+
+   ```bash
+   wp option get backups_for_restic_state --format=json
+   ```
+
+   In `check_alert.findings`, find each entry whose `code` is `tree_unreadable` and copy its
+   complete `object` value. Check `check_alert.job` and `check_alert.at` to make sure this is
+   the check you are investigating; `last_check.findings` also retains the full IDs from the
+   latest check. The option stores the check's original IDs; only the dashboard response
+   truncates them. If the report is absent or no longer matches, run a new plugin check
+   before continuing. Do not guess missing ID characters or derive them from a short match.
+
+   Use each complete ID to locate candidate snapshots:
 
    ```bash
    restic find --tree <tree-id>
