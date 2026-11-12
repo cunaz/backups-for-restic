@@ -28,8 +28,11 @@ use BackupsForRestic\Exception\QuotaExceeded;
 use BackupsForRestic\Exception\Unauthorized;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Exception\UploadRejected;
+use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
+use BackupsForRestic\Format\Index\IndexFile;
+use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\SystemClock;
@@ -281,6 +284,61 @@ final class ResticConformanceTest extends TestCase {
 		self::assertNotSame( 0, $status, 'restic agrees that the repository is damaged.' );
 		self::assertStringContainsString( basename( $damaged ), $stdout . $stderr );
 		self::assertStringContainsString( substr( basename( $deleted ), 0, 10 ), $stdout . $stderr );
+	}
+
+	public function test_tree_recovery_commands_preserve_duplicate_entries_and_find_every_reference(): void {
+		$repository = Repository::initialize( $this->server()->backend( 'tree-diagnosis' ), self::PASSWORD, $this->identity(), new SystemRandom() );
+		$cli        = new ResticCli( $this->server(), 'tree-diagnosis', self::PASSWORD );
+		$leaf       = '{"nodes":[{"name":"same","type":"file","mode":420,"size":0,"content":[]},{"name":"same","type":"file","mode":420,"size":0,"content":[]}]}';
+		$leaf_id    = Id::of( $leaf );
+		$branch     = '{"nodes":[{"name":"nested","type":"dir","mode":2147484141,"subtree":"' . $leaf_id->hex() . '"}]}';
+		$branch_id  = Id::of( $branch );
+		$root       = '{"nodes":[{"name":"a","type":"dir","mode":2147484141,"subtree":"' . $branch_id->hex() . '"},{"name":"b","type":"dir","mode":2147484141,"subtree":"' . $branch_id->hex() . '"}]}';
+		$writer     = new PackWriter( $repository->cipher() );
+		foreach ( [ $leaf, $branch, $root ] as $tree ) {
+			$writer->add( BlobType::Tree, Id::of( $tree ), $tree );
+		}
+		$pack = $writer->finish();
+		$repository->backend()->save( ObjectType::Data, $pack->id->hex(), $pack->bytes );
+		$repository->save_unpacked( ObjectType::Index, IndexFile::encode( [ $pack->id->hex() => $pack->entries ] ) );
+		$nested = $repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( '2026-11-12T00:00:00Z', Id::of( $root ), [ '/' ] ) )->to_json() );
+		$direct = $repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( '2026-11-12T00:00:01Z', $leaf_id, [ '/' ] ) )->to_json() );
+
+		self::assertSame( $leaf, $cli->must( [ 'cat', 'blob', $leaf_id->hex() ] ) );
+		self::assertSame( $leaf, $cli->must( [ 'cat', 'tree', $nested->hex() . ':/a/nested' ] ) );
+		$found = json_decode( $cli->must( [ 'find', '--json', '--tree', $leaf_id->hex() ] ), true, 512, JSON_THROW_ON_ERROR );
+		self::assertIsArray( $found );
+		self::assertCount( 2, $found, 'find --tree stops after the first matching path in each snapshot.' );
+
+		$snapshots = json_decode( $cli->must( [ 'snapshots', '--json' ] ), true, 512, JSON_THROW_ON_ERROR );
+		self::assertIsArray( $snapshots );
+		$matches = [];
+		foreach ( $snapshots as $snapshot ) {
+			self::assertIsArray( $snapshot );
+			self::assertIsString( $snapshot['id'] );
+			$document = Snapshot::from_json( $cli->must( [ 'cat', 'snapshot', $snapshot['id'] ] ) );
+			$pending  = [ [ '/', $document->tree->hex() ] ];
+			while ( [] !== $pending ) {
+				[ $path, $id ] = array_pop( $pending );
+				if ( $id === $leaf_id->hex() ) {
+					$matches[] = $snapshot['id'] . ':' . $path;
+				}
+				$tree = json_decode( $cli->must( [ 'cat', 'blob', $id ] ), true, 512, JSON_THROW_ON_ERROR );
+				self::assertIsArray( $tree );
+				self::assertIsArray( $tree['nodes'] );
+				foreach ( $tree['nodes'] as $node ) {
+					self::assertIsArray( $node );
+					if ( 'dir' === $node['type'] ) {
+						self::assertIsString( $node['name'] );
+						self::assertIsString( $node['subtree'] );
+						$pending[] = [ rtrim( $path, '/' ) . '/' . $node['name'], $node['subtree'] ];
+					}
+				}
+			}
+		}
+		self::assertEqualsCanonicalizing( [ $direct->hex() . ':/', $nested->hex() . ':/a/nested', $nested->hex() . ':/b/nested' ], $matches );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
+		self::assertContains( 'tree_unreadable', array_column( $this->plugin_check( $repository )['findings'], 'code' ) );
 	}
 
 	/**
