@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Backend\Http;
 
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\StorageFailed;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -30,8 +31,11 @@ interface HttpClient {
 	 * @param int                   $limit   Most bytes the caller accepts as response body; 0 for no limit.
 	 *                                       A longer body is cut off after one byte more, so that the
 	 *                                       caller can tell, and the rest is never held in memory.
+	 * @param string|null           $file    Existing private file to truncate and stream into. The
+	 *                                       response body is empty; bytes must not accumulate in memory.
 	 * @return HttpResponse Response, for every HTTP status.
 	 * @throws BackendException On network or TLS errors (no HTTP response).
+	 * @throws StorageFailed If the destination cannot be written.
 	 */
-	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse;
+	public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0, ?string $file = null ): HttpResponse;
 }

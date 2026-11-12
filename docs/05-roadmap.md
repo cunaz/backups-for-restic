@@ -166,14 +166,13 @@ damaged, and could hang on a pack the host cannot read within one request. Notic
 given up after 20 minutes instead of two days, and many warnings could push the errors off
 the check alert.
 
-**Open, and phase 0 of the [plan for Milestone 3](07-milestone-3-plan.md):** a preview of
-what retention would remove, and packs that no index lists, which aborted backups leave and
-prune does not remove yet. Done since, in phase 0: tests for the WordPress wiring of the
-second and third acceptance criterion (the daily probe, the stored switch to `external`,
-the administrator's click back, the heartbeat's stale notice), browser tests, and the
-repository's usage on the dashboard
-([development guide](04-development-and-quality.md) §5.3 and §5.5). The POT file was on this list: since 2026-11-10 CI builds it
-from the package and it is not committed
+**Open in the [plan for Milestone 3](07-milestone-3-plan.md):** a preview of what retention
+would remove. Done since, in phase 0: tests for the WordPress wiring of the second and
+third acceptance criterion (the daily probe, the stored switch to `external`, the
+administrator's click back, the heartbeat's stale notice), browser tests, repository usage
+on the dashboard, and removal of packs that no index lists, which aborted backups leave
+([development guide](04-development-and-quality.md) §5.3 and §5.5). The POT file was on this
+list: since 2026-11-10 CI builds it from the package and it is not committed
 ([development guide](04-development-and-quality.md) §5.8). The German translation follows
 once the plugin is listed on translate.wordpress.org.
 

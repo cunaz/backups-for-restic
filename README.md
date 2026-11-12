@@ -110,7 +110,7 @@ than expecting an incomplete backup to count as successful.
 | Secrets | libsodium-encrypted at rest, key derived from WordPress salts, `wp-config.php` overrides | [0006](docs/adr/0006-secrets-at-rest.md) |
 | Working directory | Private directory, preferably outside the web root, protection verified actively, caches encrypted | [0007](docs/adr/0007-private-directory.md) |
 | Snapshot layout | One snapshot per run: files + database directory + manifest; stable host and tags | [0009](docs/adr/0009-snapshot-layout.md) |
-| Maintenance | Forget with restic's semantics, prune without repacking, structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
+| Maintenance | Forget with restic's semantics; prune without repacking, including unindexed packs left by interrupted backups; structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
 | Conformance | The restic CLI is the oracle in CI; every release passes `restic check --read-data` and restore parity | [0023](docs/adr/0023-restic-cli-as-conformance-oracle.md) |
 | Admin UI | Vanilla JavaScript, no build step, REST API as the only data channel | [0012](docs/adr/0012-admin-ui-without-build-step.md) |
 | Restore (Milestone 3, not built yet) | Staging first; applying to the live site is a separate, guarded step | [0013](docs/adr/0013-restore-safety.md) |
@@ -132,6 +132,13 @@ than expecting an incomplete backup to count as successful.
 | Server software | none | none |
 | Repository server | a restic REST server with TLS, one repository per site: self-hosted rest-server or a hosted service | append-only mode enabled |
 | restic CLI | not needed on the server; to restore on another computer, restic 0.16.1 or newer, which the recovery kit's commands need (the repository format itself is readable since 0.9) | current release |
+
+The merged repository index also has to fit in PHP's memory limit alongside WordPress and
+the backup buffers. The plugin checks the accumulated index budget after each decoded pack
+and stops with `index_too_large` when too little memory remains. A single large index file
+or pack can still exhaust PHP memory before that check. Backups can reduce their pack size, down
+to 4 MiB, and record the reduction in the job log. This helps the buffers fit; it does not
+remove the index's memory cost. See [memory-limit recovery](docs/06-disaster-recovery.md#index-memory-limit).
 
 Backup checkpoints and saved directory entries need a writable private working directory.
 If a local read or write fails, the job stops with an environment error instead of

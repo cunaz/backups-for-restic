@@ -27,28 +27,122 @@ final class RestBackendTest extends TestCase {
 
 	/**
 	 * @param list<HttpResponse|\Throwable> $responses
+	 * @param (\Closure(string): void)|null $after_write Observes a streamed attempt before its response returns.
 	 * @return array{RestBackend, \ArrayObject<int, array{string, string, array<string, string>, string, int}>}
 	 */
-	private function backend( array $responses, ?string $username = 'user' ): array {
+	private function backend( array $responses, ?string $username = 'user', ?\Closure $after_write = null ): array {
 		$log    = new \ArrayObject();
-		$client = new class( $responses, $log ) implements HttpClient {
+		$client = new class( $responses, $log, $after_write ) implements HttpClient {
 			/**
 			 * @param list<HttpResponse|\Throwable> $responses
 			 * @param \ArrayObject<int, array{string, string, array<string, string>, string, int}> $log
+			 * @param (\Closure(string): void)|null $after_write Stream observation.
 			 */
-			public function __construct( private array $responses, private \ArrayObject $log ) {
+			public function __construct( private array $responses, private \ArrayObject $log, private ?\Closure $after_write ) {
 			}
 
-			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0 ): HttpResponse {
+			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0, ?string $file = null ): HttpResponse {
 				$this->log->append( [ $method, $url, $headers, $body, $limit ] );
 				$next = array_shift( $this->responses ) ?? new HttpResponse( 500, [], '' );
 				if ( $next instanceof \Throwable ) {
 					throw $next;
 				}
+				if ( null !== $file ) {
+					TestCase::assertSame( 0600, fileperms( $file ) & 0777, 'Private before response bytes are written.' );
+					file_put_contents( $file, $next->body );
+					if ( null !== $this->after_write ) {
+						( $this->after_write )( $file );
+					}
+					return new HttpResponse( $next->status, $next->headers, '' );
+				}
 				return $next;
 			}
 		};
 		return [ new RestBackend( $client, 'https://repo.example.com/site/', $username, 'secret', 'test-agent', 3, static function ( int $ms ): void {} ), $log ];
+	}
+
+	public function test_streamed_listing_retries_truncate_partial_responses(): void {
+		$directory = \BackupsForRestic\Tests\Support\TempDir::create( 'listing-download' );
+		try {
+			file_put_contents( $directory . '/list', 'previous' );
+			$json              = '["' . self::NAME . '"]';
+			[ $backend, $log ] = $this->backend( [ new HttpResponse( 503, [], str_repeat( 'failed', 100 ) ), new HttpResponse( 200, [], $json ) ] );
+			$backend->list_to_file( ObjectType::Data, $directory . '/list' );
+			self::assertSame( $json, file_get_contents( $directory . '/list' ) );
+			self::assertSame( [ [ self::NAME, -1 ] ], \BackupsForRestic\Backend\ListingFile::batch( $directory . '/list', 0 )['entries'] );
+			self::assertSame( [ 134217728, 134217728 ], array_column( $log->getArrayCopy(), 4 ) );
+			self::assertSame( [], glob( $directory . '/*.tmp' ) );
+		} finally {
+			\BackupsForRestic\Tests\Support\TempDir::remove( $directory );
+		}
+	}
+
+	public function test_streamed_listing_is_published_only_after_a_successful_attempt(): void {
+		$directory = \BackupsForRestic\Tests\Support\TempDir::create( 'listing-publication' );
+		try {
+			$file = $directory . '/list';
+			file_put_contents( $file, 'previous' );
+			$attempts    = 0;
+			[ $backend ] = $this->backend(
+				[ new HttpResponse( 503, [], 'failed' ), new HttpResponse( 200, [], '[]' ) ],
+				'user',
+				static function ( string $temporary ) use ( $file, &$attempts ): void {
+					++$attempts;
+					self::assertNotSame( $file, $temporary );
+					self::assertSame( 'previous', file_get_contents( $file ), 'Neither the failed response nor the next attempt may replace the published listing before success.' );
+				}
+			);
+			$backend->list_to_file( ObjectType::Data, $file );
+			self::assertSame( 2, $attempts );
+			self::assertSame( '[]', file_get_contents( $file ) );
+		} finally {
+			\BackupsForRestic\Tests\Support\TempDir::remove( $directory );
+		}
+	}
+
+	public function test_failed_streamed_listing_keeps_the_previous_file_and_removes_its_temporary(): void {
+		$directory = \BackupsForRestic\Tests\Support\TempDir::create( 'listing-download' );
+		try {
+			file_put_contents( $directory . '/list', 'previous' );
+			[ $backend ] = $this->backend( [ new HttpResponse( 401, [], 'no' ) ] );
+			try {
+				$backend->list_to_file( ObjectType::Data, $directory . '/list' );
+				self::fail( 'An unsuccessful download must not replace a working listing.' );
+			} catch ( Unauthorized ) {
+				self::assertSame( 'previous', file_get_contents( $directory . '/list' ) );
+				self::assertSame( [], glob( $directory . '/*.tmp' ) );
+			}
+		} finally {
+			\BackupsForRestic\Tests\Support\TempDir::remove( $directory );
+		}
+	}
+
+	public function test_streamed_response_cap_is_checked_without_loading_the_file(): void {
+		$directory = \BackupsForRestic\Tests\Support\TempDir::create( 'listing-download' );
+		$client    = new class() implements HttpClient {
+			public function request( string $method, string $url, array $headers = [], string $body = '', int $limit = 0, ?string $file = null ): HttpResponse {
+				TestCase::assertNotNull( $file );
+				TestCase::assertSame( 134217728, $limit );
+				$output = new \BackupsForRestic\Support\WorkFile( $file );
+				$output->truncate( $limit + 1 );
+				$output->close();
+				return new HttpResponse( 200, [], '' );
+			}
+		};
+		try {
+			file_put_contents( $directory . '/list', 'previous' );
+			$backend = new RestBackend( $client, 'https://example.com/' );
+			try {
+				$backend->list_to_file( ObjectType::Data, $directory . '/list' );
+				self::fail( 'The oversized stream must be refused before parsing.' );
+			} catch ( BackendException $error ) {
+				self::assertStringContainsString( 'listing is larger', $error->getMessage() );
+				self::assertSame( 'previous', file_get_contents( $directory . '/list' ) );
+				self::assertSame( [], glob( $directory . '/*.tmp' ) );
+			}
+		} finally {
+			\BackupsForRestic\Tests\Support\TempDir::remove( $directory );
+		}
 	}
 
 	public function test_a_whole_file_is_read_up_to_what_its_kind_can_hold(): void {

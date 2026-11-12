@@ -103,7 +103,7 @@ final class BackupSteps implements StepProvider {
 		if ( null !== $free && $free < self::MIN_FREE_BYTES + 2 * $services->pack_size() ) {
 			StorageFailed::raise( 'Not enough free disk space for the backup.', [ 'free' => $free ] );
 		}
-		$memory = self::bytes( ini_get( 'memory_limit' ) );
+		$memory = $services->memory_budget()->limit ?? -1;
 		if ( $memory > 0 && $memory < self::MIN_MEMORY_BYTES ) {
 			StorageFailed::raise( 'The PHP memory limit is too low for a backup.', [ 'memory_limit' => $memory ] );
 		}
@@ -218,6 +218,17 @@ final class BackupSteps implements StepProvider {
 			return false;
 		}
 		$job->progress = $run->progress();
+		if ( $run->pack_size() < $services->pack_size() && true !== ( $job->data['small_packs'] ?? null ) ) {
+			$job->data['small_packs'] = true;
+			$log->write(
+				'info',
+				'Packs are made smaller than configured, because the index leaves little memory.',
+				[
+					'pack_size'  => $run->pack_size(),
+					'configured' => $services->pack_size(),
+				]
+			);
+		}
 		// How much the last backup of this repository went through: the measure for a
 		// progress bar and an estimate, since this backup knows its own total only at the end.
 		$last     = $services->state->get( 'last_backup' )['progress'] ?? null;
@@ -358,6 +369,7 @@ final class BackupSteps implements StepProvider {
 		if ( null === $repository ) {
 			InvalidArgument::raise( 'The repository key is no longer available; the backup must unlock again.', [ 'code' => 'key_missing' ] );
 		}
+		$repository->limit_memory( $this->services->memory_budget() );
 		return $repository;
 	}
 
@@ -390,25 +402,5 @@ final class BackupSteps implements StepProvider {
 		sort( $theirs );
 		sort( $paths );
 		return $theirs === $paths;
-	}
-
-	/**
-	 * Parses a php.ini size such as 128M.
-	 *
-	 * @param string $value Value.
-	 * @return int Bytes, or -1 for unlimited.
-	 */
-	private static function bytes( string $value ): int {
-		$value = trim( $value );
-		if ( '' === $value || '-1' === $value ) {
-			return -1;
-		}
-		$number = (int) $value;
-		return match ( strtolower( substr( $value, -1 ) ) ) {
-			'g'     => $number * 1073741824,
-			'm'     => $number * 1048576,
-			'k'     => $number * 1024,
-			default => $number,
-		};
 	}
 }

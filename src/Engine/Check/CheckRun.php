@@ -19,6 +19,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\RepositoryChanged;
@@ -890,7 +891,7 @@ final class CheckRun {
 		if ( null === $this->index ) {
 			try {
 				$this->index = null === $this->cache ? $this->readable_index() : $this->cache->load( $this->repository );
-			} catch ( BackendException | UnsupportedRepository $exception ) {
+			} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				$this->index = $this->readable_index();
@@ -920,8 +921,10 @@ final class CheckRun {
 			}
 			foreach ( $packs as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
+				$this->repository->memory()?->check_index();
 			}
 		}
+		$this->repository->memory()?->check_loaded_index();
 		return $index;
 	}
 

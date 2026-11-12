@@ -138,13 +138,15 @@ final class GoJson {
 	 *
 	 * Large integers (inode numbers) are kept as strings instead of losing precision as floats.
 	 *
-	 * @param string $json JSON text.
+	 * @param string $json   JSON text.
+	 * @param int    $nested Levels the text lies below the top of its document, when a part of
+	 *                       a document is decoded on its own: the depth limit counts from the top.
 	 * @return mixed Decoded value.
 	 * @throws FormatException If the text is not valid JSON.
 	 */
-	public static function decode( string $json ): mixed {
+	public static function decode( string $json, int $nested = 0 ): mixed {
 		try {
-			return json_decode( $json, true, self::MAX_DEPTH, JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING );
+			return json_decode( $json, true, max( 1, self::MAX_DEPTH - $nested ), JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING );
 		} catch ( \JsonException $exception ) {
 			FormatException::raise( 'Repository object is not valid JSON.', [ 'json_error' => $exception->getMessage() ], $exception );
 		}
@@ -153,12 +155,13 @@ final class GoJson {
 	/**
 	 * Decodes JSON that must be an object.
 	 *
-	 * @param string $json JSON text.
+	 * @param string $json   JSON text.
+	 * @param int    $nested Levels the text lies below the top of its document.
 	 * @return array<mixed> Decoded object.
 	 * @throws FormatException If the text is not a JSON object.
 	 */
-	public static function decode_object( string $json ): array {
-		$value = self::decode( $json );
+	public static function decode_object( string $json, int $nested = 0 ): array {
+		$value = self::decode( $json, $nested );
 		if ( ! is_array( $value ) || ( [] !== $value && array_is_list( $value ) ) ) {
 			throw new FormatException( 'Repository object is not a JSON object.' );
 		}

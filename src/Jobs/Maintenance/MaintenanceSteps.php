@@ -162,16 +162,20 @@ final class MaintenanceSteps implements StepProvider {
 		$work       = $this->services->work_dir( $job );
 		$index      = $this->index( $repository );
 		try {
-			$run  = is_file( $work . '/state.json' )
+			$run      = is_file( $work . '/state.json' )
 				? PruneRun::resume( $repository, $work, $services->identity, $services->clock, $index )
 				: PruneRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $index );
-			$done = $run->advance( $deadline, $services->throttle() );
+			$restarts = $run->result()['restarts'];
+			$done     = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
 			Cleanup::run(
 				fn () => $this->switch_to_external( $job, $log ),
 				fn () => $this->abandon( $job )
 			);
 			return true;
+		}
+		if ( $run->result()['restarts'] > $restarts ) {
+			$log->write( 'warning', 'Another program changed the repository; prune starts over.', [ 'restart' => $run->result()['restarts'] ] );
 		}
 		$job->progress = $run->progress();
 		$job->result   = array_merge( $job->result, $run->result() );
@@ -464,6 +468,7 @@ final class MaintenanceSteps implements StepProvider {
 		if ( null === $repository ) {
 			InvalidArgument::raise( 'The repository key is no longer available; the job must unlock again.', [ 'code' => 'key_missing' ] );
 		}
+		$repository->limit_memory( $this->services->common->memory_budget() );
 		return $repository;
 	}
 

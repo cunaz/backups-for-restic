@@ -16,6 +16,7 @@ because they need the site, a database server and the restic tools; CI runs them
         <testsuite name="integration">
             <file>tests/Integration/AccessTest.php</file>
             <file>tests/Integration/WordPressSiteTest.php</file>
+            <file>tests/Integration/HttpStreamingTest.php</file>
             <file>tests/Integration/JobControlTest.php</file>
             <file>tests/Integration/ScheduleTest.php</file>
             <file>tests/Integration/CliTest.php</file>

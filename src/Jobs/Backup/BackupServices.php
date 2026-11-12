@@ -14,6 +14,7 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
+use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Job;
@@ -120,6 +121,16 @@ final readonly class BackupServices {
 	 */
 	public function index_cache( Repository $repository ): IndexCache {
 		return new IndexCache( $this->cache()->path . '/' . $repository->config()->id, $this->settings->int( 'advanced.cache_limit_mib' ) * 1048576 );
+	}
+
+	/**
+	 * The memory a job may use: PHP's limit as it is now, after the tick raised it where the
+	 * host allows (ADR 0031).
+	 *
+	 * @return MemoryBudget|null Budget, or null if PHP does not limit memory.
+	 */
+	public function memory_budget(): ?MemoryBudget {
+		return MemoryBudget::from_ini( ini_get( 'memory_limit' ) );
 	}
 
 	/**
