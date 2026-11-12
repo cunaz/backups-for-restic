@@ -345,23 +345,38 @@ final class CheckTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
-	public function test_start_releases_its_lock_when_the_index_files_cannot_be_listed(): void {
+	public function test_a_first_call_that_cannot_list_the_index_files_keeps_a_lock_the_run_knows(): void {
+		$fail       = true;
 		$backend    = new HookedBackend(
 			$this->backend,
-			static function ( string $method, ?ObjectType $type ): void {
-				if ( 'list' === $method && ObjectType::Index === $type ) {
+			static function ( string $method, ?ObjectType $type ) use ( &$fail ): void {
+				if ( $fail && 'list' === $method && ObjectType::Index === $type ) {
 					throw new BackendException( 'The server answered 503.' );
 				}
 			}
 		);
 		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$work       = $this->work_dir();
 
+		$run = CheckRun::start( $repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 100 );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'Starting sends nothing to the server.' );
 		try {
-			CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 100 );
-			self::fail( 'The check must not start.' );
+			$run->advance( 0.0 );
+			self::fail( 'The index files cannot be listed.' );
 		} catch ( BackendException ) {
-			self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'No checkpoint exists, so the lock is released at once.' );
+			$state = json_decode( (string) file_get_contents( $work . '/state.json' ), true );
+			self::assertIsArray( $state );
+			self::assertSame( [ $state['lock'] ], array_keys( $this->backend->list( ObjectType::Locks ) ), 'The checkpoint names the lock, so the next call or abort() finds it.' );
 		}
+
+		$fail = false;
+		$run  = CheckRun::resume( $repository, $work, $this->identity, new SystemClock() );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+		self::assertSame( 0, $run->result()['errors'] );
+		self::assertGreaterThan( 0, $run->result()['stats']['index_files'] ?? 0, 'The check began with the listing it could not get before.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
 	public function test_reads_packs_in_small_pieces_with_the_same_result(): void {
@@ -460,6 +475,7 @@ final class CheckTest extends TestCase {
 
 	public function test_backups_may_run_while_a_check_holds_its_shared_lock(): void {
 		$run = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		$run->advance( 0.0 );
 
 		$other = ( new Locking( $this->repository, new Identity( 'laptop', 'admin' ), new SystemClock(), 4711 ) )->acquire( false );
 
@@ -555,7 +571,9 @@ final class CheckTest extends TestCase {
 	public function test_refreshes_its_lock_during_a_long_check(): void {
 		$clock = new FrozenClock( time() );
 		$run   = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, $clock, new SystemRandom(), 0 );
+		$run->advance( 0.0 );
 		$first = array_keys( $this->backend->list( ObjectType::Locks ) );
+		self::assertCount( 1, $first, 'The first call took the lock.' );
 
 		$clock->advance( Locking::REFRESH_AFTER_SECONDS );
 		$run->advance( 0.0 );
