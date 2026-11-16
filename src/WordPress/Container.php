@@ -49,6 +49,7 @@ use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Notifications\Notifier;
 use BackupsForRestic\Plugin;
+use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Secrets\ConstantOverrideStore;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
 use BackupsForRestic\Secrets\Secret;
@@ -301,6 +302,15 @@ final class Container {
 	public function jobs(): JobStore {
 		$this->private_dir()->ensure();
 		return new JobStore( $this->private_dir()->subdirectory( 'jobs' ), $this->redactor(), $this->random() );
+	}
+
+	/**
+	 * What finished restores left in the private directory, and its removal (ADR 0040).
+	 *
+	 * @return Staging Staging directories.
+	 */
+	public function staging(): Staging {
+		return new Staging( $this->private_dir()->subdirectory( 'restores' ), $this->jobs(), $this->clock() );
 	}
 
 	/**

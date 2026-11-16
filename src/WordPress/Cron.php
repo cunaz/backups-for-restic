@@ -34,6 +34,9 @@ final class Cron {
 	/** Seconds the deactivation may spend on ending the active job. */
 	private const float STOP_SECONDS = 10.0;
 
+	/** Seconds a heartbeat may spend on deleting restore staging that is due (ADR 0040). */
+	private const float STAGING_SECONDS = 5.0;
+
 	/**
 	 * Registers the hooks.
 	 *
@@ -160,7 +163,7 @@ final class Cron {
 
 	/**
 	 * Probes for append-only mode once a day, starts scheduled jobs, advances jobs whose chain
-	 * broke, and sends the stale notice when it is due.
+	 * broke, sends the stale notice when it is due, and removes restore staging that expired.
 	 *
 	 * @param Container $container Services.
 	 */
@@ -173,6 +176,29 @@ final class Cron {
 			self::tick( $container );
 		}
 		self::exclusively( $container, static fn () => $container->notifier()->heartbeat( time() ) );
+		self::expire_staging( $container );
+	}
+
+	/**
+	 * Removes the restore staging that is due: what expired, and what jobs that did not
+	 * succeed left behind (ADR 0040). It comes last and has a few seconds, so it neither
+	 * delays a scheduled job nor a notice; what a large tree needs beyond that, the next
+	 * heartbeats do.
+	 *
+	 * It does not wait for the runner lock, which a long backup holds tick after tick while
+	 * staged plaintext would stay past its time. It needs none: the directory of a job that
+	 * has not ended is never touched, and a job's document says that it ended only after its
+	 * last step.
+	 *
+	 * @param Container $container Services.
+	 */
+	private static function expire_staging( Container $container ): void {
+		try {
+			$container->staging()->remove_due( $container->settings()->int( 'restore.staging_expiry_hours' ), microtime( true ) + self::STAGING_SECONDS );
+		} catch ( PluginException ) {
+			// The directory could not be listed. The next heartbeat tries again.
+			return;
+		}
 	}
 
 	/**

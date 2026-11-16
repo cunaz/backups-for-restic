@@ -616,6 +616,12 @@
 			],
 		},
 		{
+			title: __( 'Restore', 'backups-for-restic' ),
+			fields: [
+				[ 'restore.staging_expiry_hours', __( 'Hours to keep restored files', 'backups-for-restic' ), 'number', null, __( 'A restore puts unencrypted copies of the selected files into the private directory. They are removed this many hours after the restore finished: at least 1, at most 168.', 'backups-for-restic' ) ],
+			],
+		},
+		{
 			title: __( 'Advanced', 'backups-for-restic' ),
 			fields: [
 				[ 'advanced.tick_budget_seconds', __( 'Seconds per work step', 'backups-for-restic' ), 'number' ],

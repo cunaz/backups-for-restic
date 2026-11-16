@@ -65,12 +65,12 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
 ## Consequences
 - A long restore delays scheduled backups until it ends. The stale-backup notice still
   fires if that takes longer than the schedule allows.
-- Staged files are plaintext site data in the private directory. Until expiry, listing and
-  removal exist (package 2.3 of the Milestone 3 plan), a staging directory stays until the
-  plugin is uninstalled or somebody removes it by hand.
+- Staged files are plaintext site data in the private directory. A staging directory
+  expires, is listed and can be removed since package 2.3 of the Milestone 3 plan
+  ([ADR 0040](0040-restore-staging-expiry.md)).
 - If the cleanup of a failed job cannot remove the staging directory, the job ends as
-  failed with the directory partly there; the expiry of package 2.3 has to treat a staging
-  directory whose job did not succeed as garbage.
+  failed with the directory partly there; the heartbeat removes a staging directory whose
+  job did not succeed as a leftover (ADR 0040).
 - The engine reports too little free space as a format error, so the job shows the code
   `repository_damaged` for it. A code of its own belongs to the engine and the error
   table.

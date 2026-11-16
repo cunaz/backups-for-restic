@@ -260,6 +260,11 @@ installed is skipped:
   and nothing that the web server hands out; invalid snapshot IDs and paths are refused
   with 400 and a code; a schedule slot that comes due while a restore is active stays
   unhandled and starts its backup once the restore has ended.
+- **`RestoreStagingTest`**: a finished restore is listed by `GET /restores` with what its
+  job recorded and `DELETE /restores/{id}` removes it, with 400, 404 and 409 for a name
+  that is no job ID, a job without staging and a restore that has not ended; staging whose
+  job document says it ended before the configured hours leaves the list, and a heartbeat
+  deletes it.
 - **`ScheduleTest`**: the heartbeat, run through `wp-cron.php`, records the first slot,
   starts a backup whose slot has come and forget after it, prune and check on their slots,
   and nothing for manual schedules.

@@ -41,6 +41,8 @@ final class AccessTest extends TestCase {
 			[ 'POST', '/jobs/' . self::JOB . '/cancel' ],
 			[ 'GET', '/jobs/' . self::JOB . '/log' ],
 			[ 'GET', '/snapshots' ],
+			[ 'GET', '/restores' ],
+			[ 'DELETE', '/restores/' . self::JOB ],
 			[ 'GET', '/settings' ],
 			[ 'PUT', '/settings' ],
 			[ 'DELETE', '/cache' ],

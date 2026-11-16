@@ -33,7 +33,8 @@ final class JobStore {
 	/** In a job's directory once an administrator asked to cancel it. */
 	public const string CANCEL_MARKER = 'cancel-requested';
 
-	private const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
+	/** What a job ID looks like: the time of its creation in UTC and six random characters. */
+	public const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
 
 	/**
 	 * Whether while_idle() holds the lock of create() in this process.
@@ -159,6 +160,20 @@ final class JobStore {
 			$job->cancel_requested = $this->cancel_requested( $job );
 		}
 		return $job;
+	}
+
+	/**
+	 * Whether a document is stored for a job ID, readable by this version or not. Together
+	 * with get() it tells a job that is gone from one whose state cannot be established.
+	 *
+	 * @param string $id Job ID.
+	 * @return bool True if the job has a document.
+	 */
+	public function has_document( string $id ): bool {
+		$file = $this->directory . '/' . $id . '/job.json';
+		// Jobs are created and pruned by other requests: never answer from PHP's stat cache.
+		clearstatcache( true, $file );
+		return 1 === preg_match( self::ID_PATTERN, $id ) && is_file( $file );
 	}
 
 	/**

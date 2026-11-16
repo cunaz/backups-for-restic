@@ -56,3 +56,4 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0034](0034-snapshot-reader.md) | Read snapshots under shared locks and locate manifests independently of the live site |
 | [0036](0036-selected-file-staging.md) | Plan selected files before restoring into an owned staging directory |
 | [0037](0037-restore-job.md) | A restore is a job that blocks other jobs and stages into a directory of its own |
+| [0040](0040-restore-staging-expiry.md) | Restore staging expires, and a removal sets the directory aside first |

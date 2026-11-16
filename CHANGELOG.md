@@ -28,7 +28,12 @@ All notable changes are documented here. The format follows
   the selection into a staging directory of the job in the private directory, with
   progress, in resumable steps like a backup. A restore that fails or is cancelled removes
   what it staged and releases its repository lock. While a restore runs, scheduled jobs
-  wait. Screens, the WP-CLI command, download and the expiry of staged files still follow.
+  wait. Screens, the WP-CLI command and the download of staged files still follow.
+- Restored files do not stay: they are removed 24 hours after the restore finished, or
+  after the number of hours set under Settings → Restore (1 to 168). The heartbeat removes
+  them, and also what a restore that did not succeed left behind. `GET /restores` lists
+  what is staged with its size and time of expiry, and `DELETE /restores/{id}` removes one
+  directory at once.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

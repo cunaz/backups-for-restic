@@ -175,11 +175,11 @@ src/
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
-├── Restore/                       (M3) Staging, Selection, Apply, database Importer
+├── Restore/                       Staging (list, expiry and removal of what restore jobs staged, ADR 0040), StagedRestore; (M3) Selection, Apply, database Importer
 └── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, NoticeKind, Mailer port
 ```
 
-The entry marked (M3) arrives with that milestone. Dependency rules:
+What is marked (M3) arrives with that milestone. Dependency rules:
 
 - Only `WordPress\*` and `Plugin` call WordPress functions or use WordPress classes
   ([ADR 0029](adr/0029-wordpress-free-core.md)). The core receives paths, settings values,
@@ -257,7 +257,7 @@ directly and keep the limit of the CLI process.
 | **WP-Cron on traffic** | Due events run at the end of ordinary page loads. | Baseline; speed depends on visitors |
 | **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; see [`guides/cron.md`](guides/cron.md) |
 | **Admin polling** | While the admin page follows a running job it requests `GET /jobs/{id}` every 3 s; such a request runs a tick of at most 5 s, at most once per 5 s, and does not chain. "Keep this tab open to speed up the backup on slow hosts." | Always available |
-| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive, and at once when the repository of the settings has no probe result yet, for example after another server was saved) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Last it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
+| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive, and at once when the repository of the settings has no probe result yet, for example after another server was saved) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Then it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. Last, for at most five seconds and without that lock, it removes restore staging that is due: what expired and what jobs that did not succeed left behind (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)); what a large tree needs beyond that, the next heartbeats do. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
 | **WP-CLI** (`wp backups-for-restic …`) | `tick` runs one tick with the budget of §4.2; `tick --until-idle` repeats such ticks until no job is left. `backup`, `forget`, `prune` and `check` with `--wait` run the job in the same process in ticks of 300 s each, which do not pass through `Container::tick_budget()`: neither `max_execution_time` nor the gentle mode shortens them. Without `--wait` these commands create the job and return; the other drivers advance it. | Where the host offers WP-CLI |
 
 Only one runner may advance a job at a time: `flock()` on `<private>/runner.lock`
@@ -746,8 +746,10 @@ Restore in the plugin arrives with Milestone 3; this section is its plan where i
 built yet. Built are the engine's `Engine\Restore\RestoreRun`, which restores selected
 paths of a snapshot into a directory in resumable slices and validates every name from the
 repository, and the job type `restore` (§4.4, [ADR 0037](adr/0037-restore-job.md)), which
-`POST /jobs` starts and which stages the files in `<private>/restores/<job-id>/`. The admin
-area and WP-CLI have no restore yet, nothing lists, expires, downloads or applies what is
+`POST /jobs` starts and which stages the files in `<private>/restores/<job-id>/`, and
+`Restore\Staging` ([ADR 0040](adr/0040-restore-staging-expiry.md)), which lists what is
+staged, lets it expire and removes it (§10, `GET /restores` and `DELETE /restores/{id}` in
+§13.2). The admin area and WP-CLI have no restore yet, nothing downloads or applies what is
 staged, and a lost site is restored with the recovery kit and the restic CLI
 ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
@@ -803,13 +805,25 @@ left behind is removed once it is a minute old.
 ├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
-└── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
-    ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; owner-only (directories 0700, files 0600) whatever the snapshot recorded
-    └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
+├── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
+│   ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; owner-only (directories 0700, files 0600) whatever the snapshot recorded
+│   └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
+└── restores/.removing-<job-id>/           a staging directory whose removal has begun: renamed first, so that no list shows it, then deleted (ADR 0040)
 ```
 
-Nothing removes a staging directory yet except uninstalling: expiry after 24 hours, the
-list and the removal by an administrator arrive with package 2.3 of the Milestone 3 plan.
+Staging does not stay ([ADR 0040](adr/0040-restore-staging-expiry.md), `Restore\Staging`).
+A staging directory expires `restore.staging_expiry_hours` (default 24) after its job
+finished, by `finished_at` of the job document. From then on it is not listed, and the
+next heartbeat removes it. The heartbeat also removes leftovers at once: the directory of
+a job that failed or was cancelled, and a directory that no job accounts for. It never
+touches the directory of a job that has not ended, nor that of a job whose document this
+version cannot read. A directory whose job document was pruned with the old jobs is kept
+while it holds the report; its expiry then counts from the creation time in the job ID,
+and its counts are unknown. An administrator removes one directory with
+`DELETE /restores/{id}`. Every removal renames the directory to `.removing-<job-id>` before
+it deletes anything, deletes until a deadline (five seconds in a heartbeat, ten in a
+request) and is continued by the next heartbeat; symbolic links are removed, never
+followed.
 
 No plaintext site data is written to the private directory except restore staging and
 database import files, both explicit admin actions; the import arrives with Milestone 3. The
@@ -863,6 +877,8 @@ backup:
   excludes: []
   exclude_caches: true
   database: { enabled: true, table_scope: prefix, exclude_tables: [] }
+restore:
+  staging_expiry_hours: 24               # 1–168; hours after the end of a restore job at which its staged files are removed (§10, ADR 0040)
 notifications:
   email: { on_failure: true, on_stale: true, stale_after_hours: 36, recipients: [] }
 advanced:
@@ -1048,7 +1064,9 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
 | `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
-| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
+| `GET /restores` | what finished restores staged, newest first (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)): for each `job`, `snapshot`, `finished`, `expires`, `files`, `bytes`, `staging` and `report`, the last two as names relative to the private directory. Snapshot, counts and `finished` come from the job document and are null once it was pruned. Also `expiry_hours`, the setting, and `removing`, the number of directories that are due or being deleted. Staging that expired and the directory of a restore that has not ended are not listed |
+| `DELETE /restores/{id}` | removes the staging directory of one job, whatever became of the job. It leaves the list at once; `removed.complete` is false when deleting takes longer than ten seconds, and the heartbeat finishes it. The answer carries the list as `GET /restores` gives it. 400 `invalid_job_id` for a name that is no job ID, 404 `restore_not_found` if nothing is staged for the job, 409 `restore_active` while the job has not ended, 409 `job_unreadable` if its document cannot be read |
+| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
 | `POST /repository/test`, `POST /repository/save` | connection test; test and save. For an own server both take an optional `ca_certificate` (PEM): the test uses it from a file of its own under `tmp/` in the private directory, removed after the test, `save` stores it as the server's certificate once the server is saved, and saving a server of the preset removes a stored one. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent. `save` changes nothing while a job is active (409 `job_conflict`). A save that fails half way, also because the options table refused a write without an error (`Options::set()` answers false, `SettingsStore::update()` and `SiteState::bind()` raise `StorageFailed`), tries to put back what it changed: the settings, the REST password, the cached key and the certificate. Each part is tried on its own; while the database keeps refusing writes, a part can stay as the failed save left it, and the request answers with the error either way. Where `wp-config.php` defines the address, the certificate of a tested address that is another one is not stored; saving another address empties `repository.id` and drops the results remembered for the old repository |
 | `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; neither stores anything while a job is active (409 `job_conflict`). `create` stores the repository password before the repository exists and puts the earlier one back if the repository does not come to exist; `connect` keeps an entered password apart until the unlock job has opened the repository with it, and only then replaces the stored password and the cached key; a wrong password leaves both in place, and the kit in its answer names the entered one. `connect` without a password unlocks with the stored one. Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
@@ -1059,7 +1077,7 @@ first backup: an estimate needs a backup to measure against (§14).
 All routes: capability check in `permission_callback` (`backups_for_restic_capability`,
 `manage_options` by default); cookie + nonce or Application Passwords; no secrets in
 responses except the recovery kit, which is sent with `Cache-Control: no-store`. The
-routes that list, download and remove what a restore staged arrive with Milestone 3.
+routes that download what a restore staged arrive with package 2.4 of the Milestone 3 plan.
 
 The recovery kit is in the answer of three routes. During the setup `create` and `connect`
 return it freely, which is how the wizard shows it once; from then on all three ask for the
@@ -1173,6 +1191,8 @@ that runs out of time simply continues in the next one. Codes for restore
 
 The REST API has codes of its own for requests it refuses: `not_found` (unknown job),
 `not_editable` (a setting that `PUT /settings` does not accept), `invalid_job_type`,
+`invalid_job_id`, `restore_not_found` and `restore_active` (`DELETE /restores/{id}` with a
+name that is no job ID, for a job without staging, and for a restore that has not ended),
 `invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password` (the recovery
 kit was asked for without the right WordPress password), `password_required` (a request
 names a server or user name that the stored REST password is not for and carries no

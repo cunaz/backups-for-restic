@@ -23,6 +23,7 @@ final class SettingsTest extends TestCase {
 		self::assertSame( '2d', $settings->string( 'retention.keep.within' ) );
 		self::assertSame( 20, $settings->int( 'advanced.tick_budget_seconds' ) );
 		self::assertSame( 16, $settings->int( 'advanced.pack_size_mib' ) );
+		self::assertSame( 24, $settings->int( 'restore.staging_expiry_hours' ), 'Staged plaintext is kept for a day unless an administrator decides otherwise.' );
 		self::assertTrue( $settings->bool( 'backup.database.enabled' ) );
 		self::assertFalse( $settings->bool( 'setup.completed' ) );
 		self::assertSame( [], $settings->list( 'backup.excludes' ) );
@@ -30,7 +31,7 @@ final class SettingsTest extends TestCase {
 	}
 
 	public function test_only_what_an_administrator_decides_can_be_changed_after_the_setup(): void {
-		foreach ( [ 'schedule.backup.hour', 'retention.mode', 'backup.extra_roots', 'notifications.email.recipients', 'advanced.cpu_throttle' ] as $path ) {
+		foreach ( [ 'schedule.backup.hour', 'retention.mode', 'backup.extra_roots', 'restore.staging_expiry_hours', 'notifications.email.recipients', 'advanced.cpu_throttle' ] as $path ) {
 			self::assertTrue( Schema::editable( $path ), $path );
 		}
 		// What the setup and the jobs write: an edit would point the backups elsewhere or pass the wizard by.
@@ -94,6 +95,8 @@ final class SettingsTest extends TestCase {
 	public static function invalid_input(): iterable {
 		yield 'number too small' => [ 'advanced.tick_budget_seconds', 1, 'out_of_range' ];
 		yield 'number as words' => [ 'advanced.pack_size_mib', 'sixteen', 'out_of_range' ];
+		yield 'staging that expires at once' => [ 'restore.staging_expiry_hours', 0, 'out_of_range' ];
+		yield 'staging kept longer than a week' => [ 'restore.staging_expiry_hours', 169, 'out_of_range' ];
 		yield 'unknown choice' => [ 'repository.server', 's3', 'not_a_choice' ];
 		yield 'not a boolean' => [ 'backup.exclude_caches', 'maybe', 'not_a_boolean' ];
 		yield 'control characters' => [ 'repository.url', "https://a.example/\n", 'invalid_characters' ];

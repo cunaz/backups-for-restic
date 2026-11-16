@@ -30,7 +30,7 @@ final class RestoreJobTest extends TestCase {
 	public static function tearDownAfterClass(): void {
 		if ( TestSite::available() ) {
 			TestSite::remove_upload( self::FILE );
-			// Staging expires with package 2.3; until then the tests remove what they staged.
+			// Staging expires after a day; the tests remove at once what they staged.
 			foreach ( (array) glob( TestSite::private_dir() . '/restores/*', GLOB_ONLYDIR ) as $staging ) {
 				TempDir::remove( (string) $staging );
 			}
