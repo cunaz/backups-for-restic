@@ -37,6 +37,8 @@ defined( 'ABSPATH' ) || exit;
  * file and the number of the piece, so that pieces cannot be left out, repeated, reordered
  * or mixed with those of another file without the cache being discarded. The first piece
  * holds the names of the covered index files, the others are those of IndexSet::export().
+ * The lengths are not sealed: one that neither kind of piece can have discards the cache
+ * too, before the memory budget is asked whether the piece fits.
  *
  * If an index file disappeared from the server (restic prune or rebuild-index ran elsewhere),
  * the cache cannot tell which entries became stale, so it is rebuilt from scratch. An index
@@ -48,7 +50,10 @@ final class IndexCache {
 	/** Bytes of the random value that marks the pieces of one file. */
 	private const int MARK_BYTES = 16;
 
-	/** No sealed piece is larger than this; export() makes pieces of about one megabyte plus one bucket. */
+	/** Bytes that sealing, the mark and the number add to the content of a piece. */
+	private const int PIECE_OVERHEAD = Cipher::OVERHEAD + self::MARK_BYTES + 4;
+
+	/** The piece of names is not read beyond this, however many index files the server lists. */
 	private const int MAX_PIECE = 67108864;
 
 	/**
@@ -128,7 +133,7 @@ final class IndexCache {
 			return null;
 		}
 		try {
-			$pieces = $this->pieces( $handle, $repository->cipher(), $repository->memory() );
+			$pieces = $this->pieces( $handle, $repository->cipher(), $repository->memory(), count( $listed ) );
 			$names  = $pieces->valid() ? $pieces->current() : '';
 			if ( 'N' !== ( $names[0] ?? '' ) || 1 !== strlen( $names ) % 32 ) {
 				return null;
@@ -163,11 +168,14 @@ final class IndexCache {
 	 * @param resource          $handle Open cache file.
 	 * @param Cipher            $cipher Cipher with the repository key.
 	 * @param MemoryBudget|null $memory Current process budget, if limited.
+	 * @param int               $listed Number of index files the server lists now.
 	 * @return \Generator<int, string> The content of each piece, without mark and number.
-	 * @throws FormatException If the file is truncated or its pieces do not belong together.
+	 * @throws FormatException If the file is truncated, a length is one that no piece has, or
+	 *                         its pieces do not belong together.
 	 * @throws AuthenticationFailed If a piece was changed.
+	 * @throws IndexTooLarge If a piece of a possible length does not fit into the memory budget.
 	 */
-	private function pieces( $handle, Cipher $cipher, ?MemoryBudget $memory ): \Generator {
+	private function pieces( $handle, Cipher $cipher, ?MemoryBudget $memory, int $listed ): \Generator {
 		$mark = null;
 		for ( $number = 0; ; $number++ ) {
 			$head = (string) fread( $handle, 4 );
@@ -176,7 +184,12 @@ final class IndexCache {
 			}
 			$fields = 4 === strlen( $head ) ? unpack( 'Vlength', $head ) : false;
 			$length = is_array( $fields ) ? $fields['length'] : 0;
-			if ( $length < Cipher::OVERHEAD + self::MARK_BYTES + 4 || $length > self::MAX_PIECE ) {
+			// The length is not authenticated. One that no writer produces is damage, to be
+			// answered by reading the index files again, and must not reach the memory budget:
+			// its refusal would end every job until someone cleared the cache by hand. The
+			// first piece of a cache that can still be used names only listed index files.
+			$content = 0 === $number ? 1 + 32 * $listed : IndexSet::MAX_PIECE_BYTES;
+			if ( $length < self::PIECE_OVERHEAD || $length > min( self::MAX_PIECE, self::PIECE_OVERHEAD + $content ) ) {
 				throw new FormatException( 'The cached index is damaged.' );
 			}
 			$stat     = fstat( $handle );

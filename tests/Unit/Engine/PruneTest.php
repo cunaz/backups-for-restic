@@ -1014,7 +1014,7 @@ final class PruneTest extends TestCase {
 			}
 			self::fail( 'The malformed tail must be examined before any deletion.' );
 		} catch ( BackendException ) {
-			self::assertSame( 'parse_listing', $run->progress()['phase'] );
+			self::assertSame( 'download', $run->progress()['phase'], 'The next tick downloads the listing again.' );
 			self::assertSame( 0, $run->result()['packs_deleted'] );
 			self::assertSame( 0, $run->result()['index_files_written'] );
 			foreach ( [ 'data', 'index', 'snapshots' ] as $type ) {
@@ -1023,6 +1023,68 @@ final class PruneTest extends TestCase {
 		} finally {
 			$run->abort();
 		}
+	}
+
+	/**
+	 * Answers that are stored as the pack listing although they are not one.
+	 *
+	 * @return array<string, array{string}> The stored answer.
+	 */
+	public static function invalid_listings(): array {
+		$names = '';
+		for ( $i = 0; $i < 300; ++$i ) {
+			$names .= '"' . hash( 'sha256', 'listed only once:' . $i ) . '",';
+		}
+		return [
+			'an error page instead of a listing'    => [ '<html><body>502 Bad Gateway</body></html>' ],
+			'a negative size after the first batch' => [ '[' . $names . '{"name":"' . hash( 'sha256', 'negative' ) . '","size":-1}]' ],
+		];
+	}
+
+	#[DataProvider( 'invalid_listings' )]
+	public function test_an_invalid_stored_pack_listing_is_downloaded_again_and_the_prune_completes( string $invalid ): void {
+		$this->history_with_a_forgotten_snapshot();
+		$indexed = $this->repository->load_index()->pack_ids();
+		$used    = $this->used_packs();
+		$before  = $this->read_everything();
+		$entries = [];
+		foreach ( $this->backend->list( ObjectType::Data ) as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		$downloads                   = 0;
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( &$downloads, $invalid, $entries ): void {
+			self::assertSame( ObjectType::Data, $type );
+			file_put_contents( $path, 1 === ++$downloads ? $invalid : json_encode( $entries, JSON_THROW_ON_ERROR ) );
+		};
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		$failures                    = 0;
+		$ticks                       = 0;
+		do {
+			try {
+				$done = $run->advance( 0.0 );
+			} catch ( BackendException ) {
+				// The job treats this as a transport error and resumes from the checkpoint.
+				self::assertSame( 1, ++$failures, 'Only the tick that parsed the invalid answer fails.' );
+				$done = false;
+			}
+			if ( ! $done ) {
+				$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			}
+			self::assertLessThan( 100000, ++$ticks );
+		} while ( ! $done );
+
+		self::assertSame( 1, $failures );
+		self::assertSame( 2, $downloads, 'The next tick asks the server again instead of parsing the stored answer.' );
+		self::assertSame( count( $indexed ) - count( $used ), $run->result()['packs_deleted'], 'Nothing of the invalid answer is taken for a pack.' );
+		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
+		self::assertSame( count( $used ), count( $this->backend->list( ObjectType::Data ) ), 'The used packs stay.' );
+		self::assertSame( $before, $this->read_everything(), 'Every remaining snapshot reads completely.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock is released.' );
 	}
 
 	public function test_a_missing_live_pack_keeps_unindexed_recovery_data_and_refuses_all_mutations(): void {

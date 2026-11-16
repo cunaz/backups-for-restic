@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\ObjectType;
+use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Identity;
@@ -245,24 +246,77 @@ final class IndexCacheTest extends TestCase {
 		self::assertArrayNotHasKey( 'index', $this->backend->loads, 'The repaired cache is reused on the next load.' );
 	}
 
+	/**
+	 * Which length field of a cache file is damaged.
+	 *
+	 * @return array<string, array{int}> Number of the piece.
+	 */
+	public static function pieces_with_a_damaged_length(): array {
+		return [
+			'the piece of names'   => [ 0 ],
+			'a piece of the index' => [ 2 ],
+		];
+	}
+
 	#[RunInSeparateProcess]
-	public function test_a_complete_large_piece_still_refuses_the_memory_budget_before_reading(): void {
+	#[DataProvider( 'pieces_with_a_damaged_length' )]
+	public function test_a_length_no_piece_can_have_is_damage_and_the_cache_is_rebuilt( int $damaged ): void {
+		self::assertSame( '128M', ini_get( 'memory_limit' ) );
+		$this->index_file( 'a', 2, 10 );
+		$cache    = new IndexCache( $this->directory );
+		$expected = self::blobs( $cache->load( $this->repository ) );
+		$pieces   = $this->sealed_pieces();
+		self::assertGreaterThan( $damaged, count( $pieces ) );
+		// Far above what a writer produces, below the hard maximum, and not beyond the end of
+		// the file: only the length itself tells that the piece is not one.
+		$length = 48 * 1048576;
+		$before = implode( '', array_map( static fn ( string $piece ): string => pack( 'V', strlen( $piece ) ) . $piece, array_slice( $pieces, 0, $damaged ) ) );
 		$file   = $this->directory . '/index.bin';
 		$handle = fopen( $file, 'wb' );
 		self::assertNotFalse( $handle );
 		try {
-			self::assertSame( 4, fwrite( $handle, pack( 'V', 64 * 1048576 ) ) );
-			self::assertTrue( ftruncate( $handle, 4 + 64 * 1048576 ) );
+			self::assertSame( strlen( $before ) + 4, fwrite( $handle, $before . pack( 'V', $length ) ) );
+			self::assertTrue( ftruncate( $handle, strlen( $before ) + 4 + $length ) );
 		} finally {
 			fclose( $handle );
 		}
 		$this->repository->limit_memory( new MemoryBudget( 128 * 1048576 ) );
+		$this->backend->loads = [];
+
+		self::assertSame( $expected, self::blobs( $cache->load( $this->repository ) ), 'The memory budget is not asked about a piece that cannot exist.' );
+		self::assertSame( 1, $this->backend->loads['index'] ?? 0, 'A damaged cache is rebuilt from the repository.' );
+		$this->backend->loads = [];
+		self::assertSame( $expected, self::blobs( $cache->load( $this->repository ) ) );
+		self::assertArrayNotHasKey( 'index', $this->backend->loads, 'The repaired cache is reused on the next load.' );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_complete_large_piece_still_refuses_the_memory_budget_before_reading(): void {
+		$this->index_file( 'a', 2, 10 );
+		( new IndexCache( $this->directory ) )->load( $this->repository );
+		$names = $this->sealed_pieces()[0];
+		// The longest sealed piece of an exported index: its content, the mark and the number.
+		$length = Cipher::OVERHEAD + 16 + 4 + IndexSet::MAX_PIECE_BYTES;
+		$head   = pack( 'V', strlen( $names ) ) . $names . pack( 'V', $length );
+		$file   = $this->directory . '/index.bin';
+		$handle = fopen( $file, 'wb' );
+		self::assertNotFalse( $handle );
+		try {
+			self::assertSame( strlen( $head ), fwrite( $handle, $head ) );
+			self::assertTrue( ftruncate( $handle, strlen( $head ) + $length ) );
+		} finally {
+			fclose( $handle );
+		}
+		// Room to read the names, but not to open two megabytes: the budget wants four times
+		// the input free besides the two megabytes it always keeps.
+		gc_mem_caches();
+		$this->repository->limit_memory( new MemoryBudget( memory_get_usage( true ) + 8 * 1048576 ) );
 		try {
 			( new IndexCache( $this->directory ) )->load( $this->repository );
 			self::fail( 'A complete piece must pass the budget before it can be read or authenticated.' );
 		} catch ( IndexTooLarge $error ) {
-			self::assertSame( 64 * 1048576, $error->context()['input_bytes'] );
-			self::assertSame( 4 + 64 * 1048576, filesize( $file ), 'A capacity refusal does not discard the cache.' );
+			self::assertSame( $length, $error->context()['input_bytes'] );
+			self::assertSame( strlen( $head ) + $length, filesize( $file ), 'A capacity refusal does not discard the cache.' );
 		}
 	}
 

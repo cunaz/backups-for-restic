@@ -928,9 +928,23 @@ final class PruneRun {
 		$this->position = 0;
 	}
 
-	/** Validates a bounded batch and stores its packs before checkpointing the byte cursor. */
+	/**
+	 * Validates a bounded batch and stores its packs before checkpointing the byte cursor. A
+	 * stored answer that is not a listing fails at the same offset in every later call, so the
+	 * checkpoint goes back to the download before the error ends this one. Nothing was deleted
+	 * yet: classification starts only after the entire listing was validated.
+	 *
+	 * @throws BackendException If the stored listing is invalid; the next call downloads it again.
+	 */
 	private function parse_listing(): void {
-		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->position );
+		try {
+			$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->position );
+		} catch ( BackendException $exception ) {
+			$this->phase    = 'download';
+			$this->position = 0;
+			$this->persist();
+			throw $exception;
+		}
 		$table = new PackTable( $this->work_dir . '/packs.table' );
 		try {
 			foreach ( $batch['entries'] as [ $name, $size ] ) {

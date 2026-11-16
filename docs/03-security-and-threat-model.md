@@ -296,7 +296,9 @@ carries `Cache-Control: no-store`.
   written to the system temp directory.
 - The cache holds one file per repository, the merged index, sealed with the master key
   (encrypted and authenticated). A cache that fails authentication is ignored and rebuilt
-  from the repository.
+  from the repository. The lengths between its sealed pieces are not authenticated; a
+  length that no piece can have is treated the same way, before any memory is reserved
+  for it.
 - Packs are built in memory, not in files. The KDF table is the one sensitive temporary file
   and is deleted when the derivation finishes.
 - From Milestone 3: restore staging and database import files are plaintext by necessity:

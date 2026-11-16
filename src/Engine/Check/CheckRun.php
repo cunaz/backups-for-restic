@@ -501,9 +501,22 @@ final class CheckRun {
 		$this->state['phase']    = 'parse_packs';
 	}
 
-	/** Validates bounded batches, preserving the last occurrence of duplicate pack IDs. */
+	/**
+	 * Validates bounded batches, preserving the last occurrence of duplicate pack IDs. A stored
+	 * answer that is not a listing fails at the same offset in every later call, so the
+	 * checkpoint goes back to the download before the error ends this one.
+	 *
+	 * @throws BackendException If the stored listing is invalid; the next call downloads it again.
+	 */
 	private function parse_packs(): void {
-		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->state['position'] );
+		try {
+			$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->state['position'] );
+		} catch ( BackendException $exception ) {
+			$this->state['phase']    = 'packs';
+			$this->state['position'] = 0;
+			$this->persist();
+			throw $exception;
+		}
 		$table = new PackTable( $this->work_dir . '/packs.table' );
 		try {
 			foreach ( $batch['entries'] as [ $name, $size ] ) {
