@@ -11,6 +11,7 @@ use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Connection\ConnectionTester;
 use BackupsForRestic\Crypto\MasterKey;
+use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
@@ -37,6 +38,7 @@ use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\CurlHttpClient;
+use BackupsForRestic\Tests\Support\MemoryRepository;
 use BackupsForRestic\Tests\Support\RestServer;
 use BackupsForRestic\Tests\Support\ResticCli;
 use BackupsForRestic\Tests\Support\SqlDumpSource;
@@ -195,6 +197,33 @@ final class ResticConformanceTest extends TestCase {
 		$this->cleanup[] = $target = TempDir::create( 'restic-restore' );
 		$cli->must( [ 'restore', $latest->hex(), '--target', $target ] );
 		self::assertSame( TempDir::describe( $site ), TempDir::describe( $target . $site ) );
+	}
+
+	public function test_restic_accepts_a_streamed_prune_rewrite_with_repeated_pack_records(): void {
+		$this->cleanup[] = $scratch = TempDir::create( 'memory-conformance' );
+		$repository      = Repository::initialize( $this->server()->backend( 'memory-rewrite' ), self::PASSWORD, $this->identity(), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		( new MemoryRepository( $repository ) )->build( 500, $scratch );
+		$cli = new ResticCli( $this->server(), 'memory-rewrite', self::PASSWORD );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
+		foreach ( $repository->names( ObjectType::Index ) as $name ) {
+			$document = json_decode( $repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ), true, flags: JSON_THROW_ON_ERROR );
+			$split    = [];
+			foreach ( $document['packs'] as $pack ) {
+				foreach ( $pack['blobs'] as $blob ) {
+					$split[] = [
+						'id'    => $pack['id'],
+						'blobs' => [ $blob ],
+					];
+				}
+			}
+			$repository->save_unpacked( ObjectType::Index, json_encode( [ 'packs' => $split ], JSON_THROW_ON_ERROR ) );
+			$repository->backend()->delete( ObjectType::Index, $name );
+		}
+		$run = PruneRun::start( $repository, $scratch . '/run', $this->identity(), new SystemClock(), new SystemRandom() );
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( 1, $run->result()['packs_deleted'] );
+		self::assertSame( 1, $run->result()['index_files_written'] );
+		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
 	}
 
 	/**

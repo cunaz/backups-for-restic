@@ -135,7 +135,7 @@ final class MaintenanceStepsTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
-	public function test_a_memory_refusal_does_not_fall_back_to_a_check_without_the_cache(): void {
+	public function test_an_index_memory_refusal_before_download_still_allows_the_check_to_release_its_lock(): void {
 		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
 		$repository = Repository::initialize( $this->access()->backend(), self::PASSWORD, new Identity( 'example.com', 'www-data' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
 		$site       = $this->directory . '/site';
@@ -158,7 +158,7 @@ final class MaintenanceStepsTest extends TestCase {
 			$this->run_step( $job, 'checking' );
 			self::fail( 'The memory refusal must stop the check before it reads the snapshot trees.' );
 		} catch ( IndexTooLarge ) {
-			self::assertCount( 2, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'The index phase and cache each read the index once; no uncached fallback may read it again.' );
+			self::assertCount( 0, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'The budget refuses before the first index body is downloaded.' );
 			self::assertCount( 1, $repository->backend()->list( ObjectType::Locks ) );
 			$this->run_step( $job, 'releasing' );
 			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );

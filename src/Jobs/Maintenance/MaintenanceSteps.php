@@ -160,11 +160,11 @@ final class MaintenanceSteps implements StepProvider {
 		$services   = $this->services->common;
 		$repository = $this->repository();
 		$work       = $this->services->work_dir( $job );
-		$index      = $this->index( $repository );
+		$cache      = $services->index_cache( $repository );
 		try {
 			$run      = is_file( $work . '/state.json' )
-				? PruneRun::resume( $repository, $work, $services->identity, $services->clock, $index )
-				: PruneRun::start( $repository, $work, $services->identity, $services->clock, $services->random, $index );
+				? PruneRun::resume( $repository, $work, $services->identity, $services->clock, cache: $cache )
+				: PruneRun::start( $repository, $work, $services->identity, $services->clock, $services->random, cache: $cache );
 			$restarts = $run->result()['restarts'];
 			$done     = $run->advance( $deadline, $services->throttle() );
 		} catch ( AppendOnlyRefused ) {
@@ -470,15 +470,5 @@ final class MaintenanceSteps implements StepProvider {
 		}
 		$repository->limit_memory( $this->services->common->memory_budget() );
 		return $repository;
-	}
-
-	/**
-	 * The current index from the local cache.
-	 *
-	 * @param Repository $repository Repository.
-	 * @return \BackupsForRestic\Format\Index\IndexSet Index.
-	 */
-	private function index( Repository $repository ): \BackupsForRestic\Format\Index\IndexSet {
-		return $this->services->common->index_cache( $repository )->load( $repository );
 	}
 }

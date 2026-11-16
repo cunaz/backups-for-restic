@@ -53,7 +53,9 @@ final class PackTableTest extends TestCase {
 		$table = new PackTable( $file );
 		foreach ( $table->batch( 0, 1024 )['entries'] as $entry ) {
 			self::assertTrue( $entry['unindexed'] );
+			self::assertSame( $expected[ $entry['name'] ], $table->size( $entry['name'] ) );
 		}
+		self::assertNull( $table->size( hash( 'sha256', 'absent' ) ) );
 		$table->close();
 	}
 

@@ -87,16 +87,33 @@ ends the same way.
   million; loading from the cache peaks 4 MB above that and takes 0.5, 0.9 and 1.7 seconds.
   The [repeat measurement](../benchmarks/2026-11-12-index-memory.md) agrees on memory use.
   With a WordPress baseline of 30 to 40 MiB, the estimated capacity under 128 MiB is roughly
-  a million blobs with small packs. Full-job measurements at that count remain open.
+  a million blobs with small packs. The [full-engine measurement](../benchmarks/2026-11-12-job-memory.md)
+  includes valid history and fresh processes; the WordPress matrix records actual capacity
+  separately. Neither the index-only numbers nor the standalone runs establish WordPress capacity.
 - An accumulated index beyond the budget ends the job with a message an administrator can
-  act on. Raw index JSON and the entries of one pack are still decoded before the budget
-  is checked, so a large individual object can exhaust memory before that check.
+  act on. Before an index download, the reserved-memory budget is checked again, and the
+  object's advertised size must leave room for four input copies and 2 MiB of allocation
+  overhead. A zero-byte index is rejected before download; the download is bounded to a
+  positive advertised size. Cache piece lengths must first fit in the remaining file bytes,
+  so a truncated cache is rebuilt instead of producing a persistent capacity refusal.
+  Complete pieces receive the same input check before reading. This prevents the measured
+  failure while opening the next normal index file. An unusually large decoded pack or
+  compressed object still needs separate allocation/decompression bounds; the input check
+  does not establish those bounds.
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.
-- NFR-03 is worded with these numbers. They hold for backups. Prune and check still decode
-  an index file as a whole when they examine or rewrite it, and the sets of tree and pack
-  IDs in their checkpoints cost about 150 bytes per ID; both follow as their own change
-  (plan package 0.9, second part).
+- Prune and check now examine and rewrite index files pack by pack. Per-file summaries are
+  committed only after the whole file validates; repeated pack records retain all their
+  entries. Check validates a damaged-index fallback before adding any of its blobs.
+  Prune loads its cache only under its lock and drops the blob index after marking.
+- Check downloads the pack listing to the same private disk table used by prune and
+  compares it in bounded batches. Duplicate server entries still use their last size.
+  This adds phases and raises the check checkpoint version to 3; an earlier in-progress
+  check is refused and must be cancelled and restarted. Its lock remains releasable through
+  the common checkpoint-owner cleanup.
+- The tree and indexed-pack sets in checkpoints still cost about 150 bytes per ID and
+  their JSON serialization grows with the repository. Moving these sets and traversal
+  state out of memory remains open in package 0.9, along with oversized decoded objects.
 - Pure-PHP sealing of the cache costs about a second per million blobs in every tick. A
   faster cipher for local files is possible later; it would add a second construction to
   review.
