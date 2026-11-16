@@ -84,17 +84,17 @@ final class Staging {
 	}
 
 	/**
-	 * Removes the staging directory of one job, whatever became of the job, unless it is
-	 * still active. The directory leaves the list at once; deleting it may take longer than
-	 * the deadline allows and is then finished by remove_due().
+	 * Removes the staging directory of one job, whatever became of the job, unless it is a
+	 * restore that is still active. The directory leaves the list at once; deleting it may
+	 * take longer than the deadline allows and is then finished by remove_due().
 	 *
 	 * @param string $id       Job ID.
 	 * @param float  $deadline Unix time at which the deletion stops.
 	 * @return bool|null True if the directory is gone, false if a part is left for a later call,
 	 *                   null if nothing is staged for the job.
 	 * @throws InvalidArgument With the code invalid_job_id if the ID is not one of a job.
-	 * @throws JobConflict If the job has not ended, or with the code job_unreadable if its
-	 *                     document cannot be read.
+	 * @throws JobConflict If the job is a restore that has not ended, or with the code
+	 *                     job_unreadable if its document cannot be read.
 	 * @throws StorageFailed If the directory cannot be set aside or deleted.
 	 */
 	public function remove( string $id, float $deadline ): ?bool {
@@ -112,7 +112,9 @@ final class Staging {
 				]
 			);
 		}
-		if ( null !== $job && ! $job->state->is_terminal() ) {
+		// Only a restore stages. An active job of another type has nothing here to wait for,
+		// and the answer for it is the one for a job without staging.
+		if ( null !== $job && JobType::Restore === $job->type && ! $job->state->is_terminal() ) {
 			JobConflict::raise( 'The restore job has not ended.', [ 'job' => $id ] );
 		}
 		$aside = $this->directory . '/' . self::REMOVING . $id;

@@ -309,6 +309,46 @@ final class StagingTest extends TestCase {
 		$this->staging->remove( $job->id, self::NO_DEADLINE );
 	}
 
+	public function test_an_active_job_that_is_not_a_restore_has_no_staging_and_is_no_conflict(): void {
+		$job = $this->job( JobState::Queued, 0, [], JobType::Backup );
+		self::assertNull( $this->staging->remove( $job->id, self::NO_DEADLINE ), 'Nothing is staged for a queued backup, and nobody is told to wait for it.' );
+
+		$job->state = JobState::Running;
+		$this->jobs->save( $job );
+		self::assertNull( $this->staging->remove( $job->id, self::NO_DEADLINE ), 'Nothing is staged for a running backup either.' );
+	}
+
+	public function test_a_directory_with_more_entries_than_one_read_returns_is_removed_completely(): void {
+		// Far more than the names that one read of a directory returns, files and directories mixed.
+		$fill = function ( string $id ): void {
+			$site = $this->restores . '/' . $id . '/files/site';
+			for ( $number = 0; $number < 600; $number++ ) {
+				file_put_contents( $site . '/file-' . $number . '.txt', 'more' );
+			}
+			for ( $number = 0; $number < 300; $number++ ) {
+				mkdir( $site . '/folder-' . $number, 0700 );
+				file_put_contents( $site . '/folder-' . $number . '/inside.txt', 'more' );
+			}
+		};
+
+		$asked = $this->restored( $this->clock->seconds - 60 );
+		$fill( $asked->id );
+		self::assertTrue( $this->staging->remove( $asked->id, self::NO_DEADLINE ) );
+		self::assertSame( [], $this->names(), 'Nothing of a large directory is left when an administrator removes it.' );
+
+		$expired = $this->restored( $this->clock->seconds - 3 * 3600 );
+		$fill( $expired->id );
+		self::assertSame(
+			[
+				'removed' => 1,
+				'pending' => 0,
+				'failed'  => 0,
+			],
+			$this->staging->remove_due( 1, self::NO_DEADLINE )
+		);
+		self::assertSame( [], $this->names(), 'Nothing of a large directory is left when it expires.' );
+	}
+
 	public function test_a_job_document_that_cannot_be_read_keeps_its_staging(): void {
 		$job  = $this->job( JobState::Running );
 		$path = $this->stage( $job->id, false );

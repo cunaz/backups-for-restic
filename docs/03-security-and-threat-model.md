@@ -313,7 +313,13 @@ carries `Cache-Control: no-store`.
   removes symbolic links without following them. Residual risk: until then an exposure of
   the private directory exposes the staged files too, for the configured hours and, where
   WP-Cron does not run, until the next request brings a heartbeat; a tree that the file
-  system refuses to delete stays, unlisted, and is tried again at every heartbeat.
+  system refuses to delete stays, unlisted, and is tried again at every heartbeat. Two
+  states keep staged files past their expiry with no heartbeat to end them. A deactivated
+  plugin has no heartbeat: what is staged stays until the plugin is activated again, whose
+  first heartbeat removes what is due, or uninstalled. A staging directory whose job
+  document this version cannot read, for example after a downgrade, is neither listed nor
+  removed, because nothing proves that its job has ended; it goes with a version that can
+  read the document, or with the uninstall.
   Planned: deletion after a successful apply. Database import files follow the same rules
   when they arrive.
 - Restore staging is owner-only whatever the snapshot recorded: every staged file is `0600`

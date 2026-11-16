@@ -56,6 +56,12 @@ packages must never be offered a tree that is half gone.
   system cron the heartbeat comes with the next request. It is not offered past its expiry
   in any case.
 - Lowering the setting removes older staging at the next heartbeat.
+- Deactivation unschedules the heartbeat and removes no staging, so a deactivated plugin
+  keeps staged plaintext past its expiry until it is activated again or uninstalled. The
+  first heartbeat after the activation removes what is due.
+- A staging directory whose job document this version cannot read is never listed and
+  never removed, for example after a downgrade. Nothing proves that its job has ended; a
+  version that reads the document, or the uninstall, removes it.
 - A directory that the file system refuses to delete stays under its `.removing-` name.
   It is counted in the answer of `GET /restores` and every heartbeat tries again; nothing
   reports it by name yet.
