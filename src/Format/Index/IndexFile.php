@@ -116,11 +116,12 @@ final class IndexFile {
 		}
 		unset( $rest, $packs );
 
-		foreach ( $elements as [ $start, $length ] ) {
-			$text = substr( $json, $start, $length );
-			$pack = GoJson::decode_object( $text, 2 );
-			// The blobs of a pack must be a list in the text as well.
-			if ( ! is_string( $pack['id'] ?? null ) || ! is_array( $pack['blobs'] ?? null ) || null === self::list_of_member( $text, 'blobs' ) ) {
+		foreach ( $elements as [ $start, $length, $blobs_are_a_list ] ) {
+			$pack = GoJson::decode_object( substr( $json, $start, $length ), 2 );
+			// The blobs of a pack must be a list in the text as well. That was noted when the pack
+			// was cut out: its text is neither walked a second time nor kept while the caller
+			// works on the entries.
+			if ( ! is_string( $pack['id'] ?? null ) || ! is_array( $pack['blobs'] ?? null ) || ! $blobs_are_a_list ) {
 				throw new FormatException( 'Index file contains an invalid pack.' );
 			}
 			$entries = [];
@@ -138,7 +139,7 @@ final class IndexFile {
 	 * decided here about whether the text is valid.
 	 *
 	 * @param string $json JSON.
-	 * @return array{string, list<array{int, int}>|null} The text with "true" in the place of each element, and start and length of each element; null instead if "packs" is not a list.
+	 * @return array{string, list<array{int, int, bool}>|null} The text with "true" in the place of each element, and for each element its start, its length and whether its "blobs" member is a list; null instead if "packs" is not a list.
 	 */
 	private static function split( string $json ): array {
 		$list = self::list_of_member( $json, 'packs' );
@@ -156,22 +157,39 @@ final class IndexFile {
 	}
 
 	/**
-	 * Finds the list that a member of the outermost object holds. The decoder cannot say
-	 * whether a value was a list or an object once it is an array, so this is read from the
-	 * text, in the same way and with the same reservation as in split().
+	 * Finds the list that a member of the outermost object holds.
 	 *
 	 * @param string $json JSON.
 	 * @param string $key  Name of the member.
 	 * @return int|null Position of the list's opening bracket; null if there is no such member or its value is not a list.
 	 */
 	private static function list_of_member( string $json, string $key ): ?int {
-		$list     = null;
 		$position = strspn( $json, self::SPACE );
 		if ( '{' !== ( $json[ $position ] ?? '' ) ) {
 			return null;
 		}
-		// The members of the outermost object: a key, or a value that is skipped as a whole.
-		for ( ++$position; ; ) {
+		return self::list_in_object( $json, $position, $key )[1];
+	}
+
+	/**
+	 * Walks the members of an object to its end and finds the list that one of them holds. The
+	 * decoder cannot say whether a value was a list or an object once it is an array, so this
+	 * is read from the text, in the same way and with the same reservation as in split().
+	 *
+	 * With a name that comes more than once, the last member decides, as it does for the
+	 * decoder. That is more lenient than restic, which refuses the file if any member with the
+	 * name holds an object or a number, also when a later one holds a list. No writer of the
+	 * format repeats a name, and the reference decoder of the tests cannot see a repeated one.
+	 *
+	 * @param string $json  JSON.
+	 * @param int    $start Position of the object's opening bracket.
+	 * @param string $key   Name of the member.
+	 * @return array{int|null, int|null} Position of the bracket that closes the object, or null if there is none; and position of the list's opening bracket, or null if there is no such member or its value is not a list.
+	 */
+	private static function list_in_object( string $json, int $start, string $key ): array {
+		$list = null;
+		// The members of the object: a key, or a value that is skipped as a whole.
+		for ( $position = $start + 1; ; ) {
 			$position += strcspn( $json, '"{}[]', $position );
 			$char      = $json[ $position ] ?? '';
 			$end       = match ( $char ) {
@@ -180,13 +198,13 @@ final class IndexFile {
 				default  => null,
 			};
 			if ( null === $end ) {
-				return $list; // The object ends here, or something never closes: the decoder says which.
+				// The object ends here, or something never closes: the decoder says which.
+				return [ '}' === $char || ']' === $char ? $position : null, $list ];
 			}
 			$colon = $end + 1 + strspn( $json, self::SPACE, $end + 1 );
 			if ( '"' === $char && ':' === ( $json[ $colon ] ?? '' ) ) {
 				$value = $colon + 1 + strspn( $json, self::SPACE, $colon + 1 );
 				if ( $key === json_decode( substr( $json, $position, $end + 1 - $position ) ) ) {
-					// A second member with this key replaces the first one, as for the decoder.
 					$list = '[' === ( $json[ $value ] ?? '' ) ? $value : null;
 				}
 				$position = $value;
@@ -197,27 +215,30 @@ final class IndexFile {
 	}
 
 	/**
-	 * Finds the objects that are direct elements of a list.
+	 * Finds the objects that are direct elements of a list. The one walk that finds where an
+	 * object ends also notes whether its "blobs" member is a list, so that the text of a pack
+	 * is gone through once.
 	 *
 	 * @param string $json  JSON.
 	 * @param int    $start Position of the list's opening bracket.
-	 * @return list<array{int, int}> Start and length of each object.
+	 * @return list<array{int, int, bool}> Start and length of each object, and whether its "blobs" member is a list.
 	 */
 	private static function objects_of_list( string $json, int $start ): array {
 		$objects = [];
 		for ( $position = $start + 1; ; $position = $end + 1 ) {
-			$position += strcspn( $json, '"{}[]', $position );
-			$char      = $json[ $position ] ?? '';
-			$end       = match ( $char ) {
-				'"'      => self::string_end( $json, $position ),
-				'{', '[' => self::container_end( $json, $position ),
-				default  => null,
+			$position       += strcspn( $json, '"{}[]', $position );
+			$char            = $json[ $position ] ?? '';
+			[ $end, $blobs ] = match ( $char ) {
+				'"'     => [ self::string_end( $json, $position ), null ],
+				'{'     => self::list_in_object( $json, $position, 'blobs' ),
+				'['     => [ self::container_end( $json, $position ), null ],
+				default => [ null, null ],
 			};
 			if ( null === $end ) {
 				return $objects; // The list ends here, or something never closes.
 			}
 			if ( '{' === $char ) {
-				$objects[] = [ $position, $end + 1 - $position ];
+				$objects[] = [ $position, $end + 1 - $position, null !== $blobs ];
 			}
 		}
 	}

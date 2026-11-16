@@ -147,7 +147,8 @@ All notable changes are documented here. The format follows
   these trees as damaged before a restore can use their entries.
 - An index file that holds an object where the restic format has the list of packs or the
   list of a pack's blobs is now refused, as restic refuses it. An empty object was read as
-  an empty list before, and an object of blobs as a list of them.
+  an empty list before, and an object of blobs as a list of them. Where a member name is
+  repeated, the last member decides, which is more lenient than restic.
 - Local backup working-file failures now stop the job with an environment error. Refused
   creation, incomplete writes and failed truncation cannot advance a checkpoint, and an
   unreadable saved directory cannot silently become empty in a snapshot.

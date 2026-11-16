@@ -55,6 +55,11 @@ final class IndexFilePacksTest extends TestCase {
 		yield 'a second list of blobs replaces the first' => [ '{"packs":[{"id":"' . Id::of( 'p' )->hex() . '","blobs":[' . self::blob( 'x' ) . '],"blobs":[]}]}', 1 ];
 		yield 'the blobs key inside another member is not the list of blobs' => [ '{"packs":[{"id":"' . Id::of( 'p' )->hex() . '","other":{"blobs":{}},"blobs":[' . self::blob( 'x' ) . '],"later":{"blobs":{}}}]}', 1 ];
 		yield 'a string value that reads like the blobs key' => [ '{"packs":[{"id":"' . Id::of( 'p' )->hex() . '","note":"blobs","blobs" : [ ' . self::blob( 'x' ) . ' ]}]}', 1 ];
+		// With a repeated name the last member decides for both decoders. restic refuses these
+		// three, because it keeps the type error of the first member; no writer repeats a name.
+		yield 'an object of packs that a second member replaces by a list' => [ '{"packs":{},"packs":[' . $a . ']}', 1 ];
+		yield 'a number of packs that a second member replaces by a list' => [ '{"packs":5,"packs":[]}', 0 ];
+		yield 'an object of blobs that a second member replaces by a list' => [ '{"packs":[{"id":"' . Id::of( 'p' )->hex() . '","blobs":{},"blobs":[' . self::blob( 'x' ) . ']}]}', 1 ];
 		yield 'members whose names begin with a NUL character' => [ '{"\u0000packs":{},"packs":[{"\u0000":"\u0000","id":"' . Id::of( 'p' )->hex() . '","blobs":[],"note":"\"\u0000"}]}', 1 ];
 	}
 

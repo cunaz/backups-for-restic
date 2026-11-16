@@ -436,7 +436,9 @@ checkpoint as unindexed; the index file follows in the same or a later tick.
 `index/<id>` is encrypted JSON `{"packs":[{"id":hex,"blobs":[{"id":hex,"type":"data"|"tree","offset":n,"length":n}]}]}`.
 `packs` and `blobs` must be lists in the text of the file: like restic, the decoder refuses
 an object in their place, also an empty one and one whose members are named `"0"`, `"1"` and
-so on, which PHP decodes into the same array as a list.
+so on, which PHP decodes into the same array as a list. Where a name comes more than once,
+only the last member with it is judged: restic also refuses a file in which an earlier one
+holds an object, the decoder does not. No writer of the format repeats a name.
 A backup does not write an index file in every tick. At the end of a tick it writes one when
 50 000 blobs of uploaded packs wait for it or when 600 seconds have passed since the last
 index file, and it writes the rest when it finishes (`BackupRun::INDEX_INTERVAL_SECONDS`,
