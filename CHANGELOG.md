@@ -23,6 +23,16 @@ All notable changes are documented here. The format follows
   with replacement characters, and every entry carries a token that names its path byte
   for byte. `wp backups-for-restic ls <snapshot> [<path>]` prints a directory and quotes
   names that could control the terminal.
+- A snapshot browser in the Snapshots tab: this site's snapshots or the whole repository,
+  a snapshot's details and the site it holds, and its directories one at a time with
+  further pages and a path back up. Links are shown with their target and are not
+  followed, and a name that cannot be shown exactly is marked. Files and directories can
+  be ticked; the selection is listed and kept for the restore that follows in a later
+  version. A locked repository gets its own message and a button to try again.
+- The list of this site's snapshots says for each one whether the next cleanup keeps or
+  removes it (`retention` in `GET /snapshots`). The preview uses the policy and the
+  grouping of the forget job, removes nothing, and is renewed when a retention setting is
+  saved.
 - Restore engine foundation: several selected paths retain their original layout in empty
   private staging, with resumable planning and disk-space checks before writing. Reads hold
   a shared repository lock, grouped downloads authenticate every blob, and links/special

@@ -45,6 +45,15 @@ function repositoryServer() {
 }
 
 /**
+ * The directory of the test site as a snapshot stores it: the absolute path, without links.
+ *
+ * @return {string} Path.
+ */
+function siteRoot() {
+	return fs.realpathSync( path.join( ROOT, '.tools/site' ) );
+}
+
+/**
  * Writes a file of random bytes into the uploads directory, so that the next backup has that
  * much to chunk, encrypt and upload.
  *
@@ -84,4 +93,4 @@ function noLoopback( active ) {
 	}
 }
 
-module.exports = { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload, noLoopback };
+module.exports = { ADMIN, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback };

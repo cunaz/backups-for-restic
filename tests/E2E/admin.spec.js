@@ -1,11 +1,11 @@
 /**
  * The admin page in a browser, on a WordPress that was just installed: the setup wizard with
- * its first backup, then the dashboard, the snapshots, the settings and the recovery kit, and
- * a backup that is cancelled. What an administrator sees and clicks, nothing else: no request
+ * its first backup, then the dashboard, the snapshots with the browser of their files, the
+ * settings and the recovery kit, and a backup that is cancelled. What an administrator sees and clicks, nothing else: no request
  * is sent by the tests themselves.
  */
 const { test, expect } = require( '@playwright/test' );
-const { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload, noLoopback } = require( './site' );
+const { ADMIN, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback } = require( './site' );
 
 test.describe.configure( { mode: 'serial' } );
 
@@ -122,6 +122,70 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	const rows = page.locator( 'table tbody tr' );
 	await expect( rows ).toHaveCount( 1 );
 	await expect( rows.first().locator( 'code' ) ).toHaveText( snapshot );
+} );
+
+test( 'the snapshot browser shows the site of a snapshot and selects a file in it', async ( { page } ) => {
+	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
+	// The cleanup after the first backup holds the repository for a moment; an administrator
+	// would open the tab again.
+	await expect( async () => {
+		await openBackups( page, 'snapshots' );
+		await expect( rows ).toHaveCount( 1, { timeout: 20 * 1000 } );
+	} ).toPass( { timeout: 3 * 60 * 1000 } );
+
+	// This site's snapshots come first, each with what the next cleanup does with it.
+	await expect( page.getByLabel( 'This site' ) ).toBeChecked();
+	await expect( page.getByRole( 'columnheader', { name: 'Next cleanup' } ) ).toBeVisible();
+	await expect( rows.first().locator( '.bfr-retention' ) ).toHaveText( 'Will be kept' );
+
+	// The whole repository holds the same snapshot here; no cleanup of the site decides about that list.
+	await page.getByLabel( 'Whole repository' ).check();
+	await expect( page.getByText( 'These are all snapshots of the repository' ) ).toBeVisible();
+	await expect( rows ).toHaveCount( 1 );
+	await expect( page.getByRole( 'columnheader', { name: 'Next cleanup' } ) ).toHaveCount( 0 );
+	await page.getByLabel( 'This site' ).check();
+	await expect( page.getByRole( 'columnheader', { name: 'Next cleanup' } ) ).toBeVisible();
+
+	// The newest snapshot, with the site that it holds.
+	const id = await rows.first().locator( 'code' ).textContent();
+	await rows.first().getByRole( 'button', { name: 'Open snapshot ' + id } ).click();
+	await expect( page.getByRole( 'heading', { name: 'Snapshot ' + id, exact: true } ) ).toBeVisible();
+	const manifest = page.locator( '.bfr-manifest' );
+	await expect( manifest ).toBeVisible( { timeout: 120 * 1000 } );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Site address' } ) ).toContainText( 'http://127.0.0.1:8890' );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'WordPress version' } ) ).toContainText( /\d+\.\d+/ );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Table prefix' } ) ).toContainText( /\w+_/ );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'WordPress directory' } ) ).toContainText( siteRoot() );
+
+	// From the top directory down to the one of WordPress, one directory per request. The
+	// entries are searched in the table only: the path above it names the same directories.
+	const entries = page.locator( '.bfr-entries' );
+	const trail = page.locator( '.bfr-trail' );
+	for ( const name of siteRoot().split( '/' ).filter( Boolean ) ) {
+		await entries.getByRole( 'button', { name, exact: true } ).click();
+		await expect( trail.locator( '[aria-current]' ) ).toHaveText( name, { timeout: 120 * 1000 } );
+	}
+
+	// A file is ticked and named in the selection, which stays while another directory is open.
+	const index = page.getByLabel( 'Select index.php', { exact: true } );
+	await index.check();
+	const selection = page.locator( '.bfr-selection' );
+	await expect( selection ).toContainText( '1 path selected:' );
+	await expect( selection.locator( 'code' ) ).toHaveText( siteRoot() + '/index.php' );
+	await entries.getByRole( 'button', { name: 'wp-content', exact: true } ).click();
+	await expect( trail.locator( '[aria-current]' ) ).toHaveText( 'wp-content' );
+	await expect( page.getByLabel( 'Select uploads', { exact: true } ) ).toBeVisible();
+	await expect( selection ).toContainText( '1 path selected:' );
+
+	// Back up by the path: the box is still ticked, until the selection is cleared.
+	await trail.getByRole( 'button' ).last().click();
+	await expect( index ).toBeChecked();
+	await page.getByRole( 'button', { name: 'Clear selection' } ).click();
+	await expect( index ).not.toBeChecked();
+	await expect( selection ).toContainText( 'Nothing is selected.' );
+
+	await page.getByRole( 'button', { name: 'Back to the snapshots' } ).click();
+	await expect( rows ).toHaveCount( 1 );
 } );
 
 test( 'settings are saved, refused when invalid, and the recovery kit needs the WordPress password', async ( { page } ) => {

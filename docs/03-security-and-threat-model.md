@@ -342,6 +342,11 @@ sequences to a terminal ([ADR 0039](adr/0039-snapshot-routes.md)). The answers h
 names and the site's manifest, no secret; like every route they need the capability. A
 read creates a shared lock in the repository and removes it, which is its only write there;
 on the site it writes encrypted trees and the index into the cache of the private directory.
+The retention preview of the snapshot list decides with the policy of the forget job and
+deletes nothing. The Snapshots tab of the admin page inserts every name, tag, link target
+and manifest field as a text node, shows a link only as text, and asks for a directory by
+the token the server issued. The paths ticked for a restore are kept in the page alone;
+what a restore accepts is checked on the server when one is started.
 
 ## 10. Backup integrity and ransomware resistance
 

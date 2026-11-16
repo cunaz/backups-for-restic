@@ -52,7 +52,8 @@ used for a connection test is not in it until that server is saved.
 
 ## Scenario A — the site is damaged, WordPress and the plugin still work
 
-The plugin lists the snapshots, under **Backups → Snapshots** and with WP-CLI:
+The plugin lists the snapshots and shows the files of each one, under
+**Backups → Snapshots** and with WP-CLI:
 
 ```bash
 wp backups-for-restic snapshots

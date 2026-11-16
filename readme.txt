@@ -67,7 +67,7 @@ Yes. Every backup is a normal restic repository. The recovery kit lists the comm
 
 = Can I restore from the WordPress admin area? =
 
-Not yet. This version lists your snapshots under **Backups > Snapshots**; restoring is done with the restic command line and the recovery kit, on any computer. Restore from the admin area is planned for a later version.
+Not yet. This version lists your snapshots under **Backups > Snapshots** and lets you look into their directories; restoring is done with the restic command line and the recovery kit, on any computer. Restore from the admin area is planned for a later version.
 
 = Why does this plugin contain encryption code? =
 

@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Restore;
 
+use BackupsForRestic\Engine\Forget\Forget;
+use BackupsForRestic\Engine\Forget\RetentionPolicy;
 use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Engine\Snapshot\Reader;
 use BackupsForRestic\Exception\FormatException;
@@ -22,6 +24,7 @@ use BackupsForRestic\Format\Tree\Node;
 use BackupsForRestic\Format\Tree\NodeType;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Support\Bytes;
+use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Rfc3339;
 
@@ -32,7 +35,8 @@ defined( 'ABSPATH' ) || exit;
  * and the command line (docs/02-architecture.md §13.2). Names in a repository are raw bytes
  * and JSON takes only UTF-8, so every entry carries a text to show and a token that names its
  * path without loss (ADR 0039). A directory is answered in pages, because a repository may
- * hold one with more entries than a response should carry.
+ * hold one with more entries than a response should carry. The list of this site's snapshots
+ * also says for each one what the next forget would do with it; that preview only reads.
  *
  * Requests are refused with an InvalidArgument whose context names a code of this class;
  * failure() turns any error of a read into the code and the HTTP status of the answer.
@@ -43,6 +47,12 @@ final class SnapshotBrowser {
 
 	public const string SCOPE_SITE       = 'site';
 	public const string SCOPE_REPOSITORY = 'repository';
+
+	/** The next forget of this site keeps the snapshot. */
+	public const string RETENTION_KEEP = 'keep';
+
+	/** The next forget of this site removes the snapshot. */
+	public const string RETENTION_REMOVE = 'remove';
 
 	/** Entries of a directory in one answer unless the request names a limit. */
 	public const int DEFAULT_LIMIT = 200;
@@ -71,30 +81,39 @@ final class SnapshotBrowser {
 	/**
 	 * Creates the browser.
 	 *
-	 * @param Reader       $reader    Reader of the open repository.
-	 * @param string       $hostname  Host name of this site's snapshots.
-	 * @param list<string> $site_tags Tags that this site's snapshots carry, as the retention selects them.
+	 * @param Reader               $reader    Reader of the open repository.
+	 * @param string               $hostname  Host name of this site's snapshots.
+	 * @param list<string>         $site_tags Tags that this site's snapshots carry, as the retention selects them.
+	 * @param RetentionPolicy|null $policy    Policy of the next forget of this site; null if it would remove nothing.
+	 * @param Clock|null           $clock     Time that the policy counts back from; null for the system clock.
 	 */
 	public function __construct(
 		private readonly Reader $reader,
 		private readonly string $hostname,
-		private readonly array $site_tags
+		private readonly array $site_tags,
+		private readonly ?RetentionPolicy $policy = null,
+		private readonly ?Clock $clock = null
 	) {
 	}
 
 	/**
-	 * Lists snapshots, newest first.
+	 * Lists snapshots, newest first. In the site scope every snapshot says under retention
+	 * whether the next forget keeps or removes it. The field is null where no forget of this
+	 * site decides: in the repository scope, which also lists snapshots that the retention
+	 * never touches, and while the site has no policy to apply.
 	 *
 	 * @param string $scope site for the snapshots of this site, repository for all of them.
-	 * @return list<array<string, mixed>> Snapshots with the fields of summary().
+	 * @return list<array<string, mixed>> Snapshots with the fields of summary() and retention.
 	 * @throws InvalidArgument If the scope is neither of the two.
 	 */
 	public function snapshots( string $scope = self::SCOPE_SITE ): array {
 		self::scope( $scope );
-		$found = self::SCOPE_SITE === $scope ? $this->reader->snapshots( $this->hostname, $this->site_tags ) : $this->reader->snapshots();
-		$list  = [];
+		$site      = self::SCOPE_SITE === $scope;
+		$found     = $site ? $this->reader->snapshots( $this->hostname, $this->site_tags ) : $this->reader->snapshots();
+		$retention = $site ? $this->retention( $found ) : [];
+		$list      = [];
 		foreach ( $found as $id => $snapshot ) {
-			$list[] = self::summary( $id, $snapshot );
+			$list[] = self::summary( $id, $snapshot ) + [ 'retention' => $retention[ $id ] ?? null ];
 		}
 		return $list;
 	}
@@ -351,6 +370,33 @@ final class SnapshotBrowser {
 			InvalidArgument::raise( 'A snapshot ID has 64 hex digits.', [ 'code' => 'invalid_snapshot_id' ] );
 		}
 		return Id::from_hex( $id );
+	}
+
+	/**
+	 * What the next forget of this site would do with each of its snapshots. The decision is
+	 * the engine's own, over the group that ForgetRun forms: the snapshots with this site's
+	 * host name and the required tags are one group, whatever other tags they carry. Nothing
+	 * is written here, so a snapshot that the answer marks is still in the repository.
+	 *
+	 * @param array<string, Snapshot> $snapshots This site's snapshots by hex ID.
+	 * @return array<string, string> RETENTION_KEEP or RETENTION_REMOVE by hex ID; empty without a policy.
+	 */
+	private function retention( array $snapshots ): array {
+		// An empty policy keeps nothing and is never applied, so it previews nothing either.
+		if ( null === $this->policy || $this->policy->is_empty() ) {
+			return [];
+		}
+		$decisions = [];
+		foreach ( Forget::group( $snapshots, true, false, false ) as $group ) {
+			$decision = Forget::apply( $group, $this->policy, $this->clock?->now() );
+			foreach ( $decision['keep'] as $id ) {
+				$decisions[ $id ] = self::RETENTION_KEEP;
+			}
+			foreach ( $decision['remove'] as $id ) {
+				$decisions[ $id ] = self::RETENTION_REMOVE;
+			}
+		}
+		return $decisions;
 	}
 
 	/**
