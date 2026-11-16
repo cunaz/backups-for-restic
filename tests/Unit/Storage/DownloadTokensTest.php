@@ -78,6 +78,18 @@ final class DownloadTokensTest extends TestCase {
 		self::assertSame( [], $this->stored(), 'An expired token leaves the store when a token is presented.' );
 	}
 
+	public function test_a_token_survives_a_clock_that_is_set_back_a_little(): void {
+		$tokens = $this->tokens();
+		$token  = $tokens->issue( 'zip' );
+
+		$this->clock->advance( -60 );
+		self::assertFalse( $tokens->redeem( str_repeat( 'A', 43 ), 'zip' ) );
+		self::assertCount( 1, $this->stored(), 'A token that is not expired stays in the store.' );
+		$this->clock->advance( 60 );
+
+		self::assertTrue( $tokens->redeem( $token, 'zip' ) );
+	}
+
 	public function test_expired_tokens_leave_the_store_when_a_token_is_issued(): void {
 		$tokens = $this->tokens();
 		$tokens->issue( 'first' );

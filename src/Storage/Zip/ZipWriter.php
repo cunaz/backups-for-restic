@@ -25,14 +25,19 @@ defined( 'ABSPATH' ) || exit;
  * later request needs is in files beside the archive, named after it:
  *
  * - "<archive>.part" is the archive while it is written. The archive gets its own name only
- *   when its end record is written, so a file with that name is always complete.
+ *   when its end record is written, so a file with that name is always complete. A file
+ *   with that name and no checkpoint beside it is taken for the finished archive whatever
+ *   it holds: the caller gives every build a name of its own or removes an earlier archive
+ *   before it builds another one under the same name.
  * - "<archive>.entries" collects the records of the central directory, which stands at the
  *   end of an archive, so that they need not be kept in memory.
  * - "<archive>.state" is the checkpoint: how many bytes of the two files count, the last
  *   entry that is finished, and for a file that is being copied its place and the CRC-32 of
  *   what is copied. It is replaced atomically, at least once a second and at the end of
  *   every call. Bytes beyond the checkpoint are cut off when the work goes on, so a request
- *   that was killed at any point loses at most the work since the last checkpoint.
+ *   that was killed at any point loses at most the work since the last checkpoint. A
+ *   checkpoint whose working files are missing or shorter than it counts, as a removal cut
+ *   short or a crash of the machine leaves them, counts as none.
  *
  * The tree is walked depth first with the names of each directory in byte order, which makes
  * the archive the same however the calls are cut. A directory gets an entry of its own, so
@@ -152,12 +157,14 @@ final class ZipWriter {
 	}
 
 	/**
-	 * Removes the unfinished archive and its working files. A complete archive stays.
+	 * Removes the unfinished archive and its working files. A complete archive stays. The
+	 * checkpoint goes first, so that a request killed here leaves no checkpoint without its
+	 * files.
 	 *
 	 * @throws StorageFailed If a file cannot be removed.
 	 */
 	public function discard(): void {
-		foreach ( [ '.part', '.entries', '.state' ] as $suffix ) {
+		foreach ( [ '.state', '.part', '.entries' ] as $suffix ) {
 			self::remove( $this->target . $suffix );
 		}
 	}
@@ -177,6 +184,9 @@ final class ZipWriter {
 		}
 		$this->check_places();
 		$this->state = $this->read_state() ?? $this->begin();
+		if ( ! $this->backed() ) {
+			$this->state = $this->begin();
+		}
 		if ( 'complete' === $this->state['phase'] ) {
 			return $this->publish();
 		}
@@ -539,6 +549,35 @@ final class ZipWriter {
 		self::remove( $this->target . '.entries' );
 		self::remove( $this->target . '.state' );
 		return self::exists( $this->target );
+	}
+
+	/**
+	 * Tells whether the working files hold what the checkpoint counts. They do not after a
+	 * removal that was cut short, or after a crash of the machine that kept the checkpoint
+	 * and lost bytes written before it.
+	 *
+	 * @return bool True if the work can go on from the checkpoint.
+	 */
+	private function backed(): bool {
+		$archive = self::size( $this->target . '.part' );
+		if ( 'complete' === $this->state['phase'] ) {
+			// Without the working file the archive has its name already, or there is none.
+			return null === $archive ? self::exists( $this->target ) : $archive === $this->state['offset'];
+		}
+		$spool = self::size( $this->target . '.entries' );
+		return null !== $archive && null !== $spool && $archive >= $this->state['offset'] && $spool >= $this->state['central'];
+	}
+
+	/**
+	 * Returns the size of a working file.
+	 *
+	 * @param string $path Path.
+	 * @return int|null Bytes; null if there is no regular file of that name.
+	 */
+	private static function size( string $path ): ?int {
+		clearstatcache( true, $path );
+		$size = is_file( $path ) && ! is_link( $path ) ? filesize( $path ) : false;
+		return false === $size ? null : $size;
 	}
 
 	/**

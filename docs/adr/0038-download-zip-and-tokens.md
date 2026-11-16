@@ -27,10 +27,18 @@ follow with the rest of package 2.4.
   CRC-32 so far. It is written at least once a second and at the end of every call; bytes
   beyond it are cut off when work resumes. A request killed at any point loses the work
   since the last checkpoint and nothing else. A checkpoint that cannot be read or
-  contradicts itself counts as none, and the archive is started again.
+  contradicts itself counts as none, and the archive is started again. So does a checkpoint
+  whose working files are missing or shorter than it counts, which a removal cut short or a
+  crash of the machine can leave: nothing is synced to the disk, so after a crash the small
+  checkpoint may be there without the last bytes it counts. A finished archive gets its
+  name only if it has the size the checkpoint names. Discarding removes the checkpoint
+  first, so a request killed there leaves files that the next start clears.
 - The archive gets its name by a rename after its end record is written. A file with the
   name of the archive is therefore always complete, and an incomplete one is recognised by
-  its name.
+  its name. The writer takes a file with that name and no checkpoint beside it for the
+  finished archive and does not look at the tree again. The job step therefore gives every
+  build a name of its own, or removes the earlier archive before it builds another one
+  under the same name.
 - The local header of a file is written with an empty CRC-32 field, the content is copied
   once, and the field is filled in afterwards; that write is repeated harmlessly after a
   kill. The checksum of a file copied over several requests is kept as a number and joined
@@ -84,8 +92,15 @@ follow with the rest of package 2.4.
 ## Consequences
 - A download needs no PHP extension. The archive is as large as the files in it, and it
   occupies that space beside staging until it expires with it.
-- A tree with one name that cannot be stored yields no archive. The job step has to report
-  the name, which the exception carries percent-encoded in its context.
+- A tree with one name that cannot be stored yields no archive. Staging on a server that
+  is not Windows keeps the bytes of a name as the snapshot has them, so a staged tree can
+  hold such a name: one in Latin-1, one with a backslash, or one that starts like a drive
+  letter. The writer refuses it when the walk reaches it, which may be after several
+  requests of copying. The job step has to end the build then and report the name, which
+  the exception carries percent-encoded in its context.
+- The token of a download stays valid if the clock of the server is set back by up to five
+  minutes after it was issued. A larger step removes the tokens issued before it, and the
+  administrator asks for the download again.
 - The token store lives on the file system of one web server. Where several servers share
   a file system without a working `flock()`, a token could be redeemed twice, which is the
   limit the other locks of the plugin have.

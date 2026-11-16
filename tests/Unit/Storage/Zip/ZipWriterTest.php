@@ -171,6 +171,80 @@ final class ZipWriterTest extends TestCase {
 		self::assertFileEquals( $whole, $again );
 	}
 
+	public function test_a_checkpoint_without_its_working_files_starts_the_archive_again(): void {
+		$this->fixture();
+		$whole = $this->base . '/out/whole.zip';
+		$again = $this->base . '/out/again.zip';
+		self::assertTrue( $this->writer( $whole )->advance( microtime( true ) + 60 ) );
+
+		$losses = [
+			static fn () => unlink( $again . '.part' ),
+			static fn () => unlink( $again . '.entries' ),
+			static fn () => file_put_contents( $again . '.part', 'short' ),
+			static fn () => file_put_contents( $again . '.entries', '' ),
+		];
+		foreach ( $losses as $lose ) {
+			for ( $call = 0; $call < 5; $call++ ) {
+				self::assertFalse( $this->writer( $again )->advance( 0.0 ) );
+			}
+			self::assertGreaterThan( 0, $this->writer( $again )->progress()['entries'] );
+			$lose();
+			self::assertFalse( $this->writer( $again )->advance( 0.0 ) );
+			self::assertSame( 1, $this->writer( $again )->progress()['entries'], 'The work starts with the first entry again.' );
+		}
+		self::assertTrue( $this->writer( $again )->advance( microtime( true ) + 60 ) );
+
+		self::assertFileEquals( $whole, $again );
+	}
+
+	public function test_a_finished_checkpoint_gives_only_an_archive_of_its_size_the_name(): void {
+		$this->fixture();
+		$whole = $this->base . '/out/whole.zip';
+		$again = $this->base . '/out/again.zip';
+		self::assertTrue( $this->writer( $whole )->advance( microtime( true ) + 60 ) );
+		$finished = '{"version":1,"phase":"complete","offset":' . filesize( $whole ) . ',"central":0,"entries":0,"cursor":"","file":null,"directory":0,"copied":0}';
+
+		// What a crash of the machine leaves: the checkpoint, and an archive without its end.
+		file_put_contents( $again . '.part', substr( (string) file_get_contents( $whole ), 0, -30 ) );
+		file_put_contents( $again . '.entries', '' );
+		file_put_contents( $again . '.state', $finished );
+		self::assertFalse( $this->writer( $again )->advance( 0.0 ) );
+		self::assertFileDoesNotExist( $again, 'A shorter file is not published.' );
+
+		// A finished checkpoint with no archive at all.
+		unlink( $again . '.part' );
+		file_put_contents( $again . '.state', $finished );
+		self::assertFalse( $this->writer( $again )->advance( 0.0 ) );
+		self::assertFileExists( $again . '.part' );
+
+		// A request killed after the rename has only the working files left to remove.
+		copy( $whole, $again . '.part' );
+		file_put_contents( $again . '.state', $finished );
+		self::assertTrue( $this->writer( $again )->advance( 0.0 ) );
+		file_put_contents( $again . '.state', $finished );
+		self::assertFalse( $this->writer( $again )->is_complete() );
+		self::assertTrue( $this->writer( $again )->advance( 0.0 ) );
+
+		self::assertFileEquals( $whole, $again );
+		self::assertSame( [ 'again.zip', 'whole.zip' ], array_values( array_diff( (array) scandir( $this->base . '/out' ), [ '.', '..' ] ) ) );
+	}
+
+	public function test_discarding_removes_the_checkpoint_before_the_files_it_names(): void {
+		$this->fixture();
+		$archive = $this->base . '/out/files.zip';
+		self::assertFalse( $this->writer( $archive )->advance( 0.0 ) );
+		// The removal stops at the working file, as a killed request would.
+		unlink( $archive . '.part' );
+		mkdir( $archive . '.part', 0700 );
+
+		try {
+			@$this->writer( $archive )->discard();
+			self::fail( 'A working file that cannot be removed must be reported.' );
+		} catch ( StorageFailed ) {
+			self::assertFileDoesNotExist( $archive . '.state' );
+		}
+	}
+
 	public function test_zip64_records_are_written_when_a_limit_is_reached_and_not_before(): void {
 		$this->fixture();
 		$plain = $this->base . '/out/plain.zip';

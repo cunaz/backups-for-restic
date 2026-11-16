@@ -42,6 +42,13 @@ final class DownloadTokens {
 	public const int LIFETIME = 3600;
 
 	/**
+	 * Seconds by which the clock of the server may have been set back since a token was
+	 * issued. A token that expires later than that after a full lifetime is not one of this
+	 * class.
+	 */
+	private const int CLOCK_TOLERANCE = 300;
+
+	/**
 	 * Random bytes of a token.
 	 */
 	private const int TOKEN_BYTES = 32;
@@ -171,7 +178,7 @@ final class DownloadTokens {
 			$hash    = is_array( $record ) ? ( $record['hash'] ?? null ) : null;
 			$subject = is_array( $record ) ? ( $record['subject'] ?? null ) : null;
 			$expires = is_array( $record ) ? ( $record['expires'] ?? null ) : null;
-			if ( self::is_hash( $hash ) && self::is_hash( $subject ) && is_int( $expires ) && $expires > $now && $expires <= $now + self::LIFETIME && count( $records ) < $this->limit ) {
+			if ( self::is_hash( $hash ) && self::is_hash( $subject ) && is_int( $expires ) && $expires > $now && $expires <= $now + self::LIFETIME + self::CLOCK_TOLERANCE && count( $records ) < $this->limit ) {
 				$records[] = [
 					'hash'    => $hash,
 					'subject' => $subject,
