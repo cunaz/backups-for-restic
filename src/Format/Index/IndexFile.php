@@ -104,7 +104,10 @@ final class IndexFile {
 	public static function packs( string $json ): \Generator {
 		[ $rest, $elements ] = self::split( $json );
 		$packs               = GoJson::decode_object( $rest )['packs'] ?? null;
-		if ( ! is_array( $packs ) ) {
+		// restic refuses an object where it expects a list, whatever its members are. Decoded,
+		// an object without members or with the keys "0", "1" and so on is the same array as a
+		// list, so it is the text that says which of the two the file holds.
+		if ( ! is_array( $packs ) || null === $elements ) {
 			throw new FormatException( 'Index file has no pack list.' );
 		}
 		// Every element of the list must be one of the objects that were cut out.
@@ -114,8 +117,10 @@ final class IndexFile {
 		unset( $rest, $packs );
 
 		foreach ( $elements as [ $start, $length ] ) {
-			$pack = GoJson::decode_object( substr( $json, $start, $length ), 2 );
-			if ( ! is_string( $pack['id'] ?? null ) || ! is_array( $pack['blobs'] ?? null ) ) {
+			$text = substr( $json, $start, $length );
+			$pack = GoJson::decode_object( $text, 2 );
+			// The blobs of a pack must be a list in the text as well.
+			if ( ! is_string( $pack['id'] ?? null ) || ! is_array( $pack['blobs'] ?? null ) || null === self::list_of_member( $text, 'blobs' ) ) {
 				throw new FormatException( 'Index file contains an invalid pack.' );
 			}
 			$entries = [];
@@ -133,45 +138,62 @@ final class IndexFile {
 	 * decided here about whether the text is valid.
 	 *
 	 * @param string $json JSON.
-	 * @return array{string, list<array{int, int}>} The text with "true" in the place of each element, and start and length of each element.
+	 * @return array{string, list<array{int, int}>|null} The text with "true" in the place of each element, and start and length of each element; null instead if "packs" is not a list.
 	 */
 	private static function split( string $json ): array {
-		$elements = [];
-		$position = strspn( $json, self::SPACE );
-		if ( '{' === ( $json[ $position ] ?? '' ) ) {
-			// The members of the outermost object: a key, or a value that is skipped as a whole.
-			for ( ++$position; ; ) {
-				$position += strcspn( $json, '"{}[]', $position );
-				$char      = $json[ $position ] ?? '';
-				$end       = match ( $char ) {
-					'"'      => self::string_end( $json, $position ),
-					'{', '[' => self::container_end( $json, $position ),
-					default  => null,
-				};
-				if ( null === $end ) {
-					break; // The object ends here, or something never closes: the decoder says which.
-				}
-				$colon = $end + 1 + strspn( $json, self::SPACE, $end + 1 );
-				if ( '"' === $char && ':' === ( $json[ $colon ] ?? '' ) ) {
-					$value = $colon + 1 + strspn( $json, self::SPACE, $colon + 1 );
-					if ( 'packs' === json_decode( substr( $json, $position, $end + 1 - $position ) ) ) {
-						// A second member with this key replaces the first one, as for the decoder.
-						$elements = '[' === ( $json[ $value ] ?? '' ) ? self::objects_of_list( $json, $value ) : [];
-					}
-					$position = $value;
-					continue;
-				}
-				$position = $end + 1;
-			}
+		$list = self::list_of_member( $json, 'packs' );
+		if ( null === $list ) {
+			return [ $json, null ];
 		}
-
-		$rest   = '';
-		$copied = 0;
+		$elements = self::objects_of_list( $json, $list );
+		$rest     = '';
+		$copied   = 0;
 		foreach ( $elements as [ $start, $bytes ] ) {
 			$rest  .= substr( $json, $copied, $start - $copied ) . 'true';
 			$copied = $start + $bytes;
 		}
 		return [ $rest . substr( $json, $copied ), $elements ];
+	}
+
+	/**
+	 * Finds the list that a member of the outermost object holds. The decoder cannot say
+	 * whether a value was a list or an object once it is an array, so this is read from the
+	 * text, in the same way and with the same reservation as in split().
+	 *
+	 * @param string $json JSON.
+	 * @param string $key  Name of the member.
+	 * @return int|null Position of the list's opening bracket; null if there is no such member or its value is not a list.
+	 */
+	private static function list_of_member( string $json, string $key ): ?int {
+		$list     = null;
+		$position = strspn( $json, self::SPACE );
+		if ( '{' !== ( $json[ $position ] ?? '' ) ) {
+			return null;
+		}
+		// The members of the outermost object: a key, or a value that is skipped as a whole.
+		for ( ++$position; ; ) {
+			$position += strcspn( $json, '"{}[]', $position );
+			$char      = $json[ $position ] ?? '';
+			$end       = match ( $char ) {
+				'"'      => self::string_end( $json, $position ),
+				'{', '[' => self::container_end( $json, $position ),
+				default  => null,
+			};
+			if ( null === $end ) {
+				return $list; // The object ends here, or something never closes: the decoder says which.
+			}
+			$colon = $end + 1 + strspn( $json, self::SPACE, $end + 1 );
+			if ( '"' === $char && ':' === ( $json[ $colon ] ?? '' ) ) {
+				$value = $colon + 1 + strspn( $json, self::SPACE, $colon + 1 );
+				if ( $key === json_decode( substr( $json, $position, $end + 1 - $position ) ) ) {
+					// A second member with this key replaces the first one, as for the decoder.
+					$list = '[' === ( $json[ $value ] ?? '' ) ? $value : null;
+				}
+				$position = $value;
+				continue;
+			}
+			$position = $end + 1;
+		}
 	}
 
 	/**
