@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\Depends;
 use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\StagedTree;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
 
@@ -135,7 +136,8 @@ final class RestoreJobTest extends TestCase {
 		self::assertSame( 'restores/' . $job['id'], $job['result']['staging'] ?? null );
 		self::assertSame( 100, $job['progress']['percent'] ?? null );
 		$staging = TestSite::private_dir() . '/restores/' . $job['id'];
-		self::assertSame( TempDir::describe( self::fixture() ), TempDir::describe( $staging . '/files' . self::fixture() ) );
+		// Staging is owner-only; StagedTree takes the modes from the report and checks that.
+		self::assertSame( TempDir::describe( self::fixture() ), StagedTree::describe( $staging . '/files', self::fixture(), $staging ) );
 		self::assertFileEquals( self::fixture() . '/' . self::FILE, $staging . '/files' . self::fixture() . '/' . self::FILE );
 		self::assertGreaterThan( 0, $job['result']['files'] ?? 0 );
 		self::assertFileExists( $staging . '/entries.jsonl' );
