@@ -70,15 +70,15 @@ final class PlanFactory {
 	 * @return BackupPlan Plan.
 	 */
 	public function plan(): BackupPlan {
-		// The archiver walks lexically normalized roots, so everything that is compared with the
-		// paths it reports, and the manifest locator, uses the private directory in that form.
-		$private_dir = BackupPlan::normalize( [ $this->private_dir->path ] )[0];
+		// The archiver does not enter a symbolic link, so every directory it reports is free of
+		// links. Everything that is compared with those paths, and the manifest locator, uses
+		// the resolved private directory: a path through a link would never match, and as a
+		// root of its own it would be recorded as a link without the manifest below it. For a
+		// clean path without links the resolved path is the same string.
 		$real        = realpath( $this->private_dir->path );
-		if ( false !== $real && realpath( $private_dir ) !== $real ) {
-			// A symbolic link before a ".." component: the clean path names another directory
-			// than the one the plugin writes to. The resolved path is clean and names the right one.
-			$private_dir = $real;
-		}
+		$private_dir = false !== $real ? $real : BackupPlan::normalize( [ $this->private_dir->path ] )[0];
+		// The lexically normalized form remains for a directory that does not exist yet or that
+		// open_basedir keeps realpath() from resolving; it is the form the archiver walks.
 		$spool    = $private_dir . '/spool';
 		$database = $spool . '/database';
 		$this->ensure( $spool );

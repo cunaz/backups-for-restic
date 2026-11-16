@@ -46,6 +46,7 @@ final class SnapshotReaderTest extends TestCase {
 	private bool $reading         = false;
 	private int $read_seconds     = 0;
 	private int $snapshot_seconds = 0;
+	private int $index_seconds    = 0;
 	private int $lock_writes      = 0;
 	private bool $fail_lock_check = false;
 
@@ -69,6 +70,9 @@ final class SnapshotReaderTest extends TestCase {
 					}
 					if ( 'load' === $method && ObjectType::Snapshots === $type ) {
 						$this->clock->seconds += $this->snapshot_seconds;
+					}
+					if ( 'load' === $method && ObjectType::Index === $type ) {
+						$this->clock->seconds += $this->index_seconds;
 					}
 				}
 			}
@@ -367,6 +371,31 @@ final class SnapshotReaderTest extends TestCase {
 		$this->read_seconds = 1;
 		// Four directories take four seconds; the fifth second belongs to the manifest itself.
 		self::assertSame( '/spool/manifest.json', $this->reader( false, 5 )->manifest( $id )['path'] ?? null );
+	}
+
+	public function test_the_index_load_of_a_legacy_manifest_search_is_outside_its_time_budget(): void {
+		$id                  = $this->legacy_snapshot();
+		$this->index_seconds = 6;
+		$this->read_seconds  = 1;
+		// The index alone takes longer than the budget. Counted, it would end every call after
+		// the root, and a reader without a tree cache would never get further.
+		self::assertSame( '/spool/manifest.json', $this->reader( false, 5 )->manifest( $id )['path'] ?? null );
+		self::assertSame( 7, $this->counted->loads['data'], 'One call read all four directories, then the two on the way to the manifest and the manifest.' );
+		self::assertSame( [], $this->backend->objects['locks'] );
+	}
+
+	public function test_a_legacy_manifest_search_is_still_refused_for_its_time_after_a_slow_index_load(): void {
+		$id                  = $this->legacy_snapshot();
+		$this->index_seconds = 6;
+		$this->read_seconds  = 3;
+		try {
+			$this->reader( false, 5 )->manifest( $id );
+			self::fail( 'Only the index load is left out of the budget, not the directories.' );
+		} catch ( InvalidArgument $error ) {
+			self::assertStringContainsString( 'select the manifest explicitly', $error->getMessage() );
+			self::assertSame( 2, $this->counted->loads['data'], 'The root and one directory fit into five seconds.' );
+			self::assertSame( [], $this->backend->objects['locks'] );
+		}
 	}
 
 	public function test_a_search_refused_for_its_time_gets_further_with_the_tree_cache(): void {

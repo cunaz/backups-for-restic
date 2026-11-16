@@ -317,6 +317,41 @@ final class IndexCacheTest extends TestCase {
 		}
 	}
 
+	public function test_an_index_beyond_the_limit_removes_the_temporary_files_of_ended_requests(): void {
+		$this->index_file( 'a', 10, 300 );
+		$limited = $this->directory . '/limited';
+		mkdir( $limited, 0700 );
+		$ended   = $limited . '/index.bin.0123abcd.tmp';
+		$writing = $limited . '/index.bin.89abcdef.tmp';
+		$other   = $limited . '/index.bin.backup.tmp';
+		foreach ( [ $ended, $writing, $other ] as $file ) {
+			file_put_contents( $file, 'sealed pieces' );
+		}
+		touch( $ended, time() - 90 );
+		touch( $other, time() - 90 );
+		touch( $writing, time() - 30 );
+
+		self::assertSame( 3000, ( new IndexCache( $limited, 100000 ) )->load( $this->repository )->count() );
+		self::assertSame( [ $writing, $other ], glob( $limited . '/*' ), 'Only a temporary index file older than a minute is a leftover.' );
+
+		unlink( $other );
+		touch( $writing, time() - 90 );
+		( new IndexCache( $limited, 100000 ) )->load( $this->repository );
+		self::assertDirectoryDoesNotExist( $limited, 'Without leftovers the directory of an index that is not kept is empty and goes.' );
+	}
+
+	public function test_an_unchanged_cache_removes_the_temporary_file_of_an_ended_request(): void {
+		$this->index_file( 'a', 2, 3 );
+		$cache = new IndexCache( $this->directory );
+		$cache->load( $this->repository );
+		$ended = $this->directory . '/index.bin.0123abcd.tmp';
+		file_put_contents( $ended, 'sealed pieces' );
+		touch( $ended, time() - 90 );
+
+		$cache->load( $this->repository );
+		self::assertSame( [ $this->directory . '/index.bin' ], glob( $this->directory . '/*' ), 'A load that writes nothing removes the leftover as well.' );
+	}
+
 	/**
 	 * In a process of its own: what the tests before it left reserved would count against the
 	 * suite's memory limit, and against the figures measured here.
