@@ -301,11 +301,21 @@ carries `Cache-Control: no-store`.
   and is deleted when the derivation finishes.
 - From Milestone 3: restore staging and database import files are plaintext by necessity:
   `0600`, expire after 24 hours, deleted after a successful apply/import.
-- From Milestone 3: symlinks are never followed when applying restores; `realpath`
-  containment on every destination; `lstat` to detect links in staging. The engine's
-  `RestoreRun`, which the tests use today, already validates every name from the repository
-  (not empty, not `.` or `..`, no `/` or NUL) and removes an existing symlink at a
-  destination instead of writing through it.
+- Restore staging is owner-only whatever the snapshot recorded: every staged file is `0600`
+  and every staged directory `0700`. A snapshot's `0644` or `0666` file and its `0755` or
+  `0777` directory are never staged with those modes; the original mode is kept in the
+  report (`entries.jsonl`) for the later apply step. `Restore\Files::open()` creates staged
+  files, the report, the checkpoint and the local lock file under a umask of `077`, so that
+  a request killed right after creating one leaves nothing wider, and sets `0600` again on
+  every open, which also covers a filesystem whose default ACL overrides the umask.
+- The version 2 restore engine validates selected paths in a first pass, requires empty
+  private staging, binds directory/file identities and checks parent components. It
+  refuses existing symbolic/hard links and unexpected entries; snapshot links and special
+  nodes are recorded outside the payload, never created. Local flock, creation intents and
+  committed file/report offsets make interrupted ticks repeatable (ADR 0036). These checks
+  rely on the caller keeping staging private; portable PHP cannot eliminate races with a
+  local process that controls those directories. The later apply planner must also enforce
+  live-root containment; no apply or public staging-download route exists yet.
 - The private directory is excluded from backups except the virtual `spool/` paths.
 
 ## 9. WordPress layer

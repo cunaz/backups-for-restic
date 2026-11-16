@@ -1,6 +1,6 @@
 <?php
 /**
- * The index file decoder as it was before files were decoded pack by pack.
+ * The index file decoder that reads a file as a whole, as it was done before files were decoded pack by pack.
  *
  * @package BackupsForRestic\Tests
  */
@@ -13,15 +13,21 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Pack\PackEntry;
-use BackupsForRestic\Support\GoJson;
 
 /**
- * Decodes an index file in one go, with the strict JSON decoder over the whole text. It needs
- * several times the memory of IndexFile::packs() and exists as the reference that the
- * pack-by-pack decoder is compared with, in unit tests and by the fuzzer: for every input
- * both must give the same packs, or both must refuse it.
+ * Decodes an index file in one go, with PHP's JSON decoder over the whole text and the limits
+ * of the strict decoder. It needs several times the memory of IndexFile::packs() and exists
+ * as the reference that the pack-by-pack decoder is compared with, in unit tests and by the
+ * fuzzer: for every input both must give the same packs, or both must refuse it.
+ *
+ * The text is decoded into objects, not into arrays. As arrays, {} and [] are the same value
+ * and so are {"0":true} and [true]; restic refuses an object where its format has a list, and
+ * a reference that cannot tell them apart accepts index files that restic does not read.
  */
 final class WholeIndexDecoder {
+
+	/** The nesting GoJson::decode() accepts. */
+	private const int MAX_DEPTH = 64;
 
 	/**
 	 * Decodes an index file.
@@ -31,23 +37,33 @@ final class WholeIndexDecoder {
 	 * @throws FormatException If the structure is invalid.
 	 */
 	public static function decode( string $json ): array {
-		$packs = GoJson::decode_object( $json )['packs'] ?? null;
+		// PHP has no property whose name begins with a NUL character and refuses such a key
+		// in an object, which Go and the array decoder accept as any other unknown member.
+		// The character is therefore replaced before decoding. In a valid document a quote is
+		// followed by this escape only at the start of a string or after an escaped quote
+		// inside one; no member name, ID or blob type of the format holds either character, so
+		// what was unknown or invalid stays so.
+		try {
+			$document = json_decode( str_replace( '"\\u0000', '"\\u0001', $json ), false, self::MAX_DEPTH, JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING );
+		} catch ( \JsonException $exception ) {
+			FormatException::raise( 'Repository object is not valid JSON.', [ 'json_error' => $exception->getMessage() ], $exception );
+		}
+		$packs = self::members( $document, 'Repository object is not a JSON object.' )['packs'] ?? null;
+		// Only a JSON list is an array here: an object in its place is refused like a number.
 		if ( ! is_array( $packs ) ) {
 			throw new FormatException( 'Index file has no pack list.' );
 		}
-		// restic's decoder refuses an object where it expects the list of packs.
-		if ( ! array_is_list( $packs ) ) {
-			throw new FormatException( 'Index file contains an invalid pack.' );
-		}
 		$result = [];
 		foreach ( $packs as $pack ) {
-			if ( ! is_array( $pack ) || ( [] !== $pack && array_is_list( $pack ) ) || ! is_string( $pack['id'] ?? null ) || ! is_array( $pack['blobs'] ?? null ) ) {
+			$pack = self::members( $pack, 'Index file contains an invalid pack.' );
+			if ( ! is_string( $pack['id'] ?? null ) || ! is_array( $pack['blobs'] ?? null ) ) {
 				throw new FormatException( 'Index file contains an invalid pack.' );
 			}
 			$pack_id = Id::from_hex( $pack['id'] )->hex();
 			$entries = $result[ $pack_id ] ?? [];
 			foreach ( $pack['blobs'] as $blob ) {
-				if ( ! is_array( $blob ) || ! is_string( $blob['id'] ?? null ) || ! is_int( $blob['offset'] ?? null ) || ! is_int( $blob['length'] ?? null ) ) {
+				$blob = self::members( $blob, 'Index file contains an invalid blob.' );
+				if ( ! is_string( $blob['id'] ?? null ) || ! is_int( $blob['offset'] ?? null ) || ! is_int( $blob['length'] ?? null ) ) {
 					throw new FormatException( 'Index file contains an invalid blob.' );
 				}
 				$type         = BlobType::tryFrom( is_string( $blob['type'] ?? null ) ? $blob['type'] : '' );
@@ -60,6 +76,21 @@ final class WholeIndexDecoder {
 			$result[ $pack_id ] = $entries;
 		}
 		return $result;
+	}
+
+	/**
+	 * Returns the members of a decoded JSON object.
+	 *
+	 * @param mixed  $value   Decoded JSON.
+	 * @param string $message What to say if the value is anything else than an object.
+	 * @return array<mixed> Members by name.
+	 * @throws FormatException If the value is not an object.
+	 */
+	private static function members( mixed $value, string $message ): array {
+		if ( ! $value instanceof \stdClass ) {
+			throw new FormatException( $message );
+		}
+		return get_object_vars( $value );
 	}
 
 	/**
