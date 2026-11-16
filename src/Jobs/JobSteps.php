@@ -12,7 +12,8 @@ namespace BackupsForRestic\Jobs;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Routes maintenance jobs to their steps and everything else to the backup steps.
+ * Routes maintenance jobs and restore jobs to their steps and everything else to the backup
+ * steps.
  */
 final class JobSteps implements StepProvider {
 
@@ -21,8 +22,9 @@ final class JobSteps implements StepProvider {
 	 *
 	 * @param StepProvider $backup      Steps of backup and unlock jobs.
 	 * @param StepProvider $maintenance Steps of forget, prune and check jobs.
+	 * @param StepProvider $restore     Steps of restore jobs.
 	 */
-	public function __construct( private readonly StepProvider $backup, private readonly StepProvider $maintenance ) {
+	public function __construct( private readonly StepProvider $backup, private readonly StepProvider $maintenance, private readonly StepProvider $restore ) {
 	}
 
 	/**
@@ -33,6 +35,9 @@ final class JobSteps implements StepProvider {
 	 * @return Step Step.
 	 */
 	public function step( JobType $type, string $name ): Step {
+		if ( JobType::Restore === $type ) {
+			return $this->restore->step( $type, $name );
+		}
 		return $type->is_maintenance() ? $this->maintenance->step( $type, $name ) : $this->backup->step( $type, $name );
 	}
 }

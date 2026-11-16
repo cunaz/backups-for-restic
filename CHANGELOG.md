@@ -24,6 +24,11 @@ All notable changes are documented here. The format follows
   repository lock is asked for once per tick and before and after a refresh, as backups do,
   so a refresh never replaces a lock that another client removed. WordPress restore jobs
   and screens still follow.
+- Restore jobs: `POST /jobs` with `type: restore`, a snapshot ID and optional paths restores
+  the selection into a staging directory of the job in the private directory, with
+  progress, in resumable steps like a backup. A restore that fails or is cancelled removes
+  what it staged and releases its repository lock. While a restore runs, scheduled jobs
+  wait. Screens, the WP-CLI command, download and the expiry of staged files still follow.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

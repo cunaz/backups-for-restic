@@ -14,7 +14,7 @@ use BackupsForRestic\Settings\Settings;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Job types and their step lists. Restore joins in Milestone 3 (docs/05-roadmap.md).
+ * Job types and their step lists.
  */
 enum JobType: string {
 
@@ -32,6 +32,9 @@ enum JobType: string {
 	/** Verifies the repository with a random share of packs read (ADR 0022). */
 	case Check = 'check';
 
+	/** Restores selected paths of a snapshot into a staging directory of its own (ADR 0037). */
+	case Restore = 'restore';
+
 	/**
 	 * Steps of the regular path, in order.
 	 *
@@ -44,6 +47,7 @@ enum JobType: string {
 			self::Forget => [ 'preflight', 'unlocking', 'detecting', 'forgetting', 'recording' ],
 			self::Prune  => [ 'preflight', 'unlocking', 'detecting', 'pruning', 'recording' ],
 			self::Check  => [ 'preflight', 'unlocking', 'checking', 'recording' ],
+			self::Restore => [ 'preflight', 'unlocking', 'planning', 'restoring', 'recording' ],
 		};
 	}
 
@@ -74,6 +78,7 @@ enum JobType: string {
 	 * Backups and maintenance wait until the setup is completed, that is, until the recovery
 	 * kit is acknowledged (docs/03-security-and-threat-model.md §13): a backup that nobody can
 	 * restore once the site is lost protects nothing. Unlocking is a step of the setup itself.
+	 * A restore reads a repository that the setup connected, so it waits for the setup too.
 	 *
 	 * @param Settings $settings Settings.
 	 * @return string|null Error code setup_incomplete, configuration or retention_external; null if the job may start.
@@ -108,9 +113,9 @@ enum JobType: string {
 
 	/**
 	 * Whether a request to cancel still stops the job before a step. It does before the
-	 * steps that do the work. Once the work is done, the snapshot written or the packs
-	 * deleted, only its result is left to record: a job that stopped there would call
-	 * itself cancelled over a repository that it changed all the same.
+	 * steps that do the work. Once the work is done, the snapshot written, the packs
+	 * deleted or the files staged, only its result is left to record: a job that stopped
+	 * there would call itself cancelled over work that it did all the same.
 	 *
 	 * @param string $step Step name.
 	 * @return bool True if the job can still be cancelled before the step.

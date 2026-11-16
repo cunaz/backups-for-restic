@@ -52,6 +52,10 @@ final class UninstallTest extends TestCase {
 			self::assertContains( $name, $stored );
 		}
 		self::assertDirectoryExists( TestSite::private_dir() . '/jobs' );
+		// A staged restore that nobody removed: uninstalling takes it along.
+		$staged = TestSite::private_dir() . '/restores/20270115T030000Z-abcdef/files/var/www';
+		self::assertTrue( is_dir( $staged ) || mkdir( $staged, 0700, true ) );
+		file_put_contents( $staged . '/index.php', '<?php // A restored file.' );
 
 		try {
 			// What the Plugins screen does on "Delete", without removing the plugin's own files.

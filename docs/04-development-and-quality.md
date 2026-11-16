@@ -255,6 +255,11 @@ installed is skipped:
   browser makes it, on a site that the same file keeps from requesting itself; a setup
   that is not completed, and a backup that does not run, while the private directory is
   served.
+- **`RestoreJobTest`**: after a backup of its own, a restore job started with `POST /jobs`
+  stages one directory with bytes identical to the source, leaves no lock in the repository
+  and nothing that the web server hands out; invalid snapshot IDs and paths are refused
+  with 400 and a code; a schedule slot that comes due while a restore is active stays
+  unhandled and starts its backup once the restore has ended.
 - **`ScheduleTest`**: the heartbeat, run through `wp-cron.php`, records the first slot,
   starts a backup whose slot has come and forget after it, prune and check on their slots,
   and nothing for manual schedules.

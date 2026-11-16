@@ -24,6 +24,8 @@ use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
+use BackupsForRestic\Jobs\Restore\RestoreServices;
+use BackupsForRestic\Jobs\Restore\RestoreSteps;
 use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
@@ -123,7 +125,7 @@ final class MaintenanceJobTest extends TestCase {
 			$backup
 		);
 		$private->ensure();
-		return [ new Runner( $store, new RunnerLock( $private->path . '/runner.lock' ), new JobSteps( $backup, $maintenance ), new SystemClock(), $random ), $store ];
+		return [ new Runner( $store, new RunnerLock( $private->path . '/runner.lock' ), new JobSteps( $backup, $maintenance, new RestoreSteps( new RestoreServices( $services ), $backup ) ), new SystemClock(), $random ), $store ];
 	}
 
 	/**

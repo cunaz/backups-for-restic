@@ -22,11 +22,11 @@ final class SiteState {
 	public const string OPTION = 'backups_for_restic_state';
 
 	/**
-	 * Entries that describe one repository: the last backup and the last forget, prune and
-	 * check, the alert of a check that found damage, and how much the repository holds. They
-	 * are dropped when the jobs turn to another repository.
+	 * Entries that describe one repository: the last backup and the last forget, prune, check
+	 * and restore, the alert of a check that found damage, and how much the repository holds.
+	 * They are dropped when the jobs turn to another repository.
 	 */
-	public const array OF_THE_REPOSITORY = [ 'last_backup', 'last_forget', 'last_prune', 'last_check', 'check_alert', 'usage' ];
+	public const array OF_THE_REPOSITORY = [ 'last_backup', 'last_forget', 'last_prune', 'last_check', 'last_restore', 'check_alert', 'usage' ];
 
 	/**
 	 * Uses the options table.

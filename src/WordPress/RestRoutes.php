@@ -18,6 +18,7 @@ use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Jobs\Restore\RestoreRequest;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
@@ -271,8 +272,10 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Starts a backup, or with type forget, prune or check a maintenance job. None of them
-	 * starts before the setup is completed.
+	 * Starts a backup, or with type forget, prune or check a maintenance job, or with type
+	 * restore the restore of a snapshot into a staging directory: `snapshot` is the full ID,
+	 * `paths` a list of paths as the snapshot holds them, and without it the whole snapshot is
+	 * restored (ADR 0037). None of them starts before the setup is completed.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
@@ -282,12 +285,20 @@ final class RestRoutes {
 		if ( null === $type || JobType::Unlock === $type ) {
 			return $this->error( 'invalid_job_type', 400 );
 		}
+		$data = [];
+		if ( JobType::Restore === $type ) {
+			try {
+				$data = RestoreRequest::from_input( $request->get_param( 'snapshot' ), $request->get_param( 'paths' ) )->to_data();
+			} catch ( InvalidArgument $refused ) {
+				return $this->error( 'invalid_snapshot' === ( $refused->context()['code'] ?? null ) ? 'invalid_snapshot' : 'invalid_paths', 400 );
+			}
+		}
 		$refusal = $type->refusal( $this->container->settings() );
 		if ( null !== $refusal ) {
 			return $this->error( $refusal, 409 );
 		}
 		try {
-			$job = $this->container->jobs()->create( $type, 'manual', time() );
+			$job = $this->container->jobs()->create( $type, 'manual', time(), $data );
 		} catch ( JobConflict $conflict ) {
 			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
 		}
@@ -1030,8 +1041,16 @@ final class RestRoutes {
 				'hint'    => '',
 			],
 			'invalid_job_type'              => [
-				'message' => __( 'Jobs can be of type backup, forget, prune or check.', 'backups-for-restic' ),
+				'message' => __( 'Jobs can be of type backup, forget, prune, check or restore.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'invalid_snapshot'              => [
+				'message' => __( 'A restore needs the full ID of a snapshot.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'invalid_paths'                 => [
+				'message' => __( 'The paths to restore are not valid.', 'backups-for-restic' ),
+				'hint'    => __( 'Name up to 256 paths as the snapshot holds them, each starting with a slash, or none for the whole snapshot.', 'backups-for-restic' ),
 			],
 			'ca_certificate_missing'        => [
 				'message' => __( 'The CA certificate of the repository server is missing.', 'backups-for-restic' ),

@@ -264,6 +264,8 @@ final class Messages {
 			'forgetting'  => __( 'Removing old snapshots', 'backups-for-restic' ),
 			'pruning'     => __( 'Deleting data no snapshot uses', 'backups-for-restic' ),
 			'checking'    => __( 'Checking the repository', 'backups-for-restic' ),
+			'planning'    => __( 'Counting the files to restore', 'backups-for-restic' ),
+			'restoring'   => __( 'Restoring files to the staging directory', 'backups-for-restic' ),
 			'recording'   => __( 'Recording the result', 'backups-for-restic' ),
 			'releasing'   => __( 'Releasing the repository', 'backups-for-restic' ),
 			'cleaning_up' => __( 'Cleaning up', 'backups-for-restic' ),
@@ -308,6 +310,7 @@ final class Messages {
 			'forget'  => __( 'Remove old snapshots', 'backups-for-restic' ),
 			'prune'   => __( 'Prune', 'backups-for-restic' ),
 			'check'   => __( 'Check', 'backups-for-restic' ),
+			'restore' => __( 'Restore', 'backups-for-restic' ),
 			default   => $type,
 		};
 	}
