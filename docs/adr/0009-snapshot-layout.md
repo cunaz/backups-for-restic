@@ -38,6 +38,10 @@ names are not meaningful.
   from zero; worse deduplication of large unchanged tables.
 
 ## As built (2026-11)
+- New snapshots also carry `backups-for-restic-manifest:<base64 path>`, an encrypted
+  locator for the manifest's original snapshot path. It survives a site move and is not
+  a retention grouping key. Older snapshots are searched for a unique manifest, within
+  the limits of [ADR 0034](0034-snapshot-reader.md).
 - `spool/manifest.json` has the format `backups-for-restic-site/1` and records the time, the
   site address, `abspath`, `content`, `uploads`, `roots`, `excludes`, the table prefix,
   whether the database is included, the versions of the plugin, WordPress and PHP, and the

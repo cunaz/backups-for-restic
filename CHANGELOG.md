@@ -7,6 +7,15 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A snapshot reader for the upcoming restore browser: filter by site, read one directory
+  without following links, and read the site's manifest under a shared repository lock.
+  Encrypted tree caches share the existing cache limit with the index. New backups record
+  where their manifest lives so that a different installation can find it after a move.
+  Long snapshot lists refresh their shared lock while reading and keep only matching site
+  metadata. Repeated tree-cache reads avoid rescanning the cache directory. The search for
+  the manifest of an older snapshot stops after five seconds per call and continues from
+  the tree cache on the next one. An index too large for the cache limit no longer removes
+  the cached trees, and temporary tree files of ended requests are removed after a minute.
 - Restore engine foundation: several selected paths retain their original layout in empty
   private staging, with resumable planning and disk-space checks before writing. Reads hold
   a shared repository lock, grouped downloads authenticate every blob, and links/special

@@ -96,6 +96,7 @@ final class IndexCache {
 		if ( [] !== $new || ! $readable || count( $covered ) !== count( $listed ) ) {
 			$this->write( $repository, $index, $listed );
 		}
+		( new TreeCache( $this->directory, $this->limit ) )->trim();
 		// After the cache is written: an index that leaves no room is at least not read from
 		// the index files again when the job is tried with more memory.
 		$repository->memory()?->check_loaded_index();
@@ -119,8 +120,9 @@ final class IndexCache {
 	private function read( Repository $repository, array $listed ): ?array {
 		$file = $this->directory . '/index.bin';
 		if ( is_file( $file ) && (int) filesize( $file ) > $this->limit ) {
-			// Written under a higher limit than the one set now.
-			$this->clear();
+			// Written under a higher limit than the one set now. Only the index file goes: the
+			// directory also holds the tree cache, which a reader may be writing to.
+			Files::remove_tree( $file );
 			return null;
 		}
 		$handle = is_file( $file ) ? fopen( $file, 'rb' ) : false;
@@ -224,8 +226,10 @@ final class IndexCache {
 		$file   = $this->directory . '/index.bin';
 		if ( ! Files::write_atomic_pieces( $file, $sealed(), $this->limit ) && ! is_file( $file ) ) {
 			// Preserve an older cache; the next load checks its validity and current coverage.
-			// Only a fresh, empty cache directory needs removing here.
-			$this->clear();
+			// Only a fresh, empty cache directory needs removing here. One that holds the tree
+			// cache stays: deleting it on every load would discard all cached trees and could
+			// fail while a reader publishes one.
+			@rmdir( $this->directory ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A directory that is not empty is kept on purpose.
 		}
 	}
 }

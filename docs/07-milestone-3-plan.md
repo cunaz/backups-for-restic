@@ -88,7 +88,7 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 1.1 | `Engine\Snapshot\Reader` | M | Snapshots of this site (host and site tag) or of the whole repository; one directory of a tree by path; the manifest of a snapshot. Tree blobs are cached in the private directory within the cache limit. |
+| 1.1 | `Engine\Snapshot\Reader` | implemented; CI pending | [ADR 0034](adr/0034-snapshot-reader.md): snapshots filtered by host and required site tags or the whole repository; one directory by snapshot path; validated manifests found by locator or a bounded legacy search. Each read holds a shared lock and never follows links. Authenticated tree ciphertext shares the private cache limit with the index. Routes and browser integration remain in 1.2 and 1.3. |
 | 1.2 | Routes and commands | S | `GET /snapshots` with a scope, `GET /snapshots/<id>` with the manifest, `GET /snapshots/<id>/tree?path=` one directory per request; `wp backups-for-restic ls`. |
 | 1.3 | Snapshot browser | M | List, details with the manifest, directories, a selection of paths, and for each snapshot whether the retention policy would remove it at the next forget (the preview the architecture promised for Milestone 2). |
 
