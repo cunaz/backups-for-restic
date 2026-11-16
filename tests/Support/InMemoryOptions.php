@@ -94,6 +94,14 @@ final class InMemoryOptions implements Options {
 		return true;
 	}
 
+	public function initialize( string $name, mixed $value, bool $autoload ): bool {
+		if ( array_key_exists( $name, $this->values ) ) {
+			$this->read[ $name ] = $this->values[ $name ];
+			return $value === $this->values[ $name ] || ( is_scalar( $value ) && is_scalar( $this->values[ $name ] ) && (string) $value === (string) $this->values[ $name ] );
+		}
+		return $this->set( $name, $value, $autoload );
+	}
+
 	public function delete( string $name ): void {
 		unset( $this->values[ $name ], $this->autoload[ $name ], $this->read[ $name ] );
 	}

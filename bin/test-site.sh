@@ -29,6 +29,7 @@
 # Needs a running MySQL or MariaDB server. The database administrator defaults to root over
 # the local socket; set BFR_DB_ADMIN_USER and BFR_DB_ADMIN_PASSWORD (and BFR_DB_HOST) to
 # override, as CI does. Everything else lives under .tools/site/. Development tooling only.
+# BFR_DISABLE_WP_CRON=1 at install disables automatic cron for measured-worker benchmarks.
 #
 # The WordPress checksum was recorded after verifying the tarball against the SHA-1 that
 # wordpress.org publishes next to it.
@@ -102,6 +103,9 @@ install_site() {
 			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n"
 			// Ticks call wp_raise_memory_limit(); without this they would run with 256M.
 			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, \x27128M\x27 );\n";
+		if ( "1" === getenv( "BFR_DISABLE_WP_CRON" ) ) {
+			$extra .= "if ( ! defined( \x27DISABLE_WP_CRON\x27 ) ) { define( \x27DISABLE_WP_CRON\x27, true ); }\n";
+		}
 		$config = str_replace( "/* That\x27s all, stop editing!", $extra . "\n/* That\x27s all, stop editing!", $config );
 		file_put_contents( $site . "/wp-config.php", $config );
 	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"

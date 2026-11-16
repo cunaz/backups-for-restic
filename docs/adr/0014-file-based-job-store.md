@@ -76,4 +76,7 @@ job (docs/02-architecture.md §18). An existing document that cannot be read is 
 this version cannot establish that its job has finished, even if a raw state field looks
 terminal. Under the creation lock it blocks both new jobs and `while_idle()` changes with
 `job_unreadable`; pruning history does not remove it. A directory with no document does not
-count as an existing job.
+count as an existing job. The first options layout number is inserted atomically and never
+overwrites a competing writer's value. A malformed options marker is preserved and keeps
+the plugin inactive, including leaving jobs and locks alone during deactivation; only a
+missing marker denotes legacy settings.

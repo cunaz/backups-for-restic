@@ -132,6 +132,34 @@ final class IndexFilePacksTest extends TestCase {
 		);
 	}
 
+	public function test_encoding_a_pack_generator_preserves_repeated_pack_entries(): void {
+		$json = '{"packs":[' . self::pack( 'a', self::blob( 'a1' ) ) . ',' . self::pack( 'b' ) . ',' . self::pack( 'a', self::blob( 'a2', 40 ) ) . "]}\n";
+		self::assertSame( $json, IndexFile::encode( IndexFile::packs( $json ) ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_encoding_a_full_index_retains_only_one_packs_decoded_entries(): void {
+		$source = static function (): \Generator {
+			for ( $pack = 0; $pack < 1250; ++$pack ) {
+				$entries = [];
+				for ( $blob = 0; $blob < 40; ++$blob ) {
+					$entries[] = new PackEntry( BlobType::Data, Id::of( $pack . ':' . $blob ), $blob * 100, 100 );
+				}
+				yield Id::of( 'pack-' . $pack )->hex() => $entries;
+			}
+		};
+		memory_reset_peak_usage();
+		$before = memory_get_usage();
+		$json   = IndexFile::encode( $source() );
+		$extra  = memory_get_peak_usage() - $before;
+		self::assertLessThan( 16 * 1048576, $extra, 'The JSON output fits; a decoded 50,000-blob array does not.' );
+		$count = 0;
+		foreach ( IndexFile::packs( $json ) as $entries ) {
+			$count += count( $entries );
+		}
+		self::assertSame( IndexFile::MAX_BLOBS, $count );
+	}
+
 	public function test_an_error_in_a_later_pack_shows_when_the_iteration_gets_there(): void {
 		$json = '{"packs":[' . self::pack( 'a', self::blob( 'a1' ) ) . ',' . self::pack( 'b', self::blob( 'b1' ) ) . ',' . self::pack( 'c', self::blob( 'c1', 0, 0 ) ) . ']}';
 		$seen = [];
