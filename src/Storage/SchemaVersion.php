@@ -39,25 +39,29 @@ final class SchemaVersion {
 	/**
 	 * The number the options were last written under.
 	 *
-	 * @return int The stored number; 0 if none was ever recorded, which is the case on a fresh
-	 *             installation and for options written before the number existed.
+	 * @return int|null The stored number; 0 only if absent, as on a fresh installation or
+	 *                  before layout numbers existed; null if the stored value is malformed.
 	 */
-	public function stored(): int {
+	public function stored(): ?int {
 		$value = $this->options->get( self::OPTION );
+		if ( null === $value ) {
+			return 0;
+		}
 		if ( is_int( $value ) ) {
-			return max( 0, $value );
+			return $value > 0 ? $value : null;
 		}
 		// WordPress returns scalars from the database as strings.
-		return is_string( $value ) && 1 === preg_match( '/\A\d{1,9}\z/', $value ) ? (int) $value : 0;
+		return is_string( $value ) && 1 === preg_match( '/\A[1-9]\d{0,8}\z/', $value ) ? (int) $value : null;
 	}
 
 	/**
-	 * Whether a newer version of the plugin wrote the options.
+	 * Whether this version understands the stored layout, including unnumbered legacy options.
 	 *
-	 * @return bool True if this version must not read them.
+	 * @return bool False for a newer or malformed layout number.
 	 */
-	public function is_newer(): bool {
-		return $this->stored() > self::CURRENT;
+	public function is_supported(): bool {
+		$stored = $this->stored();
+		return null !== $stored && $stored <= self::CURRENT;
 	}
 
 	/**
@@ -65,11 +69,13 @@ final class SchemaVersion {
 	 * yet: 1 is the first layout, and options without a number have it.
 	 *
 	 * @return bool True if the current layout number is stored; false if the write was refused
-	 *              or a newer version wrote the options.
+	 *              or a newer or malformed layout is already recorded.
 	 */
 	public function upgrade(): bool {
 		$stored = $this->stored();
 		return self::CURRENT === $stored
-			|| ( $stored < self::CURRENT && $this->options->set( self::OPTION, self::CURRENT, true ) );
+			|| ( 0 === $stored
+				&& $this->options->initialize( self::OPTION, self::CURRENT, true )
+				&& self::CURRENT === $this->stored() );
 	}
 }
