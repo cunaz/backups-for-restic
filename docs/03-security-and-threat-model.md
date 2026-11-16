@@ -302,11 +302,9 @@ carries `Cache-Control: no-store`.
 - Restore staging is plaintext by necessity. A restore job
   ([ADR 0037](adr/0037-restore-job.md)) stages into `restores/<job-id>/` of the private
   directory, after a preflight that refuses a directory that is served. The staging
-  directory and `files/` in it are owner-only (0700); the entries below keep the
-  permission bits of the snapshot plus owner access
-  ([ADR 0036](adr/0036-selected-file-staging.md)), so the 0700 parent is what protects them, and
-  whoever moves a staged entry out of it must set its mode anew; a job that fails or is cancelled removes what it staged. Residual risk until
-  staging expires (package 2.3 of the Milestone 3 plan): the staged files of a finished
+  directory, `files/` in it and every entry below are owner-only
+  ([ADR 0036](adr/0036-selected-file-staging.md), next point); a job that fails or is
+  cancelled removes what it staged. Residual risk until staging expires (package 2.3 of the Milestone 3 plan): the staged files of a finished
   restore stay until the plugin is uninstalled or they are removed by hand, so a later
   exposure of the private directory would expose them too. Planned: expiry after 24 hours
   and deletion after a successful apply. Database import files follow the same rules when

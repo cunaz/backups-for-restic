@@ -804,7 +804,7 @@ left behind is removed once it is a minute old.
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
 └── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
-    ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; files/ is owner-only, the entries keep the snapshot's permission bits
+    ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; owner-only (directories 0700, files 0600) whatever the snapshot recorded
     └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
 ```
 

@@ -35,9 +35,8 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   inside the tree, so no name from a snapshot can take its place. Job IDs are unique, so two
   restores never share a directory, and what is staged inherits the protection of the
   private directory: deny files, the exposure check in the preflight, and owner-only modes
-  (0700) of the staging directory and of `files/`. The entries below keep the permission
-  bits of the snapshot plus owner access (ADR 0036): the 0700 parent protects them, not
-  their own modes.
+  of the staging directory, of `files/` and of every entry below (0700 and 0600 whatever
+  the snapshot recorded, ADR 0036).
   The run's checkpoint, local lock and growing report live in `jobs/<job-id>/restore/`
   and are deleted when the job ends.
 - **Partial staging is removed on failure and cancel.** Only a job that ends as
