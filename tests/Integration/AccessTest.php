@@ -17,6 +17,8 @@ final class AccessTest extends TestCase {
 
 	private const string JOB = '20270115T030000Z-abcdef';
 
+	private const string SNAPSHOT = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
 	private static string $editor = '';
 
 	public static function setUpBeforeClass(): void {
@@ -41,6 +43,8 @@ final class AccessTest extends TestCase {
 			[ 'POST', '/jobs/' . self::JOB . '/cancel' ],
 			[ 'GET', '/jobs/' . self::JOB . '/log' ],
 			[ 'GET', '/snapshots' ],
+			[ 'GET', '/snapshots/' . self::SNAPSHOT ],
+			[ 'GET', '/snapshots/' . self::SNAPSHOT . '/tree' ],
 			[ 'GET', '/settings' ],
 			[ 'PUT', '/settings' ],
 			[ 'DELETE', '/cache' ],
@@ -80,7 +84,7 @@ final class AccessTest extends TestCase {
 
 		$registered = [];
 		foreach ( $index['routes'] ?? [] as $route => $description ) {
-			$route = (string) preg_replace( '~\(\?P<id>[^)]*\)~', self::JOB, substr( (string) $route, strlen( '/backups-for-restic/v1' ) ) );
+			$route = (string) preg_replace( [ '~\(\?P<id>[^)]*\)~', '~\(\?P<snapshot>[^)]*\)~' ], [ self::JOB, self::SNAPSHOT ], substr( (string) $route, strlen( '/backups-for-restic/v1' ) ) );
 			foreach ( $description['methods'] ?? [] as $method ) {
 				if ( '' !== $route ) {
 					$registered[] = $method . ' ' . $route;

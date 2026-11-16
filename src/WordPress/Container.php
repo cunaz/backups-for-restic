@@ -27,6 +27,10 @@ use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
+use BackupsForRestic\Engine\MemoryBudget;
+use BackupsForRestic\Engine\Snapshot\Reader;
+use BackupsForRestic\Engine\TreeCache;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
@@ -47,6 +51,7 @@ use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Notifications\Notifier;
 use BackupsForRestic\Plugin;
+use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Secrets\ConstantOverrideStore;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
 use BackupsForRestic\Secrets\Secret;
@@ -348,6 +353,29 @@ final class Container {
 	 */
 	public function access(): RepositoryAccess {
 		return new RepositoryAccess( $this->settings(), $this->secrets(), $this->http(), $this->random(), $this->user_agent() );
+	}
+
+	/**
+	 * The snapshot browser of the REST routes and the command line. Its reader shares the
+	 * index and tree cache of the jobs and takes a repository lock of its own for every read.
+	 * This site's snapshots are those with its host name and the two tags that the retention
+	 * selects them by (MaintenanceServices::retention_tags()).
+	 *
+	 * @return SnapshotBrowser|null Browser, or null if the repository has to be unlocked first.
+	 */
+	public function snapshot_browser(): ?SnapshotBrowser {
+		$repository = $this->access()->open_cached();
+		if ( null === $repository ) {
+			return null;
+		}
+		$this->private_dir()->ensure();
+		// A request has PHP's memory limit as a job has: an index that does not fit is refused, not fatal.
+		$repository->limit_memory( MemoryBudget::from_ini( ini_get( 'memory_limit' ) ) );
+		$site   = $this->site();
+		$cache  = $this->cache()->path . '/' . $repository->config()->id;
+		$limit  = $this->settings()->int( 'advanced.cache_limit_mib' ) * 1048576;
+		$reader = new Reader( $repository, $this->identity(), $this->clock(), new IndexCache( $cache, $limit ), new TreeCache( $cache, $limit ) );
+		return new SnapshotBrowser( $reader, $site->hostname(), [ PlanFactory::TAG, $site->site_tag() ] );
 	}
 
 	/**

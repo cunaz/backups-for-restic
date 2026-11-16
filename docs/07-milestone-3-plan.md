@@ -43,7 +43,7 @@ conformance, integration and mutation runs were green on each pull request.
 | `Engine\Restore\RestoreRun` | Restores one subpath of a snapshot into a directory, resumable in the middle of a file, with verified content and safe names. It takes no repository lock, has no totals, no throttle and no free-space check, requests one blob at a time and does not require an empty target. |
 | Database dump (`Database\Dump`) | One file per table with a header and a trailer of rows and bytes ([ADR 0021](adr/0021-database-streaming.md)). There is **no importer** in `src/`; the tests import with a helper. |
 | Jobs | Types backup, unlock, forget, prune, check. A job is created without parameters and gets them afterwards, so a tick can pick it up without them. One job is active at a time. |
-| REST and UI | `GET /snapshots` lists every snapshot of the repository. No route reads a tree. Re-authentication with the WordPress password exists for the recovery kit. |
+| REST and UI | `GET /snapshots` lists the snapshots of this site or of the repository, `GET /snapshots/<id>` reads one with its manifest and `GET /snapshots/<id>/tree` one directory (package 1.2). The admin page shows the list only. Re-authentication with the WordPress password exists for the recovery kit. |
 | Restore safety | Decided in [ADR 0013](adr/0013-restore-safety.md): staging first, apply as a separate job with a dry-run report, typed confirmation for the database. |
 
 ## 3. Principles for this milestone
@@ -89,7 +89,7 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 | # | Package | Size | Notes |
 |---|---|---|---|
 | 1.1 | `Engine\Snapshot\Reader` | implemented; CI pending | [ADR 0034](adr/0034-snapshot-reader.md): snapshots filtered by host and required site tags or the whole repository; one directory by snapshot path; validated manifests found by locator or a bounded legacy search. Each read holds a shared lock and never follows links. Authenticated tree ciphertext shares the private cache limit with the index. Routes and browser integration remain in 1.2 and 1.3. |
-| 1.2 | Routes and commands | S | `GET /snapshots` with a scope, `GET /snapshots/<id>` with the manifest, `GET /snapshots/<id>/tree?path=` one directory per request; `wp backups-for-restic ls`. |
+| 1.2 | Routes and commands | implemented; CI pending | `GET /snapshots` with the scope `site` (default) or `repository`, each list cached on its own; `GET /snapshots/<id>` with the manifest or null; `GET /snapshots/<id>/tree?path=` one directory per request in pages of at most 1000 entries; `wp backups-for-restic ls <snapshot> [<path>]`. `Restore\SnapshotBrowser` builds the answers and assigns the error codes and statuses; names that are not UTF-8 are shown lossy and addressed by a path token ([ADR 0039](adr/0039-snapshot-routes.md)). The admin page still shows the list only, now of this site; the browser is 1.3. |
 | 1.3 | Snapshot browser | M | List, details with the manifest, directories, a selection of paths, and for each snapshot whether the retention policy would remove it at the next forget (the preview the architecture promised for Milestone 2). |
 
 ### Phase 2: restore files to staging

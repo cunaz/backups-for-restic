@@ -84,6 +84,37 @@ final class CliTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_ls_lists_a_directory_of_a_snapshot(): void {
+		TestSite::idle( 600 );
+		$ids = self::snapshots();
+		self::assertNotSame( [], $ids );
+		// restic lists the oldest first; every backup of the site holds the fixture.
+		$id      = $ids[ count( $ids ) - 1 ];
+		$fixture = TestSite::root() . '/wp-content/uploads/fixture';
+
+		[ $status, $output ] = self::command( [ 'ls', substr( $id, 0, 8 ), $fixture ] );
+		self::assertSame( 0, $status, $output );
+		self::assertMatchesRegularExpression( '/^- [0-7]{4} +8388608  \S+ +file-0\.bin$/m', $output );
+
+		[ $status, $output ] = self::command( [ 'ls', $id ] );
+		self::assertSame( 0, $status, $output );
+		self::assertMatchesRegularExpression( '/^d [0-7]{4} +-  \S+ +\S+\/$/m', $output, 'The root of the snapshot holds a directory.' );
+
+		$refusals = [
+			'The snapshot has no directory with this path.' => [ $id, $fixture . '/file-0.bin' ],
+			'This is not a path inside a snapshot.'        => [ $id, 'wp-content' ],
+			'This is not a snapshot ID.'                   => [ 'latest' ],
+			'The repository has no snapshot with this ID.' => [ str_repeat( 'ab', 32 ) ],
+		];
+		foreach ( $refusals as $message => $arguments ) {
+			[ $status, $output ] = self::command( [ 'ls', ...$arguments ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: ' . $message, $output );
+		}
+		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ) );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_backup_with_wait_runs_the_job_in_the_command_and_names_the_snapshot(): void {
 		TestSite::idle( 600 );
 		TestSite::add_upload( 'cli.bin', 8 );

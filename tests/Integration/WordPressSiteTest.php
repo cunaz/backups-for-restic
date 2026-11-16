@@ -136,6 +136,111 @@ final class WordPressSiteTest extends TestCase {
 		}
 	}
 
+	/**
+	 * The entry with a name in a directory of a snapshot, read page by page.
+	 *
+	 * @param string $path Path or token of the directory.
+	 * @return array<string, mixed>
+	 */
+	private static function snapshot_entry( string $snapshot, string $path, string $name ): array {
+		$offset = 0;
+		do {
+			[ $status, $page, $raw ] = TestSite::api( 'GET', '/snapshots/' . $snapshot . '/tree&path=' . rawurlencode( $path ) . '&limit=50&offset=' . $offset );
+			self::assertSame( 200, $status, $raw );
+			self::assertLessThanOrEqual( 50, count( $page['entries'] ?? [] ), $raw );
+			foreach ( $page['entries'] ?? [] as $entry ) {
+				if ( $name === ( $entry['name'] ?? null ) ) {
+					return $entry;
+				}
+			}
+			$offset = $page['next'] ?? null;
+		} while ( is_int( $offset ) );
+		self::fail( 'The directory ' . $path . ' of the snapshot has no entry ' . $name . '.' );
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_snapshots_are_listed_read_and_browsed_down_to_an_uploaded_file(): void {
+		TestSite::idle( 600 );
+		$in_repository = json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true );
+		self::assertIsArray( $in_repository );
+		$expected = array_map( 'strval', array_column( $in_repository, 'id' ) );
+		sort( $expected );
+
+		[ $status, $all, $raw ] = TestSite::api( 'GET', '/snapshots&scope=repository&fresh=1' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'repository', $all['scope'] ?? null, $raw );
+		$listed = array_column( $all['snapshots'] ?? [], 'id' );
+		sort( $listed );
+		self::assertSame( $expected, $listed, $raw );
+
+		[ $status, $site, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'site', $site['scope'] ?? null, $raw );
+		self::assertNotSame( [], $site['snapshots'] ?? [], $raw );
+		$host = (string) parse_url( TestSite::URL, PHP_URL_HOST );
+		foreach ( $site['snapshots'] as $snapshot ) {
+			self::assertContains( $snapshot['id'] ?? null, $expected, $raw );
+			self::assertSame( $host, $snapshot['hostname'] ?? null, $raw );
+			self::assertContains( 'backups-for-restic', $snapshot['tags'] ?? [], $raw );
+		}
+		// The cached list of one scope is not the answer for the other.
+		[ , $cached ] = TestSite::api( 'GET', '/snapshots&scope=repository' );
+		self::assertSame( $all['snapshots'], $cached['snapshots'] ?? null );
+		[ , $cached ] = TestSite::api( 'GET', '/snapshots' );
+		self::assertSame( $site['snapshots'], $cached['snapshots'] ?? null );
+
+		// The newest snapshot of the site, with the manifest of the backup that wrote it.
+		$id                      = (string) $site['snapshots'][0]['id'];
+		[ $status, $read, $raw ] = TestSite::api( 'GET', '/snapshots/' . $id );
+		self::assertSame( 200, $status, $raw );
+		$uploads = TestSite::root() . '/wp-content/uploads';
+		self::assertSame( [ $id, $site['snapshots'][0]['time'], $host ], [ $read['snapshot']['id'] ?? null, $read['snapshot']['time'] ?? null, $read['snapshot']['hostname'] ?? null ], $raw );
+		self::assertSame( 64, strlen( (string) ( $read['snapshot']['tree'] ?? '' ) ), $raw );
+		self::assertNotSame( [], $read['snapshot']['paths'] ?? [], $raw );
+		self::assertSame( 'found', $read['snapshot']['manifest_state'] ?? null, $raw );
+		self::assertStringEndsWith( '/spool/manifest.json', (string) ( $read['snapshot']['manifest']['path'] ?? '' ), $raw );
+		self::assertSame( 'backups-for-restic-site/1', $read['snapshot']['manifest']['data']['format'] ?? null, $raw );
+		self::assertSame( $uploads, $read['snapshot']['manifest']['data']['uploads'] ?? null, $raw );
+		self::assertTrue( $read['snapshot']['manifest']['data']['database'] ?? null, $raw );
+
+		// From the root down to a file of the fixture, one directory per request, by the tokens of the entries.
+		$token = '/';
+		$entry = [];
+		foreach ( explode( '/', ltrim( $uploads . '/fixture/file-0.bin', '/' ) ) as $name ) {
+			$entry = self::snapshot_entry( $id, $token, $name );
+			$token = (string) ( $entry['token'] ?? '' );
+		}
+		self::assertSame( [ 'file-0.bin', true, 'file', 8 * 1048576, null, false ], [ $entry['name'] ?? null, $entry['exact'] ?? null, $entry['type'] ?? null, $entry['size'] ?? null, $entry['target'] ?? null, $entry['incomplete'] ?? null ], (string) json_encode( $entry ) );
+		self::assertMatchesRegularExpression( '/^[0-7]{4}$/', (string) ( $entry['mode'] ?? '' ) );
+		self::assertMatchesRegularExpression( '/^\d{4}-\d\d-\d\dT/', (string) ( $entry['mtime'] ?? '' ) );
+		// The path and its token name the same directory.
+		[ $status, $by_path, $raw ] = TestSite::api( 'GET', '/snapshots/' . $id . '/tree&path=' . rawurlencode( $uploads . '/fixture' ) );
+		self::assertSame( 200, $status, $raw );
+		self::assertContains( 'file-0.bin', array_column( $by_path['entries'] ?? [], 'name' ), $raw );
+		self::assertSame( $uploads . '/fixture', $by_path['path'] ?? null, $raw );
+		self::assertSame( count( $by_path['entries'] ?? [] ), min( 200, (int) ( $by_path['total'] ?? -1 ) ), $raw );
+
+		$refusals = [
+			'/snapshots&scope=everything'                 => [ 400, 'invalid_snapshot_query' ],
+			'/snapshots/latest'                           => [ 400, 'invalid_snapshot_id' ],
+			'/snapshots/' . str_repeat( 'ab', 32 )        => [ 404, 'snapshot_not_found' ],
+			'/snapshots/' . str_repeat( 'ab', 32 ) . '/tree' => [ 404, 'snapshot_not_found' ],
+			'/snapshots/' . $id . '/tree&path=wp-content' => [ 400, 'invalid_snapshot_path' ],
+			'/snapshots/' . $id . '/tree&path=' . rawurlencode( '/a/../b' ) => [ 400, 'invalid_snapshot_path' ],
+			'/snapshots/' . $id . '/tree&path=b64:!'      => [ 400, 'invalid_snapshot_path' ],
+			'/snapshots/' . $id . '/tree&limit=0'         => [ 400, 'invalid_snapshot_query' ],
+			'/snapshots/' . $id . '/tree&offset=-1'       => [ 400, 'invalid_snapshot_query' ],
+			'/snapshots/' . $id . '/tree&path=' . rawurlencode( '/no/such/dir' ) => [ 404, 'snapshot_path_not_found' ],
+			'/snapshots/' . $id . '/tree&path=' . rawurlencode( $uploads . '/fixture/file-0.bin' ) => [ 404, 'snapshot_path_not_found' ],
+		];
+		foreach ( $refusals as $route => [ $expected_status, $code ] ) {
+			[ $status, $error, $raw ] = TestSite::api( 'GET', $route );
+			self::assertSame( [ $expected_status, 'backups_for_restic_' . $code ], [ $status, $error['code'] ?? null ], $route . ': ' . $raw );
+			self::assertNotSame( '', $error['message'] ?? '', $raw );
+		}
+		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ), 'Reading leaves no lock in the repository.' );
+	}
+
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_a_tick_killed_in_the_middle_of_a_backup_leaves_a_resumable_job(): void {
 		// Enough new data that the backup step is still at work when the server is stopped.

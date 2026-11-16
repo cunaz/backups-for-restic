@@ -330,6 +330,19 @@ superglobal, the sanitised `tab` parameter of the admin page; `ABSPATH` guard in
 `uninstall.php` guarded by `WP_UNINSTALL_PLUGIN`; no `eval`, dynamic includes, `unserialize`
 or remote code; assets enqueued only on the plugin's screen; no third-party assets or CDNs.
 
+The routes and the command that read snapshots (`GET /snapshots…`, `ls`) treat every name,
+link target, time and tag of a snapshot as untrusted: another client of the repository, or
+whoever holds its password, chose them. A snapshot ID is 64 hex digits and a path passes
+`Engine\Snapshot\Path::parts()` before the repository is asked; a path token is bounded
+before it is decoded, and a path only ever selects entries inside the snapshot, never a
+file of the site. A directory is answered in pages of at most 1000 entries. Text that is
+not valid UTF-8 reaches a response only with replacement characters, and the command line
+prints names with control characters quoted, so that a stored name cannot send escape
+sequences to a terminal ([ADR 0039](adr/0039-snapshot-routes.md)). The answers hold file
+names and the site's manifest, no secret; like every route they need the capability. A
+read creates a shared lock in the repository and removes it, which is its only write there;
+on the site it writes encrypted trees and the index into the cache of the private directory.
+
 ## 10. Backup integrity and ransomware resistance
 
 - Detect **append-only** automatically and recommend it; with append-only the retention mode
