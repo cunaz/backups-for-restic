@@ -55,3 +55,4 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0033](0033-prune-listing-on-disk.md) | Prune validates the server pack listing on disk before deleting |
 | [0034](0034-snapshot-reader.md) | Read snapshots under shared locks and locate manifests independently of the live site |
 | [0036](0036-selected-file-staging.md) | Plan selected files before restoring into an owned staging directory |
+| [0038](0038-download-zip-and-tokens.md) | Downloads: a stored zip written by the plugin, and one-time tokens in a file |

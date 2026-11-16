@@ -1,0 +1,115 @@
+# 0038 · Downloads: a stored zip written by the plugin, and one-time tokens in a file
+Status: accepted
+Date: 2026-11-16
+
+## Context
+Package 2.4 lets an administrator download staged files: one file, or a selection as one
+archive. Two things stand in the way. An archive of a large selection cannot be built in one
+request, with the memory of one request, or with an extension the host may not have. And a
+browser that starts a download itself sends no REST nonce, so the address of a download
+needs a credential of its own that is worth nothing once it has leaked into a log.
+
+This record covers the two parts that depend on nothing else, both in the WordPress-free
+core. The routes that hand out and accept tokens and the job step that drives the writer
+follow with the rest of package 2.4.
+
+## Decision
+
+### The archive
+- `Storage\Zip\ZipWriter` writes the zip archive itself. Every entry uses method 0
+  (stored): the content of a file is copied in pieces of one mebibyte, so memory does not
+  grow with the size of a file or of the archive.
+- The work is done in calls with a deadline, as a job step needs them. All state is in
+  files beside the archive: `<archive>.part` is the archive being written,
+  `<archive>.entries` collects the central directory records, `<archive>.state` is the
+  checkpoint (JSON, replaced atomically). The checkpoint names how many bytes of the two
+  files count, the last finished entry, and for a file being copied its place and the
+  CRC-32 so far. It is written at least once a second and at the end of every call; bytes
+  beyond it are cut off when work resumes. A request killed at any point loses the work
+  since the last checkpoint and nothing else. A checkpoint that cannot be read or
+  contradicts itself counts as none, and the archive is started again.
+- The archive gets its name by a rename after its end record is written. A file with the
+  name of the archive is therefore always complete, and an incomplete one is recognised by
+  its name.
+- The local header of a file is written with an empty CRC-32 field, the content is copied
+  once, and the field is filled in afterwards; that write is repeated harmlessly after a
+  kill. The checksum of a file copied over several requests is kept as a number and joined
+  piece by piece (`Storage\Zip\Crc32`, the method of zlib's `crc32_combine`). No hash
+  context is serialized, so the checkpoint never passes through `unserialize()`.
+- The tree is walked depth first, the names of each directory in byte order. The archive
+  is the same however the calls are cut, which is what the tests compare. A directory gets
+  an entry of its own, so an empty one survives.
+- Zip64 fields are written where a size, an offset or the number of entries does not fit
+  the classic field, and only there. The limits are arguments of `ZipRecords` so that tests
+  reach them with kilobytes.
+- Names are stored as UTF-8 with the language encoding flag. A name is refused, never
+  changed, when it is not valid UTF-8, is absolute or starts with a drive letter, has an
+  empty, `.` or `..` component, or holds a NUL or a backslash. Programs on Windows read a
+  backslash as a separator, so `..\x` could leave the directory an archive is unpacked to.
+  Changing such names instead could make two entries collide.
+- The modification time is stored as MS-DOS time in UTC and exactly in the extended
+  timestamp field. Modes are not stored: staged files are owner-only on the server, and
+  the archive should unpack with the defaults of the computer it is unpacked on.
+- The tree may hold directories and regular files with one link, which is what staging
+  holds ([ADR 0036](0036-selected-file-staging.md)). Every entry is inspected with
+  `lstat()` before it is listed or read, and an opened file is compared with what was
+  inspected. A symbolic link, a second hard link or a special file ends the work. A file
+  whose size or time changed since its header was written is reported; the tree must not
+  change while it is archived.
+- The caller names the tree and the archive, and the archive must lie outside the tree.
+  The caller also keeps two requests from working on one archive, as the runner's lock does.
+
+### The tokens
+- `Storage\DownloadTokens` issues a token for a subject, an opaque string by which the
+  caller names one download, such as a job and a relative path, or a job and the word
+  `zip`. A token is 32 bytes from the `RandomSource` as 43 characters of base64url.
+- A token is valid once and for one hour.
+- The store is one file, `download-tokens.json`, in a directory the caller names, written
+  atomically with owner-only permissions. A record holds the SHA-256 hash of the token, the
+  SHA-256 hash of the subject and the expiry time. The token is returned to the caller
+  once and is stored nowhere. A token has 256 bits of entropy, so a plain hash is enough;
+  the subject is hashed so that a record has a fixed form whatever bytes a path has.
+- Issuing and redeeming read, change and write the store under a `FileLock`. Redeeming
+  compares the presented hash with every record through `hash_equals()`, removes the
+  matching record and answers yes only after the store is written. Of two requests that
+  present one token at the same moment, one is served. If the store cannot be written, the
+  token is not accepted.
+- A token presented for another subject is refused and stays valid for its own.
+- Expired tokens are removed from the file whenever a token is issued or presented. At
+  most 256 tokens are valid at once; when that number is reached, the token that expires
+  first gives way, so a full store never blocks a download.
+- A store that cannot be read as one counts as empty: every token in it is refused, and
+  the next token issued replaces the file.
+
+## Consequences
+- A download needs no PHP extension. The archive is as large as the files in it, and it
+  occupies that space beside staging until it expires with it.
+- A tree with one name that cannot be stored yields no archive. The job step has to report
+  the name, which the exception carries percent-encoded in its context.
+- The token store lives on the file system of one web server. Where several servers share
+  a file system without a working `flock()`, a token could be redeemed twice, which is the
+  limit the other locks of the plugin have.
+- Whoever holds the token within the hour can download once. The route that redeems it
+  still has to build the path from the subject it checks, never from the token.
+
+## Alternatives considered
+- **PHP's zip extension (`ZipArchive`).** Not installed everywhere, which would make the
+  download depend on the host ([ADR 0002](0002-runtime-dependencies.md)). It also writes
+  the archive when it is closed, in one request, and offers no way to continue after a
+  kill.
+- **Compression.** Deflate costs processor time that a request with a short deadline does
+  not have, and most of what a site stores in bulk (images, archives, fonts) is compressed
+  already. A stored entry also has a size known beforehand, which keeps the header simple
+  and the progress exact.
+- **Data descriptors after the content instead of filling in the CRC-32.** Readers that
+  stream an archive cannot tell where a stored entry with a descriptor ends.
+- **A serialized hash context in the checkpoint.** Shorter, but the checkpoint would be fed
+  to `unserialize()`.
+- **Tokens in the database, as an option or a transient.** A transient may live in an
+  object cache that other code reads, an option is part of every database dump the plugin
+  itself backs up, and neither offers a compare-and-delete that two requests cannot both
+  win. The private directory already holds everything a download serves.
+- **A signed, stateless token (HMAC over subject and expiry).** Cannot be valid only once
+  without a store of used tokens, which is the same file.
+- **The REST nonce in the address.** It is valid for up to a day, for every route, and
+  would end up in the access log of the server.
