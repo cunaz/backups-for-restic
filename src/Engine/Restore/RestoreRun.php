@@ -300,21 +300,27 @@ final class RestoreRun {
 	private function keep_lock( bool $boundary = false ): void {
 		$lock = $this->state->lock;
 		if ( $boundary && ( null === $lock || $this->locking->lapsed( $this->state->locked_at ) || ! $this->probe( $lock ) ) ) {
-			$taken                  = $this->clock->now()[0];
-			$lock                   = $this->locking->acquire( false )->hex();
-			$this->state->lock      = $lock;
-			$this->state->locked_at = $taken;
-			Files::persist( $this->state );
+			$taken = $this->clock->now()[0];
+			$fresh = $this->locking->acquire( false )->hex();
 			// Another client may have repacked or forgotten during the gap.
 			$this->index   = null;
 			$this->tree_id = null;
 			$this->nodes   = [];
+			// The new lock is recorded only after the snapshot was seen under it. A call that
+			// ends before that leaves the old name in the checkpoint, so the next call takes a
+			// lock and looks again; the unrecorded lock carries this run's number and goes
+			// with the next lock taken or released.
 			if ( null === $this->repository->backend()->size( ObjectType::Snapshots, $this->state->snapshot->hex() ) ) {
 				throw new RepositoryChanged( 'The selected snapshot no longer exists.' );
 			}
-			if ( ! $this->probe( $lock ) ) {
-				$lock = null;
+			$found = null !== $this->repository->backend()->size( ObjectType::Locks, $fresh );
+			if ( $this->locking->lapsed( $taken ) ) {
+				throw new RepositoryChanged( 'A restore lock check exceeded the trusted lease.' );
 			}
+			$this->state->lock      = $fresh;
+			$this->state->locked_at = $taken;
+			Files::persist( $this->state );
+			$lock = $found ? $fresh : null;
 		}
 		if ( null === $lock || $this->locking->lapsed( $this->state->locked_at ) ) {
 			throw new RepositoryChanged( 'The restore repository lock was lost during a read; resume the run to revalidate it.' );
