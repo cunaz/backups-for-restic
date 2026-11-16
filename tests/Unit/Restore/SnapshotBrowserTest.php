@@ -245,6 +245,48 @@ final class SnapshotBrowserTest extends TestCase {
 		self::assertSame( "/caf\xe9/inside.txt", SnapshotBrowser::path( $below['entries'][0]['token'] ) );
 	}
 
+	public function test_a_long_name_with_one_invalid_byte_gets_one_replacement_character(): void {
+		$ascii = str_repeat( 'a', 100000 );
+		$wide  = str_repeat( "\u{e9}\u{20ac}", 20000 );
+		$root  = $this->tree(
+			[
+				new Node( $ascii . "\xff", NodeType::Symlink, link_target: $wide . "\xff" . $wide ),
+			]
+		);
+
+		$entry = $this->browser()->directory( $this->snapshot( $root ), '/' )['entries'][0];
+
+		self::assertSame( $ascii . "\u{fffd}", $entry['name'], 'Only the byte that belongs to no valid sequence is replaced.' );
+		self::assertSame( $wide . "\u{fffd}" . $wide, $entry['target'] );
+	}
+
+	public function test_a_line_is_printed_for_an_entry_beyond_the_limits_of_a_path(): void {
+		$entry = [
+			'name'       => 'child',
+			'exact'      => true,
+			'token'      => SnapshotBrowser::token( str_repeat( '/d', 256 ) . '/child' ),
+			'type'       => 'file',
+			'size'       => 1,
+			'mtime'      => null,
+			'mode'       => '0644',
+			'target'     => null,
+			'incomplete' => false,
+		];
+		$long  = [ 'token' => SnapshotBrowser::token( '/' . str_repeat( 'x', 4090 ) . '/child-name' ) ] + $entry;
+
+		self::assertSame( [ 'invalid_snapshot_path', 400 ], self::refused( static fn () => SnapshotBrowser::path( $entry['token'] ) ), 'The entry itself cannot be opened.' );
+		self::assertStringEndsWith( '  child', SnapshotBrowser::line( $entry ) );
+		self::assertStringEndsWith( '  child-name', SnapshotBrowser::line( $long ) );
+	}
+
+	public function test_a_full_id_is_checked_without_a_repository(): void {
+		$id = str_repeat( 'ab', 32 );
+		self::assertSame( $id, SnapshotBrowser::full_id( $id ) );
+		foreach ( [ '', 'latest', substr( $id, 1 ), strtoupper( $id ), $id . 'a' ] as $given ) {
+			self::assertSame( [ 'invalid_snapshot_id', 400 ], self::refused( static fn () => SnapshotBrowser::full_id( $given ) ), $given );
+		}
+	}
+
 	public function test_a_path_and_its_token_name_the_same_directory(): void {
 		$deep = $this->tree( [ new Node( 'file', NodeType::File, content: [] ) ] );
 		$mid  = $this->tree( [ new Node( 'b', NodeType::Dir, subtree: $deep ) ] );
@@ -438,6 +480,7 @@ final class SnapshotBrowserTest extends TestCase {
 				new Node( 'current', NodeType::Symlink, 0777, '2026-01-02T03:04:05Z', link_target: "releases/\x1b[2J" ),
 				new Node( "evil\x1b[31m\xff", NodeType::File, 0600, 'never', content: [] ),
 				new Node( 'queue', NodeType::Fifo, 0600, '2026-01-02T03:04:05Z' ),
+				new Node( "break\n", NodeType::File, 0640, '2026-01-02T03:04:05Z', content: [] ),
 			]
 		);
 		$lines = [];
@@ -450,6 +493,7 @@ final class SnapshotBrowserTest extends TestCase {
 		self::assertSame( 'l 0777            -  2026-01-02T03:04:05Z  current -> "releases/\x1b[2J"', $lines['symlink 0777'] );
 		self::assertSame( '- 0600            0  -                     "evil\x1b[31m\xff"', $lines['file 0600'] );
 		self::assertSame( '? 0600            -  2026-01-02T03:04:05Z  queue', $lines['other 0600'] );
+		self::assertSame( '- 0640            0  2026-01-02T03:04:05Z  "break\n"', $lines['file 0640'], 'A line break at the end of a name is escaped too.' );
 		foreach ( $lines as $line ) {
 			self::assertSame( 0, preg_match( '/[\x00-\x1f\x7f-\xff]/', $line ), 'No control character and no raw byte reaches the terminal.' );
 		}

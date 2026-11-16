@@ -166,6 +166,8 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- A file name that ends in a line break is written to a snapshot's tree with the break
+  escaped, as restic writes it. It was written unescaped before.
 - Initial layout recording no longer overwrites a number another request has inserted.
   Newer and malformed settings layout numbers are preserved and keep the plugin inactive;
   deactivation leaves their jobs and repository locks alone. Only a missing layout option

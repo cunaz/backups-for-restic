@@ -285,13 +285,15 @@ final class SnapshotBrowser {
 	 * One line of a directory listing for a terminal. The name comes from the token, so it
 	 * is the stored one; a name with control characters, a quote, a backslash or invalid
 	 * UTF-8 is printed quoted with escapes, because a stored name must not be able to send
-	 * control sequences to the terminal.
+	 * control sequences to the terminal. The token is only decoded and not checked as a
+	 * path: an entry beyond the limits of a path cannot be opened, but its directory lists it.
 	 *
 	 * @param Entry $entry Entry of a directory page.
 	 * @return string Line: type, mode, size, modification time, name and the target of a link.
+	 * @throws FormatException If the token is not one that directory() issued.
 	 */
 	public static function line( array $entry ): string {
-		$path = self::path( $entry['token'] );
+		$path = Bytes::base64url_decode( substr( $entry['token'], strlen( self::TOKEN_PREFIX ) ) );
 		$name = self::printable( substr( $path, (int) strrpos( $path, '/' ) + 1 ) );
 		if ( 'dir' === $entry['type'] ) {
 			$name .= '/';
@@ -323,6 +325,18 @@ final class SnapshotBrowser {
 		}
 		$code = JobError::from_throwable( $error )->code;
 		return [ $code, 'repository_locked' === $code ? 409 : 502 ];
+	}
+
+	/**
+	 * Checks a full snapshot ID, so that a route refuses a malformed one before it opens
+	 * the repository.
+	 *
+	 * @param string $id Request value.
+	 * @return string The ID.
+	 * @throws InvalidArgument If the text is not 64 lower-case hex digits.
+	 */
+	public static function full_id( string $id ): string {
+		return self::id( $id )->hex();
 	}
 
 	/**
@@ -433,15 +447,17 @@ final class SnapshotBrowser {
 		$length = strlen( $bytes );
 		$offset = 0;
 		while ( $offset < $length ) {
-			// The longest valid run from here, then one byte that belongs to none.
-			$run = 1 === preg_match( '/\G(?:[\x00-\x7F]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2})+/', $bytes, $match, 0, $offset ) ? $match[0] : '';
-			if ( '' === $run ) {
+			// A valid run from here, then one byte that belongs to none. The run is matched in
+			// bounded, possessive steps: one unbounded repetition of the group exhausts the
+			// stack of the matcher on a long name, and a failed match would read as no run.
+			$found = preg_match( '/\G(?:[\x00-\x7F]++|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}){1,32}+/', $bytes, $match, 0, $offset );
+			if ( 1 !== $found ) {
 				$text .= "\u{FFFD}";
 				++$offset;
 				continue;
 			}
-			$text   .= $run;
-			$offset += strlen( $run );
+			$text   .= $match[0];
+			$offset += strlen( $match[0] );
 		}
 		return $text;
 	}

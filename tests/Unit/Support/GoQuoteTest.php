@@ -39,6 +39,11 @@ final class GoQuoteTest extends TestCase {
 		self::assertSame( $json, GoJson::encode_string( $input ) );
 	}
 
+	public function test_quote_escapes_a_line_break_at_the_end_of_a_name(): void {
+		self::assertSame( 'abc\n', GoQuote::quote( "abc\n" ) );
+		self::assertSame( "abc\n", GoQuote::unquote( 'abc\n' ) );
+	}
+
 	public function test_unquote_accepts_octal_and_long_unicode_escapes(): void {
 		self::assertSame( "A\u{1F600}", GoQuote::unquote( '\\101\\U0001f600' ) );
 	}

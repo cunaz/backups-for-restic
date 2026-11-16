@@ -1057,7 +1057,9 @@ a job does, so an index that does not fit is refused with `index_too_large`
   that share the repository; all of them can be read and browsed. Both lists live in the
   one transient `backups_for_restic_snapshots`, each with the time it was read, so
   everything that deletes the transient (a finished backup, forget or prune, a saved,
-  created or connected repository, a job that opens another repository) drops both. The WP-CLI command `snapshots` lists every snapshot of the
+  created or connected repository, a job that opens another repository) drops both. A
+  request that stores its list reads the transient again first, so it never writes back
+  the other list from before such a deletion. The WP-CLI command `snapshots` lists every snapshot of the
   repository.
 - **Directories.** `GET /snapshots/{id}/tree` answers one directory per request and never
   follows a link. The answer has `snapshot`, `path`, `exact`, `token`, `parent` (the token
@@ -1084,9 +1086,13 @@ a job does, so an index that does not fit is refused with `index_too_large`
   `invalid_snapshot_path`), as is a scope, offset or limit that is not allowed
   (`invalid_snapshot_query`). An unknown snapshot is 404 (`snapshot_not_found`), and so is
   a path that does not exist in the snapshot, or that is a file or a link
-  (`snapshot_path_not_found`). A repository under an exclusive lock, as during a prune, is
-  409 `repository_locked`; without a cached key the routes answer 409 `configuration`;
-  every other error of the repository is 502 with its code of §14.
+  (`snapshot_path_not_found`). The two routes of one snapshot check the ID, the path and
+  the paging before they open the repository, so these refusals do not depend on its
+  state. A repository under an exclusive lock, as during a prune, is 409
+  `repository_locked`. That holds for the list too: it is read under the shared lock of
+  the reader like every other read, so the Snapshots tab shows this error instead of a
+  list that a running prune may be changing. Without a cached key the routes answer 409
+  `configuration`; every other error of the repository is 502 with its code of §14.
 
 Errors of the routes carry the codes of §14 with the prefix `backups_for_restic_`.
 

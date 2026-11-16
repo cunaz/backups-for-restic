@@ -385,6 +385,9 @@ final class RestRoutes {
 			[ $code, $status ] = SnapshotBrowser::failure( $e );
 			return $this->error( $code, $status );
 		}
+		// The other list is read again now: a job that ended during the read above deleted the
+		// transient, and the list from before that job must not be written back.
+		$cached           = $this->cached_snapshots();
 		$cached[ $scope ] = [
 			'time'      => time(),
 			'snapshots' => $list,
@@ -429,7 +432,12 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function snapshot( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		return $this->browse( static fn ( SnapshotBrowser $browser ): array => [ 'snapshot' => $browser->snapshot( self::text( $request, 'snapshot' ) ) ] );
+		return $this->browse(
+			static function () use ( $request ): \Closure {
+				$id = SnapshotBrowser::full_id( self::text( $request, 'snapshot' ) );
+				return static fn ( SnapshotBrowser $browser ): array => [ 'snapshot' => $browser->snapshot( $id ) ];
+			}
+		);
 	}
 
 	/**
@@ -441,25 +449,30 @@ final class RestRoutes {
 	 */
 	public function snapshot_tree( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		return $this->browse(
-			static function ( SnapshotBrowser $browser ) use ( $request ): array {
+			static function () use ( $request ): \Closure {
+				$id                 = SnapshotBrowser::full_id( self::text( $request, 'snapshot' ) );
 				[ $offset, $limit ] = SnapshotBrowser::paging( $request->get_param( 'offset' ), $request->get_param( 'limit' ) );
 				$path               = $request->get_param( 'path' );
 				// No path is the root; a value that is no text is refused as a malformed path.
 				$path = null === $path || '' === $path ? '/' : ( is_string( $path ) ? $path : '' );
-				return $browser->directory( self::text( $request, 'snapshot' ), $path, $offset, $limit );
+				SnapshotBrowser::path( $path );
+				return static fn ( SnapshotBrowser $browser ): array => $browser->directory( $id, $path, $offset, $limit );
 			}
 		);
 	}
 
 	/**
 	 * Answers a read of a snapshot: 409 without a cached key, as the snapshot list does,
-	 * and every refusal or error with the code and status that the browser assigns.
+	 * and every refusal or error with the code and status that the browser assigns. The
+	 * request is checked first, so a malformed ID, path or page is refused with 400 before
+	 * the repository is opened, whatever state the repository is in.
 	 *
-	 * @param \Closure(SnapshotBrowser): array<string, mixed> $read The read.
+	 * @param \Closure(): (\Closure(SnapshotBrowser): array<string, mixed>) $checked Checks the request and returns the read.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
-	private function browse( \Closure $read ): \WP_REST_Response|\WP_Error {
+	private function browse( \Closure $checked ): \WP_REST_Response|\WP_Error {
 		try {
+			$read    = $checked();
 			$browser = $this->container->snapshot_browser();
 			if ( null === $browser ) {
 				return $this->error( 'configuration', 409 );

@@ -33,8 +33,9 @@ final class GoQuote {
 	 * @return string Escaped name as stored in restic trees.
 	 */
 	public static function quote( string $name ): string {
-		// Fast path: printable ASCII without quote or backslash.
-		if ( 1 === preg_match( '/^[\x20\x21\x23-\x5B\x5D-\x7E]*$/', $name ) ) {
+		// Fast path: printable ASCII without quote or backslash. The D modifier keeps "$"
+		// from matching before a final line break, which has to be escaped.
+		if ( 1 === preg_match( '/^[\x20\x21\x23-\x5B\x5D-\x7E]*$/D', $name ) ) {
 			return $name;
 		}
 
