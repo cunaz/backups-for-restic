@@ -12,7 +12,10 @@ All notable changes are documented here. The format follows
   Encrypted tree caches share the existing cache limit with the index. New backups record
   where their manifest lives so that a different installation can find it after a move.
   Long snapshot lists refresh their shared lock while reading and keep only matching site
-  metadata. Repeated tree-cache reads avoid rescanning the cache directory.
+  metadata. Repeated tree-cache reads avoid rescanning the cache directory. The search for
+  the manifest of an older snapshot stops after five seconds per call and continues from
+  the tree cache on the next one. An index too large for the cache limit no longer removes
+  the cached trees, and temporary tree files of ended requests are removed after a minute.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

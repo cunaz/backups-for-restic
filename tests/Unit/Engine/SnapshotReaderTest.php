@@ -17,6 +17,7 @@ use BackupsForRestic\Engine\Snapshot\Manifest;
 use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Engine\Snapshot\Reader;
 use BackupsForRestic\Engine\TreeCache;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
@@ -46,6 +47,7 @@ final class SnapshotReaderTest extends TestCase {
 	private int $read_seconds     = 0;
 	private int $snapshot_seconds = 0;
 	private int $lock_writes      = 0;
+	private bool $fail_lock_check = false;
 
 	protected function setUp(): void {
 		$this->backend    = new InMemoryBackend();
@@ -54,6 +56,10 @@ final class SnapshotReaderTest extends TestCase {
 			function ( string $method, ?ObjectType $type ): void {
 				if ( 'save' === $method && ObjectType::Locks === $type ) {
 					++$this->lock_writes;
+				}
+				if ( $this->fail_lock_check && 'list' === $method && ObjectType::Locks === $type && [] !== ( $this->backend->objects['locks'] ?? [] ) ) {
+					$this->fail_lock_check = false;
+					throw new BackendException( 'The server did not answer.' );
 				}
 				if ( $this->reading && in_array( $type, [ ObjectType::Index, ObjectType::Data, ObjectType::Snapshots ], true ) ) {
 					self::assertCount( 1, $this->backend->objects['locks'] ?? [], 'Metadata, index and tree access requires the shared lock first.' );
@@ -78,9 +84,9 @@ final class SnapshotReaderTest extends TestCase {
 		TempDir::remove( $this->cache );
 	}
 
-	private function reader( bool $cached = false ): Reader {
+	private function reader( bool $cached = false, int $search_seconds = Reader::MANIFEST_SEARCH_SECONDS ): Reader {
 		$this->reading = true;
-		return new Reader( $this->repository, new Identity( 'current.example.com' ), $this->clock, $cached ? new IndexCache( $this->cache, 1048576 ) : null, $cached ? new TreeCache( $this->cache, 1048576 ) : null );
+		return new Reader( $this->repository, new Identity( 'current.example.com' ), $this->clock, $cached ? new IndexCache( $this->cache, 1048576 ) : null, $cached ? new TreeCache( $this->cache, 1048576 ) : null, $search_seconds );
 	}
 
 	/** @param list<Node> $nodes */
@@ -328,6 +334,67 @@ final class SnapshotReaderTest extends TestCase {
 		} catch ( InvalidArgument $error ) {
 			self::assertStringContainsString( 'select the manifest explicitly', $error->getMessage() );
 			self::assertSame( [], $this->backend->objects['locks'] );
+		}
+	}
+
+	/** A root with three distinct directories, one of them the spool with the manifest. */
+	private function legacy_snapshot(): Id {
+		$root = $this->tree(
+			[
+				new Node( 'a', NodeType::Dir, subtree: $this->tree( [ new Node( 'one', NodeType::File, content: [] ) ] ) ),
+				new Node( 'b', NodeType::Dir, subtree: $this->tree( [ new Node( 'two', NodeType::File, content: [] ) ] ) ),
+				new Node( 'spool', NodeType::Dir, subtree: $this->manifest_tree() ),
+			]
+		);
+		return $this->snapshot( $root );
+	}
+
+	public function test_a_legacy_manifest_search_beyond_its_time_budget_is_refused_and_releases_its_lock(): void {
+		$id                 = $this->legacy_snapshot();
+		$this->read_seconds = 3;
+		try {
+			$this->reader( false, 5 )->manifest( $id );
+			self::fail( 'A search that ran out of time must not continue or report the manifest absent.' );
+		} catch ( InvalidArgument $error ) {
+			self::assertStringContainsString( 'select the manifest explicitly', $error->getMessage() );
+			self::assertSame( 2, $this->counted->loads['data'], 'The root and one directory fit into five seconds.' );
+			self::assertSame( [], $this->backend->objects['locks'] );
+		}
+	}
+
+	public function test_a_legacy_manifest_search_within_its_time_budget_is_not_refused(): void {
+		$id                 = $this->legacy_snapshot();
+		$this->read_seconds = 1;
+		// Four directories take four seconds; the fifth second belongs to the manifest itself.
+		self::assertSame( '/spool/manifest.json', $this->reader( false, 5 )->manifest( $id )['path'] ?? null );
+	}
+
+	public function test_a_search_refused_for_its_time_gets_further_with_the_tree_cache(): void {
+		$id                 = $this->legacy_snapshot();
+		$this->read_seconds = 3;
+		$reader             = $this->reader( true, 5 );
+		try {
+			$reader->manifest( $id );
+			self::fail( 'The first call cannot read four directories in five seconds.' );
+		} catch ( InvalidArgument ) {
+			self::assertSame( [], $this->backend->objects['locks'] );
+		}
+		$manifest = $reader->manifest( $id );
+		self::assertSame( '/spool/manifest.json', $manifest['path'] ?? null );
+		self::assertSame( self::manifest_data(), $manifest['data'] ?? null );
+		self::assertSame( [], $this->backend->objects['locks'] );
+	}
+
+	public function test_a_lock_whose_second_conflict_check_fails_is_not_left_behind(): void {
+		$id                    = $this->snapshot( $this->tree( [] ) );
+		$this->fail_lock_check = true;
+		try {
+			$this->reader()->directory( $id );
+			self::fail( 'The failed check must reach the caller.' );
+		} catch ( BackendException ) {
+			self::assertSame( 1, $this->lock_writes, 'The lock was written before the check failed.' );
+			self::assertSame( [], $this->backend->objects['locks'], 'Nothing else would remove it for thirty minutes.' );
+			self::assertSame( 0, $this->counted->loads['snapshots'] ?? 0 );
 		}
 	}
 

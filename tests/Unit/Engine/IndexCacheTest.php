@@ -12,6 +12,7 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Engine\TreeCache;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -256,6 +257,23 @@ final class IndexCacheTest extends TestCase {
 		self::assertFileExists( $limited . '/index.bin' );
 		self::assertLessThan( 1000000, filesize( $limited . '/index.bin' ) );
 		self::assertGreaterThan( 100000, filesize( $limited . '/index.bin' ) );
+	}
+
+	public function test_an_index_beyond_the_limit_leaves_the_tree_cache_of_the_same_directory(): void {
+		$this->index_file( 'a', 10, 300 );
+		( new IndexCache( $this->directory, 1000000 ) )->load( $this->repository );
+		self::assertGreaterThan( 100000, filesize( $this->directory . '/index.bin' ) );
+		$plain = 'tree bytes';
+		$tree  = $this->directory . '/trees/' . Id::of( $plain )->hex() . '.bin';
+		( new TreeCache( $this->directory, 1000000 ) )->write( $this->repository, Id::of( $plain ), $plain );
+		self::assertFileExists( $tree );
+
+		// The first load finds an index file above the lowered limit, the second finds none.
+		for ( $load = 0; $load < 2; ++$load ) {
+			self::assertSame( 3000, ( new IndexCache( $this->directory, 100000 ) )->load( $this->repository )->count() );
+			self::assertSame( [ $this->directory . '/trees' ], glob( $this->directory . '/*' ), 'Only the index file and its temporary file are removed.' );
+			self::assertFileExists( $tree, 'A cached tree is not the index writer\'s to delete.' );
+		}
 	}
 
 	/**

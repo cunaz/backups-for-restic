@@ -153,6 +153,31 @@ final class TreeCacheTest extends TestCase {
 		self::assertFileDoesNotExist( $this->file( $id ), 'IndexCache itself must enforce the combined limit.' );
 	}
 
+	public function test_trimming_removes_temporary_files_that_an_ended_request_left_behind(): void {
+		$plain = $this->plain();
+		$id    = Id::of( $plain );
+		$cache = new TreeCache( $this->directory, 4096 );
+		$cache->write( $this->repository, $id, $plain );
+		$old     = $this->file( $id ) . '.0123456789abcdef.tmp';
+		$recent  = $this->file( $id ) . '.fedcba9876543210.tmp';
+		$future  = $this->file( $id ) . '.0000000000000000.tmp';
+		$foreign = $this->directory . '/trees/notes.tmp';
+		foreach ( [ $old, $recent, $future, $foreign ] as $file ) {
+			file_put_contents( $file, 'leftover' );
+		}
+		touch( $old, time() - 120 );
+		touch( $future, time() + 60 );
+		touch( $foreign, time() - 120 );
+
+		$cache->trim();
+
+		self::assertFileDoesNotExist( $old, 'It is outside the limit, so only its age can remove it.' );
+		self::assertFileExists( $recent, 'Another request may be writing this file right now.' );
+		self::assertFileExists( $future );
+		self::assertFileExists( $foreign, 'Only names this cache creates are its to delete.' );
+		self::assertSame( $plain, $cache->read( $this->repository, $id ) );
+	}
+
 	public function test_a_reduced_limit_evicts_old_tree_files_without_loading_them(): void {
 		$plain = $this->plain();
 		$id    = Id::of( $plain );

@@ -12,6 +12,7 @@ namespace BackupsForRestic\Backup;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\VirtualFile;
 use BackupsForRestic\Engine\Snapshot\Manifest;
+use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Storage\PrivateDirectory;
@@ -69,8 +70,11 @@ final class PlanFactory {
 	 * @return BackupPlan Plan.
 	 */
 	public function plan(): BackupPlan {
-		$spool    = $this->private_dir->path . '/spool';
-		$database = $spool . '/database';
+		// The archiver walks lexically normalized roots, so everything that is compared with the
+		// paths it reports, and the manifest locator, uses the private directory in that form.
+		$private_dir = BackupPlan::normalize( [ $this->private_dir->path ] )[0];
+		$spool       = $private_dir . '/spool';
+		$database    = $spool . '/database';
 		$this->ensure( $spool );
 		if ( null !== $this->database ) {
 			$this->ensure( $database );
@@ -80,16 +84,15 @@ final class PlanFactory {
 		$roots  = array_values( array_filter( $roots, static fn ( string $root ): bool => '' !== $root && is_dir( $root ) ) );
 		$inside = false;
 		foreach ( $roots as $root ) {
-			$inside = $inside || $this->private_dir->is_inside( $root );
+			$inside = $inside || str_starts_with( $private_dir . '/', BackupPlan::normalize( [ $root ] )[0] . '/' );
 		}
 		if ( ! $inside ) {
 			$roots[] = $spool;
 		}
 
-		$private_dir = $this->private_dir->path;
-		$patterns    = $this->exclude_patterns();
-		$caches      = $this->settings->bool( 'backup.exclude_caches' );
-		$exclude     = static function ( string $path, bool $is_dir ) use ( $private_dir, $spool, $patterns, $caches ): bool {
+		$patterns = $this->exclude_patterns();
+		$caches   = $this->settings->bool( 'backup.exclude_caches' );
+		$exclude  = static function ( string $path, bool $is_dir ) use ( $private_dir, $spool, $patterns, $caches ): bool {
 			if ( str_starts_with( $path . '/', $private_dir . '/' ) && $path !== $private_dir ) {
 				return $path !== $spool && ! str_starts_with( $path, $spool . '/' );
 			}
@@ -114,7 +117,15 @@ final class PlanFactory {
 			return $directory === $database && null !== $files ? $files() : [];
 		};
 
-		return new BackupPlan( $roots, [ self::TAG, $this->site->site_tag(), 'run:' . $this->job_id, Manifest::tag( $spool . '/manifest.json' ) ], $exclude, $virtual );
+		$tags = [ self::TAG, $this->site->site_tag(), 'run:' . $this->job_id ];
+		try {
+			$tags[] = Manifest::tag( $spool . '/manifest.json' );
+		} catch ( InvalidArgument ) {
+			// A path too long or too deep for a locator must not fail the backup: the snapshot
+			// is then read like an older one, by a search or an explicit manifest path.
+			$tags = array_slice( $tags, 0, 3 );
+		}
+		return new BackupPlan( $roots, $tags, $exclude, $virtual );
 	}
 
 	/**

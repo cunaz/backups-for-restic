@@ -27,6 +27,9 @@ final class TreeCache {
 	/** Large directories may be read, but are not retained in this small-object cache. */
 	private const int MAX_PLAIN_BYTES = 4194304;
 
+	/** Age after which a temporary file belongs to a request that ended before publishing it. */
+	private const int TEMPORARY_SECONDS = 60;
+
 	/**
 	 * Whether this instance has enforced its configured limit.
 	 *
@@ -105,6 +108,7 @@ final class TreeCache {
 
 	/**
 	 * Makes room for a write or enforces a reduced limit. The index always takes priority.
+	 * Temporary files older than a minute are leftovers of ended requests and are removed.
 	 * IndexCache calls this after loading/writing its own file as well.
 	 *
 	 * @param int $reserve Bytes about to be published, zero when only enforcing the limit.
@@ -122,8 +126,15 @@ final class TreeCache {
 		try {
 			$bytes = $this->index_bytes();
 			foreach ( new \DirectoryIterator( $directory ) as $entry ) {
-				if ( $entry->isFile() && ! $entry->isLink() && 1 === preg_match( '/^[0-9a-f]{64}\.bin$/D', $entry->getFilename() ) ) {
+				if ( ! $entry->isFile() || $entry->isLink() ) {
+					continue;
+				}
+				if ( 1 === preg_match( '/^[0-9a-f]{64}\.bin$/D', $entry->getFilename() ) ) {
 					$bytes += $entry->getSize();
+				} elseif ( 1 === preg_match( '/^[0-9a-f]{64}\.bin\.[0-9a-f]{16}\.tmp$/D', $entry->getFilename() ) && time() - $entry->getMTime() > self::TEMPORARY_SECONDS ) {
+					// Left by a request that was ended between creating and publishing the file.
+					// It is outside the limit, so nothing else would ever remove it.
+					@unlink( $entry->getPathname() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Another request may already have removed it.
 				}
 			}
 			$target = max( 0, $this->limit - $reserve );

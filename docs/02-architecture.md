@@ -736,17 +736,22 @@ refuses the result and requires a fresh read. It preserves raw name bytes, rejec
 path components and never follows a link. The REST and browser integration follows in
 Milestone 3 phases 1.2 and 1.3.
 
-New snapshots record their manifest's original snapshot path in an encrypted locator tag;
-old snapshots use a bounded search for a unique `spool/manifest.json`. An incomplete or
-ambiguous search requires an explicit snapshot path. Manifests are limited to 1 MiB and
+New snapshots record their manifest's original snapshot path in an encrypted locator tag,
+built from the normalized private directory path that the archiver walks;
+old snapshots use a search for a unique `spool/manifest.json` that is bounded to 4096
+directories and to five seconds per call. An incomplete or
+ambiguous search requires an explicit snapshot path; one that ran out of time gets further
+when it is repeated, because the tree cache keeps what it read. Manifests are limited to 1 MiB and
 128 blobs, authenticated and checked against their declared file size and schema. Their
 contents describe the old site; later apply/import planning must validate every use.
 
 The reader caches tree ciphertext below `cache/<repo-id>/trees/`, verifying both its
 authentication and tree ID on every hit. Index and published tree files share the configured
 cache limit, with the index taking priority. Either writer evicts trees as needed; clearing
-the cache removes both. Trees over 4 MiB are read without caching. Temporary ciphertext
-needs additional disk space during atomic publication.
+the cache removes both. An index too large for the limit is not cached and leaves the trees
+in place. Trees over 4 MiB are read without caching. Temporary ciphertext
+needs additional disk space during atomic publication; a temporary tree file that a request
+left behind is removed once it is a minute old.
 
 | Scenario | Flow |
 | --- | --- |

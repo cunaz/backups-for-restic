@@ -11,7 +11,9 @@ retain a stale in-memory index between requests or write plaintext site metadata
 
 ## Decision
 - `Engine\Snapshot\Reader` takes a fresh shared repository lock for each public operation
-  and releases it in `finally`. It lists snapshots by an optional host and required tags,
+  and releases it in `finally`. The lock is taken inside that `try`: taking it can fail
+  after the lock file was written, and the release then removes every lock that carries
+  this call's number. It lists snapshots by an optional host and required tags,
   loads individual snapshot metadata, reads a directory by path and reads the site
   manifest. The index is loaded only on demand, after the lock, and discarded before the
   lock is released. Snapshot enumeration checks the lock around each metadata read and
@@ -31,16 +33,30 @@ retain a stale in-memory index between requests or write plaintext site metadata
   further cache hits in that instance do not rescan the directory. File authentication,
   size checks and symbolic-directory refusal still apply to each read.
   Temporary ciphertext can require additional disk space
-  during replacement, as for the existing index cache. This amends the cache contents and
+  during replacement, as for the existing index cache. A temporary tree file older than a
+  minute was left by a request that ended before publishing it; trimming removes it. An
+  index too large for the limit is not cached, and its writer then removes only its own
+  file, never the trees beside it. This amends the cache contents and
   shared limit recorded in [ADR 0007](0007-private-directory.md).
 - New backup plans add a `backups-for-restic-manifest:<base64 path>` tag, naming the
-  manifest's absolute path inside that snapshot. The tag is part of the encrypted snapshot.
+  manifest's absolute path inside that snapshot. The plan builds it from the private
+  directory in the lexically normalized form the archiver walks, so a configured path with
+  an empty, dot or parent component yields the path the snapshot stores. A path the locator
+  cannot express (more than 4096 bytes or 256 components) gets no tag instead of failing the
+  backup; such a snapshot is read like an older one. The tag is part of the encrypted snapshot.
   The existing plugin/site/run tags remain; the locator is not a retention grouping key.
   A duplicate or malformed locator is refused rather than choosing one silently.
 - Without a locator, the reader searches directory nodes for `spool/manifest.json`, visiting
   a shared subtree at each path so that an ambiguous location is not hidden. The search
   stops after at most 4096 directories and requires an explicit manifest path if it cannot
-  establish a unique answer. An unfinished search never reports the manifest as absent.
+  establish a unique answer. It also stops after a time budget, five seconds unless the
+  constructor is given another: each directory can cost one request to the server, and a
+  request that the web server ends cannot release its lock. The budget is checked before
+  each directory, so one call lasts at most the budget plus one directory read, and it ends
+  with the same refusal as the directory limit, through the normal release of the lock.
+  With a tree cache the directories already read are kept, so a repeated call gets further;
+  without one the caller has to select the manifest explicitly.
+  An unfinished search never reports the manifest as absent.
   A directory with a recorded read error also prevents a complete search. A caller may
   supply an explicit snapshot path, including for nonstandard layouts.
 - A manifest is a regular file of at most 1 MiB and 128 blobs. Each blob authenticates and
@@ -51,7 +67,8 @@ retain a stale in-memory index between requests or write plaintext site metadata
 
 ## Consequences
 - Warm directory browsing can avoid loading the index or any pack. Cache limits count the
-  index and trees together, and clearing the existing cache directory removes both.
+  index and trees together, and clearing the existing cache directory removes both. Only
+  that explicit clearing removes the directory.
 - Another site's snapshots remain available through the repository-wide view. The site
   view uses the host and both required tags, matching retention's selection contract.
 - New snapshots can locate their manifest after migration without scanning the site's

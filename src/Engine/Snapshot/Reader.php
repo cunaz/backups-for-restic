@@ -40,6 +40,12 @@ final class Reader {
 	private const int MANIFEST_SEARCH_LIMIT = 4096;
 
 	/**
+	 * Default time one request may spend on that search. Each directory can cost a request to
+	 * the server, and a request the web server ends cannot release its lock.
+	 */
+	public const int MANIFEST_SEARCH_SECONDS = 5;
+
+	/**
 	 * Index valid only during the current locked operation.
 	 *
 	 * @var IndexSet|null
@@ -61,13 +67,17 @@ final class Reader {
 	 * @param Clock           $clock      Lock time source.
 	 * @param IndexCache|null $index_cache Optional encrypted index cache.
 	 * @param TreeCache|null  $tree_cache  Optional encrypted tree cache.
+	 * @param int             $search_seconds Time the search for a manifest without a locator may
+	 *                                        take in one call. The tree cache keeps what a refused
+	 *                                        search read, so the next call gets further.
 	 */
 	public function __construct(
 		private readonly Repository $repository,
 		private readonly Identity $identity,
 		private readonly Clock $clock,
 		private readonly ?IndexCache $index_cache = null,
-		private readonly ?TreeCache $tree_cache = null
+		private readonly ?TreeCache $tree_cache = null,
+		private readonly int $search_seconds = self::MANIFEST_SEARCH_SECONDS
 	) {
 	}
 
@@ -129,7 +139,8 @@ final class Reader {
 	}
 
 	/**
-	 * Reads the site's manifest. Older snapshots are searched with a bounded directory walk.
+	 * Reads the site's manifest. Older snapshots are searched with a directory walk bounded in
+	 * directories and in time; a search refused for its time gets further when it is repeated.
 	 * An explicit path lets the browser select it when that search is too large or ambiguous.
 	 *
 	 * @param Id          $id   Snapshot ID.
@@ -163,13 +174,20 @@ final class Reader {
 	 *
 	 * @param Id $root Root tree.
 	 * @return string|null Unique spool/manifest.json path, or null.
-	 * @throws InvalidArgument If discovery is too large or ambiguous.
+	 * @throws InvalidArgument If discovery is too large, takes too long or is ambiguous.
 	 */
 	private function find_manifest( Id $root ): ?string {
 		$pending = [ [ $root, '' ] ];
 		$visited = 0;
 		$found   = null;
+		$started = $this->clock->now();
 		while ( [] !== $pending ) {
+			// Checked before each directory, where its read also checks the lock: the refusal
+			// leaves through the caller's finally, which a request ended from outside would not.
+			$now = $this->clock->now();
+			if ( $now[0] - $started[0] + ( $now[1] - $started[1] ) / 1000000000 >= $this->search_seconds ) {
+				self::refuse_search();
+			}
 			[ $tree, $path ] = array_pop( $pending );
 			++$visited;
 			foreach ( $this->tree( $tree ) as $node ) {
@@ -186,13 +204,23 @@ final class Reader {
 					}
 					Path::parts( $child );
 					if ( $visited + count( $pending ) >= self::MANIFEST_SEARCH_LIMIT ) {
-						throw new InvalidArgument( 'The snapshot is too large to locate its manifest in one request; select the manifest explicitly.' );
+						self::refuse_search();
 					}
 					$pending[] = [ $node->subtree, $child ];
 				}
 			}
 		}
 		return $found;
+	}
+
+	/**
+	 * Ends a search that cannot finish in this request, by its size or by its time. It is
+	 * never reported as an absent manifest.
+	 *
+	 * @throws InvalidArgument Always.
+	 */
+	private static function refuse_search(): never {
+		throw new InvalidArgument( 'The snapshot is too large to locate its manifest in one request; select the manifest explicitly.' );
 	}
 
 	/**
@@ -316,21 +344,25 @@ final class Reader {
 	 * @return T Result.
 	 */
 	private function locked( \Closure $read ): mixed {
-		$pid             = 1 + ( hexdec( bin2hex( $this->repository->random()->bytes( 4 ) ) ) % 2147483646 );
-		$locking         = new Locking( $this->repository, $this->identity, $this->clock, $pid );
-		$locked_at       = $this->clock->now()[0];
-		$lock            = $locking->acquire( false );
-		$keep_lock       = function () use ( $locking, &$lock, &$locked_at ): void {
-			if ( $locking->lapsed( $locked_at ) ) {
-				throw new LockConflict( 'The snapshot read outlasted its repository lock; retry the read.' );
-			}
-			if ( $locking->due( $locked_at ) ) {
-				$locked_at = $this->clock->now()[0];
-				$lock      = $locking->refresh( $lock, false );
-			}
-		};
-		$this->keep_lock = $keep_lock;
+		$pid     = 1 + ( hexdec( bin2hex( $this->repository->random()->bytes( 4 ) ) ) % 2147483646 );
+		$locking = new Locking( $this->repository, $this->identity, $this->clock, $pid );
+		$lock    = null;
 		try {
+			// Inside the try: acquire() can fail after it wrote its lock, for example when the
+			// second look at the other locks does not get an answer. Releasing without a name
+			// removes every lock with this call's number.
+			$locked_at       = $this->clock->now()[0];
+			$lock            = $locking->acquire( false );
+			$keep_lock       = function () use ( $locking, &$lock, &$locked_at ): void {
+				if ( $locking->lapsed( $locked_at ) ) {
+					throw new LockConflict( 'The snapshot read outlasted its repository lock; retry the read.' );
+				}
+				if ( $locking->due( $locked_at ) ) {
+					$locked_at = $this->clock->now()[0];
+					$lock      = $locking->refresh( $lock, false );
+				}
+			};
+			$this->keep_lock = $keep_lock;
 			$keep_lock();
 			$result = $read();
 			$keep_lock();
