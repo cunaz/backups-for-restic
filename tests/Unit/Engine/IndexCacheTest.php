@@ -291,6 +291,45 @@ final class IndexCacheTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_a_piece_of_names_longer_than_the_listed_names_is_damage_before_the_budget_is_asked(): void {
+		$this->index_file( 'a', 2, 10 );
+		$cache    = new IndexCache( $this->directory );
+		$expected = self::blobs( $cache->load( $this->repository ) );
+		// A length a piece of the index may have, and the longest of them. The piece of names
+		// holds 32 bytes for each listed index file, so for it this length is damage.
+		$length = Cipher::OVERHEAD + 16 + 4 + IndexSet::MAX_PIECE_BYTES;
+		$file   = $this->directory . '/index.bin';
+		$handle = fopen( $file, 'wb' );
+		self::assertNotFalse( $handle );
+		try {
+			self::assertSame( 4, fwrite( $handle, pack( 'V', $length ) ) );
+			self::assertTrue( ftruncate( $handle, 4 + $length ) );
+		} finally {
+			fclose( $handle );
+		}
+		// The budget would refuse a piece of this length: it wants four times the input free
+		// besides the two megabytes it always keeps. So little room also keeps the index files
+		// from being read again, which is the refusal expected here: the one that does not
+		// name the damaged length as an input.
+		gc_mem_caches();
+		$this->repository->limit_memory( new MemoryBudget( memory_get_usage( true ) + 8 * 1048576 ) );
+		try {
+			$cache->load( $this->repository );
+			self::fail( 'No index fits into this budget.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertArrayNotHasKey( 'input_bytes', $error->context(), 'The memory budget is not asked about names that no listed index file has.' );
+		}
+		$this->repository->limit_memory( new MemoryBudget( 128 * 1048576 ) );
+		$this->backend->loads = [];
+
+		self::assertSame( $expected, self::blobs( $cache->load( $this->repository ) ) );
+		self::assertSame( 1, $this->backend->loads['index'] ?? 0, 'A damaged cache is rebuilt from the repository.' );
+		$this->backend->loads = [];
+		self::assertSame( $expected, self::blobs( $cache->load( $this->repository ) ) );
+		self::assertArrayNotHasKey( 'index', $this->backend->loads, 'The repaired cache is reused on the next load.' );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_a_complete_large_piece_still_refuses_the_memory_budget_before_reading(): void {
 		$this->index_file( 'a', 2, 10 );
 		( new IndexCache( $this->directory ) )->load( $this->repository );

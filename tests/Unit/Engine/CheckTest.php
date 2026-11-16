@@ -543,6 +543,35 @@ final class CheckTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock is released.' );
 	}
 
+	#[\PHPUnit\Framework\Attributes\DataProvider( 'invalid_listings' )]
+	public function test_a_pack_listing_that_stays_invalid_is_downloaded_a_bounded_number_of_times( string $invalid ): void {
+		$downloads                   = 0;
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( &$downloads, $invalid ): void {
+			self::assertSame( ObjectType::Data, $type );
+			++$downloads;
+			file_put_contents( $path, $invalid );
+		};
+		$work                        = $this->work_dir();
+		$run                         = CheckRun::start( $this->repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		// The job gives up after failures that follow each other; a call that ends normally,
+		// as the one that only downloads does, starts its count again.
+		$consecutive = 0;
+		$ticks       = 0;
+		while ( $consecutive < 5 ) {
+			try {
+				self::assertFalse( $run->advance( 0.0 ), 'A check without a valid listing never completes.' );
+				$consecutive = 0;
+			} catch ( BackendException ) {
+				++$consecutive;
+			}
+			$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+			self::assertLessThan( 2000, ++$ticks, 'The failures must follow each other once the run stops asking again.' );
+		}
+
+		self::assertSame( 1 + CheckRun::MAX_LISTING_RETRIES, $downloads );
+		self::assertSame( 'parse_packs', $run->progress()['phase'], 'The checkpoint stays at the batch that fails.' );
+	}
+
 	public function test_a_missing_pack_is_not_read_again_when_the_findings_list_is_full(): void {
 		for ( $i = 0; $i <= CheckRun::MAX_FINDINGS; $i++ ) {
 			$this->backend->objects['index'][ hash( 'sha256', 'damaged ' . $i ) ] = 'damaged ' . $i;

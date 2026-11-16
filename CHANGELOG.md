@@ -140,7 +140,9 @@ All notable changes are documented here. The format follows
 ### Fixed
 - A pack listing that the server answered with something else, such as the error page of a
   proxy, is downloaded again when a check or prune is retried; before, every retry read the
-  same stored answer and failed. A damaged length in the local index cache makes the cache
+  same stored answer and failed. A server that keeps answering so is asked at most four
+  times; then the job ends with the error instead of downloading the listing without end.
+  A damaged length in the local index cache makes the cache
   be rebuilt instead of ending every backup, check and prune with `index_too_large`. A
   settings layout number whose stored value is a serialized null counts as malformed and
   keeps the plugin inactive, as other malformed numbers do, instead of passing for an

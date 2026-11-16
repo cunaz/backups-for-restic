@@ -1087,6 +1087,40 @@ final class PruneTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock is released.' );
 	}
 
+	#[DataProvider( 'invalid_listings' )]
+	public function test_a_pack_listing_that_stays_invalid_is_downloaded_a_bounded_number_of_times( string $invalid ): void {
+		$this->history_with_a_forgotten_snapshot();
+		$packs                       = $this->backend->list( ObjectType::Data );
+		$downloads                   = 0;
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( &$downloads, $invalid ): void {
+			self::assertSame( ObjectType::Data, $type );
+			++$downloads;
+			file_put_contents( $path, $invalid );
+		};
+		$clock                       = new FrozenClock( time() );
+		$work                        = $this->work_dir();
+		$run                         = PruneRun::start( $this->repository, $work, $this->identity, $clock, new SystemRandom() );
+		// The job gives up after failures that follow each other; a call that ends normally,
+		// as the one that only downloads does, starts its count again.
+		$consecutive = 0;
+		$ticks       = 0;
+		while ( $consecutive < 5 ) {
+			try {
+				self::assertFalse( $run->advance( 0.0 ), 'A prune without a valid listing never completes.' );
+				$consecutive = 0;
+			} catch ( BackendException ) {
+				++$consecutive;
+			}
+			$run = PruneRun::resume( $this->repository, $work, $this->identity, $clock );
+			self::assertLessThan( 2000, ++$ticks, 'The failures must follow each other once the run stops asking again.' );
+		}
+
+		self::assertSame( 1 + PruneRun::MAX_LISTING_RETRIES, $downloads );
+		self::assertSame( 'parse_listing', $run->progress()['phase'], 'The checkpoint stays at the batch that fails.' );
+		self::assertSame( 0, $run->result()['packs_deleted'] );
+		self::assertSame( $packs, $this->backend->list( ObjectType::Data ), 'Nothing is deleted without a valid listing.' );
+	}
+
 	public function test_a_missing_live_pack_keeps_unindexed_recovery_data_and_refuses_all_mutations(): void {
 		$this->history_with_a_forgotten_snapshot();
 		$snapshots = $this->repository->snapshots();

@@ -681,7 +681,12 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   table slot. A stored answer that is not a valid listing, such as the error page of a
   proxy, sends the checkpoint back to the download before the error ends the request, so
   the retry asks the server again instead of parsing the same file; check does the same
-  with its listing. Both files
+  with its listing. The run counts the listings it discarded in its checkpoint, because
+  the job counts only failures that follow each other and a request that only downloads
+  ends normally between two of them. A run downloads again three times in a row at most;
+  with the fourth invalid answer the checkpoint stays at the failing batch, every later
+  request fails there at once, and the job gives up after its usual number of attempts.
+  Both files
   have mode 0600 before content is written. This bounds the new listing path, while the
   existing tree/index sets still need the full-job memory work ([ADR 0033](adr/0033-prune-listing-on-disk.md)).
   If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares
