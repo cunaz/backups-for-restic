@@ -30,6 +30,7 @@ use BackupsForRestic\Support\StringByteSource;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
+use BackupsForRestic\Tests\Support\StagedTree;
 
 /**
  * Backup and restore through the engine against an in-memory rest-server.
@@ -42,6 +43,9 @@ final class BackupRestoreTest extends TestCase {
 
 	/** @var list<string> */
 	private array $cleanup = [];
+
+	/** @var array<string, string> */
+	private array $restore_work = [];
 
 	protected function setUp(): void {
 		$this->site = TempDir::create( 'site' );
@@ -92,6 +96,7 @@ final class BackupRestoreTest extends TestCase {
 				$run = RestoreRun::resume( $repository, $work );
 			}
 		}
+		$this->restore_work[ $target ] = $work;
 		return $target;
 	}
 
@@ -122,7 +127,7 @@ final class BackupRestoreTest extends TestCase {
 		self::assertNotNull( $snapshot );
 
 		$target = $this->restore( $repository, $snapshot );
-		self::assertSame( TempDir::describe( $this->site ), TempDir::describe( $target . $this->site ) );
+		self::assertSame( TempDir::describe( $this->site ), StagedTree::describe( $target, $this->site, $this->restore_work[ $target ] ) );
 
 		$summary = $this->snapshot( $repository, $snapshot )->summary;
 		self::assertNotNull( $summary );
@@ -139,7 +144,7 @@ final class BackupRestoreTest extends TestCase {
 
 		self::assertSame( $this->site_tree( $repository, $whole ), $this->site_tree( $repository, $sliced ) );
 		$restored = $this->restore( $repository, $sliced, '/', true );
-		self::assertSame( TempDir::describe( $this->site ), TempDir::describe( $restored . $this->site ) );
+		self::assertSame( TempDir::describe( $this->site ), StagedTree::describe( $restored, $this->site, $this->restore_work[ $restored ] ) );
 	}
 
 	public function test_snapshot_layout_follows_restic_for_absolute_paths(): void {
@@ -187,7 +192,8 @@ final class BackupRestoreTest extends TestCase {
 		self::assertNotNull( $summary );
 		self::assertSame( 1, $summary->files_changed );
 		self::assertSame( 1, $summary->data_blobs );
-		self::assertSame( TempDir::describe( $this->site ), TempDir::describe( $this->restore( $repository, $second ) . $this->site ) );
+		$restored = $this->restore( $repository, $second );
+		self::assertSame( TempDir::describe( $this->site ), StagedTree::describe( $restored, $this->site, $this->restore_work[ $restored ] ) );
 	}
 
 	public function test_identical_files_share_their_blobs(): void {
@@ -221,8 +227,8 @@ final class BackupRestoreTest extends TestCase {
 		self::assertNotNull( $id );
 
 		$target = $this->restore( $repository, $id, $this->site . '/wp-config.php' );
-		self::assertSame( [ 'wp-config.php' ], array_values( array_diff( (array) scandir( $target ), [ '.', '..' ] ) ) );
-		self::assertSame( 0600, fileperms( $target . '/wp-config.php' ) & 0777 );
+		self::assertSame( [ 'wp-config.php' ], array_values( array_diff( (array) scandir( $target . $this->site ), [ '.', '..' ] ) ) );
+		self::assertSame( 0600, fileperms( $target . $this->site . '/wp-config.php' ) & 0777 );
 	}
 
 	public function test_restore_rejects_names_that_escape_the_target(): void {

@@ -101,6 +101,7 @@ final class Locking {
 	 *
 	 * @param int $locked_at Unix time the lock was written.
 	 * @return bool True if older than five minutes.
+	 * @phpstan-impure Reads the advancing wall clock.
 	 */
 	public function due( int $locked_at ): bool {
 		return $this->clock->now()[0] - $locked_at >= self::REFRESH_AFTER_SECONDS;
@@ -114,6 +115,7 @@ final class Locking {
 	 *
 	 * @param int $locked_at Unix time the lock was written.
 	 * @return bool True if the lock can no longer be trusted.
+	 * @phpstan-impure Reads the advancing wall clock.
 	 */
 	public function lapsed( int $locked_at ): bool {
 		return $this->clock->now()[0] - $locked_at > self::TRUSTED_SECONDS;
