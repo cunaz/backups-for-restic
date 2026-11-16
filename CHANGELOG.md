@@ -28,11 +28,13 @@ All notable changes are documented here. The format follows
   further pages and a path back up. Links are shown with their target and are not
   followed, and a name that cannot be shown exactly is marked. Files and directories can
   be ticked; the selection is listed and kept for the restore that follows in a later
-  version. A locked repository gets its own message and a button to try again.
+  version. What lies in a ticked directory is shown as ticked with it and counted once, and
+  the selection ends at the 256 paths that a restore takes. A locked repository gets its
+  own message and a button to try again.
 - The list of this site's snapshots says for each one whether the next cleanup keeps or
   removes it (`retention` in `GET /snapshots`). The preview uses the policy and the
   grouping of the forget job, removes nothing, and is renewed when a retention setting is
-  saved.
+  saved: a cached list is only used under the retention settings it was read with.
 - Restore engine foundation: several selected paths retain their original layout in empty
   private staging, with resumable planning and disk-space checks before writing. Reads hold
   a shared repository lock, grouped downloads authenticate every blob, and links/special

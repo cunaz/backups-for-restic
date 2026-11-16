@@ -1084,8 +1084,12 @@ a job does, so an index that does not fit is refused with `index_too_large`
   created or connected repository, a job that opens another repository, a saved retention
   setting, an automatic switch of the retention mode) drops both. A
   request that stores its list reads the transient again first, so it never writes back
-  the other list from before such a deletion. The WP-CLI command `snapshots` lists every snapshot of the
-  repository.
+  the other list from before such a deletion. Each list also names the retention settings
+  it was read under (`RetentionSettings::fingerprint()`: the rules of the previewed policy,
+  or `none`), and a list of other settings counts as missing. The deletion alone would miss
+  a list that a request was still reading when the setting was saved, and a retention
+  setting that `wp-config.php` overrides. The WP-CLI command `snapshots` lists every
+  snapshot of the repository.
 - **Retention preview.** In the site scope every snapshot has `retention`: `keep` if the
   next forget of this site keeps it, `remove` if that forget removes it. The decision is
   `Forget::apply()` over the listed snapshots as one group, which is the group of the

@@ -69,4 +69,40 @@ final class RetentionSettingsTest extends TestCase {
 	public function test_there_is_no_preview_while_another_computer_removes_old_snapshots(): void {
 		self::assertNull( RetentionSettings::preview( Settings::from_stored( [ 'retention.mode' => 'external' ] ) ) );
 	}
+
+	public function test_the_fingerprint_changes_with_every_rule_of_the_previewed_policy(): void {
+		$stored = [
+			'retention.keep.last'    => 3,
+			'retention.keep.daily'   => 5,
+			'retention.keep.weekly'  => 6,
+			'retention.keep.monthly' => 7,
+			'retention.keep.yearly'  => 8,
+			'retention.keep.within'  => '3d',
+		];
+		$before = RetentionSettings::fingerprint( Settings::from_stored( $stored ) );
+
+		self::assertSame( $before, RetentionSettings::fingerprint( Settings::from_stored( $stored ) ) );
+		foreach ( [ 'last', 'daily', 'weekly', 'monthly', 'yearly' ] as $rule ) {
+			$changed = [ 'retention.keep.' . $rule => 9 ] + $stored;
+			self::assertNotSame( $before, RetentionSettings::fingerprint( Settings::from_stored( $changed ) ), $rule );
+		}
+		self::assertNotSame( $before, RetentionSettings::fingerprint( Settings::from_stored( [ 'retention.keep.within' => '4d' ] + $stored ) ) );
+	}
+
+	public function test_the_fingerprint_says_that_there_is_no_preview(): void {
+		$plugin   = RetentionSettings::fingerprint( Settings::from_stored( [] ) );
+		$external = RetentionSettings::fingerprint( Settings::from_stored( [ 'retention.mode' => 'external' ] ) );
+		$refused  = RetentionSettings::fingerprint(
+			Settings::from_stored(
+				[
+					'retention.keep.within' => '12h',
+					'retention.keep.last'   => 0,
+				]
+			)
+		);
+
+		self::assertSame( 'none', $external );
+		self::assertSame( 'none', $refused );
+		self::assertNotSame( 'none', $plugin );
+	}
 }

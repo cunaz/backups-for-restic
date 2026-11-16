@@ -69,4 +69,24 @@ final class RetentionSettings {
 			return null;
 		}
 	}
+
+	/**
+	 * Names everything that preview() depends on, so that a stored preview can say which
+	 * settings it was computed with. A cached list is only as good as the policy behind it,
+	 * and deleting the cache when a setting is saved misses a list that is still being read.
+	 *
+	 * @param Settings $settings Settings.
+	 * @return string The rules of the previewed policy, or "none" if there is no preview.
+	 */
+	public static function fingerprint( Settings $settings ): string {
+		if ( null === self::preview( $settings ) ) {
+			return 'none';
+		}
+		$rules = [];
+		foreach ( [ 'last', 'daily', 'weekly', 'monthly', 'yearly' ] as $rule ) {
+			$rules[] = $rule . '=' . $settings->int( 'retention.keep.' . $rule );
+		}
+		$rules[] = 'within=' . $settings->string( 'retention.keep.within' );
+		return implode( ',', $rules );
+	}
 }

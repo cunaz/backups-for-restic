@@ -519,10 +519,15 @@
 	/**
 	 * The paths that are ticked in the directory browser, for a restore to start from. They
 	 * belong to one snapshot: opening another one empties the selection. `paths` maps the
-	 * token of an entry, which is what a request names it by, to `{ path, exact, type }`:
-	 * the text to show, whether that text is the stored name, and file, dir, symlink or other.
+	 * token of an entry, which is what a request names it by, to `{ path, exact, type, above }`:
+	 * the text to show, whether that text is the stored name, file, dir, symlink or other,
+	 * and the tokens of the directories above the entry. A restore brings back everything in
+	 * a ticked directory, so the map never holds an entry together with a directory above it.
 	 */
 	const restoreSelection = { snapshot: null, paths: new Map() };
+
+	// A restore refuses more paths than this (Selection::MAX_PATHS on the server).
+	const MAX_SELECTED_PATHS = 256;
 
 	function formatStamp( text ) {
 		// Snapshots carry nanoseconds, of which Date takes three digits.
@@ -684,6 +689,10 @@
 				el( 'ul', { className: 'bfr-paths' }, Array.from( restoreSelection.paths.values() ).map( function ( chosen ) {
 					return el( 'li', {}, [ el( 'code', {}, [ chosen.path ] ), chosen.exact ? null : ' ', chosen.exact ? null : inexactMark() ] );
 				} ) ),
+				count >= MAX_SELECTED_PATHS ? el( 'p', { className: 'bfr-selection-full' }, [
+					/* translators: %d: number of files and directories. */
+					sprintf( __( 'A restore takes at most %d paths, so nothing more can be ticked. Tick a directory instead of the entries in it.', 'backups-for-restic' ), MAX_SELECTED_PATHS ),
+				] ) : null,
 				el( 'p', {}, [ clear ] ),
 				el( 'p', { className: 'description' }, [ __( 'A restore cannot be started from here yet.', 'backups-for-restic' ) ] ),
 			] );
@@ -711,6 +720,21 @@
 		};
 		// Counts the directories asked for: an answer that arrives after the next click is not shown.
 		let asked = 0;
+		// The tokens of the open directory and of those above it, for sync().
+		let shownAbove = [];
+
+		/**
+		 * Whether a ticked directory already holds everything below these directories. A
+		 * restore brings such entries back whatever their own boxes say, so the boxes say it too.
+		 *
+		 * @param {Array} above Tokens of directories, the top one first.
+		 * @return {boolean} Whether one of them is selected.
+		 */
+		function covered( above ) {
+			return above.some( function ( token ) {
+				return restoreSelection.paths.has( token );
+			} );
+		}
 
 		function request( token, offset ) {
 			const query = [];
@@ -747,15 +771,30 @@
 
 		function row( entry, page, crumbs ) {
 			const path = ( '/' === page.path ? '' : page.path ) + '/' + entry.name;
+			const above = crumbs.map( function ( crumb ) {
+				return crumb.token;
+			} );
+			const inside = covered( above );
 			const select = el( 'input', {
 				type: 'checkbox',
-				checked: restoreSelection.paths.has( entry.token ),
+				checked: inside || restoreSelection.paths.has( entry.token ),
+				disabled: inside,
 				dataset: { token: entry.token },
 				/* translators: %s: name of a file or directory. */
 				'aria-label': sprintf( __( 'Select %s', 'backups-for-restic' ), entry.name ),
 				onChange() {
 					if ( select.checked ) {
-						restoreSelection.paths.set( entry.token, { path, exact: !! ( page.exact && entry.exact ), type: entry.type } );
+						// What lies below this entry comes back with it and is not counted twice.
+						restoreSelection.paths.forEach( function ( chosen, token ) {
+							if ( ( chosen.above || [] ).includes( entry.token ) ) {
+								restoreSelection.paths.delete( token );
+							}
+						} );
+						if ( restoreSelection.paths.size >= MAX_SELECTED_PATHS ) {
+							select.checked = false;
+						} else {
+							restoreSelection.paths.set( entry.token, { path, exact: !! ( page.exact && entry.exact ), type: entry.type, above } );
+						}
 					} else {
 						restoreSelection.paths.delete( entry.token );
 					}
@@ -787,7 +826,12 @@
 			const rows = el( 'tbody' );
 			const shown = el( 'p', { className: 'description bfr-shown' } );
 			const more = el( 'div' );
+			const note = el( 'p', { className: 'description bfr-covered' }, [ __( 'This directory lies in a selected directory: a restore brings back everything in it.', 'backups-for-restic' ) ] );
 			let count = 0;
+			shownAbove = crumbs.map( function ( crumb ) {
+				return crumb.token;
+			} );
+			note.hidden = ! covered( shownAbove );
 			function add( page ) {
 				page.entries.forEach( function ( entry ) {
 					rows.append( row( entry, first, crumbs ) );
@@ -807,13 +851,18 @@
 					request( first.token, page.next )
 						.then( function ( next ) {
 							if ( current === asked ) {
+								const before = rows.children.length;
 								add( next );
+								// The button went away with the page it asked for: the keyboard goes on at the first new entry.
+								focusOn( rows.children[ before ] || shown );
 							}
 						} )
 						.catch( function ( error ) {
 							if ( current === asked ) {
 								load.disabled = false;
 								replace( more, [ ...snapshotError( error, null ), el( 'p', {}, [ load ] ) ] );
+								// A disabled button loses the focus; it is the control to press again.
+								load.focus();
 							}
 						} );
 				} );
@@ -826,6 +875,7 @@
 				add( first );
 				replace( box, [
 					path,
+					note,
 					el( 'table', { className: 'widefat striped bfr-entries' }, [
 						el( 'thead', {}, [
 							el( 'tr', {}, [
@@ -876,9 +926,15 @@
 				open( [ { name: '/', exact: true, token: null } ], true );
 			},
 			sync() {
+				const inside = covered( shownAbove );
 				box.querySelectorAll( 'input[type="checkbox"]' ).forEach( function ( select ) {
-					select.checked = restoreSelection.paths.has( select.dataset.token );
+					select.checked = inside || restoreSelection.paths.has( select.dataset.token );
+					select.disabled = inside;
 				} );
+				const note = box.querySelector( '.bfr-covered' );
+				if ( note ) {
+					note.hidden = ! inside;
+				}
 			},
 		};
 	}

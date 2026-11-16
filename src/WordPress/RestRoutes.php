@@ -18,6 +18,7 @@ use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Jobs\Maintenance\RetentionSettings;
 use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
@@ -366,8 +367,11 @@ final class RestRoutes {
 	public function snapshots( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$scope = self::text( $request, 'scope' );
 		try {
-			$scope  = SnapshotBrowser::scope( '' === $scope ? SnapshotBrowser::SCOPE_SITE : $scope );
-			$cached = $this->cached_snapshots();
+			$scope = SnapshotBrowser::scope( '' === $scope ? SnapshotBrowser::SCOPE_SITE : $scope );
+			// The policy that this request previews with. A setting saved during the read below
+			// belongs to a later request, which then finds a list of another policy.
+			$policy = RetentionSettings::fingerprint( $this->container->settings() );
+			$cached = $this->cached_snapshots( $policy );
 			if ( isset( $cached[ $scope ] ) && ! self::flag( $request, 'fresh' ) ) {
 				return $this->respond(
 					[
@@ -387,9 +391,10 @@ final class RestRoutes {
 		}
 		// The other list is read again now: a job that ended during the read above deleted the
 		// transient, and the list from before that job must not be written back.
-		$cached           = $this->cached_snapshots();
+		$cached           = $this->cached_snapshots( $policy );
 		$cached[ $scope ] = [
 			'time'      => time(),
+			'policy'    => $policy,
 			'snapshots' => $list,
 		];
 		// One transient holds both lists, so every place that deletes it drops both.
@@ -404,20 +409,25 @@ final class RestRoutes {
 
 	/**
 	 * The cached snapshot lists that are younger than five minutes. Each list has its own
-	 * time, because storing one of them renews the transient that holds both.
+	 * time, because storing one of them renews the transient that holds both. A list also
+	 * names the retention settings it was read under and counts as missing under any other:
+	 * deleting the transient when a setting is saved does not reach a list that a request
+	 * was still reading then, nor a setting that wp-config.php overrides.
 	 *
-	 * @return array<string, array{time: int, snapshots: array<mixed>}> Lists by scope.
+	 * @param string $policy RetentionSettings::fingerprint() of this request's settings.
+	 * @return array<string, array{time: int, policy: string, snapshots: array<mixed>}> Lists by scope.
 	 */
-	private function cached_snapshots(): array {
+	private function cached_snapshots( string $policy ): array {
 		$stored = get_transient( 'backups_for_restic_snapshots' );
 		$lists  = [];
 		foreach ( [ SnapshotBrowser::SCOPE_SITE, SnapshotBrowser::SCOPE_REPOSITORY ] as $scope ) {
 			$entry = is_array( $stored ) && is_array( $stored[ $scope ] ?? null ) ? $stored[ $scope ] : [];
 			$time  = $entry['time'] ?? null;
 			$list  = $entry['snapshots'] ?? null;
-			if ( is_int( $time ) && is_array( $list ) && $time <= time() && time() - $time < 5 * MINUTE_IN_SECONDS ) {
+			if ( is_int( $time ) && is_array( $list ) && $time <= time() && time() - $time < 5 * MINUTE_IN_SECONDS && ( $entry['policy'] ?? null ) === $policy ) {
 				$lists[ $scope ] = [
 					'time'      => $time,
+					'policy'    => $policy,
 					'snapshots' => $list,
 				];
 			}
