@@ -12,8 +12,9 @@ All notable changes are documented here. The format follows
   a shared repository lock, grouped downloads authenticate every blob, and links/special
   files are recorded instead of created. Staged files are `0600` and staged directories
   `0700` whatever the snapshot recorded; the original modes are kept in the report. The
-  repository lock is asked for once per tick and after a refresh, as backups do. WordPress
-  restore jobs and screens still follow.
+  repository lock is asked for once per tick and before and after a refresh, as backups do,
+  so a refresh never replaces a lock that another client removed. WordPress restore jobs
+  and screens still follow.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

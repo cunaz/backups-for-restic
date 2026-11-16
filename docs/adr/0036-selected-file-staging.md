@@ -15,9 +15,12 @@ collisions, useful progress, and recovery after a killed request.
   two files with the same basename in different directories must remain distinct.
 - `start()` records the run identity locally before its first repository lock. Planning
   and restore read under a shared lock, kept as backups keep theirs: the server is asked
-  for the lock once per `advance()` call, at its start, and again after a refresh. Inside
-  the call only the clock is compared with the time the lock was taken or refreshed: a
-  lock that is due is refreshed, and a lapsed one stops the call. After a lock gap,
+  for the lock once per `advance()` call, at its start, and before and after a refresh.
+  Inside the call only the clock is compared with the time the lock was taken or
+  refreshed: a lock that is due is refreshed, and a lapsed one stops the call. A lock that
+  falls due inside a call is asked for before it is replaced, and a missing one stops the
+  call: a refresh writes a new lock whether or not the old one is still there, so it would
+  otherwise hide a removal by another client from every later call. After a lock gap,
   reacquire it at the start of a call, verify that the snapshot remains, and load the
   current index: cooperating prune may have moved blobs to different packs without
   changing their content IDs.
@@ -86,7 +89,9 @@ estimate, not a reservation: every later write is still checked. One decoded tre
 at a time and its names are validated once per path, avoiding a directory-wide scan for
 every file. Unselected siblings are passed over inside one step and do not get a
 checkpoint each. Index loading compares the clock with the lease between index documents
-and refreshes a lock that is due; it sends no lock request otherwise.
+and refreshes a lock that is due; it sends no lock request otherwise. An ordinary tick
+sends one lock request, a tick that refreshes at its start two, and a tick that refreshes
+later three: its start, the lock that is due and the lock that replaced it.
 
 `Files` checks directory identity, parent components and regular-file identity, rejects
 symbolic and hard links, completes short writes and checks seeks/truncation/flush/close.
@@ -116,10 +121,11 @@ Unit tests resume after each unit, replay creation and write gaps, and cover sta
 replaced destinations, lost/repacked repository state, lock gaps during reads, throttling,
 low disk space, exactly-once report entries, bounded/interrupted per-file planning and
 cleanup of unrecorded locks or a failed abort checkpoint. They pin the owner-only modes,
-the number of lock requests per tick and the repeated start after a killed one. The
-conformance suite compares restic-created full and selected restores, including raw names
-and links represented only in the report, for the current and minimum supported restic
-versions: names, types, times and content come from staging, modes from the report.
+the number of lock requests per tick, a lock removed before a refresh inside a tick and
+the repeated start after a killed one. The conformance suite compares restic-created
+full and selected restores, including raw names and links represented only in the report,
+for the current and minimum supported restic versions: names, types, times and content
+come from staging, modes from the report.
 Final-head CI remains the merge gate.
 
 ## Remaining release work

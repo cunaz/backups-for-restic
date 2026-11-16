@@ -860,6 +860,95 @@ final class RestoreRunTest extends TestCase {
 		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
 	}
 
+	/** @return iterable<string, array{bool}> */
+	public static function forgotten(): iterable {
+		yield 'the snapshot remains' => [ false ];
+		yield 'the snapshot was forgotten' => [ true ];
+	}
+
+	#[DataProvider( 'forgotten' )]
+	public function test_a_lock_removed_before_a_refresh_inside_a_tick_is_not_replaced( bool $forgotten ): void {
+		$snapshot   = $this->repeated_file();
+		$unlock     = false;
+		$probes     = 0;
+		$saved      = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			function ( string $method, ?ObjectType $type ) use ( &$unlock, &$probes, &$saved, $snapshot, $forgotten ): void {
+				// Another client removes every lock while a download is under way, and the
+				// download lasts until the refresh is due.
+				if ( $unlock && 'load' === $method && ObjectType::Data === $type ) {
+					$unlock                          = false;
+					$this->backend->objects['locks'] = [];
+					if ( $forgotten ) {
+						$this->backend->delete( ObjectType::Snapshots, $snapshot->hex() );
+					}
+					$this->clock->advance( Locking::REFRESH_AFTER_SECONDS );
+				}
+				if ( 'size' === $method && ObjectType::Locks === $type ) {
+					++$probes;
+				}
+				if ( 'save' === $method && ObjectType::Locks === $type ) {
+					++$saved;
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = $this->start( $snapshot, repository: $repository );
+		$this->plan( $run );
+		$unlock = true;
+		$probes = 0;
+		$saved  = 0;
+		try {
+			$run->advance( INF );
+			self::fail( 'A refresh must not replace a lock that another client removed.' );
+		} catch ( RepositoryChanged $error ) {
+			self::assertSame( 'The restore repository lock was lost during a read; resume the run to revalidate it.', $error->getMessage() );
+		}
+		self::assertSame( 2, $probes, 'The tick asks at its start and before the refresh.' );
+		self::assertSame( 0, $saved, 'No new lock hides the gap from the next tick.' );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+		$resumed = RestoreRun::resume( $this->repository, $this->work, $this->clock );
+		if ( $forgotten ) {
+			$this->expectExceptionMessage( 'The selected snapshot no longer exists.' );
+			$resumed->advance( INF );
+			return;
+		}
+		$this->finish( $resumed );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
+	}
+
+	public function test_a_refresh_inside_a_tick_asks_for_the_old_lock_and_the_new_one(): void {
+		$snapshot   = $this->repeated_file();
+		$slow       = false;
+		$probes     = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			function ( string $method, ?ObjectType $type ) use ( &$slow, &$probes ): void {
+				if ( $slow && 'load' === $method && ObjectType::Data === $type ) {
+					$slow = false;
+					$this->clock->advance( Locking::REFRESH_AFTER_SECONDS );
+				}
+				if ( 'size' === $method && ObjectType::Locks === $type ) {
+					++$probes;
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = $this->start( $snapshot, repository: $repository );
+		$this->plan( $run );
+		$before = array_keys( $this->backend->list( ObjectType::Locks ) );
+		$slow   = true;
+		$probes = 0;
+		self::assertFalse( $run->advance( 0.0 ) );
+		self::assertSame( 3, $probes, 'The start of the tick, the lock that was due and the lock that replaced it.' );
+		$after = array_keys( $this->backend->list( ObjectType::Locks ) );
+		self::assertCount( 1, $after );
+		self::assertNotSame( $before, $after );
+		$this->finish( $run );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
+	}
+
 	public function test_unselected_siblings_are_skipped_within_one_step(): void {
 		$nodes = [];
 		foreach ( [ 'a', 'b', 'c', 'd', 'e', 'f' ] as $name ) {

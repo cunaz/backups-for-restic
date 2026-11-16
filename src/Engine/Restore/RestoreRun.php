@@ -291,8 +291,8 @@ final class RestoreRun {
 
 	/**
 	 * Keeps the lease as backups keep theirs: the server is asked once per advance() call, at
-	 * its start, and again after a refresh. In between only the clock is compared with the time
-	 * the lock was taken, which costs no request per entry, blob or index file.
+	 * its start, and before and after a refresh. In between only the clock is compared with the
+	 * time the lock was taken, which costs no request per entry, blob or index file.
 	 *
 	 * @param bool $boundary Whether advance() starts here: the lock is probed, and a lost one may be taken again.
 	 * @throws RepositoryChanged If the selected snapshot or trusted lease has been lost.
@@ -320,6 +320,13 @@ final class RestoreRun {
 			throw new RepositoryChanged( 'The restore repository lock was lost during a read; resume the run to revalidate it.' );
 		}
 		if ( $this->locking->due( $this->state->locked_at ) ) {
+			// A refresh writes a new lock and tolerates a missing old one. If another client
+			// removed the old lock, the new one would hide the gap from this call and from
+			// every later one, so the snapshot and the index would never be checked again.
+			// At the start of a call the lock was asked for just above.
+			if ( ! $boundary && ! $this->probe( $lock ) ) {
+				throw new RepositoryChanged( 'The restore repository lock was lost during a read; resume the run to revalidate it.' );
+			}
 			$taken                  = $this->clock->now()[0];
 			$lock                   = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
 			$this->state->lock      = $lock;
