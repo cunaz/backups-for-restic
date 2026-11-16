@@ -9,12 +9,14 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Engine\Check;
 
+use BackupsForRestic\Backend\ListingFile;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
+use BackupsForRestic\Engine\Prune\PackTable;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
@@ -36,6 +38,7 @@ use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Decoded;
 use BackupsForRestic\Support\Throttle;
+use BackupsForRestic\Support\WorkFile;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -44,7 +47,8 @@ defined( 'ABSPATH' ) || exit;
  * (ADR 0022):
  *
  * 1. index: every index file decrypts and parses; each pack gets its expected size.
- * 2. packs: every indexed pack exists on the server with that size.
+ * 2. packs, parse_packs, compare_packs, unindexed_packs: the listing streams to disk;
+ *    bounded batches compare every indexed pack's presence and size and find unindexed ones.
  * 3. trees: every snapshot decrypts, and every tree and data blob its trees reference is
  *    indexed; every tree decrypts and parses.
  * 4. read: a random sample of packs is downloaded and verified completely: the file name is
@@ -67,13 +71,13 @@ defined( 'ABSPATH' ) || exit;
  */
 final class CheckRun {
 
-	public const int STATE_VERSION = 2;
+	public const int STATE_VERSION = 3;
 
 	/** How often the check starts over because the repository changed while its lock did not hold. */
 	public const int MAX_RESTARTS = 3;
 
 	/** The phases in their order. */
-	private const array PHASES = [ 'index', 'packs', 'snapshots', 'trees', 'read', 'done' ];
+	private const array PHASES = [ 'index', 'packs', 'parse_packs', 'compare_packs', 'unindexed_packs', 'list_snapshots', 'snapshots', 'trees', 'read', 'done' ];
 
 	/** At most this many findings are kept with details, errors rather than warnings; all are counted. */
 	public const int MAX_FINDINGS = 50;
@@ -416,6 +420,10 @@ final class CheckRun {
 		match ( $this->state['phase'] ) {
 			'index'     => $this->check_index_file(),
 			'packs'     => $this->check_packs(),
+			'parse_packs' => $this->parse_packs(),
+			'compare_packs' => $this->compare_packs(),
+			'unindexed_packs' => $this->unindexed_packs(),
+			'list_snapshots' => $this->list_snapshots(),
 			'snapshots' => $this->check_snapshot(),
 			'trees'     => $this->check_tree(),
 			'read'      => $this->read_pack(),
@@ -435,54 +443,132 @@ final class CheckRun {
 			$this->state['position'] = 0;
 			return;
 		}
-		++$this->state['position'];
-		$this->count( 'index_files' );
 		try {
-			$packs = IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) );
+			$packs = $this->pack_sizes( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) );
 		} catch ( NotFound ) {
 			$this->find( 'error', 'index_unreadable', $name, 'The index file disappeared from the server.' );
-			return;
-		} catch ( BackendException | UnsupportedRepository $exception ) {
+			$packs = [];
+		} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'index_unreadable', $name, $exception->getMessage() );
-			return;
+			$packs = [];
 		}
-		foreach ( $packs as $pack => $entries ) {
+		foreach ( $packs as $pack => $size ) {
 			if ( isset( $this->state['packs'][ $pack ] ) ) {
 				$this->find( 'warning', 'pack_in_several_indexes', $pack, 'The pack is listed in more than one index file.' );
 				continue;
 			}
-			$size = 4 + Cipher::OVERHEAD;
-			foreach ( $entries as $entry ) {
-				$size += $entry->length + ( $entry->uncompressed_length > 0 ? self::COMPRESSED_ENTRY_SIZE : self::ENTRY_SIZE );
-			}
-			$this->state['packs'][ $pack ] = [ $size, count( $entries ) ];
+			$this->state['packs'][ $pack ] = $size;
 		}
+		++$this->state['position'];
+		$this->count( 'index_files' );
 	}
 
 	/**
-	 * Compares the indexed packs with the server's listing and lists the snapshots to read.
+	 * Collects only pack sizes and counts, not decoded blobs. A pack listed twice in one
+	 * file has the combined entries of both occurrences. An invalid later entry discards
+	 * the entire file, including its otherwise readable packs.
+	 *
+	 * @param string $json Index JSON.
+	 * @return array<string, array{int, int}> Expected size and blob count by pack ID.
+	 */
+	private function pack_sizes( string $json ): array {
+		$packs = [];
+		foreach ( IndexFile::packs( $json ) as $pack => $entries ) {
+			$packs[ $pack ] ??= [ 4 + Cipher::OVERHEAD, 0 ];
+			foreach ( $entries as $entry ) {
+				$packs[ $pack ][0] += $entry->length + ( $entry->uncompressed_length > 0 ? self::COMPRESSED_ENTRY_SIZE : self::ENTRY_SIZE );
+			}
+			$packs[ $pack ][1] += count( $entries );
+		}
+		return $packs;
+	}
+
+	/**
+	 * Downloads the pack listing and prepares its disk table. This phase is checkpointed
+	 * before either working file changes, so a killed download restarts with fresh cursors.
 	 *
 	 * @throws BackendException If the server cannot be reached.
 	 */
 	private function check_packs(): void {
-		$listed = $this->repository->backend()->list( ObjectType::Data );
-		foreach ( $this->state['packs'] as $pack => [ $size ] ) {
-			if ( ! isset( $listed[ $pack ] ) ) {
+		$this->repository->backend()->list_to_file( ObjectType::Data, $this->work_dir . '/packs.json' );
+		$file  = new WorkFile( $this->work_dir . '/packs.json' );
+		$bytes = $file->size();
+		$file->close();
+		PackTable::create( $this->work_dir . '/packs.table', $bytes );
+		$this->state['position'] = 0;
+		$this->state['phase']    = 'parse_packs';
+	}
+
+	/** Validates bounded batches, preserving the last occurrence of duplicate pack IDs. */
+	private function parse_packs(): void {
+		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->state['position'] );
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		try {
+			foreach ( $batch['entries'] as [ $name, $size ] ) {
+				$table->put( $name, $size );
+			}
+		} finally {
+			$table->close();
+		}
+		$this->state['position'] = $batch['done'] ? 0 : $batch['offset'];
+		if ( $batch['done'] ) {
+			$this->state['phase'] = 'compare_packs';
+		}
+	}
+
+	/** Compares a bounded number of indexed packs with the fully validated table. */
+	private function compare_packs(): void {
+		$packs  = array_slice( $this->state['packs'], $this->state['position'], 256, true );
+		$table  = new PackTable( $this->work_dir . '/packs.table' );
+		$listed = [];
+		try {
+			foreach ( $packs as $pack => $values ) {
+				$listed[ $pack ] = $table->size( $pack );
+			}
+		} finally {
+			$table->close();
+		}
+		foreach ( $packs as $pack => [ $size ] ) {
+			if ( null === $listed[ $pack ] ) {
 				$this->state['missing'][ $pack ] = true;
 				$this->find( 'error', 'pack_missing', $pack, 'An indexed pack is missing on the server.' );
 			} elseif ( -1 !== $listed[ $pack ] && $listed[ $pack ] !== $size ) {
 				$this->find( 'error', 'pack_size', $pack, sprintf( 'The pack has %d bytes; the index describes %d.', $listed[ $pack ], $size ) );
 			}
 		}
-		foreach ( array_keys( $listed ) as $pack ) {
+		$this->state['position'] += count( $packs );
+		if ( $this->state['position'] >= count( $this->state['packs'] ) ) {
+			$this->state['phase']    = 'unindexed_packs';
+			$this->state['position'] = 0;
+		}
+	}
+
+	/** Finds unindexed packs once per unique server entry, without retaining their IDs. */
+	private function unindexed_packs(): void {
+		$table = new PackTable( $this->work_dir . '/packs.table' );
+		try {
+			$batch = $table->batch( $this->state['position'] );
+		} finally {
+			$table->close();
+		}
+		foreach ( $batch['entries'] as $entry ) {
+			$pack = $entry['name'];
 			if ( ! isset( $this->state['packs'][ $pack ] ) ) {
 				$this->find( 'warning', 'pack_unindexed', $pack, 'No index file lists the pack; restic prune removes it.' );
 			}
 		}
-		$this->stat( 'packs', count( $this->state['packs'] ) );
+		$this->state['position'] = $batch['position'];
+		if ( $batch['done'] ) {
+			$this->state['phase']    = 'list_snapshots';
+			$this->state['position'] = 0;
+			$this->stat( 'packs', count( $this->state['packs'] ) );
+		}
+	}
 
+	/** Lists the snapshots separately so a transport retry cannot count pack findings twice. */
+	private function list_snapshots(): void {
 		$names = array_map( 'strval', array_keys( $this->repository->backend()->list( ObjectType::Snapshots ) ) );
 		sort( $names );
 		$this->state['snapshot_names'] = $names;
@@ -911,15 +997,20 @@ final class CheckRun {
 		$index = new IndexSet();
 		foreach ( array_keys( $this->repository->backend()->list( ObjectType::Index ) ) as $name ) {
 			try {
-				$packs = IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) );
+				$json = $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) );
+				// Validate before adding anything: a late parse error must discard the whole
+				// file, not leave its earlier blobs available to the tree walk.
+				foreach ( IndexFile::packs( $json ) as $entries ) {
+					unset( $entries );
+				}
 			} catch ( NotFound ) {
 				continue;
-			} catch ( BackendException | UnsupportedRepository $exception ) {
+			} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				continue;
 			}
-			foreach ( $packs as $pack => $entries ) {
+			foreach ( IndexFile::packs( $json ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
 				$this->repository->memory()?->check_index();
 			}

@@ -49,13 +49,10 @@ final class Plugin {
 
 		$container = new Container( $plugin_file );
 		$schema    = $container->schema_version();
-		if ( $schema->is_newer() ) {
-			// Installed over a newer version: no hook that reads or acts on the settings.
-			add_action( 'admin_notices', [ self::class, 'render_newer_data_notice' ] );
-			return;
-		}
 		if ( ! $schema->upgrade() ) {
-			add_action( 'admin_notices', [ self::class, 'render_schema_write_notice' ] );
+			// No hook may interpret settings whose layout is unknown or was not recorded.
+			$notice = $schema->is_supported() ? 'render_schema_write_notice' : 'render_unsupported_data_notice';
+			add_action( 'admin_notices', [ self::class, $notice ] );
 			return;
 		}
 
@@ -98,7 +95,7 @@ final class Plugin {
 		}
 		try {
 			$container = new Container( $plugin_file );
-			if ( $container->schema_version()->is_newer() ) {
+			if ( ! $container->schema_version()->is_supported() ) {
 				return;
 			}
 			Cron::stop( $container );
@@ -126,17 +123,17 @@ final class Plugin {
 	}
 
 	/**
-	 * Tells administrators that the plugin is inert because a newer version wrote its options.
-	 * This version could misread them, and retention deletes snapshots by what it reads.
+	 * Tells administrators that the plugin is inert because it cannot read the options layout.
+	 * Retention must not delete snapshots by settings it may misread.
 	 */
-	public static function render_newer_data_notice(): void {
+	public static function render_unsupported_data_notice(): void {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
 
 		printf(
 			'<div class="notice notice-error"><p>%s</p></div>',
-			esc_html__( 'The backup plugin is inactive because its settings were written by a newer version of the plugin. Please update the plugin; no backups run until then.', 'backups-for-restic' )
+			esc_html__( 'The backup plugin is inactive because its settings have a newer or invalid layout number. Install a compatible plugin version or restore damaged settings from a verified backup. Do not lower or delete the layout number; no backups run until it can be read.', 'backups-for-restic' )
 		);
 	}
 

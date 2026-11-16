@@ -12,6 +12,7 @@ use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Forget\Forget;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Prune\PruneRun;
 use BackupsForRestic\Engine\Repository;
@@ -374,6 +375,52 @@ final class PruneTest extends TestCase {
 		$expected = $this->unused_bytes_in_used_packs();
 		self::assertGreaterThan( 0, $expected );
 		self::assertSame( $expected, $this->prune( null, true )->result()['reclaimable_bytes'] );
+	}
+
+	public function test_streamed_rewrite_preserves_repeated_pack_entries_and_the_waste_estimate(): void {
+		$this->history_with_waste_in_a_used_pack();
+		$expected = $this->unused_bytes_in_used_packs();
+		$before   = $this->read_everything();
+		foreach ( $this->repository->names( ObjectType::Index ) as $name ) {
+			$document = json_decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ), true, flags: JSON_THROW_ON_ERROR );
+			$split    = [];
+			foreach ( $document['packs'] as $pack ) {
+				foreach ( $pack['blobs'] as $blob ) {
+					$split[] = [
+						'id'    => $pack['id'],
+						'blobs' => [ $blob ],
+					];
+				}
+			}
+			$this->repository->save_unpacked( ObjectType::Index, json_encode( [ 'packs' => $split ], JSON_THROW_ON_ERROR ) );
+			$this->backend->delete( ObjectType::Index, $name );
+		}
+		$run = $this->prune( null, true );
+		self::assertGreaterThan( 0, $run->result()['index_files_written'] );
+		self::assertSame( $expected, $run->result()['reclaimable_bytes'] );
+		self::assertSame( $before, $this->read_everything() );
+	}
+
+	public function test_the_prune_cache_is_loaded_after_taking_the_exclusive_lock(): void {
+		$this->back_up();
+		$backend    = new HookedBackend(
+			$this->backend,
+			function ( string $method, ?ObjectType $type ): void {
+				if ( ObjectType::Index === $type && in_array( $method, [ 'load', 'list' ], true ) ) {
+					self::assertNotEmpty( $this->backend->list( ObjectType::Locks ), 'No index access before locking.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$work       = $this->work_dir();
+		$cache      = new IndexCache( $this->work_dir() );
+		$clock      = new SystemClock();
+		$run        = PruneRun::start( $repository, $work, $this->identity, $clock, new SystemRandom(), cache: $cache );
+		while ( ! $run->advance( 0.0 ) ) {
+			$run = PruneRun::resume( $repository, $work, $this->identity, $clock, cache: $cache );
+		}
+		self::assertSame( 0, $run->result()['packs_deleted'] );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
 	public function test_a_checkpoint_without_the_filter_finishes_without_an_estimate(): void {

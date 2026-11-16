@@ -195,7 +195,7 @@ final class BackupStepsTest extends TestCase {
 			}
 			self::assertCount( 1, $repository->backend()->list( ObjectType::Locks ) );
 			$index_request = 'GET /site/index/' . $indexes[0];
-			self::assertCount( 1, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ) );
+			self::assertCount( 0, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'The budget now refuses before downloading the first index file.' );
 
 			// The failure leaves ownership in the checkpoint. Neither the rest of that
 			// checkpoint nor unreadable repository data should be needed to release it.
@@ -217,7 +217,7 @@ final class BackupStepsTest extends TestCase {
 			self::assertTrue( $steps->clean_up( $job, $log, INF ) );
 			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
 			self::assertDirectoryDoesNotExist( $work );
-			self::assertCount( 1, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'Cleanup must not read the index again.' );
+			self::assertCount( 0, array_filter( $this->server->requests, static fn ( string $request ): bool => $request === $index_request ), 'Cleanup must not read the index either.' );
 		} finally {
 			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the process limit after checking cleanup.
 		}

@@ -92,3 +92,10 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   Restoring a compatible plugin version resumes normal startup. This exception to cleanup
   on deactivation is covered by the WordPress integration tests; see also the layout
   contract in [architecture §18](../02-architecture.md#18-versioning-upgrades-and-uninstall).
+- Initial layout recording inserts only if the option is absent, with a database
+  uniqueness check that never updates an existing value. A competing initial writer is
+  accepted only if the resulting number is supported. A malformed marker is retained
+  and keeps startup inactive; deactivation then leaves jobs and locks alone just as for
+  a newer marker. The administrator notice distinguishes these cases from a refused
+  first write. Future migrations still need to exclude requests running older code;
+  initial recording provides no lock around an entire request.
