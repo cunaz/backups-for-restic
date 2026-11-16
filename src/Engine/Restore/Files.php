@@ -155,12 +155,7 @@ final class Files {
 		self::verify( $state->work );
 		$path = $state->work['path'] . '/restore.json';
 		$temp = $path . '.tmp';
-		if ( self::exists( $temp ) ) {
-			self::regular( $temp );
-			if ( ! unlink( $temp ) ) {
-				throw new FormatException( 'A restore checkpoint temporary file cannot be removed.' );
-			}
-		}
+		self::remove_temporary( $temp );
 		if ( self::exists( $path ) ) {
 			self::regular( $path );
 		}
@@ -177,7 +172,39 @@ final class Files {
 	}
 
 	/**
-	 * Opens a single-link regular file without truncating it.
+	 * Removes the temporary checkpoint of a start() that was killed before it published its
+	 * first checkpoint. Without restore.json no run exists, so nothing else was written yet;
+	 * with it, the directory belongs to a run and start() refuses it as before.
+	 *
+	 * @param string $work Canonical private working directory.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	public static function discard_unpublished( string $work ): void {
+		if ( ! self::exists( $work . '/restore.json' ) ) {
+			self::remove_temporary( $work . '/restore.json.tmp' );
+		}
+	}
+
+	/**
+	 * Removes a temporary checkpoint that a killed request left behind.
+	 *
+	 * @param string $temp Temporary checkpoint path.
+	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 */
+	private static function remove_temporary( string $temp ): void {
+		if ( self::exists( $temp ) ) {
+			self::regular( $temp );
+			if ( ! unlink( $temp ) ) {
+				throw new FormatException( 'A restore checkpoint temporary file cannot be removed.' );
+			}
+		}
+	}
+
+	/**
+	 * Opens a single-link regular file without truncating it. The file is owner-only from the
+	 * moment it exists: it is created under a umask of 077, so a request killed right after
+	 * creating it leaves nothing wider, and every open sets 0600 again, which also covers
+	 * filesystems whose default ACLs override the umask.
 	 *
 	 * @param string $path Private path whose parents the caller verified.
 	 * @param bool   $create Create exclusively, otherwise require an existing regular file.
@@ -187,7 +214,12 @@ final class Files {
 	 */
 	public static function open( string $path, bool $create = false ) {
 		$before = $create ? null : self::regular( $path );
-		$handle = fopen( $path, $create ? 'x+b' : 'r+b' );
+		$umask  = umask( 0077 );
+		try {
+			$handle = fopen( $path, $create ? 'x+b' : 'r+b' );
+		} finally {
+			umask( $umask );
+		}
 		if ( false === $handle ) {
 			throw new FormatException( 'A restore file cannot be opened.' );
 		}
@@ -197,7 +229,7 @@ final class Files {
 			if ( false === $stat || $stat['dev'] !== $after['dev'] || $stat['ino'] !== $after['ino'] || ( null !== $before && ( $before['dev'] !== $after['dev'] || $before['ino'] !== $after['ino'] ) ) ) {
 				throw new FormatException( 'A restore file changed while it was being opened.' );
 			}
-			if ( $create && ! chmod( $path, 0600 ) ) {
+			if ( ! chmod( $path, 0600 ) ) {
 				throw new FormatException( 'A restore file cannot be made private.' );
 			}
 		} catch ( \Throwable $error ) {

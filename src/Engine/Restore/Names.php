@@ -19,6 +19,20 @@ defined( 'ABSPATH' ) || exit;
 final class Names {
 
 	/**
+	 * Checks what makes a name unsafe in any tree, whether or not the entry is restored. The
+	 * limits of the destination are left to validate(): an entry that is never written cannot
+	 * exceed them.
+	 *
+	 * @param string $name Raw snapshot name.
+	 * @throws FormatException If this component cannot be one path component.
+	 */
+	public static function structure( string $name ): void {
+		if ( '' === $name || '.' === $name || '..' === $name || str_contains( $name, '/' ) || str_contains( $name, "\0" ) ) {
+			throw new FormatException( 'The snapshot contains an unsafe file name.' );
+		}
+	}
+
+	/**
 	 * Checks one component before it is joined to a local destination.
 	 *
 	 * @param string $name Raw snapshot name.
@@ -26,9 +40,7 @@ final class Names {
 	 * @throws FormatException If this component cannot safely name a destination file.
 	 */
 	public static function validate( string $name, bool $windows = DIRECTORY_SEPARATOR === '\\' ): void {
-		if ( '' === $name || '.' === $name || '..' === $name || str_contains( $name, '/' ) || str_contains( $name, "\0" ) ) {
-			throw new FormatException( 'The snapshot contains an unsafe file name.' );
-		}
+		self::structure( $name );
 		if ( ! $windows ) {
 			if ( strlen( $name ) > 255 ) {
 				throw new FormatException( 'A snapshot name exceeds the destination component limit.' );
@@ -44,13 +56,15 @@ final class Names {
 	}
 
 	/**
-	 * Returns a conservative collision key for names on a case-insensitive destination.
+	 * Returns a collision key for names on a case-insensitive destination. Windows compares
+	 * names one character at a time, so the key uses simple case folding: full folding would
+	 * equate a sharp s with "ss" and refuse two names that NTFS stores side by side.
 	 *
 	 * @param string $name Previously validated name.
 	 * @param bool   $windows Destination filename rules.
 	 * @return string Collision key, retaining bytes on Unix.
 	 */
 	public static function key( string $name, bool $windows = DIRECTORY_SEPARATOR === '\\' ): string {
-		return $windows ? mb_convert_case( $name, MB_CASE_FOLD, 'UTF-8' ) : $name;
+		return $windows ? mb_convert_case( $name, MB_CASE_FOLD_SIMPLE, 'UTF-8' ) : $name;
 	}
 }

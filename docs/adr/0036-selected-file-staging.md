@@ -14,9 +14,13 @@ collisions, useful progress, and recovery after a killed request.
   already selected path. Preserve each selected entry's original path below staging;
   two files with the same basename in different directories must remain distinct.
 - `start()` records the run identity locally before its first repository lock. Planning
-  and restore read under a shared lock, refreshing it during long work. After a lock gap,
-  reacquire it, verify that the snapshot remains, and load the current index: cooperating
-  prune may have moved blobs to different packs without changing their content IDs.
+  and restore read under a shared lock, kept as backups keep theirs: the server is asked
+  for the lock once per `advance()` call, at its start, and again after a refresh. Inside
+  the call only the clock is compared with the time the lock was taken or refreshed: a
+  lock that is due is refreshed, and a lapsed one stops the call. After a lock gap,
+  reacquire it at the start of a call, verify that the snapshot remains, and load the
+  current index: cooperating prune may have moved blobs to different packs without
+  changing their content IDs.
 - A first resumable traversal validates the selected entries and counts files and bytes.
   It must also find every requested path. It writes no restored file until the complete
   selection and available space have been checked. Throttle applies during both traversals.
@@ -29,6 +33,8 @@ collisions, useful progress, and recovery after a killed request.
   file to its committed byte offset. A completed file must match its declared size and
   every blob must authenticate and match its ID. Checkpoints advance only after successful
   writes. Recorded metadata must remain available for the separate apply planner.
+- Staging is owner-only. A staged file is `0600` and a staged directory `0700`, whatever
+  mode the snapshot recorded; the original mode is kept in the report for the apply step.
 - Links and special nodes are report entries, never created in staging. Report appends
   need a committed offset so a killed request cannot duplicate entries. Completion,
   cancellation and failure release the repository lock, including a lock left by a killed
@@ -45,7 +51,12 @@ collisions, useful progress, and recovery after a killed request.
   [console handles](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#consoles).
   Device names with spaces before an extension, console names with extensions and names
   containing `~` are conservatively refused on Windows to avoid device/short-name aliases.
-  A case-folded key supports collision checks.
+  A key made with simple, one-to-one case folding supports collision checks: Windows
+  compares names character by character, so a sharp s and "ss" stay distinct there.
+  Every node of a visited directory must be a safe path component (not empty, `.`, `..`,
+  and without `/` or NUL). The limits of the destination, such as the component length,
+  apply only to entries that are visited, by the rules of the destination platform: an
+  unselected sibling is never written and cannot exceed them.
   These rules follow [Microsoft's filename documentation](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
   Leading ASCII spaces follow [Microsoft's whitespace rules](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/file-folder-name-whitespace-characters);
   padded devices follow the conservative [CPython reserved-name check](https://github.com/python/cpython/blob/main/Lib/ntpath.py).
@@ -73,7 +84,9 @@ its last committed ordinal. Free-space checks cover the target and work filesyst
 with per-entry rounding and a 16 MiB reserve. They are an
 estimate, not a reservation: every later write is still checked. One decoded tree is cached
 at a time and its names are validated once per path, avoiding a directory-wide scan for
-every file. Index loading checks/refreshes the lease between index documents.
+every file. Unselected siblings are passed over inside one step and do not get a
+checkpoint each. Index loading compares the clock with the lease between index documents
+and refreshes a lock that is due; it sends no lock request otherwise.
 
 `Files` checks directory identity, parent components and regular-file identity, rejects
 symbolic and hard links, completes short writes and checks seeks/truncation/flush/close.
@@ -81,24 +94,32 @@ A persisted directory or file creation intent allows the narrow gap between crea
 entry and saving its identity to be replayed. A committed partial file binds device/inode
 and cannot silently grow missing bytes with a sparse truncate. This relies on a private
 job-owned directory: PHP has no portable openat/no-follow primitive protecting against
-another local process that controls those directories.
+another local process that controls those directories. `Files::open()` creates files
+under a umask of `077` and sets `0600` on every open, so no staged file, report or
+checkpoint exists with a wider mode, also when a request is killed right after creating it.
+A `start()` that was killed while it published its first checkpoint leaves only
+`restore.json.tmp`; the next `start()` removes it, because without `restore.json` no run
+exists. Beside a published checkpoint the directory belongs to a run and is refused.
 
 Aborting still attempts repository-lock cleanup if publishing the aborted checkpoint fails;
 even a second cleanup failure cannot replace the original checkpoint error.
 
 `entries.jsonl` stays beside `restore.json`, outside the payload. Each selected node has
 its original path, type, mode, mtime, size and raw link target; every entry is committed
-once. Payload modes strip special bits and retain owner read/write (and directory search)
-access so checkpoints, downloads and later apply remain possible. Original modes remain
+once. Payload modes are fixed: `0600` for files and `0700` for directories. They never
+carry the group, other or special bits of the snapshot, and they keep the owner access
+that checkpoints, downloads and the later apply need. Original modes remain
 in the report for the separate apply operation. Uncommitted report suffixes are truncated
 on resume; the report is never accumulated in checkpoint memory.
 
 Unit tests resume after each unit, replay creation and write gaps, and cover stale objects,
 replaced destinations, lost/repacked repository state, lock gaps during reads, throttling,
 low disk space, exactly-once report entries, bounded/interrupted per-file planning and
-cleanup of unrecorded locks or a failed abort checkpoint. The conformance suite compares
-restic-created full and selected restores, including raw names and links
-represented only in the report, for the current and minimum supported restic versions.
+cleanup of unrecorded locks or a failed abort checkpoint. They pin the owner-only modes,
+the number of lock requests per tick and the repeated start after a killed one. The
+conformance suite compares restic-created full and selected restores, including raw names
+and links represented only in the report, for the current and minimum supported restic
+versions: names, types, times and content come from staging, modes from the report.
 Final-head CI remains the merge gate.
 
 ## Remaining release work
@@ -107,6 +128,17 @@ follow in phases 2.2–2.5. Full-job memory under 128 MiB remains a separate rel
 bounded blob groups do not bound every decoded index/tree document or the decompressor's
 allocation before checking its output size. Windows name rules are unit-tested, not a
 claim of real Windows filesystem acceptance.
+
+Two known costs remain for the job package (phase 2.2) and later work:
+
+- The index is loaded again in every tick. It lives only in the PHP process, so every
+  resumed request lists and downloads all index files before its first step, and
+  `start()` and `resume()` take no index cache, unlike backup and check. A repository
+  whose index takes longer to fetch than a tick allows makes one traversal step per tick.
+  The restore job has to hand in the index cache.
+- One decoded tree is kept at a time. After the traversal returns from a child directory
+  the parent's tree is downloaded, decrypted and decoded again, so a directory with N
+  subdirectories is fetched N + 1 times in each of the two passes.
 
 ## Alternatives considered
 - Flatten selected basenames: unrelated selections can overwrite each other.

@@ -747,13 +747,167 @@ final class RestoreRunTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
-	public function test_readonly_snapshot_permissions_do_not_prevent_resume_or_later_downloads(): void {
-		$snapshot = $this->snapshot( [ $this->file( 'readonly', 'abc', 3, 0400 ) ] );
+	/** @return iterable<string, array{int}> */
+	public static function snapshot_modes(): iterable {
+		yield 'read-only' => [ 0400 ];
+		yield 'group and world readable' => [ 0644 ];
+		yield 'world writable' => [ 0666 ];
+		yield 'setuid and executable' => [ 04755 ];
+	}
+
+	#[DataProvider( 'snapshot_modes' )]
+	public function test_staging_is_owner_only_and_the_report_keeps_the_original_mode( int $mode ): void {
+		$previous = umask( 0 );
+		try {
+			$snapshot = $this->snapshot( [ $this->directory( 'folder', [ $this->file( 'child', 'abc', 3, $mode ) ] ) ] );
+			$this->finish( $this->start( $snapshot ) );
+		} finally {
+			umask( $previous );
+		}
+		clearstatcache();
+		self::assertSame( 0700, fileperms( $this->target . '/folder' ) & 07777, 'A directory recorded as 0755 is staged for its owner only.' );
+		self::assertSame( 0600, fileperms( $this->target . '/folder/child' ) & 07777 );
+		self::assertSame( 0600, fileperms( $this->work . '/entries.jsonl' ) & 07777 );
+		self::assertSame( 0600, fileperms( $this->work . '/restore.json' ) & 07777 );
+		$lines = file( $this->work . '/entries.jsonl', FILE_IGNORE_NEW_LINES );
+		self::assertIsArray( $lines );
+		self::assertSame( [ 0755, $mode ], array_map( static fn ( string $line ): mixed => GoJson::decode_object( $line )['mode'], $lines ) );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/folder/child' ) );
+	}
+
+	public function test_a_file_left_with_a_wider_mode_is_made_private_when_it_is_opened_again(): void {
+		$run = $this->start( $this->repeated_file() );
+		$this->plan( $run );
+		self::assertFalse( $run->advance( 0.0 ) );
+		chmod( $this->target . '/repeated.txt', 0644 );
+		chmod( $this->work . '/entries.jsonl', 0664 );
+		self::assertFalse( RestoreRun::resume( $this->repository, $this->work, $this->clock )->advance( 0.0 ) );
+		clearstatcache();
+		self::assertSame( 0600, fileperms( $this->target . '/repeated.txt' ) & 07777 );
+		self::assertSame( 0600, fileperms( $this->work . '/entries.jsonl' ) & 07777 );
+	}
+
+	public function test_creating_a_file_leaves_it_private_and_restores_the_request_umask(): void {
+		$previous = umask( 0 );
+		try {
+			$handle = Files::open( $this->work . '/fresh', true );
+			$mode   = fstat( $handle );
+			fclose( $handle );
+			self::assertSame( 0, umask(), 'The umask of the request is restored.' );
+		} finally {
+			umask( $previous );
+		}
+		self::assertIsArray( $mode );
+		self::assertSame( 0600, $mode['mode'] & 07777 );
+	}
+
+	public function test_the_lock_is_probed_once_per_tick_and_again_after_a_refresh(): void {
+		$nodes = [ $this->file( 'large', 'abc', 300 ) ];
+		for ( $number = 0; $number < 6; ++$number ) {
+			$nodes[] = $this->directory( 'folder-' . $number, [ $this->file( 'one', 'one-' . $number ), $this->file( 'two', 'two-' . $number ) ] );
+		}
+		$snapshot   = $this->snapshot( $nodes );
+		$probes     = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$probes ): void {
+				if ( 'size' === $method && ObjectType::Locks === $type ) {
+					++$probes;
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = $this->start( $snapshot, repository: $repository );
+		self::assertFalse( $run->advance( 0.0 ) );
+		self::assertSame( 1, $probes, 'A tick that takes the lock asks for it once.' );
+		$this->plan( $run );
+		$probes = 0;
+		$this->clock->advance( Locking::REFRESH_AFTER_SECONDS );
+		self::assertFalse( $run->advance( 0.0 ) );
+		self::assertSame( 2, $probes, 'A refresh asks for the new lock.' );
+		$probes = 0;
+		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( 1, $probes, 'Entries, blobs and directories cost no lock request of their own.' );
+		self::assertSame( 13, $run->progress()['files'] );
+	}
+
+	public function test_a_refreshed_lock_that_is_missing_refuses_to_go_on(): void {
+		$snapshot   = $this->repeated_file();
+		$probes     = null;
+		$backend    = new HookedBackend(
+			$this->backend,
+			function ( string $method, ?ObjectType $type ) use ( &$probes ): void {
+				// The first probe of the tick finds the lock; the one after the refresh does not.
+				if ( null !== $probes && 'size' === $method && ObjectType::Locks === $type && 2 === ++$probes ) {
+					$this->backend->objects['locks'] = [];
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = $this->start( $snapshot, repository: $repository );
+		$this->plan( $run );
+		$probes = 0;
+		$this->clock->advance( Locking::REFRESH_AFTER_SECONDS );
+		try {
+			$run->advance( INF );
+			self::fail( 'A lock that vanished must stop the tick.' );
+		} catch ( RepositoryChanged $error ) {
+			self::assertSame( 'The refreshed restore lock is missing; resume the run to revalidate it.', $error->getMessage() );
+			self::assertFalse( Files::exists( $this->target . '/repeated.txt' ) );
+		}
+		$probes = null;
+		$this->finish( RestoreRun::resume( $this->repository, $this->work, $this->clock ) );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
+	}
+
+	public function test_unselected_siblings_are_skipped_within_one_step(): void {
+		$nodes = [];
+		foreach ( [ 'a', 'b', 'c', 'd', 'e', 'f' ] as $name ) {
+			$nodes[] = $this->file( $name, 'body-' . $name );
+		}
+		$run   = $this->start( $this->snapshot( $nodes ), [ '/e' ] );
+		$ticks = 0;
+		while ( 'plan' === $run->progress()['phase'] ) {
+			self::assertFalse( $run->advance( 0.0 ) );
+			++$ticks;
+		}
+		self::assertSame( 3, $ticks, 'One step for the selected file, one for its directory, one for the pass.' );
+		$this->finish( $run );
+		self::assertSame( [ 'e' ], array_keys( TempDir::describe( $this->target ) ) );
+	}
+
+	public function test_an_unselected_name_beyond_the_destination_limit_does_not_block_its_siblings(): void {
+		$long     = str_repeat( 'x', 300 );
+		$snapshot = $this->snapshot( [ $this->file( 'a.txt', 'abc' ), $this->file( $long, 'long' ) ] );
+		$this->finish( $this->start( $snapshot, [ '/a.txt' ] ) );
+		self::assertSame( 'abc', file_get_contents( $this->target . '/a.txt' ) );
+		TempDir::remove( $this->target );
+		TempDir::remove( $this->work );
+		mkdir( $this->target, 0700 );
+		mkdir( $this->work, 0700 );
+		$this->expectExceptionMessage( 'exceeds the destination component limit' );
+		$this->start( $snapshot, [ '/' . $long ] )->advance( INF );
+	}
+
+	public function test_a_start_killed_while_publishing_its_first_checkpoint_can_be_repeated(): void {
+		$snapshot = $this->repeated_file();
+		file_put_contents( $this->work . '/restore.lock', '' );
+		file_put_contents( $this->work . '/restore.json.tmp', '{"version":2' );
 		$this->finish( $this->start( $snapshot ) );
-		self::assertSame( 0600, fileperms( $this->target . '/readonly' ) & 0777 );
-		$line = trim( (string) file_get_contents( $this->work . '/entries.jsonl' ) );
-		self::assertSame( 0400, GoJson::decode_object( $line )['mode'] );
-		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/readonly' ) );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
+		self::assertFalse( Files::exists( $this->work . '/restore.json.tmp' ) );
+	}
+
+	public function test_a_temporary_checkpoint_beside_a_published_one_still_refuses_a_new_start(): void {
+		$snapshot = $this->repeated_file();
+		$this->start( $snapshot );
+		file_put_contents( $this->work . '/restore.json.tmp', '{"version":2' );
+		try {
+			$this->start( $snapshot );
+			self::fail( 'A working directory that holds a run must not be started again.' );
+		} catch ( InvalidArgument ) {
+			self::assertTrue( Files::exists( $this->work . '/restore.json.tmp' ), 'The existing run keeps its files.' );
+		}
 	}
 
 	public function test_cpu_throttle_runs_during_planning_and_data_restore(): void {

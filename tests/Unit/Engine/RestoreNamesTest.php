@@ -44,4 +44,24 @@ final class RestoreNamesTest extends TestCase {
 		self::assertSame( Names::key( 'ÜMLAUT.TXT', true ), Names::key( 'ümlaut.txt', true ) );
 		self::assertNotSame( Names::key( 'Case', false ), Names::key( 'case', false ) );
 	}
+
+	public function test_windows_keys_fold_one_character_to_one_character(): void {
+		self::assertNotSame( Names::key( "Ma\u{df}e.pdf", true ), Names::key( 'Masse.pdf', true ), 'NTFS stores a sharp s beside "ss".' );
+		self::assertNotSame( Names::key( "\u{fb01}le", true ), Names::key( 'file', true ), 'A ligature is not its two letters.' );
+		self::assertSame( Names::key( "STRA\u{1e9e}E", true ), Names::key( "stra\u{df}e", true ) );
+		self::assertSame( Names::key( "\u{391}\u{3a3}", true ), Names::key( "\u{3b1}\u{3c2}", true ), 'Both forms of sigma fold together.' );
+	}
+
+	public function test_structure_refuses_unsafe_components_and_ignores_destination_limits(): void {
+		Names::structure( str_repeat( 'x', 300 ) );
+		Names::structure( 'CON' );
+		foreach ( [ '', '.', '..', 'a/b', "nul\0" ] as $name ) {
+			try {
+				Names::structure( $name );
+				self::fail( 'An unsafe component must be refused.' );
+			} catch ( FormatException $error ) {
+				self::assertSame( 'The snapshot contains an unsafe file name.', $error->getMessage() );
+			}
+		}
+	}
 }

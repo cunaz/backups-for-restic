@@ -22,7 +22,6 @@ use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexSet;
 use BackupsForRestic\Format\Snapshot;
-use BackupsForRestic\Format\Tree\FileMode;
 use BackupsForRestic\Format\Tree\Node;
 use BackupsForRestic\Format\Tree\NodeType;
 use BackupsForRestic\Support\Clock;
@@ -132,6 +131,8 @@ final class RestoreRun {
 		$handle = Files::lock( $work['path'] );
 		try {
 			Files::empty_directory( $destination['path'] );
+			// A start killed while it published its first checkpoint left no run behind.
+			Files::discard_unpublished( $work['path'] );
 			Files::empty_directory( $work['path'], true );
 			$state = new State( $repository->config()->id, $snapshot, $selected, $destination, $work, ( $identity ?? new Identity( 'backups-for-restic-restore' ) )->hostname, random_int( 1, 2147483647 ) );
 			$run   = new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
@@ -289,42 +290,63 @@ final class RestoreRun {
 	}
 
 	/**
-	 * Refreshes a continuous lease, or reacquires it only at a tick boundary.
+	 * Keeps the lease as backups keep theirs: the server is asked once per advance() call, at
+	 * its start, and again after a refresh. In between only the clock is compared with the time
+	 * the lock was taken, which costs no request per entry, blob or index file.
 	 *
-	 * @param bool $allow_gap Whether old in-memory repository locations may be discarded.
+	 * @param bool $boundary Whether advance() starts here: the lock is probed, and a lost one may be taken again.
 	 * @throws RepositoryChanged If the selected snapshot or trusted lease has been lost.
 	 */
-	private function keep_lock( bool $allow_gap = false ): void {
+	private function keep_lock( bool $boundary = false ): void {
 		$lock = $this->state->lock;
-		if ( null !== $lock && ! $this->locking->lapsed( $this->state->locked_at ) && null !== $this->repository->backend()->size( ObjectType::Locks, $lock ) ) {
-			if ( $this->locking->lapsed( $this->state->locked_at ) ) {
-				throw new RepositoryChanged( 'A restore lock check exceeded the trusted lease.' );
+		if ( $boundary && ( null === $lock || $this->locking->lapsed( $this->state->locked_at ) || ! $this->probe( $lock ) ) ) {
+			$taken                  = $this->clock->now()[0];
+			$lock                   = $this->locking->acquire( false )->hex();
+			$this->state->lock      = $lock;
+			$this->state->locked_at = $taken;
+			Files::persist( $this->state );
+			// Another client may have repacked or forgotten during the gap.
+			$this->index   = null;
+			$this->tree_id = null;
+			$this->nodes   = [];
+			if ( null === $this->repository->backend()->size( ObjectType::Snapshots, $this->state->snapshot->hex() ) ) {
+				throw new RepositoryChanged( 'The selected snapshot no longer exists.' );
 			}
-			if ( $this->locking->due( $this->state->locked_at ) ) {
-				$taken                  = $this->clock->now()[0];
-				$this->state->lock      = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
-				$this->state->locked_at = $taken;
-				Files::persist( $this->state );
-				if ( $this->locking->lapsed( $taken ) ) {
-					throw new RepositoryChanged( 'Refreshing the restore lock exceeded the trusted lease.' );
-				}
+			if ( ! $this->probe( $lock ) ) {
+				$lock = null;
 			}
-			return;
 		}
-		if ( ! $allow_gap ) {
+		if ( null === $lock || $this->locking->lapsed( $this->state->locked_at ) ) {
 			throw new RepositoryChanged( 'The restore repository lock was lost during a read; resume the run to revalidate it.' );
 		}
-		$taken                  = $this->clock->now()[0];
-		$this->state->lock      = $this->locking->acquire( false )->hex();
-		$this->state->locked_at = $taken;
-		Files::persist( $this->state );
-		$this->index   = null;
-		$this->tree_id = null;
-		$this->nodes   = [];
-		if ( null === $this->repository->backend()->size( ObjectType::Snapshots, $this->state->snapshot->hex() ) ) {
-			throw new RepositoryChanged( 'The selected snapshot no longer exists.' );
+		if ( $this->locking->due( $this->state->locked_at ) ) {
+			$taken                  = $this->clock->now()[0];
+			$lock                   = $this->locking->refresh( Id::from_hex( $lock ), false )->hex();
+			$this->state->lock      = $lock;
+			$this->state->locked_at = $taken;
+			Files::persist( $this->state );
+			if ( $this->locking->lapsed( $taken ) ) {
+				throw new RepositoryChanged( 'Refreshing the restore lock exceeded the trusted lease.' );
+			}
+			if ( ! $this->probe( $lock ) ) {
+				throw new RepositoryChanged( 'The refreshed restore lock is missing; resume the run to revalidate it.' );
+			}
 		}
-		$this->keep_lock();
+	}
+
+	/**
+	 * Asks the server for the lock with one request. A slow answer cannot extend the lease.
+	 *
+	 * @param string $lock Recorded lock name.
+	 * @return bool Whether the lock file exists.
+	 * @throws RepositoryChanged If the answer arrived after the trusted lease ended.
+	 */
+	private function probe( string $lock ): bool {
+		$found = null !== $this->repository->backend()->size( ObjectType::Locks, $lock );
+		if ( $found && $this->locking->lapsed( $this->state->locked_at ) ) {
+			throw new RepositoryChanged( 'A restore lock check exceeded the trusted lease.' );
+		}
+		return $found;
 	}
 
 	/** Loads the index and root tree only after taking a lock. */
@@ -366,23 +388,26 @@ final class RestoreRun {
 		}
 		$frame = $this->state->stack[ $depth ];
 		$nodes = $this->tree( $frame['tree'], $frame['dir'] );
-		if ( $frame['next'] > count( $nodes ) ) {
+		$next  = $frame['next'];
+		$count = count( $nodes );
+		if ( $next > $count ) {
 			throw new FormatException( 'The restore directory cursor is outside its tree.' );
 		}
-		if ( $frame['next'] === count( $nodes ) ) {
+		// Unselected siblings need no request, so they do not get a checkpointed step each.
+		while ( $next < $count && ! $this->state->selection->visits( '/' . ( '' === $frame['dir'] ? '' : $frame['dir'] . '/' ) . $nodes[ $next ]->name ) ) {
+			++$next;
+		}
+		$this->state->stack[ $depth ]['next'] = $next;
+		if ( $next === $count ) {
 			if ( 'restore' === $this->state->phase && '' !== $frame['dir'] ) {
 				$path = Files::destination( $this->state, $frame['dir'] );
-				$this->metadata( $path, $frame['mode'], $frame['mtime'], true );
+				$this->metadata( $path, $frame['mtime'], true );
 			}
 			array_pop( $this->state->stack );
 			return;
 		}
-		$node     = $nodes[ $frame['next'] ];
+		$node     = $nodes[ $next ];
 		$relative = '' === $frame['dir'] ? $node->name : $frame['dir'] . '/' . $node->name;
-		if ( ! $this->state->selection->visits( '/' . $relative ) ) {
-			++$this->state->stack[ $depth ]['next'];
-			return;
-		}
 		if ( 'plan' === $this->state->phase ) {
 			if ( ! $this->plan_node( $node, $relative ) ) {
 				return;
@@ -547,7 +572,7 @@ final class RestoreRun {
 		}
 		$keys = [];
 		foreach ( $this->nodes as $node ) {
-			Names::validate( $node->name, false );
+			Names::structure( $node->name );
 			$relative = '' === $dir ? $node->name : $dir . '/' . $node->name;
 			if ( ! $this->state->selection->visits( '/' . $relative ) ) {
 				continue;
@@ -660,7 +685,7 @@ final class RestoreRun {
 			if ( $cursor['written'] !== $node->size ) {
 				throw new FormatException( 'The restored file size differs from its snapshot entry.' );
 			}
-			$this->metadata( $path, $node->mode, $node->mtime, false );
+			$this->metadata( $path, $node->mtime, false );
 			$this->report( $relative, $node );
 			$this->state->file = null;
 			++$this->state->files;
@@ -669,21 +694,20 @@ final class RestoreRun {
 	}
 
 	/**
-	 * Keeps owner access for later downloads/apply; original metadata remains in the report.
+	 * Staging is plaintext and owner-only: files get 0600 and directories 0700, whatever the
+	 * snapshot recorded. The original mode stays in the report for the later apply step.
 	 *
 	 * @param string $path Verified destination.
-	 * @param int    $mode Snapshot Go mode.
 	 * @param string $mtime Snapshot timestamp.
 	 * @param bool   $directory Whether this is a directory.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	private function metadata( string $path, int $mode, string $mtime, bool $directory ): void {
+	private function metadata( string $path, string $mtime, bool $directory ): void {
 		$stat = Files::stat( $path );
 		if ( ( $stat['mode'] & 0170000 ) !== ( $directory ? 0040000 : 0100000 ) || ( ! $directory && 1 !== $stat['nlink'] ) ) {
 			throw new FormatException( 'A restored entry was replaced before its metadata was applied.' );
 		}
-		$permissions = ( FileMode::to_posix_permissions( $mode ) & 0777 ) | ( $directory ? 0700 : 0600 );
-		if ( ! chmod( $path, $permissions ) || ! touch( $path, Rfc3339::parse( $mtime )[0] ) ) {
+		if ( ! chmod( $path, $directory ? 0700 : 0600 ) || ! touch( $path, Rfc3339::parse( $mtime )[0] ) ) {
 			throw new FormatException( 'Restored entry metadata cannot be applied.' );
 		}
 	}
