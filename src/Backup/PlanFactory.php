@@ -73,8 +73,14 @@ final class PlanFactory {
 		// The archiver walks lexically normalized roots, so everything that is compared with the
 		// paths it reports, and the manifest locator, uses the private directory in that form.
 		$private_dir = BackupPlan::normalize( [ $this->private_dir->path ] )[0];
-		$spool       = $private_dir . '/spool';
-		$database    = $spool . '/database';
+		$real        = realpath( $this->private_dir->path );
+		if ( false !== $real && realpath( $private_dir ) !== $real ) {
+			// A symbolic link before a ".." component: the clean path names another directory
+			// than the one the plugin writes to. The resolved path is clean and names the right one.
+			$private_dir = $real;
+		}
+		$spool    = $private_dir . '/spool';
+		$database = $spool . '/database';
 		$this->ensure( $spool );
 		if ( null !== $this->database ) {
 			$this->ensure( $database );
@@ -121,8 +127,8 @@ final class PlanFactory {
 		try {
 			$tags[] = Manifest::tag( $spool . '/manifest.json' );
 		} catch ( InvalidArgument ) {
-			// A path too long or too deep for a locator must not fail the backup: the snapshot
-			// is then read like an older one, by a search or an explicit manifest path.
+			// A path too long or too deep for a locator must not fail the backup. The reader
+			// refuses such a path as well, so this snapshot's manifest is read with other tools.
 			$tags = array_slice( $tags, 0, 3 );
 		}
 		return new BackupPlan( $roots, $tags, $exclude, $virtual );

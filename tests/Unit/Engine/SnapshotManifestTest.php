@@ -99,8 +99,31 @@ final class SnapshotManifestTest extends TestCase {
 			$paths   = new SitePaths( $root . '/site', $root . '/site/content', $root . '/site/content/uploads', 'https://old.example.com', 'old_', '6.7', '0.3.0' );
 			$private = PrivateDirectory::locate( $root . str_repeat( '/d', 256 ), $paths->content_dir, $paths->uploads_dir );
 			$plan    = ( new PlanFactory( $paths, Settings::from_stored( [ 'repository.format_version' => 1 ] ), $private, [], [], null, 'test-job', 1767225600 ) )->plan();
-			self::assertSame( [ PlanFactory::TAG, $paths->site_tag(), 'run:test-job' ], $plan->tags, 'Such a snapshot is read like one of an older version.' );
+			self::assertSame( [ PlanFactory::TAG, $paths->site_tag(), 'run:test-job' ], $plan->tags, 'The backup goes on without a locator.' );
 			self::assertContains( $private->path . '/spool', $plan->paths );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	public function test_a_link_before_a_parent_component_uses_the_directory_the_plugin_writes_to(): void {
+		$root = TempDir::create( 'manifest-link' );
+		try {
+			mkdir( $root . '/real/site/content/uploads', 0700, true );
+			mkdir( $root . '/real/private', 0700, true );
+			mkdir( $root . '/public', 0700 );
+			if ( ! symlink( $root . '/real/site', $root . '/public/site' ) ) {
+				self::markTestSkipped( 'Symbolic links cannot be created here.' );
+			}
+			// "<root>/public/site/../private" is "<root>/real/private" for the system and "<root>/public/private" as text.
+			$paths   = new SitePaths( $root . '/public/site', $root . '/public/site/content', $root . '/public/site/content/uploads', 'https://old.example.com', 'old_', '6.7', '0.3.0' );
+			$private = PrivateDirectory::locate( $root . '/public/site/../private', $paths->content_dir, $paths->uploads_dir );
+			$plan    = ( new PlanFactory( $paths, Settings::from_stored( [ 'repository.format_version' => 1 ] ), $private, [], [], null, 'test-job', 1767225600 ) )->plan();
+			$stored  = (string) realpath( $root . '/real/private' );
+			self::assertSame( $stored . '/spool/manifest.json', Manifest::path( $plan->tags ) );
+			self::assertContains( $stored . '/spool', $plan->paths );
+			self::assertDirectoryExists( $root . '/real/private/spool' );
+			self::assertDirectoryDoesNotExist( $root . '/public/private', 'Nothing is created at the path that only the text names.' );
 		} finally {
 			TempDir::remove( $root );
 		}

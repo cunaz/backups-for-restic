@@ -41,9 +41,13 @@ retain a stale in-memory index between requests or write plaintext site metadata
 - New backup plans add a `backups-for-restic-manifest:<base64 path>` tag, naming the
   manifest's absolute path inside that snapshot. The plan builds it from the private
   directory in the lexically normalized form the archiver walks, so a configured path with
-  an empty, dot or parent component yields the path the snapshot stores. A path the locator
-  cannot express (more than 4096 bytes or 256 components) gets no tag instead of failing the
-  backup; such a snapshot is read like an older one. The tag is part of the encrypted snapshot.
+  an empty, dot or parent component yields the path the snapshot stores. Where that clean
+  path names another directory than the configured one, because a symbolic link precedes a
+  parent component, the plan uses the resolved path instead. A path the locator cannot
+  express (more than 4096 bytes or 256 components) gets no tag instead of failing the
+  backup. The reader applies the same limits to every path, so it cannot read the manifest
+  of such a snapshot, neither by search nor by an explicit path; the files are in the
+  snapshot and other restic clients read them. The tag is part of the encrypted snapshot.
   The existing plugin/site/run tags remain; the locator is not a retention grouping key.
   A duplicate or malformed locator is refused rather than choosing one silently.
 - Without a locator, the reader searches directory nodes for `spool/manifest.json`, visiting
