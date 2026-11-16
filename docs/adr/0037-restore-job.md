@@ -34,7 +34,10 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   path, and the report of the entries in `entries.jsonl` beside it. The report is not
   inside the tree, so no name from a snapshot can take its place. Job IDs are unique, so two
   restores never share a directory, and what is staged inherits the protection of the
-  private directory: owner-only modes, deny files, the exposure check in the preflight.
+  private directory: deny files, the exposure check in the preflight, and owner-only modes
+  (0700) of the staging directory and of `files/`. The entries below keep the permission
+  bits of the snapshot plus owner access (ADR 0036): the 0700 parent protects them, not
+  their own modes.
   The run's checkpoint, local lock and growing report live in `jobs/<job-id>/restore/`
   and are deleted when the job ends.
 - **Partial staging is removed on failure and cancel.** Only a job that ends as
@@ -49,8 +52,13 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   the staged files over a precaution.
 - **A lost lock resumes, a few times.** A run whose lock did not hold gives up its tick.
   The next tick takes a new lock, verifies that the snapshot still exists and reads the
-  index again. After three such ticks the job fails, for example when the snapshot was
-  forgotten by another client.
+  index again. After three such ticks the job fails. A snapshot that the repository does
+  not hold, because the request named an unknown ID or another client forgot it, does not
+  come back: the job fails in the tick that finds out, without another attempt.
+- **A finished restore survives a failing cleanup.** When `cleaning_up` cannot remove
+  working files or old jobs after the run completed, the job logs a warning and still
+  succeeds. Failing it would leave a failed job that owns a complete staging directory
+  and the entry of the last restore.
 - **Restore jobs are not reported by e-mail.** An administrator starts a restore and
   watches it, as with an unlock; failure streaks and recovery notices are for unattended
   jobs.

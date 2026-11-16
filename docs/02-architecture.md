@@ -313,7 +313,8 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   `planning` ends when the selection is counted, `restoring` when every file is staged. The
   job's progress holds `phase`, `files`, `bytes`, `total_files`, `total_bytes`, `skipped`
   and `percent`. A run whose repository lock did not hold gives up its tick and is resumed
-  by the next one, at most three times. `recording` moves the report of the entries beside
+  by the next one, at most three times; a snapshot that the repository does not hold fails
+  the job at once. `recording` moves the report of the entries beside
   the staged files, writes the job's result (`snapshot`, `files`, `bytes`, `skipped` for
   entries such as links that are recorded but not created, `staging` and `report` as names
   relative to the private directory) and the `last_restore` entry of the state.
@@ -803,7 +804,7 @@ left behind is removed once it is a minute old.
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
 └── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
-    ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path, owner-only
+    ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; files/ is owner-only, the entries keep the snapshot's permission bits
     └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
 ```
 

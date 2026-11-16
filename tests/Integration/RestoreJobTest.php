@@ -161,12 +161,24 @@ final class RestoreJobTest extends TestCase {
 	#[Depends( 'test_a_backup_for_the_restore' )]
 	public function test_a_schedule_slot_waits_while_a_restore_is_active( string $snapshot ): void {
 		TestSite::idle( 600 );
-		[ , $settings ]     = TestSite::api( 'GET', '/settings' );
-		$frequency          = (string) ( $settings['values']['schedule.backup.frequency'] ?? 'daily' );
-		[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'schedule.backup.frequency' => 'daily' ] ] );
+		[ , $settings ] = TestSite::api( 'GET', '/settings' );
+		$before         = [
+			'schedule.backup.frequency'  => (string) ( $settings['values']['schedule.backup.frequency'] ?? 'daily' ),
+			'advanced.loopback_chaining' => (string) ( $settings['values']['advanced.loopback_chaining'] ?? 'auto' ),
+		];
+		// Without chaining a new job schedules no tick event and takes no cron lock: nothing but
+		// a heartbeat advances it, and a heartbeat looks at the schedule before it does.
+		[ $status, , $raw ] = TestSite::api(
+			'PUT',
+			'/settings',
+			[
+				'values' => [
+					'schedule.backup.frequency'  => 'daily',
+					'advanced.loopback_chaining' => 'off',
+				],
+			]
+		);
 		self::assertSame( 200, $status, $raw );
-		// Without requests of the site to itself the new job stays queued until a heartbeat comes.
-		TestSite::no_loopback( true );
 		try {
 			[ $status, $started, $raw ] = TestSite::api(
 				'POST',
@@ -183,41 +195,47 @@ final class RestoreJobTest extends TestCase {
 			// As if the last backup that the schedule started was long ago.
 			TestSite::schedule_state( [ 'backup_slot' => 1 ] );
 
+			// One heartbeat, made due once: the event is not due again for five minutes after
+			// it ran, so what follows describes exactly this heartbeat.
+			TestSite::php( 'wp_clear_scheduled_hook( "backups_for_restic_heartbeat" ); wp_schedule_event( time() - 1, "backups_for_restic_five_minutes", "backups_for_restic_heartbeat" );' );
 			$deadline = time() + 180;
 			do {
-				TestSite::heartbeat();
+				TestSite::cron();
 				$job = TestSite::job( $restore );
 				sleep( 1 );
 			} while ( 'queued' === ( $job['state'] ?? '' ) && time() < $deadline );
-			self::assertNotSame( 'queued', $job['state'] ?? '', 'A heartbeat found the restore and advanced it.' );
+			self::assertNotSame( 'queued', $job['state'] ?? '', 'The heartbeat found the restore and advanced it.' );
 
-			// That heartbeat looked at the schedule first and could not start the backup.
+			// It met the restore as an active job when it looked at the schedule, and started nothing.
 			self::assertSame( 1, TestSite::schedule_state()['backup_slot'] ?? null, 'The slot stays unhandled while the restore is active.' );
 			self::assertSame( [], array_values( array_diff( self::known(), $known ) ), 'No job started beside the restore.' );
-			$job = TestSite::wait_for( $restore, 1800 );
-			self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
 
-			// The next heartbeat finds the slot still due and starts the backup.
+			// Later heartbeats end the restore; the first one that finds no active job starts the
+			// backup of the slot that is still due, and the ones after it advance that backup.
 			$backup   = null;
-			$deadline = time() + 180;
+			$deadline = time() + 1800;
 			do {
 				TestSite::heartbeat();
 				[ , $list ] = TestSite::api( 'GET', '/jobs' );
 				foreach ( $list['jobs'] ?? [] as $candidate ) {
-					if ( is_array( $candidate ) && ! in_array( $candidate['id'] ?? '', $known, true ) ) {
-						$backup = TestSite::wait_for( (string) $candidate['id'], 1800 );
+					if ( is_array( $candidate ) && 'backup' === ( $candidate['type'] ?? '' ) && ! in_array( $candidate['id'] ?? '', $known, true ) && ! in_array( $candidate['state'] ?? '', [ 'queued', 'running' ], true ) ) {
+						$backup = $candidate;
 					}
 				}
 				sleep( 1 );
 			} while ( null === $backup && time() < $deadline );
-			self::assertNotNull( $backup, 'The heartbeat started no job; handled slots: ' . (string) json_encode( TestSite::schedule_state() ) );
+			self::assertNotNull( $backup, 'The heartbeats started no backup that ended; handled slots: ' . (string) json_encode( TestSite::schedule_state() ) );
+			$job = TestSite::job( $restore );
+			self::assertSame( 'succeeded', $job['state'] ?? null, (string) json_encode( $job['error'] ?? null ) );
 			self::assertSame( [ 'backup', 'schedule', 'succeeded' ], [ $backup['type'], $backup['trigger'], $backup['state'] ], (string) json_encode( $backup ) );
 			self::assertGreaterThan( 1, TestSite::schedule_state()['backup_slot'] ?? 0 );
 		} finally {
-			TestSite::no_loopback( false );
 			// Handled before the next test: no later heartbeat starts this slot again.
 			TestSite::schedule_state( [ 'backup_slot' => time() ] );
-			TestSite::api( 'PUT', '/settings', [ 'values' => [ 'schedule.backup.frequency' => $frequency ] ] );
+			TestSite::api( 'PUT', '/settings', [ 'values' => $before ] );
+			// A job that a heartbeat started without chaining, such as the forget after the
+			// backup, has no tick event: one more heartbeat advances it, and it chains again.
+			TestSite::heartbeat();
 			TestSite::idle( 600 );
 		}
 	}

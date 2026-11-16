@@ -230,23 +230,36 @@ final class RestoreSteps implements StepProvider {
 	 * Deletes the working files of the run, and after a failure or a cancellation the partial
 	 * staging directory as well. Runs on every path to the end.
 	 *
+	 * A restore that is complete stays succeeded when something here cannot be removed. A
+	 * failing cleanup step would end the job as failed while its whole tree and the entry of
+	 * the last restore stay, and a failed job must not own a staging directory (ADR 0037).
+	 * What is left lies in the directory of the job and goes when old jobs are pruned.
+	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool Always true.
+	 * @throws PluginException If the cleanup after a failure or a cancellation fails.
 	 */
 	public function clean_up( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services;
 		$partial  = null !== $job->outcome;
-		Cleanup::run(
-			static fn () => Files::remove_tree( $services->work_dir( $job ) ),
-			static function () use ( $services, $job, $partial ): void {
-				if ( $partial ) {
-					Files::remove_tree( $services->staging_dir( $job ) );
-				}
-			},
-			fn () => $this->common->clean_up( $job, $log, $deadline )
-		);
+		try {
+			Cleanup::run(
+				static fn () => Files::remove_tree( $services->work_dir( $job ) ),
+				static function () use ( $services, $job, $partial ): void {
+					if ( $partial ) {
+						Files::remove_tree( $services->staging_dir( $job ) );
+					}
+				},
+				fn () => $this->common->clean_up( $job, $log, $deadline )
+			);
+		} catch ( PluginException $failure ) {
+			if ( $partial ) {
+				throw $failure;
+			}
+			$log->write( 'warning', 'Working files of the finished restore could not be removed.', [ 'code' => JobError::from_throwable( $failure )->code ] );
+		}
 		return true;
 	}
 
@@ -256,7 +269,8 @@ final class RestoreSteps implements StepProvider {
 	 * A run whose repository lock did not hold, after a long pause or because someone removed
 	 * it, gives up the tick (ADR 0036). The next tick takes a new lock, makes sure that the
 	 * snapshot is still there and reads the index again. After MAX_RESUMPTIONS such ticks the
-	 * job fails rather than go on for ever, for example over a snapshot that was forgotten.
+	 * job fails rather than go on for ever. A snapshot that the repository does not hold, never
+	 * held or was made to forget, does not come back: the job fails in the tick that finds out.
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
@@ -270,7 +284,7 @@ final class RestoreSteps implements StepProvider {
 			$run->advance( $deadline );
 		} catch ( RepositoryChanged $changed ) {
 			$resumptions = Decoded::int( $job->data['resumptions'] ?? 0 ) + 1;
-			if ( $resumptions > self::MAX_RESUMPTIONS ) {
+			if ( $resumptions > self::MAX_RESUMPTIONS || RestoreRun::SNAPSHOT_MISSING === ( $changed->context()['cause'] ?? null ) ) {
 				throw $changed;
 			}
 			$job->data['resumptions'] = $resumptions;

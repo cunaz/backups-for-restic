@@ -279,6 +279,45 @@ final class RestoreStepsTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->directory . '/private/jobs/' . $job->id . '/restore' );
 	}
 
+	public function test_a_cleanup_that_fails_after_a_finished_restore_keeps_the_job_and_its_staging(): void {
+		if ( ! function_exists( 'posix_mkfifo' ) ) {
+			self::markTestSkipped( 'Needs a named pipe.' );
+		}
+		$snapshot = $this->backup();
+		$job      = $this->drive( $this->restore_job( $snapshot ), static fn ( Job $now ): bool => 'recording' === $now->step );
+		self::assertFalse( $job->state->is_terminal() );
+		// Every file is staged. A pipe is neither a file nor a directory: the working directory
+		// that holds one cannot be removed.
+		$pipe = $this->directory . '/private/jobs/' . $job->id . '/restore/pipe';
+		self::assertTrue( posix_mkfifo( $pipe, 0600 ) );
+
+		// The removal that fails says so with a warning of PHP as well.
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			$job = $this->drive( $job );
+		} finally {
+			restore_error_handler();
+			unlink( $pipe );
+		}
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertFileExists( $this->staging( $job ) . '/files' . $this->site . '/hello.txt' );
+		self::assertSame( $job->id, ( new SiteState( $this->options ) )->get( 'last_restore' )['job'] ?? null );
+		self::assertDirectoryExists( $this->directory . '/private/jobs/' . $job->id . '/restore', 'The cleanup did fail.' );
+	}
+
+	public function test_a_snapshot_that_the_repository_does_not_hold_fails_the_job_in_its_first_tick(): void {
+		$this->backup();
+
+		$job = $this->drive( $this->restore_job( str_repeat( 'ab', 32 ) ) );
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'repository_changed', $job->error?->code );
+		self::assertArrayNotHasKey( 'resumptions', $job->data, 'A snapshot that is not there is not a lost lock.' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
 	public function test_a_path_that_the_snapshot_does_not_hold_fails_the_job_before_a_file_is_written(): void {
 		$snapshot = $this->backup();
 
