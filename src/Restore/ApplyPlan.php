@@ -47,11 +47,12 @@ final class ApplyPlan {
 	private array $roots = [];
 
 	/**
-	 * Locations that must never be replaced.
+	 * Locations that must never be replaced, in every spelling that a canonical live target
+	 * can have, each with the reason code of the entries it skips.
 	 *
-	 * @var list<string>
+	 * @var array<string, string>
 	 */
-	private array $protected = [];
+	private array $guards = [];
 
 	/**
 	 * Opens the destination policy.
@@ -62,9 +63,10 @@ final class ApplyPlan {
 	 * @param bool            $include_config Whether configuration files were explicitly requested.
 	 * @param SiteLayout|null $layout Optional mapping for a verified fresh-site restore.
 	 * @param list<string>    $bootstrap Bootstrap locations requiring an offline restore.
-	 * @throws InvalidArgument If the site has no usable live root or a protected path is ambiguous.
+	 * @throws InvalidArgument If the site has no usable live root or a protected location is not
+	 *                         an absolute path without dot segments.
 	 */
-	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, private readonly array $bootstrap = [] ) {
+	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, array $bootstrap = [] ) {
 		if ( $include_config && null !== $layout ) {
 			throw new InvalidArgument( 'A fresh-site import preserves the current installation configuration.' );
 		}
@@ -78,13 +80,10 @@ final class ApplyPlan {
 			throw new InvalidArgument( 'No canonical live directory is available for file apply.' );
 		}
 		foreach ( array_merge( $excluded, $include_config ? [] : $config_files ) as $path ) {
-			$path = rtrim( $path, '/' );
-			Path::parts( $path );
-			$this->protected[] = $path;
-			$real              = realpath( $path );
-			if ( false !== $real && $real !== $path ) {
-				$this->protected[] = $real;
-			}
+			$this->protect( $path, 'protected' );
+		}
+		foreach ( $bootstrap as $path ) {
+			$this->protect( $path, 'offline_restore_required' );
 		}
 	}
 
@@ -221,14 +220,10 @@ final class ApplyPlan {
 		} catch ( FormatException | InvalidArgument ) {
 			return self::decision( $path, null, 'refuse', 'ambiguous_destination' );
 		}
-		foreach ( $this->protected as $excluded ) {
-			if ( null !== $target && self::within( self::fold( $target ), self::fold( $excluded ) ) ) {
-				return self::decision( $path, $target, 'skip', 'protected' );
-			}
-		}
-		foreach ( $this->bootstrap as $critical ) {
-			if ( null !== $target && self::within( self::fold( $target ), self::fold( $critical ) ) ) {
-				return self::decision( $path, $target, 'skip', 'offline_restore_required' );
+		$folded = null === $target ? null : self::fold( $target );
+		foreach ( $this->guards as $guard => $reason ) {
+			if ( null !== $folded && self::within( $folded, self::fold( $guard ) ) ) {
+				return self::decision( $path, $target, 'skip', $reason );
 			}
 		}
 		$root     = null;
@@ -380,6 +375,54 @@ final class ApplyPlan {
 			$cache[ $cache_key ] = $names;
 		}
 		return $valid;
+	}
+
+	/**
+	 * Protects a location under each spelling that a writable target can have. Every target
+	 * is canonical, so repeated and trailing slashes are dropped, and the deepest existing
+	 * ancestor is resolved: a location configured through a symbolic link, or a drop-in that
+	 * does not exist yet, then also names the directory that WordPress actually loads from.
+	 * A location listed twice keeps the reason it was listed with first.
+	 *
+	 * @param string $path   Configured location.
+	 * @param string $reason Reason code of the entries it skips.
+	 * @throws InvalidArgument If the location is not an absolute path without dot segments.
+	 */
+	private function protect( string $path, string $reason ): void {
+		while ( str_contains( $path, '//' ) ) {
+			$path = str_replace( '//', '/', $path );
+		}
+		$path = rtrim( $path, '/' );
+		try {
+			Path::parts( $path );
+		} catch ( InvalidArgument $error ) {
+			// A location that cannot be compared would be silently unprotected.
+			InvalidArgument::raise( 'A location that file apply protects is not an absolute path without dot segments.', [ 'code' => 'protected_path_invalid' ], $error );
+		}
+		foreach ( [ $path, self::resolved( $path ) ] as $spelling ) {
+			$this->guards[ $spelling ] ??= $reason;
+		}
+	}
+
+	/**
+	 * Resolves the deepest existing ancestor of a path and keeps the names below it.
+	 *
+	 * @param string $path Absolute path without empty or dot components.
+	 * @return string Canonical spelling, or the path itself when no ancestor resolves.
+	 */
+	private static function resolved( string $path ): string {
+		clearstatcache( true );
+		$parts   = explode( '/', substr( $path, 1 ) );
+		$missing = '';
+		while ( [] !== $parts ) {
+			// An ancestor outside open_basedir does not resolve; the spelling as configured stays.
+			$real = @realpath( '/' . implode( '/', $parts ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warns for every ancestor above the site.
+			if ( false !== $real ) {
+				return rtrim( $real, '/' ) . $missing;
+			}
+			$missing = '/' . array_pop( $parts ) . $missing;
+		}
+		return $path;
 	}
 
 	/**

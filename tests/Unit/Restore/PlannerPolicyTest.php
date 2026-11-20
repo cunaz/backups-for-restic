@@ -49,6 +49,60 @@ final class PlannerPolicyTest extends TestCase {
 		}
 	}
 
+	public function test_bootstrap_and_private_locations_are_protected_in_every_spelling_of_a_canonical_target(): void {
+		mkdir( $this->live . '/content/private', 0700, true );
+		mkdir( $this->live . '/content/advanced' );
+		symlink( $this->live . '/content', $this->root . '/content-link' );
+		symlink( '/', $this->root . '/top' );
+		$missing = '/bfr-missing-' . bin2hex( random_bytes( 6 ) );
+		$plan    = new ApplyPlan(
+			[ $this->live ],
+			[ $this->live . '//content//private/', $this->root . '/top' . $missing . '/state' ],
+			[],
+			false,
+			null,
+			[
+				// WP_CONTENT_DIR with a trailing slash makes WordPress derive WPMU_PLUGIN_DIR with "//".
+				$this->live . '/content//mu-plugins',
+				$this->live . '/content/must-use/',
+				// Drop-ins and directories named through a link, whether they exist or not.
+				$this->root . '/content-link/object-cache.php',
+				$this->root . '/content-link/advanced',
+				$this->root . '/content-link/private',
+			]
+		);
+		foreach ( [ '/content/mu-plugins', '/content/MU-PLUGINS/loader.php', '/content/must-use', '/content/must-use/loader.php', '/content/object-cache.php', '/content/advanced/cache.php' ] as $suffix ) {
+			self::assertSame( 'offline_restore_required', $plan->inspect( $this->files, $this->live . $suffix )['reason'], $suffix );
+		}
+		foreach ( [ '/content/must-useful', '/content/object-cache.php.bak', '/content/advanced-cache.php' ] as $suffix ) {
+			self::assertSame( 'missing_or_linked_source', $plan->inspect( $this->files, $this->live . $suffix )['reason'], $suffix );
+		}
+		// The configured spelling stays protected as well, although it can never be written.
+		self::assertSame( 'offline_restore_required', $plan->inspect( $this->files, $this->root . '/content-link/object-cache.php' )['reason'] );
+		// A location listed twice keeps the reason it was listed with first.
+		self::assertSame( 'protected', $plan->inspect( $this->files, $this->live . '/content/private/spool' )['reason'] );
+		self::assertSame( 'offline_restore_required', $plan->inspect( $this->files, $this->root . '/content-link/private' )['reason'] );
+		// A link to the filesystem root resolves to the root itself.
+		self::assertSame( 'protected', $plan->inspect( $this->files, $missing . '/state/key' )['reason'] );
+		self::assertSame( 'outside_roots', $plan->inspect( $this->files, $missing . '/stateful' )['reason'] );
+	}
+
+	public function test_a_protected_location_that_is_not_a_plain_absolute_path_refuses_the_plan(): void {
+		foreach ( [ 'wp-content/mu-plugins', $this->live . '/../mu-plugins', $this->live . '/./mu-plugins', '/', '', $this->live . "/mu\0plugins" ] as $location ) {
+			foreach ( [ [ [ $location ], [], [] ], [ [], [ $location ], [] ], [ [], [], [ $location ] ] ] as [ $excluded, $config, $bootstrap ] ) {
+				try {
+					new ApplyPlan( [ $this->live ], $excluded, $config, false, null, $bootstrap );
+					self::fail( 'A plan was built that cannot protect ' . $location );
+				} catch ( InvalidArgument $error ) {
+					self::assertSame( 'protected_path_invalid', $error->context()['code'] ?? null, $location );
+					self::assertSame( 'A location that file apply protects is not an absolute path without dot segments.', $error->getMessage() );
+				}
+			}
+		}
+		// A configuration file that the review includes is not protected, so it is not checked.
+		self::assertSame( 'live_root', ( new ApplyPlan( [ $this->live ], [], [ 'wp-config.php' ], true ) )->inspect( $this->files, $this->live )['reason'] );
+	}
+
 	public function test_roots_and_staging_are_checked_again_after_the_plan_was_created(): void {
 		symlink( $this->live, $this->root . '/alias' );
 		foreach ( [ '', '/', $this->root . '/absent', $this->root . '/alias', '.' ] as $root ) {
