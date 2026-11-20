@@ -125,12 +125,7 @@ final class MysqliConnection implements Connection {
 		}
 		$incomplete = null;
 		foreach ( $files as $file ) {
-			$source = @fopen( $file, 'rb' );
-			$copied = false === $source ? false : @stream_copy_to_stream( $source, $pipes[0] );
-			if ( false !== $source ) {
-				fclose( $source );
-			}
-			if ( false === $copied || filesize( $file ) !== $copied ) {
+			if ( ! self::send_file( $file, $pipes[0] ) ) {
 				// The file cannot be read, or the client stopped at an error and closed the pipe.
 				$incomplete = $file;
 				break;
@@ -146,6 +141,41 @@ final class MysqliConnection implements Connection {
 		if ( null !== $incomplete ) {
 			// The client found nothing wrong with what it got, but it did not get everything.
 			throw new \RuntimeException( 'Import into ' . $database . ' is incomplete: ' . $incomplete . ' could not be read or sent completely.' );
+		}
+	}
+
+	/**
+	 * Sends the whole file even when a blocking client pipe accepts only part of a write.
+	 *
+	 * @param string   $file SQL file.
+	 * @param resource $pipe Client input.
+	 */
+	private static function send_file( string $file, $pipe ): bool {
+		$source = @fopen( $file, 'rb' );
+		if ( false === $source ) {
+			return false;
+		}
+		try {
+			$sent = 0;
+			while ( ! feof( $source ) ) {
+				$chunk = fread( $source, 65536 );
+				if ( false === $chunk || ( '' === $chunk && ! feof( $source ) ) ) {
+					return false;
+				}
+				$offset = 0;
+				$length = strlen( $chunk );
+				while ( $offset < $length ) {
+					$written = @fwrite( $pipe, substr( $chunk, $offset ) );
+					if ( false === $written || 0 === $written ) {
+						return false;
+					}
+					$offset += $written;
+				}
+				$sent += $length;
+			}
+			return filesize( $file ) === $sent;
+		} finally {
+			fclose( $source );
 		}
 	}
 
