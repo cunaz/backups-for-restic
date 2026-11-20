@@ -1,9 +1,8 @@
 # Recovery acceptance for 0.3.0-rc.1
 
 These checks used disposable WordPress installations and repositories on 2026-11-20.
-The final ZIP contains 242 files and is 590,997 bytes. Two builds reproduced SHA-256
-`7d17690fd78fddb4c1e193e1980a3f3334124b6348ff490ab75ce58d6f6df9ca`. The final
-changelog edit left every other packaged file byte-identical. The browser
+The final ZIP contains 242 files and is 591,035 bytes. Two builds reproduced SHA-256
+`f13aee02252dfa5729f117d4575bf45e961a917f23a535bd13d8e754eaaa4fd1`. The browser
 runs installed candidate packages into the receiving site. The storage tests used local
 private repositories.
 
@@ -11,7 +10,13 @@ private repositories.
 | --- | --- |
 | PHP throughput | On PHP 8.3.36 with OPcache and JIT disabled under concurrent test load, chunking reached 7.9 MB/s (gate 5), deriving a new key took 2.9 seconds (gate 30), and a 256 MB backup plus 2,000 small files extrapolated to 2.4 minutes per GB (gate 15). |
 | Native integer width | WordPress 7.1.5 on Alpine x86 PHP 8.3.36 with four-byte integers refused activation from the final ZIP before writing settings or scheduling a heartbeat. A simulated host change kept a stored secret intact, showed the administrator notice and registered no workers. Deactivation cleared both scheduled events and uninstall refused to remove the local data. |
+| PHP 8.6 | All 236 packaged PHP files passed syntax checking under PHP 8.6.0 with every diagnostic enabled. The previous candidate produced a deprecation notice when registering the REST routes. The corrected package registered the same 33 route and method sets without a notice. With native sodium disabled, WordPress's bundled compatibility library encrypted and recovered an option through the packaged secret store. All 2,132 unit cases passed across configurations with and without zstd. All 38 database tests passed on MySQL 8.4.11 (388 assertions). |
 | Web access to private storage | WordPress 7.1.5 ran the packaged HTTP probe against Apache 2.4.69 and nginx 1.30.6. It permitted plaintext staging under Apache's generated deny rule and nginx's explicit deny. It detected a readable directory with Apache overrides disabled and with nginx serving default static files, refused staging in both cases and removed every temporary probe. |
+| WordPress compatibility | The installed candidate passed the WordPress 6.7.12, 7.0.9 and 7.1.5 suites on PHP 8.3 and 8.5. The 6.7.12/PHP 8.5 row used 96 MiB. On 7.1.5/PHP 8.6, 151 of 152 tests passed in one run. The CLI cancellation case exhausted the shared test disk. It passed in isolation with its original 1 GiB upload and preceding backup test (64 assertions). |
+| restic interoperability | The conformance suite passed with 36 tests and 1,480 assertions using restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0. Each version read plugin-written backups, wrote a repository for the plugin to restore and deduplicate, and verified restored bytes. Testing with and without zstd covered both format 2 behaviours. |
+| WordPress index memory | On WordPress 7.1.5 with PHP 8.3.36 limited to 128 MiB per worker, backup, check and prune completed at 500,000 blobs. The respective peaks were 100.61, 107.48 and 93.13 MiB. Check traversed 42,754 trees with no errors. At one and two million blobs, each job reported `index_too_large` and released its lock. Independent restic checks read all stored data before and after every size. |
+| Parser fuzzing | The two-minute run for each of the 26 targets processed 253,492,676 inputs without a finding (seed `6961317253957537550`). |
+| Admin JavaScript analysis | CodeQL 2.27.5 ran all 89 standard JavaScript queries from pack 2.5.1 on the shipped admin script. The SARIF report recorded successful execution and zero alerts. The extracted script matched the ZIP byte for byte. |
 | File-planner mutation testing | Infection 0.35.10 measured a covered mutation score of 97.86% across 468 mutations. PHPUnit killed 455, one was invalid, ten survived and two timed out. |
 | WordPress package and dependencies | Official WordPress Plugin Check 2.2.0 inspected the installed ZIP under WordPress 7.1.4, using the repository's CI settings. Its strict JSON report contained zero errors and warnings. All 242 files matched. Composer and npm reported zero dependency advisories. |
 | Backup using shared-hosting limits | WordPress 7.1.4 and PHP 8.3.36 ran ordinary cron requests with a 30-second execution limit, a 128 MiB memory limit and `set_time_limit` disabled. A fixture with 2 GiB of uploads and a 300 MiB MariaDB database finished in 46 minutes. Independent restic verification and restore matched the upload bytes and restored table checksums. |
@@ -26,6 +31,7 @@ private repositories.
 | Disk exhaustion before publication | A real limited filesystem held a sparse 1,292,345,344-byte original and a nine-byte replacement. The preview required 1,292,349,440 additional bytes. Allocating 16 MiB after confirmation caused the worker to stop before live mutation. The original hash, inode and allocated blocks were unchanged. |
 | Maintenance and offline undo | The ordinary public request returned HTTP 503 during a live change. The authorised controller kept working, unrelated cron work stayed out of the maintenance window, and ordinary requests resumed after lease expiry. WP-CLI recovered a site on which a restored plugin broke normal startup. |
 | Recovery kit | A real terminal and an explicitly requested private file received the kit. A redirected command without `--force` and a subscriber using `--force` were refused. Successful deliveries recorded the time, account and route, with no credentials in the audit. |
+| Diagnostic logs | The integration suite checks the repository password and HTTP credential against job files and REST responses. A separate comparison of 64 server logs and job records (1,701,260 bytes) found zero matches for the fixture's application, administrator and HTTP credentials in raw, URL-encoded and Base64 forms. |
 | Private TLS repositories | The operator smoke command backed up and restored against two disposable rest-server instances with separate credentials and private repositories. It checked both ordinary and append-only behaviour, including an append-only repository with prior history. |
 | Release deployment rehearsal | An isolated SVN repository and disposable signing keys exercised the signed-tag check, the initial release, retries, an upgrade and byte-for-byte export validation. Conflicting tags, downgrades, unsigned tags and unauthorised signing keys were refused. |
 

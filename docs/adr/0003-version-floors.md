@@ -14,12 +14,11 @@ is no restic binary at runtime (ADR 0018); restic's version matters only for ope
 restore with the CLI and for the test oracle.
 
 ## Decision
-- **PHP ≥ 8.3** (`Requires PHP: 8.3`). At 1.0 the plugin runs only on PHP versions that
+- **64-bit PHP ≥ 8.3** (`Requires PHP: 8.3`). At 1.0 the plugin runs only on PHP versions that
   still receive security fixes. The code may use readonly classes, `#[\SensitiveParameter]`
   (redaction in stack traces), typed class constants, `json_validate()` for cheap validation
   of untrusted JSON before decoding, `#[\Override]` and DNF types. JIT is not assumed;
-  performance gates are measured on PHP 8.3 without JIT. CI tests 8.3, 8.4, 8.5 and 8.6 once
-  it is released.
+  performance gates are measured on PHP 8.3 without JIT. CI tests PHP 8.3, 8.4, 8.5 and 8.6.
 - **WordPress ≥ 6.7**, single site only in 1.0 (ADR 0026).
 - **Repository format version 1** for repositories the plugin creates (ADR 0019); readable
   by every restic release since 0.9.
@@ -32,6 +31,7 @@ restore with the CLI and for the test oracle.
   `readme.txt` explains how to switch the PHP version in common hosting panels.
 - Raw secret strings are redacted from stack traces on every supported PHP version; the
   `Secret` wrapper still protects logs and serialisation.
+- Four-byte integers cannot represent the file offsets, fingerprints and cryptographic arithmetic that the engine requires. Activation checks the native integer width before opening plugin state.
 - The floor follows upstream end of life with a lag of about one year (8.4 in 2028),
   announced one minor release ahead.
 
@@ -47,4 +47,4 @@ restore with the CLI and for the test oracle.
   name and password in `RESTIC_REST_USERNAME` and `RESTIC_REST_PASSWORD`, which older
   releases do not read; those take the credentials only from the repository URL. The
   repository format itself stays readable by every release since 0.9.
-- The oracle is pinned to restic 0.19.1, 0.18.1 and 0.14.0 in `bin/install-test-tools.sh`.
+- The oracle is pinned to restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0 in `bin/install-test-tools.sh`.
