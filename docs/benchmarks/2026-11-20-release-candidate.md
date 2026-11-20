@@ -15,10 +15,10 @@ access. The other storage fixtures used local private repositories.
 | --- | --- |
 | PHP throughput | On PHP 8.3.36 with OPcache and JIT disabled under concurrent test load, chunking reached 7.9 MB/s (gate 5), deriving a new key took 2.9 seconds (gate 30), and a 256 MB backup plus 2,000 small files extrapolated to 2.4 minutes per GB (gate 15). |
 | Native integer width | WordPress 7.1.5 on Alpine x86 PHP 8.3.36 with four-byte integers refused activation from the final ZIP before writing settings or scheduling a heartbeat. A simulated host change kept a stored secret intact, showed the administrator notice and registered no workers. Deactivation cleared both scheduled events and uninstall refused to remove the local data. |
-| PHP 8.6 | All 236 packaged PHP files passed syntax checking under PHP 8.6.0 with every diagnostic enabled. The previous candidate produced a deprecation notice when registering the REST routes. The corrected package registered the same 33 route and method sets without a notice. With native sodium disabled, WordPress's bundled compatibility library encrypted and recovered an option through the packaged secret store. All 2,132 unit cases passed across configurations with and without zstd. All 38 database tests passed on MySQL 8.4.11 (388 assertions). |
+| PHP 8.6 | All 236 packaged PHP files passed syntax checking under PHP 8.6.0 with every diagnostic enabled. The previous candidate produced a deprecation notice when registering the REST routes. The corrected package registered the same 33 route and method sets without a notice. With native sodium disabled, WordPress's bundled compatibility library encrypted and recovered an option through the packaged secret store. All 38 database tests passed on MySQL 8.4.11 (388 assertions). |
 | Web access to private storage | WordPress 7.1.5 ran the packaged HTTP probe against Apache 2.4.69 and nginx 1.30.6. It permitted plaintext staging under Apache's generated deny rule and nginx's explicit deny. It detected a readable directory with Apache overrides disabled and with nginx serving default static files, refused staging in both cases and removed every temporary probe. |
 | WordPress compatibility | Seven combinations of WordPress 6.7.12, 7.0.9 and 7.1.5 passed 1,084 integration cases with 9,011 assertions and zero skips. All three versions ran on PHP 8.3 and 8.5. WordPress 7.1.5 also ran on PHP 8.6. The 6.7.12/PHP 8.5 row used 96 MiB and the other six used 128 MiB. Single-site and multisite installations matched all 242 files of the final ZIP. The PHP 8.6 run included the full 1 GiB CLI cancellation case. |
-| PHP 8.3 without zstd | On the final ZIP the full unit suite ran 2,133 cases and 28,023 assertions on PHP 8.3.36 in 19 minutes, peaking at 82 MiB. Four cases require the native zstd extension and were skipped. Six additional frame-boundary cases passed independently. |
+| PHP 8.3 without zstd | On the final ZIP the full unit suite ran 2,133 cases and 28,023 assertions on PHP 8.3.36 in 19 minutes, peaking at 82 MiB. Four cases require the native zstd extension and were skipped. The additional frame-boundary cases passed independently on PHP 8.3 and 8.6. |
 | restic interoperability | The conformance suite passed with 36 tests and 1,480 assertions using restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0. Each version read plugin-written backups, wrote a repository for the plugin to restore and deduplicate, and verified restored bytes. Testing with and without zstd covered both format 2 behaviours. |
 | WordPress index memory | On WordPress 7.1.5 with PHP 8.3.36 limited to 128 MiB per worker, backup, check and prune completed at 500,000 blobs. The respective peaks were 100.61, 107.48 and 93.13 MiB. Check traversed 42,754 trees with no errors. At one and two million blobs, each job reported `index_too_large` and released its lock. Independent restic checks read all stored data before and after every size. |
 | Parser fuzzing | The two-minute run for each of the 26 targets processed 253,492,676 inputs without a finding (seed `6961317253957537550`). |
@@ -43,6 +43,24 @@ access. The other storage fixtures used local private repositories.
 | Hosted BorgBase smoke | The plugin initialized two repositories and backed up and restored a random 32 KiB file on each, including v2 listings and ranged reads. The smoke test removed its own objects from the normal repository before the large WordPress run. The append-only repository refused deletion. A second backup and restore on that repository kept the first snapshot and produced a second. Independent restic 0.20.0 runs verified the decrypted IDs, read all data in both repositories and verified both append-only snapshots. No locks remained. |
 | Private TLS repositories | The operator smoke command backed up and restored against two disposable rest-server instances with separate credentials and private repositories. It checked both ordinary and append-only behaviour, including an append-only repository with prior history. |
 | Release deployment rehearsal | An isolated SVN repository and disposable signing keys exercised the signed-tag check, the initial release, retries, an upgrade and byte-for-byte export validation. Conflicting tags, downgrades, unsigned tags and unauthorised signing keys were refused. |
+
+## PHP unit matrix
+
+The unit suite ran against the source matching the final ZIP with native CLI OPcache
+and JIT disabled. Each PHP version ran all 2,145 cases. The conditional cases exercise
+operation with and without zstd. The other configurations cover the skipped branch.
+
+| PHP | Native zstd | Assertions | Conditional skips | Peak memory |
+| --- | --- | ---: | ---: | ---: |
+| 8.3.36 | yes | 27,675 | 3 | 74 MiB |
+| 8.4.27 | no | 27,576 | 4 | 78 MiB |
+| 8.5.12 | yes | 27,648 | 3 | 78 MiB |
+| 8.6.0 | no | 27,686 | 4 | 78 MiB |
+
+Two earlier runs exceeded the fuzzer’s one-second per-input limit in different
+file-backed tests. Both deterministic cases passed separately. The successful full
+repeats retained the original time limit and input set. PHP 8.6 ran at normal process
+priority. PHP 8.3 used a private temporary filesystem.
 
 ## Large WordPress backups
 
