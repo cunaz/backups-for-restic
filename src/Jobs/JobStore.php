@@ -156,7 +156,10 @@ final class JobStore {
 		} catch ( FormatException ) {
 			return null;
 		}
-		if ( null !== $job && ! $job->cancel_requested ) {
+		if ( null === $job || $job->id !== $id ) {
+			return null;
+		}
+		if ( ! $job->cancel_requested ) {
 			$job->cancel_requested = $this->cancel_requested( $job );
 		}
 		return $job;

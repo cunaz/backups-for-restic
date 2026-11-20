@@ -142,6 +142,14 @@ final class JobDocumentTest extends TestCase {
 		$this->assert_blocks_changes( $store, $job );
 	}
 
+	public function test_a_document_filed_under_another_job_id_blocks_changes(): void {
+		$store = $this->store();
+		$job   = $store->create( JobType::Restore, 'manual', 1767225600 );
+		$this->rewrite( $job, static fn ( array $fields ): array => [ 'id' => '20260102T000000Z-abcdef' ] + $fields );
+		self::assertNull( $store->get( $job->id ) );
+		$this->assert_blocks_changes( $store, $job );
+	}
+
 	public function test_a_damaged_document_also_cannot_prove_that_the_store_is_idle(): void {
 		$store = $this->store();
 		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );
