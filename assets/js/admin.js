@@ -1407,10 +1407,12 @@
 					return;
 				}
 				busy( false );
-				status.textContent = __( 'File preview ready.', 'backups-for-restic' );
-				replace( report, [
-					fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
-					plan.applicable && plan.write_allowed ? reviewConfirmation( plan, {
+				status.textContent = false === plan.enough_space ? __( 'File preview ready. The destination needs more disk space.', 'backups-for-restic' ) : __( 'File preview ready.', 'backups-for-restic' );
+				let controls;
+				if ( false === plan.enough_space ) {
+					controls = notice( 'warning', __( 'There is too little disk space for these file changes. Free space on the destination and open a new preview.', 'backups-for-restic' ) );
+				} else if ( plan.applicable && plan.write_allowed ) {
+					controls = reviewConfirmation( plan, {
 						path: base + ( undo ? '' : '/apply' ),
 						submitLabel: undo ? __( 'Undo live file changes', 'backups-for-restic' ) : __( 'Apply to live site', 'backups-for-restic' ),
 						data: { plan_job: plan.plan_job || null },
@@ -1421,9 +1423,19 @@
 							status.textContent = errorText( error );
 							preview.focus();
 						},
-					} ) : notice( 'info', plan.applicable
+					} );
+				} else {
+					controls = notice( 'info', plan.applicable
 						? __( 'This account or installation does not permit live file changes.', 'backups-for-restic' )
-						: __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' ) ),
+						: __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' ) );
+				}
+				replace( report, [
+					'required_bytes' in plan ? detailTable( 'bfr-file-space', [
+						[ __( 'Additional disk space needed at peak', 'backups-for-restic' ), 'number' === typeof plan.required_bytes ? formatBytes( plan.required_bytes ) : __( 'Open a new preview for an estimate.', 'backups-for-restic' ) ],
+						[ __( 'Available disk space', 'backups-for-restic' ), 'number' === typeof plan.available_bytes ? formatBytes( plan.available_bytes ) : __( 'Unknown on this host', 'backups-for-restic' ) ],
+					] ) : null,
+					fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
+					controls,
 				] );
 			}
 			if ( resume ) {

@@ -317,7 +317,18 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 		fs.writeFileSync( file, 'Before the preview.\n' );
 		await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
 		const preview = staged.getByRole( 'button', { name: 'Preview live file changes' } );
+		await page.route( ( requestURL ) => decodeURIComponent( requestURL.href ).includes( '/apply-plan' ), async ( route ) => {
+			const response = await route.fetch();
+			const plan = await response.json();
+			await route.fulfill( { response, json: { ...plan, required_bytes: 1048576, available_bytes: 0, enough_space: false, applicable: false } } );
+		}, { times: 1 } );
 		await preview.click();
+		await expect( staged.locator( '.bfr-file-space' ) ).toContainText( '1.0 MB' );
+		await expect( staged ).toContainText( 'There is too little disk space for these file changes.' );
+		await expect( staged.getByRole( 'button', { name: 'Apply to live site' } ) ).toHaveCount( 0 );
+
+		await preview.click();
+		await expect( staged.locator( '.bfr-file-space' ) ).toContainText( 'Available disk space' );
 		await expect( staged.getByRole( 'cell', { name: 'Replace file', exact: true } ) ).toBeVisible();
 
 		const apply = 'Apply to live site';
