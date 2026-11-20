@@ -15,6 +15,7 @@ use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\DiskFilePlan;
+use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\FileChange;
 use BackupsForRestic\Restore\FileWorkPending;
 use BackupsForRestic\Support\Bytes;
@@ -101,13 +102,14 @@ final class PlanBuild {
 	/**
 	 * Scans and hashes the next reported paths.
 	 *
-	 * @param resource $report Verified staged report, opened by Staging.
-	 * @param int      $device Private journal device.
-	 * @param float    $deadline Deadline.
+	 * @param resource           $report Verified staged report, opened by Staging.
+	 * @param int                $device Private journal device.
+	 * @param float              $deadline Deadline.
+	 * @param DirectorySpellings $spellings Private disk index for wide directories.
 	 * @return bool Whether the report is exhausted.
 	 * @throws StorageFailed If the report or filesystem changes.
 	 */
-	public function apply( $report, int $device, float $deadline ): bool {
+	public function apply( $report, int $device, float $deadline, DirectorySpellings $spellings ): bool {
 		$stat = fstat( $report );
 		if ( false === $stat || $this->offset > $stat['size'] || 0 !== fseek( $report, $this->offset ) ) {
 			throw new StorageFailed( 'The restore report cursor is outside the file.' );
@@ -118,10 +120,17 @@ final class PlanBuild {
 				throw new StorageFailed( 'A file preview path exceeds the supported filesystem length.' );
 			}
 			$index = $this->counts['rows'] ?? 0;
+			if ( $index >= DiskFilePlan::MAX_ENTRIES ) {
+				InvalidArgument::raise( 'The file preview exceeds its limit of one million selected entries.', [ 'code' => 'file_plan_too_large' ] );
+			}
 			if ( $this->disk->claim( 'source', $path, $index ) !== $index ) {
 				throw new StorageFailed( 'The staged report contains a duplicate path.' );
 			}
-			$row = $this->entry( $entry, $device );
+			try {
+				$row = $this->entry( $entry, $device, $spellings );
+			} catch ( FileWorkPending ) {
+				return false;
+			}
 			if ( ApplyManifest::mutates( $row ) && 'mkdir' !== $row['action'] ) {
 				$signature = hash( 'sha256', json_encode( $row, JSON_THROW_ON_ERROR ) );
 				if ( $signature !== ( $this->pending['signature'] ?? $signature ) ) {
@@ -161,14 +170,15 @@ final class PlanBuild {
 	 * Verifies the next attempted entries in reverse order. Every completed file action
 	 * is bound to its original source, target, journal and this independent preview job.
 	 *
-	 * @param DiskFilePlan $forward Confirmed apply manifest.
-	 * @param int          $attempted Number of attempted forward operations.
-	 * @param string       $workspace Original apply journal directory.
-	 * @param string       $scope Current preview job.
-	 * @param float        $deadline Deadline.
+	 * @param DiskFilePlan       $forward Confirmed apply manifest.
+	 * @param int                $attempted Number of attempted forward operations.
+	 * @param string             $workspace Original apply journal directory.
+	 * @param string             $scope Current preview job.
+	 * @param float              $deadline Deadline.
+	 * @param DirectorySpellings $spellings Private disk index for wide directories.
 	 * @return bool Finished.
 	 */
-	public function undo( DiskFilePlan $forward, int $attempted, string $workspace, string $scope, float $deadline ): bool {
+	public function undo( DiskFilePlan $forward, int $attempted, string $workspace, string $scope, float $deadline, DirectorySpellings $spellings ): bool {
 		$done = $this->counts['rows'] ?? 0;
 		while ( $done < $attempted ) {
 			$item   = $forward->mutation( $attempted - $done - 1 );
@@ -177,7 +187,7 @@ final class PlanBuild {
 			$target = Bytes::base64url_decode( $row['destination'] ?? '' );
 			$change = new FileChange( $this->plan, $this->files, $workspace . '/item-' . $item['index'], $source, $scope );
 			try {
-				$action = $this->plan->destination( $source ) === $target ? $change->undo_action( $target, $row['action'], $deadline ) : 'refuse';
+				$action = $this->plan->destination( $source ) === $target ? $change->undo_action( $target, $row['action'], $deadline, $spellings ) : 'refuse';
 			} catch ( FileWorkPending ) {
 				return false;
 			}
@@ -237,10 +247,19 @@ final class PlanBuild {
 			}
 			$offset = 0;
 		}
+		// Earlier checkpoints stored only an offset. Rebuild their short-lived
+		// directory proof from the beginning before accepting a boundary.
+		if ( $offset > 0 && ! is_string( $cursor['last'] ?? null ) ) {
+			$offset = 0;
+		}
 		$stable  = time() > $ctime;
 		$entries = new \DirectoryIterator( $target );
 		if ( $offset > 0 ) {
-			$entries->seek( $offset );
+			$entries->seek( $offset - 1 );
+			if ( ! $entries->valid() || hash( 'sha256', $entries->getFilename() ) !== ( $cursor['last'] ?? null ) ) {
+				return false;
+			}
+			$entries->next();
 		}
 		while ( $entries->valid() ) {
 			if ( ! $entries->isDot() ) {
@@ -256,6 +275,7 @@ final class PlanBuild {
 					}
 				}
 			}
+			$last = $entries->getFilename();
 			$entries->next();
 			++$offset;
 			if ( microtime( true ) >= $deadline && $entries->valid() ) {
@@ -266,6 +286,7 @@ final class PlanBuild {
 					'offset'   => $offset,
 					'identity' => $identity,
 					'stable'   => $stable,
+					'last'     => hash( 'sha256', $last ),
 				];
 				return null;
 			}
@@ -294,9 +315,10 @@ final class PlanBuild {
 	 *
 	 * @param array{path:string,type:string,mode:int} $entry Restore metadata.
 	 * @param int                                     $device Journal device.
+	 * @param DirectorySpellings                      $spellings Private lookup for wide folders.
 	 * @return Row Candidate.
 	 */
-	private function entry( array $entry, int $device ): array {
+	private function entry( array $entry, int $device, DirectorySpellings $spellings ): array {
 		$path = $entry['path'];
 		$key  = Bytes::base64url_encode( $path );
 		if ( ! in_array( $entry['type'], [ 'file', 'dir' ], true ) ) {
@@ -307,7 +329,7 @@ final class PlanBuild {
 			}
 			return ApplyManifest::row( $key, $target, 'skip', 'unstaged_special_entry' );
 		}
-		$action = $this->plan->inspect( $this->files, $path, true );
+		$action = $this->plan->inspect( $this->files, $path, $spellings );
 		$target = $action['destination'];
 		$row    = ApplyManifest::row( $key, $target, $action['action'], $action['reason'] );
 		if ( null !== $target && 'skip' !== $row['action'] ) {

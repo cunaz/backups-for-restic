@@ -37,11 +37,12 @@ final class ApplyManifest {
 	 * @param resource  $report Staging report.
 	 * @param int       $device Private journal filesystem.
 	 * @param int       $byte_limit Maximum content read synchronously.
+	 * @param bool      $inline Whether to defer wide directory scans to a background worker.
 	 * @return list<Row> Sorted, encoded entries.
 	 * @throws InvalidArgument If the report is incomplete or exceeds a limit.
 	 * @throws StorageFailed If a file cannot be verified.
 	 */
-	public static function build( ApplyPlan $plan, string $files, $report, int $device, int $byte_limit = self::MAX_BYTES ): array {
+	public static function build( ApplyPlan $plan, string $files, $report, int $device, int $byte_limit = self::MAX_BYTES, bool $inline = false ): array {
 		$inventory = [];
 		$blocked   = [];
 		$seen      = [];
@@ -58,7 +59,7 @@ final class ApplyManifest {
 				$seen[ $key ] = true;
 			}
 		}
-		foreach ( $plan->actions( $files ) as $action ) {
+		foreach ( $plan->actions( $files, false, $inline ) as $action ) {
 			$path = $action['path'];
 			$key  = Bytes::base64url_encode( $path );
 			if ( count( $rows ) >= self::MAX_ENTRIES || ! isset( $inventory[ $key ] ) || isset( $seen[ $key ] ) ) {

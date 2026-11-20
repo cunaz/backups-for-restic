@@ -384,6 +384,19 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 	}
 
+	public function test_file_plan_limit_fails_the_entire_job_instead_of_publishing_a_prefix(): void {
+		$plan = $this->queue_large_preview();
+		$this->runner->tick( 0.0 );
+		$saved = $this->jobs->get( $plan->id );
+		self::assertNotNull( $saved );
+		$saved->data['plan_cursor'] = [ 'counts' => [ 'rows' => 1000000 ] ];
+		$this->jobs->save( $saved );
+		$failed = $this->run_job( $plan, JobState::Failed );
+		self::assertSame( 'file_plan_too_large', $failed->error?->code );
+		self::assertArrayNotHasKey( 'digest', $failed->result );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
 	public function test_background_preview_rejects_a_different_report_after_its_first_checkpoint(): void {
 		$plan = $this->queue_large_preview();
 		$this->runner->tick( 0.0 );
@@ -411,6 +424,34 @@ final class FileChangesTest extends TestCase {
 		self::assertFileExists( $this->live . '/b-new/new.txt' );
 		self::assertSame( 'independent data', file_get_contents( $this->live . '/b-new/added-after-review' ) );
 		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_a_single_small_selection_beside_many_unrelated_live_files_gets_a_background_review(): void {
+		for ( $i = 0; $i < 2050; ++$i ) {
+			touch( $this->live . '/unselected-' . $i );
+		}
+		$plan = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $plan );
+		self::assertSame( JobType::FilePlan, $plan->type );
+		$ready = $this->run_job( $plan );
+		self::assertSame( 3, $ready->result['changes'] );
+		self::assertSame( 0, $ready->result['refused'] );
+		self::assertDirectoryDoesNotExist( $this->jobs->directory( $ready ) . '/verification' );
+	}
+
+	public function test_wide_staged_directory_uses_a_bounded_worker_index_and_refuses_ambiguous_names(): void {
+		$plan = $this->queue_large_preview();
+		for ( $i = 0; $i < 2050; ++$i ) {
+			touch( $this->files . $this->live . '/extra-slot-' . $i );
+		}
+		touch( $this->files . $this->live . '/A-existing' );
+		$ready = $this->run_job( $plan );
+		$page  = $this->changes->request_preview( $this->restore, false, false, $ready->id );
+		self::assertIsArray( $page );
+		self::assertFalse( $page['applicable'] );
+		self::assertGreaterThan( 0, $ready->result['refused'] );
+		self::assertDirectoryDoesNotExist( $this->jobs->directory( $ready ) . '/verification' );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
 	public function test_background_pages_refuse_tampering_and_expire_without_a_consumer(): void {

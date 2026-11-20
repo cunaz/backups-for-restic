@@ -64,6 +64,10 @@ final class Messages {
 				'message' => __( 'The server refused to delete data because the repository is append-only.', 'backups-for-restic' ),
 				'hint'    => __( 'That protects your backups. Clean up old snapshots from another computer.', 'backups-for-restic' ),
 			],
+			'file_plan_too_large'            => [
+				'message' => __( 'Online review supports up to one million selected entries and up to one million names in each folder.', 'backups-for-restic' ),
+				'hint'    => __( 'Review a smaller selection. If a single folder exceeds the limit, restore its files offline with restic.', 'backups-for-restic' ),
+			],
 			'index_too_large'                => [
 				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
 				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),

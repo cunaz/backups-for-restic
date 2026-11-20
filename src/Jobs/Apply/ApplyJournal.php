@@ -126,6 +126,19 @@ final readonly class ApplyJournal {
 
 
 	/**
+	 * Opens the ephemeral worker verification area. An independent apply preflight
+	 * always checks current directories using a new workspace.
+	 *
+	 * @param Job $job Current preview, apply or undo.
+	 * @return string Canonical verification directory.
+	 */
+	public function verification( Job $job ): string {
+		$path = $this->jobs->directory( $job ) . '/verification';
+		self::directory( $path );
+		return $path;
+	}
+
+	/**
 	 * Creates a private component below the job directory.
 	 *
 	 * @param string $dir Directory.

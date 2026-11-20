@@ -29,6 +29,9 @@ final class ApplyPlan {
 	/** Number of sibling spellings retained across a read-only batch. */
 	private const int CACHED_NAMES = 16384;
 
+	/** Wider folders share a disk index across read-only worker requests. */
+	private const int DISK_THRESHOLD = 2048;
+
 	/**
 	 * Bounded sibling indexes shared only within one read-only worker.
 	 *
@@ -90,16 +93,17 @@ final class ApplyPlan {
 	 *
 	 * @param string $files Canonical private staging files/ directory.
 	 * @param bool   $compare_content Compare existing regular files for the streaming CLI preview.
+	 * @param bool   $inline Whether a wide folder must defer this synchronous request.
 	 * @return \Generator<int, Action> Actions for staged entries.
 	 * @throws StorageFailed If the staging directory is missing or unreadable.
 	 */
-	public function actions( string $files, bool $compare_content = false ): \Generator {
+	public function actions( string $files, bool $compare_content = false, bool $inline = false ): \Generator {
 		clearstatcache( true );
 		if ( ! is_dir( $files ) || realpath( $files ) !== $files || '/' === $files ) {
 			throw new StorageFailed( 'The staged tree is unavailable.' );
 		}
 		$cache = [];
-		foreach ( $this->walk( $files, '', $cache ) as $entry ) {
+		foreach ( $this->walk( $files, '', $cache, $inline ) as $entry ) {
 			if ( $compare_content && 'replace' === $entry['action'] && null !== $entry['destination'] ) {
 				$original = hash_file( 'sha256', $entry['destination'] );
 				$source   = hash_file( 'sha256', $files . $entry['path'] );
@@ -119,19 +123,19 @@ final class ApplyPlan {
 	 * Rechecks an entry. Read-only previews can share sibling indexes within a worker.
 	 * Every mutation uses a fresh enumeration immediately before publication.
 	 *
-	 * @param string $files Canonical private staging files/ directory.
-	 * @param string $path  Absolute snapshot path.
-	 * @param bool   $review Whether reusing this worker's read-only name index is allowed.
+	 * @param string                  $files Canonical private staging files/ directory.
+	 * @param string                  $path  Absolute snapshot path.
+	 * @param DirectorySpellings|null $review Name index for a read-only worker.
 	 * @return Action Current decision.
 	 */
-	public function inspect( string $files, string $path, bool $review = false ): array {
+	public function inspect( string $files, string $path, ?DirectorySpellings $review = null ): array {
 		$cache = [];
 		clearstatcache( true );
 		if ( ! is_dir( $files ) || realpath( $files ) !== $files || '/' === $files ) {
 			return self::decision( $path, null, 'refuse', 'staging_unavailable' );
 		}
-		if ( $review ) {
-			return $this->check( $files, $path, $this->review_names );
+		if ( null !== $review ) {
+			return $this->check( $files, $path, $this->review_names, $review );
 		}
 		return $this->check( $files, $path, $cache );
 	}
@@ -153,10 +157,11 @@ final class ApplyPlan {
 	 * @param string                                     $files Canonical staging directory.
 	 * @param string                                     $path  Snapshot path of this directory, empty at its root.
 	 * @param array<string, array<string, string|false>> $cache Case indexes for this walk.
+	 * @param bool                                       $inline Whether a wide folder must defer this synchronous request.
 	 * @return \Generator<int, Action> Planned entries.
 	 * @throws StorageFailed If a staged directory cannot be listed.
 	 */
-	private function walk( string $files, string $path, array &$cache ): \Generator {
+	private function walk( string $files, string $path, array &$cache, bool $inline = false ): \Generator {
 		$dir = $files . $path;
 		clearstatcache( true );
 		if ( realpath( $dir ) !== $dir || ! is_dir( $dir ) ) {
@@ -172,10 +177,10 @@ final class ApplyPlan {
 					continue;
 				}
 				$child  = $path . '/' . $name;
-				$action = $this->check( $files, $child, $cache );
+				$action = $this->check( $files, $child, $cache, null, $inline );
 				yield $action;
 				if ( in_array( $action['action'], [ 'keep', 'mkdir' ], true ) ) {
-					yield from $this->walk( $files, $child, $cache );
+					yield from $this->walk( $files, $child, $cache, $inline );
 				}
 			}
 		} finally {
@@ -189,9 +194,11 @@ final class ApplyPlan {
 	 * @param string                                     $files Canonical staging directory.
 	 * @param string                                     $path  Absolute snapshot path.
 	 * @param array<string, array<string, string|false>> $cache Case indexes for this walk.
+	 * @param DirectorySpellings|null                    $review Private index for wide directories during read-only review.
+	 * @param bool                                       $inline Whether a wide folder must defer this synchronous request.
 	 * @return Action Current decision.
 	 */
-	private function check( string $files, string $path, array &$cache ): array {
+	private function check( string $files, string $path, array &$cache, ?DirectorySpellings $review = null, bool $inline = false ): array {
 		$target = null;
 		try {
 			$parts = Path::parts( $path );
@@ -251,7 +258,7 @@ final class ApplyPlan {
 		}
 		$prefix = '';
 		foreach ( $parts as $name ) {
-			if ( ! self::unambiguous( $files . $prefix, $name, $cache ) ) {
+			if ( ! self::unambiguous( $files . $prefix, $name, $cache, $review, $inline ) ) {
 				return self::decision( $path, $target, 'refuse', 'ambiguous_source' );
 			}
 			$prefix .= '/' . $name;
@@ -267,7 +274,7 @@ final class ApplyPlan {
 		}
 		$parent = $root;
 		foreach ( explode( '/', substr( $target, strlen( $root ) + 1 ) ) as $name ) {
-			if ( ! self::unambiguous( $parent, $name, $cache ) ) {
+			if ( ! self::unambiguous( $parent, $name, $cache, $review, $inline ) ) {
 				return self::decision( $path, $target, 'refuse', 'ambiguous_destination' );
 			}
 			$next = $parent . '/' . $name;
@@ -302,29 +309,53 @@ final class ApplyPlan {
 	 * @param string                                     $directory Existing parent directory.
 	 * @param string                                     $name      Requested spelling.
 	 * @param array<string, array<string, string|false>> $cache Case indexes for this walk.
+	 * @param DirectorySpellings|null                    $review Private index for wide directories during read-only review.
+	 * @param bool                                       $inline Whether a wide folder must defer this synchronous request.
 	 * @return bool Whether no other spelling of this name exists.
 	 */
-	private static function unambiguous( string $directory, string $name, array &$cache ): bool {
-		$key = self::fold( $name );
-		if ( isset( $cache[ $directory ] ) ) {
-			return ( $cache[ $directory ][ $key ] ?? $name ) === $name;
+	private static function unambiguous( string $directory, string $name, array &$cache, ?DirectorySpellings $review = null, bool $inline = false ): bool {
+		$key       = self::fold( $name );
+		$cache_key = $directory;
+		if ( null !== $review ) {
+			clearstatcache( true, $directory );
+			$stat = lstat( $directory );
+			if ( false === $stat ) {
+				return false;
+			}
+			// A rename can preserve whole-second stat values during the directory's
+			// change second. A later change invalidates the key of a stable directory.
+			$cache_key = time() > $stat['ctime'] ? $directory . "\0" . implode( ':', [ $stat['dev'], $stat['ino'], $stat['mode'], $stat['size'], $stat['mtime'], $stat['ctime'] ] ) : null;
+		}
+		if ( null !== $cache_key && isset( $cache[ $cache_key ] ) ) {
+			return ( $cache[ $cache_key ][ $key ] ?? $name ) === $name;
+		}
+		if ( null !== $review && $review->known( $directory ) ) {
+			return $review->unique( $directory, $name );
 		}
 		$handle = opendir( $directory );
 		if ( false === $handle ) {
 			return false;
 		}
 		$names = [];
+		$count = 0;
 		$small = true;
 		$valid = true;
 		try {
 			for ( $entry = readdir( $handle ); false !== $entry; $entry = readdir( $handle ) ) {
+				++$count;
+				if ( $inline && $count > self::DISK_THRESHOLD ) {
+					InvalidArgument::raise( 'This directory needs a background file preview.', [ 'code' => 'file_plan_large' ] );
+				}
+				if ( null !== $review && $count > self::DISK_THRESHOLD ) {
+					return $review->unique( $directory, $name );
+				}
 				$folded = self::fold( $entry );
 				if ( $folded === $key && $entry !== $name ) {
 					$valid = false;
 				}
 				if ( $small ) {
 					$names[ $folded ] = array_key_exists( $folded, $names ) ? false : $entry;
-					if ( count( $names ) > self::CACHED_NAMES ) {
+					if ( $count > self::CACHED_NAMES ) {
 						$small = false;
 						$names = [];
 					}
@@ -333,7 +364,7 @@ final class ApplyPlan {
 		} finally {
 			closedir( $handle );
 		}
-		if ( $small ) {
+		if ( $small && null !== $cache_key ) {
 			if ( count( $cache ) >= 32 ) {
 				array_shift( $cache );
 			}
@@ -346,7 +377,7 @@ final class ApplyPlan {
 			while ( $total > 2 * self::CACHED_NAMES && [] !== $cache ) {
 				$total -= count( array_shift( $cache ) );
 			}
-			$cache[ $directory ] = $names;
+			$cache[ $cache_key ] = $names;
 		}
 		return $valid;
 	}

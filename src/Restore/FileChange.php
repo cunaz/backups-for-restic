@@ -197,13 +197,14 @@ final readonly class FileChange {
 	 * Determines what can currently be reversed. Only a file installed by this entry is a
 	 * removal candidate. A missing intent means that no live write was attempted.
 	 *
-	 * @param string     $path Reviewed path.
-	 * @param string     $action Reviewed forward action.
-	 * @param float|null $deadline Deadline of a background preview.
+	 * @param string                  $path Reviewed path.
+	 * @param string                  $action Reviewed forward action.
+	 * @param float|null              $deadline Deadline of a background preview.
+	 * @param DirectorySpellings|null $review Optional name index for a read-only undo preview.
 	 * @return string restore, remove, keep or refuse.
 	 * @throws FileWorkPending If the current file verification requires another tick.
 	 */
-	public function undo_action( string $path, string $action, ?float $deadline = null ): string {
+	public function undo_action( string $path, string $action, ?float $deadline = null, ?DirectorySpellings $review = null ): string {
 		if ( null !== $deadline ) {
 			$this->proofs->deadline = $deadline;
 		}
@@ -218,7 +219,7 @@ final readonly class FileChange {
 			if ( null === $record['candidate'] || ! self::exists( $path ) ) {
 				return 'keep';
 			}
-			return self::at( $path, $record['candidate'] ) && self::metadata( $path ) === $record['installed'] && 'keep' === $this->live_action( $path ) ? 'remove' : 'refuse';
+			return self::at( $path, $record['candidate'] ) && self::metadata( $path ) === $record['installed'] && 'keep' === $this->live_action( $path, $review ) ? 'remove' : 'refuse';
 		}
 		if ( ! self::exists( $path ) ) {
 			return 'create' === $action ? 'keep' : 'refuse';
@@ -234,7 +235,7 @@ final readonly class FileChange {
 			return 'refuse';
 		}
 		$unfinished_link = 'create' === $action && 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] );
-		if ( ! $unfinished_link && 'replace' !== $this->live_action( $path ) ) {
+		if ( ! $unfinished_link && 'replace' !== $this->live_action( $path, $review ) ) {
 			return 'refuse';
 		}
 		if ( ! $this->matches( $path, $record['source'], $unfinished_link ? 2 : 1 ) ) {
@@ -393,12 +394,13 @@ final readonly class FileChange {
 	 * Rechecks the original source against the current policy and the exact live target
 	 * in this journal. Reconfiguration cannot redirect a partially applied change.
 	 *
-	 * @param string $path Live path.
+	 * @param string                  $path Live path.
+	 * @param DirectorySpellings|null $review Optional name index for a read-only undo preview.
 	 * @return string Current disposition.
 	 */
-	private function live_action( string $path ): string {
+	private function live_action( string $path, ?DirectorySpellings $review = null ): string {
 		$source = $this->source_path ?? $path;
-		$entry  = $this->plan->inspect( $this->files, $source );
+		$entry  = $this->plan->inspect( $this->files, $source, $review );
 		return ( $entry['destination'] ?? ( null === $this->source_path ? $path : null ) ) === $path ? $entry['action'] : 'refuse';
 	}
 
@@ -518,7 +520,7 @@ final readonly class FileChange {
 		if ( null !== $record['uid'] && $record['uid'] !== $stat['uid'] ) {
 			throw new StorageFailed( 'File apply cannot preserve this file owner.' );
 		}
-		if ( ( null !== $record['gid'] && $record['gid'] !== $stat['gid'] && ! chgrp( $path, $record['gid'] ) )
+		if ( ( null !== $record['gid'] && $record['gid'] !== $stat['gid'] && ! chgrp( $path, $record['gid'] ) ) // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_chgrp -- The private same-filesystem candidate must retain the reviewed live group before its atomic rename.
 			|| ( ( $stat['mode'] & 07777 ) !== $record['mode'] && ! chmod( $path, $record['mode'] ) )
 			|| ( $undo && null !== $record['mtime'] && $stat['mtime'] !== $record['mtime'] && ! touch( $path, $record['mtime'] ) ) ) {
 			throw new StorageFailed( 'File apply could not preserve file metadata.' );

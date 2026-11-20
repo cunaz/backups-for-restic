@@ -327,6 +327,17 @@ final class Staging {
 	}
 
 	/**
+	 * Discards a finished worker's temporary name and content verification indexes.
+	 *
+	 * @param Job   $job Preview, apply or undo owner.
+	 * @param float $deadline Current cleanup deadline.
+	 * @return bool Whether the private workspace is gone.
+	 */
+	public function remove_verification( Job $job, float $deadline ): bool {
+		return $this->delete( $this->jobs->directory( $job ) . '/verification', $deadline );
+	}
+
+	/**
 	 * Removes only a plan directory whose complete parent chain remains canonical.
 	 *
 	 * @param string $restore Restore ID.

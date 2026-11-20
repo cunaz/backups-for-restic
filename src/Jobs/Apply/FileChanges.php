@@ -21,6 +21,7 @@ use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\ApplyPlan;
+use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\FileChange;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\FileVerification;
@@ -118,7 +119,7 @@ final readonly class FileChanges implements StepProvider {
 		}
 		if ( ! $undo && ! $this->plans->large( $restore ) ) {
 			try {
-				return self::summary( $restore, $config, $this->rows( $restore, $config, false, 8388608 ) );
+				return self::summary( $restore, $config, $this->rows( $restore, $config, false, FilePlans::INLINE_BYTES ) );
 			} catch ( InvalidArgument $exception ) {
 				if ( 'file_plan_large' !== ( $exception->context()['code'] ?? null ) ) {
 					throw $exception;
@@ -257,7 +258,7 @@ final readonly class FileChanges implements StepProvider {
 				'preflight' => $this->prepare( $job, $deadline ),
 				'applying', 'undoing' => $this->mutate( $job, $deadline ),
 				'recording' => $this->record( $job ),
-				'cleaning_up' => $this->cleanup( $job ),
+				'cleaning_up' => $this->cleanup( $job, $deadline ),
 				default => throw new InvalidArgument( 'Unknown live file change step.' ),
 			}
 		);
@@ -335,8 +336,8 @@ final readonly class FileChanges implements StepProvider {
 		if ( ! is_int( $cursor ) || $cursor < 0 || $cursor > $head['entries'] ) {
 			throw new JobConflict( 'The sealed file preview verification cursor is invalid.' );
 		}
-		$verify = $this->jobs->directory( $job ) . '/verification';
-		ApplyJournal::directory( $verify );
+		$verify          = $this->journal->verification( $job );
+		$spellings       = new DirectorySpellings( $verify, $deadline );
 		$proof           = new FileVerification( $verify, $job->id );
 		$proof->deadline = $deadline;
 		while ( $cursor < $head['entries'] ) {
@@ -347,7 +348,7 @@ final readonly class FileChanges implements StepProvider {
 				$target = self::target( $row );
 				$change = new FileChange( $plan, $files, $this->journal->workspace( $original ) . '/item-' . $item['index'], $source, $job->id . '-preflight' );
 				try {
-					$action = $change->undo_action( $target, $item['row']['action'], $deadline );
+					$action = $change->undo_action( $target, $item['row']['action'], $deadline, $spellings );
 				} catch ( FileWorkPending ) {
 					return false;
 				}
@@ -382,8 +383,8 @@ final readonly class FileChanges implements StepProvider {
 				if ( 'identical_contents' === $row['reason'] ) {
 					$row['action'] = 'replace';
 				}
-				$this->recheck( $plan, $files, $source, $target, $row, true );
 				try {
+					$this->recheck( $plan, $files, $source, $target, $row, $spellings );
 					if ( ( null !== $row['source'] && ! $proof->matches( $files . $source, $row['source'], 1 ) ) || ( null !== $row['original'] && ! $proof->matches( $target, $row['original'], 1 ) ) ) {
 						throw new JobConflict( 'A confirmed file changed before work began.' );
 					}
@@ -490,15 +491,15 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * Checks the live parent's original identity even after this job created descendants.
 	 *
-	 * @param ApplyPlan $plan Current policy.
-	 * @param string    $files Staging.
-	 * @param string    $source Snapshot path.
-	 * @param string    $path Raw destination.
-	 * @param Row       $row Confirmed entry.
-	 * @param bool      $review Read-only preflight can share a name index within this worker.
+	 * @param ApplyPlan               $plan Current policy.
+	 * @param string                  $files Staging.
+	 * @param string                  $source Snapshot path.
+	 * @param string                  $path Raw destination.
+	 * @param Row                     $row Confirmed entry.
+	 * @param DirectorySpellings|null $review Optional private index for a read-only worker.
 	 * @throws JobConflict If an entry changed since confirmation.
 	 */
-	private function recheck( ApplyPlan $plan, string $files, string $source, string $path, array $row, bool $review = false ): void {
+	private function recheck( ApplyPlan $plan, string $files, string $source, string $path, array $row, ?DirectorySpellings $review = null ): void {
 		$parent = Bytes::base64url_decode( explode( ':', $row['parent'], 2 )[0] );
 		if ( $plan->inspect( $files, $source, $review )['action'] !== $row['action'] || ApplyManifest::parent_identity( $parent . '/child' ) !== $row['parent'] ) {
 			throw new JobConflict( 'A destination or staged file changed after confirmation.' );
@@ -537,10 +538,11 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * A partial apply keeps all its journals. An interrupted maintenance marker is cleared.
 	 *
-	 * @param Job $job Current job.
+	 * @param Job   $job Current job.
+	 * @param float $deadline Worker cleanup deadline.
 	 * @return bool True.
 	 */
-	private function cleanup( Job $job ): bool {
+	private function cleanup( Job $job, float $deadline ): bool {
 		$this->maintenance->release( $job->id, $this->jobs->directory( $job ) );
 		if ( [] === $job->result && JobType::Apply === $job->type ) {
 			$job->result = [
@@ -548,7 +550,7 @@ final readonly class FileChanges implements StepProvider {
 				'entries_attempted' => $this->journal->attempted( $job ),
 			];
 		}
-		return true;
+		return $this->staging->remove_verification( $job, $deadline );
 	}
 
 	/**
@@ -589,7 +591,7 @@ final readonly class FileChanges implements StepProvider {
 			throw new InvalidArgument( 'The complete staging report is unavailable.' );
 		}
 		try {
-			return ApplyManifest::build( ( $this->planner )( $config, $restore ), $files, $report, $this->jobs->device(), $limit );
+			return ApplyManifest::build( ( $this->planner )( $config, $restore ), $files, $report, $this->jobs->device(), $limit, FilePlans::INLINE_BYTES === $limit );
 		} finally {
 			fclose( $report );
 		}

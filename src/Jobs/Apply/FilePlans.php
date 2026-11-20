@@ -22,6 +22,7 @@ use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\DiskFilePlan;
+use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Decoded;
@@ -30,6 +31,9 @@ defined( 'ABSPATH' ) || exit;
 
 /** Builds read-only reviews and checks their identity and expiry when a caller opens one. */
 final readonly class FilePlans {
+
+	/** Maximum content comparison bytes in the initial synchronous preview. */
+	public const int INLINE_BYTES = 8388608;
 
 	/**
 	 * Opens the background preview service.
@@ -72,7 +76,7 @@ final readonly class FilePlans {
 	 */
 	public function large( string $restore ): bool {
 		$job = $this->jobs->get( $restore );
-		if ( null !== $job && ( Decoded::int( $job->result['bytes'] ?? 0 ) > 8388608 || Decoded::int( $job->result['files'] ?? 0 ) > DiskFilePlan::PAGE ) ) {
+		if ( null !== $job && ( Decoded::int( $job->result['bytes'] ?? 0 ) > self::INLINE_BYTES || Decoded::int( $job->result['files'] ?? 0 ) > DiskFilePlan::PAGE ) ) {
 			return true;
 		}
 		$handle = $this->staging->open_download( $restore, $this->hours, 'report', '' );
@@ -204,13 +208,14 @@ final readonly class FilePlans {
 	 * @throws InvalidArgument If the original report disappeared.
 	 */
 	private function build_plan( Job $job, float $deadline ): bool {
-		$restore = ApplyJournal::field( $job, 'restore' );
-		$disk    = $this->disk( $restore, $job->id, true );
-		$builder = $this->builder( $job, $disk );
+		$restore   = ApplyJournal::field( $job, 'restore' );
+		$disk      = $this->disk( $restore, $job->id, true );
+		$builder   = $this->builder( $job, $disk );
+		$spellings = new DirectorySpellings( $this->journal->verification( $job ), $deadline );
 		if ( true === ( $job->data['undo'] ?? false ) ) {
 			$original = $this->journal->original( ApplyJournal::field( $job, 'subject' ), true );
 			$forward  = $this->approved( $original );
-			$done     = $builder->undo( $forward, $this->journal->attempted( $original ), $this->journal->workspace( $original ), $job->id, $deadline );
+			$done     = $builder->undo( $forward, $this->journal->attempted( $original ), $this->journal->workspace( $original ), $job->id, $deadline, $spellings );
 		} else {
 			$report = $this->staging->open_download( $restore, $this->hours, 'report', '', true );
 			if ( null === $report ) {
@@ -221,7 +226,7 @@ final readonly class FilePlans {
 				if ( $identity !== ( $job->data['report_identity'] ?? $identity ) ) {
 					throw new JobConflict( 'The staged report changed while its preview was being built.' );
 				}
-				$done = $builder->apply( $report, $this->jobs->device(), $deadline );
+				$done = $builder->apply( $report, $this->jobs->device(), $deadline, $spellings );
 				if ( self::report_identity( $report ) !== $identity ) {
 					throw new JobConflict( 'The staged report changed during this preview tick.' );
 				}
@@ -281,6 +286,9 @@ final readonly class FilePlans {
 	 * @return bool Clean.
 	 */
 	private function clean_plan( Job $job, float $deadline ): bool {
+		if ( ! $this->staging->remove_verification( $job, $deadline ) ) {
+			return false;
+		}
 		if ( isset( $job->result['digest'] ) ) {
 			return true;
 		}
