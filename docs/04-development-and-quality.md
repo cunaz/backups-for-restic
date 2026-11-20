@@ -304,9 +304,26 @@ installed is skipped:
 the nightly CI run uses 2048 and 300. The tests that catch a backup in the middle add
 256 or 512 MiB of random data of their own.
 
-What the suite does not reach: Site Health, and the loopback chain as such, because the
-tests request `wp-cron.php` themselves. The admin page itself has the browser tests of
-§5.5.
+The integration tests request `wp-cron.php` directly to control the timing of jobs.
+A separate acceptance run on 2026-11-20 exercised visitor-triggered cron with the
+release ZIP (SHA-256 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`).
+It used WordPress 7.1.5, PHP 8.3.36, a 128 MiB memory limit, a 30-second request
+limit, a five-second tick budget and automatic loopback chaining. The fixture marked
+the previous daily backup slot as missed and waited for the heartbeat already on
+WordPress's schedule. One anonymous `GET /` triggered WordPress to send the heartbeat
+request. The plugin then sent three loopback requests. A passive observer matched each
+outbound request to the receiving cron hook. The scheduled backup finished in four
+ticks and 23.92 seconds from the page visit, with zero warnings.
+
+Native restic 0.20.0 verified all repository data before and after the scheduled
+backup. Restoring the baseline and the changed WordPress files reproduced the expected
+SHA-256 hashes, modes and modification times for a 32 MiB upload and its marker file.
+The restored SQL imported into a separate database and matched the source checksums
+for `wp_posts`, `wp_postmeta` and `wp_users`. The local repository contained both
+snapshots and zero locks. The restored SQL and the job and server logs contained no
+matches for the test credentials across 18 files (124,828 bytes).
+
+The browser tests in §5.5 cover the admin page. The suite has no Site Health test.
 
 ### 5.4 Benchmarks
 
