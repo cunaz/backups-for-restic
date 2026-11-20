@@ -93,7 +93,7 @@ owns objects from the previous process.
 ## Full WordPress backup on BorgBase
 
 The separate operator command runs a WordPress cron backup with 2 GiB of synthetic
-uploads and at least 300 MiB of SQL values. It writes to a dedicated, empty **normal**
+uploads and exactly 300 MiB of SQL values. It writes to a dedicated, empty **normal**
 BorgBase repository. A successful run retains one encrypted snapshot. The command
 verifies the authenticated repository ID before WordPress connects, sets retention to
 external and selects manual schedules. The independent restic CLI reads every pack,

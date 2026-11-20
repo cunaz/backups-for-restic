@@ -454,10 +454,20 @@ final class TestSite {
 	}
 
 	/**
+	 * An individual fixture may supply its own WP-CLI. The installer normally shares
+	 * the pinned PHAR between all sites in a checkout.
+	 */
+	private static function wp_cli(): string {
+		$fixture = self::tools_dir() . '/bin/wp';
+		return is_file( $fixture ) && is_readable( $fixture ) ? $fixture : dirname( __DIR__, 2 ) . '/.tools/bin/wp';
+	}
+
+	/**
 	 * Whether WP-CLI is installed (bin/install-test-tools.sh wp-cli).
 	 */
 	public static function has_wp_cli(): bool {
-		return is_file( self::tools_dir() . '/bin/wp' );
+		$wp_cli = self::wp_cli();
+		return is_file( $wp_cli ) && is_readable( $wp_cli );
 	}
 
 	/**
@@ -468,7 +478,7 @@ final class TestSite {
 	 * @return array{int, string} Exit status and everything the command printed.
 	 */
 	public static function wp( array $arguments, ?string $path = null ): array {
-		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( self::tools_dir() . '/bin/wp' ) . ' --no-color --path=' . escapeshellarg( $path ?? self::root() );
+		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( self::wp_cli() ) . ' --no-color --path=' . escapeshellarg( $path ?? self::root() );
 		foreach ( $arguments as $argument ) {
 			$command .= ' ' . escapeshellarg( $argument );
 		}

@@ -57,6 +57,27 @@ final class CliTest extends TestCase {
 		return array_values( array_map( 'strval', array_column( $listed, 'id' ) ) );
 	}
 
+	public function test_an_empty_fixture_uses_the_installed_wp_cli_and_can_supply_its_own(): void {
+		$site     = TestSite::root();
+		$previous = getenv( 'BFR_SITE_TOOLS_DIR' );
+		$fixture  = TempDir::create( 'cli-tools' );
+		try {
+			putenv( 'BFR_SITE_TOOLS_DIR=' . $fixture );
+			self::assertTrue( TestSite::has_wp_cli() );
+			[ $status, $output ] = TestSite::wp( [ '--version' ], $site );
+			self::assertSame( 0, $status, $output );
+			self::assertMatchesRegularExpression( '/^WP-CLI [0-9]+\.[0-9]+\.[0-9]+/m', $output );
+
+			mkdir( $fixture . '/bin' );
+			file_put_contents( $fixture . '/bin/wp', '<?php echo "fixture WP-CLI";' );
+			self::assertTrue( TestSite::has_wp_cli() );
+			self::assertSame( [ 0, 'fixture WP-CLI' ], TestSite::wp( [ '--version' ], $site ) );
+		} finally {
+			putenv( false === $previous ? 'BFR_SITE_TOOLS_DIR' : 'BFR_SITE_TOOLS_DIR=' . $previous );
+			TempDir::remove( $fixture );
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_job_creation_reports_a_private_storage_error_without_a_trace(): void {
 		$fixture = TempDir::create( 'cli-job-storage' );

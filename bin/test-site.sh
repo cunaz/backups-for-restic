@@ -174,7 +174,11 @@ install_site() {
 
 install_multisite() {
 	local archive="$ROOT/.tools/wordpress-$WP_VERSION.tar.gz"
-	if [ ! -f "$archive" ] || [ ! -x "$TOOLS/bin/wp" ]; then
+	local wp_cli="$TOOLS/bin/wp"
+	if [ ! -f "$wp_cli" ] || [ ! -r "$wp_cli" ]; then
+		wp_cli="$ROOT/.tools/bin/wp"
+	fi
+	if [ ! -f "$archive" ] || [ ! -f "$wp_cli" ] || [ ! -r "$wp_cli" ]; then
 		echo "Run bin/test-site.sh install and bin/install-test-tools.sh wp-cli first." >&2
 		exit 1
 	fi
@@ -189,7 +193,7 @@ install_multisite() {
 		GRANT ALL PRIVILEGES ON \`$MS_DB_NAME\`.* TO '$DB_USER'@'%';
 		FLUSH PRIVILEGES;"
 
-	local wp=(php -d opcache.jit=disable "$TOOLS/bin/wp" --path="$MS_SITE")
+	local wp=(php -d opcache.jit=disable "$wp_cli" --path="$MS_SITE")
 	"${wp[@]}" config create --dbname="$MS_DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST" --skip-check
 	# Without a port: a network's address has none, and this site is never served.
 	"${wp[@]}" core multisite-install --url="http://127.0.0.1" --title="Backup test network" \
