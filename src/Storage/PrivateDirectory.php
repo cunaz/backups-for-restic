@@ -27,6 +27,11 @@ final readonly class PrivateDirectory {
 
 	public const array SUBDIRECTORIES = [ 'jobs', 'cache', 'tmp', 'kdf', 'logs', 'probe', 'restores' ];
 
+	/** Identifies a directory initialized by this plugin before any recursive cleanup. */
+	private const string OWNER = '.backups-for-restic';
+
+	private const string INDEX = "<?php\n// Silence is golden.\n";
+
 	private const string HTACCESS = "# Nothing in this directory may be served.\nRequire all denied\n<IfModule !mod_authz_core.c>\n\tOrder deny,allow\n\tDeny from all\n</IfModule>\n";
 
 	private const string WEB_CONFIG = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\t<system.webServer>\n\t\t<authorization>\n\t\t\t<deny users=\"*\" />\n\t\t</authorization>\n\t</system.webServer>\n</configuration>\n";
@@ -66,16 +71,82 @@ final readonly class PrivateDirectory {
 	public function ensure(): void {
 		$umask = umask( 0077 );
 		try {
+			$this->claim();
 			$this->make_directory( $this->path );
 			$this->write_if_missing( '.htaccess', self::HTACCESS );
 			$this->write_if_missing( 'web.config', self::WEB_CONFIG );
-			$this->write_if_missing( 'index.php', "<?php\n// Silence is golden.\n" );
+			$this->write_if_missing( 'index.php', self::INDEX );
 			foreach ( self::SUBDIRECTORIES as $name ) {
+				if ( is_link( $this->subdirectory( $name ) ) ) {
+					StorageFailed::raise( 'A private subdirectory is a symbolic link.', [ 'file' => $name ] );
+				}
 				$this->make_directory( $this->path . '/' . $name );
 			}
 		} finally {
 			umask( $umask );
 		}
+	}
+
+	/**
+	 * Claims an empty directory or recognizes an installation from before the marker existed.
+	 * Check before chmod or creating protection files: a mistaken configuration must never
+	 * change the site's root or turn a shared cache into this plugin's uninstall target.
+	 *
+	 * @throws StorageFailed If the configured location is unsuitable.
+	 */
+	private function claim(): void {
+		if ( '' === $this->path || dirname( $this->path ) === $this->path || in_array( basename( $this->path ), [ '.', '..' ], true ) ) {
+			throw new StorageFailed( 'A dedicated private directory is required.' );
+		}
+		if ( ! is_dir( $this->path ) ) {
+			$this->make_directory( $this->path );
+		}
+		if ( $this->marked() ) {
+			return;
+		}
+		$entries = scandir( $this->path );
+		if ( [ '.', '..' ] !== $entries && ! $this->legacy_directory() && ! $this->marked() ) {
+			throw new StorageFailed( 'Choose an empty directory for private backup files.' );
+		}
+		// Empty marker, visible in one operation. A concurrent initializer may have created it.
+		$marker = $this->path . '/' . self::OWNER;
+		if ( ! touch( $marker ) || ! $this->marked() ) {
+			throw new StorageFailed( 'The private directory could not be marked as owned.' );
+		}
+	}
+
+	/**
+	 * Whether this installation has recorded ownership.
+	 *
+	 * @return bool True for a regular marker.
+	 */
+	private function marked(): bool {
+		$marker = $this->path . '/' . self::OWNER;
+		clearstatcache( true, $marker );
+		return is_file( $marker ) && ! is_link( $marker );
+	}
+
+	/**
+	 * Recognizes the previous directory layout by its plugin-specific protection file and
+	 * working directories. Unrelated directories may also contain jobs/ or cache/.
+	 *
+	 * @return bool Whether a previous installation initialized the directory.
+	 */
+	private function legacy_directory(): bool {
+		return is_dir( $this->subdirectory( 'jobs' ) ) && is_dir( $this->subdirectory( 'probe' ) )
+			&& ( $this->matches( '.htaccess', self::HTACCESS ) || $this->matches( 'web.config', self::WEB_CONFIG ) );
+	}
+
+	/**
+	 * Checks a small file for the exact content written by this plugin.
+	 *
+	 * @param string $name    File name.
+	 * @param string $content Expected bytes.
+	 * @return bool Whether the file is ours.
+	 */
+	private function matches( string $name, string $content ): bool {
+		$file = $this->path . '/' . $name;
+		return ! is_link( $file ) && is_file( $file ) && is_readable( $file ) && strlen( $content ) === filesize( $file ) && $content === file_get_contents( $file );
 	}
 
 	/**
@@ -111,9 +182,7 @@ final readonly class PrivateDirectory {
 		$this->ensure();
 		$token = bin2hex( $random->bytes( 16 ) );
 		$file  = $this->subdirectory( 'probe' ) . '/' . bin2hex( $random->bytes( 8 ) ) . '.txt';
-		if ( false === file_put_contents( $file, $token ) ) {
-			StorageFailed::raise( 'The probe file could not be written.' );
-		}
+		Files::write_atomic( $file, $token );
 		return [
 			'file'  => $file,
 			'token' => $token,
@@ -143,10 +212,18 @@ final readonly class PrivateDirectory {
 	 * also holds other files keeps them.
 	 */
 	public function remove_contents(): void {
+		if ( '' === $this->path || ! is_dir( $this->path ) || ( ! $this->marked() && ! $this->legacy_directory() ) ) {
+			return;
+		}
 		foreach ( [ ...self::SUBDIRECTORIES, 'spool' ] as $name ) {
 			Files::remove_tree( $this->path . '/' . $name );
 		}
-		foreach ( [ '.htaccess', 'web.config', 'index.php', 'runner.lock', 'state.lock', 'notify.lock', 'ca.pem' ] as $name ) {
+		foreach ( [ '.htaccess' => self::HTACCESS, 'web.config' => self::WEB_CONFIG, 'index.php' => self::INDEX ] as $name => $content ) {
+			if ( $this->matches( $name, $content ) ) {
+				unlink( $this->path . '/' . $name );
+			}
+		}
+		foreach ( [ 'runner.lock', 'state.lock', 'notify.lock', 'ca.pem', self::OWNER ] as $name ) {
 			if ( is_file( $this->path . '/' . $name ) ) {
 				unlink( $this->path . '/' . $name );
 			}
@@ -177,7 +254,9 @@ final readonly class PrivateDirectory {
 		if ( ! is_dir( $directory ) && ! mkdir( $directory, 0700, true ) && ! is_dir( $directory ) ) {
 			StorageFailed::raise( 'The private directory could not be created.', [ 'path' => $directory ] );
 		}
-		chmod( $directory, 0700 );
+		if ( ! chmod( $directory, 0700 ) ) {
+			StorageFailed::raise( 'The private directory could not be made owner-only.', [ 'path' => $directory ] );
+		}
 	}
 
 	/**
@@ -189,8 +268,8 @@ final readonly class PrivateDirectory {
 	 */
 	private function write_if_missing( string $name, string $content ): void {
 		$file = $this->path . '/' . $name;
-		if ( ! is_file( $file ) && false === file_put_contents( $file, $content ) ) {
-			StorageFailed::raise( 'A protection file could not be written.', [ 'file' => $name ] );
+		if ( ! is_file( $file ) ) {
+			Files::write_atomic( $file, $content );
 		}
 	}
 }
