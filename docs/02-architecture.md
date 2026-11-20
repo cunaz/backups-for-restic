@@ -761,7 +761,7 @@ left behind is removed once it is a minute old.
 | Scenario | Flow |
 | --- | --- |
 | **Single file** | tree walk → blob ids → ranged `GET`s (adjacent blobs of one pack merged into one request) → open → verify → write to `<private>/restores/<job>/`; served through a one-time token; deleted after download or 1 h |
-| **Selected paths to staging** | same per file, directories recursively, metadata applied where the PHP user may |
+| **Selected paths to staging** | same per file, directories recursively; staging is owner-only (`0600` files, `0700` directories) and gets the modification time only, the modes of the snapshot are in the report ([ADR 0036](adr/0036-selected-file-staging.md)) |
 | **Apply to live site** | guarded step: dry-run report, `realpath` containment, symlinks refused, plugin directory and `wp-config.php` skipped unless chosen, maintenance mode, rename-or-copy |
 | **Database** | `database/` files to staging → trailers verified → import (§7) after a typed confirmation |
 | **Full site (plugin works)** | files to staging → apply → database, guided |
