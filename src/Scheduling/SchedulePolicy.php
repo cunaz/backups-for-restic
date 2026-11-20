@@ -21,6 +21,51 @@ defined( 'ABSPATH' ) || exit;
 final class SchedulePolicy {
 
 	/**
+	 * Seconds by which a time that the plugin recorded may lie after the current time before
+	 * it counts as wrong: one hour.
+	 *
+	 * Times are recorded from the clock, and a handled slot is never later than the moment it
+	 * was handled, so with a clock that only moves forward nothing recorded lies ahead of it;
+	 * a daylight-saving change moves no Unix time. What puts a recorded time a little ahead
+	 * is a clock that is corrected back: NTP steps it by fractions of a second, a leap second
+	 * by one, servers that share a site differ by seconds, and a clock kept in local time
+	 * steps back the hour of a daylight-saving change. Within the hour a time is kept, so the
+	 * slot it handled does not run a second time when the clock reaches it again. Anything
+	 * later was recorded by a clock that was wrong, and would hold back the schedule and the
+	 * stale notice for as long as the clock had been ahead. One hour is far below the
+	 * shortest schedule interval, twelve hours, and the shortest stale threshold, eighteen.
+	 */
+	public const int CLOCK_TOLERANCE = 3600;
+
+	/**
+	 * Whether a time that the plugin recorded lies after now by more than CLOCK_TOLERANCE:
+	 * the clock was set back since it recorded the time, after it had been ahead.
+	 *
+	 * @param int $time Recorded Unix time.
+	 * @param int $now  Unix time.
+	 * @return bool True if the time cannot be one that this clock recorded.
+	 */
+	public static function ahead( int $time, int $now ): bool {
+		return $time > $now + self::CLOCK_TOLERANCE;
+	}
+
+	/**
+	 * The slot that counts as handled. A stored slot that lies ahead of the clock was
+	 * handled by a clock that was wrong. It is replaced by the current slot, which counts as
+	 * handled from then on: a backup ran while the clock was ahead, and the schedule goes on
+	 * with its next slot instead of waiting until the clock reaches the wrong one. Without a
+	 * schedule there is no current slot, and the stored one stays until there is one.
+	 *
+	 * @param int      $stored  Handled slot as stored; 0 before the first one.
+	 * @param int|null $current The most recent slot at or before now; null without a schedule.
+	 * @param int      $now     Unix time.
+	 * @return int The slot that counts as handled.
+	 */
+	public static function handled( int $stored, ?int $current, int $now ): int {
+		return null !== $current && self::ahead( $stored, $now ) ? $current : $stored;
+	}
+
+	/**
 	 * After how long without a successful backup the backups count as stale: the configured
 	 * hours, but at least one and a half backup intervals, so that a weekly schedule does not
 	 * raise an alarm between two regular runs.

@@ -28,8 +28,9 @@ final readonly class Notice {
 	 * @param string     $job_id   The job that caused it; for a stale notice the last successful
 	 *                             backup, empty if there was none.
 	 * @param string     $code     Error code of a failure.
-	 * @param int        $since    Unix time the problem started (recovery), or of the last
-	 *                             successful backup or the setup (stale).
+	 * @param int        $since    Unix time the problem started (recovery), of the last
+	 *                             successful backup or the setup (stale), or the recorded time
+	 *                             that lay ahead of the clock (clock).
 	 * @param int        $count    Errors a check found.
 	 */
 	public function __construct(

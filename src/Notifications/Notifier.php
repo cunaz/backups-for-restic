@@ -31,6 +31,13 @@ defined( 'ABSPATH' ) || exit;
  * Notices wait in an outbox in their own option until the mailer accepts them, so that a mail
  * server that is down for a while delays a notice instead of losing it. Each notice is tried
  * at most five times, with growing pauses between the attempts, and for at most two days.
+ *
+ * A server clock that was ahead and is set back leaves recorded times in the future
+ * (SchedulePolicy::ahead()): the age of the last backup would be negative, and no stale
+ * notice would come until the clock caught up. Such a time is not used; the age counts from
+ * the moment it was found instead, and the administrator hears of that moment once.
+ *
+ * @phpstan-type Data array{repository: string|null, failing: array<string, int>, stale: int, clock: int, outbox: list<array<mixed>>}
  */
 final class Notifier {
 
@@ -86,10 +93,10 @@ final class Notifier {
 	/**
 	 * Counts the outcome of a job and queues the notices it calls for.
 	 *
-	 * @param array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
-	 * @param Job                                                                                                 $job  Finished job.
-	 * @param int                                                                                                 $now  Unix time.
-	 * @return array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State with the outcome.
+	 * @param Data $data State.
+	 * @param Job  $job  Finished job.
+	 * @param int  $now  Unix time.
+	 * @return Data State with the outcome.
 	 */
 	private function counted( array $data, Job $job, int $now ): array {
 		$type       = $job->type->value;
@@ -147,16 +154,65 @@ final class Notifier {
 	public function heartbeat( int $now ): void {
 		$this->change(
 			function ( array $data ) use ( $now ): ?array {
-				$stale = $this->stale_notice( $data, $now );
-				if ( null === $stale ) {
-					return null;
+				[ $job, $since ] = $this->stale_since();
+				$changed         = false;
+				if ( SchedulePolicy::ahead( $since, $now ) ) {
+					// Recorded by a clock that was ahead: the age counts from when that was found.
+					if ( 0 === $data['clock'] || SchedulePolicy::ahead( $data['clock'], $now ) ) {
+						$data    = $this->clock_found( $data, $now, $since );
+						$changed = true;
+					}
+					$since = $data['clock'];
+				} elseif ( 0 !== $data['clock'] ) {
+					$data['clock'] = 0;
+					$changed       = true;
 				}
-				$data['stale']    = $now;
-				$data['outbox'][] = $this->entry( $stale );
-				return $data;
+				$stale = $this->stale_notice( $data, $job, $since, $now );
+				if ( null !== $stale ) {
+					$data['stale']    = $now;
+					$data['outbox'][] = $this->entry( $stale );
+					$changed          = true;
+				}
+				return $changed ? $data : null;
 			}
 		);
 		$this->flush( $now );
+	}
+
+	/**
+	 * Reports that the heartbeat found a handled schedule slot that lies ahead of the clock
+	 * and put it back to the current slot: the server clock was set back after it had been
+	 * ahead. One notice for one setting back, however many recorded times it left ahead.
+	 *
+	 * @param int $now   Unix time.
+	 * @param int $ahead The latest of the times that lay ahead.
+	 */
+	public function clock_set_back( int $now, int $ahead ): void {
+		$this->change(
+			function ( array $data ) use ( $now, $ahead ): ?array {
+				if ( 0 !== $data['clock'] && ! SchedulePolicy::ahead( $data['clock'], $now ) ) {
+					return null;
+				}
+				return $this->clock_found( $data, $now, $ahead );
+			}
+		);
+		$this->flush( $now );
+	}
+
+	/**
+	 * Remembers when a time ahead of the clock was found, and queues the notice about it.
+	 *
+	 * @param Data $data  State.
+	 * @param int  $now   Unix time.
+	 * @param int  $ahead The time that lay ahead.
+	 * @return Data State with the finding.
+	 */
+	private function clock_found( array $data, int $now, int $ahead ): array {
+		$data['clock'] = $now;
+		if ( $this->settings->bool( 'notifications.email.on_failure' ) ) {
+			$data['outbox'][] = $this->entry( new Notice( NoticeKind::Clock, $now, '', '', '', $ahead ) );
+		}
+		return $data;
 	}
 
 	/**
@@ -199,7 +255,8 @@ final class Notifier {
 			if ( null === $notice || $attempts > count( self::RETRY_AFTER ) || $now - $notice->at > self::MAX_AGE ) {
 				continue;
 			}
-			if ( $attempts > 0 && $now - $tried_at < self::RETRY_AFTER[ $attempts - 1 ] ) {
+			// An attempt recorded by a clock that was ahead would wait until the clock caught up.
+			if ( $attempts > 0 && $now - $tried_at < self::RETRY_AFTER[ $attempts - 1 ] && ! SchedulePolicy::ahead( $tried_at, $now ) ) {
 				$kept[] = self::waiting( $notice, $attempts, $tried_at );
 				continue;
 			}
@@ -228,24 +285,34 @@ final class Notifier {
 	/**
 	 * The stale notice that is due now, if any.
 	 *
-	 * @param array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} $data State.
-	 * @param int                                                                                                 $now  Unix time.
+	 * @param Data   $data  State.
+	 * @param string $job   The last successful backup; empty if there was none.
+	 * @param int    $since Unix time the age of the backups counts from; 0 if unknown.
+	 * @param int    $now   Unix time.
 	 * @return Notice|null Notice.
 	 */
-	private function stale_notice( array $data, int $now ): ?Notice {
+	private function stale_notice( array $data, string $job, int $since, int $now ): ?Notice {
 		$limit = SchedulePolicy::stale_after( $this->settings );
 		if ( null === $limit || $data['stale'] > 0 || ! $this->settings->bool( 'setup.completed' ) || ! $this->settings->bool( 'notifications.email.on_stale' ) ) {
 			return null;
 		}
-		$last = $this->state->get( 'last_backup' );
-		$job  = Decoded::string( $last['job'] ?? null );
-		// Without a backup in this repository yet, the time counts from the setup, or from the
-		// day the jobs turned to this repository if that was later.
-		$since = '' === $job ? max( $this->setup_time(), Decoded::int( $this->state->get( 'repository' )['since'] ?? null ) ) : Decoded::int( $last['finished'] ?? null );
 		if ( 0 === $since || $now - $since < $limit ) {
 			return null;
 		}
 		return new Notice( NoticeKind::Stale, $now, '', $job, '', $since );
+	}
+
+	/**
+	 * The last successful backup and when it finished. Without a backup in this repository
+	 * yet, the time counts from the setup, or from the day the jobs turned to this repository
+	 * if that was later.
+	 *
+	 * @return array{0: string, 1: int} Job ID, empty if there was none, and Unix time; 0 if unknown.
+	 */
+	private function stale_since(): array {
+		$last = $this->state->get( 'last_backup' );
+		$job  = Decoded::string( $last['job'] ?? null );
+		return [ $job, '' === $job ? max( $this->setup_time(), Decoded::int( $this->state->get( 'repository' )['since'] ?? null ) ) : Decoded::int( $last['finished'] ?? null ) ];
 	}
 
 	/**
@@ -287,7 +354,7 @@ final class Notifier {
 	 * The stored state.
 	 *
 	 * @param bool $fresh Whether to read past what this request read before, as a change has to.
-	 * @return array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>} State.
+	 * @return Data State.
 	 */
 	private function load( bool $fresh = false ): array {
 		$stored  = $fresh ? $this->options->fresh( self::OPTION ) : $this->options->get( self::OPTION );
@@ -312,6 +379,7 @@ final class Notifier {
 			'repository' => is_string( $bound ) ? $bound : ( is_string( $known ) ? $known : null ),
 			'failing'    => $failing,
 			'stale'      => $stale,
+			'clock'      => Decoded::int( $stored['clock'] ?? null ),
 			'outbox'     => Decoded::arrays( $stored['outbox'] ?? null ),
 		];
 	}
@@ -320,7 +388,7 @@ final class Notifier {
 	 * Changes the state, starting from what the database holds now and under the lock, so that
 	 * a notice another request queued at the same moment is not written over.
 	 *
-	 * @param \Closure(array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>}): (array{repository: string|null, failing: array<string, int>, stale: int, outbox: list<array<mixed>>}|null) $change Returns what to store; null to store nothing.
+	 * @param \Closure(Data): (Data|null) $change Returns what to store; null to store nothing.
 	 */
 	private function change( \Closure $change ): void {
 		$apply = function () use ( $change ): void {
