@@ -90,6 +90,11 @@ bin/install-test-tools.sh wp-cli
 composer pot
 ```
 
+Run `bin/build-package.sh --zip` to produce `build/backups-for-restic.zip` for the
+**Plugins → Add Plugin → Upload Plugin** screen. This option also needs Python 3.
+The ZIP contains the plugin in its own directory and uses fixed entry timestamps,
+permissions and filename order. The `.wordpress-org/` directory holds listing artwork.
+
 `bin/build-package.sh` copies the files that Git tracks, without the paths in `.distignore`,
 into `build/backups-for-restic/` (needs Git and rsync). CI runs Plugin Check, the scanner
 of the WordPress.org review team, on that directory. `composer pot` builds the package and
