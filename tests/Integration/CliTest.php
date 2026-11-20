@@ -115,6 +115,29 @@ final class CliTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_restore_stages_only_the_selected_file(): void {
+		TestSite::idle( 600 );
+		$ids                 = self::snapshots();
+		$id                  = $ids[ count( $ids ) - 1 ];
+		$path                = TestSite::root() . '/wp-content/uploads/fixture/file-0.bin';
+		[ $status, $output ] = self::command( [ 'restore', $id, '../outside' ] );
+		self::assertSame( 1, $status, $output );
+		self::assertStringNotContainsString( 'created.', $output );
+
+		[ $status, $output ] = self::command( [ 'restore', substr( $id, 0, 8 ), $path, '--wait' ] );
+		self::assertSame( 0, $status, $output );
+		$job = self::created( $output );
+		try {
+			self::assertStringContainsString( 'Files staged in restores/' . $job, $output );
+			$files = TestSite::private_dir() . '/restores/' . $job . '/files';
+			self::assertFileEquals( $path, $files . $path );
+			self::assertFileDoesNotExist( $files . TestSite::root() . '/wp-config.php' );
+		} finally {
+			TestSite::api( 'DELETE', '/restores/' . $job );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_backup_with_wait_runs_the_job_in_the_command_and_names_the_snapshot(): void {
 		TestSite::idle( 600 );
 		TestSite::add_upload( 'cli.bin', 8 );

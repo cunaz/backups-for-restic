@@ -13,7 +13,9 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\JobError;
+use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Jobs\Restore\RestoreRequest;
 use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Settings\Schema;
 
@@ -70,20 +72,7 @@ final class CliCommand {
 	 * @param array<string, string> $assoc_args Options.
 	 */
 	public function backup( array $args, array $assoc_args ): void {
-		$this->check_start( JobType::Backup );
-		try {
-			$job = $this->container->jobs()->create( JobType::Backup, 'cli', time() );
-		} catch ( JobConflict $conflict ) {
-			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $conflict )->code )['message'] );
-		}
-		/* translators: %s: job ID. */
-		\WP_CLI::line( sprintf( __( 'Job %s created.', 'backups-for-restic' ), $job->id ) );
-		if ( isset( $assoc_args['wait'] ) ) {
-			$this->run_until_idle( 300.0 );
-			$this->report( $job->id );
-			return;
-		}
-		Cron::chain( $this->container );
+		$this->start_job( JobType::Backup, $assoc_args );
 	}
 
 	/**
@@ -98,7 +87,7 @@ final class CliCommand {
 	 * @param array<string, string> $assoc_args Options.
 	 */
 	public function forget( array $args, array $assoc_args ): void {
-		$this->maintain( JobType::Forget, $assoc_args );
+		$this->start_job( JobType::Forget, $assoc_args );
 	}
 
 	/**
@@ -113,7 +102,7 @@ final class CliCommand {
 	 * @param array<string, string> $assoc_args Options.
 	 */
 	public function prune( array $args, array $assoc_args ): void {
-		$this->maintain( JobType::Prune, $assoc_args );
+		$this->start_job( JobType::Prune, $assoc_args );
 	}
 
 	/**
@@ -148,17 +137,60 @@ final class CliCommand {
 			}
 			$data['read_data_subset_percent'] = $percent;
 		}
-		$this->maintain( JobType::Check, $assoc_args, $data );
+		$this->start_job( JobType::Check, $assoc_args, $data );
 	}
 
 	/**
-	 * Creates a maintenance job and runs or chains it.
+	 * Restores snapshot files into private staging.
 	 *
-	 * @param JobType               $type       Forget, prune or check.
+	 * ## OPTIONS
+	 *
+	 * <snapshot>
+	 * : Full snapshot ID or unambiguous prefix of at least eight characters.
+	 *
+	 * [<path>...]
+	 * : Absolute paths in the snapshot. Omit to stage the whole snapshot.
+	 *
+	 * [--archive]
+	 * : Also prepare a ZIP download of the staged files.
+	 *
+	 * [--wait]
+	 * : Run the restore in this process and print the staging directory.
+	 *
+	 * @param list<string>          $args       Snapshot ID and optional paths.
+	 * @param array<string, string> $assoc_args Options.
+	 */
+	public function restore( array $args, array $assoc_args ): void {
+		$snapshot = $args[0] ?? '';
+		try {
+			if ( 64 !== strlen( $snapshot ) ) {
+				$browser = $this->container->snapshot_browser();
+				if ( null === $browser ) {
+					\WP_CLI::error( Messages::job_error( 'configuration' )['message'] );
+				}
+				$snapshot = $browser->resolve( $snapshot );
+			} else {
+				SnapshotBrowser::full_id( $snapshot );
+			}
+		} catch ( PluginException $e ) {
+			\WP_CLI::error( Messages::snapshot_error( SnapshotBrowser::failure( $e )[0] )['message'] );
+		}
+		try {
+			$request = RestoreRequest::from_input( $snapshot, isset( $args[1] ) ? array_slice( $args, 1 ) : null, isset( $assoc_args['archive'] ) );
+		} catch ( \BackupsForRestic\Exception\InvalidArgument $e ) {
+			\WP_CLI::error( __( 'Choose up to 256 absolute paths inside the snapshot.', 'backups-for-restic' ) );
+		}
+		$this->start_job( JobType::Restore, $assoc_args, $request->to_data() );
+	}
+
+	/**
+	 * Creates the requested job and runs or chains it.
+	 *
+	 * @param JobType               $type       Job type.
 	 * @param array<string, string> $assoc_args Options.
 	 * @param array<string, mixed>  $data       Job data.
 	 */
-	private function maintain( JobType $type, array $assoc_args, array $data = [] ): void {
+	private function start_job( JobType $type, array $assoc_args, array $data = [] ): void {
 		$this->check_start( $type );
 		try {
 			// The data is part of the new job document: a later save could meet the job's first tick.
@@ -428,6 +460,9 @@ final class CliCommand {
 		if ( null === $job || null !== $job->error ) {
 			\WP_CLI::error( Messages::job_error( $job?->error->code ?? 'internal' )['message'] );
 		}
+		if ( JobState::Succeeded !== $job->state ) {
+			\WP_CLI::error( Messages::state( $job->state->value ) );
+		}
 		$result = $job->result;
 		if ( isset( $result['skipped'] ) ) {
 			\WP_CLI::warning( Messages::job_error( 'append_only' === $result['skipped'] ? 'repository_append_only' : 'retention_external' )['message'] );
@@ -438,7 +473,9 @@ final class CliCommand {
 			JobType::Forget => \WP_CLI::success( sprintf( __( 'Forget finished: %1$d snapshots removed, %2$d kept.', 'backups-for-restic' ), (int) ( $result['removed'] ?? 0 ), (int) ( $result['keep'] ?? 0 ) ) ),
 			/* translators: 1: deleted packs, 2: freed size. */
 			JobType::Prune  => \WP_CLI::success( sprintf( __( 'Prune finished: %1$d packs deleted, %2$s freed.', 'backups-for-restic' ), (int) ( $result['packs_deleted'] ?? 0 ), size_format( (int) ( $result['bytes_deleted'] ?? 0 ) ) ) ),
-			JobType::Check  => $this->report_check( $result ),
+			JobType::Check   => $this->report_check( $result ),
+			/* translators: %s: restore directory under the private directory. */
+			JobType::Restore => \WP_CLI::success( sprintf( __( 'Files staged in %s.', 'backups-for-restic' ), (string) $result['staging'] ) ),
 			/* translators: %s: snapshot ID. */
 			default         => \WP_CLI::success( sprintf( __( 'Backup finished: snapshot %s.', 'backups-for-restic' ), substr( (string) ( $result['snapshot'] ?? '' ), 0, 8 ) ) ),
 		};
