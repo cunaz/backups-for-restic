@@ -186,6 +186,24 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
+	 * A table continues after its cursor.
+	 *
+	 * @return bool False.
+	 */
+	public function restarted(): bool {
+		return false;
+	}
+
+	/**
+	 * A table has no warnings.
+	 *
+	 * @return list<string> None.
+	 */
+	public function warnings(): array {
+		return [];
+	}
+
+	/**
 	 * Produces the next piece: the header, a page, or the trailer.
 	 *
 	 * @throws DatabaseFailed If a query fails.
