@@ -59,6 +59,16 @@ All notable changes are documented here. The format follows
 - Building blocks for downloading restored files, without a visible function yet: a zip
   writer of the plugin's own that needs no PHP extension and continues after an interrupted
   request, and download tokens that are valid once and for one hour.
+- The dump catalog temporarily requests quoted table/view definitions, including when the
+  server disables `sql_quote_show_create`, and restores the site's session setting afterwards.
+  It reads schema under the dump's SQL mode so compatibility modes cannot omit table options.
+  Database imports also enable quoting for their ownership checks and restore it after each tick.
+- The first database restore component imports staged table data into separate InnoDB
+  tables, with checked SQL and resumable transactions. It is not yet exposed in the admin
+  page; the schema/apply/undo workflows remain in development.
+  It also handles tables containing only generated columns and fixed-format MyISAM
+  sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
+  cannot report success with a row that the bounded importer cannot read.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses
@@ -209,6 +219,9 @@ All notable changes are documented here. The format follows
   Newer and malformed settings layout numbers are preserved and keep the plugin inactive;
   deactivation leaves their jobs and repository locks alone. Only a missing layout option
   is treated as a legacy installation.
+- Database backups preserve invisible columns and columns with expression defaults such
+  as `CURRENT_TIMESTAMP`. They were previously emitted as NULL or omitted from INSERTs;
+  values already missing from old snapshots cannot be recovered by this correction.
 - Reading a snapshot now refuses directory listings with duplicate or out-of-order names,
   including differently escaped copies of the same name. The repository check reports
   these trees as damaged before a restore can use their entries.

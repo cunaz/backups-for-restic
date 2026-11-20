@@ -15,8 +15,8 @@ use BackupsForRestic\Exception\DatabaseFailed;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Runs the dump's read-only queries through WordPress' own connection, so the dump sees the
- * same server, character set and credentials as the site.
+ * Runs the dump's reads and scoped session settings through WordPress' own connection, so
+ * the dump sees the same server, character set and credentials as the site.
  */
 final class WpdbConnection implements Connection {
 

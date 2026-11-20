@@ -203,11 +203,34 @@ jobs:
       - run: vendor/bin/phpunit --testsuite unit
 
   database:
-    name: Database dump against MySQL
+    name: Database dump and restore (${{ matrix.database }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: MySQL 8.4
+            image: mysql:8.4
+            health: mysqladmin ping -h 127.0.0.1 -proot --silent
+          - database: MariaDB 11.4
+            image: mariadb:11.4
+            health: healthcheck.sh --connect --innodb_initialized
+    services:
+      database:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 33306:3306
+        options: >-
+          --health-cmd="${{ matrix.health }}"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     env:
-      BFR_TEST_MYSQL_HOST: 127.0.0.1
+      BFR_TEST_MYSQL_HOST: 127.0.0.1:33306
       BFR_TEST_MYSQL_USER: root
       BFR_TEST_MYSQL_PASSWORD: root
     steps:
@@ -220,13 +243,11 @@ jobs:
           extensions: mbstring, openssl, mysqli
           coverage: none
           tools: composer:v2
-      - name: Start MySQL
-        run: sudo systemctl start mysql.service
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpunit --testsuite database
 
   mutation:
-    name: Mutation testing (Crypto, Format, Forget)
+    name: Mutation testing (Crypto, Format, Forget, database import)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -245,7 +266,7 @@ jobs:
         id: changes
         env:
           EVENT_NAME: ${{ github.event_name }}
-          WATCHED: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
+          WATCHED: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets|Database)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
         run: |
           run=true
           if [ "$EVENT_NAME" = 'pull_request' ]; then
@@ -253,7 +274,7 @@ jobs:
               echo 'The files of the pull request could not be listed: running in full.'
             elif ! tr '\0' '\n' < "$RUNNER_TEMP/changed-files" | grep -Eq "$WATCHED"; then
               run=false
-              echo '::notice::Mutation testing skipped: this pull request changes none of the files the run depends on (src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml). A push to main always runs it.'
+              echo '::notice::Mutation testing skipped: this pull request changes none of the files the run depends on (src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, src/Database, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml). A push to main always runs it.'
             fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
