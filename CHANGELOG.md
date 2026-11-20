@@ -56,6 +56,9 @@ All notable changes are documented here. The format follows
   them, and also what a restore that did not succeed left behind. `GET /restores` lists
   what is staged with its size and time of expiry, and `DELETE /restores/{id}` removes one
   directory at once.
+- Building blocks for downloading restored files, without a visible function yet: a zip
+  writer of the plugin's own that needs no PHP extension and continues after an interrupted
+  request, and download tokens that are valid once and for one hour.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses

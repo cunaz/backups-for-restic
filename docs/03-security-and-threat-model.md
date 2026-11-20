@@ -124,7 +124,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | Repository master key | derived once from the password via the key file | changes only with `restic copy` to a new repository | every seal/open; cached in the secret store |
 | REST password | the `.htpasswd` of the rest-server, or the BorgBase control panel | change it on the server. After setup the plugin takes the new one under Settings → Repository, where it is tested against the server before it is saved, or through the constant `BACKUPS_FOR_RESTIC_REST_PASSWORD` | `Authorization` header |
 | REST username | the `.htpasswd` of the rest-server, or the BorgBase control panel; stored as a plain setting, not as a secret, and not masked in logs | with the password; after setup through the constant `BACKUPS_FOR_RESTIC_REST_USERNAME` | `Authorization` header |
-| Download tokens (Milestone 3) | random per staged file | one-time, 1 h | download URL |
+| Download tokens (Milestone 3) | 256 random bits per download, issued by `Storage\DownloadTokens` ([ADR 0038](adr/0038-download-zip-and-tokens.md)) | one-time, 1 h; at most 256 at once, the oldest gives way | download URL. Only the SHA-256 hashes of the token and of what it allows to download are stored, with the expiry, in one owner-only file of the private directory that is written atomically. Redeeming compares in constant time and removes the token under a file lock before it answers, so of two requests with one token one is served. The routes that issue and redeem tokens follow with package 2.4 |
 
 ### 5.2 Storage: encrypted option, or constants
 
@@ -343,6 +343,11 @@ carries `Cache-Control: no-store`.
   rely on the caller keeping staging private; portable PHP cannot eliminate races with a
   local process that controls those directories. The later apply planner must also enforce
   live-root containment; no apply or public staging-download route exists yet.
+- The zip writer for downloads (`Storage\Zip\ZipWriter`, ADR 0038) reads staging the same
+  way: it inspects every entry with `lstat()` and ends on a symbolic link, a second hard
+  link or a special file. It refuses names that are not valid UTF-8 or that could leave the
+  directory an archive is unpacked to (`..`, an absolute name, a drive letter, a backslash,
+  a NUL). The unfinished archive, its checkpoint and the finished archive are `0600`.
 - The private directory is excluded from backups except the virtual `spool/` paths.
 
 ## 9. WordPress layer
