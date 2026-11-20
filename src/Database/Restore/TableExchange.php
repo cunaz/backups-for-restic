@@ -119,12 +119,13 @@ final readonly class TableExchange {
 	 * @param ExchangePlan $plan Persisted plan.
 	 * @param int          $admin Confirming current WordPress user.
 	 * @param bool         $undo Reverse an applied exchange.
+	 * @param string|null  $authority Reviewed administrative credential and role binding.
 	 * @throws DatabaseFailed If any occupied source, schema, dependency or witness changed.
 	 */
-	public function run( ExchangePlan $plan, int $admin, bool $undo ): void {
+	public function run( ExchangePlan $plan, int $admin, bool $undo, ?string $authority = null ): void {
 		$plan->owned->locked(
 			null,
-			function () use ( $plan, $admin, $undo ): void {
+			function () use ( $plan, $admin, $undo, $authority ): void {
 				$facts  = $this->destination( $plan );
 				$from   = $undo ? 'applied' : 'prepared';
 				$to     = $undo ? 'undone' : 'applied';
@@ -138,50 +139,13 @@ final readonly class TableExchange {
 				$expected = $plan->positions( $from );
 				$this->barrier->hold(
 					array_keys( $expected ),
-					function () use ( $plan, $admin, $undo, $facts, $from, $to, $expected ): void {
-						if ( $this->catalog->identities( $facts, $plan->all_names() ) !== $expected || ! $plan->owned->exists( $plan->owned->marker( $from ) ) ) {
-							throw new DatabaseFailed( 'A table was replaced or a reserved exchange name is occupied.' );
+					function () use ( $plan, $admin, $undo, $facts, $from, $to, $authority ): void {
+						[ $targets, $rename ] = $this->moves( $plan, $facts, $from, $undo );
+						$state                = new WordPressState( $this->connection );
+						if ( null !== $authority && ! hash_equals( $authority, $state->authority( $plan->document['prefix'], $admin ) ) ) {
+							DatabaseFailed::raise( 'The confirming administrator changed after the database review.', [ 'code' => 'database_exchange_changed' ] );
 						}
-						// Recheck dependencies under the same table locks that RENAME will use.
-						// An incoming FK from an unrelated schema is included by the engine dictionary.
-						foreach ( array_chunk( array_keys( $expected ), SwapCatalog::MAX_TABLES ) as $names ) {
-							if ( [] !== $this->catalog->inspect( $names )['blockers'] ) {
-								throw new DatabaseFailed( 'A current database dependency or grant prevents the reviewed exchange.' );
-							}
-						}
-						$ledger   = SqlFormatter::identifier( $plan->owned->marker( $from ) );
-						$metadata = $this->connection->rows( 'SELECT table_number,original_comment FROM ' . $ledger . " WHERE id>0 AND phase='done' ORDER BY table_number LIMIT " . ( count( $plan->document['pairs'] ) + 1 ) );
-						$targets  = [];
-						$rename   = [];
-						foreach ( $plan->document['pairs'] as $number => $pair ) {
-							$live   = $pair['name'];
-							$old    = $plan->owned->retained( $number );
-							$shadow = $plan->owned->shadow( $number );
-							$new    = $this->catalog->definition( $undo ? $live : $shadow );
-							if ( $new->structure !== $pair['after_schema'] || ( $metadata[ $number ]['table_number'] ?? null ) !== (string) $number || ( $metadata[ $number ]['original_comment'] ?? null ) !== $new->comment ) {
-								throw new DatabaseFailed( 'The imported database generation changed its schema.' );
-							}
-							if ( null !== $pair['before'] ) {
-								$prior = $this->catalog->definition( $undo ? $old : $live );
-								if ( hash( 'sha256', $prior->structure . $prior->comment ) !== $pair['before_schema'] ) {
-									throw new DatabaseFailed( 'The prior database generation changed its schema.' );
-								}
-							}
-							if ( $undo ) {
-								$rename[] = self::move( $live, $shadow );
-								if ( null !== $pair['before'] ) {
-									$targets[ $live ] = $old;
-									$rename[]         = self::move( $old, $live );
-								}
-							} else {
-								if ( null !== $pair['before'] ) {
-									$rename[] = self::move( $live, $old );
-								}
-								$targets[ $live ] = $shadow;
-								$rename[]         = self::move( $shadow, $live );
-							}
-						}
-						( new WordPressState( $this->connection ) )->copy( $plan->document['prefix'], $targets, $admin );
+						$state->copy( $plan->document['prefix'], $targets, $admin );
 						$this->connection->execute( 'COMMIT' );
 						$rename[] = self::move( $plan->owned->marker( $from ), $plan->owned->marker( $to ) );
 						$this->connection->execute( 'RENAME TABLE ' . implode( ',', $rename ) );
@@ -192,6 +156,81 @@ final readonly class TableExchange {
 				);
 			}
 		);
+	}
+
+	/**
+	 * Reads the same object and WordPress account bindings used at commit. A fresh check
+	 * under write locks remains necessary because this preview does not lock live tables.
+	 *
+	 * @param ExchangePlan $plan Stored owning apply.
+	 * @param int          $admin Proposed undo administrator.
+	 */
+	public function review_undo( ExchangePlan $plan, int $admin ): void {
+		$plan->owned->locked(
+			null,
+			function () use ( $plan, $admin ): void {
+				$facts       = $this->destination( $plan );
+				[ $targets ] = $this->moves( $plan, $facts, 'applied', true );
+				( new WordPressState( $this->connection ) )->check( $plan->document['prefix'], $targets, $admin );
+			}
+		);
+	}
+
+	/**
+	 * Builds the exact move list after checking every schema, identity and dependency.
+	 *
+	 * @param ExchangePlan $plan Validated persisted plan.
+	 * @param Facts        $facts Current server identity.
+	 * @param string       $from Current witness state.
+	 * @param bool         $undo Whether the prior generation is returning.
+	 * @return array{array<string,string>,list<string>} Private protected-state destinations and RENAME pairs.
+	 * @throws DatabaseFailed If any proposed table or its dependencies have changed.
+	 */
+	private function moves( ExchangePlan $plan, array $facts, string $from, bool $undo ): array {
+		$expected = $plan->positions( $from );
+		if ( $this->catalog->identities( $facts, $plan->all_names() ) !== $expected || ! $plan->owned->exists( $plan->owned->marker( $from ) ) ) {
+			throw new DatabaseFailed( 'A table was replaced or a reserved exchange name is occupied.' );
+		}
+		// Recheck dependencies under the same table locks that RENAME will use.
+		// An incoming FK from an unrelated schema is included by the engine dictionary.
+		foreach ( array_chunk( array_keys( $expected ), SwapCatalog::MAX_TABLES ) as $names ) {
+			if ( [] !== $this->catalog->inspect( $names )['blockers'] ) {
+				throw new DatabaseFailed( 'A current database dependency or grant prevents the reviewed exchange.' );
+			}
+		}
+		$ledger   = SqlFormatter::identifier( $plan->owned->marker( $from ) );
+		$metadata = $this->connection->rows( 'SELECT table_number,original_comment FROM ' . $ledger . " WHERE id>0 AND phase='done' ORDER BY table_number LIMIT " . ( count( $plan->document['pairs'] ) + 1 ) );
+		$targets  = [];
+		$rename   = [];
+		foreach ( $plan->document['pairs'] as $number => $pair ) {
+			$live   = $pair['name'];
+			$old    = $plan->owned->retained( $number );
+			$shadow = $plan->owned->shadow( $number );
+			$new    = $this->catalog->definition( $undo ? $live : $shadow );
+			if ( $new->structure !== $pair['after_schema'] || ( $metadata[ $number ]['table_number'] ?? null ) !== (string) $number || ( $metadata[ $number ]['original_comment'] ?? null ) !== $new->comment ) {
+				throw new DatabaseFailed( 'The imported database generation changed its schema.' );
+			}
+			if ( null !== $pair['before'] ) {
+				$prior = $this->catalog->definition( $undo ? $old : $live );
+				if ( hash( 'sha256', $prior->structure . $prior->comment ) !== $pair['before_schema'] ) {
+					throw new DatabaseFailed( 'The prior database generation changed its schema.' );
+				}
+			}
+			if ( $undo ) {
+				$rename[] = self::move( $live, $shadow );
+				if ( null !== $pair['before'] ) {
+					$targets[ $live ] = $old;
+					$rename[]         = self::move( $old, $live );
+				}
+			} else {
+				if ( null !== $pair['before'] ) {
+					$rename[] = self::move( $live, $old );
+				}
+				$targets[ $live ] = $shadow;
+				$rename[]         = self::move( $shadow, $live );
+			}
+		}
+		return [ $targets, $rename ];
 	}
 
 	/**

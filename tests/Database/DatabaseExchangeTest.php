@@ -8,11 +8,27 @@ use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\ExchangePlan;
 use BackupsForRestic\Database\Restore\Ledger;
 use BackupsForRestic\Database\Restore\Manifest;
+use BackupsForRestic\Database\Restore\RehearsalReport;
+use BackupsForRestic\Database\Restore\WordPressState;
+use BackupsForRestic\Crypto\SystemRandom;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
+use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobState;
+use BackupsForRestic\Jobs\JobStore;
+use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Jobs\Runner;
+use BackupsForRestic\Jobs\RunnerLock;
+use BackupsForRestic\Restore\FileMaintenance;
+use BackupsForRestic\Restore\Staging;
+use BackupsForRestic\Support\Redactor;
+use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Database\Restore\MysqliConnection as Direct;
 use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\TableExchange;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
+use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
@@ -194,26 +210,32 @@ final class DatabaseExchangeTest extends TestCase {
 		};
 	}
 
-	public function test_retries_on_either_side_of_the_atomic_exchange_use_the_physical_witness(): void {
+	public function test_killing_the_worker_on_either_side_of_rename_resumes_from_the_physical_witness(): void {
 		$this->mysql_only();
 		$plan   = $this->prepared();
 		$worker = new TableExchange( $this->direct );
-		foreach ( [ false, true ] as $undo ) {
-			foreach ( [ false, true ] as $committed ) {
-				$fault = $this->observing(
-					static function ( string $sql, bool $after ) use ( $committed ): void {
-						if ( $after === $committed && str_starts_with( $sql, 'RENAME TABLE ' ) ) {
-							throw new \RuntimeException( 'Lost exchange response.' );
-						}
-					}
-				);
-				try {
-					( new TableExchange( $fault ) )->run( $plan, 1, $undo );
-					self::fail( 'Expected simulated request loss at RENAME.' );
-				} catch ( \RuntimeException $e ) {
-					self::assertSame( 'Lost exchange response.', $e->getMessage() );
+		[ , $token, $fingerprint ] = explode( ':', $plan->owned->owner );
+		file_put_contents( $this->directory . '/exchange-plan.json', json_encode( [ 'plan' => $plan->document, 'token' => $token, 'fingerprint' => $fingerprint ], JSON_THROW_ON_ERROR ) );
+		$marker = $this->directory . '/exchange-kill';
+		foreach ( [ 'apply', 'undo' ] as $phase ) {
+			$undo = 'undo' === $phase;
+			foreach ( [ 'before', 'after' ] as $point ) {
+				$process = proc_open( [ PHP_BINARY, dirname( __DIR__ ) . '/Fixtures/Database/exchange-kill.php', $this->database, $this->directory, $phase, $point ], [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
+				self::assertIsResource( $process );
+				fclose( $pipes[0] );
+				$deadline = microtime( true ) + 30;
+				while ( ! is_file( $marker ) && proc_get_status( $process )['running'] && microtime( true ) < $deadline ) {
+					usleep( 10000 );
 				}
-				self::assertSame( $committed ? ( $undo ? 'undone' : 'applied' ) : ( $undo ? 'applied' : 'prepared' ), $worker->status( $plan ) );
+				$reached = is_file( $marker ) ? file_get_contents( $marker ) : '';
+				proc_terminate( $process, 9 );
+				$output = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
+				fclose( $pipes[1] );
+				fclose( $pipes[2] );
+				proc_close( $process );
+				self::assertSame( $point, $reached, $output );
+				unlink( $marker );
+				self::assertSame( 'after' === $point ? ( $undo ? 'undone' : 'applied' ) : ( $undo ? 'applied' : 'prepared' ), $worker->status( $plan ) );
 			}
 			$worker->run( $plan, 1, $undo );
 		}
@@ -259,4 +281,126 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM manually_retained' )[0]['title'] );
 	}
+	public function test_the_approving_credential_and_capabilities_are_checked_under_the_write_lock(): void {
+		$this->mysql_only();
+		$plan = $this->prepared();
+		$auth = ( new WordPressState( $this->direct ) )->authority( 'wp_', 1 );
+		$this->db->execute( "UPDATE wp_usermeta SET meta_value='revoked' WHERE user_id=1 AND meta_key='wp_capabilities'" );
+		try {
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false, $auth );
+			self::fail( 'The exchange accepted revoked authority.' );
+		} catch ( DatabaseFailed $failure ) {
+			self::assertSame( 'database_exchange_changed', $failure->context()['code'] ?? null );
+			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
+		}
+	}
+
+	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
+		$this->mysql_only();
+		$clock   = new FrozenClock();
+		$random  = new SystemRandom();
+		$jobs    = new JobStore( $this->directory . '/jobs', new Redactor(), $random );
+		$staging = new Staging( $this->directory . '/restores', $jobs, $clock );
+		$source  = $jobs->create( JobType::Restore, 'manual', $clock->seconds - 1, [ 'snapshot' => str_repeat( 'a', 64 ) ] );
+		$root    = $this->directory . '/restores/' . $source->id;
+		$files   = $root . '/files/source/database';
+		mkdir( $files, 0700, true );
+		copy( $this->directory . '/manifest.json', $files . '/manifest.json' );
+		foreach ( $this->manifest->tables as $table ) {
+			copy( $this->directory . '/' . $table['file'], $files . '/' . $table['file'] );
+		}
+		$report = [
+			'snapshot'         => $source->data['snapshot'],
+			'prefix'           => 'wp_',
+			'source_directory' => '/source/database',
+			'manifest_sha256'  => $this->manifest->fingerprint,
+		] + ( new RehearsalReport( $this->direct ) )->read( $this->manifest, $this->importer->tables );
+		$bytes = json_encode( $report, JSON_THROW_ON_ERROR );
+		file_put_contents( $root . '/database-preview.json', $bytes );
+		$source->result = [ 'database_report_sha256' => hash( 'sha256', $bytes ), 'snapshot' => $source->data['snapshot'] ];
+		$source->state = JobState::Succeeded;
+		$source->finished_at = $clock->seconds;
+		$jobs->save( $source );
+		$site    = $this->directory . '/site';
+		$flushes = 0;
+		mkdir( $site );
+		$changes = new DatabaseChanges(
+			$jobs, $staging, $clock, $random, 1, 'wp_', fn (): Direct => $this->direct,
+			static fn ( int $id ): array => 1 === $id ? [] : [ 'database_account' ],
+			new FileMaintenance( $site ),
+			static function () use ( &$flushes, $site ): void {
+				self::assertFileExists( $site . '/.maintenance' );
+				++$flushes;
+			}
+		);
+		$runner = new Runner( $jobs, new RunnerLock( $this->directory . '/runner.lock' ), $changes, $clock, $random );
+		$finish = static function ( Job $queued ) use ( $runner, $site ): Job {
+			for ( $i = 0; $i < 100; ++$i ) {
+				$job = $runner->tick( 0.08 )->job;
+				self::assertNotNull( $job );
+				self::assertSame( $queued->id, $job->id );
+				if ( $job->state->is_terminal() ) {
+					self::assertSame( JobState::Succeeded, $job->state, $job->error?->message ?? '' );
+					self::assertFileDoesNotExist( $site . '/.maintenance' );
+					return $job;
+				}
+			}
+			self::fail( 'Database job failed to finish.' );
+		};
+		$preview = $changes->preview( $source->id, 1 );
+		self::assertTrue( $preview['applicable'], implode( ',', $preview['blockers'] ) );
+		self::assertFalse( $changes->preview( $source->id, 2 )['applicable'] );
+		$queued = $changes->start_apply( $source->id, 1, $preview['digest'] );
+		$clock->seconds += 3601;
+		try {
+			$staging->remove( $source->id, microtime( true ) + 1 );
+			self::fail( 'The active database apply lost its staging pin.' );
+		} catch ( JobConflict ) {
+			self::assertDirectoryExists( $files );
+		}
+		$apply = $finish( $queued );
+		self::assertSame( 'applied', $apply->result['database_generation'] );
+		self::assertSame( 1, $flushes );
+		self::assertCount( 1, $changes->undoable() );
+		self::assertCount( 5, DatabaseGeneration::exclusions( $this->direct, $apply ) );
+		self::assertTrue( $staging->remove( $source->id, microtime( true ) + 2 ) );
+		$clock->seconds += 1;
+		$backup = $jobs->create( JobType::Backup, 'schedule', $clock->seconds );
+		$backup->state = JobState::Succeeded;
+		$jobs->save( $backup );
+		$jobs->prune( 1, $clock->seconds );
+		self::assertNotNull( $jobs->get( $apply->id ) );
+		$undo = $changes->preview_undo( $apply->id, 1 );
+		self::assertTrue( $undo['applicable'], implode( ',', $undo['blockers'] ) );
+		$queued = $changes->start_undo( $apply->id, 1, $undo['digest'] );
+		$clock->seconds += 86401;
+		self::assertTrue( $changes->expire( false, microtime( true ) + 2 ) );
+		$undone = $finish( $queued );
+		self::assertSame( 'undone', $undone->result['database_generation'] );
+		self::assertSame( 2, $flushes );
+		self::assertSame( [], $changes->undoable() );
+		self::assertTrue( $changes->expire( false, microtime( true ) + 2 ) );
+		self::assertCount( 6, DatabaseGeneration::exclusions( $this->direct, $jobs->get( $apply->id ) ) );
+		$clock->seconds += 86401;
+		for ( $i = 0; $i < 16 && isset( $jobs->get( $apply->id )->data['database_owner'] ); ++$i ) {
+			$changes->expire( false, microtime( true ) + 0.01 );
+		}
+		self::assertArrayNotHasKey( 'database_owner', $jobs->get( $apply->id )->data );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	public function test_a_target_view_created_after_approval_blocks_the_exchange(): void {
+		$this->mysql_only();
+		$plan = $this->prepared();
+		$this->db->execute( 'CREATE VIEW reporting_posts AS SELECT title FROM wp_posts' );
+		self::assertContains( 'live_views', ( new SwapCatalog( $this->direct ) )->inspect( [ 'wp_posts' ] )['blockers'] );
+		try {
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false );
+			self::fail( 'The exchange ignored a dependent destination view.' );
+		} catch ( DatabaseFailed ) {
+			self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM reporting_posts' )[0]['title'] );
+			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
+		}
+	}
+
 }

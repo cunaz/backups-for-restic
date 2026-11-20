@@ -150,7 +150,7 @@ final readonly class ExchangePlan {
 				'name'          => $pair['name'],
 				'before'        => $pair['before'],
 				'after'         => $pair['after'],
-				'before_schema' => $pair['before_schema'],
+				'before_schema' => is_string( $pair['before_schema'] ) ? $pair['before_schema'] : null,
 				'after_schema'  => $pair['after_schema'],
 			];
 		}

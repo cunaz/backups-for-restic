@@ -10,13 +10,9 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Jobs\Restore;
 
 use BackupsForRestic\Database\Restore\Connection;
-use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\OwnedTables;
 use BackupsForRestic\Database\Restore\RehearsalReport;
 use BackupsForRestic\Database\Restore\TableImporter;
-use BackupsForRestic\Engine\Restore\Files as StagedFiles;
-use BackupsForRestic\Engine\Restore\Names;
-use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Jobs\Job;
@@ -53,15 +49,17 @@ final readonly class DatabasePreview {
 	 */
 	public function bind( RestoreServices $services, Job $job, string $path, string $site, mixed $versions ): void {
 		$subdir          = rtrim( dirname( $path ), '/' ) . '/database';
-		$manifest        = $this->manifest( $this->directory( $services, $job, $subdir ) );
+		$manifest        = $this->source( $services, $job, $subdir )->manifest;
 		$source_versions = [];
 		foreach ( [ 'wordpress', 'plugin', 'php' ] as $key ) {
 			if ( is_array( $versions ) && is_string( $versions[ $key ] ?? null ) ) {
 				$source_versions[ $key ] = substr( $versions[ $key ], 0, 128 );
 			}
 		}
+		$destination                    = $this->destination();
 		$job->data['database_versions'] = $source_versions;
 		$job->data['database_binding']  = [
+			'destination' => $destination,
 			'path'        => $subdir,
 			'site'        => $site,
 			'prefix'      => $this->prefix,
@@ -81,17 +79,20 @@ final readonly class DatabasePreview {
 	 * @throws FormatException If inventory changes or exceeds its bounds.
 	 */
 	public function advance( RestoreServices $services, Job $job, float $deadline ): bool {
-		$binding   = $this->binding( $job );
-		$directory = $this->directory( $services, $job, $binding['path'] );
-		$manifest  = $this->manifest( $directory );
+		$binding  = $this->binding( $job );
+		$source   = $this->source( $services, $job, $binding['path'] );
+		$manifest = $source->manifest;
 		if ( $binding['fingerprint'] !== $manifest->fingerprint || $binding['prefix'] !== $this->prefix ) {
 			throw new FormatException( 'The staged database inventory or site prefix changed during the preview.' );
 		}
-		$importer = new TableImporter( $this->connection, $manifest, $directory, $binding['token'] );
+		$importer = new TableImporter( $this->connection, $manifest, $source->directory, $binding['token'] );
 		try {
 			$progress = $importer->tick( 16, max( 0.001, min( 20.0, $deadline - microtime( true ) ) ) );
 		} catch ( DatabaseFailed $error ) {
 			$code = $error->context()['code'] ?? null;
+			if ( in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) ) {
+				DatabaseFailed::raise( 'The database rehearsal is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] );
+			}
 			if ( in_array( $code, [ 1115, 1253, 1273 ], true ) ) {
 				DatabaseFailed::raise( 'The destination database cannot use a character set or collation required by the snapshot.', [ 'code' => 'database_restore_collation' ] );
 			}
@@ -116,10 +117,12 @@ final readonly class DatabasePreview {
 			'manifest_sha256'  => $manifest->fingerprint,
 			'prefix'           => $this->prefix,
 		] + ( new RehearsalReport( $this->connection ) )->read( $manifest, $importer->tables );
-		Files::write_atomic( $services->staging_dir( $job ) . '/' . self::REPORT, json_encode( $report, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE ) . "\n" );
-		$job->result['database_tables'] = count( $manifest->tables );
-		$job->result['database_rows']   = $report['rows'];
-		$job->result['database_report'] = $services->staging_name( $job ) . '/' . self::REPORT;
+		$bytes  = json_encode( $report, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE ) . "\n";
+		Files::write_atomic( $services->staging_dir( $job ) . '/' . self::REPORT, $bytes );
+		$job->result['database_report_sha256'] = hash( 'sha256', $bytes );
+		$job->result['database_tables']        = count( $manifest->tables );
+		$job->result['database_rows']          = $report['rows'];
+		$job->result['database_report']        = $services->staging_name( $job ) . '/' . self::REPORT;
 		return true;
 	}
 
@@ -143,46 +146,20 @@ final readonly class DatabasePreview {
 	}
 
 	/**
-	 * Opens a bounded staged inventory through a checked regular file.
-	 *
-	 * @param string $directory Resolved dump directory.
-	 * @return Manifest Validated inventory.
-	 * @throws FormatException If the staged inventory is unreadable or invalid.
-	 */
-	private function manifest( string $directory ): Manifest {
-		$handle = StagedFiles::open( $directory . '/manifest.json' );
-		try {
-			$json = stream_get_contents( $handle, Manifest::MAX_BYTES + 1 );
-			if ( false === $json ) {
-				throw new FormatException( 'The staged database manifest could not be read.' );
-			}
-			return Manifest::parse( $json, $this->prefix );
-		} finally {
-			fclose( $handle );
-		}
-	}
-
-	/**
-	 * Resolves the configured private directory once and requires every staging component
-	 * below it to have the same physical and lexical name.
+	 * Locates the staged database under this job's private files directory.
 	 *
 	 * @param RestoreServices $services Job paths.
-	 * @param Job             $job Restore job.
-	 * @param string          $path Snapshot directory.
-	 * @return string Verified local staging directory.
-	 * @throws FormatException If the selected directory cannot be safely opened.
+	 * @param Job             $job Original restore.
+	 * @param string          $path Absolute snapshot directory.
+	 * @return StagedDatabase Validated source.
+	 * @throws FormatException If the working directory is missing.
 	 */
-	private function directory( RestoreServices $services, Job $job, string $path ): string {
-		foreach ( Path::parts( $path ) as $part ) {
-			Names::validate( $part );
-		}
+	private function source( RestoreServices $services, Job $job, string $path ): StagedDatabase {
 		$private = realpath( $services->common->private_dir->path );
-		$dir     = $private . '/' . $services->staging_name( $job ) . '/files' . $path;
-		clearstatcache( true );
-		if ( false === $private || realpath( $dir ) !== $dir || ! is_dir( $dir ) ) {
-			FormatException::raise( 'Select the complete database directory of the snapshot to preview its tables.', [ 'code' => 'database_preview_missing' ] );
+		if ( false === $private ) {
+			throw new FormatException( 'The private staging directory is unavailable.' );
 		}
-		return $dir;
+		return StagedDatabase::open( $private . '/' . $services->staging_name( $job ) . '/files', $path, $this->prefix );
 	}
 
 	/**
@@ -197,6 +174,9 @@ final readonly class DatabasePreview {
 		if ( ! is_array( $data ) || ! is_string( $data['path'] ?? null ) || ! is_string( $data['site'] ?? null ) || ! is_string( $data['prefix'] ?? null ) || ! is_string( $data['fingerprint'] ?? null ) || ! is_int( $data['count'] ?? null ) || ! is_string( $data['token'] ?? null ) ) {
 			throw new FormatException( 'The database preview lost its persisted ownership information.' );
 		}
+		if ( array_key_exists( 'destination', $data ) && $this->destination() !== $data['destination'] ) {
+			throw new DatabaseFailed( 'The database rehearsal belongs to another server or database. Reconnect the original database to clean its tables.' );
+		}
 		return [
 			'path'        => $data['path'],
 			'site'        => $data['site'],
@@ -204,6 +184,25 @@ final readonly class DatabasePreview {
 			'fingerprint' => $data['fingerprint'],
 			'count'       => $data['count'],
 			'token'       => $data['token'],
+		];
+	}
+	/**
+	 * Binds new rehearsal ownership to its current target, including the server UUID or
+	 * MariaDB server UID when available. An empty destination cannot discard evidence
+	 * belonging to a renamed database or a different server.
+	 *
+	 * @return array{schema:string,server:string} Durable server and database identity.
+	 * @throws DatabaseFailed If the current schema is unavailable.
+	 */
+	private function destination(): array {
+		$schema = $this->connection->rows( 'SELECT DATABASE() AS db' )[0]['db'] ?? '';
+		if ( '' === $schema ) {
+			throw new DatabaseFailed( 'The current database could not be identified for the restore rehearsal.' );
+		}
+		$server = $this->connection->rows( "SHOW VARIABLES WHERE Variable_name IN ('server_uid','server_uuid')" )[0]['Value'] ?? '';
+		return [
+			'schema' => $schema,
+			'server' => $server,
 		];
 	}
 }

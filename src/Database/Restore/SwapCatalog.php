@@ -120,7 +120,10 @@ final readonly class SwapCatalog {
 				$issues[]  = 'dictionary_privilege';
 				$missing[] = 'PROCESS';
 			}
-			$list     = implode( ',', array_map( Session::literal( ... ), $names ) );
+			$list = implode( ',', array_map( Session::literal( ... ), $names ) );
+			if ( ! $facts['mariadb'] && [] !== $this->connection->rows( 'SELECT 1 AS present FROM information_schema.VIEW_TABLE_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN (' . $list . ') LIMIT 1' ) ) {
+				$issues[] = 'live_views';
+			}
 			$triggers = $this->connection->rows( 'SELECT 1 AS present FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE IN (' . $list . ') LIMIT 1' );
 			if ( [] !== $triggers ) {
 				$issues[] = 'live_triggers';

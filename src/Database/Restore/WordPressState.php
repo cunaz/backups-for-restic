@@ -41,6 +41,32 @@ final readonly class WordPressState {
 	}
 
 	/**
+	 * Binds the approving credential and its database-backed authority without reading any
+	 * password hash or serialized permission value into PHP. Recheck this under the write
+	 * barrier in case another request changed the user after WordPress checked user_can().
+	 *
+	 * @param string $prefix Validated target prefix.
+	 * @param int    $admin Confirmed administrator.
+	 * @return string SHA-256 of the SQL-generated row fingerprints.
+	 * @throws DatabaseFailed If the administrative identity cannot be verified.
+	 */
+	public function authority( string $prefix, int $admin ): string {
+		if ( $admin < 1 || 1 !== preg_match( '/\A[A-Za-z0-9_]{1,64}\z/', $prefix ) ) {
+			throw new DatabaseFailed( 'The current database administrator cannot be identified.' );
+		}
+		$users   = SqlFormatter::identifier( $prefix . 'users' );
+		$options = SqlFormatter::identifier( $prefix . 'options' );
+		$meta    = SqlFormatter::identifier( $prefix . 'usermeta' );
+		$user    = $this->connection->rows( 'SELECT SHA2(JSON_ARRAY(user_login,user_pass,user_email),256) AS f FROM ' . $users . ' WHERE ID=' . $admin )[0]['f'] ?? null;
+		$roles   = $this->connection->rows( 'SELECT SHA2(option_value,256) AS f FROM ' . $options . ' WHERE option_name=' . Session::literal( $prefix . 'user_roles' ) )[0]['f'] ?? null;
+		$caps    = $this->connection->rows( 'SELECT SHA2(meta_value,256) AS f FROM ' . $meta . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . ' ORDER BY umeta_id LIMIT 2' );
+		if ( ! is_string( $user ) || ! is_string( $roles ) || 1 !== count( $caps ) || ! is_string( $caps[0]['f'] ?? null ) ) {
+			DatabaseFailed::raise( 'The approving administrator has an ambiguous local identity or capabilities.', [ 'code' => 'database_admin_collision' ] );
+		}
+		return hash( 'sha256', $user . $roles . $caps[0]['f'] );
+	}
+
+	/**
 	 * Requires ordinary WordPress layouts in both generations and checks the administrator
 	 * has an unambiguous identity. Safe to call before confirmation and under the barrier.
 	 *
