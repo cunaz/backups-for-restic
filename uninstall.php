@@ -15,6 +15,10 @@ if ( version_compare( PHP_VERSION, '8.3', '<' ) ) {
 	return;
 }
 
+if ( PHP_INT_SIZE < 8 ) {
+	wp_die( esc_html__( 'Switch to 64-bit PHP before deleting Backups for restic so it can safely clean up local restore data.', 'backups-for-restic' ) );
+}
+
 require_once __DIR__ . '/src/autoload.php';
 
 $backups_for_restic_container = new \BackupsForRestic\WordPress\Container( __DIR__ . '/backups-for-restic.php' );

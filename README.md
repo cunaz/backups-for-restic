@@ -126,7 +126,7 @@ than expecting an incomplete backup to count as successful.
 
 | Component | Minimum | Recommended |
 | --- | --- | --- |
-| PHP | 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache. The JIT is not part of the recommendation: it makes chunking about five times faster, but on PHP 8.3 its tracing mode has crashed PHP during backups in the project's tests |
+| PHP | 64-bit PHP 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache. The JIT is not part of the recommendation: it makes chunking about five times faster, but on PHP 8.3 its tracing mode has crashed PHP during backups in the project's tests |
 | WordPress | 6.7, single site (multisite planned for 1.1) | current release |
 | Hosting | outbound HTTPS to the repository server; private writable disk space for caches, staging and undo copies | a control-panel cron fetching `wp-cron.php` every 1–5 minutes |
 | Server software | none | none |

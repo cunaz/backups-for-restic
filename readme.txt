@@ -34,7 +34,7 @@ What it writes is a normal restic repository. You can list, check and restore ev
 
 = Requirements =
 
-* PHP 8.3 or newer with the OpenSSL, JSON and mbstring extensions (standard on hosting), and a PHP memory limit of at least 96 MB.
+* 64-bit PHP 8.3 or newer with the OpenSSL, JSON and mbstring extensions, and a PHP memory limit of at least 96 MB.
 * At least 128 MB of free disk space for the plugin's working files.
 * Outbound HTTPS to the repository server.
 * For an existing repository in restic's format 2 with compressed data, the zstd PHP extension. Repositories that the plugin creates do not need it.
@@ -116,7 +116,7 @@ Not yet. Network support is planned for version 1.1.
 
 = My hosting runs an older PHP version. How do I switch? =
 
-The plugin needs PHP 8.3 or newer, and WordPress does not install it on older versions. Most hosts let you choose the PHP version per site in the control panel: in cPanel under **MultiPHP Manager** or **Select PHP Version**, in Plesk under **PHP Settings** of the domain. Other panels have a similar page, and your host's support can switch it for you. **Tools > Site Health > Info > Server** shows the version your site runs now.
+The plugin needs 64-bit PHP 8.3 or newer. Most hosts let you choose the PHP version per site in the control panel: in cPanel under **MultiPHP Manager** or **Select PHP Version**, in Plesk under **PHP Settings** of the domain. Other panels have a similar page, and your host's support can switch it for you. **Tools > Site Health > Info > Server** shows the version your site runs now.
 
 = Where do I get help, and where do I report a bug? =
 

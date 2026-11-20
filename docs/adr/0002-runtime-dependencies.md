@@ -9,7 +9,7 @@ package at runtime is code the maintainers must review; every external program i
 shared hosting does not have.
 
 ## Decision
-- Runtime requirements: PHP ≥ 8.3 with `ext-openssl`, `ext-json`, `ext-mbstring` and
+- Runtime requirements: 64-bit PHP ≥ 8.3 with `ext-openssl`, `ext-json`, `ext-mbstring` and
   `ext-hash` (always present); `ext-curl` recommended for the WordPress HTTP API; WordPress
   ≥ 6.7. The engine uses nothing from sodium (ADR 0027); stored secrets use
   `sodium_crypto_secretbox()`, which `ext-sodium` or WordPress' bundled `sodium_compat`
@@ -22,7 +22,9 @@ shared hosting does not have.
 - No JavaScript packages in production; plain ES modules and core's `wp.apiFetch`.
 
 ## Consequences
-- Installs and runs on every hosting plan that runs WordPress and allows outbound HTTPS.
+- Poly1305 limb products, Rabin fingerprints and repository offsets require native 64-bit
+  integers. The plugin checks the PHP process integer size before reading settings or
+  registering workers. A 32-bit PHP installation refuses activation and uninstall.
 - The plugin carries its own implementation of the restic format (ADR 0018) with the testing
   burden that implies (ADR 0023).
 - Archives for downloads use PHP's `ZipArchive` when available, otherwise per-file downloads.

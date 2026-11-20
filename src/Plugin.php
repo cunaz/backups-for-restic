@@ -41,6 +41,12 @@ final class Plugin {
 			}
 		);
 
+		if ( PHP_INT_SIZE < 8 ) {
+			add_action( 'network_admin_notices', [ self::class, 'render_integer_size_notice' ] );
+			add_action( 'admin_notices', [ self::class, 'render_integer_size_notice' ] );
+			return;
+		}
+
 		if ( is_multisite() ) {
 			// Activated by other means (must-use plugin, WP-CLI): stay inert and say why.
 			add_action( 'network_admin_notices', [ self::class, 'render_multisite_notice' ] );
@@ -75,9 +81,16 @@ final class Plugin {
 	}
 
 	/**
-	 * Activation: refuse multisite, schedule the heartbeat.
+	 * Schedules the heartbeat on supported installations.
 	 */
 	public static function activate(): void {
+		if ( PHP_INT_SIZE < 8 ) {
+			wp_die(
+				esc_html( self::integer_size_message() ),
+				esc_html__( 'Plugin activation refused', 'backups-for-restic' ),
+				[ 'back_link' => true ]
+			);
+		}
 		self::refuse_multisite_activation();
 		Cron::ensure_heartbeat();
 	}
@@ -92,7 +105,7 @@ final class Plugin {
 	 */
 	public static function deactivate( string $plugin_file ): void {
 		Cron::unschedule();
-		if ( is_multisite() ) {
+		if ( PHP_INT_SIZE < 8 || is_multisite() ) {
 			return;
 		}
 		try {
@@ -122,6 +135,22 @@ final class Plugin {
 			esc_html__( 'Plugin activation refused', 'backups-for-restic' ),
 			[ 'back_link' => true ]
 		);
+	}
+
+	/**
+	 * Explains the native integer width required by the repository format and cryptography.
+	 */
+	private static function integer_size_message(): string {
+		return __( 'Backups for restic requires 64-bit PHP. Ask your host to enable 64-bit PHP before activating the plugin or resuming a backup or restore.', 'backups-for-restic' );
+	}
+
+	/**
+	 * Tells administrators why a previously activated plugin is idle after a host change.
+	 */
+	public static function render_integer_size_notice(): void {
+		if ( current_user_can( 'activate_plugins' ) ) {
+			printf( '<div class="notice notice-error"><p>%s</p></div>', esc_html( self::integer_size_message() ) );
+		}
 	}
 
 	/**
