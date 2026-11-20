@@ -242,6 +242,50 @@ final class WordPressSiteTest extends TestCase {
 	}
 
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_the_list_of_this_sites_snapshots_previews_the_next_forget_and_follows_the_settings(): void {
+		TestSite::idle( 600 );
+		[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'plugin' ] ] );
+		self::assertSame( 200, $status, $raw );
+		try {
+			[ $status, $site, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
+			self::assertSame( 200, $status, $raw );
+			self::assertNotSame( [], $site['snapshots'] ?? [], $raw );
+			foreach ( $site['snapshots'] as $snapshot ) {
+				self::assertContains( $snapshot['retention'] ?? null, [ 'keep', 'remove' ], $raw );
+			}
+			self::assertSame( 'keep', $site['snapshots'][0]['retention'] ?? null, 'The newest snapshot is among those that are always kept.' );
+
+			// No forget of this site decides about the list of the whole repository, and the
+			// preview removed nothing: every snapshot it marked is still there.
+			[ $status, $all, $raw ] = TestSite::api( 'GET', '/snapshots&scope=repository&fresh=1' );
+			self::assertSame( 200, $status, $raw );
+			foreach ( $all['snapshots'] ?? [] as $snapshot ) {
+				self::assertArrayHasKey( 'retention', $snapshot, $raw );
+				self::assertNull( $snapshot['retention'], $raw );
+			}
+			self::assertSame( [], array_diff( array_column( $site['snapshots'], 'id' ), array_column( $all['snapshots'] ?? [], 'id' ) ), $raw );
+
+			// While another computer removes old snapshots there is nothing to preview. Saving
+			// the setting drops the cached list, so the answer needs no fresh=1.
+			[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'external' ] ] );
+			self::assertSame( 200, $status, $raw );
+			[ $status, $external, $raw ] = TestSite::api( 'GET', '/snapshots' );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( array_column( $site['snapshots'], 'id' ), array_column( $external['snapshots'] ?? [], 'id' ), $raw );
+			foreach ( $external['snapshots'] ?? [] as $snapshot ) {
+				self::assertArrayHasKey( 'retention', $snapshot, $raw );
+				self::assertNull( $snapshot['retention'], $raw );
+			}
+		} finally {
+			// Whatever the assertions say, the later tests expect this site to remove old snapshots.
+			TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'plugin' ] ] );
+		}
+		[ $status, $again, $raw ] = TestSite::api( 'GET', '/snapshots' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'keep', $again['snapshots'][0]['retention'] ?? null, 'The cached list went with the saved setting: ' . $raw );
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_a_tick_killed_in_the_middle_of_a_backup_leaves_a_resumable_job(): void {
 		// Enough new data that the backup step is still at work when the server is stopped.
 		TestSite::add_upload( 'changed.bin', 256 );

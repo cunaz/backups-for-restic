@@ -9,6 +9,9 @@ use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\BlobStore;
+use BackupsForRestic\Engine\Forget\Duration;
+use BackupsForRestic\Engine\Forget\ForgetRun;
+use BackupsForRestic\Engine\Forget\RetentionPolicy;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
@@ -32,6 +35,7 @@ use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Support\GoJson;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
+use BackupsForRestic\Tests\Support\TempDir;
 
 final class SnapshotBrowserTest extends TestCase {
 
@@ -49,8 +53,32 @@ final class SnapshotBrowserTest extends TestCase {
 		$this->clock      = new FrozenClock();
 	}
 
-	private function browser(): SnapshotBrowser {
-		return new SnapshotBrowser( new Reader( $this->repository, new Identity( 'example.com' ), $this->clock ), 'example.com', self::SITE_TAGS );
+	private function browser( ?RetentionPolicy $policy = null ): SnapshotBrowser {
+		return new SnapshotBrowser( new Reader( $this->repository, new Identity( 'example.com' ), $this->clock ), 'example.com', self::SITE_TAGS, $policy, $this->clock );
+	}
+
+	/**
+	 * The preview of a snapshot list as sorted IDs by decision.
+	 *
+	 * @param list<array<string, mixed>> $snapshots
+	 * @return array{keep: list<string>, remove: list<string>, none: list<string>}
+	 */
+	private static function preview( array $snapshots ): array {
+		$keep   = [];
+		$remove = [];
+		$none   = [];
+		foreach ( $snapshots as $snapshot ) {
+			self::assertIsString( $snapshot['id'] );
+			match ( $snapshot['retention'] ) {
+				SnapshotBrowser::RETENTION_KEEP   => $keep[]   = $snapshot['id'],
+				SnapshotBrowser::RETENTION_REMOVE => $remove[] = $snapshot['id'],
+				null                              => $none[]   = $snapshot['id'],
+			};
+		}
+		sort( $keep );
+		sort( $remove );
+		sort( $none );
+		return compact( 'keep', 'remove', 'none' );
 	}
 
 	/** @param list<Node> $nodes */
@@ -123,11 +151,98 @@ final class SnapshotBrowserTest extends TestCase {
 				'data_added' => null,
 				'files'      => null,
 				'bytes'      => null,
+				'retention'  => null,
 			],
 			$site[0],
 			'The admin page reads these fields.'
 		);
 		self::assertSame( [], $this->backend->objects['locks'], 'A list leaves no lock behind.' );
+	}
+
+	public function test_the_site_scope_previews_what_the_next_forget_keeps_and_removes(): void {
+		$tree   = $this->tree( [] );
+		$oldest = $this->snapshot( $tree, [ ...self::SITE_TAGS, 'run:one' ], time: '2025-12-29T00:00:00Z' );
+		$middle = $this->snapshot( $tree, [ ...self::SITE_TAGS, 'run:two' ], time: '2025-12-30T00:00:00Z' );
+		$newest = $this->snapshot( $tree, [ ...self::SITE_TAGS, 'run:three' ], time: '2025-12-31T00:00:00Z' );
+		$other  = $this->snapshot( $tree, self::SITE_TAGS, 'elsewhere.example.com', '2025-12-01T00:00:00Z' );
+		$plain  = $this->snapshot( $tree, [], time: '2025-12-02T00:00:00Z' );
+		$before = $this->backend->objects['snapshots'];
+
+		// The tag of the job that wrote a snapshot does not make it a group of its own: if
+		// it did, each would be the newest of its group and the policy would keep them all.
+		$site = $this->browser( new RetentionPolicy( 2 ) )->snapshots();
+
+		self::assertSame( [ $newest, $middle, $oldest ], array_column( $site, 'id' ) );
+		self::assertSame( [ 'keep', 'keep', 'remove' ], array_column( $site, 'retention' ) );
+		// No forget of this site decides about the snapshots of others.
+		$all = $this->browser( new RetentionPolicy( 2 ) )->snapshots( SnapshotBrowser::SCOPE_REPOSITORY );
+		self::assertSame( [ $newest, $middle, $oldest, $plain, $other ], array_column( $all, 'id' ) );
+		self::assertSame( [ null, null, null, null, null ], array_column( $all, 'retention' ) );
+		// A preview only reads: every snapshot is still there, and no lock is left.
+		self::assertSame( $before, $this->backend->objects['snapshots'] );
+		self::assertSame( [], $this->backend->objects['locks'] );
+	}
+
+	public function test_a_site_without_a_policy_gets_no_preview(): void {
+		$tree = $this->tree( [] );
+		$this->snapshot( $tree );
+		$this->snapshot( $tree, time: '2026-01-02T00:00:00Z' );
+
+		self::assertSame( [ null, null ], array_column( $this->browser()->snapshots(), 'retention' ) );
+		// A policy without a rule would remove everything, so it is never applied and previews nothing.
+		self::assertSame( [ null, null ], array_column( $this->browser( new RetentionPolicy() )->snapshots(), 'retention' ) );
+	}
+
+	public function test_the_preview_counts_keep_within_back_from_the_browsers_clock(): void {
+		$tree   = $this->tree( [] );
+		$oldest = $this->snapshot( $tree, time: '2025-12-20T00:00:00Z' );
+		$recent = $this->snapshot( $tree, time: '2025-12-31T12:00:00Z' );
+		// For the clock, at the start of 2026, this snapshot lies in the future: the day is
+		// counted back from the one before it, which is kept with it.
+		$future = $this->snapshot( $tree, time: '2026-06-01T00:00:00Z' );
+
+		$preview = self::preview( $this->browser( new RetentionPolicy( within: Duration::parse( '1d' ) ) )->snapshots() );
+
+		$kept = [ $recent, $future ];
+		sort( $kept );
+		self::assertSame( $kept, $preview['keep'] );
+		self::assertSame( [ $oldest ], $preview['remove'] );
+	}
+
+	public function test_a_forget_removes_exactly_what_the_preview_announced(): void {
+		$tree = $this->tree( [] );
+		for ( $day = 1; $day <= 12; $day++ ) {
+			$this->snapshot( $tree, [ ...self::SITE_TAGS, 'run:' . $day ], time: sprintf( '2025-12-%02dT03:00:00Z', $day ) );
+			$this->snapshot( $tree, [ ...self::SITE_TAGS, 'run:late-' . $day ], time: sprintf( '2025-12-%02dT15:00:00Z', $day ) );
+		}
+		$foreign = [
+			$this->snapshot( $tree, self::SITE_TAGS, 'elsewhere.example.com', '2025-11-01T00:00:00Z' ),
+			$this->snapshot( $tree, [ 'backups-for-restic', 'site:ffffffffffff' ], time: '2025-11-02T00:00:00Z' ),
+			$this->snapshot( $tree, [], time: '2025-11-03T00:00:00Z' ),
+		];
+		sort( $foreign );
+		$policy  = new RetentionPolicy( 1, 0, 3, 2, within: Duration::parse( '1d' ) );
+		$preview = self::preview( $this->browser( $policy )->snapshots() );
+		self::assertNotSame( [], $preview['keep'] );
+		self::assertNotSame( [], $preview['remove'] );
+		self::assertSame( [], $preview['none'] );
+
+		$work = TempDir::create( 'preview' );
+		try {
+			$run = ForgetRun::start( $this->repository, $work . '/run', new Identity( 'example.com' ), $this->clock, new SystemRandom(), $policy, self::SITE_TAGS );
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+		} finally {
+			TempDir::remove( $work );
+		}
+
+		$left = array_keys( $this->backend->objects['snapshots'] );
+		sort( $left );
+		$expected = [ ...$preview['keep'], ...$foreign ];
+		sort( $expected );
+		self::assertSame( $expected, $left );
+		self::assertSame( count( $preview['remove'] ), $run->result()['removed'] );
 	}
 
 	public function test_an_unknown_scope_is_refused_before_the_repository_is_asked(): void {

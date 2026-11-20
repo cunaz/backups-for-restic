@@ -312,6 +312,10 @@ on one site, without retries:
   successfully";
 - the dashboard with the last backup, the repository and the recent jobs, and the snapshot
   list with that one snapshot;
+- the snapshot browser: the retention preview of the list, the switch to the whole
+  repository and back, the newest snapshot with its manifest, the walk from the top
+  directory down to the one of WordPress, a file that is ticked and stays selected while
+  another directory is open, and the selection cleared;
 - settings that are saved and still there after a reload, an invalid retention window that
   is refused with a message at its field, and the recovery kit, which needs the WordPress
   password;

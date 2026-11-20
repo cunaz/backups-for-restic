@@ -169,12 +169,12 @@ src/
 │   └── Check/                     CheckRun: structural check plus a sampled share of packs read
 ├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, JobObserver, Step, ClosureStep, StepProvider, JobSteps, TickReport
 │   ├── Backup/                    BackupSteps (preflight, unlocking, backing_up, recording, releasing, cleaning_up), BackupServices
-│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010)
+│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
-├── Restore/                       SnapshotBrowser (snapshot lists, details and directory pages as response data, §13.2); (M3) Staging, Selection, Apply, database Importer
+├── Restore/                       SnapshotBrowser (snapshot lists with the retention preview, details and directory pages as response data, §13.2); (M3) Staging, Selection, Apply, database Importer
 └── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, NoticeKind, Mailer port
 ```
 
@@ -637,8 +637,10 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. The forget job
   selects the snapshots with this site's host name and the tags `backups-for-restic` and
   `site:<hash>` and applies the policy to them as one group (`--group-by host`); the tag of
-  the job that wrote a snapshot never splits them. A preview of what the policy would remove
-  (a dry run) does not exist yet; it is planned with the snapshot browser of Milestone 3.
+  the job that wrote a snapshot never splits them. The list of this site's snapshots
+  previews the decision (§13.2): `Restore\SnapshotBrowser` applies `Forget::apply()` to the
+  same group with the policy that `Jobs\Maintenance\RetentionSettings` builds for the forget
+  job too, so the two cannot decide differently. The preview only reads.
   Deletion is `DELETE snapshots/<id>`; HTTP 403 → `repository_append_only`
   ([ADR 0010](adr/0010-retention-and-append-only.md)).
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
@@ -992,12 +994,11 @@ the repository host with its append-only status, the running job with progress a
 tab open" hint, recent jobs, Back up now; maintenance cards for old snapshots, unused data
 with the space only a full prune reclaims, and the repository check, each with its last
 result, next run and a button; notices that stay until their cause is gone: check findings,
-a switch to retention mode `external`, and the proposal to switch back), Snapshots (a list
-with time, id, host, files, size and new data; browsing and restoring arrive with
-Milestone 3), Settings (Schedule, Old snapshots, Maintenance, Notifications, What to back
-up, Advanced, and Repository with the address, the working directory, the cache and the
-recovery kit; saving sends only changed fields, so an open page cannot undo an automatic
-switch), Environment (the Doctor's checks) and Logs (the recent jobs and, for a chosen job,
+a switch to retention mode `external`, and the proposal to switch back), Snapshots (the
+snapshot browser described below), Settings (Schedule, Old snapshots, Maintenance,
+Notifications, What to back up, Advanced, and Repository with the address, the working
+directory, the cache and the recovery kit; saving sends only changed fields, so an open
+page cannot undo an automatic switch), Environment (the Doctor's checks) and Logs (the recent jobs and, for a chosen job,
 its events and warnings on the page; there is no download). Until setup is completed the
 page shows the setup wizard instead
 (Environment → Repository server → Password, with the unlock progress when an existing
@@ -1034,7 +1035,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
-| `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` |
+| `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` and `retention` (the retention preview described below) |
 | `GET /snapshots/{id}` | one snapshot by its full ID: the fields of the list, `paths`, `tree`, and `manifest` with the site's manifest (`path`, `token`, `data`) or null. `manifest_state` is `found`, `none`, or `unreadable` for a manifest that cannot be located or is not valid |
 | `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
@@ -1060,6 +1061,29 @@ has to carry the password. A REST password defined in `wp-config.php` goes to an
 server only if the request carries that same password, and saving a server without a user
 name deletes a stored REST password.
 
+The Snapshots tab reads the three snapshot routes of §13.2. A switch chooses between this
+site's snapshots and the whole repository, and a button reads the list again past the
+cache. The list has time, id, host, tags, files, size and new data, and for this site's
+snapshots what the next cleanup does with each: "Will be kept" or "Will be removed at the
+next cleanup". Without a preview the tab says that this site removes no snapshots at the
+moment. Opening a snapshot shows its details, then the site it holds as the manifest
+describes it (site address, the versions of WordPress, PHP and the plugin, table prefix,
+whether the database is included, the directories and the exclude patterns), or a sentence
+that the snapshot has no manifest or that it cannot be read. Below that is the directory
+browser: one directory per request, a button for the next page, and a path from the top
+directory to the open one whose steps lead back up. An entry shows its name, type, size
+and time; a link shows its target as text and leads nowhere. The script asks for a
+directory by the token of its entry and never builds a path from names, and it marks a
+name that is not exact. Every entry has a checkbox. The ticked paths are listed below the
+browser with their count and live in `restoreSelection` of `assets/js/admin.js`: the full
+ID of the snapshot and a map from the token of each entry to its shown path, whether that
+text is exact, and its type. Opening another snapshot empties it. The restore controls of
+phase 2.5 start from that selection; until then nothing does. While a request runs, the
+tab says what it loads inside the page's live region. A locked repository
+(`repository_locked`) gets a sentence of its own and a button to try again, every other
+error the message and hint of the route. Names, tags, link targets and manifest fields come
+from the repository and enter the page as text nodes only.
+
 The three snapshot routes read through `Restore\SnapshotBrowser`, which turns what
 `Engine\Snapshot\Reader` returns into response data
 ([ADR 0034](adr/0034-snapshot-reader.md), [ADR 0039](adr/0039-snapshot-routes.md)). Every
@@ -1074,10 +1098,24 @@ a job does, so an index that does not fit is refused with `index_too_large`
   that share the repository; all of them can be read and browsed. Both lists live in the
   one transient `backups_for_restic_snapshots`, each with the time it was read, so
   everything that deletes the transient (a finished backup, forget or prune, a saved,
-  created or connected repository, a job that opens another repository) drops both. A
+  created or connected repository, a job that opens another repository, a saved retention
+  setting, an automatic switch of the retention mode) drops both. A
   request that stores its list reads the transient again first, so it never writes back
-  the other list from before such a deletion. The WP-CLI command `snapshots` lists every snapshot of the
-  repository.
+  the other list from before such a deletion. Each list also names the retention settings
+  it was read under (`RetentionSettings::fingerprint()`: the rules of the previewed policy,
+  or `none`), and a list of other settings counts as missing. The deletion alone would miss
+  a list that a request was still reading when the setting was saved, and a retention
+  setting that `wp-config.php` overrides. The WP-CLI command `snapshots` lists every
+  snapshot of the repository.
+- **Retention preview.** In the site scope every snapshot has `retention`: `keep` if the
+  next forget of this site keeps it, `remove` if that forget removes it. The decision is
+  `Forget::apply()` over the listed snapshots as one group, which is the group of the
+  forget job (§8), with the policy of `RetentionSettings::policy()` and the clock of the
+  request. `retention` is null where no forget of this site decides: for every snapshot of
+  the repository scope, in retention mode `external`, and with a stored policy that a
+  forget job refuses (`configuration`, §14). The answer of one snapshot has no such field.
+  The preview writes nothing and removes nothing; it is as old as the cached list, and a
+  snapshot that it marks `keep` today can fall out of its day, week or month later.
 - **Directories.** `GET /snapshots/{id}/tree` answers one directory per request and never
   follows a link. The answer has `snapshot`, `path`, `exact`, `token`, `parent` (the token
   of the directory above, null for the root), `total`, `offset`, `limit`, `next` (the
@@ -1135,7 +1173,8 @@ with an error under the same conditions as `POST /jobs` (§13.2): before the set
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. `status` prints the last backup and the active job only.
 
-Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
+Not built yet: `forget --dry-run` (the retention preview exists in the snapshot list of the
+admin page and of `GET /snapshots`, not on the command line);
 `restore …` and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
 list without a milestone. There is no command for the setup or for the recovery kit: both
 are in the admin area, where the kit asks for the WordPress password. Nothing requires

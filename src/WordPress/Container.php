@@ -44,6 +44,7 @@ use BackupsForRestic\Jobs\JobSteps;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
 use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
+use BackupsForRestic\Jobs\Maintenance\RetentionSettings;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
@@ -185,6 +186,14 @@ final class Container {
 	public function save_settings( array $changes ): Settings {
 		$mode  = $this->settings()->string( 'retention.mode' );
 		$saved = $this->settings_store()->update( $changes );
+		// Every path is one of the schema here: the update refuses any other.
+		foreach ( array_keys( $changes ) as $path ) {
+			if ( str_starts_with( $path, 'retention.' ) ) {
+				// The cached list of this site's snapshots previews the policy from before the change.
+				delete_transient( 'backups_for_restic_snapshots' );
+				break;
+			}
+		}
 		if ( $saved->string( 'retention.mode' ) !== $mode ) {
 			// An administrator chose the mode: that answers the proposal and the switch notice.
 			$this->state()->set( 'retention_proposal', [] );
@@ -359,7 +368,8 @@ final class Container {
 	 * The snapshot browser of the REST routes and the command line. Its reader shares the
 	 * index and tree cache of the jobs and takes a repository lock of its own for every read.
 	 * This site's snapshots are those with its host name and the two tags that the retention
-	 * selects them by (MaintenanceServices::retention_tags()).
+	 * selects them by (MaintenanceServices::retention_tags()). The browser gets the policy of
+	 * the next forget, so that the list of this site's snapshots previews what it removes.
 	 *
 	 * @return SnapshotBrowser|null Browser, or null if the repository has to be unlocked first.
 	 */
@@ -375,7 +385,7 @@ final class Container {
 		$cache  = $this->cache()->path . '/' . $repository->config()->id;
 		$limit  = $this->settings()->int( 'advanced.cache_limit_mib' ) * 1048576;
 		$reader = new Reader( $repository, $this->identity(), $this->clock(), new IndexCache( $cache, $limit ), new TreeCache( $cache, $limit ) );
-		return new SnapshotBrowser( $reader, $site->hostname(), [ PlanFactory::TAG, $site->site_tag() ] );
+		return new SnapshotBrowser( $reader, $site->hostname(), [ PlanFactory::TAG, $site->site_tag() ], RetentionSettings::preview( $this->settings() ), $this->clock() );
 	}
 
 	/**
@@ -524,6 +534,8 @@ final class Container {
 	public function switch_retention( string $mode ): void {
 		$this->settings_store()->update( [ 'retention.mode' => $mode ] );
 		$this->refresh();
+		// The cached list of this site's snapshots previews the mode from before the switch.
+		delete_transient( 'backups_for_restic_snapshots' );
 	}
 
 	/**

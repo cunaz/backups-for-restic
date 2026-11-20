@@ -1,11 +1,11 @@
 /**
  * The admin page in a browser, on a WordPress that was just installed: the setup wizard with
- * its first backup, then the dashboard, the snapshots, the settings and the recovery kit, and
- * a backup that is cancelled. What an administrator sees and clicks, nothing else: no request
+ * its first backup, then the dashboard, the snapshots with the browser of their files, the
+ * settings and the recovery kit, and a backup that is cancelled. What an administrator sees and clicks, nothing else: no request
  * is sent by the tests themselves.
  */
 const { test, expect } = require( '@playwright/test' );
-const { ADMIN, signIn, openBackups, repositoryServer, addUpload, removeUpload, noLoopback } = require( './site' );
+const { ADMIN, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback } = require( './site' );
 
 test.describe.configure( { mode: 'serial' } );
 
@@ -36,6 +36,34 @@ async function until( page, action, type, text ) {
 		await action();
 		await expect( notice( page, type, text ) ).toBeVisible( { timeout: 60 * 1000 } );
 	} ).toPass( { timeout: 5 * 60 * 1000 } );
+}
+
+/**
+ * Presses "Try again" if the page shows it. A read of the repository is refused for the
+ * moment in which a job of the heartbeat, such as the cleanup after a backup, holds the
+ * repository; the page then waits for the administrator.
+ *
+ * @param {import('@playwright/test').Page} page Page.
+ */
+async function pressTryAgain( page ) {
+	const again = page.getByRole( 'button', { name: 'Try again', exact: true } );
+	if ( await again.isVisible() ) {
+		await again.click( { timeout: 5 * 1000 } );
+	}
+}
+
+/**
+ * Waits for something that a read of the repository shows, and asks again whenever the
+ * repository was locked.
+ *
+ * @param {import('@playwright/test').Page}    page  Page.
+ * @param {import('@playwright/test').Locator} shown What the read shows when it succeeded.
+ */
+async function unlocked( page, shown ) {
+	await expect( async () => {
+		await pressTryAgain( page );
+		await expect( shown ).toBeVisible( { timeout: 10 * 1000 } );
+	} ).toPass( { timeout: 3 * 60 * 1000 } );
 }
 
 /**
@@ -119,9 +147,97 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	await expect( jobs.locator( 'tbody tr' ).filter( { hasText: 'Succeeded' } ).first() ).toBeVisible();
 
 	await page.locator( '.nav-tab-wrapper' ).getByRole( 'link', { name: 'Snapshots', exact: true } ).click();
-	const rows = page.locator( 'table tbody tr' );
-	await expect( rows ).toHaveCount( 1 );
+	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
+	await expect( async () => {
+		await pressTryAgain( page );
+		await expect( rows ).toHaveCount( 1, { timeout: 5 * 1000 } );
+	} ).toPass( { timeout: 3 * 60 * 1000 } );
 	await expect( rows.first().locator( 'code' ) ).toHaveText( snapshot );
+} );
+
+test( 'the snapshot browser shows the site of a snapshot and selects a file in it', async ( { page } ) => {
+	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
+	// The cleanup after the first backup holds the repository for a moment; an administrator
+	// would open the tab again.
+	await expect( async () => {
+		await openBackups( page, 'snapshots' );
+		await expect( rows ).toHaveCount( 1, { timeout: 20 * 1000 } );
+	} ).toPass( { timeout: 3 * 60 * 1000 } );
+
+	// This site's snapshots come first, each with what the next cleanup does with it.
+	await expect( page.getByLabel( 'This site' ) ).toBeChecked();
+	await expect( page.getByRole( 'columnheader', { name: 'Next cleanup' } ) ).toBeVisible();
+	await expect( rows.first().locator( '.bfr-retention' ) ).toHaveText( 'Will be kept' );
+
+	// The whole repository holds the same snapshot here; no cleanup of the site decides about that list.
+	await page.getByLabel( 'Whole repository' ).check();
+	await unlocked( page, page.getByText( 'These are all snapshots of the repository' ) );
+	await expect( rows ).toHaveCount( 1 );
+	await expect( page.getByRole( 'columnheader', { name: 'Next cleanup' } ) ).toHaveCount( 0 );
+	await page.getByLabel( 'This site' ).check();
+	await expect( page.getByRole( 'columnheader', { name: 'Next cleanup' } ) ).toBeVisible();
+
+	// The newest snapshot, with the site that it holds.
+	const id = await rows.first().locator( 'code' ).textContent();
+	await rows.first().getByRole( 'button', { name: 'Open snapshot ' + id } ).click();
+	await expect( page.getByRole( 'heading', { name: 'Snapshot ' + id, exact: true } ) ).toBeVisible();
+	const manifest = page.locator( '.bfr-manifest' );
+	await unlocked( page, manifest );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Site address' } ) ).toContainText( 'http://127.0.0.1:8890' );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'WordPress version' } ) ).toContainText( /\d+\.\d+/ );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Table prefix' } ) ).toContainText( /\w+_/ );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'WordPress directory' } ) ).toContainText( siteRoot() );
+
+	// From the top directory down to the one of WordPress, one directory per request. The
+	// entries are searched in the table only: the path above it names the same directories.
+	const entries = page.locator( '.bfr-entries' );
+	const trail = page.locator( '.bfr-trail' );
+	for ( const name of siteRoot().split( '/' ).filter( Boolean ) ) {
+		await unlocked( page, entries.getByRole( 'button', { name, exact: true } ) );
+		await entries.getByRole( 'button', { name, exact: true } ).click();
+		await expect( trail.locator( '[aria-current]' ) ).toHaveText( name, { timeout: 120 * 1000 } );
+	}
+
+	// A file is ticked and named in the selection, which stays while another directory is open.
+	const index = page.getByLabel( 'Select index.php', { exact: true } );
+	await unlocked( page, index );
+	await index.check();
+	const selection = page.locator( '.bfr-selection' );
+	await expect( selection ).toContainText( '1 path selected:' );
+	await expect( selection.locator( 'code' ) ).toHaveText( siteRoot() + '/index.php' );
+	await entries.getByRole( 'button', { name: 'wp-content', exact: true } ).click();
+	await expect( trail.locator( '[aria-current]' ) ).toHaveText( 'wp-content' );
+	// The plugins directory is in every site; WordPress creates the uploads directory only when it needs it.
+	const plugins = page.getByLabel( 'Select plugins', { exact: true } );
+	await unlocked( page, plugins );
+	await expect( selection ).toContainText( '1 path selected:' );
+
+	// A ticked directory holds what lies in it: its entries are ticked with it and counted once.
+	await plugins.check();
+	await expect( selection ).toContainText( '2 paths selected:' );
+	await entries.getByRole( 'button', { name: 'plugins', exact: true } ).click();
+	await expect( trail.locator( '[aria-current]' ) ).toHaveText( 'plugins' );
+	await unlocked( page, page.locator( '.bfr-covered' ) );
+	await expect( entries.locator( 'input[type="checkbox"]' ).first() ).toBeChecked();
+	await expect( entries.locator( 'input[type="checkbox"]' ).first() ).toBeDisabled();
+	await expect( selection ).toContainText( '2 paths selected:' );
+	await trail.getByRole( 'button' ).last().click();
+	await expect( trail.locator( '[aria-current]' ) ).toHaveText( 'wp-content' );
+	await unlocked( page, plugins );
+	await plugins.uncheck();
+	await expect( selection ).toContainText( '1 path selected:' );
+
+	// Back up by the path: the box is still ticked, until the selection is cleared.
+	await trail.getByRole( 'button' ).last().click();
+	await unlocked( page, index );
+	await expect( index ).toBeChecked();
+	await page.getByRole( 'button', { name: 'Clear selection' } ).click();
+	await expect( index ).not.toBeChecked();
+	await expect( selection ).toContainText( 'Nothing is selected.' );
+
+	await page.getByRole( 'button', { name: 'Back to the snapshots' } ).click();
+	await unlocked( page, rows.first() );
+	await expect( rows ).toHaveCount( 1 );
 } );
 
 test( 'settings are saved, refused when invalid, and the recovery kit needs the WordPress password', async ( { page } ) => {
