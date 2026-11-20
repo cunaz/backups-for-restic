@@ -31,6 +31,7 @@
 # override, as CI does. Everything else lives under .tools/site/. Development tooling only.
 # Set BFR_TEST_PLUGIN_DIR to install a copy of a built plugin package for browser tests.
 # A second site can use separate BFR_SITE_TOOLS_DIR, BFR_DB_NAME and BFR_SITE_PORT values.
+# BFR_WP_VERSION selects one of the checksum-pinned releases below.
 # BFR_DISABLE_WP_CRON=1 at install disables automatic cron for measured-worker benchmarks.
 #
 # The WordPress checksum was recorded after verifying the tarball against the SHA-1 that
@@ -40,8 +41,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS="${BFR_SITE_TOOLS_DIR:-$ROOT/.tools}"
 SITE="$TOOLS/site"
-WP_VERSION="7.1.4"
-WP_SHA256="881e53a4681ff2cd911651b11cccdede5ae477ddf0765af5d6a1a8b219a1d835"
+WP_VERSION="${BFR_WP_VERSION:-7.1.5}"
+case "$WP_VERSION" in
+	7.1.5) WP_SHA256=053857d980eaee8702c617c685948becb9be2523ba0dcbc98e4dbb2300367c79 ;;
+	7.0.9) WP_SHA256=786bf2fc7b2dfa0e2cc5d7833b1e360bfec304d56bae841626b5bb9863e5ac8c ;;
+	6.7.12) WP_SHA256=6a04d2e7f63a01c36f4ad042acb8d70064d5f29db443c18fb10577bbd23c85bc ;;
+	*) echo "Unsupported test fixture version: $WP_VERSION" >&2; exit 2 ;;
+esac
 DB_HOST="${BFR_DB_HOST:-localhost}"
 DB_NAME="${BFR_DB_NAME:-bfr_site}"
 DB_USER="${BFR_DB_USER:-bfr_site}"
@@ -64,16 +70,17 @@ admin_sql() {
 }
 
 install_site() {
-	mkdir -p "$TOOLS"
+	mkdir -p "$TOOLS" "$ROOT/.tools"
 	local archive="$ROOT/.tools/wordpress-$WP_VERSION.tar.gz"
 	if [ ! -f "$archive" ]; then
 		local work
-		work="$(mktemp -d "$TOOLS/download.XXXXXX")"
+		work="$(mktemp -d "$ROOT/.tools/download.XXXXXX")"
 		curl -fsSL --retry 3 -o "$work/file" "https://wordpress.org/wordpress-$WP_VERSION.tar.gz"
 		echo "$WP_SHA256  $work/file" | sha256sum --check --quiet -
 		mv "$work/file" "$archive"
 		rmdir "$work"
 	fi
+	echo "$WP_SHA256  $archive" | sha256sum --check --quiet -
 
 	rm -rf "$SITE"
 	mkdir -p "$SITE"
@@ -158,6 +165,7 @@ install_multisite() {
 	fi
 	rm -rf "$MS_SITE"
 	mkdir -p "$MS_SITE"
+	echo "$WP_SHA256  $archive" | sha256sum --check --quiet -
 	tar -xzf "$archive" -C "$MS_SITE" --strip-components=1
 
 	admin_sql "DROP DATABASE IF EXISTS \`$MS_DB_NAME\`;
