@@ -63,7 +63,8 @@ final class RestoreStepsTest extends TestCase {
 		$this->options   = new InMemoryOptions();
 		$this->server    = new InMemoryRestServer();
 		$this->clock     = new FrozenClock();
-		$this->jobs      = new JobStore( $this->directory . '/private/jobs', new Redactor(), new SystemRandom() );
+		( new PrivateDirectory( $this->directory . '/private' ) )->ensure();
+		$this->jobs = new JobStore( $this->directory . '/private/jobs', new Redactor(), new SystemRandom() );
 		( new SettingsStore( $this->options ) )->update(
 			[
 				'repository.url'  => 'https://backup.example.net:8000/site/',
@@ -152,8 +153,8 @@ final class RestoreStepsTest extends TestCase {
 	/**
 	 * @param list<string>|null $paths
 	 */
-	private function restore_job( string $snapshot, ?array $paths = null ): Job {
-		return $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, RestoreRequest::from_input( $snapshot, $paths )->to_data() );
+	private function restore_job( string $snapshot, ?array $paths = null, bool $archive = false ): Job {
+		return $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, RestoreRequest::from_input( $snapshot, $paths, $archive )->to_data() );
 	}
 
 	/**
@@ -165,6 +166,22 @@ final class RestoreStepsTest extends TestCase {
 
 	private function staging( Job $job ): string {
 		return $this->directory . '/private/restores/' . $job->id;
+	}
+
+	public function test_a_zip_of_selected_files_is_built_in_resumable_ticks(): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot, [ $this->site . '/hello.txt' ], true );
+		$building = $this->drive( $job, static fn ( Job $pending ): bool => ( $pending->progress['archive_bytes'] ?? 0 ) > 0 );
+		self::assertFalse( $building->state->is_terminal() );
+		self::assertFileDoesNotExist( $this->staging( $job ) . '/selection.zip' );
+		self::assertSame( [], $this->locks(), 'Local ZIP creation needs no repository lock.' );
+		$done = $this->drive( $job );
+		self::assertSame( JobState::Succeeded, $done->state );
+		$zip = (string) file_get_contents( $this->staging( $job ) . '/selection.zip' );
+		self::assertStringStartsWith( "PK\x03\x04", $zip );
+		self::assertStringContainsString( 'Hello from the site.', $zip );
+		self::assertStringNotContainsString( 'empty.txt', $zip );
+		self::assertSame( [], $done->warnings );
 	}
 
 	public function test_a_backup_and_a_restore_in_many_short_ticks_stage_identical_bytes(): void {

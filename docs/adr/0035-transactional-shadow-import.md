@@ -1,5 +1,5 @@
 # 0035 · Import database batches and their progress in one transaction
-Status: accepted; base-table import implemented, schema mapping, cleanup, apply and job integration pending
+Status: accepted. Restore jobs can rehearse base-table imports and clean their temporary tables.
 Date: 2026-11-12
 
 ## Context
@@ -67,12 +67,8 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
 
 ## Scope of this first implementation
 `TableImporter` prepares base-table data only. Its `done` result means that table loading
-finished, not that the database is ready for live apply. It is not exposed through WordPress
-jobs, REST or CLI yet. Foreign keys and unsupported schema constructs fail explicitly.
-Manifest views are retained for planning, not executed or counted as restored. Mapped
-constraints/views, bounded shadow cleanup, the report, original-engine/comment finalization,
-confirmed swap, plugin-state preservation and undo remain required before the restore
-release is complete. Maintenance belongs to the later swap; live tables stay in use here.
+finished, not that the database is ready for live apply. Restore jobs accept the boolean `database_preview` through REST and `--database-preview` through WP-CLI. Foreign keys and unsupported schema constructs fail explicitly.
+Manifest views are retained for planning, not executed or counted as restored. Mapped constraints/views, original-engine/comment finalization, confirmed swap, plugin-state preservation and undo remain open. Maintenance belongs to the later swap; live tables stay in use here.
 
 The dump writer also selects insertable columns explicitly, including invisible columns,
 and distinguishes expression defaults (`DEFAULT_GENERATED`) from virtual/stored generated
@@ -99,6 +95,28 @@ including schema defaults/comments and complete restoration of the site's sessio
 Session cleanup writes `foreign_key_checks`, `unique_checks` and `sql_quote_show_create`
 as validated numeric 0/1;
 binary string literals containing those characters are not accepted boolean settings.
+
+## Rehearsing a staged database
+
+An administrator can request a database preview when restoring the whole snapshot or a
+selection that includes its complete database directory. After staging, the job resolves
+the original spool location from the snapshot's site manifest and checks the database
+inventory against the current table prefix. The runner saves the random ownership token,
+inventory hash and table count before a later tick creates any private SQL table.
+
+A completed rehearsal writes `database-preview.json` beside the staged files. It records
+the original site address, prefix, verified row counts per snapshot base table, and the
+server's estimated row counts for current tables. Views are listed separately. A schema
+or charset the server cannot recreate ends the rehearsal before it reports success.
+The job's result includes the verified base-table and row totals and the report path.
+
+Cleanup checks the generated name and ownership comment before dropping each shadow and
+removes the progress ledger last. Cancelled jobs use the same operation. A killed tick
+can repeat its last cleanup cursor. When a database connection failure outlasts a job,
+the heartbeat resumes cleanup from the job's binding. History pruning retains these jobs.
+Other backups wait so that an all-tables dump cannot include another job's shadow data.
+Uninstall completes pending cleanup before removing the binding. If a database administrator
+revoked DROP, restore the privilege and retry.
 
 ## Verification
 Unit tests cover the SQL grammar and limits, unsafe commands, trailer and source replacement

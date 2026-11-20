@@ -214,6 +214,22 @@ final class DownloadTokensTest extends TestCase {
 		self::assertTrue( $tokens->redeem( $token, 'file' ) );
 	}
 
+	public function test_a_token_cannot_be_redeemed_without_exclusive_access(): void {
+		$tokens = $this->tokens();
+		$token  = $tokens->issue( 'file' );
+		$lock   = $this->directory . '/download-tokens.lock';
+		unlink( $lock );
+		mkdir( $lock );
+		try {
+			$tokens->redeem( $token, 'file' );
+			self::fail( 'Redemption must stop when the lock is unavailable.' );
+		} catch ( StorageFailed ) {
+			self::assertCount( 1, $this->stored() );
+		}
+		rmdir( $lock );
+		self::assertTrue( $tokens->redeem( $token, 'file' ) );
+	}
+
 	public function test_the_store_is_read_and_written_under_a_lock_that_other_requests_wait_for(): void {
 		// The clock is asked while the store is read, so it sees what another request would see.
 		$clock  = new class( $this->directory . '/download-tokens.lock' ) implements Clock {

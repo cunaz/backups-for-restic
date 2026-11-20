@@ -126,6 +126,8 @@ final class JobControlTest extends TestCase {
 				],
 			],
 			[ 'DELETE', '/cache', null ],
+			[ 'DELETE', '/repository/ca-certificate', null ],
+			[ 'POST', '/repository/ca-certificate', [ 'pem' => (string) file_get_contents( TestSite::server()->certificate ) ] ],
 			[ 'POST', '/jobs', [ 'type' => 'check' ] ],
 		];
 		foreach ( $requests as [ $method, $route, $data ] ) {
@@ -231,6 +233,27 @@ final class JobControlTest extends TestCase {
 		self::assertSame( $before['last_backup']['snapshot'], $after['last_backup']['snapshot'] ?? null, 'It is the same repository: what the plugin remembers about it stays.' );
 		[ , $settings ] = TestSite::api( 'GET', '/settings' );
 		self::assertSame( 64, strlen( (string) ( $settings['values']['repository.id'] ?? '' ) ), 'The unlock recorded which repository it opened.' );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_a_refused_certificate_setting_restores_the_original_file(): void {
+		TestSite::idle( 600 );
+		$file = TestSite::private_dir() . '/ca.pem';
+		$hash = hash_file( 'sha256', $file );
+
+		$status = TestSite::php(
+			'
+			wp_set_current_user( 1 );
+			add_filter( "pre_update_option_backups_for_restic_settings", static fn ( $new, $old ) => $old, 10, 2 );
+			$request = new WP_REST_Request( "DELETE", "/backups-for-restic/v1/repository/ca-certificate" );
+			echo rest_do_request( $request )->get_status();
+			'
+		);
+
+		self::assertSame( '500', trim( $status ) );
+		self::assertSame( $hash, hash_file( 'sha256', $file ) );
+		[ , $settings ] = TestSite::api( 'GET', '/settings' );
+		self::assertSame( 'uploaded', $settings['values']['repository.ca_certificate'] ?? null );
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]

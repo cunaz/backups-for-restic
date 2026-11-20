@@ -110,7 +110,8 @@ final class DownloadTokens {
 				// The oldest tokens give way, so that a full store never refuses a download.
 				usort( $records, static fn ( array $one, array $other ): int => $one['expires'] <=> $other['expires'] );
 				$this->write( array_slice( $records, -max( 1, $this->limit ) ) );
-			}
+			},
+			true
 		);
 		return $token;
 	}
@@ -126,7 +127,7 @@ final class DownloadTokens {
 	 * @throws StorageFailed If the store cannot be written; the token is then not used up.
 	 */
 	public function redeem( string $token, string $subject ): bool {
-		if ( self::TOKEN_LENGTH !== strlen( $token ) || self::TOKEN_LENGTH !== strspn( $token, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_' ) ) {
+		if ( ! is_file( $this->file() ) || self::TOKEN_LENGTH !== strlen( $token ) || self::TOKEN_LENGTH !== strspn( $token, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_' ) ) {
 			return false;
 		}
 		$hash    = hash( 'sha256', $token );
@@ -151,7 +152,8 @@ final class DownloadTokens {
 					$this->write( $kept );
 				}
 				return $found;
-			}
+			},
+			true
 		);
 	}
 

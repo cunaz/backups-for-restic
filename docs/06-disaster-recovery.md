@@ -1,13 +1,9 @@
 # 06 · Disaster recovery
 
-This guide is written for the worst day. It assumes nothing about the state of the
-WordPress site. Every procedure uses only the **recovery kit** and the public `restic`
-program on any computer. The plugin itself cannot restore yet: restore from the admin area
-is planned for Milestone 3 ([`02-architecture.md`](02-architecture.md) §9) and will be built
-on exactly these steps. Repositories created by the plugin use restic repository format
-version 1, which every restic release since 0.9 reads. The commands of the kit and of this
-guide need restic 0.16.1 or newer, because older releases do not read
-`RESTIC_REST_USERNAME` and `RESTIC_REST_PASSWORD`; use a current one.
+If WordPress still runs, restore files to private staging from the Backups page and
+download them there. If the server is gone, use the recovery kit and the public restic
+command line on another computer. The kit's commands require restic 0.16.1 or newer for
+the REST credential environment variables. Repositories created by the plugin use format 1.
 
 ## The recovery kit
 
@@ -32,10 +28,10 @@ Restore without WordPress, on any computer with restic 0.16.1 or newer:
   export RESTIC_REST_USERNAME='site'
   export RESTIC_REST_PASSWORD='<REST password>'
   export RESTIC_PASSWORD='<repository password>'
-  restic snapshots --host example.com
-  restic restore latest --host example.com --target ./restore
+  restic snapshots --host 'example.com' --tag 'backups-for-restic,site:100680ad546c'
+  restic restore latest --host 'example.com' --tag 'backups-for-restic,site:100680ad546c' --target ./restore
 
-The database is in the snapshot under the plugin's spool/database folder. Import its .sql files in name order, for example: cat *.sql | mariadb <database>
+The database is in the snapshot under the plugin's spool/database folder. In that directory, import the .sql files into an empty database in name order. Replace recovered_site with its name: cat ./*.sql | mariadb recovered_site
 Keep this kit away from the website, for example in a password manager.
 ```
 
@@ -52,17 +48,30 @@ used for a connection test is not in it until that server is saved.
 
 ## Scenario A — the site is damaged, WordPress and the plugin still work
 
-The plugin lists the snapshots and shows the files of each one, under
-**Backups → Snapshots** and with WP-CLI:
+1. Open **Backups → Snapshots**, select the snapshot and tick the files or directories
+   you need. **Select entire snapshot** includes every path.
+2. Choose **Build a ZIP for download** if you want one archive. Its size is about the
+   total size of the staged files. Select **Restore to staging** to start the job.
+3. Follow progress under **Backups → Restores**. Download a file by its absolute path
+   in the snapshot, or download the ZIP you requested. The restore report lists skipped
+   entries such as symbolic links.
+4. To put the staged files back, expand **Restore files to the live site** and choose
+   **Preview live file changes**. Read the actions and live paths. A site administrator
+   who can update WordPress core can acknowledge the preview, type the site's address and
+   enter their WordPress password to apply the files. The site's file modification policy
+   must permit this operation. Review a fresh preview if the files changed.
+5. The **Restores** tab lists available undo jobs and their expiry times. Choose
+   **Preview undo**, review the actions, then confirm to return the affected files to
+   their previous state. Use **Delete staged files** to remove the private downloads
+   when you are finished.
+
+Through WP-CLI, list snapshots and stage the paths you need. Replace the example
+snapshot ID and file path with the ones from your backup.
 
 ```bash
 wp backups-for-restic snapshots
+wp backups-for-restic restore 0123abcd /var/www/html/index.php --wait
 ```
-
-It cannot restore them yet. Restore single files as in Scenario C, the database as in
-Scenario D, or everything as in Scenario B from step 2, with restic on any computer. Restore
-from the admin area and with WP-CLI (to a staging directory first, then applied to the live
-site) is planned for Milestone 3.
 
 ## Scenario B — the server is gone
 
@@ -82,8 +91,12 @@ site) is planned for Milestone 3.
 2. **Find the snapshot**:
 
    ```bash
-   restic snapshots --host example.com --tag backups-for-restic
+   restic snapshots --host example.com --tag 'backups-for-restic,site:100680ad546c'
    ```
+
+   Use the host and tag from the original site's kit. If you connected the repository from a
+   new address and only have its kit, list the whole repository with `restic snapshots`.
+   Verify the source hostname, site tag, backup time and paths, then use the full snapshot ID.
 
 3. **Restore everything to a scratch directory**:
 
@@ -119,9 +132,8 @@ site) is planned for Milestone 3.
    series continues. Two things can be missing:
 
    - The CA certificate of a server with its own certificate authority. The plugin keeps it
-     in its private directory, which is not part of the backup, and the settings page has no
-     field for it. Save the certificate from the kit as `ca.pem` in that directory (by
-     default `wp-content/backups-for-restic/`).
+     in its private directory. Under **Backups → Settings**, upload the PEM certificate from
+     the recovery kit using **Upload certificate**.
    - The security keys. If jobs fail with "The stored passwords can no longer be decrypted.",
      `wp-config.php` has other keys than before: see Scenario E.
 
@@ -132,9 +144,26 @@ site) is planned for Milestone 3.
    in the background (this can take a few minutes on shared hosting) and lists the old
    snapshots under **Backups → Snapshots**.
 
-A "fresh install import" in the wizard, which would do steps 4 to 6 through the admin area
-after WordPress and the plugin are installed, does not exist yet; it is planned for
-Milestone 3.
+To recover content onto a newly installed WordPress, connect the existing repository in
+the setup wizard. After saving the recovery kit, choose **Restore from an existing site
+snapshot**. The same action is available under **Backups → Restores**.
+
+1. Choose the source site's snapshot from the whole repository. Verify its site address,
+   date and content path. This flow requires a backup that includes a site manifest and
+   database dump.
+2. Choose **Stage site files and rehearse the database restore**. The rehearsal imports
+   base tables into temporary tables and verifies them. Inspect the database rehearsal to
+   see verified rows, live estimates, engines, collations and compatibility findings. Select
+   the optional ZIP before staging to obtain the source SQL files for manual recovery.
+   MariaDB installations that refuse the protected live rename require a manual database
+   import as described in Scenario D.
+3. Preview the staged files. The **Snapshot path** and **Live path** columns show how the
+   source content and uploads map to this installation. Review and confirm the file apply
+   as in Scenario A. Preview and apply cover up to 1,000 entries and 64 MiB of staged
+   and existing file contents combined.
+4. To move the database into production, use the separate database recovery procedure with
+   the staged dump and verify the retained site address, administrator and plugin settings
+   before directing visitors to the recovered site.
 
 ## Scenario C — a single file or folder
 

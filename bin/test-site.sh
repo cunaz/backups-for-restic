@@ -29,6 +29,8 @@
 # Needs a running MySQL or MariaDB server. The database administrator defaults to root over
 # the local socket; set BFR_DB_ADMIN_USER and BFR_DB_ADMIN_PASSWORD (and BFR_DB_HOST) to
 # override, as CI does. Everything else lives under .tools/site/. Development tooling only.
+# Set BFR_TEST_PLUGIN_DIR to install a copy of a built plugin package for browser tests.
+# A second site can use separate BFR_SITE_TOOLS_DIR, BFR_DB_NAME and BFR_SITE_PORT values.
 # BFR_DISABLE_WP_CRON=1 at install disables automatic cron for measured-worker benchmarks.
 #
 # The WordPress checksum was recorded after verifying the tarball against the SHA-1 that
@@ -36,7 +38,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOOLS="$ROOT/.tools"
+TOOLS="${BFR_SITE_TOOLS_DIR:-$ROOT/.tools}"
 SITE="$TOOLS/site"
 WP_VERSION="7.1.4"
 WP_SHA256="881e53a4681ff2cd911651b11cccdede5ae477ddf0765af5d6a1a8b219a1d835"
@@ -63,7 +65,7 @@ admin_sql() {
 
 install_site() {
 	mkdir -p "$TOOLS"
-	local archive="$TOOLS/wordpress-$WP_VERSION.tar.gz"
+	local archive="$ROOT/.tools/wordpress-$WP_VERSION.tar.gz"
 	if [ ! -f "$archive" ]; then
 		local work
 		work="$(mktemp -d "$TOOLS/download.XXXXXX")"
@@ -110,7 +112,12 @@ install_site() {
 		file_put_contents( $site . "/wp-config.php", $config );
 	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"
 
-	ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
+	if [ -n "${BFR_TEST_PLUGIN_DIR:-}" ]; then
+		test -f "$BFR_TEST_PLUGIN_DIR/backups-for-restic.php"
+		cp -R "$BFR_TEST_PLUGIN_DIR" "$SITE/wp-content/plugins/backups-for-restic"
+	else
+		ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
+	fi
 	mkdir -p "$SITE/wp-content/mu-plugins"
 	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
 	ln -s "$ROOT/bin/test-site-hostile-filters.php" "$SITE/wp-content/mu-plugins/test-site-hostile-filters.php"
@@ -144,7 +151,7 @@ install_site() {
 }
 
 install_multisite() {
-	local archive="$TOOLS/wordpress-$WP_VERSION.tar.gz"
+	local archive="$ROOT/.tools/wordpress-$WP_VERSION.tar.gz"
 	if [ ! -f "$archive" ] || [ ! -x "$TOOLS/bin/wp" ]; then
 		echo "Run bin/test-site.sh install and bin/install-test-tools.sh wp-cli first." >&2
 		exit 1

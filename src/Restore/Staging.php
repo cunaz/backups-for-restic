@@ -9,6 +9,9 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Restore;
 
+use BackupsForRestic\Engine\Restore\Names;
+use BackupsForRestic\Engine\Snapshot\Path;
+use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\StorageFailed;
@@ -18,6 +21,7 @@ use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Restore\RestoreServices;
 use BackupsForRestic\Support\Clock;
+use BackupsForRestic\Storage\FileLock;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -37,6 +41,9 @@ defined( 'ABSPATH' ) || exit;
  * never holds up a request, and nothing half removed is ever listed.
  */
 final class Staging {
+
+	/** The optional report from the database rehearsal. */
+	public const string DATABASE_REPORT = 'database-preview.json';
 
 	/** Starts the name of a staging directory whose removal has begun. No job ID starts so. */
 	public const string REMOVING = '.removing-';
@@ -59,6 +66,18 @@ final class Staging {
 	}
 
 	/**
+	 * Serializes the start of a live file job with staging removal and expiry.
+	 *
+	 * @template T
+	 * @param \Closure(): T $work Operation.
+	 * @param-immediately-invoked-callable $work
+	 * @return T Result.
+	 */
+	public function guard( \Closure $work ): mixed {
+		return ( new FileLock( dirname( $this->directory ) . '/staging.lock' ) )->hold( $work, true );
+	}
+
+	/**
 	 * The staging directories of restores that succeeded and have not expired, newest first.
 	 * One that expired is not listed, even before a heartbeat came to remove it.
 	 *
@@ -68,6 +87,124 @@ final class Staging {
 	 */
 	public function listing( int $hours ): array {
 		return $this->survey( $hours )['kept'];
+	}
+
+	/**
+	 * Locates the verified files/ directory of a complete, unexpired restore.
+	 *
+	 * @param string $id    Job ID.
+	 * @param int    $hours Staging lifetime.
+	 * @param bool   $retained Allow pinned files for an active file change or undo.
+	 * @return string|null Canonical directory, or null when unavailable.
+	 */
+	public function files_directory( string $id, int $hours, bool $retained = false ): ?string {
+		if ( null === $this->available( $id, $hours, $retained ) ) {
+			return null;
+		}
+		$files = $this->directory . '/' . $id . '/files';
+		$real  = realpath( $files );
+		return false !== $real && ! is_link( $files ) && is_dir( $files ) ? $real : null;
+	}
+
+	/**
+	 * Checks the same eligibility for listing, preview and download.
+	 *
+	 * @param string $id    Job ID.
+	 * @param int    $hours Staging lifetime.
+	 * @param bool   $retained Allow pinned files for an active file change or undo.
+	 * @return StagedRestore|null A usable restore.
+	 */
+	private function available( string $id, int $hours, bool $retained = false ): ?StagedRestore {
+		clearstatcache( true );
+		if ( 1 !== preg_match( JobStore::ID_PATTERN, $id ) || is_link( $this->directory ) ) {
+			return null;
+		}
+		$job = $this->jobs->get( $id );
+		if ( null === $job && $this->jobs->has_document( $id ) ) {
+			return null;
+		}
+		$staged = $this->describe( $id, $job, $hours );
+		$now    = $this->clock->now()[0];
+		return null !== $staged && ( $staged->expires > $now || ( $retained && isset( $this->jobs->pinned_restores( $now )[ $id ] ) ) ) ? $staged : null;
+	}
+
+	/**
+	 * Opens one regular file in a successful, unexpired restore. The caller streams the
+	 * handle already inspected here, even if the next heartbeat removes the directory.
+	 *
+	 * @param string $id    Restore job ID.
+	 * @param int    $hours Configured staging lifetime.
+	 * @param string $kind  file, report or archive.
+	 * @param string $path  Absolute snapshot path, empty for a report or archive.
+	 * @param bool   $retained Allow an active job to use pinned staging.
+	 * @return resource|null Open handle, or null for anything unavailable.
+	 */
+	public function open_download( string $id, int $hours, string $kind, string $path, bool $retained = false ) {
+		$staged = $this->available( $id, $hours, $retained );
+		if ( null === $staged ) {
+			return null;
+		}
+		$root = $this->directory . '/' . $id;
+		$file = match ( $kind ) {
+			'file'    => self::payload( $root, $path ),
+			'report'  => '' === $path && null !== $staged->report ? $root . '/' . RestoreServices::REPORT : null,
+			'archive' => '' === $path && $staged->archive ? $root . '/' . RestoreServices::ARCHIVE : null,
+			'database_report' => '' === $path && $staged->database_report ? $root . '/' . self::DATABASE_REPORT : null,
+			default   => null,
+		};
+		if ( null === $file || ! self::regular( $file ) ) {
+			return null;
+		}
+		$before = lstat( $file );
+		$handle = fopen( $file, 'rb' );
+		if ( false === $handle ) {
+			return null;
+		}
+		$opened = fstat( $handle );
+		if ( false === $before || false === $opened || 1 !== $opened['nlink'] || 0100000 !== ( $opened['mode'] & 0170000 ) || $before['dev'] !== $opened['dev'] || $before['ino'] !== $opened['ino'] ) {
+			fclose( $handle );
+			return null;
+		}
+		return $handle;
+	}
+
+	/**
+	 * Resolves one path through existing staging directories without following a link.
+	 *
+	 * @param string $root Job's staging directory.
+	 * @param string $path Absolute snapshot path.
+	 * @return string|null Regular staged file, if present.
+	 */
+	private static function payload( string $root, string $path ): ?string {
+		if ( str_ends_with( $path, '/' ) ) {
+			return null;
+		}
+		$file = $root . '/files';
+		try {
+			foreach ( Path::parts( $path ) as $part ) {
+				Names::validate( $part );
+				clearstatcache( true, $file );
+				if ( is_link( $file ) || ! is_dir( $file ) ) {
+					return null;
+				}
+				$file .= '/' . $part;
+			}
+		} catch ( FormatException | InvalidArgument ) {
+			return null;
+		}
+		return self::regular( $file ) ? $file : null;
+	}
+
+	/**
+	 * Checks the entry itself, including whether a second hard link exists.
+	 *
+	 * @param string $file File in staging.
+	 * @return bool Whether this is an ordinary file with one name.
+	 */
+	private static function regular( string $file ): bool {
+		clearstatcache( true, $file );
+		$stat = is_file( $file ) && ! is_link( $file ) ? lstat( $file ) : false;
+		return false !== $stat && 0100000 === ( $stat['mode'] & 0170000 ) && 1 === $stat['nlink'];
 	}
 
 	/**
@@ -98,6 +235,28 @@ final class Staging {
 	 * @throws StorageFailed If the directory cannot be set aside or deleted.
 	 */
 	public function remove( string $id, float $deadline ): ?bool {
+		if ( ! is_dir( dirname( $this->directory ) ) ) {
+			if ( 1 !== preg_match( JobStore::ID_PATTERN, $id ) ) {
+				InvalidArgument::raise( 'This is not the ID of a job.', [ 'code' => 'invalid_job_id' ] );
+			}
+			return null;
+		}
+		return $this->guard( fn (): ?bool => $this->remove_one( $id, $deadline ) );
+	}
+
+	/**
+	 * Removes staging under the lifecycle lock.
+	 *
+	 * @param string $id Job ID.
+	 * @param float  $deadline Deletion deadline.
+	 * @return bool|null Removal result.
+	 * @throws JobConflict If this staging belongs to an active change or its undo window.
+	 */
+	private function remove_one( string $id, float $deadline ): ?bool {
+		$this->require_root();
+		if ( isset( $this->jobs->pinned_restores( $this->clock->now()[0] )[ $id ] ) ) {
+			throw new JobConflict( 'A live file change still needs this staging for apply or undo.' );
+		}
 		// The ID becomes part of a path: nothing but the form of a job ID gets that far.
 		if ( 1 !== preg_match( JobStore::ID_PATTERN, $id ) ) {
 			InvalidArgument::raise( 'This is not the ID of a job.', [ 'code' => 'invalid_job_id' ] );
@@ -145,6 +304,37 @@ final class Staging {
 	 * @throws StorageFailed If restores/ cannot be listed.
 	 */
 	public function remove_due( int $hours, float $deadline ): array {
+		if ( ! is_dir( dirname( $this->directory ) ) ) {
+			return [
+				'removed' => 0,
+				'pending' => 0,
+				'failed'  => 0,
+			];
+		}
+		return $this->guard( fn (): array => $this->expire( $hours, $deadline ) );
+	}
+
+	/**
+	 * Deletes due staging and expired undo workspaces under the lifecycle lock.
+	 *
+	 * @param int   $hours Staging lifetime.
+	 * @param float $deadline Deletion deadline.
+	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
+	 */
+	private function expire( int $hours, float $deadline ): array {
+		$active = $this->jobs->active();
+		foreach ( $this->jobs->file_changes() as $job ) {
+			if ( $this->late( $deadline ) ) {
+				break;
+			}
+			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) ) {
+				continue;
+			}
+			$undo = $this->jobs->directory( $job ) . '/undo';
+			if ( $job->finished_at + 86400 <= $this->clock->now()[0] || is_file( $undo . '/reverted' ) || ! is_file( $undo . '/attempted' ) ) {
+				$this->delete( $undo, $deadline );
+			}
+		}
 		$survey  = $this->survey( $hours );
 		$removed = 0;
 		$pending = 0;
@@ -196,6 +386,7 @@ final class Staging {
 		$due      = [];
 		$removing = [];
 		$now      = $this->clock->now()[0];
+		$pins     = $this->jobs->pinned_restores( $now );
 		foreach ( $this->entries() as $name ) {
 			if ( str_starts_with( $name, self::REMOVING ) && 1 === preg_match( JobStore::ID_PATTERN, substr( $name, strlen( self::REMOVING ) ) ) ) {
 				$removing[] = $name;
@@ -210,7 +401,9 @@ final class Staging {
 			}
 			$staged = $this->describe( $name, $job, $hours );
 			if ( null === $staged || $now >= $staged->expires ) {
-				$due[] = $name;
+				if ( ! isset( $pins[ $name ] ) ) {
+					$due[] = $name;
+				}
 			} else {
 				$kept[] = $staged;
 			}
@@ -238,21 +431,26 @@ final class Staging {
 	private function describe( string $id, ?Job $job, int $hours ): ?StagedRestore {
 		$path = $this->directory . '/' . $id;
 		// A link or a file under the name of a job is no staging, whatever the job says.
+		clearstatcache( true, $path );
 		if ( is_link( $path ) || ! is_dir( $path ) ) {
 			return null;
 		}
-		$staging  = basename( $this->directory ) . '/' . $id;
-		$file     = $path . '/' . RestoreServices::REPORT;
-		$report   = is_file( $file ) && ! is_link( $file ) ? $staging . '/' . RestoreServices::REPORT : null;
-		$lifetime = 3600 * max( 1, $hours );
+		$staging         = basename( $this->directory ) . '/' . $id;
+		$file            = $path . '/' . RestoreServices::REPORT;
+		$database_report = self::regular( $path . '/' . self::DATABASE_REPORT );
+		$archive         = self::regular( $path . '/' . RestoreServices::ARCHIVE );
+		$report          = self::regular( $file ) ? $staging . '/' . RestoreServices::REPORT : null;
+		$lifetime        = 3600 * max( 1, $hours );
 		if ( null === $job ) {
-			return null === $report ? null : new StagedRestore( $id, null, null, self::created( $id ) + $lifetime, null, null, $staging, $report );
+			return null === $report ? null : new StagedRestore( $id, null, null, self::created( $id ) + $lifetime, null, null, $staging, $report, $archive, null, $database_report );
 		}
 		if ( JobType::Restore !== $job->type || JobState::Succeeded !== $job->state ) {
 			return null;
 		}
 		$finished = $job->finished_at > 0 ? $job->finished_at : null;
 		$snapshot = $job->result['snapshot'] ?? null;
+		$paths    = $job->data['paths'] ?? null;
+		$selected = is_array( $paths ) && 1 === count( $paths ) && is_string( $paths[0] ?? null ) ? $paths[0] : null;
 		return new StagedRestore(
 			$id,
 			is_string( $snapshot ) && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $snapshot ) ? $snapshot : null,
@@ -261,7 +459,11 @@ final class Staging {
 			self::count( $job->result['files'] ?? null ),
 			self::count( $job->result['bytes'] ?? null ),
 			$staging,
-			$report
+			$report,
+			$archive,
+			null !== $selected && null !== self::payload( $path, $selected ) ? $selected : null,
+			$database_report,
+			true === ( $job->data['fresh_install'] ?? false )
 		);
 	}
 
@@ -368,12 +570,25 @@ final class Staging {
 	}
 
 	/**
+	 * Checks the staging root before listing or removing names beneath it.
+	 *
+	 * @throws StorageFailed If the root has become a link.
+	 */
+	private function require_root(): void {
+		clearstatcache( true, $this->directory );
+		if ( is_link( $this->directory ) ) {
+			StorageFailed::raise( 'The staging root is a symbolic link.' );
+		}
+	}
+
+	/**
 	 * The names in restores/, newest job first.
 	 *
 	 * @return list<string> Names without the two dot entries.
 	 * @throws StorageFailed If the directory cannot be listed.
 	 */
 	private function entries(): array {
+		$this->require_root();
 		if ( ! is_dir( $this->directory ) ) {
 			return [];
 		}

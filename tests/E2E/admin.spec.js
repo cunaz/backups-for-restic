@@ -4,10 +4,16 @@
  * settings and the recovery kit, and a backup that is cancelled. What an administrator sees and clicks, nothing else: no request
  * is sent by the tests themselves.
  */
+const fs = require( 'node:fs' );
+const { URL } = require( 'node:url' );
+const path = require( 'node:path' );
 const { test, expect } = require( '@playwright/test' );
-const { ADMIN, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback } = require( './site' );
+const { ADMIN, freshSite, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback } = require( './site' );
 
 test.describe.configure( { mode: 'serial' } );
+
+const SOURCE_UPLOAD = 'bfr-acceptance-source.txt';
+const SOURCE_BYTES = 'Uploaded to the source installation before its first backup.\n';
 
 /**
  * A notice of the plugin's page with a text.
@@ -111,6 +117,7 @@ test( 'the wizard sets the site up and runs the first backup', async ( { page } 
 	const kit = page.locator( '.bfr-kit textarea' );
 	await expect( kit ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/, { timeout: 120 * 1000 } );
 	await expect( kit ).toHaveValue( /-----BEGIN CERTIFICATE-----/ );
+	await expect( kit ).toHaveValue( /RESTIC_REST_PASSWORD='rest user'\\''s password'/ );
 
 	// The kit has to be acknowledged.
 	await page.getByRole( 'button', { name: 'Continue', exact: true } ).click();
@@ -122,9 +129,17 @@ test( 'the wizard sets the site up and runs the first backup', async ( { page } 
 	await page.getByLabel( 'Back up', { exact: true } ).selectOption( 'daily' );
 	await page.getByLabel( 'Hour', { exact: true } ).fill( '3' );
 	await page.getByLabel( 'Minute', { exact: true } ).fill( '17' );
-	await page.getByRole( 'button', { name: 'Save and run the first backup' } ).click();
-	await expect( page.getByText( 'The first backup uploads everything once' ) ).toBeVisible();
-	await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 8 * 60 * 1000 } );
+	const uploads = path.join( siteRoot(), 'wp-content/uploads' );
+	fs.mkdirSync( uploads, { recursive: true } );
+	const file = path.join( uploads, SOURCE_UPLOAD );
+	fs.writeFileSync( file, SOURCE_BYTES, { flag: 'wx' } );
+	try {
+		await page.getByRole( 'button', { name: 'Save and run the first backup' } ).click();
+		await expect( page.getByText( 'The first backup uploads everything once' ) ).toBeVisible();
+		await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 8 * 60 * 1000 } );
+	} finally {
+		fs.unlinkSync( file );
+	}
 
 	await page.getByRole( 'link', { name: 'Go to the dashboard' } ).click();
 	await expect( page.getByRole( 'heading', { name: 'Last backup', exact: true } ) ).toBeVisible();
@@ -155,7 +170,7 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	await expect( rows.first().locator( 'code' ) ).toHaveText( snapshot );
 } );
 
-test( 'the snapshot browser shows the site of a snapshot and selects a file in it', async ( { page } ) => {
+test( 'a selected snapshot file can be staged and downloaded', async ( { page } ) => {
 	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
 	// The cleanup after the first backup holds the repository for a moment; an administrator
 	// would open the tab again.
@@ -183,7 +198,7 @@ test( 'the snapshot browser shows the site of a snapshot and selects a file in i
 	await expect( page.getByRole( 'heading', { name: 'Snapshot ' + id, exact: true } ) ).toBeVisible();
 	const manifest = page.locator( '.bfr-manifest' );
 	await unlocked( page, manifest );
-	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Site address' } ) ).toContainText( 'http://127.0.0.1:8890' );
+	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Site address' } ) ).toContainText( new URL( page.url() ).origin );
 	await expect( manifest.locator( 'tr' ).filter( { hasText: 'WordPress version' } ) ).toContainText( /\d+\.\d+/ );
 	await expect( manifest.locator( 'tr' ).filter( { hasText: 'Table prefix' } ) ).toContainText( /\w+_/ );
 	await expect( manifest.locator( 'tr' ).filter( { hasText: 'WordPress directory' } ) ).toContainText( siteRoot() );
@@ -199,12 +214,12 @@ test( 'the snapshot browser shows the site of a snapshot and selects a file in i
 	}
 
 	// A file is ticked and named in the selection, which stays while another directory is open.
-	const index = page.getByLabel( 'Select index.php', { exact: true } );
-	await unlocked( page, index );
-	await index.check();
+	const license = page.getByLabel( 'Select license.txt', { exact: true } );
+	await unlocked( page, license );
+	await license.check();
 	const selection = page.locator( '.bfr-selection' );
 	await expect( selection ).toContainText( '1 path selected:' );
-	await expect( selection.locator( 'code' ) ).toHaveText( siteRoot() + '/index.php' );
+	await expect( selection.locator( 'code' ) ).toHaveText( siteRoot() + '/license.txt' );
 	await entries.getByRole( 'button', { name: 'wp-content', exact: true } ).click();
 	await expect( trail.locator( '[aria-current]' ) ).toHaveText( 'wp-content' );
 	// The plugins directory is in every site; WordPress creates the uploads directory only when it needs it.
@@ -229,13 +244,88 @@ test( 'the snapshot browser shows the site of a snapshot and selects a file in i
 
 	// Back up by the path: the box is still ticked, until the selection is cleared.
 	await trail.getByRole( 'button' ).last().click();
-	await unlocked( page, index );
-	await expect( index ).toBeChecked();
+	await unlocked( page, license );
+	await expect( license ).toBeChecked();
 	await page.getByRole( 'button', { name: 'Clear selection' } ).click();
-	await expect( index ).not.toBeChecked();
+	await expect( license ).not.toBeChecked();
 	await expect( selection ).toContainText( 'Nothing is selected.' );
+	await page.getByRole( 'button', { name: 'Select entire snapshot' } ).click();
+	await expect( page.getByLabel( 'Rehearse the database import in temporary tables.' ) ).toBeVisible();
+	await page.getByRole( 'button', { name: 'Clear selection' } ).click();
 
-	await page.getByRole( 'button', { name: 'Back to the snapshots' } ).click();
+	await license.check();
+	await expect( page.getByLabel( 'Rehearse the database import in temporary tables.' ) ).toHaveCount( 0 );
+	await page.getByLabel( 'Build a ZIP for download', { exact: false } ).check();
+	await page.getByRole( 'button', { name: 'Restore to staging' } ).click();
+	await expect( page.getByRole( 'heading', { name: 'Staged restores' } ) ).toBeVisible();
+	const staged = page.locator( 'section.bfr-card' ).filter( { hasText: 'Download ZIP' } );
+	await expect( staged ).toBeVisible( { timeout: 4 * 60 * 1000 } );
+	await expect( staged.getByLabel( 'Absolute file path in the snapshot' ) ).toHaveValue( siteRoot() + '/license.txt' );
+
+	const downloads = {};
+	for ( const name of [ 'Download file', 'Download ZIP', 'Download restore report' ] ) {
+		const pending = page.waitForEvent( 'download' );
+		await staged.getByRole( 'button', { name, exact: true } ).click();
+		const downloaded = await pending;
+		expect( await downloaded.failure() ).toBeNull();
+		downloads[ name ] = fs.readFileSync( await downloaded.path() );
+	}
+	expect( downloads[ 'Download file' ] ).toEqual( fs.readFileSync( siteRoot() + '/license.txt' ) );
+	expect( downloads[ 'Download ZIP' ].subarray( 0, 4 ).toString( 'hex' ) ).toBe( '504b0304' );
+	expect( downloads[ 'Download restore report' ].toString() ).toContain( 'license.txt' );
+} );
+
+test( 'live apply and undo require a current preview and confirmation', async ( { page } ) => {
+	await openBackups( page, 'restores' );
+	const staged = page.locator( 'section.bfr-card' ).filter( { hasText: 'Download ZIP' } );
+	const file = siteRoot() + '/license.txt';
+	const original = fs.readFileSync( file );
+	const revision = 'Local change on the disposable test site.\n';
+	const url = new URL( page.url() ).origin;
+	async function confirm( form, label, address, password ) {
+		await form.getByLabel( 'I have reviewed these changes to the live site.' ).check();
+		await form.getByLabel( 'Type the site address to confirm' ).fill( address );
+		await form.getByLabel( 'Your WordPress password' ).fill( password );
+		await form.getByRole( 'button', { name: label, exact: true } ).click();
+	}
+
+	try {
+		fs.writeFileSync( file, 'Before the preview.\n' );
+		await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
+		const preview = staged.getByRole( 'button', { name: 'Preview live file changes' } );
+		await preview.click();
+		await expect( staged.getByRole( 'cell', { name: 'Replace file', exact: true } ) ).toBeVisible();
+
+		const apply = 'Apply to live site';
+		await confirm( staged, apply, url + '/another-site', ADMIN.password );
+		await expect( staged ).toContainText( 'type the exact site address' );
+		await confirm( staged, apply, url, 'incorrect' );
+		await expect( staged ).toContainText( 'Your WordPress password was not correct.' );
+
+		fs.writeFileSync( file, revision );
+		await confirm( staged, apply, url, ADMIN.password );
+		await expect( staged ).toContainText( 'review a fresh preview', { ignoreCase: true } );
+		expect( fs.readFileSync( file, 'utf8' ) ).toBe( revision );
+
+		await preview.click();
+		await confirm( staged, apply, url, ADMIN.password );
+		await expect.poll( () => fs.readFileSync( file ), { timeout: 120000 } ).toEqual( original );
+
+		const undo = page.locator( 'section.bfr-card' ).filter( { hasText: 'Preview undo' } );
+		await undo.getByRole( 'button', { name: 'Preview undo' } ).click();
+		await confirm( undo, 'Undo live file changes', url, ADMIN.password );
+		await expect.poll( () => fs.readFileSync( file, 'utf8' ), { timeout: 120000 } ).toBe( revision );
+	} finally {
+		fs.writeFileSync( file, original );
+	}
+
+	await staged.getByRole( 'button', { name: 'Delete staged files' } ).click();
+	await staged.getByRole( 'button', { name: 'Keep files' } ).click();
+	await staged.getByRole( 'button', { name: 'Delete staged files' } ).click();
+	await staged.getByRole( 'button', { name: 'Confirm deletion' } ).click();
+	await expect( page.getByText( 'No staged files.', { exact: false } ) ).toBeVisible();
+	await page.getByRole( 'link', { name: 'Snapshots', exact: true } ).click();
+	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
 	await unlocked( page, rows.first() );
 	await expect( rows ).toHaveCount( 1 );
 } );
@@ -348,6 +438,92 @@ test( 'the browser checks the working directory where the site cannot request it
 	await expect( page.locator( '.bfr-checks' ) ).toContainText( 'The working directory is protected' );
 } );
 
+test( 'a fresh installation can import a source snapshot and keep its own configuration', async ( { page, browser, request } ) => {
+	// Read the source repository password from the kit through the regular admin screen.
+	await openBackups( page, 'settings' );
+	await page.getByLabel( 'Your WordPress password', { exact: true } ).fill( ADMIN.password );
+	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
+	const kit = page.locator( '.bfr-kit textarea' );
+	await expect( kit ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/ );
+	const password = ( await kit.inputValue() ).match( /RESTIC_PASSWORD='([A-Za-z0-9_-]{32})'/ )[ 1 ];
+	await page.close();
+
+	const target = await freshSite();
+	const context = await browser.newContext( { baseURL: target.url } );
+	try {
+		const destination = await context.newPage();
+		const configFile = path.join( target.root, 'wp-config.php' );
+		const configuration = fs.readFileSync( configFile );
+		const upload = path.join( target.root, 'wp-content/uploads', SOURCE_UPLOAD );
+		await signIn( destination );
+		await openBackups( destination );
+		await destination.getByRole( 'button', { name: 'Continue', exact: true } ).click();
+		const server = repositoryServer();
+		await destination.getByLabel( 'Repository URL' ).fill( server.url );
+		await destination.getByLabel( 'REST username' ).fill( server.username );
+		await destination.getByLabel( 'REST password' ).fill( server.password );
+		await destination.getByLabel( 'CA certificate for a self-signed server (optional, PEM)' ).fill( server.certificate );
+		await destination.getByRole( 'button', { name: 'Test connection' } ).click();
+		await destination.getByRole( 'button', { name: 'Save and continue' } ).click();
+		await destination.getByLabel( 'Repository password', { exact: true } ).fill( password );
+		await destination.getByRole( 'button', { name: 'Connect', exact: true } ).click();
+		await destination.getByLabel( 'I have stored the recovery kit outside this server.' ).check( { timeout: 120000 } );
+		await destination.getByRole( 'button', { name: 'Restore from an existing site snapshot' } ).click();
+		const row = destination.getByRole( 'button', { name: /Open snapshot/ } ).first();
+		await unlocked( destination, row );
+		await row.click();
+		await expect( destination.locator( '.bfr-manifest' ) ).toContainText( siteRoot() + '/wp-content' );
+		await destination.getByRole( 'button', { name: 'Stage site files and rehearse the database restore' } ).click();
+		const staged = destination.locator( 'section.bfr-card' ).filter( { hasText: 'Download database rehearsal report' } );
+		await expect( staged ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+		expect( fs.existsSync( upload ) ).toBe( false );
+		await staged.getByRole( 'button', { name: 'Inspect database rehearsal' } ).click();
+		const options = staged.locator( '.bfr-database-tables tbody tr' ).filter( { has: destination.getByRole( 'cell', { name: 'wp_options', exact: true } ) } );
+		await expect( options ).toBeVisible();
+		expect( Number( await options.locator( 'td' ).nth( 1 ).innerText() ) ).toBeGreaterThan( 0 );
+
+		// A setting of the receiving installation differs from the source.
+		const settings = await context.newPage();
+		await openBackups( settings, 'settings' );
+		await settings.getByLabel( 'Keep one snapshot per day, for this many days' ).fill( '13' );
+		await settings.getByLabel( 'Continue jobs with loopback requests' ).selectOption( 'off' );
+		await settings.getByRole( 'button', { name: 'Save settings' } ).click();
+		await expect( notice( settings, 'success', 'Settings saved.' ) ).toBeVisible();
+		async function apply() {
+			await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
+			await expect( staged.getByLabel( 'Include wp-config.php in the preview.' ) ).toHaveCount( 0 );
+			await staged.getByRole( 'button', { name: 'Preview live file changes' } ).click();
+			await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible();
+			await expect( staged.getByRole( 'columnheader', { name: 'Live path' } ) ).toBeVisible();
+			await staged.getByLabel( 'I have reviewed these changes to the live site.' ).check();
+			await staged.getByLabel( 'Type the site address to confirm' ).fill( target.url );
+			await staged.getByLabel( 'Your WordPress password' ).fill( ADMIN.password );
+			await staged.getByRole( 'button', { name: 'Apply to live site' } ).click();
+		}
+		await apply();
+		// This destination advances only through the open, authenticated control page.
+		// The prepared marker is held between ticks, including while cancellation is requested.
+		const marker = path.join( target.root, '.maintenance' );
+		await expect.poll( () => fs.existsSync( marker ), { timeout: 60000, intervals: [ 50, 100 ] } ).toBe( true );
+		const cookie = ( await context.cookies( target.url ) ).find( ( entry ) => entry.name === 'bfr_file_control' );
+		expect( cookie ).toMatchObject( { httpOnly: true, sameSite: 'Strict', path: '/' } );
+		expect( ( await request.get( target.url + '/' ) ).status() ).toBe( 503 );
+		await destination.getByRole( 'button', { name: 'Cancel', exact: true } ).click();
+		await expect( notice( destination, 'info', 'Cancelled' ) ).toBeVisible();
+		expect( fs.existsSync( marker ) ).toBe( false );
+		expect( ( await request.get( target.url + '/' ) ).status() ).toBe( 200 );
+		await apply();
+		await expect( notice( destination, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+		expect( fs.readFileSync( upload, 'utf8' ) ).toBe( SOURCE_BYTES );
+		expect( fs.readFileSync( configFile ) ).toEqual( configuration );
+		await settings.reload();
+		await expect( settings.getByLabel( 'Keep one snapshot per day, for this many days' ) ).toHaveValue( '13' );
+	} finally {
+		await context.close();
+		target.remove();
+	}
+} );
+
 test( 'a running backup is cancelled from the dashboard', async ( { page } ) => {
 	// More new data than one tick of twenty seconds gets through on any machine: a request to
 	// cancel that arrives once the snapshot is written no longer stops the job.
@@ -374,4 +550,48 @@ test( 'a running backup is cancelled from the dashboard', async ( { page } ) => 
 	} finally {
 		removeUpload( 'cancelled.bin' );
 	}
+} );
+
+test( 'a files-only snapshot still restores individual files', async ( { page } ) => {
+	await openBackups( page, 'settings' );
+	await page.getByLabel( 'Back up the database', { exact: true } ).uncheck();
+	await page.getByRole( 'button', { name: 'Save settings' } ).click();
+	await expect( notice( page, 'success', 'Settings saved.' ) ).toBeVisible();
+	await openBackups( page );
+	const last = card( page, 'Last backup' );
+	const previous = ( await last.innerText() ).match( /Snapshot [0-9a-f]{8}/ )[ 0 ];
+	await page.getByRole( 'button', { name: 'Back up now' } ).click();
+	await expect( last ).not.toContainText( previous, { timeout: 6 * 60 * 1000 } );
+	await expect( last ).toContainText( /Snapshot [0-9a-f]{8}/ );
+	const id = ( await last.innerText() ).match( /Snapshot ([0-9a-f]{8})/ )[ 1 ];
+
+	await openBackups( page, 'restores' );
+	await page.getByRole( 'link', { name: 'Restore from an existing site snapshot' } ).click();
+	const choose = page.getByRole( 'button', { name: 'Open snapshot ' + id } );
+	await unlocked( page, choose );
+	await choose.click();
+	await unlocked( page, page.locator( '.bfr-manifest' ) );
+	await expect( notice( page, 'warning', 'This import requires a site manifest and a database backup.' ) ).toBeVisible();
+	await expect( page.getByRole( 'button', { name: 'Stage site files and rehearse the database restore' } ) ).toHaveCount( 0 );
+
+	await openBackups( page, 'snapshots' );
+	await unlocked( page, choose );
+	await choose.click();
+	await unlocked( page, page.locator( '.bfr-manifest' ) );
+	for ( const name of siteRoot().split( '/' ).filter( Boolean ) ) {
+		const directory = page.locator( '.bfr-entries' ).getByRole( 'button', { name, exact: true } );
+		await unlocked( page, directory );
+		await directory.click();
+	}
+	const license = page.getByLabel( 'Select license.txt', { exact: true } );
+	await unlocked( page, license );
+	await license.check();
+	await page.getByRole( 'button', { name: 'Restore to staging' } ).click();
+	await expect( notice( page, 'success', 'Restored 1 file to staging' ) ).toBeVisible( { timeout: 120000 } );
+	const staged = page.locator( 'section.bfr-card' ).filter( { hasText: id } ).first();
+	const pending = page.waitForEvent( 'download' );
+	await staged.getByRole( 'button', { name: 'Download file', exact: true } ).click();
+	const downloaded = await pending;
+	expect( await downloaded.failure() ).toBeNull();
+	expect( fs.readFileSync( await downloaded.path() ) ).toEqual( fs.readFileSync( path.join( siteRoot(), 'license.txt' ) ) );
 } );

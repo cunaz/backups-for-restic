@@ -96,9 +96,37 @@ final class Messages {
 				'message' => __( 'The stored passwords can no longer be decrypted.', 'backups-for-restic' ),
 				'hint'    => __( 'The security keys in wp-config.php probably changed. Enter the passwords again.', 'backups-for-restic' ),
 			],
+			'staging_unverified'             => [
+				'message' => __( 'The restore stopped because the privacy of its staging directory could not be verified.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
+			],
 			'environment'                    => [
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
 				'hint'    => __( 'The checks on the Environment tab show what is missing.', 'backups-for-restic' ),
+			],
+			'database_preview_missing' => [
+				'message' => __( 'The staged selection does not contain the complete database dump.', 'backups-for-restic' ),
+				'hint' => __( 'Select the whole database directory or restore the whole snapshot.', 'backups-for-restic' ),
+			],
+			'database_restore_prefix' => [
+				'message' => __( 'The database dump uses another table prefix.', 'backups-for-restic' ),
+				'hint' => __( 'Rehearse this snapshot on a site with its original table prefix. You can also download the staged SQL files for a manual restore.', 'backups-for-restic' ),
+			],
+			'database_restore_collation' => [
+				'message' => __( 'The destination database cannot use a character set or collation in this snapshot.', 'backups-for-restic' ),
+				'hint' => __( 'Compare the source and destination database versions. Use a compatible database to import the staged SQL files.', 'backups-for-restic' ),
+			],
+			'database_restore_privilege' => [
+				'message' => __( 'The database account lacks permission to rehearse this snapshot.', 'backups-for-restic' ),
+				'hint' => __( 'The rehearsal creates, reads, inserts, updates and drops its own temporary InnoDB tables in the WordPress database. Your database administrator can verify the account permissions.', 'backups-for-restic' ),
+			],
+			'database_restore_format' => [
+				'message' => __( 'The SQL dump could not be verified by the database rehearsal.', 'backups-for-restic' ),
+				'hint' => __( 'The job log explains which part of the dump was refused. Stage the snapshot without a database rehearsal to download its SQL files.', 'backups-for-restic' ),
+			],
+			'database_restore_failed' => [
+				'message' => __( 'The database rehearsal could not finish.', 'backups-for-restic' ),
+				'hint' => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
 			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
@@ -202,6 +230,10 @@ final class Messages {
 				/* translators: %s: size such as 50 MB. */
 				sprintf( __( 'Only %s are free; at least 128 MB are needed.', 'backups-for-restic' ), $bytes )
 			),
+			'private_directory/unavailable'              => self::pair(
+				__( 'The private working directory could not be initialized', 'backups-for-restic' ),
+				__( 'Set BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php to a dedicated, writable directory outside the web root. Use an empty directory for a new installation.', 'backups-for-restic' )
+			),
 			'private_directory/exposed'                  => self::pair(
 				__( 'The working directory can be read from the web', 'backups-for-restic' ),
 				__( 'Your web server ignores the protection files. Backups stay disabled until BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php points to a directory outside the web root.', 'backups-for-restic' )
@@ -299,6 +331,8 @@ final class Messages {
 			'checking'    => __( 'Checking the repository', 'backups-for-restic' ),
 			'planning'    => __( 'Counting the files to restore', 'backups-for-restic' ),
 			'restoring'   => __( 'Restoring files to the staging directory', 'backups-for-restic' ),
+			'applying'    => __( 'Applying the reviewed live file changes', 'backups-for-restic' ),
+			'undoing'     => __( 'Restoring the previous live files', 'backups-for-restic' ),
 			'recording'   => __( 'Recording the result', 'backups-for-restic' ),
 			'releasing'   => __( 'Releasing the repository', 'backups-for-restic' ),
 			'cleaning_up' => __( 'Cleaning up', 'backups-for-restic' ),
@@ -344,6 +378,8 @@ final class Messages {
 			'prune'   => __( 'Prune', 'backups-for-restic' ),
 			'check'   => __( 'Check', 'backups-for-restic' ),
 			'restore' => __( 'Restore', 'backups-for-restic' ),
+			'apply'   => __( 'Apply staged files', 'backups-for-restic' ),
+			'undo'    => __( 'Undo file changes', 'backups-for-restic' ),
 			default   => $type,
 		};
 	}

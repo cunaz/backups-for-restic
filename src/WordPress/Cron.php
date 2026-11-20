@@ -177,6 +177,12 @@ final class Cron {
 		}
 		self::exclusively( $container, static fn () => $container->notifier()->heartbeat( time() ) );
 		self::expire_staging( $container );
+		try {
+			$container->clean_database_previews( false, microtime( true ) + self::STAGING_SECONDS );
+		} catch ( PluginException ) {
+			// The job retains the ownership evidence until the database accepts cleanup.
+			return;
+		}
 	}
 
 	/**

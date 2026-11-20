@@ -13,6 +13,7 @@ use BackupsForRestic\WordPress\AdminPage;
 use BackupsForRestic\WordPress\CliCommand;
 use BackupsForRestic\WordPress\Container;
 use BackupsForRestic\WordPress\Cron;
+use BackupsForRestic\WordPress\Downloads;
 use BackupsForRestic\WordPress\RestRoutes;
 use BackupsForRestic\WordPress\SiteHealth;
 
@@ -57,6 +58,7 @@ final class Plugin {
 		}
 
 		Cron::register( $container );
+		( new Downloads( $container ) )->register();
 		add_action(
 			'rest_api_init',
 			static function () use ( $container ): void {

@@ -16,8 +16,10 @@ use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Restore\RestoreRequest;
+use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Settings\Schema;
+use BackupsForRestic\Support\GoQuote;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -154,6 +156,9 @@ final class CliCommand {
 	 * [--archive]
 	 * : Also prepare a ZIP download of the staged files.
 	 *
+	 * [--database-preview]
+	 * : Rehearse importing the selected complete database dump into temporary tables.
+	 *
 	 * [--wait]
 	 * : Run the restore in this process and print the staging directory.
 	 *
@@ -176,7 +181,7 @@ final class CliCommand {
 			\WP_CLI::error( Messages::snapshot_error( SnapshotBrowser::failure( $e )[0] )['message'] );
 		}
 		try {
-			$request = RestoreRequest::from_input( $snapshot, isset( $args[1] ) ? array_slice( $args, 1 ) : null, isset( $assoc_args['archive'] ) );
+			$request = RestoreRequest::from_input( $snapshot, isset( $args[1] ) ? array_slice( $args, 1 ) : null, isset( $assoc_args['archive'] ), isset( $assoc_args['database-preview'] ) );
 		} catch ( \BackupsForRestic\Exception\InvalidArgument $e ) {
 			\WP_CLI::error( __( 'Choose up to 256 absolute paths inside the snapshot.', 'backups-for-restic' ) );
 		}
@@ -299,6 +304,104 @@ final class CliCommand {
 			}
 		} catch ( PluginException $e ) {
 			\WP_CLI::error( Messages::snapshot_error( SnapshotBrowser::failure( $e )[0] )['message'] );
+		}
+	}
+
+	/**
+	 * Previews file changes for an unexpired staged restore, one JSON object per entry.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <job>
+	 * : ID of a successful restore job.
+	 *
+	 * [--include-wp-config]
+	 * : Include wp-config.php in the preview.
+	 *
+	 * @subcommand apply-plan
+	 * @param list<string>          $args       Restore job ID.
+	 * @param array<string, string> $assoc_args Options.
+	 */
+	public function apply_plan( array $args, array $assoc_args ): void {
+		$id      = $args[0] ?? '';
+		$staging = $this->container->staging();
+		$hours   = $this->container->settings()->int( 'restore.staging_expiry_hours' );
+		$files   = $staging->files_directory( $id, $hours );
+		if ( null === $files ) {
+			\WP_CLI::error( __( 'This restore has no available staging directory.', 'backups-for-restic' ) );
+		}
+		$refused = false;
+		try {
+			$plan   = $this->container->apply_plan( isset( $assoc_args['include-wp-config'] ), $id );
+			$report = $staging->open_download( $id, $hours, 'report', '' );
+			if ( null === $report ) {
+				\WP_CLI::error( __( 'The staging report is unavailable.', 'backups-for-restic' ) );
+			}
+			try {
+				foreach ( ApplyManifest::report( $report ) as $entry ) {
+					if ( ! in_array( $entry['type'], [ 'dir', 'file' ], true ) ) {
+						$destination = $plan->destination( $entry['path'] );
+						\WP_CLI::line(
+							(string) wp_json_encode(
+								[
+									'path'        => GoQuote::quote( $entry['path'] ),
+									'action'      => 'skip',
+									'destination' => null === $destination ? null : GoQuote::quote( $destination ),
+									'reason'      => 'unstaged_special_entry',
+								],
+								JSON_UNESCAPED_SLASHES
+							)
+						);
+					}
+				}
+			} finally {
+				fclose( $report ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Close the verified native stream returned by Staging.
+			}
+			foreach ( $plan->actions( $files, true ) as $entry ) {
+				$refused              = $refused || 'refuse' === $entry['action'];
+				$entry['path']        = GoQuote::quote( $entry['path'] );
+				$entry['destination'] = null === $entry['destination'] ? null : GoQuote::quote( $entry['destination'] );
+				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
+			}
+		} catch ( PluginException $error ) {
+			\WP_CLI::error( $error->getMessage() );
+		}
+		if ( $refused ) {
+			\WP_CLI::error( __( 'The preview contains refused entries.', 'backups-for-restic' ) );
+		}
+	}
+
+	/**
+	 * Reviews and reverses the file changes of an apply job.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <apply-job>
+	 * : ID of the original apply job.
+	 *
+	 * [--yes]
+	 * : Confirm the displayed undo without a prompt.
+	 *
+	 * @param list<string>         $args Apply job.
+	 * @param array<string,string> $assoc_args Confirmation options.
+	 */
+	public function undo( array $args, array $assoc_args ): void {
+		$id      = $args[0] ?? '';
+		$service = $this->container->file_changes();
+		try {
+			$preview = $service->preview_undo( $id );
+			foreach ( $preview['entries'] as $entry ) {
+				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
+			}
+			if ( ! $preview['applicable'] ) {
+				\WP_CLI::error( __( 'The current live files cannot be safely reverted.', 'backups-for-restic' ) );
+			}
+			\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ), $assoc_args );
+			$job = $service->start_undo( $id, $preview['digest'] );
+			$this->run_until_idle( $this->container->tick_budget() );
+			$this->report( $job->id );
+		} catch ( PluginException $error ) {
+			\WP_CLI::error( $error->getMessage() );
 		}
 	}
 
@@ -464,7 +567,7 @@ final class CliCommand {
 			\WP_CLI::error( Messages::state( $job->state->value ) );
 		}
 		$result = $job->result;
-		if ( isset( $result['skipped'] ) ) {
+		if ( is_string( $result['skipped'] ?? null ) ) {
 			\WP_CLI::warning( Messages::job_error( 'append_only' === $result['skipped'] ? 'repository_append_only' : 'retention_external' )['message'] );
 			return;
 		}
@@ -476,6 +579,7 @@ final class CliCommand {
 			JobType::Check   => $this->report_check( $result ),
 			/* translators: %s: restore directory under the private directory. */
 			JobType::Restore => \WP_CLI::success( sprintf( __( 'Files staged in %s.', 'backups-for-restic' ), (string) $result['staging'] ) ),
+			JobType::Undo => \WP_CLI::success( __( 'The confirmed file changes were reverted.', 'backups-for-restic' ) ),
 			/* translators: %s: snapshot ID. */
 			default         => \WP_CLI::success( sprintf( __( 'Backup finished: snapshot %s.', 'backups-for-restic' ), substr( (string) ( $result['snapshot'] ?? '' ), 0, 8 ) ) ),
 		};

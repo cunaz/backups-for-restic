@@ -26,7 +26,7 @@ final class Job {
 	 * change that a version without the change would misread; a document with a higher number
 	 * is not loaded.
 	 */
-	public const int SCHEMA = 1;
+	public const int SCHEMA = 2;
 
 	/**
 	 * Where the job is in its life.

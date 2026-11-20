@@ -121,6 +121,28 @@ final class JobDocumentTest extends TestCase {
 		self::assertFalse( $changed );
 	}
 
+	public function test_an_unfinished_database_cleanup_survives_pruning_and_blocks_another_backup(): void {
+		$store      = $this->store();
+		$job        = $store->create( JobType::Restore, 'cli', 1767225600, [ 'database_binding' => [ 'pending' => true ] ] );
+		$job->state = JobState::Failed;
+		$store->save( $job );
+		$newer        = new Job( '20260102T000000Z-abcdef', JobType::Backup, 'manual', 1767312000 );
+		$newer->state = JobState::Succeeded;
+		$store->save( $newer );
+		self::assertSame( 0, $store->prune( 1 ) );
+		self::assertSame( [ $job->id ], array_map( static fn ( Job $pending ): string => $pending->id, iterator_to_array( $store->pending_database_cleanups( false ) ) ) );
+		try {
+			$store->create( JobType::Backup, 'manual', 1767312100 );
+			self::fail( 'A backup must not see temporary tables of an interrupted preview.' );
+		} catch ( JobConflict $expected ) {
+			self::assertSame( $job->id, $expected->context()['job'] );
+		}
+		unset( $job->data['database_binding'] );
+		$store->save( $job );
+		self::assertSame( [], iterator_to_array( $store->pending_database_cleanups( false ) ) );
+		self::assertSame( 1, $store->prune( 1 ) );
+	}
+
 	public function test_a_newer_document_is_kept_even_if_its_raw_state_looks_terminal(): void {
 		$store = $this->store();
 		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );

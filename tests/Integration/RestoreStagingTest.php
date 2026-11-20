@@ -47,7 +47,7 @@ final class RestoreStagingTest extends TestCase {
 	 *
 	 * @return array{int, array<mixed>, string} Status, decoded body, raw body.
 	 */
-	private static function request( string $snapshot ): array {
+	private static function request( string $snapshot, bool $archive = false ): array {
 		return TestSite::api(
 			'POST',
 			'/jobs',
@@ -55,6 +55,7 @@ final class RestoreStagingTest extends TestCase {
 				'type'     => 'restore',
 				'snapshot' => $snapshot,
 				'paths'    => [ self::fixture() ],
+				'archive'  => $archive,
 			]
 		);
 	}
@@ -64,9 +65,9 @@ final class RestoreStagingTest extends TestCase {
 	 *
 	 * @return array<mixed> Job.
 	 */
-	private static function restore( string $snapshot ): array {
+	private static function restore( string $snapshot, bool $archive = false ): array {
 		TestSite::idle( 600 );
-		[ $status, $started, $raw ] = self::request( $snapshot );
+		[ $status, $started, $raw ] = self::request( $snapshot, $archive );
 		self::assertSame( 201, $status, $raw );
 		$job = TestSite::wait_for( (string) $started['job']['id'], 1800 );
 		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
@@ -109,6 +110,71 @@ final class RestoreStagingTest extends TestCase {
 		$snapshot = (string) ( $listed['snapshots'][0]['id'] ?? '' );
 		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $snapshot, $raw );
 		return $snapshot;
+	}
+
+	/**
+	 * Redeems the issued form as an anonymous browser, including its attachment headers.
+	 *
+	 * @param array<mixed> $form Validated fields returned by the plugin.
+	 * @return array{int, string, string} Status, headers and body.
+	 */
+	private function redeem( array $form ): array {
+		$url = $form['url'] ?? null;
+		self::assertSame( TestSite::URL . '/wp-admin/admin-post.php', $url );
+		self::assertIsArray( $form['fields'] ?? null );
+		$handle = curl_init( $url );
+		curl_setopt_array(
+			$handle,
+			[
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_HEADER         => true,
+				CURLOPT_POSTFIELDS     => http_build_query( $form['fields'] ),
+				CURLOPT_TIMEOUT        => 30,
+			]
+		);
+		$raw = curl_exec( $handle );
+		self::assertIsString( $raw );
+		$split = (int) curl_getinfo( $handle, CURLINFO_HEADER_SIZE );
+		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), substr( $raw, 0, $split ), substr( $raw, $split ) ];
+	}
+
+	#[Depends( 'test_the_site_has_a_snapshot_to_restore_from' )]
+	public function test_single_use_downloads_serve_only_the_issued_staged_content( string $snapshot ): void {
+		$job    = self::restore( $snapshot, true );
+		$id     = (string) $job['id'];
+		$route  = '/restores/' . $id . '/download';
+		$file   = self::fixture() . '/file-0.bin';
+		$staged = TestSite::private_dir() . '/restores/' . $id;
+		self::assertTrue( self::listed( $id )[0]['archive'] ?? false );
+		$before             = hash_file( 'sha256', $file );
+		[ $exit, $preview ] = TestSite::wp( [ 'backups-for-restic', 'apply-plan', $id ] );
+		self::assertSame( 0, $exit, $preview );
+		// The development installation symlinks its plugin to the checkout, which can
+		// contain the entire fixture site. The production ZIP installs only the plugin.
+		$plugin    = realpath( TestSite::root() . '/wp-content/plugins/backups-for-restic' );
+		$protected = false !== $plugin && str_starts_with( $file, $plugin . '/' );
+		self::assertStringContainsString( $protected ? '"reason":"protected"' : '"reason":"identical_contents"', $preview );
+		self::assertSame( $before, hash_file( 'sha256', $file ) );
+		foreach ( [ [ 'file', $file, $staged . '/files' . $file ], [ 'archive', '', $staged . '/selection.zip' ], [ 'report', '', $staged . '/entries.jsonl' ] ] as [ $kind, $path, $expected ] ) {
+			[ $issued, $form ] = TestSite::api(
+				'POST',
+				$route,
+				[
+					'kind' => $kind,
+					'path' => $path,
+				]
+			);
+			self::assertSame( 200, $issued );
+			[ $status, $headers, $bytes ] = $this->redeem( $form );
+			self::assertSame( 200, $status );
+			self::assertStringContainsString( 'Content-Disposition: attachment;', $headers );
+			self::assertSame( hash_file( 'sha256', $expected ), hash( 'sha256', $bytes ) );
+			self::assertSame( 403, $this->redeem( $form )[0] );
+		}
+		[ $issued, $form ] = TestSite::api( 'POST', $route, [ 'kind' => 'archive' ] );
+		self::assertSame( 200, $issued );
+		self::assertSame( 200, TestSite::api( 'DELETE', '/restores/' . $id )[0] );
+		self::assertSame( 404, $this->redeem( $form )[0], 'A token cannot serve removed staging.' );
 	}
 
 	#[Depends( 'test_the_site_has_a_snapshot_to_restore_from' )]

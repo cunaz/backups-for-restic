@@ -14,6 +14,7 @@ use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
@@ -73,6 +74,12 @@ final class RestRoutes {
 			'/restores'                                  => [ 'GET', 'restores' ],
 			// Any name reaches the route, so that a malformed ID is answered with its own error.
 			'/restores/(?P<id>[^/]+)'                    => [ 'DELETE', 'remove_restore' ],
+			'/restores/(?P<id>[^/]+)/download'           => [ 'POST', 'download' ],
+			'/restores/(?P<id>[^/]+)/apply-plan'         => [ 'POST', 'apply_preview' ],
+			'/restores/(?P<id>[^/]+)/apply'              => [ 'POST', 'apply_files' ],
+			'/undo'                                      => [ 'GET', 'undoable' ],
+			'/undo/(?P<id>[^/]+)/plan'                   => [ 'POST', 'undo_preview' ],
+			'/undo/(?P<id>[^/]+)'                        => [ 'POST', 'undo_files' ],
 			'/settings'                                  => [ 'GET', 'settings', 'PUT', 'update_settings' ],
 			'/cache'                                     => [ 'DELETE', 'clear_cache' ],
 			'/repository/test'                           => [ 'POST', 'test_repository' ],
@@ -89,7 +96,7 @@ final class RestRoutes {
 				$endpoints[] = [
 					'methods'             => $method,
 					'callback'            => fn ( \WP_REST_Request $request ): mixed => $this->answer( \Closure::fromCallable( [ $this, $callback ] ), $request ),
-					'permission_callback' => [ self::class, 'allowed' ],
+					'permission_callback' => in_array( $callback, [ 'apply_files', 'undo_files' ], true ) ? [ self::class, 'live_writes_allowed' ] : [ self::class, 'allowed' ],
 				];
 			}
 			register_rest_route( self::NAMESPACE, $path, $endpoints );
@@ -220,13 +227,17 @@ final class RestRoutes {
 	 * @return \WP_REST_Response Response.
 	 */
 	public function environment( \WP_REST_Request $request ): \WP_REST_Response {
-		$checks = [];
+		$checks          = [];
+		$directory_ready = true;
 		foreach ( $this->container->doctor( self::flag( $request, 'fresh' ) ) as $check ) {
 			$checks[] = $check->to_array() + Messages::check( $check );
+			if ( 'private_directory' === $check->id && 'unavailable' === $check->code ) {
+				$directory_ready = false;
+			}
 		}
 		try {
 			// The site could not request itself: the admin page lets the browser look.
-			$browser = $this->container->exposure()->needs_browser();
+			$browser = $directory_ready && $this->container->exposure()->needs_browser();
 		} catch ( PluginException ) {
 			$browser = false;
 		}
@@ -246,10 +257,11 @@ final class RestRoutes {
 	public function begin_probe(): \WP_REST_Response|\WP_Error {
 		try {
 			$exposure = $this->container->exposure();
-			if ( null === $exposure->probe_url( 'x' ) ) {
+			$location = $exposure->probe_url( '' );
+			if ( null === $location ) {
 				return $this->respond( [ 'url' => null ] );
 			}
-			$probe = $this->container->browser_probe()->begin();
+			$probe = $this->container->browser_probe()->begin( $location );
 			return $this->respond(
 				[
 					'url'   => $exposure->probe_url( $probe ),
@@ -294,15 +306,21 @@ final class RestRoutes {
 	 */
 	public function create_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$type = JobType::tryFrom( '' === self::text( $request, 'type' ) ? 'backup' : self::text( $request, 'type' ) );
-		if ( null === $type || JobType::Unlock === $type ) {
+		if ( ! in_array( $type, [ JobType::Backup, JobType::Restore, JobType::Check, JobType::Forget, JobType::Prune ], true ) ) {
 			return $this->error( 'invalid_job_type', 400 );
 		}
 		$data = [];
 		if ( JobType::Restore === $type ) {
 			try {
-				$data = RestoreRequest::from_input( $request->get_param( 'snapshot' ), $request->get_param( 'paths' ) )->to_data();
+				$data = RestoreRequest::from_input(
+					$request->get_param( 'snapshot' ),
+					$request->get_param( 'paths' ),
+					$request->get_param( 'archive' ) ?? false,
+					$request->get_param( 'database_preview' ) ?? false,
+					$request->get_param( 'fresh_install' ) ?? false
+				)->to_data();
 			} catch ( InvalidArgument $refused ) {
-				return $this->error( 'invalid_snapshot' === ( $refused->context()['code'] ?? null ) ? 'invalid_snapshot' : 'invalid_paths', 400 );
+				return $this->error( Decoded::string( $refused->context()['code'] ?? 'invalid_paths' ), 400 );
 			}
 		}
 		$refusal = $type->refusal( $this->container->settings() );
@@ -325,7 +343,7 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$id  = self::text( $request, 'id' );
+		$id  = Decoded::string( $request->get_url_params()['id'] ?? null );
 		$job = $this->container->jobs()->get( $id );
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
@@ -348,7 +366,7 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function cancel_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$job = $this->container->runner()->cancel( self::text( $request, 'id' ), [ 'user' => get_current_user_id() ] );
+		$job = $this->container->runner()->cancel( Decoded::string( $request->get_url_params()['id'] ?? null ), [ 'user' => get_current_user_id() ] );
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
 		}
@@ -363,7 +381,7 @@ final class RestRoutes {
 	 */
 	public function job_log( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$jobs = $this->container->jobs();
-		$job  = $jobs->get( self::text( $request, 'id' ) );
+		$job  = $jobs->get( Decoded::string( $request->get_url_params()['id'] ?? null ) );
 		if ( null === $job ) {
 			return $this->error( 'not_found', 404 );
 		}
@@ -523,6 +541,17 @@ final class RestRoutes {
 	}
 
 	/**
+	 * Issues the form fields for one download to an authorized administrator.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error One-time form, or a missing download.
+	 */
+	public function download( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$form = ( new Downloads( $this->container ) )->issue( Decoded::string( $request->get_url_params()['id'] ?? null ), self::text( $request, 'kind' ), self::text( $request, 'path' ) );
+		return null === $form ? $this->error( 'download_not_found', 404 ) : $this->respond( $form, 200, true );
+	}
+
+	/**
 	 * Removes the staging directory of one restore job. It leaves the list at once; when
 	 * deleting a large tree takes longer than a request should, the heartbeat finishes it and
 	 * `complete` is false.
@@ -531,7 +560,7 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function remove_restore( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$id = self::text( $request, 'id' );
+		$id = Decoded::string( $request->get_url_params()['id'] ?? null );
 		try {
 			$complete = $this->container->staging()->remove( $id, microtime( true ) + $this->container->tick_budget( self::REMOVAL_SECONDS ) );
 		} catch ( InvalidArgument ) {
@@ -552,10 +581,159 @@ final class RestRoutes {
 		);
 	}
 
+	/** Live writes can replace WordPress PHP files, including core and other plugins. */
+	public static function live_writes_allowed(): bool {
+		return self::allowed() && current_user_can( 'update_core' ) && wp_is_file_mod_allowed( 'backups_for_restic_apply' );
+	}
+
+	/** Lists apply jobs whose changes can still be reversed. */
+	public function undoable(): \WP_REST_Response {
+		return $this->respond( [ 'jobs' => $this->container->file_changes()->undoable() ] );
+	}
+
+	/**
+	 * Previews the live destinations of a staged restore.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Plan or refusal.
+	 */
+	public function apply_preview( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->live_preview( $request, false );
+	}
+
+	/**
+	 * Previews reversing the changes a previous apply made.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Plan or refusal.
+	 */
+	public function undo_preview( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->live_preview( $request, true );
+	}
+
+	/**
+	 * Builds a read-only plan. Only an applicable plan gets a proof of review bound to
+	 * these operations, the authenticated session and the selected configuration scope.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $undo    Whether to inspect an undo.
+	 * @return \WP_REST_Response|\WP_Error Plan or refusal.
+	 */
+	private function live_preview( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
+		$id             = Decoded::string( $request->get_url_params()['id'] ?? null );
+		$include_config = $request->get_param( 'include_config' ) ?? false;
+		if ( ! is_bool( $include_config ) || ( $undo && $include_config ) ) {
+			return $this->error( 'invalid_config_choice', 400 );
+		}
+		$service = $this->container->file_changes();
+		try {
+			$plan = $undo ? $service->preview_undo( $id ) : $service->preview( $id, $include_config );
+		} catch ( InvalidArgument | JobConflict $refused ) {
+			return $this->plan_error( $refused );
+		}
+		$plan['site_url']      = home_url();
+		$plan['write_allowed'] = self::live_writes_allowed();
+		$plan['review_token']  = $plan['applicable'] && $plan['write_allowed'] ? wp_create_nonce( self::review_action( $undo, $id, $include_config, $plan['digest'] ) ) : null;
+		return $this->respond( $plan, 200, true );
+	}
+
+	/**
+	 * Queues the reviewed file changes for a staged restore.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error New job or refusal.
+	 */
+	public function apply_files( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->start_live_change( $request, false );
+	}
+
+	/**
+	 * Queues undo for one apply job.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error New job or refusal.
+	 */
+	public function undo_files( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->start_live_change( $request, true );
+	}
+
+	/**
+	 * Re-authenticates the administrator and checks the reviewed plan. Sensitive values
+	 * must come in the JSON body. The job only receives its source and plan digest.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $undo    Whether to undo changes.
+	 * @return \WP_REST_Response|\WP_Error New job or refusal.
+	 */
+	private function start_live_change( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
+		$id   = Decoded::string( $request->get_url_params()['id'] ?? null );
+		$body = $request->get_json_params();
+		if ( true !== ( $body['reviewed'] ?? null ) || home_url() !== ( $body['site_url'] ?? null ) ) {
+			return $this->error( 'live_confirmation', 400 );
+		}
+		$include_config = $body['include_config'] ?? false;
+		$digest         = $body['digest'] ?? null;
+		$token          = $body['review_token'] ?? null;
+		if ( ! is_bool( $include_config ) || ( $undo && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $undo, $id, $include_config, $digest ) ) ) {
+			return $this->error( 'live_plan_changed', 409 );
+		}
+		$user = wp_get_current_user();
+		if ( ! is_string( $body['user_password'] ?? null ) || ! wp_check_password( $body['user_password'], $user->user_pass, $user->ID ) ) {
+			return $this->error( 'wrong_user_password', 403 );
+		}
+		$control = bin2hex( $this->container->random()->bytes( 32 ) );
+		$hash    = hash( 'sha256', $control );
+		try {
+			$service = $this->container->file_changes();
+			$job     = $undo ? $service->start_undo( $id, $digest, $hash ) : $service->start_apply( $id, $include_config, $digest, $hash );
+		} catch ( InvalidArgument | JobConflict $refused ) {
+			return $this->plan_error( $refused );
+		}
+		Cron::chain( $this->container );
+		// Maintenance permits this job's control requests before WordPress performs its
+		// ordinary authentication and capability checks. Only the initiating client gets the token.
+		$response = $this->respond(
+			[
+				'job'           => $this->job_summary( $job ),
+				'control_token' => $control,
+			],
+			201,
+			true
+		);
+		$response->header( 'Set-Cookie', 'bfr_file_control=' . $control . '; Path=/; Max-Age=' . DAY_IN_SECONDS . '; HttpOnly; SameSite=Strict' . ( is_ssl() ? '; Secure' : '' ) );
+		return $response;
+	}
+
+	/**
+	 * Binds a preview to the site, operation, originating job, file scope and inspected data.
+	 *
+	 * @param bool   $undo    Undo an apply.
+	 * @param string $id      Source job.
+	 * @param bool   $include_config Include wp-config.php.
+	 * @param string $digest  Fingerprint of the inspected changes.
+	 * @return string WordPress nonce action.
+	 */
+	private static function review_action( bool $undo, string $id, bool $include_config, string $digest ): string {
+		return implode( '|', [ 'backups_for_restic_live', home_url(), $undo ? 'undo' : 'apply', $id, $include_config ? 'with-config' : 'default', $digest ] );
+	}
+
+	/**
+	 * Reports a refusal without returning filesystem details from an exception.
+	 *
+	 * @param InvalidArgument|JobConflict $refused Reason.
+	 * @return \WP_Error Error.
+	 */
+	private function plan_error( InvalidArgument|JobConflict $refused ): \WP_Error {
+		if ( $refused instanceof JobConflict ) {
+			return $this->error( 'live_plan_conflict', 409 );
+		}
+		return $this->error( 'live_plan_unavailable', 400 );
+	}
+
 	/**
 	 * What GET /restores answers.
 	 *
-	 * @return array{restores: list<array<string, int|string|null>>, removing: int, expiry_hours: int} The list, the number of directories on their way out, and the setting.
+	 * @return array{restores: list<array<string, bool|int|string|null>>, removing: int, expiry_hours: int} The list, the number of directories on their way out, and the setting.
 	 */
 	private function staged(): array {
 		$hours   = $this->container->settings()->int( 'restore.staging_expiry_hours' );
@@ -730,43 +908,55 @@ final class RestRoutes {
 		if ( ! $tested ) {
 			return static function (): void {};
 		}
-		$pem       = $this->candidate_ca( $request );
+		$pem = $this->candidate_ca( $request );
+		if ( is_string( $pem ) ) {
+			return $this->change_ca( $pem );
+		}
+		if ( 'rest-server' !== self::text( $request, 'server' ) ) {
+			return $this->change_ca( null );
+		}
+		return static function (): void {};
+	}
+
+	/**
+	 * Updates the certificate file and its setting together, while the job store holds
+	 * the configuration lock. A server save can undo this change if a later write fails.
+	 *
+	 * @param string|null $pem New certificate, or null to remove it.
+	 * @return \Closure(): void Restores the previous file and setting.
+	 * @throws StorageFailed If the certificate or setting cannot be changed.
+	 * @throws \Throwable On a failed settings write, after restoring the previous certificate.
+	 */
+	private function change_ca( ?string $pem ): \Closure {
 		$directory = $this->container->private_dir();
 		$file      = $directory->path . '/ca.pem';
 		$store     = $this->container->settings_store();
-		$setting   = $this->container->settings()->string( 'repository.ca_certificate' );
-		try {
-			$stored = $directory->ca_certificate();
-		} catch ( PluginException ) {
-			$stored = null;
+		$setting   = $store->load( true )->string( 'repository.ca_certificate' );
+		$stored    = is_file( $file ) ? file_get_contents( $file ) : null; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Preserve the local file byte for byte during rollback.
+		if ( false === $stored ) {
+			StorageFailed::raise( 'The previous CA certificate could not be read.' );
 		}
-		$undo = static function () use ( $file, $store, $setting, $stored ): void {
-			if ( null === $stored ) {
-				wp_delete_file( $file );
+		$write = static function ( ?string $contents ) use ( $file ): void {
+			if ( null !== $contents ) {
+				Files::write_atomic( $file, $contents );
 			} else {
-				Files::write_atomic( $file, $stored );
-			}
-			$store->update( [ 'repository.ca_certificate' => $setting ] );
-		};
-		try {
-			if ( is_string( $pem ) ) {
-				$directory->ensure();
-				Files::write_atomic( $file, $pem );
-				$store->update( [ 'repository.ca_certificate' => 'uploaded' ] );
-			} elseif ( 'rest-server' !== self::text( $request, 'server' ) && 'uploaded' === $setting ) {
 				wp_delete_file( $file );
-				$store->update( [ 'repository.ca_certificate' => 'none' ] );
+				if ( file_exists( $file ) || is_link( $file ) ) {
+					StorageFailed::raise( 'The CA certificate could not be removed.' );
+				}
 			}
+		};
+		$write( $pem );
+		try {
+			$store->update( [ 'repository.ca_certificate' => null === $pem ? 'none' : 'uploaded' ] );
 		} catch ( \Throwable $failure ) {
-			// Nobody else can: the caller gets the undo only from a change that was made.
-			try {
-				$undo();
-			} catch ( \Throwable ) {
-				throw $failure;
-			}
+			$write( $stored );
 			throw $failure;
 		}
-		return $undo;
+		return static function () use ( $write, $stored, $store, $setting ): void {
+			$write( $stored );
+			$store->update( [ 'repository.ca_certificate' => $setting ] );
+		};
 	}
 
 	/**
@@ -848,29 +1038,32 @@ final class RestRoutes {
 		if ( ! self::is_certificate( $pem ) ) {
 			return $this->error( 'invalid_certificate', 400 );
 		}
-		$directory = $this->container->private_dir();
-		try {
-			$directory->ensure();
-			// Only a certificate that is on disk may be announced in the settings.
-			Files::write_atomic( $directory->path . '/ca.pem', $pem );
-		} catch ( PluginException $e ) {
-			return $this->error( JobError::from_throwable( $e )->code, 500 );
-		}
-		$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'uploaded' ] );
-		$this->container->refresh();
-		return $this->respond( [ 'ca_certificate' => 'uploaded' ] );
+		return $this->save_ca( $pem );
 	}
 
 	/**
 	 * Removes the CA certificate.
 	 *
-	 * @return \WP_REST_Response Response.
+	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
-	public function delete_ca(): \WP_REST_Response {
-		wp_delete_file( $this->container->private_dir()->path . '/ca.pem' );
-		$this->container->settings_store()->update( [ 'repository.ca_certificate' => 'none' ] );
+	public function delete_ca(): \WP_REST_Response|\WP_Error {
+		return $this->save_ca( null );
+	}
+
+	/**
+	 * Changes the configured trust bundle between jobs, under the same lock as a server save.
+	 *
+	 * @param string|null $pem Certificate, or null for the public authorities.
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	private function save_ca( ?string $pem ): \WP_REST_Response|\WP_Error {
+		try {
+			$this->container->jobs()->while_idle( fn () => $this->change_ca( $pem ) );
+		} catch ( JobConflict $conflict ) {
+			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
+		}
 		$this->container->refresh();
-		return $this->respond( [ 'ca_certificate' => 'none' ] );
+		return $this->respond( [ 'ca_certificate' => null === $pem ? 'none' : 'uploaded' ] );
 	}
 
 	/**
@@ -1118,7 +1311,7 @@ final class RestRoutes {
 	 */
 	private static function flag( \WP_REST_Request $request, string $name ): bool {
 		$value = $request->get_param( $name );
-		return true === $value || ( ( is_string( $value ) || is_int( $value ) ) && rest_sanitize_boolean( $value ) );
+		return true === filter_var( $value, FILTER_VALIDATE_BOOLEAN );
 	}
 
 	/**
@@ -1216,9 +1409,45 @@ final class RestRoutes {
 				'message' => __( 'A restore needs the full ID of a snapshot.', 'backups-for-restic' ),
 				'hint'    => '',
 			],
+			'invalid_config_choice'         => [
+				'message' => __( 'Choose whether to include wp-config.php.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'live_plan_unavailable'         => [
+				'message' => __( 'A file change plan is unavailable for this job.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the source job and its expiry. For a large restore, stage a smaller selection.', 'backups-for-restic' ),
+			],
+			'live_plan_conflict'            => [
+				'message' => __( 'The file change cannot start in the current state.', 'backups-for-restic' ),
+				'hint'    => __( 'Wait for active work to finish and review a fresh preview.', 'backups-for-restic' ),
+			],
+			'live_plan_changed'             => [
+				'message' => __( 'Review a fresh preview of these file changes.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'live_confirmation'             => [
+				'message' => __( 'Review the listed changes, acknowledge them and type the exact site address.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
 			'invalid_job_id'                => [
 				'message' => __( 'This is not the ID of a job.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'invalid_database_preview'      => [
+				'message' => __( 'The database rehearsal option must be true or false.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'invalid_fresh_install'         => [
+				'message' => __( 'A fresh-install restore uses the site manifest to select files and requires a database rehearsal.', 'backups-for-restic' ),
+				'hint'    => __( 'Choose a site snapshot containing the database.', 'backups-for-restic' ),
+			],
+			'invalid_archive'               => [
+				'message' => __( 'The archive option must be true or false.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'download_not_found'            => [
+				'message' => __( 'This staged download is unavailable.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the file path and whether the restore has expired.', 'backups-for-restic' ),
 			],
 			'restore_not_found'             => [
 				'message' => __( 'No restored files are kept for this job.', 'backups-for-restic' ),

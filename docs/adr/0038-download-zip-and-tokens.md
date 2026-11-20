@@ -107,6 +107,20 @@ follow with the rest of package 2.4.
 - Whoever holds the token within the hour can download once. The route that redeems it
   still has to build the path from the subject it checks, never from the token.
 
+## WordPress delivery
+
+A restore request with `archive: true` builds `selection.zip` in its own staging directory
+after releasing the repository lock. The runner resumes the ZIP in subsequent ticks. The
+staged files remain downloadable if an entry cannot be archived, and the job warning
+identifies the refused name. Expiry removes the archive together with the restored files.
+
+An administrator requests a download with `POST /restores/<job>/download`. The response
+contains a form that submits the one-time token and encoded subject to `admin-post.php`.
+The token store requires an exclusive lock. The handler checks the staging lifetime and
+the file again on redemption, then streams the inspected handle as an attachment. The
+download kinds are `file` with an absolute snapshot path, `archive`, `report`, and
+`database_report` when a database rehearsal has published its result.
+
 ## Alternatives considered
 - **PHP's zip extension (`ZipArchive`).** Not installed everywhere, which would make the
   download depend on the host ([ADR 0002](0002-runtime-dependencies.md)). It also writes

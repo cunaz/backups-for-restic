@@ -122,6 +122,32 @@ final class StagingTest extends TestCase {
 		return array_values( array_diff( (array) scandir( $this->restores ), [ '.', '..' ] ) );
 	}
 
+	public function test_downloads_use_only_regular_files_in_unexpired_successful_staging(): void {
+		$job                = $this->restored( $this->clock->seconds );
+		$job->data['paths'] = [ '/site/one.txt' ];
+		$this->jobs->save( $job );
+		$dir = $this->restores . '/' . $job->id;
+		file_put_contents( $dir . '/selection.zip', 'archive' );
+		file_put_contents( $dir . '/database-preview.json', '{}' );
+		self::assertSame( '/site/one.txt', $this->staging->listing( 24 )[0]->file );
+		self::assertTrue( $this->staging->listing( 24 )[0]->archive );
+		foreach ( [ [ 'file', '/site/one.txt', 'one!' ], [ 'report', '', "{}\n" ], [ 'archive', '', 'archive' ], [ 'database_report', '', '{}' ] ] as [ $kind, $path, $content ] ) {
+			$handle = $this->staging->open_download( $job->id, 24, $kind, $path );
+			self::assertIsResource( $handle );
+			self::assertSame( $content, stream_get_contents( $handle ) );
+			fclose( $handle );
+		}
+		symlink( $dir, $dir . '/files/other' );
+		link( $dir . '/entries.jsonl', $dir . '/files/alias.txt' );
+		foreach ( [ '/other/selection.zip', '/alias.txt', '/../selection.zip', '/site/one.txt/', '/site', '/' ] as $path ) {
+			self::assertNull( $this->staging->open_download( $job->id, 24, 'file', $path ) );
+		}
+		self::assertNull( $this->staging->open_download( $job->id, 24, 'report', '' ) );
+		self::assertNull( $this->staging->open_download( '../' . $job->id, 24, 'archive', '' ) );
+		$this->clock->advance( 24 * 3600 );
+		self::assertNull( $this->staging->open_download( $job->id, 24, 'archive', '' ) );
+	}
+
 	public function test_the_list_shows_a_finished_restore_with_what_its_job_recorded(): void {
 		$finished = $this->clock->seconds - 600;
 		$older    = $this->restored( $finished - 60 );
@@ -132,14 +158,17 @@ final class StagingTest extends TestCase {
 		self::assertSame( [ $newer->id, $older->id ], array_column( array_map( static fn ( StagedRestore $restore ): array => $restore->to_array(), $list ), 'job' ), 'Newest first.' );
 		self::assertSame(
 			[
-				'job'      => $newer->id,
-				'snapshot' => self::SNAPSHOT,
-				'finished' => $finished,
-				'expires'  => $finished + 24 * 3600,
-				'files'    => 3,
-				'bytes'    => 12,
-				'staging'  => 'restores/' . $newer->id,
-				'report'   => 'restores/' . $newer->id . '/entries.jsonl',
+				'job'             => $newer->id,
+				'snapshot'        => self::SNAPSHOT,
+				'finished'        => $finished,
+				'expires'         => $finished + 24 * 3600,
+				'files'           => 3,
+				'bytes'           => 12,
+				'staging'         => 'restores/' . $newer->id,
+				'report'          => 'restores/' . $newer->id . '/entries.jsonl',
+				'archive'         => false,
+				'file'            => null,
+				'database_report' => false,
 			],
 			$list[0]->to_array()
 		);
@@ -156,15 +185,18 @@ final class StagingTest extends TestCase {
 		self::assertCount( 1, $list );
 		self::assertSame(
 			[
-				'job'      => $id,
-				'snapshot' => null,
-				'finished' => null,
+				'job'             => $id,
+				'snapshot'        => null,
+				'finished'        => null,
 				// Counted from the creation that the ID names: never later than from the unknown end.
-				'expires'  => $this->clock->seconds - 3600 + 24 * 3600,
-				'files'    => null,
-				'bytes'    => null,
-				'staging'  => 'restores/' . $id,
-				'report'   => 'restores/' . $id . '/entries.jsonl',
+				'expires'         => $this->clock->seconds - 3600 + 24 * 3600,
+				'files'           => null,
+				'bytes'           => null,
+				'staging'         => 'restores/' . $id,
+				'report'          => 'restores/' . $id . '/entries.jsonl',
+				'archive'         => false,
+				'file'            => null,
+				'database_report' => false,
 			],
 			$list[0]->to_array()
 		);

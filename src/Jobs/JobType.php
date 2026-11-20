@@ -35,6 +35,11 @@ enum JobType: string {
 	/** Restores selected paths of a snapshot into a staging directory of its own (ADR 0037). */
 	case Restore = 'restore';
 
+	/** Apply or undo a confirmed live file plan. */
+	case Apply = 'apply';
+
+	case Undo = 'undo';
+
 	/**
 	 * Steps of the regular path, in order.
 	 *
@@ -48,6 +53,8 @@ enum JobType: string {
 			self::Prune  => [ 'preflight', 'unlocking', 'detecting', 'pruning', 'recording' ],
 			self::Check  => [ 'preflight', 'unlocking', 'checking', 'recording' ],
 			self::Restore => [ 'preflight', 'unlocking', 'planning', 'restoring', 'recording' ],
+			self::Apply => [ 'preflight', 'applying', 'recording' ],
+			self::Undo => [ 'preflight', 'undoing', 'recording' ],
 		};
 	}
 
@@ -58,7 +65,7 @@ enum JobType: string {
 	 */
 	public function cleanup_steps(): array {
 		return match ( $this ) {
-			self::Unlock => [ 'cleaning_up' ],
+			self::Apply, self::Undo, self::Unlock => [ 'cleaning_up' ],
 			default      => [ 'releasing', 'cleaning_up' ],
 		};
 	}

@@ -8,6 +8,7 @@ use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\StagedTree;
+use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
 
@@ -76,7 +77,7 @@ final class RestoreJobTest extends TestCase {
 	#[Depends( 'test_a_backup_for_the_restore' )]
 	public function test_invalid_restore_requests_are_refused_with_a_code( string $snapshot ): void {
 		$requests = [
-			'backups_for_restic_invalid_snapshot' => [
+			'backups_for_restic_invalid_snapshot'      => [
 				[ 'type' => 'restore' ],
 				[
 					'type'     => 'restore',
@@ -87,7 +88,21 @@ final class RestoreJobTest extends TestCase {
 					'snapshot' => '../' . substr( $snapshot, 3 ),
 				],
 			],
-			'backups_for_restic_invalid_paths'    => [
+			'backups_for_restic_invalid_fresh_install' => [
+				[
+					'type'          => 'restore',
+					'snapshot'      => $snapshot,
+					'fresh_install' => true,
+				],
+				[
+					'type'             => 'restore',
+					'snapshot'         => $snapshot,
+					'fresh_install'    => true,
+					'database_preview' => true,
+					'paths'            => [ '/' ],
+				],
+			],
+			'backups_for_restic_invalid_paths'         => [
 				[
 					'type'     => 'restore',
 					'snapshot' => $snapshot,
@@ -158,6 +173,34 @@ final class RestoreJobTest extends TestCase {
 		);
 		curl_exec( $handle );
 		self::assertSame( 403, curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ) );
+	}
+
+	#[Depends( 'test_a_backup_for_the_restore' )]
+	public function test_a_database_preview_verifies_the_dump_and_removes_its_private_tables( string $snapshot ): void {
+		TestSite::idle( 600 );
+		$db = MysqliConnection::connect( MysqliConnection::environment( 'BFR_DB_NAME', 'bfr_site' ) );
+		self::assertNotNull( $db );
+		$before                     = $db->rows( 'SELECT ID, post_title FROM wp_posts ORDER BY ID' );
+		[ $status, $started, $raw ] = TestSite::api(
+			'POST',
+			'/jobs',
+			[
+				'type'             => 'restore',
+				'snapshot'         => $snapshot,
+				'paths'            => [ TestSite::private_dir() . '/spool/database' ],
+				'database_preview' => true,
+			]
+		);
+		self::assertSame( 201, $status, $raw );
+		$job = TestSite::wait_for( (string) $started['job']['id'], 1800 );
+		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
+		self::assertGreaterThan( 0, $job['result']['database_tables'] );
+		self::assertGreaterThan( 0, $job['result']['database_rows'] );
+		$report = json_decode( (string) file_get_contents( TestSite::private_dir() . '/' . $job['result']['database_report'] ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertSame( $snapshot, $report['snapshot'] );
+		self::assertContains( 'wp_options', array_column( $report['tables'], 'name' ) );
+		self::assertSame( [], $db->rows( "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_COMMENT LIKE 'backups-for-restic-restore/1:%'" ) );
+		self::assertSame( $before, $db->rows( 'SELECT ID, post_title FROM wp_posts ORDER BY ID' ) );
 	}
 
 	#[Depends( 'test_a_backup_for_the_restore' )]

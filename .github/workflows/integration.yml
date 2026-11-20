@@ -207,8 +207,9 @@ jobs:
           path: .tools/bin
           key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
       - run: bin/install-test-tools.sh rest-server
-      # A WordPress that was just installed: the tests begin with the setup wizard.
-      - run: bin/test-site.sh install
+      # Install a copy at its normal location so live restore exercises the package's path protections.
+      - run: bin/build-package.sh
+      - run: BFR_TEST_PLUGIN_DIR="$PWD/build/backups-for-restic" bin/test-site.sh install
       - run: bin/test-site.sh start
       # Exactly the packages of package-lock.json, without their install scripts; the browser
       # is then fetched by the Playwright version that the lock file names.

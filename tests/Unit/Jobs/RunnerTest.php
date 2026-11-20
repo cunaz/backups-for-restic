@@ -21,6 +21,7 @@ use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Support\Redactor;
+use BackupsForRestic\Tests\Support\FixedRandom;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -669,6 +670,44 @@ final class RunnerTest extends TestCase {
 		} catch ( JobConflict ) {
 			self::assertTrue( $probe::free( $file ), 'A refusal releases the lock too.' );
 		}
+	}
+
+	public function test_a_repeated_id_cannot_overwrite_job_history_or_retained_staging(): void {
+		$now    = $this->clock->seconds;
+		$prefix = gmdate( 'Ymd\THis\Z', $now ) . '-';
+		mkdir( $this->directory . '/restores/' . $prefix . '020202', 0700, true );
+		$random       = new FixedRandom( prefix: hex2bin( '010101010101020202030303' ) );
+		$store        = new JobStore( $this->directory . '/jobs', new Redactor(), $random );
+		$first        = $store->create( JobType::Backup, 'manual', $now );
+		$first->state = JobState::Succeeded;
+		$store->save( $first );
+		$second = $store->create( JobType::Restore, 'manual', $now );
+		self::assertSame( $prefix . '030303', $second->id );
+		self::assertSame( JobState::Succeeded, $store->get( $first->id )?->state );
+		self::assertSame( JobState::Queued, $store->get( $second->id )?->state );
+	}
+
+	public function test_redaction_preserves_job_control_fields_and_handles_json_escapes(): void {
+		$redactor = new Redactor();
+		$secret   = 'quoted"back\\slash';
+		foreach ( [ 'backup', 'false', 'state', $secret ] as $password ) {
+			$redactor->add( new Secret( $password ) );
+		}
+		$store = $this->store( $redactor );
+		$job   = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$job->warn( $secret );
+		$job->progress['current'] = '/private/' . $secret;
+		$store->save( $job );
+		$store->log( $job )->write( 'warning', $secret, [ 'message' => $secret ] );
+
+		$loaded = $store->get( $job->id );
+		self::assertNotNull( $loaded );
+		self::assertSame( JobType::Backup, $loaded->type );
+		self::assertSame( [ '[redacted]' ], $loaded->warnings );
+		self::assertSame( '/private/[redacted]', $loaded->progress['current'] );
+		$event = $store->log( $job )->read( 1 )[0];
+		self::assertSame( '[redacted]', $event['message'] );
+		self::assertSame( [ 'message' => '[redacted]' ], $event['context'] );
 	}
 
 	public function test_job_files_are_redacted_and_private(): void {

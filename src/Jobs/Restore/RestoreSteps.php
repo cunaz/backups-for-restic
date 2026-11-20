@@ -10,8 +10,10 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Jobs\Restore;
 
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Engine\Snapshot\Reader;
 use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\StorageFailed;
@@ -25,7 +27,9 @@ use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
 use BackupsForRestic\Jobs\StepProvider;
+use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Storage\Files;
+use BackupsForRestic\Storage\Zip\ZipWriter;
 use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
@@ -91,7 +95,7 @@ final class RestoreSteps implements StepProvider {
 		}
 		RestoreRequest::from_job( $job );
 		$this->common->require_configured();
-		$this->common->require_reachable();
+		$this->common->require_reachable( true );
 		$log->write( 'info', 'Preflight passed.' );
 		return true;
 	}
@@ -130,8 +134,25 @@ final class RestoreSteps implements StepProvider {
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool True once every selected file is staged.
+	 * @throws DatabaseFailed If the snapshot has no database for the requested preview.
 	 */
 	public function restore( Job $job, EventLog $log, float $deadline ): bool {
+		if ( 'database_import' === ( $job->progress['phase'] ?? null ) ) {
+			if ( $this->preview()->advance( $this->services, $job, $deadline ) ) {
+				$job->progress['phase'] = 'database_cleanup';
+			}
+			return false;
+		}
+		if ( 'database_cleanup' === ( $job->progress['phase'] ?? null ) ) {
+			if ( ! $this->preview()->clean( $job, $deadline ) ) {
+				return false;
+			}
+			$job->progress['phase'] = 'complete';
+			return $this->after_staging( $job );
+		}
+		if ( 'archiving' === ( $job->progress['phase'] ?? null ) ) {
+			return $this->archive( $job, $deadline );
+		}
 		if ( 'complete' !== $this->advance( $job, $log, $deadline ) ) {
 			return false;
 		}
@@ -143,6 +164,74 @@ final class RestoreSteps implements StepProvider {
 				'bytes' => $job->progress['bytes'] ?? 0,
 			]
 		);
+		if ( RestoreRequest::from_job( $job )->database_preview ) {
+			$common     = $this->services->common;
+			$repository = $this->repository();
+			$reader     = new Reader( $repository, $common->identity, $common->clock, $common->index_cache( $repository ) );
+			$manifest   = $reader->manifest( Id::from_hex( RestoreRequest::from_job( $job )->snapshot ) );
+			if ( null === $manifest || true !== ( $manifest['data']['database'] ?? null ) || ! is_string( $manifest['data']['home_url'] ?? null ) ) {
+				throw new DatabaseFailed( 'This snapshot has no complete site manifest with a database.' );
+			}
+			$this->preview()->bind( $this->services, $job, $manifest['path'], $manifest['data']['home_url'], $manifest['data']['versions'] ?? null );
+			$job->progress['phase'] = 'database_import';
+			// Returning before DDL ensures the runner persists the cleanup identity first.
+			return false;
+		}
+		return $this->after_staging( $job );
+	}
+
+	/**
+	 * Opens the non-reconnecting preview connection only for jobs that need it.
+	 *
+	 * @return DatabasePreview Database operations of this request.
+	 * @throws DatabaseFailed If the adapter is unavailable.
+	 */
+	private function preview(): DatabasePreview {
+		if ( null === $this->services->preview ) {
+			throw new DatabaseFailed( 'The database preview connection is unavailable.' );
+		}
+		return ( $this->services->preview )();
+	}
+
+	/**
+	 * Continues with archive creation or recording after staging and any database rehearsal.
+	 *
+	 * @param Job $job Restore job.
+	 * @return bool Whether recording can begin.
+	 */
+	private function after_staging( Job $job ): bool {
+		if ( RestoreRequest::from_job( $job )->archive ) {
+			$job->progress['phase'] = 'archiving';
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Builds the optional archive in the remaining restore ticks. Staged files stay usable
+	 * when a name cannot be archived or the second copy does not fit on disk.
+	 *
+	 * @param Job   $job      Job with completed staging.
+	 * @param float $deadline End of this tick.
+	 * @return bool Whether recording may begin.
+	 */
+	private function archive( Job $job, float $deadline ): bool {
+		$writer = new ZipWriter( $this->services->files_dir( $job ), $this->services->staging_dir( $job ) . '/' . RestoreServices::ARCHIVE );
+		try {
+			if ( ! $writer->advance( $deadline ) ) {
+				$job->progress['archive_bytes'] = $writer->progress()['bytes'];
+				return false;
+			}
+		} catch ( InvalidArgument | StorageFailed $error ) {
+			$name = $error->context()['name'] ?? '';
+			$job->warn( 'ZIP unavailable. ' . $error->getMessage() . ( is_string( $name ) && '' !== $name ? ' ' . $name : '' ) );
+			try {
+				$writer->discard();
+			} catch ( StorageFailed ) {
+				$job->warn( 'Archive working files will be removed when staging expires.' );
+			}
+		}
+		$job->progress['phase'] = 'complete';
 		return true;
 	}
 
@@ -177,7 +266,7 @@ final class RestoreSteps implements StepProvider {
 			'skipped'  => Decoded::int( $job->progress['skipped'] ?? null ),
 			'staging'  => $staging,
 			'report'   => $staging . '/' . RestoreServices::REPORT,
-		];
+		] + $job->result;
 		$services->common->state->set(
 			'last_restore',
 			[
@@ -202,6 +291,9 @@ final class RestoreSteps implements StepProvider {
 	 * @throws PluginException If the lock of an unfinished run cannot be released.
 	 */
 	public function release( Job $job, EventLog $log, float $deadline ): bool {
+		if ( isset( $job->data['database_binding'] ) && ! $this->preview()->clean( $job, $deadline ) ) {
+			return false;
+		}
 		$services = $this->services->common;
 		$work     = $this->services->work_dir( $job );
 		// A run records itself before it takes its first lock: no checkpoint, no lock.
@@ -316,10 +408,24 @@ final class RestoreSteps implements StepProvider {
 		$services   = $this->services->common;
 		$repository = $this->repository();
 		$work       = $this->services->work_dir( $job );
-		if ( is_file( $work . '/' . RestoreServices::CHECKPOINT ) ) {
+		$request    = RestoreRequest::from_job( $job );
+		$resume     = is_file( $work . '/' . RestoreServices::CHECKPOINT );
+		$paths      = $request->paths;
+		if ( $request->fresh_install && ( ! $resume || ! isset( $job->data['site_layout'] ) ) ) {
+			// A worker can stop after creating the engine checkpoint and before saving the
+			// job. Re-read the same immutable snapshot in that case to recover the binding.
+			$reader   = new Reader( $repository, $services->identity, $services->clock, $services->index_cache( $repository ) );
+			$manifest = $reader->manifest( Id::from_hex( $request->snapshot ) );
+			if ( null === $manifest ) {
+				throw new InvalidArgument( 'Fresh installation requires a verified site manifest.' );
+			}
+			$binding                  = SiteLayout::bind( $request->snapshot, $manifest['data'], $manifest['path'] );
+			$paths                    = SiteLayout::selection( $binding );
+			$job->data['site_layout'] = $binding;
+		}
+		if ( $resume ) {
 			return RestoreRun::resume( $repository, $work, $services->clock, $services->throttle() );
 		}
-		$request = RestoreRequest::from_job( $job );
 		// No checkpoint means no run: what a start that the host ended left behind holds no
 		// lock and no file, and would only keep the new start from finding its directory empty.
 		Files::remove_tree( $work );
@@ -329,13 +435,13 @@ final class RestoreSteps implements StepProvider {
 		}
 		chmod( $this->services->staging_dir( $job ), 0700 );
 		chmod( $target, 0700 );
-		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $request->paths, $services->identity, $services->clock, $services->throttle() );
+		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $paths, $services->identity, $services->clock, $services->throttle() );
 		$log->write(
 			'info',
 			'Restore started.',
 			[
 				'snapshot' => $request->snapshot,
-				'paths'    => count( $request->paths ),
+				'paths'    => count( $paths ),
 			]
 		);
 		return $run;

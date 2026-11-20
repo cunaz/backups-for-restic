@@ -25,8 +25,9 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * **Retention and maintenance.** Old snapshots are removed by a restic-compatible policy, data that no snapshot uses any more is deleted weekly, and a monthly check downloads and verifies a share of the stored data. Data in packs that still hold used data stays until a full `restic prune` from another computer; the dashboard shows how much that is.
 * **Append-only aware.** If your server is append-only, nobody who takes over the website can delete your backups. The plugin notices it, stops deleting, and tells you how to clean up from another computer.
 * **E-mail notifications** when a backup or a maintenance job (removing old snapshots, deleting unused data, the check) fails, when no backup succeeded for too long, when it works again, when a check finds damage, and when the plugin stops removing old snapshots because the server became append-only.
+* **Restore selected files.** Browse a snapshot and stage files in a private directory. Download a file, a ZIP archive or the restore report. Staging expires after 24 hours by default.
 * **Recovery kit.** One page with everything needed to restore without the website: repository address, passwords, the CA certificate of a server with its own certificate authority, and the exact restic commands.
-* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`). Setup and settings are done in the admin area.
+* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`, `ls`, `restore`, `apply-plan`). Setup and settings are done in the admin area.
 * **Site Health** checks and debug information.
 
 = Requirements =
@@ -67,7 +68,11 @@ Yes. Every backup is a normal restic repository. The recovery kit lists the comm
 
 = Can I restore from the WordPress admin area? =
 
-Not yet. This version lists your snapshots under **Backups > Snapshots** and lets you look into their directories; restoring is done with the restic command line and the recovery kit, on any computer. Restore from the admin area is planned for a later version.
+Yes. In **Backups > Snapshots**, select the files or directories you need. Download them from private staging, or review the file changes and confirm your site address and password to apply them. You can review an undo for 24 hours. On a replacement WordPress installation, connect with the recovery kit and select **Restore from an existing snapshot** to stage content, map uploads to their new location and rehearse the database import. The recovery kit also works on a separate computer with the restic CLI.
+
+= Why does the plugin use direct filesystem access? =
+
+Backups read files in chunks. Restores write each selection to a private directory, verify its contents and stream large downloads. Applying an approved file change uses a same-filesystem atomic operation and retains the original for undo. These operations require local file handles. The receiving site must permit WordPress file modifications for live changes. Staging requires a verified private location.
 
 = Why does this plugin contain encryption code? =
 

@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Tests\Support\TestSite;
+use BackupsForRestic\Tests\Support\TempDir;
 
 /**
  * Who may use the plugin's REST API: administrators, and nobody else. Every route is asked
@@ -47,6 +48,12 @@ final class AccessTest extends TestCase {
 			[ 'GET', '/snapshots/' . self::SNAPSHOT . '/tree' ],
 			[ 'GET', '/restores' ],
 			[ 'DELETE', '/restores/' . self::JOB ],
+			[ 'POST', '/restores/' . self::JOB . '/download' ],
+			[ 'POST', '/restores/' . self::JOB . '/apply-plan' ],
+			[ 'POST', '/restores/' . self::JOB . '/apply' ],
+			[ 'GET', '/undo' ],
+			[ 'POST', '/undo/' . self::JOB . '/plan' ],
+			[ 'POST', '/undo/' . self::JOB ],
 			[ 'GET', '/settings' ],
 			[ 'PUT', '/settings' ],
 			[ 'DELETE', '/cache' ],
@@ -80,6 +87,50 @@ final class AccessTest extends TestCase {
 		self::assertSame( 'rest_forbidden', $error['code'] ?? null, $raw );
 	}
 
+	public function test_setup_requires_an_affirmative_recovery_kit_acknowledgment(): void {
+		foreach ( [ false, 'no', 'off', 'unknown' ] as $value ) {
+			[ $status, $error, $raw ] = TestSite::api( 'POST', '/setup/complete', [ 'recovery_kit_acknowledged' => $value ] );
+			self::assertSame( 400, $status, $raw );
+			self::assertSame( 'backups_for_restic_recovery_kit_not_acknowledged', $error['code'] ?? null, $raw );
+		}
+	}
+
+	public function test_a_delegated_backup_capability_does_not_grant_live_file_writes(): void {
+		$statuses = TestSite::php(
+			'
+			add_filter( "backups_for_restic_capability", static fn () => "read" );
+			wp_set_current_user( get_user_by( "login", "bfr-editor" )->ID );
+			foreach ( [ "/restores/" . $arguments[0] . "/apply", "/undo/" . $arguments[0] ] as $route ) {
+				echo rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1" . $route ) )->get_status(), "\n";
+			}
+			',
+			[ self::JOB ]
+		);
+		self::assertSame( [ '403', '403' ], explode( "\n", trim( $statuses ) ) );
+	}
+
+	public function test_live_writes_respect_the_hosts_file_modification_policy(): void {
+		$statuses = TestSite::php(
+			'
+			wp_set_current_user( 1 );
+			add_filter( "file_mod_allowed", "__return_false" );
+			foreach ( [ "/restores/" . $arguments[0] . "/apply", "/undo/" . $arguments[0] ] as $route ) {
+				echo rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1" . $route ) )->get_status(), "\n";
+			}
+			',
+			[ self::JOB ]
+		);
+		self::assertSame( [ '403', '403' ], explode( "\n", trim( $statuses ) ) );
+	}
+
+	public function test_live_changes_cannot_be_started_through_the_generic_job_endpoint(): void {
+		foreach ( [ 'apply', 'undo' ] as $type ) {
+			[ $status, $error ] = TestSite::api( 'POST', '/jobs', [ 'type' => $type ] );
+			self::assertSame( 400, $status );
+			self::assertSame( 'backups_for_restic_invalid_job_type', $error['code'] ?? null );
+		}
+	}
+
 	public function test_the_list_of_routes_is_complete(): void {
 		[ $status, $index, $raw ] = TestSite::api( 'GET', '' );
 		self::assertSame( 200, $status, $raw );
@@ -97,6 +148,38 @@ final class AccessTest extends TestCase {
 		$tested = array_keys( iterator_to_array( self::routes() ) );
 		sort( $tested );
 		self::assertSame( $registered, $tested, 'A route that this test does not know is not tested for who may call it.' );
+	}
+
+	public function test_configured_private_directory_is_claimed_on_write_and_invalid_locations_reach_doctor(): void {
+		$path = TempDir::create( 'wp-state-lock' );
+		try {
+			$output = TestSite::php(
+				'
+				add_filter( "backups_for_restic_private_dir", static fn () => $arguments[0] );
+				$c = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+				$c->settings();
+				$c->state()->get( "last_backup" );
+				$untouched = scandir( $arguments[0] );
+				file_put_contents( $arguments[0] . "/unrelated", "keep" );
+				$routes = new BackupsForRestic\WordPress\RestRoutes( $c );
+				$report = $routes->environment( new WP_REST_Request( "GET" ) )->get_data();
+				$check = array_column( $report["checks"], null, "id" )["private_directory"];
+				try { $c->settings_store()->update( [] ); $refused = false; }
+				catch ( BackupsForRestic\Exception\StorageFailed ) { $refused = true; }
+				$foreign = scandir( $arguments[0] );
+				unlink( $arguments[0] . "/unrelated" );
+				// Invalid input stops before writing any option, after ownership and the lock are established.
+				try { $c->settings_store()->update( [ "unknown.setting" => true ] ); }
+				catch ( BackupsForRestic\Exception\ValidationFailed ) {}
+				$c->private_dir()->ensure();
+				echo wp_json_encode( [ $untouched, $check["status"], $check["code"], $report["browser_probe"], $refused, $foreign, is_file( $arguments[0] . "/state.lock" ) ] );
+				',
+				[ $path ]
+			);
+			self::assertSame( [ [ '.', '..' ], 'critical', 'unavailable', false, true, [ '.', '..', 'unrelated' ], true ], json_decode( $output, true ), $output );
+		} finally {
+			TempDir::remove( $path );
+		}
 	}
 
 	public function test_the_private_directory_is_not_served(): void {

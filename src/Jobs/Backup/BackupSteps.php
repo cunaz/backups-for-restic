@@ -128,12 +128,16 @@ final class BackupSteps implements StepProvider {
 	 * The part of the preflight that asks over the network: the private directory must not be
 	 * served, and the repository must answer and hold a config file.
 	 *
-	 * @throws StorageFailed If the private directory can be read from the web.
+	 * @param bool $staging Require verified protection before restoring plaintext.
+	 * @throws StorageFailed If the private directory cannot protect the job data.
 	 * @throws NotFound If the repository does not exist.
 	 */
-	public function require_reachable(): void {
+	public function require_reachable( bool $staging = false ): void {
 		$services = $this->services;
-		if ( true === $services->exposure?->exposed() ) {
+		if ( $staging && false === $services->exposure?->permits_staging() ) {
+			StorageFailed::raise( 'Protection of the restore staging directory could not be verified.', [ 'code' => 'staging_unverified' ] );
+		}
+		if ( ! $staging && true === $services->exposure?->exposed() ) {
 			StorageFailed::raise( 'The private directory can be read from the web.' );
 		}
 		if ( null === $services->access->backend()->size( ObjectType::Config, 'config' ) ) {

@@ -2,12 +2,27 @@
  * The test site as the browser tests use it: signing in, opening the plugin's page, the
  * repository server that global-setup.js started, and files for a backup to work on.
  */
+const { execFileSync } = require( 'node:child_process' );
 const crypto = require( 'node:crypto' );
 const fs = require( 'node:fs' );
 const path = require( 'node:path' );
+const net = require( 'node:net' );
 
 const ROOT = path.resolve( __dirname, '../..' );
 const UPLOADS = path.join( ROOT, '.tools/site/wp-content/uploads/e2e' );
+
+function freePort() {
+	return new Promise( function ( resolve, reject ) {
+		const server = net.createServer();
+		server.on( 'error', reject );
+		server.listen( 0, '127.0.0.1', function () {
+			const { port } = server.address();
+			server.close( function () {
+				resolve( port );
+			} );
+		} );
+	} );
+}
 
 /** The administrator of bin/test-site.sh install. */
 const ADMIN = { login: 'admin', password: 'admin-password-test-only' };
@@ -18,11 +33,11 @@ const ADMIN = { login: 'admin', password: 'admin-password-test-only' };
  * @param {import('@playwright/test').Page} page Page.
  */
 async function signIn( page ) {
-	await page.goto( '/wp-login.php' );
+	await page.goto( '/wp-login.php?redirect_to=' + encodeURIComponent( '/wp-admin/admin.php?page=backups-for-restic' ) );
 	await page.locator( '#user_login' ).fill( ADMIN.login );
 	await page.locator( '#user_pass' ).fill( ADMIN.password );
 	await page.locator( '#wp-submit' ).click();
-	await page.waitForURL( /\/wp-admin\// );
+	await page.waitForURL( /\/wp-admin\//, { waitUntil: 'domcontentloaded' } );
 }
 
 /**
@@ -93,4 +108,36 @@ function noLoopback( active ) {
 	}
 }
 
-module.exports = { ADMIN, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback };
+/**
+ * Provisions a second installation with independent WordPress salts, database,
+ * content directory and URL. The source is the package already installed on the first site.
+ *
+ * @return {Promise<Object>} Destination and its cleanup function.
+ */
+async function freshSite() {
+	const plugin = path.join( siteRoot(), 'wp-content/plugins/backups-for-restic' );
+	if ( fs.lstatSync( plugin ).isSymbolicLink() ) {
+		throw new Error( 'Install the browser fixture with BFR_TEST_PLUGIN_DIR pointing at the built package.' );
+	}
+	const port = await freePort();
+	const tools = fs.mkdtempSync( path.join( ROOT, '.tools/e2e-destination-' ) );
+	const env = { ...process.env, BFR_TEST_PLUGIN_DIR: plugin, BFR_SITE_TOOLS_DIR: tools, BFR_DISABLE_WP_CRON: '1',
+		BFR_SITE_PORT: String( port ), BFR_DB_NAME: 'bfr_import_' + crypto.randomBytes( 8 ).toString( 'hex' ) };
+	function run( command ) {
+		execFileSync( path.join( ROOT, 'bin/test-site.sh' ), [ command ], { env } );
+	}
+	function remove() {
+		run( 'reset' );
+		fs.rmSync( tools, { recursive: true, force: true } );
+	}
+	try {
+		run( 'install' );
+		run( 'start' );
+		return { url: 'http://127.0.0.1:' + port, root: path.join( tools, 'site' ), remove };
+	} catch ( error ) {
+		remove();
+		throw error;
+	}
+}
+
+module.exports = { ADMIN, freePort, freshSite, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback };

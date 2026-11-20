@@ -129,7 +129,7 @@ final class EncryptedOptionStore implements SecretStore {
 		if ( null === $this->lock ) {
 			$apply();
 		} else {
-			$this->lock->hold( $apply );
+			$this->lock->hold( $apply, true );
 		}
 	}
 

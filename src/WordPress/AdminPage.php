@@ -22,7 +22,7 @@ final class AdminPage {
 
 	public const string SLUG = 'backups-for-restic';
 
-	private const array TABS = [ 'dashboard', 'snapshots', 'settings', 'environment', 'logs' ];
+	private const array TABS = [ 'dashboard', 'snapshots', 'restores', 'settings', 'environment', 'logs' ];
 
 	/**
 	 * Registers the menu and assets.
@@ -132,6 +132,7 @@ final class AdminPage {
 		$labels    = [
 			'dashboard'   => __( 'Dashboard', 'backups-for-restic' ),
 			'snapshots'   => __( 'Snapshots', 'backups-for-restic' ),
+			'restores'    => __( 'Restores', 'backups-for-restic' ),
 			'settings'    => __( 'Settings', 'backups-for-restic' ),
 			'environment' => __( 'Environment', 'backups-for-restic' ),
 			'logs'        => __( 'Logs', 'backups-for-restic' ),

@@ -17,6 +17,15 @@ if ( version_compare( PHP_VERSION, '8.3', '<' ) ) {
 
 require_once __DIR__ . '/src/autoload.php';
 
+$backups_for_restic_container = new \BackupsForRestic\WordPress\Container( __DIR__ . '/backups-for-restic.php' );
+try {
+	$backups_for_restic_clean = $backups_for_restic_container->clean_database_previews( true, microtime( true ) + 15.0 );
+} catch ( \BackupsForRestic\Exception\PluginException ) {
+	$backups_for_restic_clean = false;
+}
+if ( ! $backups_for_restic_clean ) {
+	wp_die( esc_html__( 'Private database preview cleanup could not finish. Check the database connection and DROP permission, then retry deletion.', 'backups-for-restic' ) );
+}
 foreach ( [ 'backups_for_restic_settings', 'backups_for_restic_secrets', 'backups_for_restic_state', 'backups_for_restic_notifications', 'backups_for_restic_schema_version' ] as $backups_for_restic_option ) {
 	delete_option( $backups_for_restic_option );
 }
@@ -29,7 +38,7 @@ wp_clear_scheduled_hook( 'backups_for_restic_tick' );
 // The directory the plugin worked in: the constant, the backups_for_restic_private_dir filter,
 // then wp-content or uploads (ADR 0007). Uninstalling runs with the other plugins loaded, so
 // the filter answers as it did while the plugin ran.
-( new \BackupsForRestic\WordPress\Container( __DIR__ . '/backups-for-restic.php' ) )->private_dir()->remove_contents();
+$backups_for_restic_container->private_dir()->remove_contents();
 
 // And the one from before a filter was added, if that is another one. remove_contents() only
 // deletes what the plugin created, so a second call for the same directory finds nothing.

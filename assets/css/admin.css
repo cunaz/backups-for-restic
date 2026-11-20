@@ -164,3 +164,13 @@
 .backups-for-restic .bfr-inexact {
 	font-style: italic;
 }
+
+.backups-for-restic .bfr-file-actions td,
+.backups-for-restic .bfr-staging td,
+.backups-for-restic .bfr-database-tables td {
+	overflow-wrap: anywhere;
+}
+
+.backups-for-restic .bfr-database-tables {
+	margin: 0.75rem 0;
+}

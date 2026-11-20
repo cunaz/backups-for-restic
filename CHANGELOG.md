@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Selected files can be staged from the snapshot browser or WP-CLI and downloaded through single-use forms. Completed restores can include ZIP archives and a database rehearsal report.
+- Administrators can preview and confirm live file changes and review an undo within 24 hours. The fresh-install wizard maps verified snapshot content and uploads to the receiving site's paths.
+- The package builder can produce a reproducible ZIP for installation from the WordPress dashboard.
 - A snapshot reader for the upcoming restore browser: filter by site, read one directory
   without following links, and read the site's manifest under a shared repository lock.
   Encrypted tree caches share the existing cache limit with the index. New backups record

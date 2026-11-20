@@ -221,7 +221,7 @@ final class MaintenanceSteps implements StepProvider {
 		if ( $done ) {
 			// Kept with the job: recording then needs neither the checkpoint nor the server, and
 			// so also works in the last tick before the plugin is switched off.
-			$job->data['check_details'] = self::details( $result );
+			$job->data['check_details'] = $this->details( $result );
 			$log->write(
 				$result['errors'] > 0 ? 'error' : 'info',
 				$result['errors'] > 0 ? 'The check found damage.' : 'The check found no errors.',
@@ -245,7 +245,7 @@ final class MaintenanceSteps implements StepProvider {
 	public function record( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services->common;
 		$now      = $services->clock->now()[0];
-		$details  = JobType::Check === $job->type ? ( self::kept_details( $job ) ?? $this->check_details( $job ) ) : null;
+		$details  = JobType::Check === $job->type ? ( $this->kept_details( $job ) ?? $this->check_details( $job ) ) : null;
 		$services->state->set(
 			'last_' . $job->type->value,
 			[
@@ -282,7 +282,7 @@ final class MaintenanceSteps implements StepProvider {
 	 * @param Job $job Check job.
 	 * @return array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>}|null Details, or null if the job carries none.
 	 */
-	private static function kept_details( Job $job ): ?array {
+	private function kept_details( Job $job ): ?array {
 		$kept = $job->data['check_details'] ?? null;
 		// Anything but what the checking step wrote: the checkpoint is asked. A count of errors
 		// that was taken for zero would clear the alert of a damaged repository.
@@ -299,7 +299,7 @@ final class MaintenanceSteps implements StepProvider {
 				'severity' => Decoded::string( $finding['severity'] ?? null ),
 				'code'     => Decoded::string( $finding['code'] ?? null ),
 				'object'   => Decoded::string( $finding['object'] ?? null ),
-				'message'  => Decoded::string( $finding['message'] ?? null ),
+				'message'  => $this->services->common->jobs->diagnostic( Decoded::string( $finding['message'] ?? null ) ),
 			];
 		}
 		return [
@@ -322,7 +322,7 @@ final class MaintenanceSteps implements StepProvider {
 		if ( ! is_file( $work . '/state.json' ) ) {
 			return null;
 		}
-		return self::details( CheckRun::resume( $this->repository(), $work, $services->identity, $services->clock )->result() );
+		return $this->details( CheckRun::resume( $this->repository(), $work, $services->identity, $services->clock )->result() );
 	}
 
 	/**
@@ -334,14 +334,19 @@ final class MaintenanceSteps implements StepProvider {
 	 * @phpstan-param array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>, ...} $result
 	 * @return array{errors: int, counts: array<string, int>, findings: list<array{severity: string, code: string, object: string, message: string}>} Details.
 	 */
-	private static function details( array $result ): array {
+	private function details( array $result ): array {
 		$findings = $result['findings'];
 		// usort() is stable, so each severity keeps the order in which the check found it.
 		usort( $findings, static fn ( array $a, array $b ): int => ( 'error' === $b['severity'] ) <=> ( 'error' === $a['severity'] ) );
+		$findings = array_slice( $findings, 0, self::REPORTED_FINDINGS );
+		foreach ( $findings as &$finding ) {
+			$finding['message'] = $this->services->common->jobs->diagnostic( $finding['message'] );
+		}
+		unset( $finding );
 		return [
 			'errors'   => $result['errors'],
 			'counts'   => $result['counts'],
-			'findings' => array_slice( $findings, 0, self::REPORTED_FINDINGS ),
+			'findings' => $findings,
 		];
 	}
 

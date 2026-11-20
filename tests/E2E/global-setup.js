@@ -7,22 +7,10 @@ const { execFileSync, spawn } = require( 'node:child_process' );
 const fs = require( 'node:fs' );
 const net = require( 'node:net' );
 const path = require( 'node:path' );
+const { freePort } = require( './site' );
 
 const USERNAME = 'plugin';
-const PASSWORD = 'rest password';
-
-function freePort() {
-	return new Promise( function ( resolve, reject ) {
-		const server = net.createServer();
-		server.on( 'error', reject );
-		server.listen( 0, '127.0.0.1', function () {
-			const { port } = server.address();
-			server.close( function () {
-				resolve( port );
-			} );
-		} );
-	} );
-}
+const PASSWORD = "rest user's password";
 
 function listening( port ) {
 	return new Promise( function ( resolve ) {

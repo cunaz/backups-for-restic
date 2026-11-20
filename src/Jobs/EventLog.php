@@ -44,11 +44,16 @@ final class EventLog {
 		if ( $size >= self::MAX_BYTES ) {
 			return;
 		}
+		foreach ( $context as $key => $value ) {
+			if ( is_string( $value ) ) {
+				$context[ $key ] = $this->redactor->redact( $value );
+			}
+		}
 		$line = json_encode(
 			[
 				'time'    => time(),
 				'level'   => $level,
-				'message' => $message,
+				'message' => $this->redactor->redact( $message ),
 				'context' => $context,
 			],
 			JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
@@ -56,7 +61,6 @@ final class EventLog {
 		if ( false === $line ) {
 			return;
 		}
-		$line = $this->redactor->redact( $line );
 		if ( $size + strlen( $line ) + 1 > self::MAX_BYTES ) {
 			$line = '{"level":"warning","message":"The log reached its size limit; later entries are dropped."}';
 		}

@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Storage;
 
+use BackupsForRestic\Exception\StorageFailed;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -16,10 +18,9 @@ defined( 'ABSPATH' ) || exit;
  * writes it back holds the lock for that long, so that no other request's change in between
  * is written over.
  *
- * Where the file cannot be opened or locked, as before the private directory exists, the
- * work runs without the lock: a change that may be lost in a rare collision is better than
- * one that is not made at all. Like the runner's lock, this one does not hold across web
- * servers that share a network file system without a working flock().
+ * Required changes fail closed when exclusive access is unavailable. A caller that only
+ * records a diagnostic may opt into best-effort writes. As with the runner lock, a shared
+ * filesystem must implement flock() across every worker.
  */
 final class FileLock {
 
@@ -33,9 +34,9 @@ final class FileLock {
 	/**
 	 * Names the lock file.
 	 *
-	 * @param string $file Path of the lock file; its directory need not exist.
+	 * @param string|(\Closure(): string) $file Path, or a resolver that prepares the private directory on first use.
 	 */
-	public function __construct( private readonly string $file ) {
+	public function __construct( private readonly string|\Closure $file ) {
 	}
 
 	/**
@@ -43,17 +44,20 @@ final class FileLock {
 	 *
 	 * @template T
 	 * @param \Closure(): T $work What reads, changes and writes.
+	 * @param bool          $required Fail if this operation cannot run exclusively.
 	 * @param-immediately-invoked-callable $work
 	 * @return T What the work returned.
 	 */
-	public function hold( \Closure $work ): mixed {
+	public function hold( \Closure $work, bool $required = false ): mixed {
 		if ( $this->depth > 0 ) {
 			return $work();
 		}
-		$handle = $this->open();
-		if ( null !== $handle ) {
-			// Should this fail, the work runs all the same.
-			flock( $handle, LOCK_EX );
+		$handle = $this->acquire( true );
+		if ( ! is_resource( $handle ) ) {
+			if ( $required ) {
+				StorageFailed::raise( 'The exclusive file lock could not be acquired.' );
+			}
+			return $work();
 		}
 		return $this->run( $handle, $work );
 	}
@@ -70,34 +74,52 @@ final class FileLock {
 			$work();
 			return true;
 		}
-		$handle = $this->open();
-		$busy   = 0;
-		if ( null !== $handle && ! flock( $handle, LOCK_EX | LOCK_NB, $busy ) && 1 === $busy ) {
-			fclose( $handle );
+		$handle = $this->acquire( false );
+		if ( false === $handle ) {
 			return false;
 		}
-		$this->run( $handle, $work );
+		if ( null === $handle ) {
+			$work();
+		} else {
+			$this->run( $handle, $work );
+		}
 		return true;
 	}
 
 	/**
-	 * Opens the lock file.
+	 * Prepares and locks the file. A busy nonblocking lock is distinct from an unavailable file.
 	 *
-	 * @return resource|null Handle; null where there is no file to lock.
+	 * @param bool $wait Whether to wait for a lock held by another request.
+	 * @return resource|false|null Locked handle, false if busy, null if locking failed.
 	 */
-	private function open() {
-		// Asked first: before setup there is no private directory, and that is no error.
-		$directory = dirname( $this->file );
-		$usable    = is_file( $this->file ) ? is_writable( $this->file ) : is_dir( $directory ) && is_writable( $directory );
-		$handle    = $usable ? fopen( $this->file, 'c' ) : false;
-		return false === $handle ? null : $handle;
+	private function acquire( bool $wait ) {
+		try {
+			$file = $this->file instanceof \Closure ? ( $this->file )() : $this->file;
+		} catch ( StorageFailed ) {
+			return null;
+		}
+		if ( is_link( $file ) || ( file_exists( $file ) && ! is_file( $file ) ) ) {
+			return null;
+		}
+		$directory = dirname( $file );
+		$usable    = is_file( $file ) ? is_writable( $file ) : is_dir( $directory ) && is_writable( $directory );
+		$handle    = $usable ? fopen( $file, 'c' ) : false;
+		if ( false === $handle ) {
+			return null;
+		}
+		$busy = 0;
+		if ( flock( $handle, $wait ? LOCK_EX : LOCK_EX | LOCK_NB, $busy ) ) {
+			return $handle;
+		}
+		fclose( $handle );
+		return 1 === $busy ? false : null;
 	}
 
 	/**
 	 * Runs the work and releases the lock.
 	 *
 	 * @template T
-	 * @param resource|null $handle Lock file, if there is one.
+	 * @param resource      $handle Locked file.
 	 * @param \Closure(): T $work   Work.
 	 * @param-immediately-invoked-callable $work
 	 * @return T What the work returned.
@@ -108,10 +130,8 @@ final class FileLock {
 			return $work();
 		} finally {
 			--$this->depth;
-			if ( null !== $handle ) {
-				flock( $handle, LOCK_UN );
-				fclose( $handle );
-			}
+			flock( $handle, LOCK_UN );
+			fclose( $handle );
 		}
 	}
 }

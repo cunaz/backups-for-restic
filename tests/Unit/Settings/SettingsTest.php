@@ -10,6 +10,9 @@ use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\FileLock;
+use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 
 final class SettingsTest extends TestCase {
@@ -61,6 +64,38 @@ final class SettingsTest extends TestCase {
 		self::assertEquals( $saved, $store->load() );
 	}
 
+	public function test_reading_an_option_leaves_the_directory_unclaimed_and_writing_claims_it_first(): void {
+		$root      = TempDir::create( 'settings-lock' );
+		$directory = new PrivateDirectory( $root );
+		$lock      = new FileLock(
+			static function () use ( $directory ): string {
+				$directory->ensure();
+				return $directory->path . '/state.lock';
+			}
+		);
+		$options   = new InMemoryOptions();
+		$store     = new SettingsStore( $options, [], $lock );
+		try {
+			$store->load();
+			self::assertSame( [ '.', '..' ], scandir( $root ) );
+			file_put_contents( $root . '/unrelated', 'keep' );
+			try {
+				$store->update( [ 'advanced.tick_budget_seconds' => 25 ] );
+				self::fail( 'A change without an exclusive lock must be refused.' );
+			} catch ( StorageFailed ) {
+				self::assertSame( [ '.', '..', 'unrelated' ], scandir( $root ) );
+				self::assertNull( $options->get( SettingsStore::OPTION ) );
+			}
+			unlink( $root . '/unrelated' );
+			$store->update( [ 'advanced.tick_budget_seconds' => 25 ] );
+			self::assertFileExists( $root . '/state.lock' );
+			$directory->ensure();
+			self::assertSame( 25, $store->load()->int( 'advanced.tick_budget_seconds' ) );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
 	public function test_settings_that_the_options_table_refused_do_not_pass_for_saved(): void {
 		$options = new InMemoryOptions();
 		$store   = new SettingsStore( $options );
@@ -75,6 +110,21 @@ final class SettingsTest extends TestCase {
 		} catch ( StorageFailed ) {
 			self::assertSame( 20, $store->load()->int( 'advanced.tick_budget_seconds' ) );
 		}
+	}
+
+	public function test_a_settings_write_keeps_a_concurrent_change_to_retention(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$store                  = new SettingsStore( $options );
+		$store->load();
+
+		$options->values[ SettingsStore::OPTION ] = [ 'retention.mode' => 'external' ];
+
+		$saved = $store->update( [ 'schedule.backup.hour' => 3 ] );
+
+		self::assertSame( 'external', $saved->string( 'retention.mode' ) );
+		self::assertSame( 'external', $options->values[ SettingsStore::OPTION ]['retention.mode'] );
+		self::assertSame( 3, $saved->int( 'schedule.backup.hour' ) );
 	}
 
 	public function test_durations_and_e_mail_addresses_are_normalized(): void {

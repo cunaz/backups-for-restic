@@ -318,8 +318,10 @@ to a rest-server and times nothing.
 ### 5.5 End-to-end (Playwright)
 
 `tests/E2E/admin.spec.js` drives the admin page in Chromium against the test site of §5.3,
-on a WordPress that was just installed (`npm run test:e2e`; in CI the job "Admin page in a
-browser" of `integration.yml`). The tests click and read what an administrator clicks and
+with the installed distribution at its normal path. Build it with `bin/build-package.sh`,
+then run `BFR_TEST_PLUGIN_DIR="$PWD/build/backups-for-restic" bin/test-site.sh install`,
+`bin/test-site.sh start` and `npm run test:e2e`. CI uses the same sequence in the
+"Admin page in a browser" job. The tests click and read what an administrator clicks and
 reads, and send no request of their own. `tests/E2E/global-setup.js` starts a TLS
 rest-server with a certificate of its own authority for them. They run one after the other
 on one site, without retries:
@@ -343,8 +345,10 @@ on one site, without retries:
   of the working directory, and the check says "protected";
 - a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.
 
-Still to come with the restore of Milestone 3: snapshot browsing, single-file restore and
-download, and the acceptance test of that milestone. Site Health has no browser test.
+The restore tests download the selected file, ZIP and report. On a disposable site they
+exercise rejected and accepted live-file confirmations, a stale preview, undo and staged
+deletion. The two-installation test uses a second real WordPress, database, URL and content
+directory, created for that test from the same package.
 
 ### 5.6 Mutation testing and fuzzing
 

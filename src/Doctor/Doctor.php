@@ -129,6 +129,9 @@ final class Doctor {
 	 * @return Check Result.
 	 */
 	private static function private_directory( Environment $environment ): Check {
+		if ( ! $environment->private_ready ) {
+			return new Check( 'private_directory', Check::CRITICAL, 'unavailable' );
+		}
 		if ( true === $environment->exposed ) {
 			return new Check( 'private_directory', Check::CRITICAL, 'exposed' );
 		}

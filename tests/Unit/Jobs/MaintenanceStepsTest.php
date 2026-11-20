@@ -56,7 +56,8 @@ final class MaintenanceStepsTest extends TestCase {
 		$this->directory = TempDir::create( 'maintenance' );
 		$this->options   = new InMemoryOptions();
 		$this->server    = new InMemoryRestServer();
-		$this->jobs      = new JobStore( $this->directory . '/private/jobs', new Redactor(), new SystemRandom() );
+		( new PrivateDirectory( $this->directory . '/private' ) )->ensure();
+		$this->jobs = new JobStore( $this->directory . '/private/jobs', new Redactor(), new SystemRandom() );
 		( new SettingsStore( $this->options ) )->update( [ 'repository.url' => 'https://backup.example.net:8000/site/' ] );
 	}
 
@@ -135,6 +136,30 @@ final class MaintenanceStepsTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_resumed_check_redacts_its_report_before_recording_it_in_site_state(): void {
+		$redactor = new Redactor();
+		$redactor->add( new Secret( 'sensitive-token' ) );
+		$this->jobs                 = new JobStore( $this->directory . '/private/jobs', $redactor, new SystemRandom() );
+		$job                        = new Job( '20270115T030000Z-abcdef', JobType::Check, 'manual', 1800000000 );
+		$job->data['check_details'] = [
+			'errors'   => 1,
+			'counts'   => [ 'pack_hash' => 1 ],
+			'findings' => [
+				[
+					'severity' => 'error',
+					'code'     => 'pack_hash',
+					'object'   => 'pack',
+					'message'  => 'sensitive-token in a diagnostic',
+				],
+			],
+		];
+		$this->run_step( $job, 'recording' );
+		$state = new SiteState( $this->options );
+		foreach ( [ 'last_check', 'check_alert' ] as $key ) {
+			self::assertSame( '[redacted] in a diagnostic', $state->get( $key )['findings'][0]['message'] );
+		}
+	}
+
 	public function test_an_index_memory_refusal_before_download_still_allows_the_check_to_release_its_lock(): void {
 		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
 		$repository = Repository::initialize( $this->access()->backend(), self::PASSWORD, new Identity( 'example.com', 'www-data' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );

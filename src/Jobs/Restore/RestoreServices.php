@@ -23,6 +23,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final readonly class RestoreServices {
 
+	/** The optional archive beside the staged tree; every restore has a unique job ID. */
+	public const string ARCHIVE = 'selection.zip';
+
 	/** The checkpoint that RestoreRun writes into its working directory. */
 	public const string CHECKPOINT = 'restore.json';
 
@@ -32,9 +35,10 @@ final readonly class RestoreServices {
 	/**
 	 * Creates the services.
 	 *
-	 * @param BackupServices $common Shared services.
+	 * @param BackupServices                     $common Shared services.
+	 * @param (\Closure(): DatabasePreview)|null $preview Opens a database preview on demand.
 	 */
-	public function __construct( public BackupServices $common ) {
+	public function __construct( public BackupServices $common, public ?\Closure $preview = null ) {
 	}
 
 	/**

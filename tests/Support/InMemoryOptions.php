@@ -67,7 +67,7 @@ final class InMemoryOptions implements Options {
 	/** Runs before fresh() answers: what another request wrote since this one read. */
 	public ?\Closure $meanwhile = null;
 
-	public function fresh( string $name ): mixed {
+	public function fresh( string $name, bool $autoload = false ): mixed {
 		++$this->fresh;
 		if ( null !== $this->meanwhile ) {
 			$meanwhile       = $this->meanwhile;
