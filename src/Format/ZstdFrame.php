@@ -71,7 +71,7 @@ final readonly class ZstdFrame {
 			self::require_capacity( $size, $capacity );
 		}
 		// RFC 8878 section 3.1.1.2.2 limits each regenerated block to 128 KiB or the window.
-		$block_limit = min( 131072, $single ? ( $size ?? 0 ) : $window );
+		$block_limit = min( 131072, $single ? $size : $window );
 		$bound       = 0;
 		do {
 			$header = self::integer( $data, $cursor, 3, 0xffffff );

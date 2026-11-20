@@ -47,7 +47,7 @@ final class Compression {
 		}
 		// ext-zstd keeps its decoder buffer, a growing output string and a return copy.
 		// Leave room for allocation rounding, the window, and reporting a refusal.
-		$memory = ini_parse_quantity( (string) ini_get( 'memory_limit' ) );
+		$memory = ini_parse_quantity( ini_get( 'memory_limit' ) );
 		$limit  = self::MAX_DECOMPRESSED_SIZE;
 		if ( $memory > 0 ) {
 			$limit = min( $limit, intdiv( max( 0, $memory - memory_get_usage( true ) - 2097152 ), 4 ) );
