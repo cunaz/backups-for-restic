@@ -11,6 +11,7 @@ namespace BackupsForRestic\Jobs\Restore;
 
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Snapshot\Reader;
+use BackupsForRestic\Engine\Restore\Files as StagingFiles;
 use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\DatabaseFailed;
@@ -251,7 +252,7 @@ final class RestoreSteps implements StepProvider {
 		// A tick that the host ended after the move finds the report in its place.
 		if ( is_file( $source ) && ! is_link( $source ) ) {
 			if ( ! rename( $source, $report ) ) {
-				StorageFailed::raise( 'The restore report could not be moved to the staging directory.' );
+				StorageFailed::raise( 'The restore report could not be moved to the staging directory.', [ 'code' => StagingFiles::WRITE_FAILED ] );
 			}
 			chmod( $report, 0600 );
 		} elseif ( ! is_file( $report ) ) {
@@ -437,7 +438,13 @@ final class RestoreSteps implements StepProvider {
 		Files::remove_tree( $work );
 		$target = $this->services->files_dir( $job );
 		if ( ! is_dir( $target ) && ! mkdir( $target, 0700, true ) && ! is_dir( $target ) ) {
-			StorageFailed::raise( 'The staging directory could not be created in the private directory.', [ 'job' => $job->id ] );
+			StorageFailed::raise(
+				'The staging directory could not be created in the private directory.',
+				[
+					'job'  => $job->id,
+					'code' => StagingFiles::WRITE_FAILED,
+				]
+			);
 		}
 		chmod( $this->services->staging_dir( $job ), 0700 );
 		chmod( $target, 0700 );

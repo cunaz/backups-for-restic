@@ -36,6 +36,7 @@ use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
 final class RestoreRunTest extends TestCase {
@@ -236,6 +237,7 @@ final class RestoreRunTest extends TestCase {
 			self::fail( 'Missing selections must not silently restore a subset.' );
 		} catch ( InvalidArgument $error ) {
 			self::assertStringContainsString( 'does not exist', $error->getMessage() );
+			self::assertSame( 'restore_path_missing', JobError::from_throwable( $error )->code );
 		}
 		self::assertSame( [], TempDir::describe( $this->target ) );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
@@ -361,6 +363,35 @@ final class RestoreRunTest extends TestCase {
 			json_decode( $output, true ),
 			$output . $errors
 		);
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_write_that_the_file_system_refuses_is_a_local_storage_failure(): void {
+		if ( ! function_exists( 'posix_setrlimit' ) || ! function_exists( 'pcntl_signal_get_handler' ) || ! defined( 'POSIX_RLIMIT_FSIZE' ) ) {
+			self::markTestSkipped( 'This failure injection needs POSIX file-size limits and signals.' );
+		}
+		$run = $this->start( $this->snapshot( [ $this->file( 'large.bin', str_repeat( 'x', 65536 ), 4 ) ] ), space: static fn (): float => 1073741824.0 );
+		$this->plan( $run );
+		$limits  = posix_getrlimit();
+		$soft    = is_int( $limits['soft filesize'] ) ? $limits['soft filesize'] : POSIX_RLIMIT_INFINITY;
+		$hard    = is_int( $limits['hard filesize'] ) ? $limits['hard filesize'] : POSIX_RLIMIT_INFINITY;
+		$handler = pcntl_signal_get_handler( SIGXFSZ );
+		// As a full disk or a quota refuses a write: the file may not grow beyond its first blob.
+		pcntl_signal( SIGXFSZ, SIG_IGN );
+		self::assertTrue( posix_setrlimit( POSIX_RLIMIT_FSIZE, 65536, $hard ) );
+		set_error_handler( static fn (): bool => true, E_WARNING | E_NOTICE );
+		try {
+			$run->advance( INF );
+			self::fail( 'A refused write must stop the restore.' );
+		} catch ( StorageFailed $error ) {
+			self::assertSame( 'staging_write', JobError::from_throwable( $error )->code, 'The user is told about the disk, not about damage in the repository.' );
+		} finally {
+			restore_error_handler();
+			posix_setrlimit( POSIX_RLIMIT_FSIZE, $soft, $hard );
+			pcntl_signal( SIGXFSZ, $handler );
+		}
+		self::assertSame( 65536, filesize( $this->target . '/large.bin' ) );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock is released.' );
 	}
 
 	public function test_nonempty_target_is_refused_without_changing_existing_content(): void {

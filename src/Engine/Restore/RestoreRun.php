@@ -130,12 +130,13 @@ final class RestoreRun {
 	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
 	 * @return self New run; no file has been restored yet.
 	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws StorageFailed With the code staging_write if the working directory cannot be created.
 	 */
 	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string|array $selection = '/', ?Identity $identity = null, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
 		$selected    = new Selection( is_string( $selection ) ? [ $selection ] : $selection );
 		$destination = Files::bind( $target );
 		if ( ! Files::exists( $work_dir ) && ! mkdir( $work_dir, 0700, true ) ) {
-			throw new InvalidArgument( 'The restore working directory cannot be created.' );
+			StorageFailed::raise( 'The restore working directory cannot be created.', [ 'code' => Files::WRITE_FAILED ] );
 		}
 		$work       = Files::bind( $work_dir );
 		$target_key = Names::key( '\\' === DIRECTORY_SEPARATOR ? str_replace( '\\', '/', $destination['path'] ) : $destination['path'] );
@@ -536,7 +537,7 @@ final class RestoreRun {
 	/**
 	 * Finishes preflight before writing; completion checks actual bytes against the plan.
 	 *
-	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws InvalidArgument With the code restore_path_missing if a selected path is not in the snapshot.
 	 * @throws StorageFailed With the code staging_space if the files are known not to fit.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
@@ -546,7 +547,7 @@ final class RestoreRun {
 		}
 		if ( 'plan' === $this->state->phase ) {
 			if ( [] !== array_diff( $this->state->selection->paths, $this->state->found ) ) {
-				throw new InvalidArgument( 'A selected path does not exist in the snapshot.' );
+				InvalidArgument::raise( 'A selected path does not exist in the snapshot.', [ 'code' => 'restore_path_missing' ] );
 			}
 			Files::empty_directory( $this->state->target['path'] );
 			// Round each entry up generously and reserve room for the report/checkpoint.
@@ -657,6 +658,7 @@ final class RestoreRun {
 	 *
 	 * @param string $relative Raw relative destination.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code staging_write if the directory cannot be created.
 	 */
 	private function create_directory( string $relative ): void {
 		$path = Files::destination( $this->state, $relative );
@@ -670,7 +672,7 @@ final class RestoreRun {
 			throw new FormatException( 'The restore directory intent does not match its traversal.' );
 		}
 		if ( ! Files::exists( $path ) && ! mkdir( $path, 0700 ) ) {
-			throw new FormatException( 'A staging directory cannot be created.' );
+			StorageFailed::raise( 'A staging directory cannot be created.', [ 'code' => Files::WRITE_FAILED ] );
 		}
 		if ( ( Files::stat( $path )['mode'] & 0170000 ) !== 0040000 ) {
 			throw new FormatException( 'A staging directory was replaced with a link or file.' );
@@ -762,6 +764,7 @@ final class RestoreRun {
 	 * @param string $mtime Snapshot timestamp.
 	 * @param bool   $directory Whether this is a directory.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code staging_write if the mode or time cannot be set.
 	 */
 	private function metadata( string $path, string $mtime, bool $directory ): void {
 		$stat = Files::stat( $path );
@@ -769,7 +772,7 @@ final class RestoreRun {
 			throw new FormatException( 'A restored entry was replaced before its metadata was applied.' );
 		}
 		if ( ! chmod( $path, $directory ? 0700 : 0600 ) || ! touch( $path, Rfc3339::parse( $mtime )[0] ) ) {
-			throw new FormatException( 'Restored entry metadata cannot be applied.' );
+			StorageFailed::raise( 'Restored entry metadata cannot be applied.', [ 'code' => Files::WRITE_FAILED ] );
 		}
 	}
 

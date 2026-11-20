@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\ScryptParameters;
@@ -350,7 +351,7 @@ final class RestoreStepsTest extends TestCase {
 		$job = $this->drive( $this->restore_job( $snapshot, [ $this->site . '/missing' ] ) );
 
 		self::assertSame( JobState::Failed, $job->state );
-		self::assertSame( 'configuration', $job->error?->code );
+		self::assertSame( 'restore_path_missing', $job->error?->code, 'The setup is complete; the snapshot lacks the path.' );
 		self::assertSame( [], $this->locks() );
 		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
 	}
@@ -377,6 +378,34 @@ final class RestoreStepsTest extends TestCase {
 		self::assertCount( 1, $job->warnings );
 		self::assertStringContainsString( 'free disk space is unknown', $job->warnings[0] );
 		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_write_that_the_disk_refuses_fails_the_restore_with_a_storage_error(): void {
+		if ( ! function_exists( 'posix_setrlimit' ) || ! function_exists( 'pcntl_signal_get_handler' ) || ! defined( 'POSIX_RLIMIT_FSIZE' ) ) {
+			self::markTestSkipped( 'This failure injection needs POSIX file-size limits and signals.' );
+		}
+		$snapshot = $this->backup();
+		$limits   = posix_getrlimit();
+		$soft     = is_int( $limits['soft filesize'] ) ? $limits['soft filesize'] : POSIX_RLIMIT_INFINITY;
+		$hard     = is_int( $limits['hard filesize'] ) ? $limits['hard filesize'] : POSIX_RLIMIT_INFINITY;
+		$handler  = pcntl_signal_get_handler( SIGXFSZ );
+		// As a full disk or a quota refuses a write: no file may grow beyond 512 KiB, and the site has one of 1.5 MB.
+		pcntl_signal( SIGXFSZ, SIG_IGN );
+		self::assertTrue( posix_setrlimit( POSIX_RLIMIT_FSIZE, 524288, $hard ) );
+		set_error_handler( static fn (): bool => true, E_WARNING | E_NOTICE );
+		try {
+			$job = $this->drive( $this->restore_job( $snapshot ) );
+		} finally {
+			restore_error_handler();
+			posix_setrlimit( POSIX_RLIMIT_FSIZE, $soft, $hard );
+			pcntl_signal( SIGXFSZ, $handler );
+		}
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'staging_write', $job->error?->code, 'The user is told about the disk, not about damage in the repository.' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ), 'A failed restore leaves no partial tree.' );
 	}
 
 	public function test_an_error_of_php_while_a_finished_restore_releases_its_lock_keeps_the_staged_files(): void {
