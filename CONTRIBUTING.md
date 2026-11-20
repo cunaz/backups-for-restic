@@ -37,8 +37,11 @@ npm ci
 npm run lint:js
 ```
 
-The database suite needs a MySQL or MariaDB server (root over the local socket, or
-`BFR_TEST_MYSQL_HOST`, `BFR_TEST_MYSQL_USER` and `BFR_TEST_MYSQL_PASSWORD`):
+Run the database suite on a disposable MySQL or MariaDB server. It uses root over
+the local socket by default. Set `BFR_TEST_MYSQL_HOST`, `BFR_TEST_MYSQL_USER` and
+`BFR_TEST_MYSQL_PASSWORD` for a different test server. The suite creates and drops
+temporary schemas. The MySQL exchange test also creates a temporary login, grants and
+revokes its database privileges and global PROCESS, and drops the login when it finishes.
 
 ```bash
 composer test:database
