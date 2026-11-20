@@ -66,7 +66,7 @@ final class EventLog {
 		}
 		// The result is not checked on purpose: a line that cannot be written must not fail the
 		// job it tells about. The job document, which decides what happens next, is checked.
-		file_put_contents( $this->file, $line . "\n", FILE_APPEND | LOCK_EX );
+		@file_put_contents( $this->file, $line . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- This best-effort append may fail after the job document has been committed.
 	}
 
 	/**

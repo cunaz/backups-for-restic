@@ -5,6 +5,9 @@ namespace BackupsForRestic\Tests\Integration;
 
 use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Jobs\JobStore;
+use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
 
 /**
@@ -52,6 +55,29 @@ final class CliTest extends TestCase {
 		$listed = json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true );
 		self::assertIsArray( $listed );
 		return array_values( array_map( 'strval', array_column( $listed, 'id' ) ) );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_job_creation_reports_a_private_storage_error_without_a_trace(): void {
+		$fixture = TempDir::create( 'cli-job-storage' );
+		$private = new PrivateDirectory( $fixture . '/private' );
+		try {
+			$private->ensure();
+			$override = $fixture . '/private-dir.php';
+			file_put_contents( $override, '<?php define( "BACKUPS_FOR_RESTIC_PRIVATE_DIR", ' . var_export( $private->path, true ) . ' );' );
+			$jobs = $private->subdirectory( 'jobs' );
+			// A directory cannot be opened as a writable lock file, even when testing as root.
+			mkdir( $jobs . '/' . JobStore::CREATE_LOCK );
+			[ $status, $output ] = self::command( [ 'backup', '--require=' . $override ] );
+			self::assertSame( 1, $status, $output );
+			self::assertSame( 'Error: The job could not be started. Check free space and write permissions in the private working directory.', TestSite::last_line( $output ) );
+			self::assertStringNotContainsString( $private->path, $output );
+			self::assertStringNotContainsString( 'Stack trace:', $output );
+			self::assertStringNotContainsString( 'Warning:', $output );
+			self::assertSame( [ '.', '..', JobStore::CREATE_LOCK ], scandir( $jobs ) );
+		} finally {
+			TempDir::remove( $fixture );
+		}
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]

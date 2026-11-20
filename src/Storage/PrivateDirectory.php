@@ -290,10 +290,10 @@ final readonly class PrivateDirectory {
 	 * @throws StorageFailed If it cannot be created.
 	 */
 	private function make_directory( string $directory ): void {
-		if ( ! is_dir( $directory ) && ! mkdir( $directory, 0700, true ) && ! is_dir( $directory ) ) {
+		if ( ! is_dir( $directory ) && ! @mkdir( $directory, 0700, true ) && ! is_dir( $directory ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An occupied or unwritable filesystem is reported below.
 			StorageFailed::raise( 'The private directory could not be created.', [ 'path' => $directory ] );
 		}
-		if ( ! chmod( $directory, 0700 ) ) {
+		if ( ! @chmod( $directory, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The exception reports a read-only directory without printing its private path.
 			StorageFailed::raise( 'The private directory could not be made owner-only.', [ 'path' => $directory ] );
 		}
 	}

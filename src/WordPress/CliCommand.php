@@ -11,6 +11,7 @@ namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
@@ -232,6 +233,8 @@ final class CliCommand {
 			$job = $this->container->jobs()->create( $type, 'cli', time(), $data );
 		} catch ( JobConflict $conflict ) {
 			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $conflict )->code )['message'] );
+		} catch ( StorageFailed ) {
+			\WP_CLI::error( __( 'The job could not be started. Check free space and write permissions in the private working directory.', 'backups-for-restic' ) );
 		}
 		/* translators: %s: job ID. */
 		\WP_CLI::line( sprintf( __( 'Job %s created.', 'backups-for-restic' ), $job->id ) );

@@ -76,7 +76,13 @@ final class JobStore {
 			$this->require_idle();
 			$job       = new Job( $this->reserve_id( $now ), $type, $trigger, $now );
 			$job->data = $data;
-			$this->save( $job );
+			try {
+				$this->save( $job );
+			} catch ( StorageFailed $error ) {
+				// Only remove our empty reservation, while the creation lock still holds.
+				@rmdir( $this->directory . '/' . $job->id ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Preserve the write error and leave any unexpected contents intact.
+				throw $error;
+			}
 		} finally {
 			if ( null !== $lock ) {
 				flock( $lock, LOCK_UN );
@@ -112,7 +118,7 @@ final class JobStore {
 			if ( file_exists( $path ) || is_link( $path ) || file_exists( $staging ) || is_link( $staging ) ) {
 				continue;
 			}
-			if ( ! mkdir( $path, 0700 ) ) {
+			if ( ! @mkdir( $path, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Report storage exhaustion without PHP's path-bearing warning.
 				throw new StorageFailed( 'The new job directory could not be reserved.' );
 			}
 			return $id;
@@ -510,10 +516,10 @@ final class JobStore {
 	 * @throws StorageFailed If the jobs directory cannot be created or locked.
 	 */
 	private function lock() {
-		if ( ! is_dir( $this->directory ) && ! mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) {
+		if ( ! is_dir( $this->directory ) && ! @mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A concurrent creator is harmless and a real write refusal is reported.
 			StorageFailed::raise( 'The jobs directory could not be created.' );
 		}
-		$handle = fopen( $this->directory . '/' . self::CREATE_LOCK, 'c' );
+		$handle = @fopen( $this->directory . '/' . self::CREATE_LOCK, 'c' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A checked error replaces PHP's path-bearing warning.
 		if ( false === $handle ) {
 			StorageFailed::raise( 'The jobs directory could not be locked.' );
 		}

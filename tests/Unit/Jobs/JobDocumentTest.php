@@ -4,10 +4,12 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
@@ -54,6 +56,35 @@ final class JobDocumentTest extends TestCase {
 		self::assertSame( 'schema', array_key_first( $document ) );
 		self::assertSame( Job::SCHEMA, $document['schema'] );
 		self::assertSame( Job::SCHEMA, $job->to_array()['schema'] );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_partial_first_write_releases_the_job_reservation_for_retry(): void {
+		if ( ! function_exists( 'posix_setrlimit' ) || ! function_exists( 'pcntl_signal_get_handler' ) || ! defined( 'POSIX_RLIMIT_FSIZE' ) ) {
+			self::markTestSkipped( 'This failure injection needs POSIX file-size limits and signals.' );
+		}
+		$limits = posix_getrlimit();
+		if ( false === $limits ) {
+			self::fail( 'The process file-size limits could not be read.' );
+		}
+		$soft    = is_int( $limits['soft filesize'] ) ? $limits['soft filesize'] : POSIX_RLIMIT_INFINITY;
+		$hard    = is_int( $limits['hard filesize'] ) ? $limits['hard filesize'] : POSIX_RLIMIT_INFINITY;
+		$handler = pcntl_signal_get_handler( SIGXFSZ );
+		$store   = $this->store();
+		pcntl_signal( SIGXFSZ, SIG_IGN );
+		try {
+			self::assertTrue( posix_setrlimit( POSIX_RLIMIT_FSIZE, 128, $hard ) );
+			$store->create( JobType::Backup, 'cli', 1767225600 );
+			self::fail( 'A partially written job document was accepted.' );
+		} catch ( StorageFailed $error ) {
+			self::assertSame( 'environment', JobError::from_throwable( $error )->code );
+		} finally {
+			posix_setrlimit( POSIX_RLIMIT_FSIZE, $soft, $hard );
+			pcntl_signal( SIGXFSZ, $handler );
+		}
+		self::assertSame( [ '.', '..', JobStore::CREATE_LOCK ], scandir( $this->directory ) );
+		$job = $store->create( JobType::Backup, 'cli', 1767225600 );
+		self::assertSame( $job->id, $store->active()?->id );
 	}
 
 	public function test_a_document_from_before_the_number_existed_has_the_first_layout(): void {

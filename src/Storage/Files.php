@@ -44,7 +44,7 @@ final class Files {
 		$temporary = $file . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
 		$umask     = umask( 0077 );
 		try {
-			$handle = fopen( $temporary, 'xb' );
+			$handle = @fopen( $temporary, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A checked storage error replaces PHP's warning about the private path.
 		} finally {
 			umask( $umask );
 		}
@@ -62,7 +62,7 @@ final class Files {
 				if ( $written > $limit ) {
 					return false;
 				}
-				if ( strlen( $piece ) !== fwrite( $handle, $piece ) ) {
+				if ( strlen( $piece ) !== @fwrite( $handle, $piece ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A full filesystem can also emit a notice for a short write.
 					StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
 				}
 			}
