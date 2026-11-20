@@ -74,11 +74,35 @@ final class CompressionTest extends TestCase {
 		$data    = $padding . "\x28\xb5\x2f\xfd" . $body . self::STREAMED;
 		$skipped = ZstdFrame::read( $data, 0, 0 );
 		self::assertTrue( $skipped->skip );
+		self::assertSame( 0, $skipped->size );
 		self::assertSame( strlen( $padding ), $skipped->end );
 		$frame = ZstdFrame::read( $data, $skipped->end, $size );
 		self::assertFalse( $frame->skip );
 		self::assertSame( $size, $frame->size );
 		self::assertSame( strlen( $data ) - strlen( self::STREAMED ), $frame->end );
+	}
+
+	/** @return iterable<string, array{string}> */
+	public static function invalid_envelopes(): iterable {
+		yield 'truncated skippable payload' => [ "\x50\x2a\x4d\x18" . pack( 'V', 3 ) . 'ab' ];
+		yield 'partial skippable magic' => [ "\x40\x2a\x4d\x18" . pack( 'V', 0 ) ];
+		yield 'unknown magic with an otherwise complete frame' => [ "\x25\xb5\x2f\xfd\x20\x05\x29\x00\x00books" ];
+		yield 'reserved frame header bit' => [ "\x28\xb5\x2f\xfd\x28\x05\x29\x00\x00books" ];
+		yield 'reserved block type' => [ "\x28\xb5\x2f\xfd\x20\x01\x0f\x00\x00x" ];
+	}
+
+	#[DataProvider( 'invalid_envelopes' )]
+	public function test_preflight_refuses_incomplete_or_reserved_frames( string $data ): void {
+		$this->expectException( FormatException::class );
+		ZstdFrame::read( $data, 0, 1024 );
+	}
+
+	public function test_a_content_checksum_is_part_of_its_frame(): void {
+		$checksummed = "\x28\xb5\x2f\xfd\x24\x05\x29\x00\x00books\x1c\x6f\x78\xfd";
+		$data        = $checksummed . self::STREAMED;
+		$first       = ZstdFrame::read( $data, 0, 5 );
+		self::assertSame( strlen( $checksummed ), $first->end );
+		self::assertSame( strlen( $data ), ZstdFrame::read( $data, $first->end, 1024 )->end );
 	}
 
 	public function test_a_truncated_frame_never_returns_partial_plaintext(): void {
