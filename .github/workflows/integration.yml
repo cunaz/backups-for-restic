@@ -1,7 +1,24 @@
-# Milestone 1 acceptance against a real WordPress (tests/Integration): setup through the REST
-# API, backups driven by wp-cron.php with max_execution_time = 30 and memory_limit = 128M, a
-# killed tick, restic check and restore, and a database import with identical checksums.
-# A second job drives the admin page in a browser (tests/E2E), on a site of its own.
+# Three groups of jobs, each on a WordPress site of its own.
+#
+# "WordPress on PHP 8.3" is the Milestone 1 acceptance against a real WordPress
+# (tests/Integration): setup through the REST API, backups driven by wp-cron.php with
+# max_execution_time = 30 and memory_limit = 128M, a killed tick, restic check and restore,
+# and a database import with identical checksums.
+#
+# "WordPress memory" is a matrix of three repository sizes (500000, 1000000 and 2000000
+# blobs) that runs with every trigger. bin/bench-wordpress-memory.php builds a history of
+# that size and drives a complete backup, check and prune job of the plugin, every tick in a
+# new PHP process with memory_limit = 128M, max_execution_time = 30, set_time_limit()
+# disabled and a full WordPress. The site is installed with BFR_DISABLE_WP_CRON=1, so that
+# no request starts a tick that is not measured; the script refuses any other site. A size
+# passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job
+# ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack,
+# a check that succeeds finds no error, and restic check --read-data accepts the repository
+# before and after. At 500000 blobs all three jobs must succeed; at the larger sizes each
+# must succeed or fail with index_too_large. The reports of every tick and the logs are
+# uploaded as the artifact wordpress-memory-<blobs>, also when the job fails.
+#
+# "Admin page in a browser" runs the browser tests (tests/E2E).
 name: Integration
 
 on:

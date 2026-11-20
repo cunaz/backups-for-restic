@@ -247,24 +247,31 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
 
-	/** @return iterable<string, array{string|list<int>}> */
+	/**
+	 * Values of the layout marker as get_option() returns them. Null stands for a row that
+	 * holds a serialized null (N;), which WordPress decodes to what it answers for a missing
+	 * option; such a row exists and is therefore malformed, not the layout before numbers.
+	 *
+	 * @return iterable<string, array{string|list<int>|null}>
+	 */
 	public static function unsupported_layouts(): iterable {
 		yield 'newer' => [ '2' ];
 		yield 'damaged numeral' => [ '2x' ];
 		yield 'empty' => [ '' ];
 		yield 'zero' => [ '0' ];
 		yield 'array' => [ [ 2 ] ];
+		yield 'serialized null' => [ null ];
 	}
 
-	/** @param string|list<int> $value Unsupported option value. */
+	/** @param string|list<int>|null $value Unsupported option value. */
 	#[DataProvider( 'unsupported_layouts' )]
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
-	public function test_an_unsupported_options_layout_keeps_the_plugin_inert( string|array $value ): void {
+	public function test_an_unsupported_options_layout_keeps_the_plugin_inert( string|array|null $value ): void {
 		TestSite::idle( 600 );
 		$db        = self::site_database();
 		$select    = "SELECT option_value FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'";
 		$stored    = $db->rows( $select )[0]['option_value'] ?? null;
-		$raw_value = is_array( $value ) ? serialize( $value ) : $value;
+		$raw_value = is_string( $value ) ? $value : serialize( $value );
 		self::assertSame( '1', $stored, 'The plugin recorded the layout of its options on its first request.' );
 
 		try {
@@ -400,10 +407,10 @@ final class WordPressSiteTest extends TestCase {
 		}
 	}
 
-	/** @param string|list<int> $value Unsupported option value. */
+	/** @param string|list<int>|null $value Unsupported option value. */
 	#[DataProvider( 'unsupported_layouts' )]
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
-	public function test_deactivation_leaves_jobs_alone_when_the_options_layout_is_unsupported( string|array $value ): void {
+	public function test_deactivation_leaves_jobs_alone_when_the_options_layout_is_unsupported( string|array|null $value ): void {
 		TestSite::idle( 600 );
 		$output = TestSite::php(
 			'
@@ -414,7 +421,18 @@ final class WordPressSiteTest extends TestCase {
 			$directory = $store->directory( $job );
 			$before = file_get_contents( $directory . "/job.json" );
 			try {
-				update_option( "backups_for_restic_schema_version", json_decode( $arguments[1], true, 512, JSON_THROW_ON_ERROR ), true );
+				$value = json_decode( $arguments[1], true, 512, JSON_THROW_ON_ERROR );
+				if ( null === $value ) {
+					// update_option() cannot store a null. The row is written as a tool or a
+					// hand writes it, and the caches of this request forget the old value.
+					global $wpdb;
+					$wpdb->update( $wpdb->options, [ "option_value" => "N;" ], [ "option_name" => "backups_for_restic_schema_version" ] );
+					wp_cache_delete( "backups_for_restic_schema_version", "options" );
+					wp_cache_delete( "alloptions", "options" );
+					wp_cache_delete( "notoptions", "options" );
+				} else {
+					update_option( "backups_for_restic_schema_version", $value, true );
+				}
 				deactivate_plugins( $arguments[0] );
 				echo "\n", json_encode( [
 					$before === file_get_contents( $directory . "/job.json" ),

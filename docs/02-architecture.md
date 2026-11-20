@@ -449,7 +449,10 @@ an uploaded pack is recorded only in the job's checkpoint. Reading merges all in
 merged set so later runs load one file instead of all index files. The cache file is a row
 of pieces of about one megabyte, each sealed with the master key and carrying a mark of its
 file and its number; reading and writing need one piece in memory besides the index, and a
-file whose pieces do not belong together is discarded.
+file whose pieces do not belong together is discarded. The length before each piece is not
+sealed: one that no piece can have (more than the names of the listed index files, or more
+than `IndexSet::MAX_PIECE_BYTES` of index) discards the file as well, before the memory
+budget is asked, so that a damaged length cannot end every job with `index_too_large`.
 Prune-lite rewrites index files without the deleted packs.
 
 ### 5.8 Trees and nodes
@@ -680,7 +683,15 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   pack. Classification counts distinct live names across batches; a missing pack stops the
   run as repository damage, preserving unindexed packs that may hold recovery copies.
   Unindexed packs never enter the JSON checkpoint: classification and deletion resume by
-  table slot. Both files
+  table slot. A stored answer that is not a valid listing, such as the error page of a
+  proxy, sends the checkpoint back to the download before the error ends the request, so
+  the retry asks the server again instead of parsing the same file; check does the same
+  with its listing. The run counts the listings it discarded in its checkpoint, because
+  the job counts only failures that follow each other and a request that only downloads
+  ends normally between two of them. A run downloads again three times in a row at most;
+  with the fourth invalid answer the checkpoint stays at the failing batch, every later
+  request fails there at once, and the job gives up after its usual number of attempts.
+  Both files
   have mode 0600 before content is written. This bounds the new listing path, while the
   existing tree/index sets still need the full-job memory work ([ADR 0033](adr/0033-prune-listing-on-disk.md)).
   If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares
@@ -1292,6 +1303,8 @@ and schedules are slots in the site's time zone.
   events but leaves jobs and their repository locks alone when the options have a newer
   or malformed layout number. A missing option is the only legacy case: zero, negative,
   empty and non-numeric values are unknown layouts, preserved without starting the plugin.
+  So is a row whose value decodes to null, which `get_option()` cannot tell from a missing
+  option: `Options::exists()` asks with a default that no stored value can be.
   `WpOptions::initialize()` uses a prepared insert with a no-op duplicate-key clause,
   because WordPress' `add_option()` can update an existing row after a stale existence
   check. This operation does not use the `add_option()` or `update_option()` hooks; normal

@@ -29,6 +29,19 @@ final class WpOptions implements Options {
 	}
 
 	/**
+	 * Tells whether an option exists.
+	 *
+	 * @param string $name Option name.
+	 * @return bool True if the options table has the option, whatever its value decodes to.
+	 */
+	public function exists( string $name ): bool {
+		// A row that holds a serialized null decodes to the null that get() also answers for
+		// a missing option. Only a default that no stored value can be tells the two apart.
+		$absent = new \stdClass();
+		return $absent !== get_option( $name, $absent );
+	}
+
+	/**
 	 * Reads an option from the database, past what this request has cached.
 	 *
 	 * @param string $name Option name.
