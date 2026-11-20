@@ -10,6 +10,7 @@ use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Dump\Table;
 use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Database\Restore\InsertStatement;
+use BackupsForRestic\Exception\DatabaseFailed;
 
 final class DumpColumnsTest extends TestCase {
 
@@ -91,6 +92,27 @@ final class DumpColumnsTest extends TestCase {
 		);
 		$source = new TableSource( $db, $table, '', null, static function (): void {} );
 		self::assertStringContainsString( '(`id`,`hidden`) VALUES (1,42);', $source->read( 10000 ) );
+	}
+
+	public function test_integer_seek_paging_refuses_schema_drift_and_invalid_checkpoints(): void {
+		$db    = new class() implements Connection {
+			public int $queries = 0;
+
+			public function rows( string $sql ): array {
+				++$this->queries;
+				return [ [ 'id' => 'new-text-key' ] ];
+			}
+		};
+		$table = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`id` int)', [ 'id' => SqlFormatter::NUMERIC ], 'id', [ 'id' ] );
+		foreach ( [ null, '{"after":"old-text-key"}' ] as $cursor ) {
+			try {
+				( new TableSource( $db, $table, '', $cursor, static function (): void {} ) )->read( 10000 );
+				self::fail( 'Integer seek paging continued with a changed primary key.' );
+			} catch ( DatabaseFailed $error ) {
+				self::assertSame( 'The database dump primary key is no longer an integer.', $error->getMessage() );
+				self::assertSame( 1, $db->queries );
+			}
+		}
 	}
 
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {

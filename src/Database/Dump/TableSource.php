@@ -120,6 +120,7 @@ final class TableSource implements ResumableByteSource {
 	 * @param string                   $preamble    Session settings, one statement per line.
 	 * @param string|null              $cursor      Cursor from an earlier source, or null to start.
 	 * @param \Closure(int, int): void $on_complete Receives rows and bytes once the trailer is written.
+	 * @throws DatabaseFailed If the saved integer primary key is invalid.
 	 */
 	public function __construct(
 		private readonly Connection $connection,
@@ -132,7 +133,7 @@ final class TableSource implements ResumableByteSource {
 		$state         = is_array( $state ) ? $state : null;
 		$this->started = null !== $state;
 		$after         = $state['after'] ?? null;
-		$this->after   = is_string( $after ) && 1 === preg_match( '/\A-?\d+(\.\d+)?\z/', $after ) ? $after : null;
+		$this->after   = null === $table->key || null === $after ? null : self::integer_key( $after );
 		$this->offset  = is_int( $state['offset'] ?? null ) ? $state['offset'] : 0;
 		$this->rows    = is_int( $state['rows'] ?? null ) ? $state['rows'] : 0;
 		$this->bytes   = is_int( $state['bytes'] ?? null ) ? $state['bytes'] : 0;
@@ -234,6 +235,9 @@ final class TableSource implements ResumableByteSource {
 			return;
 		}
 
+		if ( null !== $this->table->key ) {
+			$this->after = self::integer_key( $rows[ array_key_last( $rows ) ][ $this->table->key ] ?? null );
+		}
 		$columns = $this->table->columns;
 		$prefix  = 'INSERT INTO ' . $table . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $columns ) ) ) . ') VALUES ';
 		$tuples  = [];
@@ -261,10 +265,6 @@ final class TableSource implements ResumableByteSource {
 		$count         = count( $rows );
 		$this->rows   += $count;
 		$this->offset += $count;
-		if ( null !== $this->table->key ) {
-			$last        = $rows[ $count - 1 ][ $this->table->key ] ?? null;
-			$this->after = is_string( $last ) ? $last : $this->after;
-		}
 		if ( $count < $this->page ) {
 			$this->exhausted = true;
 		}
@@ -273,6 +273,21 @@ final class TableSource implements ResumableByteSource {
 		} elseif ( $size < intdiv( self::TARGET_PAGE_BYTES, 2 ) && $count === $this->page ) {
 			$this->page = min( 20000, $this->page * 2 );
 		}
+	}
+
+	/**
+	 * Checks the SQL seek literal at both its sources. Concurrent DDL can change
+	 * the live column type after the catalog selected integer pagination.
+	 *
+	 * @param mixed $value A server row or a saved checkpoint field.
+	 * @return string Signed or unsigned MySQL integer, preserving full precision.
+	 * @throws DatabaseFailed If the primary key no longer matches the catalog.
+	 */
+	private static function integer_key( mixed $value ): string {
+		if ( ! is_string( $value ) || 1 !== preg_match( '/\A-?[0-9]{1,20}\z/', $value ) ) {
+			throw new DatabaseFailed( 'The database dump primary key is no longer an integer.' );
+		}
+		return $value;
 	}
 
 	/**
