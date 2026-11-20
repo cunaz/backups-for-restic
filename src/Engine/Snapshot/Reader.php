@@ -41,7 +41,9 @@ final class Reader {
 
 	/**
 	 * Default time one request may spend on that search. Each directory can cost a request to
-	 * the server, and a request the web server ends cannot release its lock.
+	 * the server, and a request the web server ends cannot release its lock. Loading the index
+	 * is not counted: every call loads it again, so a load as long as this time would let each
+	 * call read one directory only.
 	 */
 	public const int MANIFEST_SEARCH_SECONDS = 5;
 
@@ -58,6 +60,13 @@ final class Reader {
 	 * @var (\Closure(): void)|null
 	 */
 	private ?\Closure $keep_lock = null;
+
+	/**
+	 * Seconds the current locked operation spent loading the index.
+	 *
+	 * @var float
+	 */
+	private float $index_seconds = 0.0;
 
 	/**
 	 * Opens a reader. Cache directories must belong to this repository's private directory.
@@ -181,11 +190,13 @@ final class Reader {
 		$visited = 0;
 		$found   = null;
 		$started = $this->clock->now();
+		$loading = $this->index_seconds;
 		while ( [] !== $pending ) {
 			// Checked before each directory, where its read also checks the lock: the refusal
 			// leaves through the caller's finally, which a request ended from outside would not.
-			$now = $this->clock->now();
-			if ( $now[0] - $started[0] + ( $now[1] - $started[1] ) / 1000000000 >= $this->search_seconds ) {
+			// The time of an index load during the search is taken off: the first directory that
+			// misses the tree cache pays it in every call, whatever the search has read so far.
+			if ( self::elapsed( $started, $this->clock->now() ) - ( $this->index_seconds - $loading ) >= $this->search_seconds ) {
 				self::refuse_search();
 			}
 			[ $tree, $path ] = array_pop( $pending );
@@ -317,12 +328,29 @@ final class Reader {
 	}
 
 	/**
-	 * Loads the index only when a tree or file misses the cache.
+	 * Loads the index only when a tree or file misses the cache, and measures the load so that
+	 * the manifest search can leave it out of its time budget.
 	 *
 	 * @return IndexSet Index valid under the current lock.
 	 */
 	private function index(): IndexSet {
-		return $this->index ??= $this->index_cache?->load( $this->repository ) ?? $this->repository->load_index();
+		if ( null === $this->index ) {
+			$started             = $this->clock->now();
+			$this->index         = $this->index_cache?->load( $this->repository ) ?? $this->repository->load_index();
+			$this->index_seconds = self::elapsed( $started, $this->clock->now() );
+		}
+		return $this->index;
+	}
+
+	/**
+	 * The time between two readings of the clock.
+	 *
+	 * @param array{int, int} $from Earlier reading: seconds and nanoseconds.
+	 * @param array{int, int} $to   Later reading.
+	 * @return float Seconds.
+	 */
+	private static function elapsed( array $from, array $to ): float {
+		return $to[0] - $from[0] + ( $to[1] - $from[1] ) / 1000000000;
 	}
 
 	/**
@@ -368,8 +396,9 @@ final class Reader {
 			$keep_lock();
 			return $result;
 		} finally {
-			$this->index     = null;
-			$this->keep_lock = null;
+			$this->index         = null;
+			$this->index_seconds = 0.0;
+			$this->keep_lock     = null;
 			$locking->release( $lock );
 		}
 	}

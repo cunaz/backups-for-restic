@@ -36,14 +36,20 @@ retain a stale in-memory index between requests or write plaintext site metadata
   during replacement, as for the existing index cache. A temporary tree file older than a
   minute was left by a request that ended before publishing it; trimming removes it. An
   index too large for the limit is not cached, and its writer then removes only its own
-  file, never the trees beside it. This amends the cache contents and
+  file, never the trees beside it. Such an index writes a temporary file on every load, and
+  a request ended during that write leaves it outside the limit; every index load removes
+  temporary index files older than a minute. This amends the cache contents and
   shared limit recorded in [ADR 0007](0007-private-directory.md).
 - New backup plans add a `backups-for-restic-manifest:<base64 path>` tag, naming the
-  manifest's absolute path inside that snapshot. The plan builds it from the private
-  directory in the lexically normalized form the archiver walks, so a configured path with
-  an empty, dot or parent component yields the path the snapshot stores. Where that clean
-  path names another directory than the configured one, because a symbolic link precedes a
-  parent component, the plan uses the resolved path instead. A path the locator cannot
+  manifest's absolute path inside that snapshot. The plan builds it from the resolved
+  private directory. The archiver records a symbolic link as a link and does not enter it,
+  so every path a snapshot stores is free of links: a private directory reached through a
+  link, with or without a parent component after it, is stored under its real path. The
+  spool root, the exclusion of the rest of the private directory and the virtual files use
+  the same resolved path; for a clean path without links it is the same string. Where the
+  directory cannot be resolved, because it does not exist yet or `open_basedir` refuses,
+  the plan uses the lexically normalized form the archiver walks, so a configured path with
+  an empty, dot or parent component yields the path the snapshot stores. A path the locator cannot
   express (more than 4096 bytes or 256 components) gets no tag instead of failing the
   backup. The reader applies the same limits to every path, so it cannot read the manifest
   of such a snapshot, neither by search nor by an explicit path; the files are in the
@@ -56,8 +62,11 @@ retain a stale in-memory index between requests or write plaintext site metadata
   establish a unique answer. It also stops after a time budget, five seconds unless the
   constructor is given another: each directory can cost one request to the server, and a
   request that the web server ends cannot release its lock. The budget is checked before
-  each directory, so one call lasts at most the budget plus one directory read, and it ends
-  with the same refusal as the directory limit, through the normal release of the lock.
+  each directory and does not count the loading of the index: every call loads the index
+  again, so a load as long as the budget would let each call read a single directory. One
+  call therefore lasts at most the budget plus one index load and one directory read, and
+  it ends with the same refusal as the directory limit, through the normal release of the
+  lock.
   With a tree cache the directories already read are kept, so a repeated call gets further;
   without one the caller has to select the manifest explicitly.
   An unfinished search never reports the manifest as absent.
@@ -71,8 +80,9 @@ retain a stale in-memory index between requests or write plaintext site metadata
 
 ## Consequences
 - Warm directory browsing can avoid loading the index or any pack. Cache limits count the
-  index and trees together, and clearing the existing cache directory removes both. Only
-  that explicit clearing removes the directory.
+  index and trees together, and clearing the existing cache directory removes both. Besides
+  that explicit clearing, only the index writer removes the directory, and only when an
+  index too large for the limit leaves it empty.
 - Another site's snapshots remain available through the repository-wide view. The site
   view uses the host and both required tags, matching retention's selection contract.
 - New snapshots can locate their manifest after migration without scanning the site's

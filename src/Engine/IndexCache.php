@@ -41,7 +41,9 @@ defined( 'ABSPATH' ) || exit;
  * If an index file disappeared from the server (restic prune or rebuild-index ran elsewhere),
  * the cache cannot tell which entries became stale, so it is rebuilt from scratch. An index
  * larger than the cache limit (advanced.cache_limit_mib) is not kept: every tick then reads
- * the index files again, which is slower but never fills the disk.
+ * the index files again, which is slower but never fills the disk. A request that is ended
+ * while it writes leaves its temporary file, which no limit counts; every load removes such
+ * files once they are older than a minute.
  */
 final class IndexCache {
 
@@ -50,6 +52,9 @@ final class IndexCache {
 
 	/** No sealed piece is larger than this; export() makes pieces of about one megabyte plus one bucket. */
 	private const int MAX_PIECE = 67108864;
+
+	/** Age after which a temporary file belongs to a request that ended before publishing it. */
+	private const int TEMPORARY_SECONDS = 60;
 
 	/**
 	 * Uses a cache directory.
@@ -93,6 +98,9 @@ final class IndexCache {
 				$repository->memory()?->check_index();
 			}
 		}
+		// Before the write: a cache directory that holds nothing else can then be removed when
+		// the index does not fit, and an index that fits finds the room its leftovers took.
+		$this->remove_stale_temporaries();
 		if ( [] !== $new || ! $readable || count( $covered ) !== count( $listed ) ) {
 			$this->write( $repository, $index, $listed );
 		}
@@ -108,6 +116,27 @@ final class IndexCache {
 	 */
 	public function clear(): void {
 		Files::remove_tree( $this->directory );
+	}
+
+	/**
+	 * Removes the temporary index files of requests that ended while they wrote one. Such a
+	 * file can be as large as the cache limit and is outside it, and an index above the limit
+	 * writes one on every load, so nothing else would bound what ended requests leave. A file
+	 * younger than a minute may belong to a request that is still writing.
+	 */
+	private function remove_stale_temporaries(): void {
+		$names = is_dir( $this->directory ) ? scandir( $this->directory ) : false;
+		foreach ( false === $names ? [] : $names as $name ) {
+			$file = $this->directory . '/' . $name;
+			if ( 1 !== preg_match( '/^index\.bin\.[0-9a-f]{8}\.tmp$/D', $name ) || is_link( $file ) || ! is_file( $file ) ) {
+				continue;
+			}
+			clearstatcache( true, $file );
+			$modified = @filemtime( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Its writer or another load may have removed it meanwhile.
+			if ( false !== $modified && time() - $modified > self::TEMPORARY_SECONDS ) {
+				@unlink( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Another load may already have removed it.
+			}
+		}
 	}
 
 	/**

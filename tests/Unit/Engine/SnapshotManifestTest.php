@@ -10,6 +10,7 @@ use BackupsForRestic\Backup\SitePaths;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupRun;
+use BackupsForRestic\Engine\Backup\VirtualFile;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Snapshot\Manifest;
@@ -18,7 +19,9 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\Tree\Node;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Support\ByteSource;
 use BackupsForRestic\Support\Bytes;
+use BackupsForRestic\Support\StringByteSource;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -126,6 +129,49 @@ final class SnapshotManifestTest extends TestCase {
 			self::assertDirectoryDoesNotExist( $root . '/public/private', 'Nothing is created at the path that only the text names.' );
 		} finally {
 			TempDir::remove( $root );
+		}
+	}
+
+	/** @return iterable<string, array{string, string}> */
+	public static function linked_private_directories(): iterable {
+		yield 'outside the roots' => [ '/linked/private', '/real/private' ];
+		yield 'below a root by its real path' => [ '/linked/site/content/private', '/real/site/content/private' ];
+	}
+
+	#[DataProvider( 'linked_private_directories' )]
+	public function test_a_private_directory_behind_a_link_without_a_parent_component_is_backed_up_by_its_real_path( string $configured, string $stored ): void {
+		$created = TempDir::create( 'manifest-linked' );
+		try {
+			// The archiver records a link in a root's path as a link, so the site itself is given by its real path.
+			$root = (string) realpath( $created );
+			mkdir( $root . '/real/site/content/uploads', 0700, true );
+			mkdir( $root . $stored . '/work', 0700, true );
+			file_put_contents( $root . $stored . '/work/secret', 'not part of a backup' );
+			if ( ! symlink( $root . '/real', $root . '/linked' ) ) {
+				self::markTestSkipped( 'Symbolic links cannot be created here.' );
+			}
+			$paths      = new SitePaths( $root . '/real/site', $root . '/real/site/content', $root . '/real/site/content/uploads', 'https://old.example.com', 'old_', '6.7', '0.3.0' );
+			$private    = PrivateDirectory::locate( $root . $configured, $paths->content_dir, $paths->uploads_dir );
+			$clock      = new FrozenClock();
+			$dump       = static fn (): array => [ new VirtualFile( 'dump.sql', static fn (): ByteSource => new StringByteSource( 'SELECT 1;' ), $clock->seconds, 0600 ) ];
+			$plan       = ( new PlanFactory( $paths, Settings::from_stored( [ 'repository.format_version' => 1 ] ), $private, [], [], $dump, 'test-job', $clock->seconds ) )->plan();
+			$identity   = new Identity( $paths->hostname() );
+			$repository = Repository::initialize( new InMemoryBackend(), 'test password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+			$run        = BackupRun::start( $repository, $plan, $root . '/work', $identity, $clock );
+			self::assertTrue( $run->advance( INF ) );
+			$id = $run->snapshot_id();
+			self::assertNotNull( $id );
+			$reader = new Reader( $repository, $identity, $clock );
+			self::assertSame( $root . $stored . '/spool/manifest.json', Manifest::path( $reader->snapshot( $id )->tags ) );
+			$manifest = $reader->manifest( $id );
+			self::assertSame( $root . $stored . '/spool/manifest.json', $manifest['path'] ?? null, 'The locator names a path the snapshot contains.' );
+			self::assertSame( 'https://old.example.com', $manifest['data']['home_url'] ?? null );
+			$names = static fn ( string $path ): array => array_map( static fn ( Node $node ): string => $node->name, $reader->directory( $id, $path ) );
+			self::assertSame( [ 'spool' ], $names( $root . $stored ), 'The rest of the private directory stays out of the backup.' );
+			self::assertSame( [ 'database', 'manifest.json' ], $names( $root . $stored . '/spool' ) );
+			self::assertSame( [ 'dump.sql' ], $names( $root . $stored . '/spool/database' ), 'The database dump is in the snapshot as well.' );
+		} finally {
+			TempDir::remove( $created );
 		}
 	}
 
