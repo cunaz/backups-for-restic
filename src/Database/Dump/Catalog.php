@@ -157,18 +157,6 @@ final class Catalog {
 	}
 
 	/**
-	 * Time zone offset of the session, so that TIMESTAMP values import unchanged.
-	 *
-	 * @return string Offset such as +02:00.
-	 * @throws DatabaseFailed If the server does not answer.
-	 */
-	public function time_zone(): string {
-		$rows = $this->connection->rows( "SELECT TIME_FORMAT(TIMEDIFF(NOW(), UTC_TIMESTAMP()), '%H:%i') AS tz_offset" );
-		$diff = $rows[0]['tz_offset'] ?? '00:00';
-		return str_starts_with( $diff, '-' ) ? $diff : '+' . $diff;
-	}
-
-	/**
 	 * Server version, for the manifest.
 	 *
 	 * @return string Version string.

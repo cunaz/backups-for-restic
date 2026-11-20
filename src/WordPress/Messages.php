@@ -172,6 +172,10 @@ final class Messages {
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job contains the database error.', 'backups-for-restic' ),
 			],
+			'database_dump_session'          => [
+				'message' => __( 'The database connection does not keep the settings the backup needs to read the database exactly.', 'backups-for-restic' ),
+				'hint'    => __( 'A database drop-in (wp-content/db.php) sends statements to different connections, and the backup could not open a connection of its own with the settings in wp-config.php. Check the drop-in and the database settings.', 'backups-for-restic' ),
+			],
 			'job_conflict'                   => [
 				'message' => __( 'Another backup job is still running.', 'backups-for-restic' ),
 				'hint'    => __( 'Wait for it to finish or cancel it.', 'backups-for-restic' ),

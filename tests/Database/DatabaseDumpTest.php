@@ -181,6 +181,98 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertGreaterThan( 1000000, strlen( $whole ) );
 	}
 
+	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone(): void {
+		$db   = self::database( self::$source );
+		$zone = self::daylight_saving_zone( $db );
+		if ( null === $zone ) {
+			self::markTestSkipped( 'The server knows no time zone with daylight saving time: no time zone tables, and a SYSTEM zone without it.' );
+		}
+		$db->execute( 'CREATE TABLE tz_events (id INT PRIMARY KEY, at TIMESTAMP(6) NULL, plain TIMESTAMP NULL)' );
+		$instants = [
+			1 => gmmktime( 10, 0, 0, 1, 15, 2026 ),
+			2 => gmmktime( 10, 0, 0, 7, 15, 2026 ),
+			// 02:30 local time twice in Berlin: before and after the clocks go back.
+			3 => gmmktime( 0, 30, 0, 10, 25, 2026 ),
+			4 => gmmktime( 1, 30, 0, 10, 25, 2026 ),
+		];
+		foreach ( $instants as $id => $instant ) {
+			$db->execute( sprintf( 'INSERT INTO tz_events VALUES (%d, FROM_UNIXTIME(%d.250000), FROM_UNIXTIME(%d))', $id, $instant, $instant ) );
+		}
+		$db->execute( 'INSERT INTO tz_events VALUES (5, NULL, NULL)' );
+		$session = 'SELECT @@SESSION.time_zone AS zone';
+		$before  = $db->rows( $session );
+
+		$manifest = $this->dump_and_import( $db, 'tz_' );
+
+		$query = 'SELECT id, UNIX_TIMESTAMP(at) AS at, UNIX_TIMESTAMP(plain) AS plain FROM tz_events ORDER BY id';
+		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), 'Every instant survives, including both of the repeated autumn hour.' );
+		self::assertSame( (string) $instants[2], self::database( self::$target )->rows( $query )[1]['plain'] );
+		self::assertSame( '+00:00', $manifest['time_zone'] );
+		self::assertStringContainsString( "SET SESSION time_zone = '+00:00';\n", (string) file_get_contents( $this->directory . '/010-tz_events.sql' ) );
+		self::assertSame( $before, $db->rows( $session ), 'The site connection keeps its time zone.' );
+	}
+
+	public function test_a_latin1_connection_dumps_and_restores_the_stored_bytes_of_latin1_and_utf8mb4_columns(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'CREATE TABLE cs_rows (id INT PRIMARY KEY, legacy TEXT CHARACTER SET latin1, label VARCHAR(40) CHARACTER SET latin1, modern TEXT CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4' );
+		$db->execute( "INSERT INTO cs_rows (id, modern) VALUES (1, '内容 Архив 😀 Åtgärd'), (2, NULL)" );
+		// A site with DB_CHARSET latin1 sends UTF-8 bytes through a latin1 connection: the
+		// latin1 columns store them byte for byte, "é" as C3 A9.
+		$db->mysqli->set_charset( 'latin1' );
+		$db->execute( "UPDATE cs_rows SET legacy = 'café Ål ünïcödé', label = 'naïve' WHERE id = 1" );
+		$db->execute( "UPDATE cs_rows SET legacy = 0xe9ff00, label = '' WHERE id = 2" );
+		$settings = 'SELECT @@SESSION.character_set_client AS client, @@SESSION.character_set_connection AS connection, @@SESSION.character_set_results AS results, @@SESSION.collation_connection AS collation';
+		$before   = $db->rows( $settings );
+		self::assertSame( 'latin1', $before[0]['results'] );
+
+		$this->dump_and_import( $db, 'cs_' );
+
+		$query = 'SELECT id, HEX(legacy) AS legacy, HEX(label) AS label, HEX(modern) AS modern FROM cs_rows ORDER BY id';
+		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), 'Both columns hold the same bytes after the import.' );
+		self::assertSame( bin2hex( 'café Ål ünïcödé' ), strtolower( (string) $db->rows( $query )[0]['legacy'] ) );
+		self::assertSame( $before, $db->rows( $settings ), 'The site connection keeps its character set.' );
+	}
+
+	/**
+	 * Dumps the tables with a prefix in pages with a stop after every read, writes the files
+	 * and imports them into the target database with the command-line client.
+	 *
+	 * @return array<string, mixed> The decoded manifest.
+	 */
+	private function dump_and_import( MysqliConnection $db, string $prefix ): array {
+		$files = [];
+		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'state.json', $prefix, [], 1767323100 ) )->files() as $file ) {
+			$files[ $file->name ] = $this->read( $file->source, 1 );
+			if ( str_ends_with( $file->name, '.sql' ) ) {
+				file_put_contents( $this->directory . '/' . $file->name, $files[ $file->name ] );
+			}
+		}
+		$sql = array_map( fn ( string $name ): string => $this->directory . '/' . $name, array_filter( array_keys( $files ), static fn ( string $name ): bool => str_ends_with( $name, '.sql' ) ) );
+		MysqliConnection::import( self::$target, array_values( $sql ) );
+		$manifest = json_decode( $files['manifest.json'], true );
+		self::assertIsArray( $manifest );
+		return $manifest;
+	}
+
+	/**
+	 * A time zone whose offset differs between January and July: a named one where the server
+	 * has time zone tables, otherwise its system zone if that has daylight saving time.
+	 */
+	private static function daylight_saving_zone( MysqliConnection $db ): ?string {
+		foreach ( [ 'Europe/Berlin', 'SYSTEM' ] as $zone ) {
+			try {
+				$db->execute( "SET SESSION time_zone = '" . $zone . "'" );
+			} catch ( \RuntimeException ) {
+				continue;
+			}
+			$offsets = $db->rows( sprintf( 'SELECT TIMESTAMPDIFF(MINUTE, FROM_UNIXTIME(%1$d), CONVERT_TZ(FROM_UNIXTIME(%1$d), @@SESSION.time_zone, \'+00:00\')) AS winter, TIMESTAMPDIFF(MINUTE, FROM_UNIXTIME(%2$d), CONVERT_TZ(FROM_UNIXTIME(%2$d), @@SESSION.time_zone, \'+00:00\')) AS summer', gmmktime( 12, 0, 0, 1, 15, 2026 ), gmmktime( 12, 0, 0, 7, 15, 2026 ) ) );
+			if ( null !== $offsets[0]['winter'] && $offsets[0]['winter'] !== $offsets[0]['summer'] ) {
+				return $zone;
+			}
+		}
+		return null;
+	}
+
 	/**
 	 * Reads a virtual file like the backup does, asking a resumable source to stop after the
 	 * given number of reads and continuing with its cursor.

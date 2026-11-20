@@ -26,10 +26,26 @@ defined( 'ABSPATH' ) || exit;
  * The table list is fixed when the backup first lists the directory and kept in a state file
  * in the job's directory, together with the row and byte counts of finished tables, so the
  * dump stays consistent across ticks.
+ *
+ * Every read runs with utf8mb4 results and the time zone +00:00 (SharedConnection), and the
+ * files say so: TIMESTAMP values are UTC, as with mysqldump --tz-utc, and text arrives in the
+ * one character set the manifest names. A dump that an earlier version started recorded the
+ * session's offset instead; it keeps reading in the session's time zone until it is done, so
+ * that all of its files agree with the one offset in its manifest.
  */
 final class DatabaseDump {
 
 	public const string DIRECTORY = 'database';
+
+	/** State files of earlier versions have no version and recorded the session's offset. */
+	private const int STATE_VERSION = 2;
+
+	/**
+	 * Connection with the dump's session settings, made on first use.
+	 *
+	 * @var Connection|null
+	 */
+	private ?Connection $reader = null;
 
 	/**
 	 * Prepares the dump.
@@ -57,8 +73,9 @@ final class DatabaseDump {
 	 */
 	public function files(): array {
 		$state    = $this->state();
+		$reader   = $this->reader( $state['version'] );
 		$preamble = $this->preamble( $state['time_zone'] );
-		$catalog  = new Catalog( $this->connection );
+		$catalog  = new Catalog( $reader );
 		$files    = [];
 
 		$header  = '-- ' . TableSource::FORMAT . "\n";
@@ -71,7 +88,7 @@ final class DatabaseDump {
 			$files[] = $this->file(
 				$file,
 				fn ( ?string $cursor ): ByteSource => new TableSource(
-					$this->connection,
+					$reader,
 					$catalog->table( $name ),
 					$preamble,
 					$cursor,
@@ -93,6 +110,16 @@ final class DatabaseDump {
 		);
 		$files[] = $this->file( 'manifest.json', fn (): ByteSource => new StringByteSource( $this->manifest() ) );
 		return $files;
+	}
+
+	/**
+	 * The connection with the dump's session settings.
+	 *
+	 * @param int $version Version of the dump's state.
+	 * @return Connection Reader.
+	 */
+	private function reader( int $version ): Connection {
+		return $this->reader ??= new SharedConnection( $this->connection, self::STATE_VERSION === $version ? '+00:00' : null );
 	}
 
 	/**
@@ -137,7 +164,7 @@ final class DatabaseDump {
 				'prefix'         => $this->prefix,
 				'tables'         => $tables,
 				'views'          => $state['views'],
-				'trigger_tables' => ( new Catalog( $this->connection ) )->trigger_tables( $state['tables'] ),
+				'trigger_tables' => ( new Catalog( $this->reader( $state['version'] ) ) )->trigger_tables( $state['tables'] ),
 			],
 			JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 		) . "\n";
@@ -164,7 +191,7 @@ final class DatabaseDump {
 	/**
 	 * Loads the state, listing tables and views on first use.
 	 *
-	 * @return array{tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int}>} State.
+	 * @return array{version: int, tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int}>} State.
 	 * @throws DatabaseFailed If the tables cannot be listed.
 	 */
 	private function state(): array {
@@ -182,6 +209,7 @@ final class DatabaseDump {
 				}
 			}
 			return [
+				'version'   => is_int( $stored['version'] ?? null ) ? $stored['version'] : 1,
 				'tables'    => array_values( array_filter( $stored['tables'], 'is_string' ) ),
 				'views'     => array_values( array_filter( is_array( $stored['views'] ?? null ) ? $stored['views'] : [], 'is_string' ) ),
 				'time_zone' => is_string( $stored['time_zone'] ?? null ) ? $stored['time_zone'] : '+00:00',
@@ -189,11 +217,13 @@ final class DatabaseDump {
 				'results'   => $results,
 			];
 		}
-		$catalog = new Catalog( $this->connection );
+		$catalog = new Catalog( $this->reader( self::STATE_VERSION ) );
 		$state   = [
+			'version'   => self::STATE_VERSION,
 			'tables'    => $catalog->table_names( $this->prefix, $this->exclude ),
 			'views'     => $catalog->view_names( $this->prefix ),
-			'time_zone' => $catalog->time_zone(),
+			// The reads run in UTC, so TIMESTAMP values import unchanged whatever the session's zone.
+			'time_zone' => '+00:00',
 			'server'    => $catalog->server_version(),
 			'results'   => [],
 		];
