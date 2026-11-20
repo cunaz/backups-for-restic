@@ -75,7 +75,10 @@
             "@analyse",
             "@test:unit"
         ],
-        "mutation": ".tools/bin/infection --threads=max",
+        "mutation": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --threads=max"
+        ],
         "mutation:planner": [
             "Composer\\Config::disableProcessTimeout",
             ".tools/bin/infection --configuration=infection-planner.json5.dist --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"

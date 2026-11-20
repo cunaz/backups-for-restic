@@ -74,8 +74,8 @@ composer mutation
 `composer fuzz` fuzzes every parser for ten seconds. A finding is saved under
 `.tools/fuzz-findings/` with the command that replays it; after the fix, copy the input to
 `tests/Fixtures/fuzz/<target>/` so the unit suite replays it forever. `composer mutation`
-needs pcov or Xdebug and checks that the tests of `Crypto`, `Format` and `Engine\Forget`
-kill at least 90 % of the covered mutants. In CI it runs on `main` and on pull requests
+needs pcov or Xdebug. It requires a covered mutation score of at least 90 % across
+`Crypto`, `Format`, `Engine\Forget` and `Database\Restore`. In CI it runs on `main` and on pull requests
 that change the engine, the code below it, the tests or the tools
 ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
 
