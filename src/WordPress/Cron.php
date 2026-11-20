@@ -120,6 +120,7 @@ final class Cron {
 		ignore_user_abort( true );
 		$budget = $container->tick_budget( $budget );
 		if ( function_exists( 'set_time_limit' ) ) {
+			// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged -- A worker needs a bounded grace period to checkpoint and release its lock after the tick budget expires.
 			set_time_limit( (int) ceil( $budget ) + 30 );
 		}
 		$report = $container->runner()->tick( $budget );

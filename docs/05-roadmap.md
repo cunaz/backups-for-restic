@@ -217,6 +217,10 @@ Acceptance
 
 ## Milestone 4 — 1.0.0
 
+The release candidate has local recovery and packaging evidence. The operator's live
+provider run, directory approval and first public SVN comparison are pending.
+[Release-candidate verification](benchmarks/2026-11-20-release-candidate.md).
+
 Scope
 - Hardening against the pre-release checklist; an internal security pass over `Crypto`,
   `Format` and `Engine` with the self-review checklist; an extended fuzzing campaign with
