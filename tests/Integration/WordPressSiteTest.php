@@ -100,27 +100,17 @@ final class WordPressSiteTest extends TestCase {
 
 		$cli = TestSite::restic();
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
-		$target = TempDir::create( 'site-restore' );
-		$cli->must( [ 'restore', 'latest', '--target', $target ] );
-		self::assertSame( TempDir::describe( $uploads ), TempDir::describe( $target . $uploads ) );
-
-		$private  = TestSite::root() . '/wp-content/backups-for-restic';
-		$restored = 'bfr_site_restored_' . bin2hex( random_bytes( 3 ) );
-		$admin    = MysqliConnection::connect();
-		self::assertNotNull( $admin );
-		$admin->execute( 'CREATE DATABASE `' . $restored . '` CHARACTER SET utf8mb4' );
-		$files = array_map( 'strval', (array) glob( $target . $private . '/spool/database/*.sql' ) );
-		self::assertNotSame( [], $files, 'The snapshot contains the database dump.' );
-		// With the client, like the recovery guide: one request with the whole dump exceeds
-		// the server's max_allowed_packet at the acceptance size.
-		MysqliConnection::import( $restored, $files );
-		$copy = MysqliConnection::connect( $restored );
-		self::assertNotNull( $copy );
-		foreach ( [ 'wp_postmeta', 'wp_posts', 'wp_users' ] as $table ) {
-			self::assertSame( $db->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $copy->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $table );
+		$private = TestSite::root() . '/wp-content/backups-for-restic';
+		$target  = TempDir::create( 'site-restore' );
+		try {
+			$cli->must( [ 'restore', 'latest', '--target', $target ] );
+			self::assertSame( TempDir::describe( $uploads ), TempDir::describe( $target . $uploads ) );
+			// The upload comparison is complete. Free the restored media before importing the database.
+			TempDir::remove( $target . $uploads );
+			self::assert_restored_database( $db, $target . $private . '/spool/database' );
+		} finally {
+			TempDir::remove( $target );
 		}
-		$admin->execute( 'DROP DATABASE `' . $restored . '`' );
-		TempDir::remove( $target );
 
 		// No secret in job files or REST responses.
 		$responses = '';
@@ -133,6 +123,26 @@ final class WordPressSiteTest extends TestCase {
 		}
 		foreach ( [ TestSite::$repository_password, RestServer::PASSWORD ] as $secret ) {
 			self::assertStringNotContainsString( $secret, $responses );
+		}
+	}
+
+	private static function assert_restored_database( MysqliConnection $original, string $dump_directory ): void {
+		$files = array_map( 'strval', (array) glob( $dump_directory . '/*.sql' ) );
+		self::assertNotSame( [], $files, 'The snapshot contains the database dump.' );
+		$admin = MysqliConnection::connect();
+		self::assertNotNull( $admin );
+		$restored = 'bfr_site_restored_' . bin2hex( random_bytes( 3 ) );
+		$admin->execute( 'CREATE DATABASE `' . $restored . '` CHARACTER SET utf8mb4' );
+		try {
+			// Use the recovery guide's client so the full dump can exceed max_allowed_packet.
+			MysqliConnection::import( $restored, $files );
+			$copy = MysqliConnection::connect( $restored );
+			self::assertNotNull( $copy );
+			foreach ( [ 'wp_postmeta', 'wp_posts', 'wp_users' ] as $table ) {
+				self::assertSame( $original->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $copy->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $table );
+			}
+		} finally {
+			$admin->execute( 'DROP DATABASE `' . $restored . '`' );
 		}
 	}
 
