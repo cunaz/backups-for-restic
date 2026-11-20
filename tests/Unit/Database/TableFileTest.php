@@ -26,7 +26,12 @@ final class TableFileTest extends TestCase {
 	public function test_batch_positions_resume_duplicate_rows_without_rereading_the_first_batch(): void {
 		$manifest = StagedDump::write( $this->directory );
 		$file     = new TableFile( $this->directory, $manifest, 0, 'shadow', 'owner' );
+		// Independent SHA-256 checkpoints for the exact bytes in StagedDump::table().
+		self::assertSame( 'fb695063a650a3dfa57657d190d4b3a3f7a6677f8430d4aa45927b065764037c', $file->header_digest );
 		self::assertSame( 2, $file->batch( $file->data_offset, 0 )?->rows );
+		self::assertSame( '', $file->transcript( '' ), 'Legacy imports keep their empty transcript.' );
+		$transcript = $file->transcript( $file->header_digest );
+		self::assertSame( 'e09b965dee151044fd712e7d24ec2ee8ca49f5b9701194d4620e86e87a51a447', $transcript );
 		$offset   = $file->position();
 		$identity = $file->identity;
 		$file->close();
@@ -36,7 +41,10 @@ final class TableFileTest extends TestCase {
 			$batch = $resumed->batch( $offset, 2 );
 			self::assertSame( 2, $batch?->rows );
 			self::assertStringStartsWith( 'INSERT INTO `shadow`', $batch?->sql ?? '' );
+			$transcript = $resumed->transcript( $transcript );
+			self::assertSame( '1267abd4740e9a10b4c284d7d78d68f01f17619fb240d39a8527eaa858c6bbd5', $transcript );
 			self::assertNull( $resumed->batch( $resumed->position(), 4 ) );
+			self::assertSame( '8df6b787be2d0d2a047e28d88e035879287ce24cc78ae1700fb7c77bad2a8d39', $resumed->transcript( $transcript ) );
 			self::assertSame( strlen( StagedDump::table() ), $resumed->position() );
 		} finally {
 			$resumed->close();
