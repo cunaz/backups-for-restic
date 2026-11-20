@@ -40,6 +40,12 @@ defined( 'ABSPATH' ) || exit;
 final class RestoreRun {
 
 	/**
+	 * The cause in the context of a RepositoryChanged for a snapshot that the repository does
+	 * not hold. A caller that retries after a lost lock need not retry this.
+	 */
+	public const string SNAPSHOT_MISSING = 'snapshot_missing';
+
+	/**
 	 * Index loaded under the current lease.
 	 *
 	 * @var IndexSet|null
@@ -311,7 +317,7 @@ final class RestoreRun {
 			// lock and looks again; the unrecorded lock carries this run's number and goes
 			// with the next lock taken or released.
 			if ( null === $this->repository->backend()->size( ObjectType::Snapshots, $this->state->snapshot->hex() ) ) {
-				throw new RepositoryChanged( 'The selected snapshot no longer exists.' );
+				RepositoryChanged::raise( 'The selected snapshot no longer exists.', [ 'cause' => self::SNAPSHOT_MISSING ] );
 			}
 			$found = null !== $this->repository->backend()->size( ObjectType::Locks, $fresh );
 			if ( $this->locking->lapsed( $taken ) ) {

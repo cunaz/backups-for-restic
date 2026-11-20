@@ -46,7 +46,7 @@ final class Notifier {
 	/** Seconds after which an unsent notice is dropped: two days. */
 	private const int MAX_AGE = 172800;
 
-	/** Job types whose outcome is reported; unlocking runs while an administrator watches. */
+	/** Job types whose outcome is reported; unlocking and restoring run while an administrator watches. */
 	private const array REPORTED = [ JobType::Backup, JobType::Forget, JobType::Prune, JobType::Check ];
 
 	/**

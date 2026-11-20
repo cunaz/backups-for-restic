@@ -169,7 +169,8 @@ src/
 │   └── Check/                     CheckRun: structural check plus a sampled share of packs read
 ├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, JobObserver, Step, ClosureStep, StepProvider, JobSteps, TickReport
 │   ├── Backup/                    BackupSteps (preflight, unlocking, backing_up, recording, releasing, cleaning_up), BackupServices
-│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
+│   ├── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
+│   └── Restore/                   RestoreSteps (preflight, planning, restoring, recording, releasing, cleaning_up), RestoreServices, RestoreRequest (ADR 0037)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
@@ -217,8 +218,8 @@ more than one bounded slice at a time and never relies on a particular trigger.
 
 ### 4.2 Jobs and ticks
 
-A **job** (`Jobs\JobType`: backup, unlock, forget, prune or check; restore joins in
-Milestone 3) is a JSON document in the private directory
+A **job** (`Jobs\JobType`: backup, unlock, forget, prune, check or restore) is a JSON
+document in the private directory
 ([ADR 0014](adr/0014-file-based-job-store.md)). A **tick** loads the active job, advances it
 for at most the budget, writes a checkpoint and arranges the next tick. Every engine
 operation is written as a **resumable step**: it can stop after any blob, any directory, any
@@ -277,6 +278,7 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 | `forget` | `preflight` → `unlocking` → `detecting` → `forgetting` → `recording` | `releasing` → `cleaning_up` |
 | `prune` | `preflight` → `unlocking` → `detecting` → `pruning` → `recording` | `releasing` → `cleaning_up` |
 | `check` | `preflight` → `unlocking` → `checking` → `recording` | `releasing` → `cleaning_up` |
+| `restore` | `preflight` → `unlocking` → `planning` → `restoring` → `recording` | `releasing` → `cleaning_up` |
 
 ```
  queued → running: regular steps → cleanup steps → succeeded
@@ -291,8 +293,8 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   ([ADR 0020](adr/0020-unlocking-and-kdf.md)). The `unlock` job exists for the wizard when it
   connects an existing repository.
 - No step of its own takes the repository lock, scans, uploads or writes the snapshot: the
-  engine run inside `backing_up`, `forgetting`, `pruning` or `checking` does all of that and
-  keeps its own checkpoint (§4.5). `releasing` releases the lock of a run that did not
+  engine run inside `backing_up`, `forgetting`, `pruning`, `checking`, or `planning` and
+  `restoring`, does all of that and keeps its own checkpoint (§4.5). `releasing` releases the lock of a run that did not
   finish, which rest-server allows even in append-only mode.
 - `detecting` is the append-only probe of forget and prune jobs
   ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
@@ -300,7 +302,28 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 - An error with a retryable code (`repository_unreachable`, `repository_locked`) does not
   fail the job at once: the runner waits 30 s, then twice as long after each further failure
   in a row, and fails the job at the sixth.
-- Restore jobs join in Milestone 3 with their own step list.
+- A **restore job** ([ADR 0037](adr/0037-restore-job.md)) carries its request in the job
+  document from its creation: `data.snapshot`, the full ID, and `data.paths`, the selected
+  snapshot paths (`Jobs\Restore\RestoreRequest`; an invalid request creates no job).
+  `preflight` asks for a completed setup, a valid request, a private directory that is not
+  served and a repository that answers; the free space is checked by the run once it knows
+  how much the selection holds. `planning` and `restoring` drive one
+  `Engine\Restore\RestoreRun` ([ADR 0036](adr/0036-selected-file-staging.md)): started once,
+  resumed from its checkpoint in every later tick, with the throttle of the other jobs.
+  `planning` ends when the selection is counted, `restoring` when every file is staged. The
+  job's progress holds `phase`, `files`, `bytes`, `total_files`, `total_bytes`, `skipped`
+  and `percent`. A run whose repository lock did not hold gives up its tick and is resumed
+  by the next one, at most three times; a snapshot that the repository does not hold fails
+  the job at once. `recording` moves the report of the entries beside
+  the staged files, writes the job's result (`snapshot`, `files`, `bytes`, `skipped` for
+  entries such as links that are recorded but not created, `staging` and `report` as names
+  relative to the private directory) and the `last_restore` entry of the state.
+  `releasing` aborts the run, which releases its repository lock, on every path.
+  `cleaning_up` removes the run's working files, and after a failure or a cancellation the
+  staging directory too: only a restore that succeeded leaves files behind. While a restore
+  is queued or running, no other job starts, scheduled ones included: the heartbeat leaves
+  the schedule slot unhandled and tries again. The notifier does not report restore jobs;
+  an administrator started the job and watches it.
 - Exactly one job is active at a time; creating another is rejected (HTTP 409), cancel is
   always possible.
 - **Creating a job** (`JobStore::create()`): the check for an active job and the write of
@@ -737,14 +760,16 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
 ## 9. Restore
 
-Restore in the plugin arrives with Milestone 3; this section is its plan. Today the engine
-has `Engine\Restore\RestoreRun`, which restores a snapshot or a part of it into a directory
-in resumable slices and validates every name from the repository. Only the unit and
-conformance suites use it: the admin area, the REST API and WP-CLI have no restore yet, and
-until then a restore is done with the recovery kit and the restic CLI
+Restore in the plugin arrives with Milestone 3; this section is its plan where it is not
+built yet. Built are the engine's `Engine\Restore\RestoreRun`, which restores selected
+paths of a snapshot into a directory in resumable slices and validates every name from the
+repository, and the job type `restore` (§4.4, [ADR 0037](adr/0037-restore-job.md)), which
+`POST /jobs` starts and which stages the files in `<private>/restores/<job-id>/`. The admin
+area and WP-CLI have no restore yet, nothing lists, expires, downloads or applies what is
+staged, and a lost site is restored with the recovery kit and the restic CLI
 ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
-Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs with progress.
+Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores are jobs with progress.
 
 The first reader is `Engine\Snapshot\Reader` ([ADR 0034](adr/0034-snapshot-reader.md)):
 snapshot metadata with optional host/tag filters, one directory by snapshot path, and the
@@ -794,14 +819,19 @@ a request left behind is removed once it is a minute old.
 ├── cache/<repo-id>/trees/<tree-id>.bin    tree blobs for browsing, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
-├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
+├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
-└── restores/<job-id>/                     (M3) staging, expires after 24 h; the directory exists empty today
+└── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
+    ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; owner-only (directories 0700, files 0600) whatever the snapshot recorded
+    └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
 ```
 
+Nothing removes a staging directory yet except uninstalling: expiry after 24 hours, the
+list and the removal by an administrator arrive with package 2.3 of the Milestone 3 plan.
+
 No plaintext site data is written to the private directory except restore staging and
-database import files, both explicit admin actions that arrive with Milestone 3. The
+database import files, both explicit admin actions; the import arrives with Milestone 3. The
 database holds five options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
@@ -1032,7 +1062,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune; a job asks for that listing once, so a listing that outlasts the request cannot keep a finished job from ending), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
 | `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
-| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
+| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job, or with `type: restore` a restore to staging: `snapshot` is the full 64-character ID, `paths` a list of at most 256 absolute paths as the snapshot holds them, the whole snapshot without it. Refused with 400 `invalid_job_type`, `invalid_snapshot` or `invalid_paths`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
 | `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` and `retention` (the retention preview described below) |
@@ -1048,8 +1078,8 @@ first backup: an estimate needs a backup to measure against (§14).
 
 All routes: capability check in `permission_callback` (`backups_for_restic_capability`,
 `manage_options` by default); cookie + nonce or Application Passwords; no secrets in
-responses except the recovery kit, which is sent with `Cache-Control: no-store`. Routes
-that restore arrive with Milestone 3.
+responses except the recovery kit, which is sent with `Cache-Control: no-store`. The
+routes that list, download and remove what a restore staged arrive with Milestone 3.
 
 The recovery kit is in the answer of three routes. During the setup `create` and `connect`
 return it freely, which is how the wizard shows it once; from then on all three ask for the
@@ -1245,7 +1275,7 @@ translated message and a hint. The codes:
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
 | `database_dump_failed` | a query of the dump failed |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
-| `setup_incomplete` | a backup, forget, prune or check was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
+| `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |

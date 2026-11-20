@@ -43,6 +43,8 @@ use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
+use BackupsForRestic\Jobs\Restore\RestoreServices;
+use BackupsForRestic\Jobs\Restore\RestoreSteps;
 use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
 use BackupsForRestic\Jobs\Maintenance\RetentionSettings;
 use BackupsForRestic\Jobs\Job;
@@ -477,7 +479,7 @@ final class Container {
 	}
 
 	/**
-	 * The job runner with the backup and maintenance steps.
+	 * The job runner with the backup, maintenance and restore steps.
 	 *
 	 * @return Runner Runner.
 	 */
@@ -504,7 +506,8 @@ final class Container {
 		);
 		$backup      = new BackupSteps( $services );
 		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ), $this->site()->site_tag() ), $backup );
-		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random(), new JobEvents( $this ) );
+		$restore     = new RestoreSteps( new RestoreServices( $services ), $backup );
+		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance, $restore ), $this->clock(), $this->random(), new JobEvents( $this ) );
 	}
 
 	/**

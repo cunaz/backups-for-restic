@@ -301,8 +301,16 @@ carries `Cache-Control: no-store`.
   for it.
 - Packs are built in memory, not in files. The KDF table is the one sensitive temporary file
   and is deleted when the derivation finishes.
-- From Milestone 3: restore staging and database import files are plaintext by necessity:
-  `0600`, expire after 24 hours, deleted after a successful apply/import.
+- Restore staging is plaintext by necessity. A restore job
+  ([ADR 0037](adr/0037-restore-job.md)) stages into `restores/<job-id>/` of the private
+  directory, after a preflight that refuses a directory that is served. The staging
+  directory, `files/` in it and every entry below are owner-only
+  ([ADR 0036](adr/0036-selected-file-staging.md), next point); a job that fails or is
+  cancelled removes what it staged. Residual risk until staging expires (package 2.3 of the Milestone 3 plan): the staged files of a finished
+  restore stay until the plugin is uninstalled or they are removed by hand, so a later
+  exposure of the private directory would expose them too. Planned: expiry after 24 hours
+  and deletion after a successful apply. Database import files follow the same rules when
+  they arrive.
 - Restore staging is owner-only whatever the snapshot recorded: every staged file is `0600`
   and every staged directory `0700`. A snapshot's `0644` or `0666` file and its `0755` or
   `0777` directory are never staged with those modes; the original mode is kept in the
@@ -310,6 +318,10 @@ carries `Cache-Control: no-store`.
   files, the report, the checkpoint and the local lock file under a umask of `077`, so that
   a request killed right after creating one leaves nothing wider, and sets `0600` again on
   every open, which also covers a filesystem whose default ACL overrides the umask.
+- The request of a restore job is validated before the job exists: the snapshot ID is 64
+  hexadecimal characters and never part of a local path, and the selected paths are
+  snapshot paths, checked by the engine's `Selection`, that only choose entries of the
+  snapshot. The staging directory is named by the job ID alone.
 - The version 2 restore engine validates selected paths in a first pass, requires empty
   private staging, binds directory/file identities and checks parent components. It
   refuses existing symbolic/hard links and unexpected entries; snapshot links and special
