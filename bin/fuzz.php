@@ -26,7 +26,7 @@ $options = getopt( '', [ 'seconds:', 'seed:', 'replay:' ], $rest );
 $seconds = isset( $options['seconds'] ) && is_string( $options['seconds'] ) ? max( 0.1, (float) $options['seconds'] ) : 10.0;
 $seed    = isset( $options['seed'] ) && is_string( $options['seed'] ) ? (int) $options['seed'] : random_int( 1, PHP_INT_MAX );
 $replay  = isset( $options['replay'] ) && is_string( $options['replay'] ) ? $options['replay'] : null;
-$targets = Targets::all();
+$targets = Targets::factories();
 $names   = array_slice( $argv, $rest );
 $names   = [] === $names ? array_keys( $targets ) : $names;
 
@@ -39,7 +39,7 @@ foreach ( $names as $name ) {
 
 if ( null !== $replay ) {
 	$input   = (string) file_get_contents( $replay );
-	$fuzzer  = new Fuzzer( $targets[ $names[0] ], new Randomizer( new Xoshiro256StarStar( $seed ) ) );
+	$fuzzer  = new Fuzzer( $targets[ $names[0] ](), new Randomizer( new Xoshiro256StarStar( $seed ) ) );
 	$outcome = $fuzzer->execute( $input );
 	foreach ( $fuzzer->findings() as [ , $error ] ) {
 		echo $error, "\n";
@@ -52,7 +52,7 @@ printf( "Seed %d, %.1f s per target\n\n%-20s %10s %10s %8s\n", $seed, $seconds, 
 $found     = 0;
 $directory = dirname( __DIR__ ) . '/.tools/fuzz-findings';
 foreach ( $names as $name ) {
-	$fuzzer = new Fuzzer( $targets[ $name ], new Randomizer( new Xoshiro256StarStar( $seed ) ) );
+	$fuzzer = new Fuzzer( $targets[ $name ](), new Randomizer( new Xoshiro256StarStar( $seed ) ) );
 	$fuzzer->run( $seconds );
 	printf( "%-20s %10d %10d %8d\n", $name, $fuzzer->executions(), $fuzzer->behaviours(), count( $fuzzer->findings() ) );
 	foreach ( $fuzzer->findings() as [ $input, $error ] ) {
