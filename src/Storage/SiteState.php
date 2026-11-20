@@ -75,11 +75,13 @@ final class SiteState {
 	 * Changes one entry, starting from what is stored now: for an entry that more than one
 	 * request adds to, such as a list.
 	 *
-	 * @param string                                               $key    Entry name.
-	 * @param \Closure(array<string, mixed>): array<string, mixed> $change Gets the entry, empty if unknown, and returns what replaces it.
+	 * @param string                                               $key      Entry name.
+	 * @param \Closure(array<string, mixed>): array<string, mixed> $change   Gets the entry, empty if unknown, and returns what replaces it.
+	 * @param bool                                                 $required Whether the caller depends on a durable update.
+	 * @throws StorageFailed If the required lock or option write fails.
 	 */
-	public function update( string $key, \Closure $change ): void {
-		$this->change(
+	public function update( string $key, \Closure $change, bool $required = false ): void {
+		$saved = $this->change(
 			static function ( array $state ) use ( $key, $change ): array {
 				$entry = [];
 				foreach ( is_array( $state[ $key ] ?? null ) ? $state[ $key ] : [] as $field => $value ) {
@@ -87,8 +89,12 @@ final class SiteState {
 				}
 				$state[ $key ] = $change( $entry );
 				return $state;
-			}
+			},
+			$required
 		);
+		if ( $required && ! $saved ) {
+			throw new StorageFailed( 'The database refused a required site state update.' );
+		}
 	}
 
 	/**

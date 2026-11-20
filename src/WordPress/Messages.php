@@ -68,6 +68,10 @@ final class Messages {
 				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
 				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),
 			],
+			'decompression_limit'            => [
+				'message' => __( 'A repository object is too large for PHP to decompress safely.', 'backups-for-restic' ),
+				'hint'    => __( 'For a trusted repository, ask your host to increase the PHP memory limit. You can also use restic on another computer to verify the repository and restore the snapshot.', 'backups-for-restic' ),
+			],
 			'quota_exceeded'                 => [
 				'message' => __( 'The repository server has no space left.', 'backups-for-restic' ),
 				'hint'    => __( 'Increase the quota of the repository or remove old snapshots.', 'backups-for-restic' ),
@@ -104,29 +108,57 @@ final class Messages {
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
 				'hint'    => __( 'The checks on the Environment tab show what is missing.', 'backups-for-restic' ),
 			],
-			'database_preview_missing' => [
+			'database_preview_missing'       => [
 				'message' => __( 'The staged selection does not contain the complete database dump.', 'backups-for-restic' ),
-				'hint' => __( 'Select the whole database directory or restore the whole snapshot.', 'backups-for-restic' ),
+				'hint'    => __( 'Select the whole database directory or restore the whole snapshot.', 'backups-for-restic' ),
 			],
-			'database_restore_prefix' => [
+			'database_restore_prefix'        => [
 				'message' => __( 'The database dump uses another table prefix.', 'backups-for-restic' ),
-				'hint' => __( 'Rehearse this snapshot on a site with its original table prefix. You can also download the staged SQL files for a manual restore.', 'backups-for-restic' ),
+				'hint'    => __( 'Rehearse on a site with the original table prefix. For a manual import, open the snapshot again, stage the database directory with rehearsal disabled, and download the SQL files or request a ZIP.', 'backups-for-restic' ),
 			],
-			'database_restore_collation' => [
+			'database_restore_collation'     => [
 				'message' => __( 'The destination database cannot use a character set or collation in this snapshot.', 'backups-for-restic' ),
-				'hint' => __( 'Compare the source and destination database versions. Use a compatible database to import the staged SQL files.', 'backups-for-restic' ),
+				'hint'    => __( 'Compare the source and destination database versions. Open the snapshot again, stage its database directory with rehearsal disabled, and download the SQL files or request a ZIP for import on a compatible server.', 'backups-for-restic' ),
 			],
-			'database_restore_privilege' => [
+			'database_restore_privilege'     => [
 				'message' => __( 'The database account lacks permission to rehearse this snapshot.', 'backups-for-restic' ),
-				'hint' => __( 'The rehearsal creates, reads, inserts, updates and drops its own temporary InnoDB tables in the WordPress database. Your database administrator can verify the account permissions.', 'backups-for-restic' ),
+				'hint'    => __( 'The rehearsal creates, reads, inserts, updates and drops its own temporary InnoDB tables in the WordPress database. Your database administrator can verify the account permissions.', 'backups-for-restic' ),
 			],
-			'database_restore_format' => [
+			'database_restore_format'        => [
 				'message' => __( 'The SQL dump could not be verified by the database rehearsal.', 'backups-for-restic' ),
-				'hint' => __( 'The job log explains which part of the dump was refused. Stage the snapshot without a database rehearsal to download its SQL files.', 'backups-for-restic' ),
+				'hint'    => __( 'The job log explains which part of the dump was refused. Stage the snapshot without a database rehearsal to download its SQL files.', 'backups-for-restic' ),
 			],
-			'database_restore_failed' => [
+			'database_restore_failed'        => [
 				'message' => __( 'The database rehearsal could not finish.', 'backups-for-restic' ),
-				'hint' => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
+				'hint'    => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
+			],
+			'database_restore_busy' => [
+				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
+				'hint'    => __( 'The job retries automatically using its saved database progress and operation witness.', 'backups-for-restic' ),
+			],
+			'database_admin_collision' => [
+				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the administrator’s ID, login, email and local role assignments in both installations. Resolve the conflict before starting a new rehearsal.', 'backups-for-restic' ),
+			],
+			'database_wordpress_version' => [
+				'message' => __( 'The snapshot and destination use different WordPress database versions.', 'backups-for-restic' ),
+				'hint'    => __( 'Use a destination with a matching WordPress schema, or import the staged SQL into a separate database and run the WordPress upgrade there.', 'backups-for-restic' ),
+			],
+			'database_review_required' => [
+				'message' => __( 'This restore needs a new verified database rehearsal.', 'backups-for-restic' ),
+				'hint'    => __( 'Stage the complete database with the rehearsal option, then review its table plan before applying it.', 'backups-for-restic' ),
+			],
+			'database_exchange_changed' => [
+				'message' => __( 'The reviewed database exchange is no longer available.', 'backups-for-restic' ),
+				'hint'    => __( 'Open a new review and check the destination, permissions, administrator account and recovery window.', 'backups-for-restic' ),
+			],
+			'database_exchange_failed' => [
+				'message' => __( 'The database could not complete the reviewed table exchange.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the job result and log for the recorded generation and the database operation that stopped. Use the staged SQL files for a manual restore if the server cannot support this exchange.', 'backups-for-restic' ),
+			],
+			'database_exchange_cleanup' => [
+				'message' => __( 'The database restore could not finish its cleanup.', 'backups-for-restic' ),
+				'hint'    => __( 'Keep the private job directory, reconnect the original database with its restore permissions, and allow the next heartbeat to retry.', 'backups-for-restic' ),
 			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
@@ -318,25 +350,32 @@ final class Messages {
 	 * Name of a job step.
 	 *
 	 * @param string $step Step.
+	 * @param string $type Job type when a step has a type-specific label.
 	 * @return string Name.
 	 */
-	public static function step( string $step ): string {
+	public static function step( string $step, string $type = '' ): string {
+		if ( 'file_plan' === $type && 'planning' === $step ) {
+			return __( 'Preparing the live file preview', 'backups-for-restic' );
+		}
 		return match ( $step ) {
-			'preflight'   => __( 'Checking the environment', 'backups-for-restic' ),
-			'unlocking'   => __( 'Unlocking the repository', 'backups-for-restic' ),
-			'backing_up'  => __( 'Backing up files and database', 'backups-for-restic' ),
-			'detecting'   => __( 'Checking whether the server allows deletions', 'backups-for-restic' ),
-			'forgetting'  => __( 'Removing old snapshots', 'backups-for-restic' ),
-			'pruning'     => __( 'Deleting data no snapshot uses', 'backups-for-restic' ),
-			'checking'    => __( 'Checking the repository', 'backups-for-restic' ),
-			'planning'    => __( 'Counting the files to restore', 'backups-for-restic' ),
-			'restoring'   => __( 'Restoring files to the staging directory', 'backups-for-restic' ),
-			'applying'    => __( 'Applying the reviewed live file changes', 'backups-for-restic' ),
-			'undoing'     => __( 'Restoring the previous live files', 'backups-for-restic' ),
-			'recording'   => __( 'Recording the result', 'backups-for-restic' ),
-			'releasing'   => __( 'Releasing the repository', 'backups-for-restic' ),
-			'cleaning_up' => __( 'Cleaning up', 'backups-for-restic' ),
-			default       => __( 'Waiting to start', 'backups-for-restic' ),
+			'preflight'          => __( 'Checking the environment', 'backups-for-restic' ),
+			'unlocking'          => __( 'Unlocking the repository', 'backups-for-restic' ),
+			'backing_up'         => __( 'Backing up files and database', 'backups-for-restic' ),
+			'detecting'          => __( 'Checking whether the server allows deletions', 'backups-for-restic' ),
+			'forgetting'         => __( 'Removing old snapshots', 'backups-for-restic' ),
+			'pruning'            => __( 'Deleting data no snapshot uses', 'backups-for-restic' ),
+			'checking'           => __( 'Checking the repository', 'backups-for-restic' ),
+			'planning'           => __( 'Counting the files to restore', 'backups-for-restic' ),
+			'restoring'          => __( 'Restoring files to the staging directory', 'backups-for-restic' ),
+			'applying'           => __( 'Applying the reviewed live file changes', 'backups-for-restic' ),
+			'undoing'            => __( 'Restoring the previous live files', 'backups-for-restic' ),
+			'importing_database' => __( 'Importing the rehearsed database tables', 'backups-for-restic' ),
+			'preparing_database' => __( 'Verifying the database exchange', 'backups-for-restic' ),
+			'swapping_database'  => __( 'Switching the live database tables', 'backups-for-restic' ),
+			'recording'          => __( 'Recording the result', 'backups-for-restic' ),
+			'releasing'          => __( 'Releasing the repository', 'backups-for-restic' ),
+			'cleaning_up'        => __( 'Cleaning up', 'backups-for-restic' ),
+			default              => __( 'Waiting to start', 'backups-for-restic' ),
 		};
 	}
 
@@ -372,15 +411,18 @@ final class Messages {
 	 */
 	public static function job_type( string $type ): string {
 		return match ( $type ) {
-			'backup'  => __( 'Backup', 'backups-for-restic' ),
-			'unlock'  => __( 'Unlock', 'backups-for-restic' ),
-			'forget'  => __( 'Remove old snapshots', 'backups-for-restic' ),
-			'prune'   => __( 'Prune', 'backups-for-restic' ),
-			'check'   => __( 'Check', 'backups-for-restic' ),
-			'restore' => __( 'Restore', 'backups-for-restic' ),
-			'apply'   => __( 'Apply staged files', 'backups-for-restic' ),
-			'undo'    => __( 'Undo file changes', 'backups-for-restic' ),
-			default   => $type,
+			'backup'         => __( 'Backup', 'backups-for-restic' ),
+			'unlock'         => __( 'Unlock', 'backups-for-restic' ),
+			'forget'         => __( 'Remove old snapshots', 'backups-for-restic' ),
+			'prune'          => __( 'Prune', 'backups-for-restic' ),
+			'check'          => __( 'Check', 'backups-for-restic' ),
+			'restore'        => __( 'Restore', 'backups-for-restic' ),
+			'file_plan'      => __( 'Preview file changes', 'backups-for-restic' ),
+			'apply'          => __( 'Apply staged files', 'backups-for-restic' ),
+			'undo'           => __( 'Undo file changes', 'backups-for-restic' ),
+			'database_apply' => __( 'Apply staged database', 'backups-for-restic' ),
+			'database_undo'  => __( 'Undo database changes', 'backups-for-restic' ),
+			default          => $type,
 		};
 	}
 

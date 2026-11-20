@@ -341,7 +341,7 @@ final class JobStore {
 	public function file_changes(): \Generator {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && in_array( $job->type->value, [ 'apply', 'undo', 'database_apply' ], true ) ) {
+			if ( null !== $job && in_array( $job->type->value, [ 'apply', 'undo', 'file_plan', 'database_apply' ], true ) ) {
 				yield $job;
 			}
 		}
@@ -366,6 +366,29 @@ final class JobStore {
 	}
 
 	/**
+	 * Sealed disk plans in use by an active apply, its undo preview or the undo window.
+	 *
+	 * @param int $now Current time.
+	 * @return array<string,true> Pinned plan IDs.
+	 */
+	public function pinned_file_plans( int $now ): array {
+		$pins = [];
+		$active = $this->active();
+		$undoing = null === $active ? null : ( JobType::Undo === $active->type ? ( $active->data['apply'] ?? null ) : ( ( $active->data['undo'] ?? false ) === true ? ( $active->data['subject'] ?? null ) : null ) );
+		foreach ( $this->file_changes() as $job ) {
+			$plan = $job->data['plan_job'] ?? null;
+			if ( ! is_string( $plan ) ) {
+				continue;
+			}
+			$workspace = $this->directory . '/' . $job->id . '/undo';
+			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $workspace . '/attempted' ) && ! is_file( $workspace . '/reverted' ) ) ) {
+				$pins[ $plan ] = true;
+			}
+		}
+		return $pins;
+	}
+
+	/**
 	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
 	 * know whether its job has finished.
 	 *
@@ -378,12 +401,25 @@ final class JobStore {
 		$pins    = $this->pinned_restores( $now ?? time() );
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
+			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}
 		}
 		return $deleted;
+	}
+
+	/**
+	 * Enumerates every owning apply, including jobs beyond the visible history list.
+	 *
+	 * @return \Generator<int, Job> Jobs with active or retained SQL ownership.
+	 */
+	public function database_owners(): \Generator {
+		foreach ( $this->file_changes() as $job ) {
+			if ( JobType::DatabaseApply === $job->type && isset( $job->data['database_owner'] ) ) {
+				yield $job;
+			}
+		}
 	}
 
 	/**
@@ -443,7 +479,10 @@ final class JobStore {
 					]
 				);
 			}
-			if ( null !== $job && ( ! $job->state->is_terminal() || isset( $job->data['database_binding'] ) ) ) {
+			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {
+				JobConflict::raise( 'An interrupted database restore must finish cleaning its owned tables before another job starts.', [ 'job' => $id, 'code' => 'database_exchange_cleanup' ] );
+			}
+			if ( null !== $job && ! $job->state->is_terminal() ) {
 				JobConflict::raise( 'Another job is still running.', [ 'job' => $id ] );
 			}
 		}

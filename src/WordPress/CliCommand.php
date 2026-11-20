@@ -12,6 +12,7 @@ namespace BackupsForRestic\WordPress;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobType;
@@ -60,6 +61,35 @@ final class CliCommand {
 			\WP_CLI::error( __( 'This server cannot run backups yet.', 'backups-for-restic' ) );
 		}
 		\WP_CLI::success( __( 'This server can run backups.', 'backups-for-restic' ) );
+	}
+
+	/**
+	 * Prints repository credentials and the commands for offline recovery.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--force]
+	 * : Allow the complete kit to be written to a file or pipe.
+	 *
+	 * @subcommand recovery-kit
+	 * @param list<string>          $args       Positional arguments.
+	 * @param array<string, string> $assoc_args Options.
+	 */
+	public function recovery_kit( array $args, array $assoc_args ): void {
+		if ( ! isset( $assoc_args['force'] ) && ( ! function_exists( 'stream_isatty' ) || ! stream_isatty( STDOUT ) ) ) {
+			\WP_CLI::error( __( 'The recovery kit contains credentials. Use an interactive terminal or pass --force to write it to a private destination.', 'backups-for-restic' ) );
+		}
+		if ( get_current_user_id() > 0 && ! RestRoutes::allowed() ) {
+			\WP_CLI::error( __( 'The selected WordPress user cannot manage backups.', 'backups-for-restic' ) );
+		}
+		if ( ! $this->container->settings()->bool( 'setup.completed' ) ) {
+			\WP_CLI::error( __( 'Complete the backup setup before exporting the recovery kit.', 'backups-for-restic' ) );
+		}
+		try {
+			\WP_CLI::line( RecoveryKit::deliver( $this->container, 'cli' ) );
+		} catch ( PluginException $error ) {
+			\WP_CLI::error( $error->getMessage() );
+		}
 	}
 
 	/**
@@ -389,15 +419,30 @@ final class CliCommand {
 		$id      = $args[0] ?? '';
 		$service = $this->container->file_changes();
 		try {
-			$preview = $service->preview_undo( $id );
-			foreach ( $preview['entries'] as $entry ) {
-				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
+			$preview = $service->request_preview( $id, true, false );
+			$plan    = null;
+			if ( $preview instanceof Job ) {
+				$plan = $preview->id;
+				$this->run_until_idle( $this->container->tick_budget() );
+				$preview = $service->request_preview( $id, true, false, $plan );
 			}
+			do {
+				if ( $preview instanceof Job ) {
+					\WP_CLI::error( __( 'The undo preview is still being prepared.', 'backups-for-restic' ) );
+				}
+				foreach ( $preview['entries'] as $entry ) {
+					\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
+				}
+				$next = $preview['next_offset'] ?? null;
+				if ( null !== $next ) {
+					$preview = $service->request_preview( $id, true, false, $plan, $next );
+				}
+			} while ( null !== $next );
 			if ( ! $preview['applicable'] ) {
 				\WP_CLI::error( __( 'The current live files cannot be safely reverted.', 'backups-for-restic' ) );
 			}
 			\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ), $assoc_args );
-			$job = $service->start_undo( $id, $preview['digest'] );
+			$job = $service->start_undo( $id, $preview['digest'], '', $plan );
 			$this->run_until_idle( $this->container->tick_budget() );
 			$this->report( $job->id );
 		} catch ( PluginException $error ) {

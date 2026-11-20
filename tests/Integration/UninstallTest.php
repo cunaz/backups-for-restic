@@ -81,6 +81,30 @@ final class UninstallTest extends TestCase {
 			unlink( $unknown . '/job.json' );
 			rmdir( $unknown );
 
+			// The previous directory owns a real private InnoDB table from an interrupted rehearsal.
+			$ledger = TestSite::last_line(
+				TestSite::php(
+					'
+					global $wpdb;
+					$store = (new BackupsForRestic\WordPress\Container(WP_PLUGIN_DIR . "/" . $arguments[0]))->jobs();
+					$sql = new BackupsForRestic\Database\Restore\MysqliConnection($wpdb->dbh);
+					$token = bin2hex(random_bytes(16));
+					$digest = hash("sha256", $token);
+					$owned = new BackupsForRestic\Database\Restore\OwnedTables($sql, $wpdb->prefix, $digest, $token);
+					$binding = ["site" => home_url(), "path" => "/database", "prefix" => $wpdb->prefix,
+						"fingerprint" => $digest, "count" => 0, "token" => $token];
+					$job = $store->create(BackupsForRestic\Jobs\JobType::Restore, "cli", time(), ["database_binding" => $binding]);
+					$job->state = BackupsForRestic\Jobs\JobState::Failed;
+					$store->save($job);
+					$sql->execute("CREATE TABLE " . $owned->progress() . " (id INT) ENGINE=InnoDB COMMENT=" .
+						BackupsForRestic\Database\Dump\SqlFormatter::value($owned->owner, BackupsForRestic\Database\Dump\SqlFormatter::TEXT));
+					echo "\n", $owned->progress();
+					',
+					[ TestSite::PLUGIN ]
+				)
+			);
+			self::assertMatchesRegularExpression( '/\A_bfr_r_[0-9a-f]{32}_p\z/', $ledger );
+
 			// What the Plugins screen does on "Delete", without removing the plugin's own files.
 			TestSite::php(
 				'
@@ -96,6 +120,10 @@ final class UninstallTest extends TestCase {
 			self::assertDirectoryDoesNotExist( TestSite::private_dir(), 'The private directory held nothing but the plugin\'s files.' );
 			self::assertSame( [ '.', '..', 'jobs' ], scandir( $foreign ) );
 			self::assertSame( 'another application', file_get_contents( $foreign . '/jobs/owner.txt' ) );
+			self::assertSame(
+				'0',
+				TestSite::last_line( TestSite::php( 'global $wpdb; echo "\n", $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", $arguments[0]));', [ $ledger ] ) )
+			);
 			self::assertSame( $snapshots, TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), 'The repository is not touched.' );
 			self::assertStringContainsString( 'no errors were found', TestSite::restic()->must( [ 'check' ] ) );
 		} finally {

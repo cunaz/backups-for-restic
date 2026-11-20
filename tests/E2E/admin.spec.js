@@ -1,19 +1,34 @@
 /**
- * The admin page in a browser, on a WordPress that was just installed: the setup wizard with
- * its first backup, then the dashboard, the snapshots with the browser of their files, the
- * settings and the recovery kit, and a backup that is cancelled. What an administrator sees and clicks, nothing else: no request
- * is sent by the tests themselves.
+ * Exercises the packaged admin UI on independent WordPress installations. Setup, backup,
+ * file restore, database exchange and undo run through the same controls administrators use.
+ * Fixture helpers create source and destination content. Guest requests and direct reads
+ * verify maintenance, public posts and retained configuration after the jobs complete.
  */
 const fs = require( 'node:fs' );
 const { URL } = require( 'node:url' );
 const path = require( 'node:path' );
 const { test, expect } = require( '@playwright/test' );
-const { ADMIN, freshSite, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback } = require( './site' );
+const { ADMIN, freshSite, signIn, openBackups, repositoryServer, siteRoot, wordpress, addUpload, removeUpload, noLoopback } = require( './site' );
 
 test.describe.configure( { mode: 'serial' } );
 
 const SOURCE_UPLOAD = 'bfr-acceptance-source.txt';
 const SOURCE_BYTES = 'Uploaded to the source installation before its first backup.\n';
+
+const DESTINATION_ADMIN = { login: 'destination-owner', password: 'destination-owner-acceptance-only' };
+
+function publishPost( root, slug ) {
+	const id = wordpress( root,
+		'echo wp_insert_post( [ "post_title" => $argv[2], "post_name" => $argv[2], "post_content" => $argv[2], "post_status" => "publish", "post_author" => 1 ] );', [ slug ] );
+	expect( Number( id ) ).toBeGreaterThan( 0 );
+	return id;
+}
+
+async function publicPost( request, url, slug ) {
+	const response = await request.get( url + '/?rest_route=/wp/v2/posts&slug=' + encodeURIComponent( slug ) + '&_fields=slug' );
+	expect( response.status() ).toBe( 200 );
+	return ( await response.json() ).map( ( post ) => post.slug );
+}
 
 /**
  * A notice of the plugin's page with a text.
@@ -133,12 +148,21 @@ test( 'the wizard sets the site up and runs the first backup', async ( { page } 
 	fs.mkdirSync( uploads, { recursive: true } );
 	const file = path.join( uploads, SOURCE_UPLOAD );
 	fs.writeFileSync( file, SOURCE_BYTES, { flag: 'wx' } );
+	const many = fs.mkdtempSync( path.join( uploads, 'bfr-file-review-' ) );
+	const sourcePost = publishPost( siteRoot(), 'bfr-migration-source' );
 	try {
+		// Combined with the packaged content, this forces more than 1,000 real
+		// restore entries through the persistent planner in the migration test.
+		for ( let i = 0; i < 500; i++ ) {
+			fs.writeFileSync( path.join( many, 'document-' + i + '.txt' ), SOURCE_BYTES );
+		}
 		await page.getByRole( 'button', { name: 'Save and run the first backup' } ).click();
 		await expect( page.getByText( 'The first backup uploads everything once' ) ).toBeVisible();
 		await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 8 * 60 * 1000 } );
 	} finally {
+		fs.rmSync( many, { recursive: true } );
 		fs.unlinkSync( file );
+		wordpress( siteRoot(), 'wp_delete_post( (int) $argv[2], true );', [ sourcePost ] );
 	}
 
 	await page.getByRole( 'link', { name: 'Go to the dashboard' } ).click();
@@ -439,6 +463,7 @@ test( 'the browser checks the working directory where the site cannot request it
 } );
 
 test( 'a fresh installation can import a source snapshot and keep its own configuration', async ( { page, browser, request } ) => {
+	test.setTimeout( 20 * 60 * 1000 );
 	// Read the source repository password from the kit through the regular admin screen.
 	await openBackups( page, 'settings' );
 	await page.getByLabel( 'Your WordPress password', { exact: true } ).fill( ADMIN.password );
@@ -455,7 +480,11 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		const configFile = path.join( target.root, 'wp-config.php' );
 		const configuration = fs.readFileSync( configFile );
 		const upload = path.join( target.root, 'wp-content/uploads', SOURCE_UPLOAD );
-		await signIn( destination );
+		const owner = wordpress( target.root,
+			'echo wp_insert_user( [ "user_login" => $argv[2], "user_pass" => $argv[3], "user_email" => "destination-owner@example.test", "role" => "administrator" ] );', [ DESTINATION_ADMIN.login, DESTINATION_ADMIN.password ] );
+		expect( Number( owner ) ).toBeGreaterThan( 1 );
+		publishPost( target.root, 'bfr-migration-destination' );
+		await signIn( destination, DESTINATION_ADMIN );
 		await openBackups( destination );
 		await destination.getByRole( 'button', { name: 'Continue', exact: true } ).click();
 		const server = repositoryServer();
@@ -478,6 +507,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		await expect( staged ).toBeVisible( { timeout: 6 * 60 * 1000 } );
 		expect( fs.existsSync( upload ) ).toBe( false );
 		await staged.getByRole( 'button', { name: 'Inspect database rehearsal' } ).click();
+		await expect( staged.getByRole( 'button', { name: 'Close database rehearsal' } ) ).toBeFocused();
 		const options = staged.locator( '.bfr-database-tables tbody tr' ).filter( { has: destination.getByRole( 'cell', { name: 'wp_options', exact: true } ) } );
 		await expect( options ).toBeVisible();
 		expect( Number( await options.locator( 'td' ).nth( 1 ).innerText() ) ).toBeGreaterThan( 0 );
@@ -489,18 +519,53 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		await settings.getByLabel( 'Continue jobs with loopback requests' ).selectOption( 'off' );
 		await settings.getByRole( 'button', { name: 'Save settings' } ).click();
 		await expect( notice( settings, 'success', 'Settings saved.' ) ).toBeVisible();
-		async function apply() {
+		async function apply( resume = false ) {
 			await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
 			await expect( staged.getByLabel( 'Include wp-config.php in the preview.' ) ).toHaveCount( 0 );
-			await staged.getByRole( 'button', { name: 'Preview live file changes' } ).click();
-			await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible();
+			const preview = staged.getByRole( 'button', { name: 'Preview live file changes' } );
+			if ( resume ) {
+				const isPlan = ( response ) => response.request().method() === 'POST' && decodeURIComponent( response.url() ).includes( '/apply-plan' );
+				const [ queued ] = await Promise.all( [ destination.waitForResponse( ( response ) => isPlan( response ) && 202 === response.status() ), preview.click() ] );
+				const id = ( await queued.json() ).job.id;
+				await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+				await destination.reload();
+				await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
+				await Promise.all( [
+					destination.waitForResponse( ( response ) => isPlan( response ) && 200 === response.status() && response.request().postDataJSON().plan_job === id ),
+					preview.click(),
+				] );
+			} else {
+				await preview.click();
+			}
+			await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+			const actions = staged.locator( '.bfr-file-actions' );
+			await expect( actions ).toContainText( /Showing file changes 1–100 of [1-9]\d{3,}\./ );
+			const next = actions.getByRole( 'button', { name: 'Next file changes' } );
+			const previous = actions.getByRole( 'button', { name: 'Previous file changes' } );
+			await next.focus();
+			if ( resume ) {
+				// A transient page failure keeps the reviewed rows and focused retry control.
+				const planURL = ( url ) => decodeURIComponent( url.href ).includes( '/apply-plan' );
+				await destination.route( planURL, ( route ) => route.fulfill( { status: 503, json: { code: 'unavailable', message: 'Preview page temporarily unavailable.', data: { status: 503 } } } ), { times: 1 } );
+				await next.press( 'Enter' );
+				await expect( actions.getByRole( 'status' ) ).toHaveText( 'Preview page temporarily unavailable.' );
+				await expect( next ).toBeFocused();
+				await expect( actions.locator( 'tbody tr' ) ).toHaveCount( 100 );
+			}
+			await next.press( 'Enter' );
+			await expect( actions.getByRole( 'status' ) ).toHaveText( /Showing file changes 101–200 of / );
+			await expect( next ).toBeFocused();
+			await previous.focus();
+			await previous.press( 'Enter' );
+			await expect( actions.getByRole( 'status' ) ).toHaveText( /Showing file changes 1–100 of / );
+			await expect( next ).toBeFocused();
 			await expect( staged.getByRole( 'columnheader', { name: 'Live path' } ) ).toBeVisible();
 			await staged.getByLabel( 'I have reviewed these changes to the live site.' ).check();
 			await staged.getByLabel( 'Type the site address to confirm' ).fill( target.url );
-			await staged.getByLabel( 'Your WordPress password' ).fill( ADMIN.password );
+			await staged.getByLabel( 'Your WordPress password' ).fill( DESTINATION_ADMIN.password );
 			await staged.getByRole( 'button', { name: 'Apply to live site' } ).click();
 		}
-		await apply();
+		await apply( true );
 		// This destination advances only through the open, authenticated control page.
 		// The prepared marker is held between ticks, including while cancellation is requested.
 		const marker = path.join( target.root, '.maintenance' );
@@ -518,6 +583,51 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		expect( fs.readFileSync( configFile ) ).toEqual( configuration );
 		await settings.reload();
 		await expect( settings.getByLabel( 'Keep one snapshot per day, for this many days' ) ).toHaveValue( '13' );
+		const db = staged.locator( 'details' ).filter( { has: destination.getByText( 'Restore tables to the live database', { exact: true } ) } );
+		await db.getByText( 'Restore tables to the live database', { exact: true } ).click();
+		const [ review ] = await Promise.all( [
+			destination.waitForResponse( ( response ) => response.request().method() === 'POST' && decodeURIComponent( response.url() ).includes( '/database/plan' ) ),
+			db.getByRole( 'button', { name: 'Preview live database changes' } ).click(),
+		] );
+		expect( review.status() ).toBe( 200 );
+		expect( review.headers()[ 'cache-control' ] ).toContain( 'no-store' );
+		await expect( db.getByRole( 'status' ).filter( { hasText: 'Database preview ready.' } ) ).toBeVisible();
+		await expect( db ).toContainText( 'wp_posts' );
+		const applyDatabase = db.getByRole( 'button', { name: 'Apply database restore', exact: true } );
+		if ( '1' === process.env.BFR_E2E_EXPECT_DATABASE_SWAP ) {
+			await expect( applyDatabase ).toBeVisible();
+			expect( await publicPost( request, target.url, 'bfr-migration-source' ) ).toEqual( [] );
+			expect( await publicPost( request, target.url, 'bfr-migration-destination' ) ).toEqual( [ 'bfr-migration-destination' ] );
+			async function exchange( area, submit, outcome ) {
+				await area.getByLabel( 'I have reviewed these changes to the live site.' ).check();
+				await area.getByLabel( 'Type the site address to confirm' ).fill( target.url );
+				await area.getByLabel( 'Your WordPress password' ).fill( DESTINATION_ADMIN.password );
+				const previous = destination.url();
+				await submit.click();
+				await destination.waitForURL( ( url ) => url.href !== previous && url.searchParams.has( 'job' ) );
+				await expect( notice( destination, 'success', outcome ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+				await settings.reload();
+				await expect( settings.getByLabel( 'Keep one snapshot per day, for this many days' ) ).toHaveValue( '13' );
+				expect( wordpress( target.root, 'global $wpdb; echo $wpdb->get_var( "SELECT option_value FROM {$wpdb->options} WHERE option_name=\x27home\x27" );' ) ).toBe( target.url );
+			}
+			await db.getByLabel( 'I have reviewed these changes to the live site.' ).check();
+			await db.getByLabel( 'Type the site address to confirm' ).fill( target.url );
+			await db.getByLabel( 'Your WordPress password' ).fill( 'incorrect-acceptance-password' );
+			await applyDatabase.click();
+			await expect( db ).toContainText( 'Your WordPress password was not correct.' );
+			await expect( db.getByLabel( 'Your WordPress password' ) ).toBeFocused();
+			await exchange( db, applyDatabase, 'Database restore applied.' );
+			expect( await publicPost( request, target.url, 'bfr-migration-source' ) ).toEqual( [ 'bfr-migration-source' ] );
+			expect( await publicPost( request, target.url, 'bfr-migration-destination' ) ).toEqual( [] );
+			const undo = destination.locator( 'section.bfr-card' ).filter( { has: destination.getByRole( 'button', { name: 'Preview database undo' } ) } );
+			await undo.getByRole( 'button', { name: 'Preview database undo' } ).click();
+			await exchange( undo, undo.getByRole( 'button', { name: 'Undo database restore', exact: true } ), 'Database restore undone.' );
+			expect( await publicPost( request, target.url, 'bfr-migration-destination' ) ).toEqual( [ 'bfr-migration-destination' ] );
+			expect( await publicPost( request, target.url, 'bfr-migration-source' ) ).toEqual( [] );
+		} else if ( 'mariadb' === process.env.BFR_E2E_EXPECT_DATABASE_SWAP ) {
+			await expect( db ).toContainText( 'MariaDB requires a manual live database restore' );
+			await expect( applyDatabase ).toHaveCount( 0 );
+		}
 	} finally {
 		await context.close();
 		target.remove();

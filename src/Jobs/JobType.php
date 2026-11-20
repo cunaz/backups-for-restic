@@ -40,6 +40,14 @@ enum JobType: string {
 
 	case Undo = 'undo';
 
+	/** Prepares a private, paginated apply or undo preview. */
+	case FilePlan = 'file_plan';
+
+	/** Applies or reverses a password-confirmed, rehearsed database exchange. */
+	case DatabaseApply = 'database_apply';
+
+	case DatabaseUndo = 'database_undo';
+
 	/**
 	 * Steps of the regular path, in order.
 	 *
@@ -55,6 +63,9 @@ enum JobType: string {
 			self::Restore => [ 'preflight', 'unlocking', 'planning', 'restoring', 'recording' ],
 			self::Apply => [ 'preflight', 'applying', 'recording' ],
 			self::Undo => [ 'preflight', 'undoing', 'recording' ],
+			self::DatabaseApply => [ 'preflight', 'importing_database', 'preparing_database', 'swapping_database', 'recording' ],
+			self::DatabaseUndo => [ 'preflight', 'swapping_database', 'recording' ],
+			self::FilePlan => [ 'preflight', 'planning', 'recording' ],
 		};
 	}
 
@@ -65,7 +76,7 @@ enum JobType: string {
 	 */
 	public function cleanup_steps(): array {
 		return match ( $this ) {
-			self::Apply, self::Undo, self::Unlock => [ 'cleaning_up' ],
+			self::DatabaseApply, self::DatabaseUndo, self::FilePlan, self::Apply, self::Undo, self::Unlock => [ 'cleaning_up' ],
 			default      => [ 'releasing', 'cleaning_up' ],
 		};
 	}

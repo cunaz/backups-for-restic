@@ -24,8 +24,9 @@ final class JobSteps implements StepProvider {
 	 * @param StepProvider      $maintenance Steps of forget, prune and check jobs.
 	 * @param StepProvider      $restore     Steps of restore jobs.
 	 * @param StepProvider|null $changes Live file apply and undo steps.
+	 * @param StepProvider|null $database Confirmed database exchange steps.
 	 */
-	public function __construct( private readonly StepProvider $backup, private readonly StepProvider $maintenance, private readonly StepProvider $restore, private readonly ?StepProvider $changes = null ) {
+	public function __construct( private readonly StepProvider $backup, private readonly StepProvider $maintenance, private readonly StepProvider $restore, private readonly ?StepProvider $changes = null, private readonly ?StepProvider $database = null ) {
 	}
 
 	/**
@@ -36,7 +37,10 @@ final class JobSteps implements StepProvider {
 	 * @return Step Step.
 	 */
 	public function step( JobType $type, string $name ): Step {
-		if ( in_array( $type, [ JobType::Apply, JobType::Undo ], true ) && null !== $this->changes ) {
+		if ( null !== $this->database && in_array( $type, [ JobType::DatabaseApply, JobType::DatabaseUndo ], true ) ) {
+			return $this->database->step( $type, $name );
+		}
+		if ( in_array( $type, [ JobType::Apply, JobType::Undo, JobType::FilePlan ], true ) && null !== $this->changes ) {
 			return $this->changes->step( $type, $name );
 		}
 		if ( JobType::Restore === $type ) {

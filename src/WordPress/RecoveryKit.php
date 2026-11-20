@@ -10,19 +10,54 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Backup\PlanFactory;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Plugin;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
  * Everything needed to restore without this site (docs/03-security-and-threat-model.md §5.5):
  * repository address, credentials, password and a short restic recipe. It is shown, never
- * stored, and only to an administrator who just entered their WordPress password.
+ * stored. The web routes confirm authorization before delivery. WP-CLI requires an
+ * interactive terminal or an explicit request for redirected output.
  */
 final class RecoveryKit {
+
+	/** Number of kit deliveries retained for the administrator's audit history. */
+	private const int KIT_VIEWS = 20;
+
+	/**
+	 * Records the delivery before returning the kit. Shell access without a selected
+	 * WordPress user is recorded as WP-CLI with user ID zero.
+	 *
+	 * @param Container $container Site services.
+	 * @param string    $via create, connect, settings or cli.
+	 * @return string Recovery kit.
+	 * @throws PluginException If the kit or the audit entry cannot be produced.
+	 */
+	public static function deliver( Container $container, string $via ): string {
+		$kit  = self::text( $container, 'connect' === $via );
+		$user = wp_get_current_user();
+		$view = [
+			'at'    => time(),
+			'user'  => $user->ID,
+			'login' => 'cli' === $via && 0 === $user->ID ? 'WP-CLI' : $user->user_login,
+			'via'   => $via,
+		];
+		$container->state()->update( 'recovery_kit', static fn ( array $entry ): array => [ 'views' => array_slice( [ $view, ...Decoded::arrays( $entry['views'] ?? null ) ], 0, self::KIT_VIEWS ) ], true );
+		/**
+		 * Fires when the recovery kit has been prepared for an authorized recipient.
+		 *
+		 * @param int    $user_id WordPress user ID, or zero for a local shell operator.
+		 * @param string $via     create, connect, settings or cli.
+		 */
+		do_action( 'backups_for_restic_recovery_kit_shown', $user->ID, $via );
+		return $kit;
+	}
 
 	/**
 	 * Quotes one argument for the POSIX shell used in the recovery instructions. The

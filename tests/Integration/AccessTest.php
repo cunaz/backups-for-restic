@@ -51,6 +51,11 @@ final class AccessTest extends TestCase {
 			[ 'POST', '/restores/' . self::JOB . '/download' ],
 			[ 'POST', '/restores/' . self::JOB . '/apply-plan' ],
 			[ 'POST', '/restores/' . self::JOB . '/apply' ],
+			[ 'POST', '/restores/' . self::JOB . '/database/plan' ],
+			[ 'POST', '/restores/' . self::JOB . '/database/apply' ],
+			[ 'GET', '/database-changes' ],
+			[ 'POST', '/database-changes/' . self::JOB . '/undo-plan' ],
+			[ 'POST', '/database-changes/' . self::JOB . '/undo' ],
 			[ 'GET', '/undo' ],
 			[ 'POST', '/undo/' . self::JOB . '/plan' ],
 			[ 'POST', '/undo/' . self::JOB ],
@@ -109,6 +114,59 @@ final class AccessTest extends TestCase {
 		self::assertSame( [ '403', '403' ], explode( "\n", trim( $statuses ) ) );
 	}
 
+	public function test_database_writes_require_every_capability_including_core_updates(): void {
+		$output = TestSite::php(
+			'
+			add_filter( "backups_for_restic_capability", static fn () => "bfr_manage_backups" );
+			$editor = get_user_by( "login", "bfr-editor" )->ID;
+			wp_set_current_user( $editor );
+			$required = [ "bfr_manage_backups", "manage_options", "edit_users", "promote_users", "update_core" ];
+			$omitted = "";
+			add_filter( "user_has_cap", static function ( $caps ) use ( $required, &$omitted ) {
+				foreach ( $required as $cap ) { $caps[ $cap ] = $omitted !== $cap; }
+				return $caps;
+			} );
+			$results = [ BackupsForRestic\WordPress\RestRoutes::database_writes_allowed() ];
+			foreach ( $required as $omitted ) {
+				$results[] = BackupsForRestic\WordPress\RestRoutes::database_writes_allowed();
+			}
+			wp_set_current_user( 0 );
+			$omitted = "";
+			$results[] = BackupsForRestic\WordPress\RestRoutes::database_user_allowed( $editor );
+			$results[] = BackupsForRestic\WordPress\RestRoutes::database_writes_allowed();
+			echo wp_json_encode( $results );
+			'
+		);
+		self::assertSame( [ true, false, false, false, false, false, true, false ], json_decode( $output, true ), $output );
+	}
+
+	public function test_database_routes_refuse_a_delegated_user_who_cannot_update_core(): void {
+		$output = TestSite::php(
+			'
+			wp_set_current_user( get_user_by( "login", "bfr-editor" )->ID );
+			add_filter( "backups_for_restic_capability", static fn () => "read" );
+			add_filter( "user_has_cap", static function ( $caps ) {
+				$caps["manage_options"] = $caps["edit_users"] = $caps["promote_users"] = true;
+				$caps["update_core"] = false;
+				return $caps;
+			} );
+			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo" ] as $route ) {
+				echo rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1" . $route ) )->get_status(), "\n";
+			}
+			',
+			[ self::JOB ]
+		);
+		self::assertSame( [ '403', '403' ], explode( "\n", trim( $output ) ) );
+	}
+
+	public function test_database_writes_require_explicit_confirmation_in_the_json_body(): void {
+		foreach ( [ '/restores/' . self::JOB . '/database/apply', '/database-changes/' . self::JOB . '/undo' ] as $route ) {
+			[ $status, $error, $raw ] = TestSite::api( 'POST', $route . '&reviewed=true&site_url=' . rawurlencode( TestSite::URL ), [] );
+			self::assertSame( 400, $status, $raw );
+			self::assertSame( 'backups_for_restic_live_confirmation', $error['code'] ?? null, $raw );
+		}
+	}
+
 	public function test_live_writes_respect_the_hosts_file_modification_policy(): void {
 		$statuses = TestSite::php(
 			'
@@ -123,8 +181,16 @@ final class AccessTest extends TestCase {
 		self::assertSame( [ '403', '403' ], explode( "\n", trim( $statuses ) ) );
 	}
 
+	public function test_invalid_preview_page_identifiers_are_rejected_before_planning(): void {
+		foreach ( [ [ 'offset' => -1 ], [ 'offset' => 1 ], [ 'plan_job' => 'invalid' ] ] as $body ) {
+			[ $status, $error, $raw ] = TestSite::api( 'POST', '/restores/' . self::JOB . '/apply-plan', $body );
+			self::assertSame( 400, $status, $raw );
+			self::assertSame( 'backups_for_restic_invalid_plan_page', $error['code'] ?? null, $raw );
+		}
+	}
+
 	public function test_live_changes_cannot_be_started_through_the_generic_job_endpoint(): void {
-		foreach ( [ 'apply', 'undo' ] as $type ) {
+		foreach ( [ 'apply', 'undo', 'file_plan', 'database_apply', 'database_undo' ] as $type ) {
 			[ $status, $error ] = TestSite::api( 'POST', '/jobs', [ 'type' => $type ] );
 			self::assertSame( 400, $status );
 			self::assertSame( 'backups_for_restic_invalid_job_type', $error['code'] ?? null );

@@ -18,6 +18,7 @@ use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
+use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Maintenance\RetentionSettings;
 use BackupsForRestic\Jobs\Restore\RestoreRequest;
@@ -34,9 +35,11 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Routes under backups-for-restic/v1 (docs/02-architecture.md §13.2). The admin UI uses nothing
- * else. Every route requires the backup capability; no response contains a secret except the
- * recovery kit, which the wizard shows once during the setup and which needs the
- * administrator's WordPress password afterwards.
+ * else. Every route requires the configured backup capability. The recovery kit contains
+ * repository credentials. Sensitive responses, including temporary download and review
+ * grants, are delivered with no-store cache policy.
+ *
+ * @phpstan-type LiveReview array{digest:string,applicable:bool,plan_job?:string,...}
  */
 final class RestRoutes {
 
@@ -45,7 +48,6 @@ final class RestRoutes {
 	/** Seconds a request may spend on deleting a staging directory; the heartbeat finishes the rest. */
 	private const float REMOVAL_SECONDS = 10.0;
 
-	/** Settings that the settings page may change; repository and setup have their own routes. */
 	/**
 	 * Creates the routes.
 	 *
@@ -77,6 +79,11 @@ final class RestRoutes {
 			'/restores/(?P<id>[^/]+)/download'           => [ 'POST', 'download' ],
 			'/restores/(?P<id>[^/]+)/apply-plan'         => [ 'POST', 'apply_preview' ],
 			'/restores/(?P<id>[^/]+)/apply'              => [ 'POST', 'apply_files' ],
+			'/restores/(?P<id>[^/]+)/database/plan'      => [ 'POST', 'database_preview' ],
+			'/restores/(?P<id>[^/]+)/database/apply'     => [ 'POST', 'apply_database' ],
+			'/database-changes'                          => [ 'GET', 'database_undoable' ],
+			'/database-changes/(?P<id>[^/]+)/undo-plan'  => [ 'POST', 'database_undo_preview' ],
+			'/database-changes/(?P<id>[^/]+)/undo'       => [ 'POST', 'undo_database' ],
 			'/undo'                                      => [ 'GET', 'undoable' ],
 			'/undo/(?P<id>[^/]+)/plan'                   => [ 'POST', 'undo_preview' ],
 			'/undo/(?P<id>[^/]+)'                        => [ 'POST', 'undo_files' ],
@@ -96,7 +103,14 @@ final class RestRoutes {
 				$endpoints[] = [
 					'methods'             => $method,
 					'callback'            => fn ( \WP_REST_Request $request ): mixed => $this->answer( \Closure::fromCallable( [ $this, $callback ] ), $request ),
-					'permission_callback' => in_array( $callback, [ 'apply_files', 'undo_files' ], true ) ? [ self::class, 'live_writes_allowed' ] : [ self::class, 'allowed' ],
+					'permission_callback' => [
+						self::class,
+						match ( $callback ) {
+								'apply_files', 'undo_files'       => 'live_writes_allowed',
+								'apply_database', 'undo_database' => 'database_writes_allowed',
+								default                           => 'allowed',
+						},
+					],
 				];
 			}
 			register_rest_route( self::NAMESPACE, $path, $endpoints );
@@ -125,13 +139,18 @@ final class RestRoutes {
 	 * @return bool True if allowed.
 	 */
 	public static function allowed(): bool {
+		return current_user_can( self::capability() );
+	}
+
+	/** The configured capability shared by the menu, API and background authorization. */
+	public static function capability(): string {
 		/**
 		 * Filters the capability needed to manage backups.
 		 *
 		 * @param string $capability Capability, manage_options by default.
 		 */
 		$capability = apply_filters( 'backups_for_restic_capability', 'manage_options' );
-		return current_user_can( $capability );
+		return Decoded::string( $capability, 'manage_options' );
 	}
 
 	/**
@@ -586,9 +605,113 @@ final class RestRoutes {
 		return self::allowed() && current_user_can( 'update_core' ) && wp_is_file_mod_allowed( 'backups_for_restic_apply' );
 	}
 
+	/** A live database exchange can replace roles, accounts, plugins and administration settings. */
+	public static function database_writes_allowed(): bool {
+		return self::database_user_allowed( get_current_user_id() );
+	}
+
+	/**
+	 * Rechecks the initiating account when a background tick reaches the database exchange.
+	 *
+	 * @param int $user_id WordPress administrator that confirmed this operation.
+	 * @return bool Whether the account retains all required capabilities.
+	 */
+	public static function database_user_allowed( int $user_id ): bool {
+		if ( $user_id < 1 ) {
+			return false;
+		}
+		return user_can( $user_id, self::capability() ) && user_can( $user_id, 'manage_options' ) && user_can( $user_id, 'edit_users' ) && user_can( $user_id, 'promote_users' ) && user_can( $user_id, 'update_core' );
+	}
+
 	/** Lists apply jobs whose changes can still be reversed. */
 	public function undoable(): \WP_REST_Response {
 		return $this->respond( [ 'jobs' => $this->container->file_changes()->undoable() ] );
+	}
+
+	/** Lists database exchanges with a retained original generation available for undo. */
+	public function database_undoable(): \WP_REST_Response {
+		return $this->respond( [ 'jobs' => $this->container->database_changes()->undoable() ] );
+	}
+
+	/**
+	 * Reviews the tables and compatibility of a rehearsed restore.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Plan or refusal.
+	 */
+	public function database_preview( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->review_database( $request, false );
+	}
+
+	/**
+	 * Reviews an exchange that would bring the retained tables back into service.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Plan or refusal.
+	 */
+	public function database_undo_preview( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->review_database( $request, true );
+	}
+
+	/**
+	 * Issues a session-specific review for the exact generations and preservation policy.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $undo Whether to restore retained tables.
+	 * @return \WP_REST_Response|\WP_Error Reviewed plan or refusal.
+	 */
+	private function review_database( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
+		$id = Decoded::string( $request->get_url_params()['id'] ?? null );
+		try {
+			$service = $this->container->database_changes();
+			$plan    = $undo ? $service->preview_undo( $id, get_current_user_id() ) : $service->preview( $id, get_current_user_id() );
+		} catch ( InvalidArgument | JobConflict $refused ) {
+			return $this->plan_error( $refused, true );
+		}
+		return $this->reviewed_response( $plan, $id, $undo, false, true );
+	}
+
+	/**
+	 * Queues the separately confirmed live database exchange.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Queued job or refusal.
+	 */
+	public function apply_database( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->start_database_change( $request, false );
+	}
+
+	/**
+	 * Queues a separately reviewed reversal of a live database exchange.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Queued job or refusal.
+	 */
+	public function undo_database( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->start_database_change( $request, true );
+	}
+
+	/**
+	 * Checks the current user's password and reviewed database binding before scheduling.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $undo Whether to undo an earlier exchange.
+	 * @return \WP_REST_Response|\WP_Error Queued job or refusal.
+	 */
+	private function start_database_change( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
+		$review = $this->confirmed_plan( $request, $undo, true );
+		if ( $review instanceof \WP_Error ) {
+			return $review;
+		}
+		[ $id, $digest ] = $review;
+		try {
+			$service = $this->container->database_changes();
+			$job     = $undo ? $service->start_undo( $id, get_current_user_id(), $digest ) : $service->start_apply( $id, get_current_user_id(), $digest );
+		} catch ( InvalidArgument | JobConflict $refused ) {
+			return $this->plan_error( $refused, true );
+		}
+		Cron::chain( $this->container );
+		return $this->respond( [ 'job' => $this->job_summary( $job ) ], 201, true );
 	}
 
 	/**
@@ -625,15 +748,37 @@ final class RestRoutes {
 		if ( ! is_bool( $include_config ) || ( $undo && $include_config ) ) {
 			return $this->error( 'invalid_config_choice', 400 );
 		}
-		$service = $this->container->file_changes();
+		$plan_job = $request->get_param( 'plan_job' );
+		$offset   = $request->get_param( 'offset' ) ?? 0;
+		if ( ( null !== $plan_job && ( ! is_string( $plan_job ) || 1 !== preg_match( JobStore::ID_PATTERN, $plan_job ) ) ) || ! is_int( $offset ) || $offset < 0 || ( $offset > 0 && null === $plan_job ) ) {
+			return $this->error( 'invalid_plan_page', 400 );
+		}
 		try {
-			$plan = $undo ? $service->preview_undo( $id ) : $service->preview( $id, $include_config );
+			$plan = $this->container->file_changes()->request_preview( $id, $undo, $include_config, $plan_job, $offset );
 		} catch ( InvalidArgument | JobConflict $refused ) {
 			return $this->plan_error( $refused );
 		}
+		if ( $plan instanceof Job ) {
+			Cron::chain( $this->container );
+			return $this->respond( [ 'job' => $this->job_summary( $plan ) ], 202, true );
+		}
+		return $this->reviewed_response( $plan, $id, $undo, $include_config, false );
+	}
+
+	/**
+	 * Provides a confirmation token only for an applicable plan this user may write.
+	 *
+	 * @param LiveReview $plan Inspected plan.
+	 * @param string     $id Source restore or prior apply job.
+	 * @param bool       $undo Whether to undo changes.
+	 * @param bool       $include_config Whether the file review includes wp-config.php.
+	 * @param bool       $database Whether the review concerns database tables.
+	 * @return \WP_REST_Response Reviewed plan.
+	 */
+	private function reviewed_response( array $plan, string $id, bool $undo, bool $include_config, bool $database ): \WP_REST_Response {
 		$plan['site_url']      = home_url();
-		$plan['write_allowed'] = self::live_writes_allowed();
-		$plan['review_token']  = $plan['applicable'] && $plan['write_allowed'] ? wp_create_nonce( self::review_action( $undo, $id, $include_config, $plan['digest'] ) ) : null;
+		$plan['write_allowed'] = $database ? self::database_writes_allowed() : self::live_writes_allowed();
+		$plan['review_token']  = $plan['applicable'] && $plan['write_allowed'] ? wp_create_nonce( self::review_action( $undo, $id, $include_config, $plan['digest'], $plan['plan_job'] ?? null, $database ) ) : null;
 		return $this->respond( $plan, 200, true );
 	}
 
@@ -666,26 +811,16 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error New job or refusal.
 	 */
 	private function start_live_change( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
-		$id   = Decoded::string( $request->get_url_params()['id'] ?? null );
-		$body = $request->get_json_params();
-		if ( true !== ( $body['reviewed'] ?? null ) || home_url() !== ( $body['site_url'] ?? null ) ) {
-			return $this->error( 'live_confirmation', 400 );
+		$review = $this->confirmed_plan( $request, $undo, false );
+		if ( $review instanceof \WP_Error ) {
+			return $review;
 		}
-		$include_config = $body['include_config'] ?? false;
-		$digest         = $body['digest'] ?? null;
-		$token          = $body['review_token'] ?? null;
-		if ( ! is_bool( $include_config ) || ( $undo && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $undo, $id, $include_config, $digest ) ) ) {
-			return $this->error( 'live_plan_changed', 409 );
-		}
-		$user = wp_get_current_user();
-		if ( ! is_string( $body['user_password'] ?? null ) || ! wp_check_password( $body['user_password'], $user->user_pass, $user->ID ) ) {
-			return $this->error( 'wrong_user_password', 403 );
-		}
-		$control = bin2hex( $this->container->random()->bytes( 32 ) );
-		$hash    = hash( 'sha256', $control );
+		[ $id, $digest, $include_config, $plan_job ] = $review;
+		$control                                     = bin2hex( $this->container->random()->bytes( 32 ) );
+		$hash                                        = hash( 'sha256', $control );
 		try {
 			$service = $this->container->file_changes();
-			$job     = $undo ? $service->start_undo( $id, $digest, $hash ) : $service->start_apply( $id, $include_config, $digest, $hash );
+			$job     = $undo ? $service->start_undo( $id, $digest, $hash, $plan_job ) : $service->start_apply( $id, $include_config, $digest, $hash, $plan_job );
 		} catch ( InvalidArgument | JobConflict $refused ) {
 			return $this->plan_error( $refused );
 		}
@@ -705,29 +840,63 @@ final class RestRoutes {
 	}
 
 	/**
+	 * Checks an explicit JSON-body confirmation against the signed review and the current user.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @param bool                                   $undo Whether to reverse a previous change.
+	 * @param bool                                   $database Whether the operation changes database tables.
+	 * @return array{string, string, bool, string|null}|\WP_Error Source, digest, configuration scope and background plan, or refusal.
+	 */
+	private function confirmed_plan( \WP_REST_Request $request, bool $undo, bool $database ): array|\WP_Error {
+		$id   = Decoded::string( $request->get_url_params()['id'] ?? null );
+		$body = $request->get_json_params();
+		if ( true !== ( $body['reviewed'] ?? null ) || home_url() !== ( $body['site_url'] ?? null ) ) {
+			return $this->error( 'live_confirmation', 400 );
+		}
+		$include_config = $body['include_config'] ?? false;
+		$digest         = $body['digest'] ?? null;
+		$token          = $body['review_token'] ?? null;
+		$plan_job       = $body['plan_job'] ?? null;
+		if ( null !== $plan_job && ( $database || ! is_string( $plan_job ) || 1 !== preg_match( JobStore::ID_PATTERN, $plan_job ) ) ) {
+			return $this->error( $database ? 'database_exchange_changed' : 'live_plan_changed', 409 );
+		}
+		if ( ! is_bool( $include_config ) || ( ( $undo || $database ) && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $undo, $id, $include_config, $digest, $plan_job, $database ) ) ) {
+			return $this->error( $database ? 'database_exchange_changed' : 'live_plan_changed', 409 );
+		}
+		$user = wp_get_current_user();
+		if ( ! is_string( $body['user_password'] ?? null ) || ! wp_check_password( $body['user_password'], $user->user_pass, $user->ID ) ) {
+			return $this->error( 'wrong_user_password', 403 );
+		}
+		return [ $id, $digest, $include_config, $plan_job ];
+	}
+
+	/**
 	 * Binds a preview to the site, operation, originating job, file scope and inspected data.
 	 *
-	 * @param bool   $undo    Undo an apply.
-	 * @param string $id      Source job.
-	 * @param bool   $include_config Include wp-config.php.
-	 * @param string $digest  Fingerprint of the inspected changes.
+	 * @param bool        $undo    Undo an apply.
+	 * @param string      $id      Source job.
+	 * @param bool        $include_config Include wp-config.php.
+	 * @param string      $digest  Fingerprint of the inspected changes.
+	 * @param string|null $plan_job Reviewed background plan, if the selection needed one.
+	 * @param bool        $database Whether the review concerns database tables.
 	 * @return string WordPress nonce action.
 	 */
-	private static function review_action( bool $undo, string $id, bool $include_config, string $digest ): string {
-		return implode( '|', [ 'backups_for_restic_live', home_url(), $undo ? 'undo' : 'apply', $id, $include_config ? 'with-config' : 'default', $digest ] );
+	private static function review_action( bool $undo, string $id, bool $include_config, string $digest, ?string $plan_job, bool $database ): string {
+		return implode( '|', [ 'backups_for_restic_live', home_url(), $database ? 'tables' : 'files', $undo ? 'undo' : 'apply', $id, $include_config ? 'with-config' : 'default', $digest, $plan_job ?? '' ] );
 	}
 
 	/**
 	 * Reports a refusal without returning filesystem details from an exception.
 	 *
 	 * @param InvalidArgument|JobConflict $refused Reason.
+	 * @param bool                        $database Whether the plan concerns a database exchange.
 	 * @return \WP_Error Error.
 	 */
-	private function plan_error( InvalidArgument|JobConflict $refused ): \WP_Error {
+	private function plan_error( InvalidArgument|JobConflict $refused, bool $database = false ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
-			return $this->error( 'live_plan_conflict', 409 );
+			return $this->error( $database ? JobError::from_throwable( $refused )->code : 'live_plan_conflict', 409 );
 		}
-		return $this->error( 'live_plan_unavailable', 400 );
+		return $this->error( $database ? 'database_review_required' : 'live_plan_unavailable', 400 );
 	}
 
 	/**
@@ -975,7 +1144,7 @@ final class RestRoutes {
 			$this->setup()->create( $this->secret_param( $request, 'password' ) );
 			$this->container->refresh();
 			delete_transient( 'backups_for_restic_snapshots' );
-			$kit = $this->kit( 'create' );
+			$kit = RecoveryKit::deliver( $this->container, 'create' );
 		} catch ( JobConflict $conflict ) {
 			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
 		} catch ( PluginException $e ) {
@@ -1013,7 +1182,7 @@ final class RestRoutes {
 		delete_transient( 'backups_for_restic_snapshots' );
 		Cron::chain( $this->container );
 		try {
-			$kit = $this->kit( 'connect' );
+			$kit = RecoveryKit::deliver( $this->container, 'connect' );
 		} catch ( PluginException $e ) {
 			return $this->kit_error( $e, 409 );
 		}
@@ -1104,46 +1273,11 @@ final class RestRoutes {
 			return $this->error( 'wrong_user_password', 403 );
 		}
 		try {
-			$kit = $this->kit( 'settings' );
+			$kit = RecoveryKit::deliver( $this->container, 'settings' );
 		} catch ( PluginException $e ) {
 			return $this->kit_error( $e, 409 );
 		}
 		return $this->respond( [ 'recovery_kit' => $kit ], 200, true );
-	}
-
-	/** Deliveries of the recovery kit that are remembered. */
-	private const int KIT_VIEWS = 20;
-
-	/**
-	 * Builds the recovery kit for an answer and records that it was handed out: to whom, when
-	 * and on which way. The kit carries every secret of the backups, so an administrator
-	 * should be able to see who else looked at it.
-	 *
-	 * @param string $via create, connect or settings.
-	 * @return string The kit.
-	 * @throws PluginException If the kit cannot be complete.
-	 */
-	private function kit( string $via ): string {
-		$kit   = RecoveryKit::text( $this->container, 'connect' === $via );
-		$user  = wp_get_current_user();
-		$state = $this->container->state();
-		$view  = [
-			'at'    => time(),
-			'user'  => $user->ID,
-			'login' => $user->user_login,
-			'via'   => $via,
-		];
-		// Added to what is stored now: two administrators may look at the kit at the same time.
-		$state->update( 'recovery_kit', static fn ( array $entry ): array => [ 'views' => array_slice( [ $view, ...Decoded::arrays( $entry['views'] ?? null ) ], 0, self::KIT_VIEWS ) ] );
-		/**
-		 * Fires when the recovery kit, which contains the repository password, was put into a
-		 * response for an administrator.
-		 *
-		 * @param int    $user_id User the kit was shown to.
-		 * @param string $via     create or connect (the setup wizard and the repository forms), or settings (the recovery kit form).
-		 */
-		do_action( 'backups_for_restic_recovery_kit_shown', $user->ID, $via );
-		return $kit;
 	}
 
 	/**
@@ -1345,7 +1479,7 @@ final class RestRoutes {
 			'state'            => $job->state->value,
 			'state_label'      => Messages::state( $job->state->value ),
 			'step'             => $job->step,
-			'step_label'       => Messages::step( $job->step ),
+			'step_label'       => Messages::step( $job->step, $job->type->value ),
 			'created_at'       => $job->created_at,
 			'started_at'       => $job->started_at,
 			'finished_at'      => $job->finished_at,
@@ -1359,11 +1493,11 @@ final class RestRoutes {
 	}
 
 	/**
-	 * A JSON response that proxies and browsers must not store.
+	 * A JSON response with explicit cache policy.
 	 *
 	 * @param array<string, mixed> $data      Data.
 	 * @param int                  $status    HTTP status.
-	 * @param bool                 $sensitive Whether it contains the recovery kit.
+	 * @param bool                 $sensitive Whether the response carries credentials or a temporary grant.
 	 * @return \WP_REST_Response Response.
 	 */
 	private function respond( array $data, int $status = 200, bool $sensitive = false ): \WP_REST_Response {
@@ -1409,13 +1543,17 @@ final class RestRoutes {
 				'message' => __( 'A restore needs the full ID of a snapshot.', 'backups-for-restic' ),
 				'hint'    => '',
 			],
+			'invalid_plan_page'             => [
+				'message' => __( 'This file preview page is invalid.', 'backups-for-restic' ),
+				'hint'    => __( 'Open the preview again.', 'backups-for-restic' ),
+			],
 			'invalid_config_choice'         => [
 				'message' => __( 'Choose whether to include wp-config.php.', 'backups-for-restic' ),
 				'hint'    => '',
 			],
 			'live_plan_unavailable'         => [
 				'message' => __( 'A file change plan is unavailable for this job.', 'backups-for-restic' ),
-				'hint'    => __( 'Check the source job and its expiry. For a large restore, stage a smaller selection.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the source job and its expiry, then open the preview again.', 'backups-for-restic' ),
 			],
 			'live_plan_conflict'            => [
 				'message' => __( 'The file change cannot start in the current state.', 'backups-for-restic' ),

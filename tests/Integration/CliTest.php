@@ -55,6 +55,23 @@ final class CliTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
+		$before            = TestSite::state( 'recovery_kit' );
+		[ $exit, $output ] = self::command( [ 'recovery-kit' ] );
+		self::assertNotSame( 0, $exit );
+		self::assertFalse( str_contains( $output, TestSite::$repository_password ) );
+		self::assertSame( $before, TestSite::state( 'recovery_kit' ) );
+
+		[ $exit, $kit ] = self::command( [ 'recovery-kit', '--force' ] );
+		self::assertSame( 0, $exit );
+		self::assertTrue( str_contains( $kit, "RESTIC_PASSWORD='" . TestSite::$repository_password . "'" ) );
+		$history = TestSite::state( 'recovery_kit' );
+		self::assertSame( 'cli', $history['views'][0]['via'] ?? null );
+		self::assertSame( 'WP-CLI', $history['views'][0]['login'] ?? null );
+		self::assertFalse( str_contains( (string) json_encode( $history ), TestSite::$repository_password ) );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_doctor_status_and_snapshots_report_the_site(): void {
 		TestSite::idle( 600 );
 

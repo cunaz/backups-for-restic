@@ -199,6 +199,14 @@ final class SiteStateTest extends TestCase {
 		self::assertSame( [], $state->get( 'usage' ) );
 	}
 
+	public function test_a_required_audit_entry_cannot_succeed_after_a_refused_option_write(): void {
+		$options                  = new InMemoryOptions();
+		$options->refuses         = static fn ( string $name ): bool => SiteState::OPTION === $name;
+		$options->refuses_quietly = true;
+		$this->expectException( StorageFailed::class );
+		( new SiteState( $options ) )->update( 'recovery_kit', static fn (): array => [ 'views' => [] ], true );
+	}
+
 	public function test_a_change_holds_the_lock_from_reading_to_writing(): void {
 		$directory = TempDir::create( 'state' );
 		try {

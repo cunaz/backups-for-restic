@@ -10,6 +10,7 @@
 	const { __, _n, sprintf } = wp.i18n;
 	const config = window.backupsForRestic || {};
 	const POLL_MS = 3000;
+	const JOB_ID = /^\d{8}T\d{6}Z-[0-9a-f]{6}$/;
 
 	/**
 	 * Creates an element.
@@ -52,8 +53,14 @@
 		return __( 'Something went wrong. Please reload the page.', 'backups-for-restic' );
 	}
 
-	function notice( type, text ) {
-		return el( 'div', { className: 'notice inline notice-' + type }, [ el( 'p', {}, [ text ] ) ] );
+	function notice( type, text, announce = true ) {
+		const attributes = { className: 'notice inline notice-' + type };
+		if ( announce && 'error' === type ) {
+			attributes.role = 'alert';
+		} else if ( announce && 'success' === type ) {
+			attributes.role = 'status';
+		}
+		return el( 'div', attributes, [ el( 'p', {}, [ text ] ) ] );
 	}
 
 	function formatBytes( bytes ) {
@@ -85,10 +92,13 @@
 	function field( label, control, help ) {
 		const id = 'bfr-' + Math.random().toString( 36 ).slice( 2 );
 		control.id = id;
+		if ( help ) {
+			control.setAttribute( 'aria-describedby', id + '-help' );
+		}
 		return el( 'p', { className: 'bfr-field' }, [
 			el( 'label', { htmlFor: id }, [ label ] ),
 			control,
-			help ? el( 'span', { className: 'description' }, [ help ] ) : null,
+			help ? el( 'span', { className: 'description', id: id + '-help' }, [ help ] ) : null,
 		] );
 	}
 
@@ -107,10 +117,10 @@
 			] ) );
 		}
 		if ( 'number' === typeof progress.database_tables ) {
-			lines.push( el( 'p', {}, [
-				/* translators: 1: imported database tables, 2: total tables. */
-				sprintf( __( 'Rehearsing database import (%1$d of %2$d tables).', 'backups-for-restic' ), progress.database_tables, progress.database_total ),
-			] ) );
+			const label = 'database_apply' === job.type
+				? /* translators: 1: prepared replacement tables, 2: total tables. */ __( 'Preparing replacement tables (%1$d of %2$d).', 'backups-for-restic' )
+				: /* translators: 1: imported database tables, 2: total tables. */ __( 'Rehearsing database import (%1$d of %2$d tables).', 'backups-for-restic' );
+			lines.push( el( 'p', {}, [ sprintf( label, progress.database_tables, progress.database_total ) ] ) );
 		}
 		if ( 'archiving' === progress.phase ) {
 			lines.push( el( 'p', {}, [
@@ -120,6 +130,12 @@
 		}
 		if ( 'number' === typeof progress.unlock_percent ) {
 			lines.push( el( 'progress', { max: 100, value: progress.unlock_percent } ) );
+		}
+		if ( 'file_plan' === job.type && Number.isInteger( progress.done ) ) {
+			lines.push( el( 'p', {}, [
+				/* translators: %d: inspected file entries. */
+				sprintf( _n( 'Inspected %d file entry.', 'Inspected %d file entries.', progress.done, 'backups-for-restic' ), progress.done ),
+			] ) );
 		}
 		if ( [ 'apply', 'undo' ].includes( job.type ) && 'number' === typeof progress.total ) {
 			lines.push( el( 'p', {}, [
@@ -214,6 +230,19 @@
 				...( job.warnings || [] ).map( ( warning ) => notice( 'warning', warning ) ),
 			] );
 		}
+		if ( 'succeeded' === job.state && [ 'database_apply', 'database_undo' ].includes( job.type ) ) {
+			return el( 'div', {}, [
+				notice( 'success', 'database_undo' === job.type ? __( 'Database restore undone.', 'backups-for-restic' ) : __( 'Database restore applied.', 'backups-for-restic' ) ),
+				el( 'p', {}, [
+					/* translators: %d: number of database tables in the exchange. */
+					sprintf( _n( '%d table exchanged.', '%d tables exchanged.', result.database_tables, 'backups-for-restic' ), result.database_tables ),
+				] ),
+				result.retained_until && 'database_apply' === job.type ? el( 'p', {}, [
+					/* translators: %s: date and time when the previous live database tables expire. */
+					sprintf( __( 'Previous database tables available until %s.', 'backups-for-restic' ), formatTime( result.retained_until ) ),
+				] ) : null,
+			] );
+		}
 		if ( 'succeeded' === job.state && 'append_only' === result.skipped ) {
 			return notice( 'warning', __( 'The server is append-only, so nothing was deleted. This site no longer removes old snapshots; remove them from another computer.', 'backups-for-restic' ) );
 		}
@@ -248,39 +277,57 @@
 	 * Follows a job until it ends. Each request also advances the job a little, so an open tab
 	 * speeds up slow hosts.
 	 *
-	 * @param {string}                id       Job ID.
-	 * @param {Element}               target   Where to show progress.
-	 * @param {(job: Object) => void} finished Called with the final job.
+	 * @param {string}                  id            Job ID.
+	 * @param {Element}                 target        Where to show progress.
+	 * @param {(job: Object) => void}   finished      Called with the final job.
+	 * @param {(error: Object) => void} [unavailable] Called when this session can no longer read the job.
 	 */
-	function follow( id, target, finished ) {
-		const cancelError = el( 'div' );
+	function follow( id, target, finished, unavailable ) {
+		const activity = el( 'div' );
+		const pending = el( 'div' );
+		const feedback = el( 'div', { role: 'status' } );
 		const cancel = button( __( 'Cancel', 'backups-for-restic' ), function () {
-			cancel.disabled = true;
-			api( '/jobs/' + id + '/cancel', { method: 'POST' } ).catch( function ( error ) {
-				cancel.disabled = false;
-				replace( cancelError, [ notice( 'error', errorText( error ) ) ] );
+			if ( 'true' === cancel.getAttribute( 'aria-disabled' ) ) {
+				return;
+			}
+			cancel.setAttribute( 'aria-disabled', 'true' );
+			api( '/jobs/' + id + '/cancel', { method: 'POST' } ).then( function () {
+				feedback.textContent = __( 'Cancellation requested.', 'backups-for-restic' );
+			} ).catch( function ( error ) {
+				cancel.removeAttribute( 'aria-disabled' );
+				replace( feedback, [ notice( 'error', errorText( error ) ) ] );
 			} );
 		} );
+		pending.hidden = true;
+		pending.append( el( 'p', { className: 'description' }, [ __( 'Keep this tab open to speed up the job on slow hosts.', 'backups-for-restic' ) ] ), cancel );
+		replace( target, [ activity, pending, feedback ] );
 		function poll() {
 			api( '/jobs/' + id )
 				.then( function ( response ) {
 					const job = response.job;
 					if ( [ 'queued', 'running' ].includes( job.state ) ) {
-						replace( target, [
-							...progressLines( job ),
-							el( 'p', { className: 'description' }, [ __( 'Keep this tab open to speed up the job on slow hosts.', 'backups-for-restic' ) ] ),
-							cancel, cancelError,
-						] );
+						replace( activity, progressLines( job ) );
+						pending.hidden = false;
+						if ( job.cancel_requested ) {
+							cancel.setAttribute( 'aria-disabled', 'true' );
+						}
 						window.setTimeout( poll, POLL_MS );
 					} else {
+						const hadFocus = cancel.ownerDocument.activeElement === cancel;
 						replace( target, [ jobOutcome( job ) ] );
+						if ( hadFocus ) {
+							target.tabIndex = -1;
+							target.focus();
+						}
 						finished( job );
 					}
 				} )
 				.catch( function ( error ) {
-					replace( target, [ notice( 'error', errorText( error ) ) ] );
+					replace( activity, [ notice( 'error', errorText( error ) ) ] );
 					if ( ! error.data || ! [ 401, 403, 404 ].includes( error.data.status ) ) {
 						window.setTimeout( poll, POLL_MS * 3 );
+					} else if ( unavailable ) {
+						unavailable( error );
 					}
 				} );
 		}
@@ -1105,13 +1152,73 @@
 	}
 
 	/**
+	 * Pages a reviewed table, keeping its controls and status in place while rows change.
+	 *
+	 * @param {Object}                                     first  First page of rows.
+	 * @param {(offset: number) => Object|Promise<Object>} load   Reads a page at the requested offset.
+	 * @param {(page: Object) => void}                     show   Replaces the visible table rows.
+	 * @param {Object}                                     labels Translated labels and page summary.
+	 * @return {Element} Paging controls.
+	 */
+	function pageControls( first, load, show, labels ) {
+		const status = el( 'p', { role: 'status', 'aria-atomic': 'true' } );
+		const previous = button( labels.previous, () => move( true ) );
+		const next = button( labels.next, () => move( false ) );
+		const visited = [ 0 ];
+		let page = first;
+		let busy = false;
+		function display() {
+			show( page );
+			previous.hidden = next.hidden = 1 === visited.length && null === page.next_offset;
+			previous.disabled = 1 === visited.length;
+			next.disabled = null === page.next_offset;
+			status.textContent = labels.summary( page );
+		}
+		async function move( back ) {
+			if ( busy ) {
+				return;
+			}
+			busy = true;
+			const trigger = back ? previous : next;
+			const alternative = back ? next : previous;
+			const offset = back ? visited[ visited.length - 2 ] : page.next_offset;
+			previous.setAttribute( 'aria-disabled', 'true' );
+			next.setAttribute( 'aria-disabled', 'true' );
+			try {
+				const result = await load( offset );
+				const keepFocus = trigger.ownerDocument.activeElement === trigger;
+				page = result;
+				if ( back ) {
+					visited.pop();
+				} else {
+					visited.push( offset );
+				}
+				display();
+				if ( keepFocus && trigger.disabled ) {
+					alternative.focus();
+				}
+			} catch ( error ) {
+				status.textContent = errorText( error );
+			} finally {
+				busy = false;
+				previous.removeAttribute( 'aria-disabled' );
+				next.removeAttribute( 'aria-disabled' );
+			}
+		}
+		display();
+		return el( 'div', {}, [ status, previous, ' ', next ] );
+	}
+
+	/**
 	 * Displays a bounded page of file actions. Paths are text, including when they
 	 * contain characters significant in HTML.
 	 *
-	 * @param {Array} entries Reviewed actions.
+	 * @param {Object}                              plan    Initial reviewed page.
+	 * @param {(offset: number) => Promise<Object>} getPage Fetches a page of the same completed background plan.
+	 * @param {boolean}                             fresh   Whether content roots are mapped onto a new installation.
 	 * @return {Element} Table and paging controls.
 	 */
-	function fileActions( entries ) {
+	function fileActions( plan, getPage, fresh ) {
 		const actions = {
 			create: __( 'Create file', 'backups-for-restic' ), replace: __( 'Replace file', 'backups-for-restic' ),
 			mkdir: __( 'Create directory', 'backups-for-restic' ), keep: __( 'Keep', 'backups-for-restic' ),
@@ -1120,6 +1227,7 @@
 		};
 		const reasons = {
 			protected: __( 'Protected plugin, configuration or private path', 'backups-for-restic' ),
+			offline_restore_required: __( 'Restore this WordPress startup file offline using the recovery kit.', 'backups-for-restic' ),
 			outside_roots: __( 'Outside the live site directories', 'backups-for-restic' ),
 			unavailable_destination_root: __( 'The live destination directory is unavailable.', 'backups-for-restic' ),
 			invalid_path: __( 'Invalid file name or path', 'backups-for-restic' ),
@@ -1143,24 +1251,36 @@
 			changed_since_apply: __( 'Live file changed after the apply job', 'backups-for-restic' ),
 			undo_journal: __( 'From the original apply job', 'backups-for-restic' ),
 		};
-		const mapped = entries.some( ( entry ) => 'source' in entry && entry.source !== entry.destination );
+		const remote = !! plan.plan_job;
+		const mapped = fresh || remote || plan.entries.some( ( entry ) => 'source' in entry && entry.source !== entry.destination );
+		const total = remote ? plan.total : plan.entries.length;
 		const rows = el( 'tbody' );
-		const more = button( __( 'Show more file changes', 'backups-for-restic' ), next );
-		let offset = 0;
-		function next() {
-			const batch = entries.slice( offset, offset + 50 );
-			batch.forEach( function ( entry ) {
-				rows.append( el( 'tr', {}, [
+		function localPage( offset ) {
+			return { entries: plan.entries.slice( offset, offset + 50 ), offset, next_offset: offset + 50 < total ? offset + 50 : null };
+		}
+		function render( page ) {
+			replace( rows, page.entries.map( function ( entry ) {
+				return el( 'tr', {}, [
 					el( 'td', {}, [ actions[ entry.action ] || entry.action ] ),
 					mapped ? el( 'td', {}, [ el( 'code', {}, [ entry.source ] ) ] ) : null,
 					el( 'td', {}, [ el( 'code', {}, [ mapped ? ( entry.destination || '–' ) : entry.path ] ) ] ),
 					el( 'td', {}, [ reasons[ entry.reason ] || entry.reason ] ),
-				] ) );
-			} );
-			offset += batch.length;
-			more.hidden = offset >= entries.length;
+				] );
+			} ) );
 		}
-		next();
+		async function load( offset ) {
+			const page = remote ? await getPage( offset ) : localPage( offset );
+			if ( remote && ( page.plan_job !== plan.plan_job || page.digest !== plan.digest || page.offset !== offset ) ) {
+				throw new Error( __( 'Review a fresh preview of these file changes.', 'backups-for-restic' ) );
+			}
+			return page;
+		}
+		const paging = pageControls( remote ? plan : localPage( 0 ), load, render, {
+			previous: __( 'Previous file changes', 'backups-for-restic' ),
+			next: __( 'Next file changes', 'backups-for-restic' ),
+			/* translators: 1: first file action on this page, 2: last action shown, 3: total actions. */
+			summary: ( page ) => total ? sprintf( __( 'Showing file changes %1$d–%2$d of %3$d.', 'backups-for-restic' ), page.offset + 1, page.offset + page.entries.length, total ) : __( 'No file changes.', 'backups-for-restic' ),
+		} );
 		return el( 'div', { className: 'bfr-file-actions' }, [
 			el( 'table', { className: 'widefat striped' }, [
 				el( 'thead', {}, [ el( 'tr', {}, [
@@ -1169,86 +1289,153 @@
 					el( 'th', { scope: 'col' }, [ __( 'Live path', 'backups-for-restic' ) ] ),
 					el( 'th', { scope: 'col' }, [ __( 'Reason', 'backups-for-restic' ) ] ),
 				] ) ] ), rows,
-			] ), more,
+			] ), paging,
+		] );
+	}
+
+	/**
+	 * Confirms a reviewed live change without retaining a password or exposing it in a URL.
+	 *
+	 * @param {Object} plan    Authorized preview.
+	 * @param {Object} options Submit label, endpoint, operation-specific arguments and UI callbacks.
+	 * @return {Element} Confirmation form.
+	 */
+	function reviewConfirmation( plan, options ) {
+		const reviewed = el( 'input', { type: 'checkbox' } );
+		const typed = el( 'input', { type: 'text', className: 'regular-text code', autocomplete: 'off' } );
+		const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
+		const message = el( 'div', { role: 'status' } );
+		const submit = button( options.submitLabel, function () {
+			submit.disabled = true;
+			options.busy( true );
+			api( options.path, { method: 'POST', data: {
+				...options.data, reviewed: reviewed.checked, site_url: typed.value, user_password: password.value,
+				digest: plan.digest, review_token: plan.review_token,
+			} } ).then( function ( response ) {
+				if ( options.submitted ) {
+					options.submitted();
+				}
+				window.location.assign( config.pageUrl + '&tab=restores&job=' + encodeURIComponent( response.job.id ) );
+			} ).catch( function ( error ) {
+				password.value = '';
+				options.busy( false );
+				if ( error.data && 409 === error.data.status ) {
+					options.stale( error );
+				} else {
+					submit.disabled = false;
+					replace( message, [ notice( 'error', errorText( error ), false ) ] );
+					if ( ! reviewed.checked ) {
+						reviewed.focus();
+					} else if ( typed.value !== plan.site_url ) {
+						typed.focus();
+					} else {
+						password.focus();
+					}
+				}
+			} );
+		} );
+		return el( 'div', {}, [
+			el( 'p', {}, [ el( 'label', {}, [ reviewed, ' ', __( 'I have reviewed these changes to the live site.', 'backups-for-restic' ) ] ) ] ),
+			field( __( 'Type the site address to confirm', 'backups-for-restic' ), typed, plan.site_url ),
+			field( __( 'Your WordPress password', 'backups-for-restic' ), password ),
+			submit, message,
 		] );
 	}
 
 	function liveChange( id, undo, fresh = false ) {
 		const base = ( undo ? '/undo/' : '/restores/' ) + encodeURIComponent( id );
 		const report = el( 'div' );
-		const include = el( 'input', { type: 'checkbox' } );
-		let version = 0;
-		include.addEventListener( 'change', function () {
-			version++;
-			replace( report, [] );
-			preview.disabled = false;
-		} );
+		const status = el( 'p', { role: 'status', className: 'screen-reader-text' } );
+		const planKey = 'backups-for-restic-plan:' + config.pageUrl + ':' + base;
+		let shown = false;
+		function remember( job ) {
+			try {
+				if ( job ) {
+					window.sessionStorage.setItem( planKey, job );
+				} else {
+					window.sessionStorage.removeItem( planKey );
+				}
+			} catch {
+				// Browsing with storage disabled still supports the complete review in this tab.
+			}
+		}
+		function remembered() {
+			try {
+				const idOfPlan = window.sessionStorage.getItem( planKey );
+				return idOfPlan && JOB_ID.test( idOfPlan ) ? idOfPlan : null;
+			} catch {
+				return null;
+			}
+		}
+		function busy( active ) {
+			preview.setAttribute( 'aria-disabled', String( active ) );
+		}
 		const preview = button( undo ? __( 'Preview undo', 'backups-for-restic' ) : __( 'Preview live file changes', 'backups-for-restic' ), function () {
-			const current = ++version;
-			const scope = include.checked;
-			preview.disabled = true;
+			if ( 'true' === preview.getAttribute( 'aria-disabled' ) ) {
+				return;
+			}
+			const resume = shown ? null : remembered();
+			shown = true;
+			busy( true );
+			status.textContent = __( 'Inspecting files…', 'backups-for-restic' );
 			replace( report, [ el( 'p', {}, [ __( 'Inspecting files…', 'backups-for-restic' ) ] ) ] );
-			api( base + ( undo ? '/plan' : '/apply-plan' ), { method: 'POST', data: { include_config: scope } } )
-				.then( function ( plan ) {
-					if ( current !== version ) {
-						return;
+
+			function fetchPage( job = null, offset = 0 ) {
+				return api( base + ( undo ? '/plan' : '/apply-plan' ), { method: 'POST', data: { plan_job: job, offset } } );
+			}
+			function failed( error ) {
+				remember( null );
+				busy( false );
+				replace( report, [ notice( 'error', errorText( error ), false ) ] );
+				status.textContent = errorText( error );
+			}
+			function track( idOfPlan ) {
+				remember( idOfPlan );
+				follow( idOfPlan, report, function ( job ) {
+					if ( 'succeeded' === job.state ) {
+						fetchPage( idOfPlan ).then( display ).catch( failed );
+					} else {
+						remember( null );
+						busy( false );
+						status.textContent = job.state_label;
 					}
-					replace( report, [
-						fileActions( plan.entries ),
-						plan.applicable && plan.write_allowed ? confirmation( plan, scope ) : notice( 'info', plan.applicable
-							? __( 'This account or installation does not permit live file changes.', 'backups-for-restic' )
-							: __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' ) ),
-					] );
-				} )
-				.catch( function ( error ) {
-					if ( current === version ) {
-						replace( report, [ notice( 'error', errorText( error ) ) ] );
-					}
-				} )
-				.finally( function () {
-					if ( current === version ) {
-						preview.disabled = false;
-					}
-				} );
+				}, failed );
+			}
+			function display( plan ) {
+				if ( plan.job ) {
+					track( plan.job.id );
+					return;
+				}
+				busy( false );
+				status.textContent = __( 'File preview ready.', 'backups-for-restic' );
+				replace( report, [
+					fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
+					plan.applicable && plan.write_allowed ? reviewConfirmation( plan, {
+						path: base + ( undo ? '' : '/apply' ),
+						submitLabel: undo ? __( 'Undo live file changes', 'backups-for-restic' ) : __( 'Apply to live site', 'backups-for-restic' ),
+						data: { plan_job: plan.plan_job || null },
+						busy, submitted: () => remember( null ),
+						stale( error ) {
+							remember( null );
+							replace( report, [ notice( 'warning', errorText( error ) ) ] );
+							status.textContent = errorText( error );
+							preview.focus();
+						},
+					} ) : notice( 'info', plan.applicable
+						? __( 'This account or installation does not permit live file changes.', 'backups-for-restic' )
+						: __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' ) ),
+				] );
+			}
+			if ( resume ) {
+				track( resume );
+			} else {
+				remember( null );
+				fetchPage().then( display ).catch( failed );
+			}
 		} );
 
-		function confirmation( plan, scope ) {
-			const reviewed = el( 'input', { type: 'checkbox' } );
-			const typed = el( 'input', { type: 'text', className: 'regular-text code', autocomplete: 'off' } );
-			const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
-			const message = el( 'div' );
-			const submit = button( undo ? __( 'Undo live file changes', 'backups-for-restic' ) : __( 'Apply to live site', 'backups-for-restic' ), function () {
-				submit.disabled = true;
-				preview.disabled = true;
-				include.disabled = true;
-				api( base + ( undo ? '' : '/apply' ), { method: 'POST', data: {
-					reviewed: reviewed.checked, site_url: typed.value, user_password: password.value,
-					include_config: scope, digest: plan.digest, review_token: plan.review_token,
-				} } ).then( function ( response ) {
-					window.location.assign( config.pageUrl + '&tab=restores&job=' + encodeURIComponent( response.job.id ) );
-				} ).catch( function ( error ) {
-					password.value = '';
-					preview.disabled = false;
-					include.disabled = false;
-					if ( error.data && 409 === error.data.status ) {
-						replace( report, [ notice( 'warning', errorText( error ) ) ] );
-						preview.focus();
-					} else {
-						submit.disabled = false;
-						replace( message, [ notice( 'error', errorText( error ) ) ] );
-					}
-				} );
-			} );
-			return el( 'div', {}, [
-				el( 'p', {}, [ el( 'label', {}, [ reviewed, ' ', __( 'I have reviewed these changes to the live site.', 'backups-for-restic' ) ] ) ] ),
-				field( __( 'Type the site address to confirm', 'backups-for-restic' ), typed, plan.site_url ),
-				field( __( 'Your WordPress password', 'backups-for-restic' ), password ),
-				submit, message,
-			] );
-		}
 		return el( 'div', {}, [
-			undo || fresh ? null : el( 'p', {}, [ el( 'label', {}, [ include, ' ', __( 'Include wp-config.php in the preview.', 'backups-for-restic' ) ] ) ] ),
-			preview, report,
+			preview, status, report,
 		] );
 	}
 
@@ -1287,9 +1474,17 @@
 		}
 	}
 
-	function rehearsalView( report ) {
-		const labels = {
+	function databaseFindings() {
+		return {
 			write_locked_rename: __( 'MariaDB requires a manual live database restore on this server. Recover the SQL dump from the staging ZIP or recovery kit and import it into a separate database.', 'backups-for-restic' ),
+			database_admin_collision: __( 'The snapshot has a different user with the same ID, login or email as the confirming administrator.', 'backups-for-restic' ),
+			database_wordpress_version: __( 'The source and destination WordPress database schema versions differ.', 'backups-for-restic' ),
+			database_exchange_changed: __( 'The destination table generations or administrator no longer match this review.', 'backups-for-restic' ),
+			snapshot_check: __( 'The snapshot contains a CHECK constraint that needs manual handling.', 'backups-for-restic' ),
+			wordpress_tables: __( 'The snapshot must include compatible WordPress options, users and user metadata tables.', 'backups-for-restic' ),
+			wordpress_environment: __( 'This WordPress installation cannot perform an automatic database exchange.', 'backups-for-restic' ),
+			database_account: __( 'This WordPress account does not have the required database restore permissions.', 'backups-for-restic' ),
+			persistent_object_cache: __( 'A persistent object cache prevents a verified database exchange on this site.', 'backups-for-restic' ),
 			check_constraints: __( 'Named CHECK constraints require manual handling.', 'backups-for-restic' ),
 			live_definition: __( 'The definitions of live tables require manual review.', 'backups-for-restic' ),
 			server_configuration: __( 'The database server configuration does not support a safe swap.', 'backups-for-restic' ),
@@ -1299,6 +1494,7 @@
 			dictionary_privilege: __( 'The account cannot inspect all database relationships.', 'backups-for-restic' ),
 			foreign_keys: __( 'Foreign keys involve tables in the restore.', 'backups-for-restic' ),
 			live_triggers: __( 'Live tables have triggers.', 'backups-for-restic' ),
+			live_views: __( 'A database view uses a live table in this restore.', 'backups-for-restic' ),
 			live_object_identity: __( 'The identity of a live database object could not be verified.', 'backups-for-restic' ),
 			snapshot_triggers_unknown: __( 'The snapshot has no trigger inventory.', 'backups-for-restic' ),
 			snapshot_triggers: __( 'The source table had triggers.', 'backups-for-restic' ),
@@ -1307,6 +1503,27 @@
 			live_object_type: __( 'The live object has a different type.', 'backups-for-restic' ),
 			live_engine: __( 'The live storage engine requires review.', 'backups-for-restic' ),
 		};
+	}
+
+	function databaseTables( name, labels, tables, cells ) {
+		const rows = el( 'tbody' );
+		function read( offset ) {
+			return { entries: tables.slice( offset, offset + 50 ), offset, next_offset: offset + 50 < tables.length ? offset + 50 : null };
+		}
+		const paging = pageControls( read( 0 ), read, function ( page ) {
+			replace( rows, page.entries.map( ( table ) => el( 'tr', {}, cells( table ).map( ( value ) => el( 'td', {}, [ value ] ) ) ) ) );
+		}, {
+			previous: __( 'Previous tables', 'backups-for-restic' ), next: __( 'Next tables', 'backups-for-restic' ),
+			/* translators: 1: first table on this page, 2: last table shown, 3: total tables in the report. */
+			summary: ( page ) => tables.length ? sprintf( __( 'Showing tables %1$d–%2$d of %3$d.', 'backups-for-restic' ), page.offset + 1, page.offset + page.entries.length, tables.length ) : __( 'No tables in this report.', 'backups-for-restic' ),
+		} );
+		return el( 'div', {}, [ el( 'table', { className: 'widefat striped ' + name }, [
+			el( 'thead', {}, [ el( 'tr', {}, labels.map( ( label ) => el( 'th', { scope: 'col' }, [ label ] ) ) ) ] ), rows,
+		] ), paging ] );
+	}
+
+	function rehearsalView( report ) {
+		const labels = databaseFindings();
 		const preflight = report.swap_preflight || {};
 		const findings = new Map();
 		( report.findings || [] ).forEach( ( item ) => {
@@ -1316,21 +1533,11 @@
 			findings.set( table, group );
 		} );
 		const head = [ __( 'Table', 'backups-for-restic' ), __( 'Verified source rows', 'backups-for-restic' ), __( 'Estimated live rows', 'backups-for-restic' ), __( 'Source engine and collation', 'backups-for-restic' ), __( 'Live engine and collation', 'backups-for-restic' ), __( 'Findings', 'backups-for-restic' ) ];
-		const rows = el( 'tbody' );
-		const more = button( __( 'Show more tables', 'backups-for-restic' ), next );
-		let offset = 0;
-
-		function next() {
-			const batch = report.tables.slice( offset, offset + 50 );
-			batch.forEach( function ( table ) {
-				const source = [ table.snapshot_engine, table.snapshot_charset, table.snapshot_collation ].filter( Boolean ).join( ' · ' );
-				const live = [ table.live_engine, table.live_charset, table.live_collation ].filter( Boolean ).join( ' · ' );
-				rows.append( el( 'tr', {}, [ table.name, table.snapshot_rows ?? '–', table.live_rows_estimate ?? '–', source || '–', live || '–', ( findings.get( table.name ) || [] ).join( ' ' ) ].map( ( value ) => el( 'td', {}, [ value ] ) ) ) );
-			} );
-			offset += batch.length;
-			more.hidden = offset >= report.tables.length;
-		}
-		next();
+		const tables = databaseTables( 'bfr-database-tables', head, report.tables, function ( table ) {
+			const source = [ table.snapshot_engine, table.snapshot_charset, table.snapshot_collation ].filter( Boolean ).join( ' · ' );
+			const live = [ table.live_engine, table.live_charset, table.live_collation ].filter( Boolean ).join( ' · ' );
+			return [ table.name, table.snapshot_rows ?? '–', table.live_rows_estimate ?? '–', source || '–', live || '–', ( findings.get( table.name ) || [] ).join( ' ' ) ];
+		} );
 		const issues = ( preflight.blockers || [] ).map( ( code ) => labels[ code ] || code ).concat( findings.get( '' ) || [] );
 		return el( 'div', {}, [
 			detailTable( 'bfr-database-versions', [
@@ -1341,26 +1548,102 @@
 				[ __( 'Missing database privileges', 'backups-for-restic' ), ( preflight.missing_privileges || [] ).join( ', ' ) || null ],
 			] ),
 			issues.length ? notice( 'warning', issues.join( ' ' ) ) : null,
-			el( 'table', { className: 'widefat striped bfr-database-tables' }, [
-				el( 'thead', {}, [ el( 'tr', {}, head.map( ( label ) => el( 'th', { scope: 'col' }, [ label ] ) ) ) ] ), rows,
-			] ), more,
+			tables,
 		] );
 	}
 
 	function databaseRehearsal( endpoint ) {
 		const body = el( 'div' );
-		const open = button( __( 'Inspect database rehearsal', 'backups-for-restic' ), function () {
-			open.disabled = true;
+		const status = el( 'p', { role: 'status', className: 'screen-reader-text' } );
+		const label = __( 'Inspect database rehearsal', 'backups-for-restic' );
+		let loading = false;
+		const open = button( label, function () {
+			if ( loading ) {
+				return;
+			}
+			if ( 'true' === open.getAttribute( 'aria-expanded' ) ) {
+				replace( body, [] );
+				open.setAttribute( 'aria-expanded', 'false' );
+				open.textContent = label;
+				status.textContent = '';
+				return;
+			}
+			loading = true;
+			open.setAttribute( 'aria-disabled', 'true' );
+			status.textContent = __( 'Loading the database rehearsal report…', 'backups-for-restic' );
 			api( endpoint + '/download', { method: 'POST', data: { kind: 'database_report' } } )
 				.then( readRehearsal ).then( function ( report ) {
 					replace( body, [ rehearsalView( report ) ] );
-					open.hidden = true;
+					open.textContent = __( 'Close database rehearsal', 'backups-for-restic' );
+					open.setAttribute( 'aria-expanded', 'true' );
+					status.textContent = __( 'Database rehearsal report opened.', 'backups-for-restic' );
 				} ).catch( function ( error ) {
-					open.disabled = false;
-					replace( body, [ notice( 'error', errorText( error ) ) ] );
+					replace( body, [ notice( 'error', errorText( error ), false ) ] );
+					status.textContent = errorText( error );
+				} ).finally( function () {
+					loading = false;
+					open.removeAttribute( 'aria-disabled' );
 				} );
 		} );
-		return el( 'div', {}, [ open, body ] );
+		open.setAttribute( 'aria-expanded', 'false' );
+		return el( 'div', {}, [ open, status, body ] );
+	}
+
+	/**
+	 * Displays the database generations and compatibility checks that the service reviewed.
+	 *
+	 * @param {string}  id   Restore or original database apply.
+	 * @param {boolean} undo Whether to bring back retained originals.
+	 * @return {Element} Reviewed exchange.
+	 */
+	function databaseChange( id, undo ) {
+		const base = ( undo ? '/database-changes/' : '/restores/' ) + encodeURIComponent( id );
+		const body = el( 'div' );
+		const status = el( 'p', { role: 'status', className: 'screen-reader-text' } );
+		const preview = button( undo ? __( 'Preview database undo', 'backups-for-restic' ) : __( 'Preview live database changes', 'backups-for-restic' ), function () {
+			if ( 'true' === preview.getAttribute( 'aria-disabled' ) ) {
+				return;
+			}
+			busy( true );
+			replace( body, [] );
+			status.textContent = __( 'Inspecting database tables…', 'backups-for-restic' );
+			api( base + ( undo ? '/undo-plan' : '/database/plan' ), { method: 'POST' } ).then( function ( plan ) {
+				const labels = databaseFindings();
+				const actions = {
+					replace: __( 'Replace live table', 'backups-for-restic' ), create: __( 'Create live table', 'backups-for-restic' ),
+					keep: __( 'Keep live table', 'backups-for-restic' ), remove_from_live: __( 'Remove table from the live database', 'backups-for-restic' ),
+				};
+				const canApply = plan.applicable && plan.write_allowed && plan.preserve_admin && plan.preserve_address && ! plan.blockers.length;
+				const confirmation = canApply ? reviewConfirmation( plan, {
+					submitLabel: undo ? __( 'Undo database restore', 'backups-for-restic' ) : __( 'Apply database restore', 'backups-for-restic' ),
+					path: base + ( undo ? '/undo' : '/database/apply' ), data: {}, busy,
+					stale( error ) {
+						showError( error );
+						preview.focus();
+					},
+				} ) : null;
+				const table = databaseTables( 'bfr-database-changes', [ __( 'Table', 'backups-for-restic' ), __( 'Action', 'backups-for-restic' ) ], plan.entries,
+					( entry ) => [ el( 'code', {}, [ entry.table ] ), actions[ entry.action ] || entry.action ] );
+				replace( body, [
+					plan.preserve_admin && plan.preserve_address ? el( 'p', {}, [ __( 'The exchange keeps this site address, your administrator account and its active sessions, and the backup configuration.', 'backups-for-restic' ) ] ) : null,
+					plan.entries.length ? table : null,
+					...plan.blockers.map( ( code ) => notice( 'warning', labels[ code ] || code ) ),
+					plan.missing_privileges.length ? detailTable( 'bfr-database-privileges', [ [ __( 'Missing database privileges', 'backups-for-restic' ), plan.missing_privileges.join( ', ' ) ] ] ) : null,
+					! plan.write_allowed ? notice( 'info', __( 'This account cannot apply or undo live database changes.', 'backups-for-restic' ) ) : null,
+					! canApply && plan.write_allowed && ! plan.blockers.length ? notice( 'info', __( 'No database changes can be applied from this review.', 'backups-for-restic' ) ) : null,
+					confirmation,
+				] );
+				status.textContent = __( 'Database preview ready.', 'backups-for-restic' );
+			} ).catch( showError ).finally( () => busy( false ) );
+		} );
+		function busy( active ) {
+			preview.setAttribute( 'aria-disabled', String( active ) );
+		}
+		function showError( error ) {
+			replace( body, [ notice( 'error', errorText( error ), false ) ] );
+			status.textContent = errorText( error );
+		}
+		return el( 'div', {}, [ preview, status, body ] );
 	}
 
 	function stagedRestore( staged, render ) {
@@ -1416,6 +1699,7 @@
 				staged.report ? download( __( 'Download restore report', 'backups-for-restic' ), 'report' ) : null,
 			] ),
 			staged.database_report ? databaseRehearsal( endpoint ) : null,
+			staged.database_report ? el( 'details', {}, [ el( 'summary', {}, [ __( 'Restore tables to the live database', 'backups-for-restic' ) ] ), databaseChange( staged.job, false ) ] ) : null,
 			remove, message,
 			el( 'details', {}, [ el( 'summary', {}, [ __( 'Restore files to the live site', 'backups-for-restic' ) ] ), liveChange( staged.job, false, staged.fresh_install ) ] ),
 		] );
@@ -1429,7 +1713,14 @@
 		const list = el( 'div' );
 		const progress = el( 'div' );
 		const history = el( 'div' );
+		const databaseHistory = el( 'div' );
+		let stagedVersion = null;
 		function render( response ) {
+			const version = JSON.stringify( response.restores );
+			if ( version === stagedVersion ) {
+				return;
+			}
+			stagedVersion = version;
 			replace( list, response.restores.length
 				? response.restores.map( ( staged ) => stagedRestore( staged, render ) )
 				: [ el( 'p', {}, [ __( 'No staged files. Open a snapshot to restore files or directories.', 'backups-for-restic' ) ] ) ] );
@@ -1451,23 +1742,43 @@
 			} ).catch( function ( error ) {
 				replace( history, [ notice( 'error', errorText( error ) ) ] );
 			} );
+			api( '/database-changes' ).then( function ( response ) {
+				replace( databaseHistory, response.jobs.length ? [
+					el( 'h2', {}, [ __( 'Undo live database changes', 'backups-for-restic' ) ] ),
+					...response.jobs.map( ( job ) => el( 'section', { className: 'bfr-card' }, [
+						el( 'h3', {}, [ job.job ] ),
+						el( 'p', {}, [
+							/* translators: %s: date and time when the previous live database tables expire. */
+							sprintf( __( 'Previous database tables available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
+						] ),
+						databaseChange( job.job, true ),
+					] ) ),
+				] : [] );
+			} ).catch( function ( error ) {
+				replace( databaseHistory, [ notice( 'error', errorText( error ) ) ] );
+			} );
 			api( '/restores' ).then( render ).catch( function ( error ) {
+				stagedVersion = null;
 				replace( list, [ notice( 'error', errorText( error ) ), button( __( 'Try again', 'backups-for-restic' ), load ) ] );
 			} );
 		}
 		replace( root, [
 			el( 'h2', {}, [ __( 'Staged restores', 'backups-for-restic' ) ] ),
 			el( 'p', {}, [ el( 'a', { className: 'button', href: config.pageUrl + '&tab=restores&import=1' }, [ __( 'Restore from an existing site snapshot', 'backups-for-restic' ) ] ) ] ),
-			progress, list, history,
+			progress, list, history, databaseHistory,
 		] );
 		load();
 		const job = new URL( window.location.href ).searchParams.get( 'job' );
-		if ( job && /^\d{8}T\d{6}Z-[0-9a-f]{6}$/.test( job ) ) {
+		if ( job && JOB_ID.test( job ) ) {
 			follow( job, progress, load );
 		} else {
 			api( '/status' ).then( function ( status ) {
-				if ( status.active_job && [ 'restore', 'apply', 'undo' ].includes( status.active_job.type ) ) {
-					follow( status.active_job.id, progress, load );
+				if ( status.active_job && [ 'restore', 'file_plan', 'apply', 'undo', 'database_apply', 'database_undo' ].includes( status.active_job.type ) ) {
+					follow( status.active_job.id, progress, function ( done ) {
+						if ( 'file_plan' !== done.type ) {
+							load();
+						}
+					} );
 				}
 			} ).catch( function ( error ) {
 				replace( progress, [ notice( 'error', errorText( error ) ) ] );

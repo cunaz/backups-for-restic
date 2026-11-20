@@ -116,26 +116,32 @@ final class RestoreStagingTest extends TestCase {
 	 * Redeems the issued form as an anonymous browser, including its attachment headers.
 	 *
 	 * @param array<mixed> $form Validated fields returned by the plugin.
-	 * @return array{int, string, string} Status, headers and body.
+	 * @return array{int, string, string} Status, headers and SHA-256 of the streamed body.
 	 */
 	private function redeem( array $form ): array {
 		$url = $form['url'] ?? null;
 		self::assertSame( TestSite::URL . '/wp-admin/admin-post.php', $url );
 		self::assertIsArray( $form['fields'] ?? null );
-		$handle = curl_init( $url );
+		$handle  = curl_init( $url );
+		$headers = '';
+		$digest  = hash_init( 'sha256' );
 		curl_setopt_array(
 			$handle,
 			[
-				CURLOPT_RETURNTRANSFER => true,
-				CURLOPT_HEADER         => true,
+				CURLOPT_HEADERFUNCTION => static function ( \CurlHandle $curl, string $line ) use ( &$headers ): int {
+					$headers .= $line;
+					return strlen( $line );
+				},
+				CURLOPT_WRITEFUNCTION  => static function ( \CurlHandle $curl, string $chunk ) use ( $digest ): int {
+					hash_update( $digest, $chunk );
+					return strlen( $chunk );
+				},
 				CURLOPT_POSTFIELDS     => http_build_query( $form['fields'] ),
-				CURLOPT_TIMEOUT        => 30,
+				CURLOPT_TIMEOUT        => 300,
 			]
 		);
-		$raw = curl_exec( $handle );
-		self::assertIsString( $raw );
-		$split = (int) curl_getinfo( $handle, CURLINFO_HEADER_SIZE );
-		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), substr( $raw, 0, $split ), substr( $raw, $split ) ];
+		self::assertTrue( curl_exec( $handle ), curl_error( $handle ) );
+		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), $headers, hash_final( $digest ) ];
 	}
 
 	#[Depends( 'test_the_site_has_a_snapshot_to_restore_from' )]
@@ -165,10 +171,10 @@ final class RestoreStagingTest extends TestCase {
 				]
 			);
 			self::assertSame( 200, $issued );
-			[ $status, $headers, $bytes ] = $this->redeem( $form );
+			[ $status, $headers, $digest ] = $this->redeem( $form );
 			self::assertSame( 200, $status );
 			self::assertStringContainsString( 'Content-Disposition: attachment;', $headers );
-			self::assertSame( hash_file( 'sha256', $expected ), hash( 'sha256', $bytes ) );
+			self::assertSame( hash_file( 'sha256', $expected ), $digest );
 			self::assertSame( 403, $this->redeem( $form )[0] );
 		}
 		[ $issued, $form ] = TestSite::api( 'POST', $route, [ 'kind' => 'archive' ] );

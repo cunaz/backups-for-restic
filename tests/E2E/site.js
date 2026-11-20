@@ -30,12 +30,13 @@ const ADMIN = { login: 'admin', password: 'admin-password-test-only' };
 /**
  * Signs in as the administrator.
  *
- * @param {import('@playwright/test').Page} page Page.
+ * @param {import('@playwright/test').Page} page      Page.
+ * @param {Object}                          [account] WordPress login for this installation.
  */
-async function signIn( page ) {
+async function signIn( page, account = ADMIN ) {
 	await page.goto( '/wp-login.php?redirect_to=' + encodeURIComponent( '/wp-admin/admin.php?page=backups-for-restic' ) );
-	await page.locator( '#user_login' ).fill( ADMIN.login );
-	await page.locator( '#user_pass' ).fill( ADMIN.password );
+	await page.locator( '#user_login' ).fill( account.login );
+	await page.locator( '#user_pass' ).fill( account.password );
 	await page.locator( '#wp-submit' ).click();
 	await page.waitForURL( /\/wp-admin\//, { waitUntil: 'domcontentloaded' } );
 }
@@ -66,6 +67,18 @@ function repositoryServer() {
  */
 function siteRoot() {
 	return fs.realpathSync( path.join( ROOT, '.tools/site' ) );
+}
+
+/**
+ * Seeds WordPress content for the migration or reads a stored value for verification.
+ *
+ * @param {string} root   Disposable site's installation directory.
+ * @param {string} script PHP fixture operation.
+ * @param {Array}  args   Input arguments.
+ * @return {string} Fixture response.
+ */
+function wordpress( root, script, args = [] ) {
+	return execFileSync( 'php', [ '-r', '$_SERVER["HTTP_HOST"] = "127.0.0.1"; require $argv[1] . "/wp-load.php"; ' + script, root, ...args ], { encoding: 'utf8' } ).trim();
 }
 
 /**
@@ -140,4 +153,4 @@ async function freshSite() {
 	}
 }
 
-module.exports = { ADMIN, freePort, freshSite, signIn, openBackups, repositoryServer, siteRoot, addUpload, removeUpload, noLoopback };
+module.exports = { ADMIN, freePort, freshSite, signIn, openBackups, repositoryServer, siteRoot, wordpress, addUpload, removeUpload, noLoopback };

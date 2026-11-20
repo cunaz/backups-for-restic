@@ -45,6 +45,8 @@ use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
 use BackupsForRestic\Jobs\Apply\FileChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
 use BackupsForRestic\Jobs\Restore\RestoreServices;
@@ -405,6 +407,49 @@ final class Container {
 	}
 
 	/**
+	 * Builds confirmed database jobs without opening SQL on unrelated runner requests.
+	 * During uninstall the supplied store and directory identify a previous private path.
+	 *
+	 * @param PrivateDirectory|null $directory Private job directory for retained generations.
+	 * @param JobStore|null $store Corresponding validated store.
+	 * @return DatabaseChanges Reviewed database operations.
+	 */
+	public function database_changes( ?PrivateDirectory $directory = null, ?JobStore $store = null ): DatabaseChanges {
+		$directory ??= $this->private_dir();
+		$store     ??= $this->jobs();
+		return new DatabaseChanges(
+			$store,
+			new Staging( $directory->subdirectory( 'restores' ), $store, $this->clock() ),
+			$this->clock(),
+			$this->random(),
+			$this->settings()->int( 'restore.staging_expiry_hours' ),
+			self::wpdb()->prefix,
+			$this->database_connection( ... ),
+			static function ( int $user ): array {
+				$blockers = [];
+				if ( ! RestRoutes::database_user_allowed( $user ) ) {
+					$blockers[] = 'database_account';
+				}
+				$wpdb = self::wpdb();
+				if ( is_multisite() || \wpdb::class !== $wpdb::class || $wpdb->users !== $wpdb->prefix . 'users' || $wpdb->usermeta !== $wpdb->prefix . 'usermeta' || file_exists( WP_CONTENT_DIR . '/db.php' ) ) {
+					$blockers[] = 'wordpress_environment';
+				}
+				if ( wp_using_ext_object_cache() || file_exists( WP_CONTENT_DIR . '/object-cache.php' ) ) {
+					$blockers[] = 'persistent_object_cache';
+				}
+				return $blockers;
+			},
+			$this->file_maintenance(),
+			static function (): void {
+				if ( ! wp_cache_flush() ) {
+					throw new DatabaseFailed( 'The WordPress object cache could not be refreshed after the exchange.' );
+				}
+				Cron::ensure_heartbeat();
+			}
+		);
+	}
+
+	/**
 	 * The cache directory.
 	 *
 	 * @return CacheDirectory Cache.
@@ -576,7 +621,13 @@ final class Container {
 			 */
 			$exclude  = apply_filters( 'backups_for_restic_database_tables_excluded', $settings->list( 'backup.database.exclude_tables' ) );
 			$prefix   = 'all' === $settings->string( 'backup.database.table_scope' ) ? '' : $wpdb->prefix;
-			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, self::strings( $exclude ), $job->created_at );
+			$exclude  = self::strings( $exclude );
+			if ( '' === $prefix ) {
+				foreach ( $this->jobs()->database_owners() as $owner ) {
+					array_push( $exclude, ...DatabaseGeneration::exclusions( $this->database_connection(), $owner ) );
+				}
+			}
+			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, $exclude, $job->created_at );
 			$database = $dump->files( ... );
 		}
 		return ( new PlanFactory( $this->site(), $settings, $this->private_dir(), self::strings( $roots ), self::strings( $excludes ), $database, $job->id, $job->created_at ) )->plan();
@@ -611,7 +662,7 @@ final class Container {
 		$backup      = new BackupSteps( $services );
 		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ), $this->site()->site_tag() ), $backup );
 		$restore     = new RestoreSteps( new RestoreServices( $services, $this->database_preview( ... ) ), $backup );
-		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance, $restore, $this->file_changes() ), $this->clock(), $this->random(), new JobEvents( $this ) );
+		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance, $restore, $this->file_changes(), $this->database_changes( $this->private_dir(), $jobs ) ), $this->clock(), $this->random(), new JobEvents( $this ) );
 	}
 
 	/**
@@ -621,12 +672,21 @@ final class Container {
 	 * @throws DatabaseFailed If the site's database adapter does not expose a mysqli handle.
 	 */
 	private function database_preview(): DatabasePreview {
-		$wpdb   = self::wpdb();
-		$handle = $wpdb->__get( 'dbh' );
+		return new DatabasePreview( $this->database_connection(), self::wpdb()->prefix );
+	}
+
+	/**
+	 * Obtains the single WordPress connection without its query retry machinery.
+	 *
+	 * @return MysqliConnection Current SQL session.
+	 * @throws DatabaseFailed If a drop-in does not expose a usable mysqli handle.
+	 */
+	private function database_connection(): MysqliConnection {
+		$handle = self::wpdb()->__get( 'dbh' );
 		if ( ! $handle instanceof \mysqli ) {
 			throw new DatabaseFailed( 'Database preview requires the WordPress mysqli connection.' );
 		}
-		return new DatabasePreview( new MysqliConnection( $handle ), $wpdb->prefix );
+		return new MysqliConnection( $handle );
 	}
 
 	/**
@@ -664,7 +724,7 @@ final class Container {
 					}
 				} while ( ! $done );
 			}
-			return true;
+			return $this->database_changes( $directory, $store )->expire( $uninstall, $deadline );
 		} finally {
 			$lock->release();
 		}
