@@ -1,10 +1,15 @@
 # Recovery acceptance for 0.3.0-rc.1
 
 These checks used disposable WordPress installations and repositories on 2026-11-20.
-The final ZIP contains 242 files and is 591,035 bytes. Two builds reproduced SHA-256
-`f13aee02252dfa5729f117d4575bf45e961a917f23a535bd13d8e754eaaa4fd1`. The browser
-runs installed candidate packages into the receiving site. The storage tests used local
-private repositories.
+The installable ZIP contains 242 files and is 591,899 bytes. Builds from the working
+tree and a clean checkout reproduced SHA-256
+`2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`.
+The earlier candidate used for the seven WordPress combinations, upgrade from the
+development version and PHP 8.6 route comparison had SHA-256
+`f13aee02252dfa5729f117d4575bf45e961a917f23a535bd13d8e754eaaa4fd1`. The subsequent
+code changes concern job creation, filesystem write failures and WP-Cron callbacks.
+The hosted tests used two dedicated BorgBase repositories with normal and append-only
+access. The other storage fixtures used local private repositories.
 
 | Scenario | Evidence |
 | --- | --- |
@@ -17,6 +22,8 @@ private repositories.
 | WordPress index memory | On WordPress 7.1.5 with PHP 8.3.36 limited to 128 MiB per worker, backup, check and prune completed at 500,000 blobs. The respective peaks were 100.61, 107.48 and 93.13 MiB. Check traversed 42,754 trees with no errors. At one and two million blobs, each job reported `index_too_large` and released its lock. Independent restic checks read all stored data before and after every size. |
 | Parser fuzzing | The two-minute run for each of the 26 targets processed 253,492,676 inputs without a finding (seed `6961317253957537550`). |
 | Admin JavaScript analysis | CodeQL 2.27.5 ran all 89 standard JavaScript queries from pack 2.5.1 on the shipped admin script. The SARIF report recorded successful execution and zero alerts. The extracted script matched the ZIP byte for byte. |
+| Starting a job with full storage | WordPress 7.1.5 on PHP 8.6.0 ran WP-CLI on a private 512 KiB filesystem. Tests exhausted inodes at directory and lock creation, exhausted blocks when writing the first job document, and remounted the fixture read-only. Failed starts left no job reservation and succeeded after space or write access returned. Failure to append the first log entry preserved an already committed job. Under full diagnostics WP-CLI 2.12.0 itself emits deprecation notices when formatting errors. |
+| Storage failure during a WordPress heartbeat | The REST job endpoint returned its structured environment error. The heartbeat preserved the due slot, continued other callbacks and started that backup once storage was writable. When the configured directory was entirely unavailable, other WordPress callbacks still ran after both the heartbeat and the tick. |
 | File-planner mutation testing | Infection 0.35.10 measured a covered mutation score of 97.86% across 468 mutations. PHPUnit killed 455, one was invalid, ten survived and two timed out. |
 | WordPress package and dependencies | Official WordPress Plugin Check 2.2.0 inspected the installed ZIP under WordPress 7.1.4, using the repository's CI settings. Its strict JSON report contained zero errors and warnings. All 242 files matched. Composer and npm reported zero dependency advisories. |
 | Backup using shared-hosting limits | WordPress 7.1.4 and PHP 8.3.36 ran ordinary cron requests with a 30-second execution limit, a 128 MiB memory limit and `set_time_limit` disabled. A fixture with 2 GiB of uploads and a 300 MiB MariaDB database finished in 46 minutes. Independent restic verification and restore matched the upload bytes and restored table checksums. |
@@ -32,6 +39,7 @@ private repositories.
 | Maintenance and offline undo | The ordinary public request returned HTTP 503 during a live change. The authorised controller kept working, unrelated cron work stayed out of the maintenance window, and ordinary requests resumed after lease expiry. WP-CLI recovered a site on which a restored plugin broke normal startup. |
 | Recovery kit | A real terminal and an explicitly requested private file received the kit. A redirected command without `--force` and a subscriber using `--force` were refused. Successful deliveries recorded the time, account and route, with no credentials in the audit. |
 | Diagnostic logs | The integration suite checks the repository password and HTTP credential against job files and REST responses. A separate comparison of 64 server logs and job records (1,701,260 bytes) found zero matches for the fixture's application, administrator and HTTP credentials in raw, URL-encoded and Base64 forms. |
+| Hosted BorgBase | The plugin initialized two repositories and backed up and restored a random 32 KiB file on each, including v2 listings and ranged reads. The normal repository returned to an empty snapshot list. The append-only repository refused deletion and retained one snapshot. Independent restic 0.20.0 runs verified the decrypted IDs and completed `check --read-data` on both. No locks remained. |
 | Private TLS repositories | The operator smoke command backed up and restored against two disposable rest-server instances with separate credentials and private repositories. It checked both ordinary and append-only behaviour, including an append-only repository with prior history. |
 | Release deployment rehearsal | An isolated SVN repository and disposable signing keys exercised the signed-tag check, the initial release, retries, an upgrade and byte-for-byte export validation. Conflicting tags, downgrades, unsigned tags and unauthorised signing keys were refused. |
 
@@ -41,6 +49,5 @@ use the manual recovery procedure. WordPress core, configuration and other start
 also require offline recovery. See [the recovery guide](../06-disaster-recovery.md) and
 [the database compatibility requirements](../adr/0043-atomic-mysql-database-exchange.md).
 
-The owner runs the hosted repository test against dedicated credentials before release,
-approves the WordPress.org listing and authorises the signed stable deployment. The local
+WordPress.org directory approval and the owner’s signed stable deployment are pending. The local
 release rehearsal uses the same publishing scripts. [Operator repository smoke](../../tests/Live/README.md).

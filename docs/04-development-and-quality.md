@@ -403,8 +403,7 @@ The hosted job runs only after the local job passes and the operator enables
 a pair of dedicated, initialized repositories and the expected authenticated repository
 IDs. The job removes only objects it created in the normal fixture and leaves the
 append-only history in place. Dispatch the workflow on the candidate's `main` commit
-before a release and record the passing provider/mode pairs. A hosted BorgBase run
-still requires the owner's fixture repositories. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
+before a release and record the passing provider/mode pairs. On 2026-11-20 the same hosted command passed directly on the owner's normal and append-only BorgBase fixtures. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
 
 ### 5.8 Checks on the package
 

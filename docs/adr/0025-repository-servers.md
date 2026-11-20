@@ -68,9 +68,14 @@ The local private-repository smoke run also verified byte-for-byte restore, REST
 pack sizes and ranges, lock creation/removal, exact cleanup of normal fixture objects
 and append-only snapshot retention across two runs.
 
-**BorgBase measurements are pending.** The operator must supply two dedicated hosted
-repositories and record a successful run of both modes before attributing these results
-to BorgBase. The preset uses the same REST backend with its own hostname rule.
+On 2026-11-20 the hosted smoke ran against dedicated normal and append-only BorgBase
+repositories with public TLS verification. In both modes the plugin verified the
+repository ID, backed up and restored a random 32 KiB file, and checked the REST v2
+pack size and ranged bytes. The normal repository returned to its original inventory.
+The append-only repository refused deletion and retained its snapshot. Independent
+restic 0.20.0 reads verified both repositories, which held no remaining lock.
+The HTTP status table above records the separate local rest-server tests.
+[Release acceptance](../benchmarks/2026-11-20-release-candidate.md).
 
 ## Consequences
 - A larger audience (self-hosters) with modest extra support, contained by documentation
