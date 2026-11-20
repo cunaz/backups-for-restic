@@ -347,8 +347,9 @@ final class BackupStepsTest extends TestCase {
 		$this->secrets->set( SecretName::RepositoryPasswordCandidate, new Secret( 'not the password of this repository' ) );
 		$job = new Job( '20270115T030100Z-abcdef', JobType::Unlock, 'setup', 1_800_000_000 );
 
+		self::assertFalse( $this->steps()->unlock( $job, $this->jobs->log( $job ), 0.0 ), 'Checking the entered password can span ticks.' );
 		try {
-			$this->steps()->unlock( $job, $this->jobs->log( $job ), microtime( true ) + 5 );
+			$this->steps()->unlock( $job, $this->jobs->log( $job ), INF );
 			self::fail( 'The cached key says nothing about the entered password.' );
 		} catch ( WrongPassword ) {
 			self::assertSame( self::PASSWORD, $this->secrets->get( SecretName::RepositoryPassword )?->reveal(), 'The backups go on with the password that works.' );
