@@ -12,6 +12,7 @@
         "ext-pcre": "*"
     },
     "require-dev": {
+        "ext-sodium": "*",
         "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
         "phpstan/phpstan": "^2",
         "phpstan/phpstan-strict-rules": "^2",

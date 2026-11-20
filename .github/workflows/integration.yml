@@ -52,6 +52,7 @@ jobs:
         include:
           - { wordpress: '7.1.5', php: '8.3', memory: '128', large: true }
           - { wordpress: '7.1.5', php: '8.5', memory: '128', large: false }
+          - { wordpress: '7.1.5', php: '8.6', memory: '128', large: false }
           - { wordpress: '7.0.9', php: '8.3', memory: '128', large: false }
           - { wordpress: '7.0.9', php: '8.5', memory: '128', large: true }
           - { wordpress: '6.7.12', php: '8.3', memory: '128', large: true }
@@ -93,6 +94,16 @@ jobs:
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh restic rest-server wp-cli
       - run: bin/build-package.sh
+      - name: Lint every packaged PHP file with all diagnostics enabled
+        if: matrix.php == '8.6'
+        run: |
+          diagnostics="$RUNNER_TEMP/package-php-lint.log"
+          if ! find "$BFR_TEST_PLUGIN_DIR" -type f -name '*.php' \
+            -exec php -d error_reporting=-1 -d display_errors=stderr -d log_errors=0 -l {} + \
+            > /dev/null 2> "$diagnostics" || [ -s "$diagnostics" ]; then
+            cat "$diagnostics" >&2
+            exit 1
+          fi
       - run: bin/test-site.sh install
       - name: Check private storage on Apache and nginx
         if: matrix.wordpress == '7.1.5' && matrix.php == '8.3'
