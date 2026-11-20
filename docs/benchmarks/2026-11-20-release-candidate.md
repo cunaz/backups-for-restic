@@ -1,7 +1,7 @@
 # Recovery acceptance for 0.3.0-rc.1
 
 These checks used disposable WordPress installations and repositories on 2026-11-20.
-The installable ZIP contains 242 files and is 591,899 bytes. Builds from the working
+The ZIP used for the hosted acceptance contains 242 files and is 591,899 bytes. Builds from the working
 tree and a clean checkout reproduced SHA-256
 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`.
 The earlier package used to compare PHP 8.6 route registration had SHA-256
@@ -10,6 +10,16 @@ WordPress matrix below used the final ZIP, including its fixes for job creation,
 filesystem write failures and WP-Cron callbacks.
 The hosted tests used two dedicated BorgBase repositories with normal and append-only
 access. The other storage fixtures used local private repositories.
+
+### Package after merge review
+
+The archive prepared for main contains 244 files and is 593,062 bytes, with SHA-256
+`66f722c743ad37b520a5c1b1d37960ed3390f0c779c039e4a026c4af95be315c`.
+The snapshot detail endpoint now distinguishes a damaged repository tree from an
+unreadable optional site manifest. The CLI listing preserves invalid UTF-8 link-target
+bytes and rejects a timestamp with a trailing newline. The reader, browser and timestamp
+suites passed 106 cases with 646 assertions. The hosted transfer and restore measurements
+below apply to the preceding archive, identified above.
 
 | Scenario | Evidence |
 | --- | --- |

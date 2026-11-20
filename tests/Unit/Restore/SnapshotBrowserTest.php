@@ -295,6 +295,14 @@ final class SnapshotBrowserTest extends TestCase {
 		self::assertSame( 'unreadable', $answer['manifest_state'] );
 	}
 
+	public function test_damage_while_searching_for_the_manifest_is_a_repository_error(): void {
+		$node = new Node( 'duplicate', NodeType::File, content: [] );
+		$tree = $this->store->save( BlobType::Tree, '{"nodes":[' . $node->to_json() . ',' . $node->to_json() . ']}' );
+		$id   = $this->snapshot( $tree );
+
+		self::assertSame( [ 'repository_damaged', 502 ], self::refused( fn () => $this->browser()->snapshot( $id ) ) );
+	}
+
 	public function test_a_directory_lists_files_directories_links_and_special_files(): void {
 		$leaf = $this->tree( [] );
 		$root = $this->tree(
@@ -352,6 +360,7 @@ final class SnapshotBrowserTest extends TestCase {
 		self::assertSame( [ "caf\u{e9}", "caf\u{fffd}", "\u{fffd}\u{fffd}" ], array_column( $entries, 'name' ) );
 		self::assertSame( [ true, false, false ], array_column( $entries, 'exact' ) );
 		self::assertSame( "target\u{fffd}", $entries[2]['target'] );
+		self::assertStringEndsWith( ' -> "target\xc0"', SnapshotBrowser::line( $entries[2] ) );
 		self::assertSame( "/caf\xe9", SnapshotBrowser::path( $entries[1]['token'] ), 'The token holds the stored bytes.' );
 
 		$below = $this->browser()->directory( $id, $entries[1]['token'] );

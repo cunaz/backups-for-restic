@@ -28,6 +28,11 @@ final class Rfc3339Test extends TestCase {
 		Rfc3339::parse( '2026-01-02 03:04:05' );
 	}
 
+	public function test_rejects_a_trailing_line_break(): void {
+		$this->expectException( FormatException::class );
+		Rfc3339::parse( "2026-01-02T03:04:05Z\n" );
+	}
+
 	public function test_bytes_helpers_round_trip_and_validate(): void {
 		self::assertSame( 4294967295, Bytes::read_uint32_le( Bytes::uint32_le( 4294967295 ) ) );
 		self::assertSame( "\x01\x00\x00\x00", Bytes::uint32_le( 1 ) );

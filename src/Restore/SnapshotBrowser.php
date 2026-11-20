@@ -15,8 +15,10 @@ use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Engine\Snapshot\Reader;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\ManifestNotLocated;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\UnreadableManifest;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Format\Tree\FileMode;
@@ -41,7 +43,7 @@ defined( 'ABSPATH' ) || exit;
  * Requests are refused with an InvalidArgument whose context names a code of this class;
  * failure() turns any error of a read into the code and the HTTP status of the answer.
  *
- * @phpstan-type Entry array{name: string, exact: bool, token: string, type: string, size: int|null, mtime: string|null, mode: string, target: string|null, incomplete: bool}
+ * @phpstan-type Entry array{name: string, exact: bool, token: string, type: string, size: int|null, mtime: string|null, mode: string, target: string|null, target_raw?: string, incomplete: bool}
  */
 final class SnapshotBrowser {
 
@@ -156,7 +158,7 @@ final class SnapshotBrowser {
 					'data'  => $found['data'],
 				];
 			}
-		} catch ( InvalidArgument | FormatException ) {
+		} catch ( ManifestNotLocated | UnreadableManifest ) {
 			// Several candidates, a search that is too large, or a file that is no valid manifest.
 			$state = 'unreadable';
 		}
@@ -318,7 +320,8 @@ final class SnapshotBrowser {
 			$name .= '/';
 		}
 		if ( null !== $entry['target'] ) {
-			$name .= ' -> ' . self::printable( $entry['target'] );
+			$target = isset( $entry['target_raw'] ) ? Bytes::base64_decode( $entry['target_raw'] ) : $entry['target'];
+			$name  .= ' -> ' . self::printable( $target );
 		}
 		$letter = match ( $entry['type'] ) {
 			'file'    => '-',
@@ -450,7 +453,7 @@ final class SnapshotBrowser {
 		} catch ( FormatException ) {
 			$mtime = null;
 		}
-		return [
+		$entry = [
 			'name'       => self::text( $node->name ),
 			'exact'      => self::is_text( $node->name ),
 			'token'      => self::token( $directory . '/' . $node->name ),
@@ -466,6 +469,10 @@ final class SnapshotBrowser {
 			'target'     => NodeType::Symlink === $node->type ? self::text( $node->link_target ) : null,
 			'incomplete' => '' !== $node->error,
 		];
+		if ( NodeType::Symlink === $node->type && $entry['target'] !== $node->link_target ) {
+			$entry['target_raw'] = Bytes::base64_encode( $node->link_target );
+		}
+		return $entry;
 	}
 
 	/**

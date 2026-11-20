@@ -45,7 +45,7 @@ final class Rfc3339 {
 	 * @throws FormatException If the text is not an RFC 3339 timestamp.
 	 */
 	public static function parse( string $text ): array {
-		$pattern = '/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/';
+		$pattern = '/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})\z/';
 		if ( 1 !== preg_match( $pattern, $text, $parts ) ) {
 			throw new FormatException( 'Timestamp is not in RFC 3339 format.' );
 		}

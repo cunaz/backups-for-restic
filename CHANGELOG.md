@@ -25,6 +25,8 @@ All notable changes are documented here. The format follows
   index files of ended requests are removed after a minute. A private directory reached
   through a symbolic link is backed up under its real path, so that the manifest and the
   database dump are in the snapshot and the recorded location names them.
+- Snapshot details report damaged repository trees. The command-line listing preserves
+  original link-target bytes and omits malformed modification times.
 - REST routes and a command that read snapshots: `GET /snapshots` takes a scope (this
   site's snapshots by default, or all of the repository), `GET /snapshots/<id>` answers
   one snapshot with the site's manifest, and `GET /snapshots/<id>/tree` answers one

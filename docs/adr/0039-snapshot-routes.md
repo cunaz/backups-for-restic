@@ -45,7 +45,8 @@ than one response should carry, and the reader returns a directory as a whole.
 - **Terminal.** `ls` prints a name or link target as it is only if Go's `strconv.Quote`
   would leave it unchanged; otherwise in double quotes with its escapes, the form restic
   itself stores in tree JSON. The name is taken from the token, so the escapes show the
-  stored bytes.
+  stored bytes. For a link target containing invalid UTF-8, the entry carries its stored
+  bytes as Base64 in the optional `target_raw` field alongside the UTF-8 display text.
 - **One transient for both scopes.** The two snapshot lists are cached in the existing
   transient, each with the time it was read. Every place that deleted the transient
   before drops both lists without a change.
