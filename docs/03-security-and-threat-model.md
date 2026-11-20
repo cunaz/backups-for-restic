@@ -306,11 +306,24 @@ carries `Cache-Control: no-store`.
   directory, after a preflight that refuses a directory that is served. The staging
   directory, `files/` in it and every entry below are owner-only
   ([ADR 0036](adr/0036-selected-file-staging.md), next point); a job that fails or is
-  cancelled removes what it staged. Residual risk until staging expires (package 2.3 of the Milestone 3 plan): the staged files of a finished
-  restore stay until the plugin is uninstalled or they are removed by hand, so a later
-  exposure of the private directory would expose them too. Planned: expiry after 24 hours
-  and deletion after a successful apply. Database import files follow the same rules when
-  they arrive.
+  cancelled removes what it staged. The staged files of a finished restore expire
+  ([ADR 0040](adr/0040-restore-staging-expiry.md)): `restore.staging_expiry_hours` after
+  the job finished, 24 by default and 168 at most, they leave the list, and the next
+  heartbeat deletes them, as it deletes at once what a job that did not succeed left
+  behind. An administrator can remove them earlier (`DELETE /restores/{id}`). The removal
+  takes a job ID and nothing else as a name, renames the directory before it deletes, and
+  removes symbolic links without following them. Residual risk: until then an exposure of
+  the private directory exposes the staged files too, for the configured hours and, where
+  WP-Cron does not run, until the next request brings a heartbeat; a tree that the file
+  system refuses to delete stays, unlisted, and is tried again at every heartbeat. Two
+  states keep staged files past their expiry with no heartbeat to end them. A deactivated
+  plugin has no heartbeat: what is staged stays until the plugin is activated again, whose
+  first heartbeat removes what is due, or uninstalled. A staging directory whose job
+  document this version cannot read, for example after a downgrade, is neither listed nor
+  removed, because nothing proves that its job has ended; it goes with a version that can
+  read the document, or with the uninstall.
+  Planned: deletion after a successful apply. Database import files follow the same rules
+  when they arrive.
 - Restore staging is owner-only whatever the snapshot recorded: every staged file is `0600`
   and every staged directory `0700`. A snapshot's `0644` or `0666` file and its `0755` or
   `0777` directory are never staged with those modes; the original mode is kept in the

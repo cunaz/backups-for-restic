@@ -57,3 +57,4 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0036](0036-selected-file-staging.md) | Plan selected files before restoring into an owned staging directory |
 | [0037](0037-restore-job.md) | A restore is a job that blocks other jobs and stages into a directory of its own |
 | [0039](0039-snapshot-routes.md) | Snapshot routes show names as text and address paths by a lossless token |
+| [0040](0040-restore-staging-expiry.md) | Restore staging expires, and a removal sets the directory aside first |

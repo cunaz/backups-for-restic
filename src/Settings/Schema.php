@@ -24,7 +24,7 @@ final class Schema {
 	 * Beginnings of the paths that an administrator may change after the setup, on the
 	 * settings page and with WP-CLI. Everything else is written by the setup and the jobs.
 	 */
-	public const array EDITABLE = [ 'schedule.', 'retention.', 'backup.', 'notifications.', 'advanced.' ];
+	public const array EDITABLE = [ 'schedule.', 'retention.', 'backup.', 'restore.', 'notifications.', 'advanced.' ];
 
 	/**
 	 * Whether a setting may be changed after the setup.
@@ -108,6 +108,8 @@ final class Schema {
 			'backup.database.enabled'                 => Field::boolean( true ),
 			'backup.database.table_scope'             => Field::choice( 'prefix', [ 'prefix', 'all' ] ),
 			'backup.database.exclude_tables'          => Field::list( 64 ),
+			// Staged files are plaintext: a day by default, a week at most (ADR 0040).
+			'restore.staging_expiry_hours'            => Field::integer( 24, 1, 168 ),
 			'notifications.email.on_failure'          => Field::boolean( true ),
 			'notifications.email.on_stale'            => Field::boolean( true ),
 			'notifications.email.stale_after_hours'   => Field::integer( 36, 1, 720 ),

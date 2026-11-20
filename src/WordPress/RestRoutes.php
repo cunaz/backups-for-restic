@@ -21,6 +21,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Maintenance\RetentionSettings;
 use BackupsForRestic\Jobs\Restore\RestoreRequest;
 use BackupsForRestic\Restore\SnapshotBrowser;
+use BackupsForRestic\Restore\StagedRestore;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
@@ -39,6 +40,9 @@ defined( 'ABSPATH' ) || exit;
 final class RestRoutes {
 
 	public const string NAMESPACE = 'backups-for-restic/v1';
+
+	/** Seconds a request may spend on deleting a staging directory; the heartbeat finishes the rest. */
+	private const float REMOVAL_SECONDS = 10.0;
 
 	/** Settings that the settings page may change; repository and setup have their own routes. */
 	/**
@@ -66,6 +70,9 @@ final class RestRoutes {
 			// Any text is taken as the ID, so that a malformed one is answered as such and not as an unknown route.
 			'/snapshots/(?P<snapshot>[^/]+)'             => [ 'GET', 'snapshot' ],
 			'/snapshots/(?P<snapshot>[^/]+)/tree'        => [ 'GET', 'snapshot_tree' ],
+			'/restores'                                  => [ 'GET', 'restores' ],
+			// Any name reaches the route, so that a malformed ID is answered with its own error.
+			'/restores/(?P<id>[^/]+)'                    => [ 'DELETE', 'remove_restore' ],
 			'/settings'                                  => [ 'GET', 'settings', 'PUT', 'update_settings' ],
 			'/cache'                                     => [ 'DELETE', 'clear_cache' ],
 			'/repository/test'                           => [ 'POST', 'test_repository' ],
@@ -503,6 +510,61 @@ final class RestRoutes {
 			[ $code, $status ] = SnapshotBrowser::failure( $e );
 			return $this->error( $code, $status );
 		}
+	}
+
+	/**
+	 * The staging directories of finished restores, newest first, with the hours after which
+	 * they expire and the number of directories that are being removed (ADR 0040).
+	 *
+	 * @return \WP_REST_Response Response.
+	 */
+	public function restores(): \WP_REST_Response {
+		return $this->respond( $this->staged() );
+	}
+
+	/**
+	 * Removes the staging directory of one restore job. It leaves the list at once; when
+	 * deleting a large tree takes longer than a request should, the heartbeat finishes it and
+	 * `complete` is false.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	public function remove_restore( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$id = self::text( $request, 'id' );
+		try {
+			$complete = $this->container->staging()->remove( $id, microtime( true ) + $this->container->tick_budget( self::REMOVAL_SECONDS ) );
+		} catch ( InvalidArgument ) {
+			return $this->error( 'invalid_job_id', 400 );
+		} catch ( JobConflict $conflict ) {
+			return $this->error( 'job_unreadable' === JobError::from_throwable( $conflict )->code ? 'job_unreadable' : 'restore_active', 409 );
+		}
+		if ( null === $complete ) {
+			return $this->error( 'restore_not_found', 404 );
+		}
+		return $this->respond(
+			[
+				'removed' => [
+					'job'      => $id,
+					'complete' => $complete,
+				],
+			] + $this->staged()
+		);
+	}
+
+	/**
+	 * What GET /restores answers.
+	 *
+	 * @return array{restores: list<array<string, int|string|null>>, removing: int, expiry_hours: int} The list, the number of directories on their way out, and the setting.
+	 */
+	private function staged(): array {
+		$hours   = $this->container->settings()->int( 'restore.staging_expiry_hours' );
+		$staging = $this->container->staging();
+		return [
+			'restores'     => array_map( static fn ( StagedRestore $restore ): array => $restore->to_array(), $staging->listing( $hours ) ),
+			'removing'     => $staging->removing( $hours ),
+			'expiry_hours' => $hours,
+		];
 	}
 
 	/**
@@ -1153,6 +1215,18 @@ final class RestRoutes {
 			'invalid_snapshot'              => [
 				'message' => __( 'A restore needs the full ID of a snapshot.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'invalid_job_id'                => [
+				'message' => __( 'This is not the ID of a job.', 'backups-for-restic' ),
+				'hint'    => '',
+			],
+			'restore_not_found'             => [
+				'message' => __( 'No restored files are kept for this job.', 'backups-for-restic' ),
+				'hint'    => __( 'They were removed already, or the restore did not succeed.', 'backups-for-restic' ),
+			],
+			'restore_active'                => [
+				'message' => __( 'This restore is still running.', 'backups-for-restic' ),
+				'hint'    => __( 'Wait for it to finish or cancel it. A cancelled restore keeps no files.', 'backups-for-restic' ),
 			],
 			'invalid_paths'                 => [
 				'message' => __( 'The paths to restore are not valid.', 'backups-for-restic' ),
