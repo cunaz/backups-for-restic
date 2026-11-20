@@ -260,4 +260,54 @@ final class FileChangeTest extends TestCase {
 		self::assertTrue( $this->change->undo( $this->path, 'mkdir', INF ) );
 		self::assertDirectoryDoesNotExist( $this->path );
 	}
+
+	public function test_undo_review_keeps_entries_created_below_a_removed_directory(): void {
+		$plugin = $this->site . '/plugin';
+		$code   = $plugin . '/main.php';
+		mkdir( $this->staging . $plugin, 0700 );
+		file_put_contents( $this->staging . $code, 'plugin code' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		file_put_contents( $this->path, 'old' );
+		$plan      = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$directory = new FileChange( $plan, $this->staging, $this->root . '/journal-directory' );
+		$created   = new FileChange( $plan, $this->staging, $this->root . '/journal-created' );
+		$replaced  = new FileChange( $plan, $this->staging, $this->root . '/journal-replaced' );
+		self::assertTrue( $directory->apply( $plugin, 'mkdir', null, null, INF ) );
+		self::assertTrue( $created->apply( $code, 'create', hash( 'sha256', 'plugin code' ), null, INF ) );
+		self::assertTrue( $replaced->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		// The administrator deletes the restored plugin within the undo window.
+		TempDir::remove( $plugin );
+		self::assertSame( 'keep', $created->undo_action( $code, 'create' ) );
+		self::assertSame( 'keep', $directory->undo_action( $plugin, 'mkdir' ) );
+		self::assertSame( 'restore', $replaced->undo_action( $this->path, 'replace' ) );
+		self::assertTrue( $created->undo( $code, 'create', INF ) );
+		self::assertTrue( $directory->undo( $plugin, 'mkdir', INF ) );
+		self::assertTrue( $replaced->undo( $this->path, 'replace', INF ) );
+		self::assertSame( 'old', file_get_contents( $this->path ) );
+		self::assertDirectoryDoesNotExist( $plugin );
+	}
+
+	public function test_undo_review_refuses_a_replacement_whose_directory_was_removed_or_linked(): void {
+		$folder = $this->site . '/folder';
+		$file   = $folder . '/settings.json';
+		mkdir( $folder );
+		mkdir( $this->staging . $folder, 0700 );
+		file_put_contents( $file, 'old' );
+		file_put_contents( $this->staging . $file, 'new' );
+		self::assertTrue( $this->change->apply( $file, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		TempDir::remove( $folder );
+		self::assertSame( 'refuse', $this->change->undo_action( $file, 'replace' ) );
+		try {
+			$this->change->undo( $file, 'replace', INF );
+			self::fail( 'Undo cannot restore a replaced file into a removed directory.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'later change', $refused->getMessage() );
+		}
+		// A link in place of the removed directory is not the recorded parent either.
+		mkdir( $this->root . '/elsewhere' );
+		file_put_contents( $this->root . '/elsewhere/settings.json', 'new' );
+		symlink( $this->root . '/elsewhere', $folder );
+		self::assertSame( 'refuse', $this->change->undo_action( $file, 'replace' ) );
+		self::assertSame( 'new', file_get_contents( $this->root . '/elsewhere/settings.json' ) );
+	}
 }

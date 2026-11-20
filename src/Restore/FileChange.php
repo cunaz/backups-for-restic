@@ -233,6 +233,11 @@ final readonly class FileChange {
 	 * Determines what can currently be reversed. Only a file installed by this entry is a
 	 * removal candidate. A missing intent means that no live write was attempted.
 	 *
+	 * Absence is decided before the parent: a created file or directory that is gone, also
+	 * below a directory that was removed since, leaves nothing to reverse, and a replaced file
+	 * that is gone is a conflict. A parent that is no longer the recorded canonical directory
+	 * refuses the entry instead of failing the whole review.
+	 *
 	 * @param string                  $path Reviewed path.
 	 * @param string                  $action Reviewed forward action.
 	 * @param float|null              $deadline Deadline of a background preview.
@@ -248,17 +253,17 @@ final readonly class FileChange {
 		if ( null === $record || 'undone' === $record['phase'] || 'copy' === $record['phase'] ) {
 			return 'keep';
 		}
-		if ( self::directory_identity( dirname( $path ) ) !== $record['parent'] ) {
+		if ( ! self::exists( $path ) ) {
+			return 'replace' === $action ? 'refuse' : 'keep';
+		}
+		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
 			return 'refuse';
 		}
 		if ( 'mkdir' === $action ) {
-			if ( null === $record['candidate'] || ! self::exists( $path ) ) {
+			if ( null === $record['candidate'] ) {
 				return 'keep';
 			}
 			return self::at( $path, $record['candidate'] ) && self::metadata( $path ) === $record['installed'] && 'keep' === $this->live_action( $path, $review ) ? 'remove' : 'refuse';
-		}
-		if ( ! self::exists( $path ) ) {
-			return 'create' === $action ? 'keep' : 'refuse';
 		}
 		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) && $this->matches( $path, $record['original'] ) ) {
 			return 'keep';
@@ -586,15 +591,22 @@ final readonly class FileChange {
 	 * @throws StorageFailed If the checked filesystem operation cannot complete.
 	 */
 	private static function directory_identity( string $path ): array {
+		return self::current_directory( $path ) ?? throw new StorageFailed( 'A file change directory is no longer a canonical directory.' );
+	}
+
+	/**
+	 * Reads the identity of a directory that may have been removed or replaced since.
+	 *
+	 * @param string $path Directory to inspect.
+	 * @return Identity|null Identity, or null if the path is no longer a canonical directory.
+	 */
+	private static function current_directory( string $path ): ?array {
 		clearstatcache( true );
 		if ( ! is_dir( $path ) || realpath( $path ) !== $path ) {
-			throw new StorageFailed( 'A file change directory is no longer a canonical directory.' );
+			return null;
 		}
 		$stat = lstat( $path );
-		if ( false === $stat ) {
-			throw new StorageFailed( 'The directory identity is unavailable.' );
-		}
-		return self::identity( $stat );
+		return false === $stat ? null : self::identity( $stat );
 	}
 
 	/**

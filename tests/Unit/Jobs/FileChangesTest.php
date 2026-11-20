@@ -299,6 +299,32 @@ final class FileChangesTest extends TestCase {
 		$this->changes->start_undo( $job->id, $approved['digest'] );
 	}
 
+	public function test_undo_after_a_created_directory_was_removed_restores_the_replaced_file(): void {
+		$job = $this->run_job( $this->start() );
+		TempDir::remove( $this->live . '/b-new' );
+		$review  = $this->changes->preview_undo( $job->id );
+		$actions = array_column( $review['entries'], 'action', 'path' );
+		self::assertSame( 'keep', $actions[ $this->live . '/b-new/new.txt' ] );
+		self::assertSame( 'keep', $actions[ $this->live . '/b-new' ] );
+		self::assertSame( 'restore', $actions[ $this->live . '/a-existing' ] );
+		$this->undo( $job );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+	}
+
+	public function test_background_undo_review_keeps_entries_below_a_removed_directory(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		TempDir::remove( $this->live . '/b-new' );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		self::assertSame( 0, $review->result['refused'] );
+		$this->run_job( $this->changes->start_undo( $apply->id, $review->result['digest'], '', $review->id ) );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+	}
+
 	public function test_expired_undo_is_removed_and_staging_released(): void {
 		$job = $this->run_job( $this->start() );
 		$this->clock->advance( 86400 );
