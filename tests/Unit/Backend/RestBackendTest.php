@@ -28,9 +28,10 @@ final class RestBackendTest extends TestCase {
 	/**
 	 * @param list<HttpResponse|\Throwable> $responses
 	 * @param (\Closure(string): void)|null $after_write Observes a streamed attempt before its response returns.
+	 * @param (\Closure(int): void)|null    $sleep       Observes the delay between requests.
 	 * @return array{RestBackend, \ArrayObject<int, array{string, string, array<string, string>, string, int}>}
 	 */
-	private function backend( array $responses, ?string $username = 'user', ?\Closure $after_write = null ): array {
+	private function backend( array $responses, ?string $username = 'user', ?\Closure $after_write = null, ?\Closure $sleep = null ): array {
 		$log    = new \ArrayObject();
 		$client = new class( $responses, $log, $after_write ) implements HttpClient {
 			/**
@@ -58,7 +59,7 @@ final class RestBackendTest extends TestCase {
 				return $next;
 			}
 		};
-		return [ new RestBackend( $client, 'https://repo.example.com/site/', $username, 'secret', 'test-agent', 3, static function ( int $ms ): void {} ), $log ];
+		return [ new RestBackend( $client, 'https://repo.example.com/site/', $username, 'secret', 'test-agent', sleep: $sleep ?? static function ( int $ms ): void {} ), $log ];
 	}
 
 	public function test_streamed_listing_retries_truncate_partial_responses(): void {
@@ -254,6 +255,50 @@ final class RestBackendTest extends TestCase {
 		[ $backend, $log ] = $this->backend( [ new BackendException( 'reset' ), new HttpResponse( 503, [], '' ), new HttpResponse( 200, [], 'ok' ) ] );
 		self::assertSame( 'ok', $backend->load( ObjectType::Snapshots, self::NAME ) );
 		self::assertCount( 3, $log );
+	}
+
+	public function test_upload_retries_the_same_bytes_and_stops_after_five_server_refusals(): void {
+		$delays    = [];
+		$responses = [
+			new HttpResponse( 429, [], '' ),
+			...array_fill( 0, 4, new HttpResponse( 503, [], '' ) ),
+			new HttpResponse( 200, [], '' ),
+		];
+
+		[ $backend, $log ] = $this->backend(
+			$responses,
+			sleep: static function ( int $ms ) use ( &$delays ): void {
+				$delays[] = $ms;
+			}
+		);
+		try {
+			$backend->save( ObjectType::Data, self::NAME, 'same bytes' );
+			self::fail( 'A sixth POST must not be sent.' );
+		} catch ( BackendException $error ) {
+			self::assertSame( 503, $error->context()['status'] );
+		}
+		self::assertSame( [ 500, 1000, 2000, 4000 ], $delays );
+		self::assertSame( 'POST', $log[0][0] );
+		self::assertSame( 'same bytes', $log[0][3] );
+		self::assertSame( array_fill( 0, 5, $log[0] ), $log->getArrayCopy() );
+	}
+
+	/** @return iterable<string, array{ObjectType, string, HttpResponse|BackendException}> */
+	public static function uploads_without_a_retry(): iterable {
+		yield 'lost response' => [ ObjectType::Data, self::NAME, new BackendException( 'Connection reset' ) ];
+		yield 'repository config' => [ ObjectType::Config, 'config', new HttpResponse( 503, [], '' ) ];
+		yield 'storage quota' => [ ObjectType::Data, self::NAME, new HttpResponse( 507, [], '' ) ];
+	}
+
+	#[\PHPUnit\Framework\Attributes\DataProvider( 'uploads_without_a_retry' )]
+	public function test_a_single_attempt_upload_is_never_sent_twice( ObjectType $type, string $name, HttpResponse|BackendException $first ): void {
+		[ $backend, $log ] = $this->backend( [ $first, new HttpResponse( 200, [], '' ) ] );
+		$this->expectException( BackendException::class );
+		try {
+			$backend->save( $type, $name, 'body' );
+		} finally {
+			self::assertCount( 1, $log );
+		}
 	}
 
 	public function test_existing_upload_of_the_same_size_counts_as_success(): void {
