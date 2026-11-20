@@ -32,7 +32,7 @@ final readonly class RehearsalReport {
 	 *
 	 * @param Manifest    $manifest Validated dump.
 	 * @param OwnedTables $owned Completed rehearsal's private objects.
-	 * @return array{tables:list<array<string,int|string|null>>,views_not_imported:list<string>,snapshot_server:string,destination_server:string,findings:list<array{code:string,table:string}>,rows:int,swap_preflight:array{blockers:list<string>,missing_privileges:list<string>,required_database_privileges:list<string>,required_global_privileges:list<string>}}
+	 * @return array{tables:list<array<string,int|string|null>>,views_not_imported:list<string>,snapshot_server:string,destination_server:string,findings:list<array{code:string,table:string}>,rows:int,content_digest:string|null,swap_preflight:array{blockers:list<string>,missing_privileges:list<string>,required_database_privileges:list<string>,required_global_privileges:list<string>}}
 	 * @throws FormatException If the live inventory exceeds the same table limit as the dump.
 	 * @throws DatabaseFailed If the completed ledger and imported shadows do not match the inventory.
 	 */
@@ -136,10 +136,30 @@ final readonly class RehearsalReport {
 						];
 					}
 				}
+				$checks = $this->connection->rows( 'SELECT DISTINCT p.table_number FROM ' . $ledger . ' p JOIN information_schema.TABLE_CONSTRAINTS c ON c.CONSTRAINT_SCHEMA=DATABASE() AND c.TABLE_NAME=CONCAT(' . $prefix . ",p.table_number) AND c.CONSTRAINT_TYPE='CHECK' WHERE p.id>0" );
+				foreach ( $checks as $check ) {
+					$table = $manifest->tables[ (int) $check['table_number'] ] ?? null;
+					if ( null !== $table ) {
+						$findings[] = [
+							'code'  => 'snapshot_check',
+							'table' => $table['name'],
+						];
+					}
+				}
+				foreach ( WordPressState::TABLES as $suffix ) {
+					$name = $manifest->prefix . $suffix;
+					if ( 'both' !== ( $rows[ $name ]['comparison'] ?? null ) ) {
+						$findings[] = [
+							'code'  => 'wordpress_tables',
+							'table' => $name,
+						];
+					}
+				}
 				$inspection = ( new SwapCatalog( $this->connection ) )->inspect( array_column( $manifest->tables, 'name' ) );
 				return [
+					'content_digest'     => Ledger::content_digest( $this->connection, $owned, $manifest ),
 					'swap_preflight'     => [
-						'blockers'                     => $inspection['blockers'],
+						'blockers'                     => array_values( array_unique( [ ...$inspection['blockers'], ...array_column( $findings, 'code' ) ] ) ),
 						'missing_privileges'           => $inspection['missing_privileges'],
 						'required_database_privileges' => SwapCatalog::PRIVILEGES,
 						'required_global_privileges'   => [ 'PROCESS' ],

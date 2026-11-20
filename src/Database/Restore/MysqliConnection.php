@@ -75,6 +75,19 @@ final readonly class MysqliConnection implements Connection {
 	}
 
 	/**
+	 * Releases server-side locks and transactions if SQL session cleanup itself fails.
+	 * Used only when the connection is no longer safe for any caller to reuse.
+	 */
+	public function discard(): void {
+		try {
+			$this->mysqli->close();
+		} catch ( \Error ) {
+			// An already closed handle owns no server session.
+			return;
+		}
+	}
+
+	/**
 	 * Keeps server error text, which may quote imported private data, out of exceptions.
 	 *
 	 * @param string $sql Validated statement.

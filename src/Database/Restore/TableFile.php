@@ -52,6 +52,20 @@ final class TableFile {
 	public readonly string $identity;
 
 	/**
+	 * Transcript of the original dump header, independent of the shadow's name or inode.
+	 *
+	 * @var string
+	 */
+	public readonly string $header_digest;
+
+	/**
+	 * Binary digest of the physical line just accepted by batch().
+	 *
+	 * @var string
+	 */
+	private string $line_digest = '';
+
+	/**
 	 * Manifest's expected counts and table name.
 	 *
 	 * @var array{name: string, file: string, rows: int, bytes: int}
@@ -113,10 +127,12 @@ final class TableFile {
 					throw new FormatException( 'The staged database table header differs from the dump format.' );
 				}
 			}
-			$definition        = $this->line();
-			$this->create      = CreateStatement::parse( $definition, $this->table['name'], $shadow, $owner );
-			$this->data_offset = $this->position();
-			$this->identity    = hash( 'sha256', $this->metadata . "\n" . implode( "\n", $header ) . "\n" . $definition );
+			$definition          = $this->line();
+			$this->create        = CreateStatement::parse( $definition, $this->table['name'], $shadow, $owner );
+			$this->data_offset   = $this->position();
+			$header              = implode( "\n", $header ) . "\n" . $definition;
+			$this->identity      = hash( 'sha256', $this->metadata . "\n" . $header );
+			$this->header_digest = hash( 'sha256', $header . "\n" );
 		} catch ( \Throwable $error ) {
 			$this->close();
 			throw $error;
@@ -141,7 +157,8 @@ final class TableFile {
 		if ( 0 !== fseek( $handle, $offset ) ) {
 			throw new StorageFailed( 'The staged database table could not be sought.' );
 		}
-		$line = $this->line();
+		$line              = $this->line();
+		$this->line_digest = hash( 'sha256', $line, true );
 		if ( str_starts_with( $line, '--' ) ) {
 			if ( $line !== '-- end table rows=' . $rows . ' bytes=' . $offset || $rows !== $this->table['rows'] || $this->position() !== $this->table['bytes'] ) {
 				throw new FormatException( 'The database table trailer does not match its imported rows and bytes.' );
@@ -159,6 +176,25 @@ final class TableFile {
 		}
 		$this->unchanged();
 		return $batch;
+	}
+
+	/**
+	 * Extends the transcript through the last validated INSERT or trailer. The ledger
+	 * commits this value with the corresponding rows, so a lost tick repeats no bytes.
+	 * Every physical line has a mandatory LF and each boundary contributes one digest.
+	 *
+	 * @param string $previous Previously committed lower-case SHA-256 transcript.
+	 * @return string Next transcript, or empty for legacy imports without this field.
+	 * @throws FormatException If the previous transcript or current batch is invalid.
+	 */
+	public function transcript( string $previous ): string {
+		if ( '' === $previous ) {
+			return '';
+		}
+		if ( 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $previous ) || 32 !== strlen( $this->line_digest ) ) {
+			throw new FormatException( 'The staged database content transcript is incomplete.' );
+		}
+		return hash( 'sha256', $previous . $this->line_digest );
 	}
 
 	/**

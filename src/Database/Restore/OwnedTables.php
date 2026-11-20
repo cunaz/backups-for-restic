@@ -70,10 +70,49 @@ final readonly class OwnedTables {
 	 * @throws FormatException If the ordinal is outside the inventory limit.
 	 */
 	public function shadow( int $number ): string {
+		return $this->ordinal( '_t', $number );
+	}
+
+	/**
+	 * Private name holding the original physical table during the undo window.
+	 *
+	 * @param int $number Manifest ordinal.
+	 * @return string Generated backup name.
+	 */
+	public function retained( int $number ): string {
+		return $this->ordinal( '_b', $number );
+	}
+
+	/**
+	 * Generates the name for a validated ordinal in this import's private namespace.
+	 *
+	 * @param string $role Constant role suffix.
+	 * @param int    $number Table ordinal.
+	 * @return string Private name.
+	 * @throws FormatException If the ordinal exceeds the supported inventory size.
+	 */
+	private function ordinal( string $role, int $number ): string {
 		if ( $number < 0 || $number >= Manifest::MAX_TABLES ) {
 			throw new FormatException( 'The database shadow ordinal is invalid.' );
 		}
-		return $this->prefix . '_t' . $number;
+		return $this->prefix . $role . $number;
+	}
+
+	/**
+	 * The ledger moves in the same atomic statement as all table pairs. Its physical
+	 * identity and ownership comment distinguish three outcomes even after a lost reply.
+	 *
+	 * @param string $state prepared, applied, or undone.
+	 * @return string Generated state witness name.
+	 * @throws FormatException If the state is unknown.
+	 */
+	public function marker( string $state ): string {
+		return match ( $state ) {
+			'prepared' => $this->progress(),
+			'applied' => $this->prefix . '_a',
+			'undone' => $this->prefix . '_u',
+			default => throw new FormatException( 'The database exchange has an invalid state.' ),
+		};
 	}
 
 	/**
@@ -155,9 +194,9 @@ final readonly class OwnedTables {
 		$locked  = false;
 		$failed  = false;
 		try {
-			$acquired = $this->connection->rows( 'SELECT GET_LOCK(' . $lock . ', 0) AS acquired' );
+			$acquired = $this->connection->rows( 'SELECT GET_LOCK(' . $lock . ', 1) AS acquired' );
 			if ( ( $acquired[0]['acquired'] ?? null ) !== '1' ) {
-				throw new JobConflict( 'Another request is working on this staged database.' );
+				JobConflict::raise( 'Another request is working on this staged database.', [ 'code' => 'database_restore_busy' ] );
 			}
 			$locked = true;
 			return $work();

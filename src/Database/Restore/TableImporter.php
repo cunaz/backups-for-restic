@@ -131,7 +131,7 @@ final readonly class TableImporter {
 					throw new DatabaseFailed( 'The database did not insert the complete restore batch.' );
 				}
 				$file->unchanged();
-				$ledger->advance( $file->position(), $state['rows'] + $batch->rows );
+				$ledger->advance( $file->position(), $state['rows'] + $batch->rows, $file->transcript( $state['digest'] ) );
 			}
 			$this->connection->execute( 'COMMIT' );
 		} finally {

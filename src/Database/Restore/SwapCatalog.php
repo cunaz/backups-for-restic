@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Database\Restore;
 
+use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Privileges;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
@@ -20,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  * foreign keys even from another database. Without dictionary visibility a site can still
  * rehearse, but cannot safely assign live tables to an undo generation.
  *
- * @phpstan-type Facts array{database:string,server:string,mariadb:bool,read_only:bool,atomic:bool}
+ * @phpstan-type Facts array{database:string,uuid:string,server:string,mariadb:bool,read_only:bool,atomic:bool}
  * @phpstan-type Inspection array{facts:Facts,ids:array<string,string>,blockers:list<string>,missing_privileges:list<string>}
  */
 final readonly class SwapCatalog {
@@ -60,7 +61,12 @@ final readonly class SwapCatalog {
 		if ( $maria && 'ON' === ( $this->connection->rows( "SHOW VARIABLES LIKE 'wsrep_on'" )[0]['Value'] ?? '' ) ) {
 			$atomic = false;
 		}
+		$uuid = $maria ? '' : ( $this->connection->rows( "SHOW VARIABLES LIKE 'server_uuid'" )[0]['Value'] ?? '' );
+		if ( ! $maria && 1 !== preg_match( '/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/', $uuid ) ) {
+			$atomic = false;
+		}
 		return [
+			'uuid'      => $uuid,
 			'database'  => $db,
 			'server'    => $version,
 			'mariadb'   => $maria,
@@ -76,6 +82,7 @@ final readonly class SwapCatalog {
 	 *
 	 * @param list<string> $names Proposed site tables, including names absent on the target.
 	 * @return Inspection Preflight results.
+	 * @throws DatabaseFailed If an unexpected server error prevents a metadata check.
 	 */
 	public function inspect( array $names ): array {
 		$facts   = $this->facts();
@@ -83,6 +90,9 @@ final readonly class SwapCatalog {
 		$issues  = [];
 		if ( ! $facts['atomic'] || $facts['read_only'] ) {
 			$issues[] = 'server_configuration';
+		}
+		if ( $facts['mariadb'] ) {
+			$issues[] = 'write_locked_rename';
 		}
 		if ( [] !== $missing ) {
 			$issues[] = 'database_privileges';
@@ -114,6 +124,10 @@ final readonly class SwapCatalog {
 			$triggers = $this->connection->rows( 'SELECT 1 AS present FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE IN (' . $list . ') LIMIT 1' );
 			if ( [] !== $triggers ) {
 				$issues[] = 'live_triggers';
+			}
+			$checks = $this->connection->rows( "SELECT 1 AS present FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_TYPE='CHECK' AND TABLE_NAME IN (" . $list . ') LIMIT 1' );
+			if ( [] !== $checks ) {
+				$issues[] = 'check_constraints';
 			}
 			// There is no dictionary row for a view, a partitioned table's logical name
 			// or a non-InnoDB table. A missing name, however, is a valid new destination.
@@ -167,6 +181,57 @@ final readonly class SwapCatalog {
 		}
 		ksort( $ids, SORT_STRING );
 		return $ids;
+	}
+
+	/**
+	 * Fingerprints the logical definition of a verified permanent table, with its comment.
+	 * The changing auto-increment counter is data, so it does not invalidate a review.
+	 * A temporary table hiding a live object is refused before copying from it.
+	 * The caller uses a normalized SQL session for quoting and the dump's SQL mode.
+	 *
+	 * @param string $table Known table name.
+	 * @return CreateStatement Validated live definition with a canonical comparison name.
+	 * @throws FormatException If the server cannot expose a supported permanent table definition.
+	 */
+	public function definition( string $table ): CreateStatement {
+		if ( ! self::simple( $table ) ) {
+			throw new FormatException( 'A database table name cannot be checked for the exchange.' );
+		}
+		$name = SqlFormatter::identifier( $table );
+		$sql  = $this->connection->rows( 'SHOW CREATE TABLE ' . $name )[0]['Create Table'] ?? '';
+		if ( ! str_starts_with( $sql, 'CREATE TABLE ' . $name . ' (' ) ) {
+			throw new FormatException( 'A database exchange target is hidden by a session object or is not a permanent table.' );
+		}
+		return CreateStatement::parse( SqlFormatter::one_line( $sql ) . ';', $table, 'bfr_schema', '' );
+	}
+
+	/**
+	 * Binds a review to the current identities and logical definitions without publishing
+	 * schema contents. Physical row counts and auto-increment counters may change normally.
+	 *
+	 * @param list<string> $names Logical site tables in the snapshot.
+	 * @return array{inspection:Inspection,schemas:array<string,string>} Current live bindings.
+	 */
+	public function review( array $names ): array {
+		$inspection = $this->inspect( $names );
+		$schemas    = [];
+		if ( [] === $inspection['blockers'] ) {
+			$session = new Session( $this->connection, null );
+			try {
+				foreach ( array_keys( $inspection['ids'] ) as $name ) {
+					$definition       = $this->definition( $name );
+					$schemas[ $name ] = hash( 'sha256', $definition->structure . $definition->comment );
+				}
+			} catch ( FormatException ) {
+				$inspection['blockers'][] = 'live_definition';
+			} finally {
+				$session->close();
+			}
+		}
+		return [
+			'inspection' => $inspection,
+			'schemas'    => $schemas,
+		];
 	}
 
 	/**

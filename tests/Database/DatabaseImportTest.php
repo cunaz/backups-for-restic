@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\SqlFormatter;
+use BackupsForRestic\Database\Restore\Ledger;
 use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\RehearsalReport;
 use BackupsForRestic\Database\Restore\SwapCatalog;
@@ -178,7 +179,7 @@ final class DatabaseImportTest extends TestCase {
 		$catalog = new SwapCatalog( new RestoreConnection( $this->db->mysqli ) );
 		$before  = $catalog->inspect( [ 'wp_live', 'private_shadow', 'missing' ] );
 		self::assertSame( [], $before['missing_privileges'] );
-		self::assertSame( [], $before['blockers'] );
+		self::assertSame( $before['facts']['mariadb'] ? [ 'write_locked_rename' ] : [], $before['blockers'] );
 		self::assertArrayNotHasKey( 'missing', $before['ids'] );
 		$this->db->execute( 'RENAME TABLE wp_live TO retained, private_shadow TO wp_live' );
 		$after = $catalog->identities( $before['facts'], [ 'wp_live', 'retained' ] );
@@ -215,6 +216,34 @@ final class DatabaseImportTest extends TestCase {
 		self::assertTrue( $this->importer( $manifest )->tick()['done'] );
 		self::assertSame( $rows, $this->db->rows( $rows_query ) );
 		self::assertSame( $ledger, $this->db->rows( $ledger_query ) );
+	}
+
+	public function test_completed_transcript_binds_the_imported_values_even_with_identical_manifest_bytes(): void {
+		$original = StagedDump::table();
+		$bindings = [];
+		$digests  = [];
+		foreach ( [ $original, $original, str_replace( "'same'", "'edit'", $original ) ] as $sql ) {
+			$this->token = bin2hex( random_bytes( 16 ) );
+			$manifest    = StagedDump::write( $this->directory, $sql );
+			$importer    = $this->importer( $manifest );
+			$this->finish( $importer );
+			$bindings[] = $manifest->fingerprint;
+			$digests[]  = $importer->tables->locked( $manifest, fn () => Ledger::content_digest( new RestoreConnection( $this->db->mysqli ), $importer->tables, $manifest ) );
+		}
+		self::assertCount( 1, array_unique( $bindings ) );
+		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $digests[0] );
+		self::assertSame( $digests[0], $digests[1] );
+		self::assertNotSame( $digests[0], $digests[2] );
+	}
+
+	public function test_an_older_ledger_resumes_without_claiming_a_content_binding(): void {
+		$manifest = StagedDump::write( $this->directory );
+		$importer = $this->importer( $manifest );
+		$importer->tick( 1 );
+		$this->db->execute( 'ALTER TABLE `' . $importer->tables->progress() . '` DROP COLUMN content_digest' );
+		$this->finish( $importer );
+		self::assertNull( $importer->tables->locked( $manifest, fn () => Ledger::content_digest( new RestoreConnection( $this->db->mysqli ), $importer->tables, $manifest ) ) );
+		self::assertSame( '4', $this->db->rows( 'SELECT COUNT(*) AS n FROM `' . $importer->tables->shadow( 0 ) . '`' )[0]['n'] );
 	}
 
 	public function test_bounded_cleanup_replays_a_lost_cursor_and_leaves_other_tables_untouched(): void {

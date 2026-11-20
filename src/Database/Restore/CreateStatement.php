@@ -35,8 +35,9 @@ final readonly class CreateStatement {
 	 * @param string       $engine Original local storage engine.
 	 * @param string       $comment Original table comment as a validated SQL literal.
 	 * @param list<string> $columns Non-generated columns, in declaration order.
+	 * @param string       $structure Stable schema digest excluding the current auto-increment counter and table comment.
 	 */
-	private function __construct( public string $sql, public string $engine, public string $comment, public array $columns ) {
+	private function __construct( public string $sql, public string $engine, public string $comment, public array $columns, public string $structure ) {
 	}
 
 	/**
@@ -86,11 +87,15 @@ final readonly class CreateStatement {
 		}
 		[ $options, $engine, $comment ] = self::options( $lexer );
 		$lexer->end();
+		$structure = $options;
+		unset( $structure['AUTO_INCREMENT'] );
+		ksort( $structure, SORT_STRING );
 		return new self(
-			'CREATE TABLE ' . SqlFormatter::identifier( $shadow ) . ' (' . implode( ', ', $definitions ) . ') ENGINE=InnoDB ' . $options . ' COMMENT=' . SqlFormatter::value( $owner, SqlFormatter::TEXT ) . ';',
+			'CREATE TABLE ' . SqlFormatter::identifier( $shadow ) . ' (' . implode( ', ', $definitions ) . ') ENGINE=InnoDB ' . implode( ' ', $options ) . ' COMMENT=' . SqlFormatter::value( $owner, SqlFormatter::TEXT ) . ';',
 			$engine,
 			$comment,
-			$columns
+			$columns,
+			hash( 'sha256', implode( "\0", [ $engine, ...$definitions, ...array_values( $structure ) ] ) )
 		);
 	}
 
@@ -183,7 +188,7 @@ final readonly class CreateStatement {
 	 * Allows options that describe local storage, never file paths, table unions or plugins.
 	 *
 	 * @param SqlLexer $lexer Remainder after the closing definition parenthesis.
-	 * @return array{string, string, string} Safe options, original engine and original comment literal.
+	 * @return array{array<string,string>, string, string} Safe options, original engine and original comment literal.
 	 * @throws FormatException If an option is duplicated, missing or unsupported.
 	 */
 	private static function options( SqlLexer $lexer ): array {
@@ -244,7 +249,7 @@ final readonly class CreateStatement {
 		if ( 'INNODB' !== $engine ) {
 			unset( $options['KEY_BLOCK_SIZE'] );
 		}
-		return [ implode( ' ', $options ), $engine, $comment ];
+		return [ $options, $engine, $comment ];
 	}
 
 	/**
