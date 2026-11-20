@@ -439,8 +439,8 @@ blob; identical chunks are stored once. The repository polynomial is generated a
 the same GF(2) arithmetic and Ben-Or irreducibility test restic uses. The unit suite
 compares the 17 boundaries of a 24 MiB stream with a vector recorded from restic's chunker
 library (`tests/Fixtures/vectors/go-strings-and-chunker.json`). Parity with the CLI is tested
-indirectly: when the plugin backs up files that restic 0.19.1 or 0.14.0 backed up before, it
-adds no data blob.
+indirectly. The same files backed up using restic 0.20.0, 0.19.1, 0.18.1 or 0.14.0 add no
+new data blobs when the plugin backs them up.
 
 ### 5.6 Packs
 

@@ -44,8 +44,8 @@ The suite in `tests/Conformance/` differs from the list in the decision:
 
 - Step 1 compares `restic snapshots --json` (host name, tags, paths) and reads
   `restic diff` after an incremental backup. No test compares `ls --json` or `cat` output.
-- Step 2: restic 0.19.1 and 0.14.0 each create a format 1 repository during the test; no
-  repository of restic 0.14 is stored. The plugin restores from it and deduplicates against
+- Step 2 runs against restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0. Each version creates a
+  format 1 repository during the test. The plugin restores from it and deduplicates against
   it, and restic checks the result. The plugin's own check runs only on repositories the
   plugin wrote. Format 2 is tested with restic's default compression, in the CI job that
   installs `ext-zstd`; a format 2 repository without compressed files does not occur
@@ -60,9 +60,11 @@ The suite in `tests/Conformance/` differs from the list in the decision:
   error `repository_append_only`.
 - Vectors: `bin/record-vectors.sh` records master key, config, snapshot, index, the root
   tree and a raw copy of the repository into `tests/Fixtures/restic-<version>/`; one
-  version exists, 0.19.1. `bin/record-forget-vectors.sh` records the forget results.
-- CI needs no Docker. `bin/install-test-tools.sh` downloads the pinned, checksum-verified
-  programs: restic 0.19.1, 0.18.1 and 0.14.0 and rest-server 0.14.0.
+  version exists, 0.19.1. The vector recorders default to that version, including
+  `bin/record-forget-vectors.sh` for the forget results.
+- CI uses restic 0.20.0 by default. Before installing each restic release,
+  `bin/install-test-tools.sh` compares the pin with its official `SHA256SUMS` and verifies
+  the downloaded archive. The local test repository runs rest-server 0.14.0.
 - No scheduled job bumps the matrix. A new restic release enters it through a pull request
   that changes the pins; picking releases up automatically is planned for Milestone 3.
 - The suite runs on every change under `src/` and `tests/`, not only in the four

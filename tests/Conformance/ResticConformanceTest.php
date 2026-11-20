@@ -132,8 +132,7 @@ final class ResticConformanceTest extends TestCase {
 		$first      = $this->backup( $repository, $site );
 		$cli        = new ResticCli( $this->server(), 'plugin', self::PASSWORD );
 
-		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
-		foreach ( [ '0.18.1', '0.14.0' ] as $version ) {
+		foreach ( ResticCli::VERSIONS as $version ) {
 			self::assertStringContainsString( 'no errors were found', ( new ResticCli( $this->server(), 'plugin', self::PASSWORD, $version ) )->must( [ 'check', '--read-data' ] ), 'restic ' . $version );
 		}
 
@@ -394,8 +393,9 @@ final class ResticConformanceTest extends TestCase {
 	 * @return iterable<string, array{string}>
 	 */
 	public static function restic_versions(): iterable {
-		yield 'restic 0.19.1' => [ '0.19.1' ];
-		yield 'restic 0.14.0' => [ '0.14.0' ];
+		foreach ( ResticCli::VERSIONS as $version ) {
+			yield 'restic ' . $version => [ $version ];
+		}
 	}
 
 	#[DataProvider( 'restic_versions' )]

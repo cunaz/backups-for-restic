@@ -449,9 +449,11 @@ the cause is clear.
 An error with code `tree_unreadable` can mean that a directory's entry names are duplicated
 or out of order, even when the encrypted data authenticates correctly. The plugin refuses
 that directory because its listing is ambiguous. The full restic check below helps find
-other damage, but restic 0.19.1 does not check this ordering or uniqueness: a clean result
-does not clear this finding. Use the [separate tree-name recovery path](#duplicate-or-unordered-tree-names)
-for this case; rebuilding the index cannot repair malformed tree contents.
+other damage. Both restic 0.19.1 and 0.20.0 can report a clean check on a directory with
+duplicate names. Rebuilding the index leaves those directory entries in place. Follow the
+[tree-name recovery procedure](#duplicate-or-unordered-tree-names) to identify the affected
+snapshots and paths. Starting with restic 0.20.0, the CLI's
+restore operation also reports an error for duplicate or unordered names. [restic 0.20.0 release notes](https://github.com/restic/restic/releases/tag/v0.20.0)
 
 1. Stop every automatic deletion: set **Backups → Settings → Old snapshots → Who removes old
    snapshots** to *Another computer*, so that this site starts no forget or prune, and pause
@@ -494,8 +496,7 @@ for this case; rebuilding the index cannot repair malformed tree contents.
    damaged files and directories, which is a loss that cannot be undone. Check once more.
 6. Require both a clean `restic check --read-data` and a clean plugin check before resuming
    automatic deletion. The full restic check verifies all data; the plugin reads a sample
-   (2 % by default) and also rejects duplicate or unordered tree names, which restic 0.19.1
-   does not report. Start **Check now** on the dashboard and confirm that it clears the
+   (2 % by default) and also checks tree names for duplicates and incorrect order. Start **Check now** on the dashboard and confirm that it clears the
    error notice. Then set retention back to what it was in step 1. Leave it at *Another
    computer* if that was your choice or if the server is append-only.
 
@@ -526,9 +527,9 @@ contents, and this guide provides no automatic lossless repair for that ambiguit
    restic find --tree <tree-id>
    ```
 
-   Repeat for each reported tree. This identifies candidate snapshots, but restic 0.19.1
-   stops at the first matching path in each snapshot. Do not treat that output as a complete
-   list of affected directories. To inspect the stored entries directly, use
+   Repeat for each reported tree to identify candidate snapshots. In restic 0.19.1 and
+   0.20.0, this command reports the first matching path in each snapshot. The same tree
+   can occur at additional paths. To inspect the stored entries directly, use
    `restic cat blob <tree-id>`. Alternatively, `restic cat tree '<snapshot-id>:<path>'`
    reads the tree at a snapshot path; it does not accept a tree ID.
 

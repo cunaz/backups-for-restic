@@ -6,7 +6,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RESTIC="${RESTIC:-$ROOT/.tools/bin/restic}"
+# The checked-in vectors record this release, independently of the latest test oracle.
+RESTIC="${RESTIC:-$ROOT/.tools/bin/restic-0.19.1}"
 OUT="$ROOT/tests/Fixtures/vectors/forget-restic.json"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
