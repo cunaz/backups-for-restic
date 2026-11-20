@@ -19,6 +19,13 @@ All notable changes are documented here. The format follows
   index files of ended requests are removed after a minute. A private directory reached
   through a symbolic link is backed up under its real path, so that the manifest and the
   database dump are in the snapshot and the recorded location names them.
+- REST routes and a command that read snapshots: `GET /snapshots` takes a scope (this
+  site's snapshots by default, or all of the repository), `GET /snapshots/<id>` answers
+  one snapshot with the site's manifest, and `GET /snapshots/<id>/tree` answers one
+  directory in pages of at most 1000 entries. Names that are not valid UTF-8 are shown
+  with replacement characters, and every entry carries a token that names its path byte
+  for byte. `wp backups-for-restic ls <snapshot> [<path>]` prints a directory and quotes
+  names that could control the terminal.
 - Restore engine foundation: several selected paths retain their original layout in empty
   private staging, with resumable planning and disk-space checks before writing. Reads hold
   a shared repository lock, grouped downloads authenticate every blob, and links/special
@@ -98,6 +105,10 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Changed
+- The snapshot list of the admin page shows the snapshots of this site; those of other
+  sites and clients in the same repository are listed with `scope=repository`. Listing
+  snapshots now takes a shared repository lock, so it answers "repository locked" while a
+  prune holds its exclusive lock.
 - Prune and check examine index files one pack at a time, and prune rewrites them without
   retaining every decoded blob. Prune loads its index cache under the repository lock and
   releases the blob index after marking. Check streams the server's pack listing to a
@@ -167,6 +178,8 @@ All notable changes are documented here. The format follows
   settings layout number whose stored value is a serialized null counts as malformed and
   keeps the plugin inactive, as other malformed numbers do, instead of passing for an
   installation without a number.
+- A file name that ends in a line break is written to a snapshot's tree with the break
+  escaped, as restic writes it. It was written unescaped before.
 - Initial layout recording no longer overwrites a number another request has inserted.
   Newer and malformed settings layout numbers are preserved and keep the plugin inactive;
   deactivation leaves their jobs and repository locks alone. Only a missing layout option

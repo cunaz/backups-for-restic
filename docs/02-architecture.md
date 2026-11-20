@@ -174,11 +174,11 @@ src/
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
-├── Restore/                       (M3) Staging, Selection, Apply, database Importer
+├── Restore/                       SnapshotBrowser (snapshot lists, details and directory pages as response data, §13.2); (M3) Staging, Selection, Apply, database Importer
 └── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, NoticeKind, Mailer port
 ```
 
-The entry marked (M3) arrives with that milestone. Dependency rules:
+The entries marked (M3) arrive with that milestone. Dependency rules:
 
 - Only `WordPress\*` and `Plugin` call WordPress functions or use WordPress classes
   ([ADR 0029](adr/0029-wordpress-free-core.md)). The core receives paths, settings values,
@@ -1034,7 +1034,9 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
-| `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
+| `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` |
+| `GET /snapshots/{id}` | one snapshot by its full ID: the fields of the list, `paths`, `tree`, and `manifest` with the site's manifest (`path`, `token`, `data`) or null. `manifest_state` is `found`, `none`, or `unreadable` for a manifest that cannot be located or is not valid |
+| `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
 | `POST /repository/test`, `POST /repository/save` | connection test; test and save. For an own server both take an optional `ca_certificate` (PEM): the test uses it from a file of its own under `tmp/` in the private directory, removed after the test, `save` stores it as the server's certificate once the server is saved, and saving a server of the preset removes a stored one. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent. `save` changes nothing while a job is active (409 `job_conflict`). A save that fails half way, also because the options table refused a write without an error (`Options::set()` answers false, `SettingsStore::update()` and `SiteState::bind()` raise `StorageFailed`), tries to put back what it changed: the settings, the REST password, the cached key and the certificate. Each part is tried on its own; while the database keeps refusing writes, a part can stay as the failed save left it, and the request answers with the error either way. Where `wp-config.php` defines the address, the certificate of a tested address that is another one is not stored; saving another address empties `repository.id` and drops the results remembered for the old repository |
@@ -1045,8 +1047,8 @@ first backup: an estimate needs a backup to measure against (§14).
 
 All routes: capability check in `permission_callback` (`backups_for_restic_capability`,
 `manage_options` by default); cookie + nonce or Application Passwords; no secrets in
-responses except the recovery kit, which is sent with `Cache-Control: no-store`. Restore
-routes arrive with Milestone 3.
+responses except the recovery kit, which is sent with `Cache-Control: no-store`. Routes
+that restore arrive with Milestone 3.
 
 The recovery kit is in the answer of three routes. During the setup `create` and `connect`
 return it freely, which is how the wizard shows it once; from then on all three ask for the
@@ -1058,17 +1060,74 @@ has to carry the password. A REST password defined in `wp-config.php` goes to an
 server only if the request carries that same password, and saving a server without a user
 name deletes a stored REST password.
 
-`GET /snapshots` and the WP-CLI command `snapshots` list every snapshot in the repository,
-also those of other hosts that share it. A list limited to this site is planned for
-Milestone 3. Errors of the routes carry the codes of §14 with the prefix
-`backups_for_restic_`.
+The three snapshot routes read through `Restore\SnapshotBrowser`, which turns what
+`Engine\Snapshot\Reader` returns into response data
+([ADR 0034](adr/0034-snapshot-reader.md), [ADR 0039](adr/0039-snapshot-routes.md)). Every
+read takes a shared repository lock of its own and releases it, and uses the index and tree
+cache of the jobs within `advanced.cache_limit_mib`. A request knows PHP's memory limit as
+a job does, so an index that does not fit is refused with `index_too_large`
+([ADR 0031](adr/0031-compact-index-and-memory-budget.md)).
+
+- **Scope.** The snapshots of this site are those with the site's host name and the two
+  tags that the retention selects them by, `backups-for-restic` and `site:<hash>` (§8).
+  `scope=repository` also lists the snapshots of other sites and of other restic clients
+  that share the repository; all of them can be read and browsed. Both lists live in the
+  one transient `backups_for_restic_snapshots`, each with the time it was read, so
+  everything that deletes the transient (a finished backup, forget or prune, a saved,
+  created or connected repository, a job that opens another repository) drops both. A
+  request that stores its list reads the transient again first, so it never writes back
+  the other list from before such a deletion. The WP-CLI command `snapshots` lists every snapshot of the
+  repository.
+- **Directories.** `GET /snapshots/{id}/tree` answers one directory per request and never
+  follows a link. The answer has `snapshot`, `path`, `exact`, `token`, `parent` (the token
+  of the directory above, null for the root), `total`, `offset`, `limit`, `next` (the
+  offset of the next page, or null) and `entries` in the order the snapshot stores them.
+  `limit` is 200 by default and at most 1000: a larger value is lowered to 1000, and the
+  answer names the limit that applied. An entry has `name`, `exact`, `token`, `type`
+  (`file`, `dir`, `symlink`, or `other` for devices, pipes, sockets and irregular files),
+  `size` (bytes of a file, null otherwise), `mtime` (RFC 3339 as stored, null if the
+  stored text is no timestamp), `mode` (permission bits with setuid, setgid and sticky as
+  four octal digits), `target` (of a link, null otherwise) and `incomplete` (true if the
+  backup recorded a read error for it).
+- **Names and path tokens.** A name in a restic repository is a sequence of bytes, and
+  JSON carries only UTF-8. `name` is therefore a text to show: the stored name if it is
+  valid UTF-8 (`exact` is true), otherwise the name with U+FFFD in place of every byte
+  that belongs to no valid sequence (`exact` is false). The same holds for `path` and for
+  the `target` of a link. `token` names the entry's path byte for byte: `b64:` followed by
+  the base64url form, without padding, of the absolute path's bytes. The `path` parameter
+  takes either an absolute path starting with `/`, which reaches every entry whose path is
+  valid UTF-8, or a token, which reaches every entry. A client walks a snapshot by sending
+  back the tokens it was given and never builds a path from names that are not exact.
+  Paths keep the limits of the reader: 4096 bytes and 256 components.
+- **Errors.** A malformed ID or path is 400 (`invalid_snapshot_id`,
+  `invalid_snapshot_path`), as is a scope, offset or limit that is not allowed
+  (`invalid_snapshot_query`). An unknown snapshot is 404 (`snapshot_not_found`), and so is
+  a path that does not exist in the snapshot, or that is a file or a link
+  (`snapshot_path_not_found`). The two routes of one snapshot check the ID, the path and
+  the paging before they open the repository, so these refusals do not depend on its
+  state. A repository under an exclusive lock, as during a prune, is 409
+  `repository_locked`. That holds for the list too: it is read under the shared lock of
+  the reader like every other read, so the Snapshots tab shows this error instead of a
+  list that a running prune may be changing. Without a cached key the routes answer 409
+  `configuration`; every other error of the repository is 502 with its code of §14.
+
+Errors of the routes carry the codes of §14 with the prefix `backups_for_restic_`.
 
 ### 13.3 WP-CLI (`wp backups-for-restic …`, optional surface)
 
 Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
 `forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
-`tick [--until-idle]`, `status`, `snapshots`, `settings list|get|set`, `cancel [<job>]` and
-`logs [<job>] [--lines=<number>]`. `settings set` changes what the settings page can change
+`tick [--until-idle]`, `status`, `snapshots`, `ls <snapshot> [<path>]`,
+`settings list|get|set`, `cancel [<job>]` and `logs [<job>] [--lines=<number>]`. `ls` prints
+one directory of a snapshot, `/` by default, through the same `Restore\SnapshotBrowser` as
+the REST routes (§13.2): one line per entry with the type (`-`, `d`, `l`, or `?` for a
+special file), the mode, the size, the modification time and the name, a `/` after a
+directory and the target after a link. The snapshot is its full ID or the first 8 or more
+characters, as `snapshots` prints them, if exactly one snapshot starts with them; the path
+is an absolute path or a token. A name or target with control characters, a quote, a
+backslash or invalid UTF-8 is printed in double quotes with Go's escapes (`\x1b`, `\xff`),
+so that a stored name cannot send control sequences to the terminal.
+`settings set` changes what the settings page can change
 (`Settings\Schema::editable()`), with the same validation; `cancel` asks the active or the
 named job to stop and runs one tick for its cleanup; `logs` prints a job's event log,
 which is redacted when it is written. The four commands that start a job end
@@ -1077,8 +1136,7 @@ completed, without a repository address, and `forget` and `prune` in retention m
 `external`. `status` prints the last backup and the active job only.
 
 Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
-`ls <snapshot> [<path>]`, `restore …` and `apply …`, which arrive with restore in
-Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
+`restore …` and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
 list without a milestone. There is no command for the setup or for the recovery kit: both
 are in the admin area, where the kit asks for the WordPress password. Nothing requires
 WP-CLI.
@@ -1168,7 +1226,10 @@ password), `password_too_short` (a chosen repository password of fewer than 12 c
 a recovery kit would be incomplete), `environment_blocked` (the setup cannot be completed
 while the Doctor has a critical finding), `invalid_settings` (with one message per field) and
 `invalid_url` for the connection test, which also covers a server without ranged reads
-(`server_incompatible`). The messages of `invalid_settings` come from the validation codes
+(`server_incompatible`). The snapshot routes and the `ls` command add `invalid_snapshot_id`,
+`invalid_snapshot_path`, `invalid_snapshot_query`, `snapshot_not_found` and
+`snapshot_path_not_found` (§13.2); `Restore\SnapshotBrowser::failure()` assigns them and
+their HTTP status. The messages of `invalid_settings` come from the validation codes
 of the settings (`Settings::with()`), among them `retention_floor`: `retention.keep.within`
 must be at least one day, or `retention.keep.last` at least 1. The rule is checked when one
 of the two fields changes.

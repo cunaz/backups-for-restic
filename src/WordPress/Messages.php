@@ -128,6 +128,39 @@ final class Messages {
 	}
 
 	/**
+	 * Message and hint for a code of a read of snapshots (Restore\SnapshotBrowser); every
+	 * other code is a job error.
+	 *
+	 * @param string $code Error code.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function snapshot_error( string $code ): array {
+		return match ( $code ) {
+			'invalid_snapshot_id'     => [
+				'message' => __( 'This is not a snapshot ID.', 'backups-for-restic' ),
+				'hint'    => __( 'A snapshot ID has 64 characters: the digits 0 to 9 and the letters a to f. The command line also takes its first 8 or more characters if only one snapshot starts with them.', 'backups-for-restic' ),
+			],
+			'invalid_snapshot_path'   => [
+				'message' => __( 'This is not a path inside a snapshot.', 'backups-for-restic' ),
+				'hint'    => __( 'A path starts with a slash and names one directory after the other, without "." and "..".', 'backups-for-restic' ),
+			],
+			'invalid_snapshot_query'  => [
+				'message' => __( 'The request for snapshots has a value that is not allowed.', 'backups-for-restic' ),
+				'hint'    => __( 'The scope is "site" or "repository". Offset and limit are whole numbers, and the limit is at least 1.', 'backups-for-restic' ),
+			],
+			'snapshot_not_found'      => [
+				'message' => __( 'The repository has no snapshot with this ID.', 'backups-for-restic' ),
+				'hint'    => __( 'It may have been removed since the list was loaded. Load the list of snapshots again.', 'backups-for-restic' ),
+			],
+			'snapshot_path_not_found' => [
+				'message' => __( 'The snapshot has no directory with this path.', 'backups-for-restic' ),
+				'hint'    => __( 'The path does not exist in this snapshot, or it is a file or a link. Links are not followed.', 'backups-for-restic' ),
+			],
+			default                   => self::job_error( $code ),
+		};
+	}
+
+	/**
 	 * Label and description of a Doctor result.
 	 *
 	 * @param Check $check Result.

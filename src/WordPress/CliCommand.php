@@ -14,6 +14,7 @@ use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Settings\Schema;
 
 defined( 'ABSPATH' ) || exit;
@@ -232,6 +233,40 @@ final class CliCommand {
 			}
 		} catch ( PluginException $e ) {
 			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $e )->code )['message'] );
+		}
+	}
+
+	/**
+	 * Lists a directory of a snapshot.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <snapshot>
+	 * : Snapshot ID, or its first 8 or more characters as "snapshots" prints them.
+	 *
+	 * [<path>]
+	 * : Directory inside the snapshot. Default: /.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp backups-for-restic ls 1a2b3c4d
+	 *     wp backups-for-restic ls 1a2b3c4d /var/www/html/wp-content/uploads
+	 *
+	 * @param list<string> $args Snapshot and path.
+	 */
+	public function ls( array $args ): void {
+		try {
+			$browser = $this->container->snapshot_browser();
+			if ( null === $browser ) {
+				\WP_CLI::error( Messages::job_error( 'configuration' )['message'] );
+			}
+			// A terminal takes the whole directory; each line is printed without control characters.
+			$page = $browser->directory( $browser->resolve( $args[0] ?? '' ), $args[1] ?? '/', 0, null );
+			foreach ( $page['entries'] as $entry ) {
+				\WP_CLI::line( SnapshotBrowser::line( $entry ) );
+			}
+		} catch ( PluginException $e ) {
+			\WP_CLI::error( Messages::snapshot_error( SnapshotBrowser::failure( $e )[0] )['message'] );
 		}
 	}
 

@@ -18,6 +18,7 @@ use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Restore\SnapshotBrowser;
 use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
@@ -60,6 +61,9 @@ final class RestRoutes {
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/cancel' => [ 'POST', 'cancel_job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/log' => [ 'GET', 'job_log' ],
 			'/snapshots'                                 => [ 'GET', 'snapshots' ],
+			// Any text is taken as the ID, so that a malformed one is answered as such and not as an unknown route.
+			'/snapshots/(?P<snapshot>[^/]+)'             => [ 'GET', 'snapshot' ],
+			'/snapshots/(?P<snapshot>[^/]+)/tree'        => [ 'GET', 'snapshot_tree' ],
 			'/settings'                                  => [ 'GET', 'settings', 'PUT', 'update_settings' ],
 			'/cache'                                     => [ 'DELETE', 'clear_cache' ],
 			'/repository/test'                           => [ 'POST', 'test_repository' ],
@@ -353,39 +357,131 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Snapshots of this site, newest first, cached for five minutes.
+	 * Snapshots, newest first: those of this site, or with scope=repository all of the
+	 * repository. Each list is cached for five minutes; fresh=1 reads it again.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function snapshots( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$cached = get_transient( 'backups_for_restic_snapshots' );
-		if ( is_array( $cached ) && ! self::flag( $request, 'fresh' ) ) {
-			return $this->respond( [ 'snapshots' => $cached ] );
-		}
+		$scope = self::text( $request, 'scope' );
 		try {
-			$repository = $this->container->access()->open_cached();
-			if ( null === $repository ) {
+			$scope  = SnapshotBrowser::scope( '' === $scope ? SnapshotBrowser::SCOPE_SITE : $scope );
+			$cached = $this->cached_snapshots();
+			if ( isset( $cached[ $scope ] ) && ! self::flag( $request, 'fresh' ) ) {
+				return $this->respond(
+					[
+						'scope'     => $scope,
+						'snapshots' => $cached[ $scope ]['snapshots'],
+					]
+				);
+			}
+			$browser = $this->container->snapshot_browser();
+			if ( null === $browser ) {
 				return $this->error( 'configuration', 409 );
 			}
-			$list = [];
-			foreach ( $repository->snapshots() as $id => $snapshot ) {
-				$list[] = [
-					'id'         => $id,
-					'short_id'   => substr( $id, 0, 8 ),
-					'time'       => $snapshot->time,
-					'hostname'   => $snapshot->hostname,
-					'tags'       => $snapshot->tags,
-					'data_added' => $snapshot->summary?->data_added,
-					'files'      => null === $snapshot->summary ? null : $snapshot->summary->files_new + $snapshot->summary->files_changed + $snapshot->summary->files_unmodified,
-					'bytes'      => $snapshot->summary?->total_bytes_processed,
+			$list = $browser->snapshots( $scope );
+		} catch ( PluginException $e ) {
+			[ $code, $status ] = SnapshotBrowser::failure( $e );
+			return $this->error( $code, $status );
+		}
+		// The other list is read again now: a job that ended during the read above deleted the
+		// transient, and the list from before that job must not be written back.
+		$cached           = $this->cached_snapshots();
+		$cached[ $scope ] = [
+			'time'      => time(),
+			'snapshots' => $list,
+		];
+		// One transient holds both lists, so every place that deletes it drops both.
+		set_transient( 'backups_for_restic_snapshots', $cached, 5 * MINUTE_IN_SECONDS );
+		return $this->respond(
+			[
+				'scope'     => $scope,
+				'snapshots' => $list,
+			]
+		);
+	}
+
+	/**
+	 * The cached snapshot lists that are younger than five minutes. Each list has its own
+	 * time, because storing one of them renews the transient that holds both.
+	 *
+	 * @return array<string, array{time: int, snapshots: array<mixed>}> Lists by scope.
+	 */
+	private function cached_snapshots(): array {
+		$stored = get_transient( 'backups_for_restic_snapshots' );
+		$lists  = [];
+		foreach ( [ SnapshotBrowser::SCOPE_SITE, SnapshotBrowser::SCOPE_REPOSITORY ] as $scope ) {
+			$entry = is_array( $stored ) && is_array( $stored[ $scope ] ?? null ) ? $stored[ $scope ] : [];
+			$time  = $entry['time'] ?? null;
+			$list  = $entry['snapshots'] ?? null;
+			if ( is_int( $time ) && is_array( $list ) && $time <= time() && time() - $time < 5 * MINUTE_IN_SECONDS ) {
+				$lists[ $scope ] = [
+					'time'      => $time,
+					'snapshots' => $list,
 				];
 			}
-		} catch ( PluginException $e ) {
-			return $this->error( JobError::from_throwable( $e )->code, 502 );
 		}
-		set_transient( 'backups_for_restic_snapshots', $list, 5 * MINUTE_IN_SECONDS );
-		return $this->respond( [ 'snapshots' => $list ] );
+		return $lists;
+	}
+
+	/**
+	 * One snapshot with the site's manifest, or manifest null if it has none.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	public function snapshot( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->browse(
+			static function () use ( $request ): \Closure {
+				$id = SnapshotBrowser::full_id( self::text( $request, 'snapshot' ) );
+				return static fn ( SnapshotBrowser $browser ): array => [ 'snapshot' => $browser->snapshot( $id ) ];
+			}
+		);
+	}
+
+	/**
+	 * One page of one directory of a snapshot. The path is an absolute path or the token of
+	 * an entry, which names it byte for byte (ADR 0039).
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	public function snapshot_tree( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		return $this->browse(
+			static function () use ( $request ): \Closure {
+				$id                 = SnapshotBrowser::full_id( self::text( $request, 'snapshot' ) );
+				[ $offset, $limit ] = SnapshotBrowser::paging( $request->get_param( 'offset' ), $request->get_param( 'limit' ) );
+				$path               = $request->get_param( 'path' );
+				// No path is the root; a value that is no text is refused as a malformed path.
+				$path = null === $path || '' === $path ? '/' : ( is_string( $path ) ? $path : '' );
+				SnapshotBrowser::path( $path );
+				return static fn ( SnapshotBrowser $browser ): array => $browser->directory( $id, $path, $offset, $limit );
+			}
+		);
+	}
+
+	/**
+	 * Answers a read of a snapshot: 409 without a cached key, as the snapshot list does,
+	 * and every refusal or error with the code and status that the browser assigns. The
+	 * request is checked first, so a malformed ID, path or page is refused with 400 before
+	 * the repository is opened, whatever state the repository is in.
+	 *
+	 * @param \Closure(): (\Closure(SnapshotBrowser): array<string, mixed>) $checked Checks the request and returns the read.
+	 * @return \WP_REST_Response|\WP_Error Response.
+	 */
+	private function browse( \Closure $checked ): \WP_REST_Response|\WP_Error {
+		try {
+			$read    = $checked();
+			$browser = $this->container->snapshot_browser();
+			if ( null === $browser ) {
+				return $this->error( 'configuration', 409 );
+			}
+			return $this->respond( $read( $browser ) );
+		} catch ( PluginException $e ) {
+			[ $code, $status ] = SnapshotBrowser::failure( $e );
+			return $this->error( $code, $status );
+		}
 	}
 
 	/**
@@ -1050,7 +1146,7 @@ final class RestRoutes {
 				'message' => __( 'Enter the REST password for this server.', 'backups-for-restic' ),
 				'hint'    => __( 'The stored password is only sent to the server and user name it was saved for. If wp-config.php defines the password, enter that one.', 'backups-for-restic' ),
 			],
-			default                         => Messages::job_error( $code ),
+			default                         => Messages::snapshot_error( $code ),
 		};
 		return new \WP_Error(
 			'backups_for_restic_' . $code,
