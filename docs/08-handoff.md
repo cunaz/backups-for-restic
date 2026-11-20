@@ -1,6 +1,6 @@
-# 08 · Handoff (2026-11-12)
+# 08 · Handoff (2026-11-16)
 
-This handoff records the state on November 12. The November 20 release candidate and
+This handoff records the state on November 16. The November 20 release candidate and
 remaining publication steps are documented in the [release verification](benchmarks/2026-11-20-release-candidate.md).
 
 Where the work stands, what is open, and what whoever continues has to know that the code
@@ -10,76 +10,71 @@ replaced or removed when the next handoff is written.
 
 ## 1. State of `main`
 
-`main` contains Milestones 0 to 2 and, of phase 0 of the Milestone 3 plan, the packages
-0.1 and 0.5 to 0.8. All workflows (`ci.yml`, `integration.yml`, `conformance.yml`) were green
-on the commit before this file.
+`main` contains Milestones 0 to 2, phase 0 of the Milestone 3 plan except the rest of 0.9
+(see its row in the plan), and the two engine packages of the restore: the snapshot reader
+(1.1, ADR 0034) and the staging engine (2.1, ADR 0036).
 
-Merged on 2026-11-11, each as its own pull request with a merge commit:
+Merged since the last handoff, each as its own pull request with a merge commit:
 
 | PR | What |
 | --- | --- |
-| 11 to 16 | Setup state, tests of the WordPress layer, browser tests, browser probe of the private directory, settings forms, smaller promises (phase 0.5, 0.6, 0.8) |
-| 17 | `minimatch` override for the lint tooling |
-| 18 | An entered repository password is a candidate until an unlock job has opened the repository with it |
-| 19 | State, notifications and secrets are changed from the database and under `state.lock`; one request at a time sends notices |
-| 20 | A server save that fails half way puts back settings, REST password, cached key and certificate |
-| 21 | A cancel request that finds the work done still gets the result recorded; a check keeps its details with the job |
-| 22 | CI installs the browser without packages from apt |
-| 23 | The throttle test of a large file is deterministic |
-| 24 | A write that the database refused no longer passes for done (`Options::set()` returns `bool`) |
+| 10, 26 to 30 | Lock continuity, schema numbers, compact index, run checkpoints, strict tree order, prune of unindexed packs (phase 0.2 to 0.4, 0.9 first part) |
+| 34 to 36 | Job memory budget and the WordPress memory matrix in CI, the layout marker under concurrent and malformed writes, a changelog correction |
+| 37 | The index decoder refuses an object where the format has a list (the finding of the scheduled fuzz run) |
+| 32 | Snapshot reader (1.1), with the fixes of its reread |
+| 33 | Staging engine (2.1), with the fixes of its reread |
 
-## 2. Open work, in order
+## 2. Open pull requests, in the order to merge them
 
-1. **Pull request 10, `feat/lock-continuity`** (ADR 0030, phase 0.3). The owner waived
-   ADR 0024's 24-hour wait for the ongoing completion of this handoff (section 4).
-   Before merging: read the whole diff against `main` once more, check that CI is
-   green on the head, and bring `main` in if GitHub reports a conflict (then wait for CI
-   again).
-2. **Pull requests 26 and 27**, both brought up to `main` and opened on 2026-11-12:
-   - **26, `feat/schema-numbers`** (phase 0.2): option and job layout numbers, inert startup
-     on newer options or a refused first layout write, and deactivation that leaves newer
-     data alone. Review corrections also keep unreadable job documents and block new jobs
-     and repository changes; the user-facing recovery instructions explain the refusal.
-   - **27, `feat/compact-index`** (phase 0.9, first part): compact records, a cache in sealed
-     pieces, pack-by-pack decoding, and a memory budget. The repeated index benchmark is in
-     `docs/benchmarks/2026-11-12-index-memory.md`. Full-job memory measurements and the
-     remaining prune/check data structures are still open.
+All were opened on 2026-11-16. Each package was built, read by two independent reviewers
+and corrected before it was pushed; the integration and browser tests of the packages ran
+in CI for the first time there.
 
-   Both require green CI and addressed review findings on their final heads. Incorporate
-   later merges from `main` where needed; in particular, combine the compact index's memory
-   budget with PR 10's deferred index loading without loading an index before its lock.
-3. **`feat/prune-unindexed` has no pull request yet** (phase 0.4). It depends on 0.3: merge
-   PR 10 first, then bring this branch up to `main`, run section 4's checks and open its own
-   pull request. The waiting period is waived for this engine change too; the final reread,
-   green CI and addressed findings remain required.
-4. **Engine items of phase 0** that have no branch yet: the order of tree entries checked
-   on reading, the unchecked writes in `BackupRun`, a checkpoint written by another
-   version, and the second part of 0.9 (memory with many blobs).
-5. **Phases 1 to 5** of Milestone 3 as planned.
+1. **41**, a lock order fix in `RestoreRun` (follow-up to 33), and **44**, three
+   fixes to the reader and the backup plan (follow-up to 32). Small; merge first.
+2. **45**, four minor findings of the reread of 34 and 35.
+3. **38**, routes and the `ls` command (1.2), then **42**, the snapshot browser and the
+   retention preview (1.3), which is stacked on 38.
+4. **40**, the restore job (2.2), then **43**, staging list, expiry and removal (2.3),
+   which is stacked on 40.
+5. **39**, the zip writer and the download tokens (2.4, the parts without WordPress).
+6. **31**, the database importer (phase 3). Not read in this round.
 
-Once a package of phase 0 is merged, mark it in the table of
-[07-milestone-3-plan.md](07-milestone-3-plan.md) §4.
+The pull requests 38 to 43 were opened against the branch below them. Once that branch is
+merged, change the base to `main` (the head and its checks stay). 38, 39 and 40 were built
+side by side: each adds to `CHANGELOG.md`, `docs/02-architecture.md`,
+`docs/07-milestone-3-plan.md`, `docs/adr/README.md`, `RestRoutes`, `Container`, `Messages`
+and `AccessTest`. After one of them is merged, bring `main` into the next, keep both sides,
+run the checks of section 4 and wait for CI again.
 
-## 3. Review findings that were declined, and why
+CodeRabbit reviewed none of the pull requests opened on 2026-11-16: its hourly limit was
+used up. Ask for a review on each (a comment with its review command) before merging, and
+treat what it finds as section 4 says.
 
-So that they are not raised and argued again. Each has a reply on its review thread.
+## 3. What is missing for phase 2
 
-- `Options::fresh()` does not drop the `alloptions` cache: the options it reads are stored
-  with autoload off. `WpOptions::set()` does drop it for its comparison, because the
-  settings are autoloaded.
-- `WpOptions::set()` compares through `get_option()` and not against the raw row: a foreign
-  `pre_option_*` filter on one of the plugin's options governs every read of the plugin
-  anyway. The reviewer withdrew this one.
-- `SiteState::bind()` failing in a foreign hook after the results were dropped is not
-  rolled back; `RepositoryRecord::moved()` does that write last instead.
-- A rollback that itself fails while the database keeps refusing writes is not recorded
-  anywhere: nothing can be stored then, and the request reports its error. The documents
-  say that the rollback is attempted.
-- A job that the scheduler creates in the moment of deactivation stays queued until the
-  plugin is activated again. It holds no lock.
-- A job whose `backing_up` step fails while a cancel request arrives is cancelled without a
-  snapshot record; decompression limits inside WordPress' `Requests` library are described
-  as a residual risk (T-19) instead of worked around.
+- **2.4, second part:** the routes that issue and redeem a download token and stream a
+  file, and the job step that drives `ZipWriter`. ADR 0038 lists the duties these have
+  (a name of its own per archive, reporting a refused name, files found through
+  `Restore\Staging` so that expired staging is not served).
+- **2.5:** the screens (start from the browser's selection, which the page keeps in
+  `restoreSelection`; progress; the staging list; download; delete) and
+  `wp backups-for-restic restore`.
+- The acceptance of the whole phase under 128 MiB (plan, section 5).
+
+Smaller points that are recorded nowhere else:
+
+- The docblocks of `IndexFile::packs()` and `split()` and decision 5 of ADR 0031 still say
+  that the text walk decides nothing about validity; since 37 it decides whether `packs`
+  and `blobs` are lists.
+- The reader takes two shared locks for `GET /snapshots/<id>` (snapshot, then manifest).
+- While a prune holds the repository, the Snapshots tab answers with an error unless the
+  list is cached. What it should show is a product decision for 1.3.
+- `replace()` in `assets/js/admin.js` hands its arguments to `replaceChildren()`; a `null`
+  among them would be shown as the text "null". Two callers on the Settings tab pass
+  `null`. Seen by reading and in a stand-in page, not on a real site: check it there.
+- The engine reports too little free space for a restore as a format error, so the job
+  shows `repository_damaged` (ADR 0037).
 
 ## 4. How changes are made here
 
@@ -100,27 +95,25 @@ the ones that are easy to get wrong.
   merging, require green CI on the pull request's head, and fix or answer every review
   finding. The waiver applies to the waiting period only.
 - Before a push: `vendor/bin/phpcs -q`,
-  `vendor/bin/phpstan.phar analyse --no-progress --memory-limit=1G`,
-  `vendor/bin/phpunit --testsuite unit` (about four minutes), `npm run lint:js` for
-  `assets/js`. WordPress, WP-CLI, Plugin Check, the conformance suite and mutation testing
-  run in CI only; a full CI round takes 35 to 45 minutes because of mutation testing.
+  `vendor/bin/phpstan.phar analyse --no-progress --memory-limit=2G`,
+  `vendor/bin/phpunit --testsuite unit` (six to seven minutes), `npm run lint:js`.
+  WordPress, WP-CLI, Plugin Check, the conformance suite, the browser tests and mutation
+  testing run in CI only; a full CI round takes about 50 minutes because of mutation
+  testing.
+- A new class in `tests/Integration` runs only if it is listed in
+  `phpunit-integration.xml.dist`. One was written without that and passed CI unrun.
+- A pull request that conflicts with `main` gets no CI run. Bring `main` in first.
 - CodeRabbit reviews every pull request. Its findings are claims to verify against the
   code. Valid ones are fixed, the others get a reply on their thread; ten reviews per hour
   are included, and it pauses on a branch with many pushes.
-
-Two things that cost time today:
-
-- The browser job depended on apt; it no longer does. A job that fails before any test ran
-  because of the runner's network is rerun, not fixed.
-- `WpOptions` has no unit test: it is the adapter over WordPress' option functions. A
-  change there is judged by the integration suite.
 
 ## 5. For the repository owner
 
 - Delete the merged remote branches. Merges are pushed to `main` from a local merge, so
   GitHub's "automatically delete head branches" does not act on them.
-- The first revision of the description of pull requests 7 to 24 carries a link that the
-  tooling added; delete those revisions in the "edited" menu of each description.
+- The first revision of the description of the pull requests carries a link that the
+  tooling added; delete those revisions in the "edited" menu of each description (7 to 25,
+  and 37 to 46).
 - A ruleset for `main` would have to allow the pushes that merge pull requests, or the way
   of merging has to change first.
 - Open decisions D2 to D9 of [07-milestone-3-plan.md](07-milestone-3-plan.md) §7, and the
