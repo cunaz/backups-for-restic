@@ -411,7 +411,7 @@ final class Container {
 	 * During uninstall the supplied store and directory identify a previous private path.
 	 *
 	 * @param PrivateDirectory|null $directory Private job directory for retained generations.
-	 * @param JobStore|null $store Corresponding validated store.
+	 * @param JobStore|null         $store Corresponding validated store.
 	 * @return DatabaseChanges Reviewed database operations.
 	 */
 	public function database_changes( ?PrivateDirectory $directory = null, ?JobStore $store = null ): DatabaseChanges {
@@ -619,9 +619,9 @@ final class Container {
 			 *
 			 * @param list<string> $tables Table names from the settings.
 			 */
-			$exclude  = apply_filters( 'backups_for_restic_database_tables_excluded', $settings->list( 'backup.database.exclude_tables' ) );
-			$prefix   = 'all' === $settings->string( 'backup.database.table_scope' ) ? '' : $wpdb->prefix;
-			$exclude  = self::strings( $exclude );
+			$exclude = apply_filters( 'backups_for_restic_database_tables_excluded', $settings->list( 'backup.database.exclude_tables' ) );
+			$prefix  = 'all' === $settings->string( 'backup.database.table_scope' ) ? '' : $wpdb->prefix;
+			$exclude = self::strings( $exclude );
 			if ( '' === $prefix ) {
 				foreach ( $this->jobs()->database_owners() as $owner ) {
 					array_push( $exclude, ...DatabaseGeneration::exclusions( $this->database_connection(), $owner ) );

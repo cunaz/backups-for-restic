@@ -301,8 +301,9 @@ final class CliTest extends TestCase {
 
 			[ $status, $output ] = self::command( [ 'logs', $id ] );
 			self::assertSame( 0, $status, $output );
-			self::assertStringStartsWith( $id . ' Backup Cancelled', $output );
-			self::assertMatchesRegularExpression( '/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d info +Job created\./m', $output );
+			// WP-CLI can emit its own PHP startup diagnostics before invoking the plugin command.
+			$header = preg_quote( $id . ' Backup Cancelled', '/' );
+			self::assertMatchesRegularExpression( '/^' . $header . '\n\d{4}-\d\d-\d\d \d\d:\d\d:\d\d info +Job created\./m', $output );
 			self::assertStringContainsString( 'Cancellation requested. {"user":"wp-cli"}', $output );
 			self::assertStringContainsString( 'Job finished. {"state":"cancelled"}', $output );
 			[ $status, $latest ] = self::command( [ 'logs', '--lines=2' ] );

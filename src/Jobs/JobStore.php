@@ -372,8 +372,8 @@ final class JobStore {
 	 * @return array<string,true> Pinned plan IDs.
 	 */
 	public function pinned_file_plans( int $now ): array {
-		$pins = [];
-		$active = $this->active();
+		$pins    = [];
+		$active  = $this->active();
 		$undoing = null === $active ? null : ( JobType::Undo === $active->type ? ( $active->data['apply'] ?? null ) : ( ( $active->data['undo'] ?? false ) === true ? ( $active->data['subject'] ?? null ) : null ) );
 		foreach ( $this->file_changes() as $job ) {
 			$plan = $job->data['plan_job'] ?? null;
@@ -480,7 +480,13 @@ final class JobStore {
 				);
 			}
 			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {
-				JobConflict::raise( 'An interrupted database restore must finish cleaning its owned tables before another job starts.', [ 'job' => $id, 'code' => 'database_exchange_cleanup' ] );
+				JobConflict::raise(
+					'An interrupted database restore must finish cleaning its owned tables before another job starts.',
+					[
+						'job'  => $id,
+						'code' => 'database_exchange_cleanup',
+					]
+				);
 			}
 			if ( null !== $job && ! $job->state->is_terminal() ) {
 				JobConflict::raise( 'Another job is still running.', [ 'job' => $id ] );
