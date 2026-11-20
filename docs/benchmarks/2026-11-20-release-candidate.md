@@ -26,7 +26,6 @@ access. The other storage fixtures used local private repositories.
 | Storage failure during a WordPress heartbeat | The REST job endpoint returned its structured environment error. The heartbeat preserved the due slot, continued other callbacks and started that backup once storage was writable. When the configured directory was entirely unavailable, other WordPress callbacks still ran after both the heartbeat and the tick. |
 | File-planner mutation testing | Infection 0.35.10 measured a covered mutation score of 97.86% across 468 mutations. PHPUnit killed 455, one was invalid, ten survived and two timed out. |
 | WordPress package and dependencies | Official WordPress Plugin Check 2.2.0 inspected the installed ZIP under WordPress 7.1.4, using the repository's CI settings. Its strict JSON report contained zero errors and warnings. All 242 files matched. Composer and npm reported zero dependency advisories. |
-| Backup using shared-hosting limits | The final ZIP on WordPress 7.1.5, PHP 8.3.36 and MariaDB 11.4.13 backed up 256 files totaling 2,147,483,648 bytes plus 308,000 test rows (315,392,000 payload bytes) to a local TLS rest-server. Ordinary cron completed 20 ticks with no warnings at 128 MiB and 30 seconds per request, with `set_time_limit` disabled. In 11 minutes 26 seconds, the test also completed restic 0.20.0 `check --read-data`, a full restore, byte and metadata comparisons for every upload, and an independent SQL import with matching extended checksums for three WordPress tables. |
 | Files and database on a fresh MySQL site | Two packaged WordPress 7.1.5 installations used separate databases, salts and administrators on MySQL 8.4.11. Chromium checked the incoming and original posts before and after undo. The destination login, session, site URL and backup settings survived the exchange. Stale review and an incorrect confirmation password were refused. |
 | Fresh MariaDB site | All ten packaged Chromium tests passed on WordPress 7.1.5 and MariaDB 11.4.13. The database rehearsal showed the manual SQL recovery procedure. File restore, cancellation, undo and downloads remained available. |
 | In-place upgrade | WordPress's plugin updater replaced the installed package from commit `9bb0902` with the final ZIP. Existing settings, encrypted secrets, kit audit, completed job and log survived. The old snapshot restored its original bytes, a new backup completed, and restic 0.19.1 passed `check --read-data`. Activation with a deliberately newer stored schema preserved the data and displayed an administrator notice. |
@@ -40,9 +39,39 @@ access. The other storage fixtures used local private repositories.
 | Recovery kit | A real terminal and an explicitly requested private file received the kit. A redirected command without `--force` and a subscriber using `--force` were refused. Successful deliveries recorded the time, account and route, with no credentials in the audit. |
 | Release archive and credentials | The final archive (242 files) and the tracked checkout (543 files) contained zero matches for the actual BorgBase test HTTP and repository passwords, including URL-encoded and Base64 representations. |
 | Diagnostic logs | The integration suite checks the repository password and HTTP credential against job files and REST responses. A separate comparison of 64 server logs and job records (1,701,260 bytes) found zero matches for the fixture's application, administrator and HTTP credentials in raw, URL-encoded and Base64 forms. |
-| Hosted BorgBase | The plugin initialized two repositories and backed up and restored a random 32 KiB file on each, including v2 listings and ranged reads. The normal repository returned to an empty snapshot list. The append-only repository refused deletion. A second backup and restore on that repository kept the first snapshot and produced a second. Independent restic 0.20.0 runs verified the decrypted IDs, read all data in both repositories and verified both append-only snapshots. No locks remained. |
+| Hosted BorgBase smoke | The plugin initialized two repositories and backed up and restored a random 32 KiB file on each, including v2 listings and ranged reads. The smoke test removed its own objects from the normal repository before the large WordPress run. The append-only repository refused deletion. A second backup and restore on that repository kept the first snapshot and produced a second. Independent restic 0.20.0 runs verified the decrypted IDs, read all data in both repositories and verified both append-only snapshots. No locks remained. |
 | Private TLS repositories | The operator smoke command backed up and restored against two disposable rest-server instances with separate credentials and private repositories. It checked both ordinary and append-only behaviour, including an append-only repository with prior history. |
 | Release deployment rehearsal | An isolated SVN repository and disposable signing keys exercised the signed-tag check, the initial release, retries, an upgrade and byte-for-byte export validation. Conflicting tags, downgrades, unsigned tags and unauthorised signing keys were refused. |
+
+## Large WordPress backups
+
+The final ZIP ran on WordPress 7.1.5, PHP 8.3.36 and MariaDB 11.4.13. Both sites used
+ordinary WordPress cron with a 128 MiB memory limit, a 30-second execution limit and
+`set_time_limit` disabled. Each backed up the same 256 synthetic upload files totaling
+2,147,483,648 bytes. Both jobs finished without warnings.
+
+| Storage | Test rows and SQL payload | Cron backup | Full acceptance run |
+| --- | --- | --- | --- |
+| Local TLS rest-server | 308,000 rows, 315,392,000 bytes | 20 ticks, 6 min 55 s | 11 min 26 s |
+| Hosted BorgBase, normal access | 307,200 rows, 314,572,800 bytes | 24 ticks, 8 min 28 s | 14 min 18 s |
+
+In both runs restic 0.20.0 passed `check --read-data`, restored the uploads with
+matching SHA-256 digests and metadata, and supplied SQL for an independent MariaDB
+import. The BorgBase run used the WordPress wizard, verified the TLS certificate and
+authenticated repository ID, and restored the snapshot identified by the WordPress
+job. Its 14 SQL files totaled 322,264,694 bytes. Source and restored
+`CHECKSUM TABLE … EXTENDED` values matched for `wp_postmeta` (2494083864),
+`wp_posts` (2594047603) and `wp_users` (4213990131). The recovered SQL, job files
+and WordPress diagnostics contained zero matches for either password or the HTTP
+Basic credentials across 20 files and 322,602,126 bytes. The scan covered raw,
+URL-encoded and Base64 representations.
+
+An earlier local run on WordPress 7.1.4 completed in 46 minutes. The first local
+7.1.5 run exhausted the shared test disk while restic restored uploads.
+The successful local result above used the final ZIP and a fresh restore target.
+At the end of hosted acceptance, the normal BorgBase repository held one verified
+large snapshot and the append-only repository held its two small smoke snapshots.
+Both repositories had zero remaining locks. [Hosted acceptance procedure](../../tests/Live/README.md#full-wordpress-backup-on-borgbase)
 
 The live database exchange requires an eligible MySQL installation. MariaDB, mismatched
 WordPress prefixes, unresolved table dependencies and an external persistent object cache

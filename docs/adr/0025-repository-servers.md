@@ -71,8 +71,12 @@ and append-only snapshot retention across two runs.
 On 2026-11-20 the hosted smoke ran against dedicated normal and append-only BorgBase
 repositories with public TLS verification. In both modes the plugin verified the
 repository ID, backed up and restored a random 32 KiB file, and checked the REST v2
-pack size and ranged bytes. The normal repository returned to its original inventory.
-The append-only repository refused deletion, and a second run retained the first snapshot. Independent restic 0.20.0 reads verified both repositories and both append-only snapshots. No locks remained.
+pack size and ranged bytes. The normal repository returned to its original inventory
+after this smoke test. The append-only repository refused deletion and retained both
+smoke snapshots. A subsequent WordPress 7.1.5 run wrote 2 GiB of uploads and 300 MiB of
+SQL values to the normal repository. Independent restic 0.20.0 reads verified the full
+WordPress backup and the two append-only snapshots. The repositories held one and two
+snapshots respectively and both released all locks.
 The HTTP status table above records the separate local rest-server tests.
 [Release acceptance](../benchmarks/2026-11-20-release-candidate.md).
 
