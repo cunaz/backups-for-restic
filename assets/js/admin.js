@@ -1228,6 +1228,7 @@
 		const reasons = {
 			protected: __( 'Protected plugin, configuration or private path', 'backups-for-restic' ),
 			offline_restore_required: __( 'Restore this WordPress startup file offline using the recovery kit.', 'backups-for-restic' ),
+			snapshot_spool: __( 'Private database dump and site manifest of a backup', 'backups-for-restic' ),
 			outside_roots: __( 'Outside the live site directories', 'backups-for-restic' ),
 			unavailable_destination_root: __( 'The live destination directory is unavailable.', 'backups-for-restic' ),
 			invalid_path: __( 'Invalid file name or path', 'backups-for-restic' ),

@@ -226,6 +226,9 @@ final class ApplyPlan {
 				return self::decision( $path, $target, 'skip', $reason );
 			}
 		}
+		if ( self::spool( $files, $parts ) ) {
+			return self::decision( $path, $target, 'skip', 'snapshot_spool' );
+		}
 		$root     = null;
 		$ancestor = $this->layout?->is_ancestor( $path ) ?? false;
 		foreach ( $this->roots as $allowed ) {
@@ -375,6 +378,29 @@ final class ApplyPlan {
 			$cache[ $cache_key ] = $names;
 		}
 		return $valid;
+	}
+
+	/**
+	 * Recognizes a snapshot's spool by its fixed layout. Every backup records the site
+	 * manifest and the plaintext database dump in spool/ of the private directory, at the
+	 * location the directory had then. Once the private directory has moved, nothing else
+	 * protects that location, and the dump carries none of the deny files of a private
+	 * directory. So no apply writes a spool anywhere; the database rehearsal reads it from
+	 * staging instead.
+	 *
+	 * @param string       $files Canonical staging directory.
+	 * @param list<string> $parts Names of the snapshot path.
+	 * @return bool Whether the path is a staged spool or lies in one.
+	 */
+	private static function spool( string $files, array $parts ): bool {
+		$prefix = $files;
+		foreach ( $parts as $name ) {
+			$prefix .= '/' . $name;
+			if ( 'spool' === $name && ( is_file( $prefix . '/manifest.json' ) || is_dir( $prefix . '/database' ) ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

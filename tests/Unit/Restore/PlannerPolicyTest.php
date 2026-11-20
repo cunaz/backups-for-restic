@@ -238,6 +238,57 @@ final class PlannerPolicyTest extends TestCase {
 		new ApplyPlan( [ $this->live ], [], [], true, $layout );
 	}
 
+	public function test_a_fresh_site_never_maps_a_spool_into_its_content(): void {
+		$snapshot  = str_repeat( 'b', 64 );
+		$job       = new Job( '20270115T030000Z-abcdef', JobType::Restore, 'manual', 1800000000 );
+		$job->data = [
+			'fresh_install' => true,
+			'snapshot'      => $snapshot,
+			'site_layout'   => SiteLayout::bind(
+				$snapshot,
+				[
+					'database' => true,
+					'content'  => '/old/content',
+					'uploads'  => '/old/content/uploads',
+				],
+				'/old/private/spool/manifest.json'
+			),
+		];
+		$layout    = SiteLayout::from_job( $job, $this->live, $this->live . '/uploads' );
+		self::assertNotNull( $layout );
+		$plan = new ApplyPlan( [ $this->live ], [], [], false, $layout );
+		// The snapshot's own spool, and a copy that an earlier apply left in the content tree.
+		foreach ( [ '/old/private/spool', '/old/content/backups-for-restic/spool' ] as $spool ) {
+			mkdir( $this->files . $spool . '/database', 0700, true );
+			file_put_contents( $this->files . $spool . '/database/010-wp_users.sql', 'INSERT INTO wp_users VALUES (1);' );
+		}
+		file_put_contents( $this->files . '/old/content/theme.css', 'body {}' );
+		$rows = array_column( iterator_to_array( $plan->actions( $this->files ) ), null, 'path' );
+		self::assertSame( 'create', $rows['/old/content/theme.css']['action'] );
+		self::assertSame( 'mkdir', $rows['/old/content/backups-for-restic']['action'] );
+		self::assertSame( 'outside_roots', $rows['/old/private']['reason'] );
+		self::assertArrayNotHasKey( '/old/private/spool', $rows );
+		self::assertSame(
+			[
+				'path'        => '/old/private/spool/database',
+				'destination' => null,
+				'action'      => 'skip',
+				'reason'      => 'snapshot_spool',
+			],
+			$plan->inspect( $this->files, '/old/private/spool/database' )
+		);
+		self::assertSame(
+			[
+				'path'        => '/old/content/backups-for-restic/spool',
+				'destination' => $this->live . '/backups-for-restic/spool',
+				'action'      => 'skip',
+				'reason'      => 'snapshot_spool',
+			],
+			$rows['/old/content/backups-for-restic/spool']
+		);
+		self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, '/old/content/backups-for-restic/spool/database/010-wp_users.sql' )['reason'] );
+	}
+
 	public function test_live_links_pipes_and_executable_files_receive_the_exact_policy_decision(): void {
 		$plan   = new ApplyPlan( [ $this->live ], [] );
 		$target = $this->live . '/service';
