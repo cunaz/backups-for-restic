@@ -58,6 +58,10 @@ DB_NAME="${BFR_DB_NAME:-bfr_site}"
 DB_USER="${BFR_DB_USER:-bfr_site}"
 DB_PASSWORD="${BFR_DB_PASSWORD:-bfr-site-test-only}"
 PORT="${BFR_SITE_PORT:-8890}"
+if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PORT < 1 || 10#$PORT > 65535 )); then
+	echo "BFR_SITE_PORT must be a valid loopback port." >&2
+	exit 2
+fi
 URL="http://127.0.0.1:$PORT"
 PID_FILE="$TOOLS/site-server.pid"
 MS_SITE="$TOOLS/site-ms"

@@ -64,7 +64,7 @@ final class TestSite {
 		if ( false === $port || '' === $port ) {
 			$port = '8890';
 		}
-		if ( ! ctype_digit( $port ) || (int) $port < 1 || (int) $port > 65535 ) {
+		if ( strlen( $port ) > 5 || ! ctype_digit( $port ) || (int) $port < 1 || (int) $port > 65535 ) {
 			throw new \RuntimeException( 'BFR_SITE_PORT must be a valid loopback port.' );
 		}
 		return 'http://127.0.0.1:' . (int) $port;
