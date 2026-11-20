@@ -93,10 +93,15 @@ final class SqlFormatter {
 	 * Puts a statement from SHOW CREATE on one line. Line breaks there are only whitespace
 	 * between clauses: the server escapes them inside string literals.
 	 *
+	 * The pattern names its bytes instead of using \s or \R: without the u modifier those
+	 * also match 0x85 (and, under some locales, 0xA0), which are continuation bytes of
+	 * UTF-8 characters such as "х" (D1 85), "内" (E5 86 85) or "Å" (C3 85). With the u
+	 * modifier, a definition that is not valid UTF-8 would make preg_replace() fail.
+	 *
 	 * @param string $statement Statement.
 	 * @return string One line.
 	 */
 	public static function one_line( string $statement ): string {
-		return trim( (string) preg_replace( '/\s*\R\s*/', ' ', $statement ) );
+		return trim( (string) preg_replace( '/[ \t]*(?:(?:\r\n|\r|\n)[ \t]*)+/', ' ', $statement ) );
 	}
 }
