@@ -193,6 +193,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      BFR_E2E_EXPECT_DATABASE_SWAP: "1"
       BFR_DB_HOST: 127.0.0.1
       BFR_DB_ADMIN_USER: root
       BFR_DB_ADMIN_PASSWORD: root
@@ -219,6 +220,11 @@ jobs:
       # Install a copy at its normal location so live restore exercises the package's path protections.
       - run: bin/build-package.sh
       - run: BFR_TEST_PLUGIN_DIR="$PWD/build/backups-for-restic" bin/test-site.sh install
+      # The disposable MySQL account needs to see inbound relationships across schemas.
+      - name: Grant dictionary inspection to the browser fixture
+        env:
+          MYSQL_PWD: ${{ env.BFR_DB_ADMIN_PASSWORD }}
+        run: mysql -h "$BFR_DB_HOST" -u "$BFR_DB_ADMIN_USER" -e "GRANT PROCESS ON *.* TO 'bfr_site'@'localhost', 'bfr_site'@'%';"
       - run: bin/test-site.sh start
       # Exactly the packages of package-lock.json, without their install scripts; the browser
       # is then fetched by the Playwright version that the lock file names.

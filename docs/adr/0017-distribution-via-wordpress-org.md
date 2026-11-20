@@ -50,12 +50,12 @@ plugins from WordPress.org only) and double the release testing.
 - **WordPress.org only, source private**: contradicts the goal of public, reviewable code.
 
 ## As built (2026-11)
-- Nothing is released yet, and of the release pipeline only its first step exists:
-  `bin/build-package.sh` builds the package from `.distignore`. There is no deployment
-  workflow and there are no `.wordpress-org/` assets. Testers copy the built directory into
-  `wp-content/plugins/` or link a checkout of the repository there; the plugin runs without
-  a build step. The listing assets are planned for Milestone 3 and the deployment workflow
-  for Milestone 4 ([roadmap](../05-roadmap.md)).
+- `bin/build-package.sh --zip` builds an installable package from the tracked files and
+  `.distignore`. The banner and icons live in `.wordpress-org/`. The deployment workflow
+  verifies an owner-signed stable tag on `main`, checks the package and uses the protected
+  `wordpress-org` environment for publication. A local release rehearsal exercises the
+  SVN transaction and byte comparison. First submission, account setup and public
+  deployment require the owner. See the [release process](../04-development-and-quality.md#7-release-process-wordpressorg).
 - Since 2026-11-10 Plugin Check runs in CI on the built package, for every pull request.
   Its errors about native file functions in the WordPress-free core are set aside in the
   workflow, with the reason; the reviewers will see them
