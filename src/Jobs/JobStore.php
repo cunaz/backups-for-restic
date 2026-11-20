@@ -292,6 +292,15 @@ final class JobStore {
 	}
 
 	/**
+	 * Returns the filesystem location holding file-change journals and their payloads.
+	 *
+	 * @return string Private jobs directory.
+	 */
+	public function storage_directory(): string {
+		return $this->directory;
+	}
+
+	/**
 	 * Returns the filesystem that will hold the private file-change journals.
 	 *
 	 * @return int Device number.

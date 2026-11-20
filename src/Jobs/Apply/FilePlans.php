@@ -23,13 +23,18 @@ use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\DiskFilePlan;
 use BackupsForRestic\Restore\DirectorySpellings;
+use BackupsForRestic\Restore\FileSpace;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
-/** Builds read-only reviews and checks their identity and expiry when a caller opens one. */
+/**
+ * Builds read-only reviews and checks their identity and expiry when a caller opens one.
+ *
+ * @phpstan-import-type Row from ApplyManifest
+ */
 final readonly class FilePlans {
 
 	/** Maximum content comparison bytes in the initial synchronous preview. */
@@ -44,8 +49,9 @@ final readonly class FilePlans {
 	 * @param int                             $hours Normal staging lifetime.
 	 * @param \Closure(bool,string):ApplyPlan $planner Site policy factory.
 	 * @param ApplyJournal                    $journal Original source and undo records.
+	 * @param FileSpace                       $space Destination volume.
 	 */
-	public function __construct( private JobStore $jobs, private Staging $staging, private Clock $clock, private int $hours, private \Closure $planner, private ApplyJournal $journal ) {
+	public function __construct( private JobStore $jobs, private Staging $staging, private Clock $clock, private int $hours, private \Closure $planner, private ApplyJournal $journal, private FileSpace $space ) {
 	}
 
 	/**
@@ -106,7 +112,7 @@ final readonly class FilePlans {
 	 * @param bool   $config Configuration.
 	 * @param string $plan_job Preview job.
 	 * @param int    $offset First row.
-	 * @return array{restore:string,digest:string,applicable:bool,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null} Public page.
+	 * @return array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null} Public page.
 	 * @throws JobConflict If this preview expired or does not match the request.
 	 */
 	public function plan_page( string $id, string $restore, bool $undo, bool $config, string $plan_job, int $offset ): array {
@@ -121,18 +127,19 @@ final readonly class FilePlans {
 		if ( $id !== $header['subject'] || $restore !== $header['restore'] || $undo !== $header['undo'] || $config !== $header['config'] || $offset < 0 || $offset > $total ) {
 			throw new JobConflict( 'This file preview does not match the requested page.' );
 		}
-		$entries = array_map( ApplyManifest::display( ... ), $disk->page( $offset ) );
-		$next    = $offset + count( $entries );
+		$entries  = array_map( ApplyManifest::display( ... ), $disk->page( $offset ) );
+		$next     = $offset + count( $entries );
+		$estimate = $this->space->estimate( $undo ? 0 : $header['required_bytes'] );
 		return [
 			'restore'     => $restore,
 			'digest'      => $digest,
-			'applicable'  => 0 === $header['refused'] && $header['changes'] > 0,
+			'applicable'  => 0 === $header['refused'] && $header['changes'] > 0 && false !== $estimate['enough_space'],
 			'entries'     => $entries,
 			'plan_job'    => $plan_job,
 			'total'       => $total,
 			'offset'      => $offset,
 			'next_offset' => $next < $total ? $next : null,
-		];
+		] + $estimate;
 	}
 
 
@@ -195,7 +202,7 @@ final readonly class FilePlans {
 		if ( true === ( $job->data['undo'] ?? false ) ) {
 			$config = true === ( $this->journal->original( ApplyJournal::field( $job, 'subject' ), true )->data['include_config'] ?? false );
 		}
-		return new PlanBuild( $disk, ( $this->planner )( $config, $restore ), $this->journal->files( $restore, true ), $cursor );
+		return new PlanBuild( $disk, ( $this->planner )( $config, $restore ), $this->journal->files( $restore, true ), $cursor, $this->space );
 	}
 
 
@@ -267,7 +274,7 @@ final readonly class FilePlans {
 		$restore     = ApplyJournal::field( $job, 'restore' );
 		$disk        = $this->disk( $restore, $job->id, true );
 		$builder     = $this->builder( $job, $disk );
-		$digest      = $disk->seal( ApplyJournal::field( $job, 'subject' ), $restore, true === ( $job->data['undo'] ?? false ), true === ( $job->data['include_config'] ?? false ), $builder->counts, $builder->changes, $builder->refused );
+		$digest      = $disk->seal( ApplyJournal::field( $job, 'subject' ), $restore, true === ( $job->data['undo'] ?? false ), true === ( $job->data['include_config'] ?? false ), $builder->counts, $builder->changes, $builder->refused, $builder->required_bytes );
 		$job->result = [
 			'digest'  => $digest,
 			'entries' => $builder->counts['rows'] ?? 0,
@@ -297,6 +304,44 @@ final readonly class FilePlans {
 			unset( $job->data['plan_retained'] );
 		}
 		return $removed;
+	}
+
+
+	/**
+	 * Accounts for outstanding, confirmed items on an apply already in progress when
+	 * the space check was introduced. Private partial copies are credited by FileChange.
+	 *
+	 * @param Job               $job Current apply.
+	 * @param DiskFilePlan|null $disk Its authenticated large plan, if any.
+	 * @param list<Row>         $rows Inline mutation manifest.
+	 * @param int               $done Published rows.
+	 * @param int               $total Number of mutations.
+	 * @param float             $deadline Worker tick deadline.
+	 * @return bool Whether all remaining rows have been charged.
+	 * @throws StorageFailed If a migration checkpoint or confirmed row is missing.
+	 */
+	public function resume_space( Job $job, ?DiskFilePlan $disk, array $rows, int $done, int $total, float $deadline ): bool {
+		$cursor = $job->data['space_cursor'] ?? $done;
+		$bytes  = $job->data['space_total'] ?? 0;
+		if ( ! is_int( $cursor ) || $cursor < $done || $cursor > $total || ! is_int( $bytes ) || $bytes < 0 ) {
+			throw new StorageFailed( 'The remaining file estimate cursor is invalid.' );
+		}
+		while ( $cursor < $total ) {
+			$row = null === $disk ? ( $rows[ $cursor ] ?? null ) : $disk->mutation( $cursor )['row'];
+			if ( null === $row ) {
+				throw new StorageFailed( 'The remaining file estimate has an incomplete manifest.' );
+			}
+			$bytes = FileSpace::add( $bytes, $this->space->row( $row ) );
+			++$cursor;
+			if ( $cursor < $total && microtime( true ) >= $deadline ) {
+				$job->data['space_cursor'] = $cursor;
+				$job->data['space_total']  = $bytes;
+				return false;
+			}
+		}
+		$job->data['remaining_bytes'] = $bytes;
+		unset( $job->data['space_cursor'], $job->data['space_total'] );
+		return true;
 	}
 
 

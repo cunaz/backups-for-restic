@@ -24,6 +24,7 @@ use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\FileChange;
 use BackupsForRestic\Restore\FileMaintenance;
+use BackupsForRestic\Restore\FileSpace;
 use BackupsForRestic\Restore\FileVerification;
 use BackupsForRestic\Restore\FileWorkPending;
 use BackupsForRestic\Restore\Staging;
@@ -39,7 +40,7 @@ defined( 'ABSPATH' ) || exit;
  * killed request and works backwards so children leave before their directory.
  *
  * @phpstan-import-type Row from ApplyManifest
- * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>}
+ * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>}
  */
 final readonly class FileChanges implements StepProvider {
 
@@ -49,6 +50,13 @@ final readonly class FileChanges implements StepProvider {
 	 * @var FilePlans
 	 */
 	private FilePlans $plans;
+
+	/**
+	 * Disk estimates for the filesystem that holds all writable payloads.
+	 *
+	 * @var FileSpace
+	 */
+	private FileSpace $space;
 
 	/**
 	 * Recovery records shared by the plan and mutation workers.
@@ -67,6 +75,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @param \Closure(bool,string):ApplyPlan $planner Current live site policy.
 	 * @param FileMaintenance                 $maintenance WordPress maintenance marker.
 	 * @param \Closure():bool                 $allowed Host-wide permission to write live files.
+	 * @param FileSpace|null                  $space Host filesystem capacity.
 	 */
 	public function __construct(
 		private JobStore $jobs,
@@ -75,10 +84,12 @@ final readonly class FileChanges implements StepProvider {
 		private int $hours,
 		private \Closure $planner,
 		private FileMaintenance $maintenance,
-		private \Closure $allowed
+		private \Closure $allowed,
+		?FileSpace $space = null
 	) {
+		$this->space   = $space ?? new FileSpace( $jobs->storage_directory() );
 		$this->journal = new ApplyJournal( $jobs, $staging, $clock, $hours );
-		$this->plans   = new FilePlans( $jobs, $staging, $clock, $hours, $planner, $this->journal );
+		$this->plans   = new FilePlans( $jobs, $staging, $clock, $hours, $planner, $this->journal, $this->space );
 	}
 
 	/**
@@ -90,7 +101,7 @@ final readonly class FileChanges implements StepProvider {
 	 */
 	public function preview( string $restore, bool $include_config = false ): array {
 		$rows = $this->rows( $restore, $include_config, false );
-		return self::summary( $restore, $include_config, $rows );
+		return $this->summary( $restore, $include_config, $rows );
 	}
 
 	/**
@@ -102,7 +113,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @param bool        $config Include configuration.
 	 * @param string|null $plan_job Previously completed background job.
 	 * @param int         $offset First presentation ordinal.
-	 * @return Preview|array{restore:string,digest:string,applicable:bool,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null}|Job Preview or queued job.
+	 * @return Preview|array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null}|Job Preview or queued job.
 	 * @throws InvalidArgument If a requested page or option is invalid.
 	 */
 	public function request_preview( string $id, bool $undo, bool $config, ?string $plan_job = null, int $offset = 0 ): Job|array {
@@ -119,7 +130,7 @@ final readonly class FileChanges implements StepProvider {
 		}
 		if ( ! $undo && ! $this->plans->large( $restore ) ) {
 			try {
-				return self::summary( $restore, $config, $this->rows( $restore, $config, false, FilePlans::INLINE_BYTES ) );
+				return $this->summary( $restore, $config, $this->rows( $restore, $config, false, FilePlans::INLINE_BYTES ) );
 			} catch ( InvalidArgument $exception ) {
 				if ( 'file_plan_large' !== ( $exception->context()['code'] ?? null ) ) {
 					throw $exception;
@@ -289,7 +300,9 @@ final readonly class FileChanges implements StepProvider {
 		$restore = ApplyJournal::field( $job, 'restore' );
 		$config  = true === ( $job->data['include_config'] ?? null );
 		$rows    = $this->rows( $restore, $config, true );
-		self::confirmed( self::summary( $restore, $config, $rows ), $digest );
+		$preview = $this->summary( $restore, $config, $rows );
+		self::confirmed( $preview, $digest );
+		$job->data['remaining_bytes'] = $preview['required_bytes'];
 		// A kill can leave this file before the runner persisted its next step. Rebuilding
 		// in preflight is safe: a mutation happens only after the step change is durable.
 		$dir = $this->journal->workspace( $job );
@@ -335,6 +348,16 @@ final readonly class FileChanges implements StepProvider {
 		$cursor    = $job->progress['verified'] ?? 0;
 		if ( ! is_int( $cursor ) || $cursor < 0 || $cursor > $head['entries'] ) {
 			throw new JobConflict( 'The sealed file preview verification cursor is invalid.' );
+		}
+		// A pre-upgrade job may have verified rows without accounting for their payloads.
+		if ( ! $undo && ! isset( $job->data['verified_bytes'] ) ) {
+			$cursor                      = 0;
+			$job->progress['verified']   = 0;
+			$job->data['verified_bytes'] = 0;
+		}
+		$required = $job->data['verified_bytes'] ?? 0;
+		if ( ! is_int( $required ) || $required < 0 ) {
+			throw new StorageFailed( 'The verified file-space total is invalid.' );
 		}
 		$verify          = $this->journal->verification( $job );
 		$spellings       = new DirectorySpellings( $verify, $deadline );
@@ -392,12 +415,18 @@ final readonly class FileChanges implements StepProvider {
 					return false;
 				}
 			}
+			if ( ! $undo && 'identical_contents' !== $row['reason'] ) {
+				$required                    = FileSpace::add( $required, $this->space->row( $row ) );
+				$job->data['verified_bytes'] = $required;
+			}
 			$job->progress['verified'] = ++$cursor;
 			if ( microtime( true ) >= $deadline || $this->jobs->cancel_requested( $job ) ) {
 				return false;
 			}
 		}
 		if ( ! $undo ) {
+			FileSpace::require_space( $this->space->estimate( $required ) );
+			$job->data['remaining_bytes'] = $required;
 			ApplyJournal::directory( $this->journal->workspace( $job ) );
 		}
 		$job->progress['total'] = $undo ? $attempted : $head['changes'];
@@ -439,6 +468,9 @@ final readonly class FileChanges implements StepProvider {
 			}
 		}
 		$this->enter_maintenance( $job );
+		if ( ! $undo && ! isset( $job->data['remaining_bytes'] ) && ! $this->plans->resume_space( $job, $disk, $rows, $done, $total, $deadline ) ) {
+			return false;
+		}
 		do {
 			$i      = $undo ? $total - 1 - $done : $done;
 			$record = $disk?->mutation( $i );
@@ -473,11 +505,22 @@ final readonly class FileChanges implements StepProvider {
 				if ( ! $change->started( $path, $row['action'] ) ) {
 					$this->recheck( $plan, $files, $source, $path, $row );
 				}
+				$payload   = $this->space->row( $row );
+				$remaining = $job->data['remaining_bytes'] ?? null;
+				if ( ! is_int( $remaining ) || $remaining < $payload ) {
+					throw new StorageFailed( 'The remaining file-space total is inconsistent.' );
+				}
+				$later = $remaining - $payload;
+				$need  = $change->remaining( $path, $row['action'], $payload, $this->space );
+				FileSpace::require_space( $this->space->estimate( FileSpace::add( $later, $need ) ) );
 				if ( $this->journal->attempted( $original ) <= $i ) {
 					ApplyJournal::directory( $item );
 					Files::write_atomic( $dir . '/attempted', (string) ( $i + 1 ) );
 				}
 				$complete = $change->apply( $path, $row['action'], $row['source'], $row['original'], $deadline, $row['mode'] );
+				if ( $complete ) {
+					$job->data['remaining_bytes'] = $later;
+				}
 			}
 			if ( ! $complete ) {
 				return false;
@@ -605,21 +648,24 @@ final readonly class FileChanges implements StepProvider {
 	 * @param list<Row> $rows Manifest.
 	 * @return Preview Preview.
 	 */
-	private static function summary( string $restore, bool $config, array $rows ): array {
-		$entries = [];
-		$blocked = false;
-		$changes = false;
+	private function summary( string $restore, bool $config, array $rows ): array {
+		$entries  = [];
+		$blocked  = false;
+		$changes  = false;
+		$required = 0;
 		foreach ( $rows as $row ) {
+			$required  = FileSpace::add( $required, $this->space->row( $row ) );
 			$entries[] = ApplyManifest::display( $row );
 			$blocked   = $blocked || 'refuse' === $row['action'];
 			$changes   = $changes || in_array( $row['action'], [ 'create', 'replace', 'mkdir', 'restore', 'remove' ], true );
 		}
+		$estimate = $this->space->estimate( $required );
 		return [
 			'entries'    => $entries,
 			'restore'    => $restore,
 			'digest'     => hash( 'sha256', self::json( [ $restore, $config, $rows ] ) ),
-			'applicable' => ! $blocked && $changes,
-		];
+			'applicable' => ! $blocked && $changes && false !== $estimate['enough_space'],
+		] + $estimate;
 	}
 
 	/**
@@ -660,7 +706,7 @@ final readonly class FileChanges implements StepProvider {
 			$row['reason'] = 'refuse' === $row['action'] ? 'changed_since_apply' : 'undo_journal';
 			$undo[]        = $row;
 		}
-		$result               = self::summary( $restore, $config, $undo );
+		$result               = $this->summary( $restore, $config, $undo );
 		$result['applicable'] = [] !== $undo && ! in_array( 'refuse', array_column( $undo, 'action' ), true );
 		$result['digest']     = hash( 'sha256', $apply->id . $result['digest'] );
 		return $result;
@@ -742,6 +788,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @throws JobConflict If the confirmed digest or eligibility changed.
 	 */
 	private static function confirmed( array $preview, string $digest ): void {
+		FileSpace::require_space( $preview );
 		if ( ! $preview['applicable'] || ! hash_equals( $preview['digest'], $digest ) ) {
 			throw new JobConflict( 'The approved file plan is stale or contains no applicable changes.' );
 		}

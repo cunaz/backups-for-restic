@@ -15,6 +15,7 @@ use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\FileMaintenance;
+use BackupsForRestic\Restore\FileSpace;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Support\Redactor;
@@ -36,6 +37,7 @@ final class FileChangesTest extends TestCase {
 	private FileChanges $changes;
 	private Runner $runner;
 	private bool $allowed = true;
+	private ?int $free    = PHP_INT_MAX;
 
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'apply-job' );
@@ -70,7 +72,8 @@ final class FileChangesTest extends TestCase {
 				return new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
 			},
 			new FileMaintenance( $this->live ),
-			fn (): bool => $this->allowed
+			fn (): bool => $this->allowed,
+			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free )
 		);
 		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
 	}
@@ -160,6 +163,87 @@ final class FileChangesTest extends TestCase {
 		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
 		self::assertDirectoryDoesNotExist( $this->files );
 		self::assertDirectoryDoesNotExist( $this->jobs->directory( $job ) . '/undo' );
+	}
+
+	public function test_apply_reports_dense_preimage_and_candidate_bytes_and_blocks_a_full_volume(): void {
+		$unit = max( 1, stat( $this->jobs->storage_directory() )['blksize'] );
+		$old  = fopen( $this->live . '/a-existing', 'r+b' );
+		ftruncate( $old, 3 * $unit + 1 );
+		fclose( $old );
+		$this->free = 6 * $unit - 1;
+		$review     = $this->changes->request_preview( $this->restore, false, false );
+		self::assertIsArray( $review );
+		self::assertSame( 6 * $unit, $review['required_bytes'] ); // Four blocks for old bytes, one for each new payload.
+		self::assertSame( $this->free, $review['available_bytes'] );
+		self::assertFalse( $review['enough_space'] );
+		self::assertFalse( $review['applicable'] );
+		try {
+			$this->changes->start_apply( $this->restore, false, $review['digest'] );
+			self::fail( 'A rejected file-space check must prevent enqueue.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'file_space', $refused->context()['code'] );
+		}
+		self::assertNull( $this->jobs->active() );
+		self::assertFileDoesNotExist( $this->live . '/.maintenance' );
+		++$this->free;
+		$ready = $this->changes->preview( $this->restore );
+		self::assertSame( $review['digest'], $ready['digest'] );
+		self::assertTrue( $ready['enough_space'] );
+		self::assertTrue( $ready['applicable'] );
+	}
+
+	public function test_later_disk_pressure_blocks_the_first_write_even_after_successful_preflight(): void {
+		$apply = $this->start();
+		$this->runner->tick( 0.0 ); // Preflight completed, mutation request has not started.
+		$this->free = max( 1, stat( $this->jobs->storage_directory() )['blksize'] ) * 2;
+		$failed     = $this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'file_space', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+		self::assertSame( [], $this->changes->undoable() );
+	}
+
+	public function test_pre_upgrade_in_progress_apply_estimates_the_full_remainder_before_resuming(): void {
+		$apply = $this->start();
+		$this->runner->tick( 0.0 );
+		$saved = $this->jobs->get( $apply->id );
+		self::assertNotNull( $saved );
+		unset( $saved->data['remaining_bytes'] );
+		$this->jobs->save( $saved );
+		$this->free = max( 1, stat( $this->jobs->storage_directory() )['blksize'] ) * 2;
+		$this->runner->tick( 0.0 );
+		self::assertSame( 1, $this->jobs->get( $apply->id )?->data['space_cursor'] );
+		$failed = $this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'file_space', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertSame( [], $this->changes->undoable() );
+	}
+
+	public function test_partial_apply_fails_on_new_disk_pressure_and_undo_reuses_its_preimage(): void {
+		$apply = $this->start();
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+		$this->free = 0;
+		$failed     = $this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'file_space', $failed->error?->code );
+		self::assertSame( 1, $failed->result['entries_completed'] );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+		$review = $this->changes->preview_undo( $apply->id );
+		self::assertSame( 0, $review['required_bytes'] );
+		self::assertSame( 0, $review['available_bytes'] );
+		self::assertTrue( $review['enough_space'] );
+		$this->undo( $apply );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_host_with_unknown_capacity_still_validates_and_applies_reviewed_bytes(): void {
+		$this->free = null;
+		$review     = $this->changes->preview( $this->restore );
+		self::assertGreaterThan( 0, $review['required_bytes'] );
+		self::assertNull( $review['available_bytes'] );
+		self::assertNull( $review['enough_space'] );
+		$this->run_job( $this->start() );
 	}
 
 	public function test_stale_confirmation_refused_before_enqueue_and_again_before_writing(): void {
@@ -351,6 +435,9 @@ final class FileChangesTest extends TestCase {
 		self::assertIsArray( $page );
 		self::assertCount( 100, $page['entries'] );
 		self::assertTrue( $page['applicable'] );
+		$space = new FileSpace( $this->jobs->storage_directory() );
+		self::assertSame( $space->allocation( strlen( $original ) ) + $space->allocation( strlen( $replacement ) ) + $space->allocation( 7 ), $page['required_bytes'] );
+		self::assertTrue( $page['enough_space'] );
 		self::assertSame( 100, $page['next_offset'] );
 		$last = $this->changes->request_preview( $this->restore, false, false, $plan->id, 100 );
 		self::assertIsArray( $last );
@@ -368,11 +455,37 @@ final class FileChangesTest extends TestCase {
 		$undo = $this->changes->request_preview( $apply->id, true, false, $undo_plan->id );
 		self::assertIsArray( $undo );
 		self::assertTrue( $undo['applicable'] );
+		self::assertSame( 0, $undo['required_bytes'] );
 		$this->run_job( $this->changes->start_undo( $apply->id, $undo['digest'], '', $undo_plan->id ) );
 		self::assertSame( hash( 'sha256', $original ), hash_file( 'sha256', $this->live . '/a-existing' ) );
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
 		self::assertDirectoryDoesNotExist( dirname( $this->files ) );
+	}
+
+	public function test_legacy_sealed_plan_without_an_estimate_restarts_interrupted_preflight_before_mutating(): void {
+		$plan   = $this->run_job( $this->queue_large_preview() );
+		$sealed = dirname( $this->files ) . '/plans/' . $plan->id . '/sealed.json';
+		$header = json_decode( file_get_contents( $sealed ), true, 512, JSON_THROW_ON_ERROR );
+		unset( $header['required_bytes'] );
+		$old                    = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
+		$plan->result['digest'] = hash( 'sha256', $old );
+		file_put_contents( $sealed, $old );
+		$this->jobs->save( $plan );
+
+		$review = $this->changes->request_preview( $this->restore, false, false, $plan->id );
+		self::assertIsArray( $review );
+		self::assertNull( $review['required_bytes'] );
+		self::assertTrue( $review['applicable'] );
+		$apply                       = $this->changes->start_apply( $this->restore, false, $review['digest'], '', $plan->id );
+		$apply->progress['verified'] = $header['entries'];
+		$this->jobs->save( $apply );
+		$this->free = 0;
+		$failed     = $this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'file_space', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+		self::assertSame( [], $this->changes->undoable() );
 	}
 
 	public function test_background_preflight_refuses_changed_files_before_the_first_live_write(): void {

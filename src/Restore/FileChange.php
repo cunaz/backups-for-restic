@@ -57,6 +57,35 @@ final readonly class FileChange {
 	}
 
 	/**
+	 * Charges only the portion that will still be written after a stopped copy tick.
+	 *
+	 * @param string    $path Reviewed live path.
+	 * @param string    $action Original action.
+	 * @param int       $payload Reviewed allocation of the entire entry.
+	 * @param FileSpace $space Allocation estimates on this volume.
+	 * @return int Remaining payload allocation.
+	 */
+	public function remaining( string $path, string $action, int $payload, FileSpace $space ): int {
+		if ( 0 === $payload ) {
+			return 0;
+		}
+		$record = $this->read( $path, $action );
+		if ( null === $record ) {
+			return $payload;
+		}
+		if ( 'copy' !== $record['phase'] ) {
+			return 0;
+		}
+		foreach ( 'replace' === $action ? [ 'original', 'candidate' ] : [ 'candidate' ] as $name ) {
+			$file = $this->item_directory . '/' . $name;
+			if ( self::exists( $file ) ) {
+				$payload = max( 0, $payload - $space->allocation( self::regular( $file )['size'] ) );
+			}
+		}
+		return $payload;
+	}
+
+	/**
 	 * Advances one reviewed change. The file digests bind the bytes to the confirmed plan.
 	 *
 	 * @param string      $path Absolute snapshot and destination path.

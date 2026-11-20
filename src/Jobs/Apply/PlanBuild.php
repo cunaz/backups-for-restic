@@ -17,6 +17,7 @@ use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\DiskFilePlan;
 use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\FileChange;
+use BackupsForRestic\Restore\FileSpace;
 use BackupsForRestic\Restore\FileWorkPending;
 use BackupsForRestic\Support\Bytes;
 
@@ -59,6 +60,13 @@ final class PlanBuild {
 	public int $refused = 0;
 
 	/**
+	 * Conservative data allocation, or null for a plan started by an older version.
+	 *
+	 * @var int|null
+	 */
+	public ?int $required_bytes;
+
+	/**
 	 * Hash progress within the current report line.
 	 *
 	 * @var array<string,mixed>
@@ -72,9 +80,10 @@ final class PlanBuild {
 	 * @param ApplyPlan           $plan Current site policy.
 	 * @param string              $files Canonical staging files.
 	 * @param array<string,mixed> $data Worker state.
+	 * @param FileSpace           $space Destination volume.
 	 * @throws StorageFailed If the stored cursor is invalid.
 	 */
-	public function __construct( private readonly DiskFilePlan $disk, private readonly ApplyPlan $plan, private readonly string $files, array $data ) {
+	public function __construct( private readonly DiskFilePlan $disk, private readonly ApplyPlan $plan, private readonly string $files, array $data, private readonly FileSpace $space ) {
 		$counts  = $data['counts'] ?? [];
 		$offset  = $data['offset'] ?? 0;
 		$changes = $data['changes'] ?? 0;
@@ -89,9 +98,14 @@ final class PlanBuild {
 			}
 			$this->counts[ $name ] = $count;
 		}
-		$this->offset  = $offset;
-		$this->changes = $changes;
-		$this->refused = $refused;
+		$required = $data['required_bytes'] ?? ( 0 === $offset ? 0 : null );
+		if ( null !== $required && ( ! is_int( $required ) || $required < 0 ) ) {
+			throw new StorageFailed( 'The background file preview allocation total is invalid.' );
+		}
+		$this->required_bytes = $required;
+		$this->offset         = $offset;
+		$this->changes        = $changes;
+		$this->refused        = $refused;
 		foreach ( $pending as $key => $value ) {
 			if ( is_string( $key ) ) {
 				$this->pending[ $key ] = $value;
@@ -302,11 +316,12 @@ final class PlanBuild {
 	public function checkpoint(): array {
 		$this->disk->flush();
 		return [
-			'offset'  => $this->offset,
-			'counts'  => $this->counts,
-			'changes' => $this->changes,
-			'refused' => $this->refused,
-			'pending' => $this->pending,
+			'offset'         => $this->offset,
+			'counts'         => $this->counts,
+			'changes'        => $this->changes,
+			'refused'        => $this->refused,
+			'pending'        => $this->pending,
+			'required_bytes' => $this->required_bytes,
 		];
 	}
 
@@ -396,6 +411,9 @@ final class PlanBuild {
 		$this->refused       += 'refuse' === $row['action'] ? 1 : 0;
 		if ( ! ApplyManifest::mutates( $row ) || null === $row['destination'] ) {
 			return;
+		}
+		if ( null !== $this->required_bytes ) {
+			$this->required_bytes = FileSpace::add( $this->required_bytes, $this->space->row( $row ) );
 		}
 		$target  = Bytes::base64url_decode( $row['destination'] );
 		$stream  = sprintf( 'd%03d', substr_count( $target, '/' ) );

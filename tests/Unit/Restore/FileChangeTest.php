@@ -8,6 +8,7 @@ use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\FileChange;
+use BackupsForRestic\Restore\FileSpace;
 use BackupsForRestic\Tests\Support\TempDir;
 
 final class FileChangeTest extends TestCase {
@@ -44,7 +45,11 @@ final class FileChangeTest extends TestCase {
 		$new_hash = hash( 'sha256', $new );
 		$old_hash = hash( 'sha256', $old );
 
+		$space   = new FileSpace( $this->root );
+		$payload = $space->allocation( strlen( $new ) ) + $space->allocation( strlen( $old ) );
+		self::assertSame( $payload, $this->change->remaining( $this->path, 'replace', $payload, $space ) );
 		self::assertFalse( $this->change->apply( $this->path, 'replace', $new_hash, $old_hash, 0 ) );
+		self::assertSame( $payload - $space->allocation( 1048576 ), $this->change->remaining( $this->path, 'replace', $payload, $space ) );
 		self::assertSame( $old, file_get_contents( $this->path ) );
 		self::assertSame( 'keep', $this->change->undo_action( $this->path, 'replace' ) );
 		for ( $tick = 0; $tick < 10; ++$tick ) {
@@ -54,6 +59,7 @@ final class FileChangeTest extends TestCase {
 		}
 		self::assertLessThan( 10, $tick );
 		self::assertTrue( $this->change->apply( $this->path, 'replace', $new_hash, $old_hash, INF ) );
+		self::assertSame( 0, $this->change->remaining( $this->path, 'replace', $payload, $space ) );
 		self::assertSame( $new, file_get_contents( $this->path ) );
 		self::assertSame( 0640, fileperms( $this->path ) & 0777 );
 		self::assertSame( 'restore', $this->change->undo_action( $this->path, 'replace' ) );

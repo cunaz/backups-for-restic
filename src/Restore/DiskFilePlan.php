@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  * A directory can therefore be found and checked without loading the entire plan.
  *
  * @phpstan-import-type Row from ApplyManifest
- * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,counts:array<string,int>,indexes:array<string,string>}
+ * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,required_bytes:int|null,counts:array<string,int>,indexes:array<string,string>}
  */
 final class DiskFilePlan {
 
@@ -242,10 +242,11 @@ final class DiskFilePlan {
 	 * @param array<string,int> $counts Records per stream.
 	 * @param int               $changes Applicable mutations.
 	 * @param int               $refused Refused actions.
+	 * @param int|null          $required_bytes Estimated peak file data on the journal volume.
 	 * @return string Digest to persist in the job document.
 	 * @throws StorageFailed If a stream is incomplete.
 	 */
-	public function seal( string $subject, string $restore, bool $undo, bool $config, array $counts, int $changes, int $refused ): string {
+	public function seal( string $subject, string $restore, bool $undo, bool $config, array $counts, int $changes, int $refused, ?int $required_bytes = null ): string {
 		$this->flush();
 		$indexes = [];
 		ksort( $counts, SORT_STRING );
@@ -271,7 +272,10 @@ final class DiskFilePlan {
 			'counts'  => $counts,
 			'indexes' => $indexes,
 		];
-		$body   = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
+		if ( null !== $required_bytes ) {
+			$header['required_bytes'] = $required_bytes;
+		}
+		$body = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
 		Files::write_atomic( $this->directory . '/sealed.json', $body );
 		return hash( 'sha256', $body );
 	}
@@ -305,17 +309,22 @@ final class DiskFilePlan {
 				$indexes[ $name ] = $hash;
 			}
 		}
+		$required = $value['required_bytes'] ?? null;
+		if ( null !== $required && ( ! is_int( $required ) || $required < 0 ) ) {
+			throw new StorageFailed( 'The sealed plan contains an invalid file-space estimate.' );
+		}
 		$this->header = [
-			'version' => 1,
-			'subject' => $value['subject'],
-			'restore' => $value['restore'],
-			'undo'    => $value['undo'],
-			'config'  => $value['config'],
-			'entries' => $value['entries'],
-			'changes' => $value['changes'],
-			'refused' => $value['refused'],
-			'counts'  => $counts,
-			'indexes' => $indexes,
+			'required_bytes' => $required,
+			'version'        => 1,
+			'subject'        => $value['subject'],
+			'restore'        => $value['restore'],
+			'undo'           => $value['undo'],
+			'config'         => $value['config'],
+			'entries'        => $value['entries'],
+			'changes'        => $value['changes'],
+			'refused'        => $value['refused'],
+			'counts'         => $counts,
+			'indexes'        => $indexes,
 		];
 		return $this->header;
 	}
