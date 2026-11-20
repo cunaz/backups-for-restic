@@ -261,6 +261,69 @@ final class FileChangeTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->path );
 	}
 
+	public function test_records_and_copies_reach_the_disk_before_the_live_changes_they_authorise(): void {
+		file_put_contents( $this->path, 'old' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		$steps  = [];
+		$record = static function ( string $operation, string $subject ) use ( &$steps ): void {
+			$steps[] = $operation . ' ' . $subject;
+		};
+		$change = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, 'apply', $record );
+		self::assertTrue( $change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		$copy      = $this->journal . '/original';
+		$candidate = $this->journal . '/candidate';
+		self::assertSame(
+			[
+				'journal copy',
+				'sync ' . $copy,
+				'journal copy',
+				'sync ' . $candidate,
+				'journal ready',
+				'rename ' . $this->path,
+				'sync ' . $this->site,
+				'journal done',
+			],
+			$steps
+		);
+		$steps = [];
+		self::assertTrue( $change->undo( $this->path, 'replace', INF ) );
+		self::assertSame( [ 'sync ' . $copy, 'journal restore', 'rename ' . $this->path, 'sync ' . $this->site, 'journal undone' ], $steps );
+		self::assertSame( 'old', file_get_contents( $this->path ) );
+
+		$created = $this->site . '/created.php';
+		$journal = $this->root . '/journal-created';
+		file_put_contents( $this->staging . $created, 'created' );
+		$steps  = [];
+		$change = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $journal, null, 'apply', $record );
+		self::assertTrue( $change->apply( $created, 'create', hash( 'sha256', 'created' ), null, INF ) );
+		self::assertSame(
+			[
+				'journal copy',
+				'sync ' . $journal . '/candidate',
+				'journal ready',
+				'link ' . $created,
+				'unlink ' . $journal . '/candidate',
+				'sync ' . $this->site,
+				'journal done',
+			],
+			$steps
+		);
+		$steps = [];
+		self::assertTrue( $change->undo( $created, 'create', INF ) );
+		self::assertSame( [ 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
+	}
+
+	public function test_undo_removes_a_created_file_whose_private_name_survived_a_power_loss(): void {
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF ) );
+		// The completed record survived, the earlier unlink of the private name did not.
+		link( $this->path, $this->journal . '/candidate' );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+		self::assertTrue( $this->change->undo( $this->path, 'create', INF ) );
+		self::assertFileDoesNotExist( $this->path );
+		self::assertFileDoesNotExist( $this->journal . '/candidate' );
+	}
+
 	public function test_undo_review_keeps_entries_created_below_a_removed_directory(): void {
 		$plugin = $this->site . '/plugin';
 		$code   = $plugin . '/main.php';

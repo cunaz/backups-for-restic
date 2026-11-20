@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Storage;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -55,6 +56,28 @@ final class FilesTest extends TestCase {
 		}
 		self::assertSame( 'previous', file_get_contents( $file ) );
 		self::assertSame( [], glob( $file . '.*.tmp' ), 'A failed cache write must not accumulate partial files.' );
+	}
+
+	public function test_a_durable_write_replaces_the_target_privately_without_a_temporary_file(): void {
+		$file = $this->directory . '/entry.json';
+		file_put_contents( $file, 'previous' );
+		chmod( $file, 0644 );
+		Files::write_durable( $file, '{"phase":"ready"}' );
+		self::assertSame( '{"phase":"ready"}', file_get_contents( $file ) );
+		self::assertSame( 0600, fileperms( $file ) & 0777 );
+		self::assertSame( [], glob( $file . '.*.tmp' ) );
+	}
+
+	public function test_synchronisation_accepts_read_only_copies_and_skips_what_cannot_be_opened(): void {
+		$copy = $this->directory . '/candidate';
+		file_put_contents( $copy, 'bytes' );
+		chmod( $copy, 0400 );
+		Files::sync_file( $copy );
+		Files::sync_directory( $this->directory );
+		// A directory that cannot be opened as a stream is skipped, never an error.
+		Files::sync_directory( $this->directory . '/missing' );
+		$this->expectException( StorageFailed::class );
+		Files::sync_file( $this->directory . '/missing' );
 	}
 
 	public function test_a_file_beyond_the_limit_leaves_the_target_unchanged(): void {

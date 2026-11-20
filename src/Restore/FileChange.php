@@ -20,6 +20,11 @@ defined( 'ABSPATH' ) || exit;
  * that completed before its caller could checkpoint. An undo refuses an edited live file.
  * The caller serializes writers and pins staging and the item directory until undo expires.
  *
+ * Every journal record is synchronised to disk before the live change it authorises, and a
+ * private copy before the record that names it. A live publication or removal is
+ * synchronised in its directory before the record that marks it complete, so a power loss
+ * leaves a state that the retry or the undo recognises, as a killed process does.
+ *
  * @phpstan-type Identity array{dev: int, ino: int}
  * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string}
  */
@@ -35,13 +40,17 @@ final readonly class FileChange {
 	/**
 	 * Binds a change to its staged tree and its private undo journal.
 	 *
-	 * @param ApplyPlan   $plan Current site policy.
-	 * @param string      $files Canonical staging files directory.
-	 * @param string      $item_directory Unique private directory for this manifest row.
-	 * @param string|null $source_path Original snapshot path when the live target is mapped.
-	 * @param string      $scope Current job for independent verification checkpoints.
+	 * @param ApplyPlan                             $plan Current site policy.
+	 * @param string                                $files Canonical staging files directory.
+	 * @param string                                $item_directory Unique private directory for this manifest row.
+	 * @param string|null                           $source_path Original snapshot path when the live target is mapped.
+	 * @param string                                $scope Current job for independent verification checkpoints.
+	 * @param (\Closure(string, string): void)|null $observer Optional observer, called after each journal record
+	 *                                                         (with its phase), synchronisation and live operation
+	 *                                                         (with its path), in order. Tests use it to stop a
+	 *                                                         worker at each crash point.
 	 */
-	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null, string $scope = 'legacy' ) {
+	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null, string $scope = 'legacy', private ?\Closure $observer = null ) {
 		$this->proofs = new FileVerification( $item_directory, $scope );
 	}
 
@@ -178,6 +187,8 @@ final readonly class FileChange {
 				if ( ! $this->copy_file( $path, $old, $original_hash, $deadline ) ) {
 					return false;
 				}
+				// The retained bytes are on disk before the record that names them.
+				$this->sync_file( $old );
 				$record['backup'] = self::identity( self::regular( $old ) );
 				$this->save( $record );
 			}
@@ -185,6 +196,8 @@ final readonly class FileChange {
 				return false;
 			}
 			self::set_attributes( $next, $record, false );
+			// The candidate's bytes and attributes are on disk before publication is authorised.
+			$this->sync_file( $next );
 			$record['candidate'] = self::identity( self::regular( $next ) );
 			$record['installed'] = self::metadata( $next );
 			$record['phase']     = 'ready';
@@ -194,7 +207,7 @@ final readonly class FileChange {
 		// A create uses a no-clobber hard link. If it was interrupted between link and
 		// unlink, drop our private name before the planner rechecks the live link count.
 		if ( 'create' === $action && self::at( $next, $record['candidate'] ) && self::at( $path, $record['candidate'] ) ) {
-			self::remove_file( $next );
+			$this->remove_file( $next );
 		}
 		if ( ! self::at( $path, $record['candidate'] ) ) {
 			$this->require_action( $path, $action );
@@ -211,14 +224,14 @@ final readonly class FileChange {
 				if ( ApplyManifest::identity( $path ) !== $live ) {
 					throw new StorageFailed( 'The live original changed during verification of its undo copy.' );
 				}
-				self::publish( $next, $path );
+				$this->publish( $next, $path );
 			} else {
-				if ( ! function_exists( 'link' ) || ! link( $next, $path ) ) {
-					throw new StorageFailed( 'The new file could not be published without replacing an existing entry.' );
-				}
-				self::remove_file( $next );
+				$this->link( $next, $path );
+				$this->remove_file( $next );
 			}
 		}
+		// Also after a retry: the publication is on disk before the record that completes it.
+		$this->sync_directory( dirname( $path ) );
 		$this->require_action( $path, 'replace' );
 		if ( self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $source_hash ) ) {
 			throw new StorageFailed( 'The published file has changed.' );
@@ -275,7 +288,7 @@ final readonly class FileChange {
 		if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] ) {
 			return 'refuse';
 		}
-		$unfinished_link = 'create' === $action && 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] );
+		$unfinished_link = self::private_link( $action, $record, $this->item_directory . '/candidate' );
 		if ( ! $unfinished_link && 'replace' !== $this->live_action( $path, $review ) ) {
 			return 'refuse';
 		}
@@ -331,6 +344,8 @@ final readonly class FileChange {
 		if ( 'restore' === $decision ) {
 			$old = $this->item_directory . '/original';
 			self::set_attributes( $old, $record, true );
+			// The restored permissions and time are on disk before the rename is authorised.
+			$this->sync_file( $old );
 			$record['phase'] = 'restore';
 			$this->save( $record );
 			$this->require_action( $path, 'replace' );
@@ -338,17 +353,18 @@ final readonly class FileChange {
 			if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $record['source'] ) ) {
 				throw new StorageFailed( 'The live file changed during undo.' );
 			}
-			self::publish( $old, $path );
+			$this->publish( $old, $path );
 		} elseif ( 'remove' === $decision ) {
 			$this->require_parent( $path, $record );
 			if ( 'mkdir' === $action ) {
-				if ( [ '.', '..' ] !== scandir( $path ) || ! rmdir( $path ) ) {
-					throw new StorageFailed( 'A directory created by file apply is no longer empty or cannot be removed.' );
-				}
+				$this->remove_directory( $path );
 			} else {
-				self::remove_file( $path );
+				$this->remove_file( $path );
 			}
 		}
+		// Also after a retry: the reversal is on disk before the record that completes it. A
+		// directory that no longer exists has nothing to synchronise.
+		$this->sync_directory( dirname( $path ) );
 		if ( 'mkdir' !== $action && 'copy' !== $record['phase'] ) {
 			self::invalidate( $path );
 		}
@@ -367,10 +383,24 @@ final readonly class FileChange {
 	 */
 	private function undo_decision( string $path, string $action, array $record ): string {
 		$next = $this->item_directory . '/candidate';
-		if ( 'create' === $action && 'ready' === $record['phase'] && self::at( $next, $record['candidate'] ) && self::at( $path, $record['candidate'] ) ) {
-			self::remove_file( $next );
+		if ( self::private_link( $action, $record, $next ) && self::at( $path, $record['candidate'] ) ) {
+			$this->remove_file( $next );
 		}
 		return $this->undo_action( $path, $action );
+	}
+
+	/**
+	 * Whether a create still holds its private name for the candidate: the worker stopped
+	 * between the no-clobber link and the unlink, or a power loss dropped the unlink although
+	 * the record that followed it survived.
+	 *
+	 * @param string $action Forward action.
+	 * @param Record $record Intent.
+	 * @param string $next Private candidate name.
+	 * @return bool Whether the private name refers to the candidate.
+	 */
+	private static function private_link( string $action, array $record, string $next ): bool {
+		return 'create' === $action && in_array( $record['phase'], [ 'ready', 'done' ], true ) && self::at( $next, $record['candidate'] );
 	}
 
 	/**
@@ -395,9 +425,11 @@ final readonly class FileChange {
 			if ( ! mkdir( $path, $record['mode'] | 0700 ) ) {
 				throw new StorageFailed( 'The reviewed directory could not be created.' );
 			}
+			$this->observe( 'mkdir', $path );
 			$record['candidate'] = self::directory_identity( $path );
 			$record['installed'] = self::metadata( $path );
 		}
+		$this->sync_directory( dirname( $path ) );
 		$record['phase'] = 'done';
 		$this->save( $record );
 		return true;
@@ -411,8 +443,12 @@ final readonly class FileChange {
 	private function prepare_directory(): void {
 		$parent = dirname( $this->item_directory );
 		self::directory_identity( $parent );
-		if ( ! is_dir( $this->item_directory ) && ! mkdir( $this->item_directory, 0700 ) ) {
-			throw new StorageFailed( 'The file apply journal could not be created.' );
+		if ( ! is_dir( $this->item_directory ) ) {
+			if ( ! mkdir( $this->item_directory, 0700 ) ) {
+				throw new StorageFailed( 'The file apply journal could not be created.' );
+			}
+			// The journal's directory survives a power loss before its first record does.
+			Files::sync_directory( $parent );
 		}
 		self::directory_identity( $this->item_directory );
 	}
@@ -703,10 +739,25 @@ final readonly class FileChange {
 	 * @param string $to Destination on the same filesystem.
 	 * @throws StorageFailed If the checked filesystem operation cannot complete.
 	 */
-	private static function publish( string $from, string $to ): void {
+	private function publish( string $from, string $to ): void {
 		if ( ! rename( $from, $to ) ) {
 			throw new StorageFailed( 'An atomic file replacement was refused.' );
 		}
+		$this->observe( 'rename', $to );
+	}
+
+	/**
+	 * Publishes a new file under a name that must not exist, with a no-clobber hard link.
+	 *
+	 * @param string $from Private candidate.
+	 * @param string $to Live destination on the same filesystem.
+	 * @throws StorageFailed If the name exists or the filesystem refuses the link.
+	 */
+	private function link( string $from, string $to ): void {
+		if ( ! function_exists( 'link' ) || ! link( $from, $to ) ) {
+			throw new StorageFailed( 'The new file could not be published without replacing an existing entry.' );
+		}
+		$this->observe( 'link', $to );
 	}
 
 	/**
@@ -715,9 +766,56 @@ final readonly class FileChange {
 	 * @param string $path File to unlink.
 	 * @throws StorageFailed If the checked filesystem operation cannot complete.
 	 */
-	private static function remove_file( string $path ): void {
+	private function remove_file( string $path ): void {
 		if ( ! unlink( $path ) ) {
 			throw new StorageFailed( 'A file change could not remove its file.' );
+		}
+		$this->observe( 'unlink', $path );
+	}
+
+	/**
+	 * Removes a directory that this entry created, only while it is empty.
+	 *
+	 * @param string $path Verified directory.
+	 * @throws StorageFailed If the directory has an entry or cannot be removed.
+	 */
+	private function remove_directory( string $path ): void {
+		if ( [ '.', '..' ] !== scandir( $path ) || ! rmdir( $path ) ) {
+			throw new StorageFailed( 'A directory created by file apply is no longer empty or cannot be removed.' );
+		}
+		$this->observe( 'rmdir', $path );
+	}
+
+	/**
+	 * Puts a private copy on disk before a record names it.
+	 *
+	 * @param string $path Private regular file.
+	 * @throws StorageFailed If the copy cannot be synchronised.
+	 */
+	private function sync_file( string $path ): void {
+		Files::sync_file( $path );
+		$this->observe( 'sync', $path );
+	}
+
+	/**
+	 * Puts a directory's entries on disk where the host can synchronise a directory.
+	 *
+	 * @param string $path Directory.
+	 */
+	private function sync_directory( string $path ): void {
+		Files::sync_directory( $path );
+		$this->observe( 'sync', $path );
+	}
+
+	/**
+	 * Reports a completed step to the optional observer.
+	 *
+	 * @param string $operation journal, sync, mkdir, rename, link, unlink or rmdir.
+	 * @param string $subject Phase of a journal record, otherwise the path.
+	 */
+	private function observe( string $operation, string $subject ): void {
+		if ( null !== $this->observer ) {
+			( $this->observer )( $operation, $subject );
 		}
 	}
 
@@ -744,12 +842,13 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Publishes a complete progress record.
+	 * Publishes a complete progress record, on disk before the caller's next live change.
 	 *
 	 * @param Record $record Private intent.
 	 */
 	private function save( array $record ): void {
-		Files::write_atomic( $this->item_directory . '/entry.json', json_encode( $record, JSON_THROW_ON_ERROR ) );
+		Files::write_durable( $this->item_directory . '/entry.json', json_encode( $record, JSON_THROW_ON_ERROR ) );
+		$this->observe( 'journal', $record['phase'] );
 	}
 
 	/**
