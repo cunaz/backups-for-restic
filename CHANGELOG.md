@@ -213,6 +213,7 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a
   proxy, is downloaded again when a check or prune is retried; before, every retry read the

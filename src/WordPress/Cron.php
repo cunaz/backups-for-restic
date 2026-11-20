@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\AppendOnlyProbe;
 use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\TickReport;
 use BackupsForRestic\Scheduling\SchedulePolicy;
@@ -44,18 +45,23 @@ final class Cron {
 	 */
 	public static function register( Container $container ): void {
 		add_filter( 'cron_schedules', [ self::class, 'schedules' ] ); // phpcs:ignore WordPress.WP.CronInterval.CronSchedulesInterval -- The heartbeat runs every five minutes on purpose (ADR 0011).
-		add_action(
-			self::TICK,
-			static function () use ( $container ): void {
-				self::tick( $container );
-			}
-		);
-		add_action(
-			self::HEARTBEAT,
-			static function () use ( $container ): void {
-				self::heartbeat( $container );
-			}
-		);
+		$workers = [
+			self::TICK      => self::tick( ... ),
+			self::HEARTBEAT => self::heartbeat( ... ),
+		];
+		foreach ( $workers as $hook => $worker ) {
+			add_action(
+				$hook,
+				static function () use ( $worker, $container ): void {
+					try {
+						$worker( $container );
+					} catch ( StorageFailed ) {
+						// Keep unrelated WP-Cron events running. The heartbeat retries from durable state.
+						return;
+					}
+				}
+			);
+		}
 		add_action( 'init', [ self::class, 'ensure_heartbeat' ] );
 	}
 
@@ -324,7 +330,8 @@ final class Cron {
 		try {
 			$container->jobs()->create( $type, $trigger, $now );
 			return true;
-		} catch ( JobConflict ) {
+		} catch ( JobConflict | StorageFailed ) {
+			// Leave the slot due so a later heartbeat can retry once storage is writable.
 			return false;
 		}
 	}

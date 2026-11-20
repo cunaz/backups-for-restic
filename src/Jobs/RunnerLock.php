@@ -43,7 +43,7 @@ final class RunnerLock {
 		if ( null !== $this->handle ) {
 			return true;
 		}
-		$handle = fopen( $this->file, 'c' );
+		$handle = @fopen( $this->file, 'c' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A full or read-only filesystem leaves the lock unavailable for this tick.
 		if ( false === $handle ) {
 			return false;
 		}
