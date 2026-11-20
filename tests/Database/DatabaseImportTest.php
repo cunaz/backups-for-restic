@@ -9,6 +9,8 @@ use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Restore\Manifest;
+use BackupsForRestic\Database\Restore\RehearsalReport;
+use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\MysqliConnection as RestoreConnection;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
@@ -128,6 +130,76 @@ final class DatabaseImportTest extends TestCase {
 			],
 			$ledger
 		);
+	}
+
+	public function test_rehearsal_reports_server_versions_original_engines_and_live_only_tables(): void {
+		$this->db->execute( 'CREATE TABLE wp_shared (id INT) ENGINE=InnoDB DEFAULT CHARSET=latin1' );
+		$this->db->execute( 'CREATE TABLE wp_snapshot (id INT) ENGINE=MyISAM' );
+		$this->db->execute( 'CREATE VIEW wp_view AS SELECT id FROM wp_shared' );
+		$this->db->execute( 'CREATE TRIGGER wp_guard BEFORE UPDATE ON wp_shared FOR EACH ROW SET NEW.id=NEW.id' );
+		$this->db->execute( 'INSERT INTO wp_shared VALUES (1),(2)' );
+		$manifest = $this->stage_dump();
+		$this->db->execute( 'DROP TABLE wp_snapshot' );
+		$this->db->execute( 'CREATE TABLE wp_live (id INT) ENGINE=InnoDB' );
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$report = ( new RehearsalReport( new RestoreConnection( $this->db->mysqli ) ) )->read( $manifest, $importer->tables );
+		$tables = array_column( $report['tables'], null, 'name' );
+		self::assertSame( $manifest->server, $report['destination_server'] );
+		self::assertSame( $manifest->server, $report['snapshot_server'] );
+		self::assertSame( 2, $report['rows'] );
+		self::assertSame( 'live_only', $tables['wp_live']['comparison'] );
+		self::assertSame( 'both', $tables['wp_shared']['comparison'] );
+		self::assertSame( 'latin1', $tables['wp_shared']['snapshot_charset'] );
+		self::assertSame( $tables['wp_shared']['live_collation'], $tables['wp_shared']['snapshot_collation'] );
+		self::assertSame( 'snapshot_only', $tables['wp_snapshot']['comparison'] );
+		self::assertSame( 'MYISAM', $tables['wp_snapshot']['snapshot_engine'] );
+		self::assertSame( [ 'wp_view' ], $report['views_not_imported'] );
+		self::assertSame( [ 'wp_shared' ], $manifest->trigger_tables );
+		self::assertContains(
+			[
+				'code'  => 'snapshot_triggers',
+				'table' => 'wp_shared',
+			],
+			$report['findings']
+		);
+		self::assertContains(
+			[
+				'code'  => 'snapshot_engine',
+				'table' => 'wp_snapshot',
+			],
+			$report['findings']
+		);
+	}
+
+	public function test_physical_ownership_survives_rename_and_changes_when_a_name_is_reused(): void {
+		$this->db->execute( 'CREATE TABLE wp_live (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE private_shadow (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$catalog = new SwapCatalog( new RestoreConnection( $this->db->mysqli ) );
+		$before  = $catalog->inspect( [ 'wp_live', 'private_shadow', 'missing' ] );
+		self::assertSame( [], $before['missing_privileges'] );
+		self::assertSame( [], $before['blockers'] );
+		self::assertArrayNotHasKey( 'missing', $before['ids'] );
+		$this->db->execute( 'RENAME TABLE wp_live TO retained, private_shadow TO wp_live' );
+		$after = $catalog->identities( $before['facts'], [ 'wp_live', 'retained' ] );
+		self::assertSame( $before['ids']['wp_live'], $after['retained'] );
+		self::assertSame( $before['ids']['private_shadow'], $after['wp_live'] );
+		$this->db->execute( 'DROP TABLE retained' );
+		$this->db->execute( 'CREATE TABLE retained (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		self::assertNotSame( $after['retained'], $catalog->identities( $before['facts'], [ 'retained' ] )['retained'] );
+	}
+
+	public function test_dictionary_detects_incoming_foreign_keys_outside_the_wordpress_database(): void {
+		$foreign = $this->database . '_other';
+		$this->db->execute( 'CREATE DATABASE `' . $foreign . '`' );
+		try {
+			$this->db->execute( 'CREATE TABLE wp_live (id INT PRIMARY KEY) ENGINE=InnoDB' );
+			$this->db->execute( 'CREATE TABLE `' . $foreign . '`.other (id INT PRIMARY KEY, FOREIGN KEY (id) REFERENCES `' . $this->database . '`.wp_live(id)) ENGINE=InnoDB' );
+			$catalog = new SwapCatalog( new RestoreConnection( $this->db->mysqli ) );
+			self::assertContains( 'foreign_keys', $catalog->inspect( [ 'wp_live' ] )['blockers'] );
+		} finally {
+			$this->db->execute( 'DROP DATABASE `' . $foreign . '`' );
+		}
 	}
 
 	public function test_repeating_a_completed_import_preserves_every_row_and_its_ledger(): void {

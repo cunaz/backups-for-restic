@@ -129,14 +129,15 @@ final class DatabaseDump {
 		}
 		return (string) json_encode(
 			[
-				'format'    => TableSource::FORMAT,
-				'created'   => Rfc3339::format( $this->time ),
-				'server'    => $state['server'],
-				'charset'   => 'utf8mb4',
-				'time_zone' => $state['time_zone'],
-				'prefix'    => $this->prefix,
-				'tables'    => $tables,
-				'views'     => $state['views'],
+				'format'         => TableSource::FORMAT,
+				'created'        => Rfc3339::format( $this->time ),
+				'server'         => $state['server'],
+				'charset'        => 'utf8mb4',
+				'time_zone'      => $state['time_zone'],
+				'prefix'         => $this->prefix,
+				'tables'         => $tables,
+				'views'          => $state['views'],
+				'trigger_tables' => ( new Catalog( $this->connection ) )->trigger_tables( $state['tables'] ),
 			],
 			JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 		) . "\n";

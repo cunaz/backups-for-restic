@@ -30,12 +30,14 @@ final readonly class Manifest {
 	 * Keeps an inventory whose shapes and table/file associations have already been checked.
 	 *
 	 * @param string                                                         $prefix    Expected live table prefix.
+	 * @param string                                                         $server Original database server version.
 	 * @param string                                                         $time_zone Session offset used when the dump was produced.
 	 * @param list<array{name: string, file: string, rows: int, bytes: int}> $tables Completed table files, in dump order.
 	 * @param list<string>                                                   $views Views kept for later restore planning, never executed as table rows.
+	 * @param list<string>|null                                              $trigger_tables Tables with source triggers, or null when unknown.
 	 * @param string                                                         $fingerprint Hash of this exact inventory, for binding resumable import state.
 	 */
-	private function __construct( public string $prefix, public string $time_zone, public array $tables, public array $views, public string $fingerprint ) {
+	private function __construct( public string $prefix, public string $server, public string $time_zone, public array $tables, public array $views, public ?array $trigger_tables, public string $fingerprint ) {
 	}
 
 	/**
@@ -55,7 +57,7 @@ final readonly class Manifest {
 			throw new FormatException( 'The database dump format or connection character set is unsupported.' );
 		}
 		if ( ( $data['prefix'] ?? null ) !== $prefix ) {
-			throw new FormatException( 'The database dump table prefix differs from this site; prefix conversion is not supported.' );
+			FormatException::raise( 'The database dump table prefix differs from this site; prefix conversion is not supported.', [ 'code' => 'database_restore_prefix' ] );
 		}
 		if ( ! is_string( $data['created'] ?? null ) || ! is_string( $data['server'] ?? null ) || str_contains( $data['server'], "\0" ) ) {
 			throw new FormatException( 'The database dump creation metadata is invalid.' );
@@ -105,7 +107,20 @@ final readonly class Manifest {
 			$seen[ $name ] = true;
 			$names[]       = $name;
 		}
-		return new self( $prefix, $zone, $tables, $names, hash( 'sha256', $json ) );
+		$triggers = $data['trigger_tables'] ?? null;
+		if ( null !== $triggers ) {
+			if ( ! is_array( $triggers ) || ! array_is_list( $triggers ) || count( $triggers ) > count( $tables ) ) {
+				throw new FormatException( 'The database trigger inventory is invalid.' );
+			}
+			$base = array_fill_keys( array_column( $tables, 'name' ), true );
+			foreach ( $triggers as $name ) {
+				if ( ! is_string( $name ) || ! isset( $base[ $name ] ) ) {
+					throw new FormatException( 'The database trigger inventory names a repeated or unknown table.' );
+				}
+				unset( $base[ $name ] );
+			}
+		}
+		return new self( $prefix, $data['server'], $zone, $tables, $names, $triggers, hash( 'sha256', $json ) );
 	}
 
 	/**

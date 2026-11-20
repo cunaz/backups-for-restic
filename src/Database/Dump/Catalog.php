@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Database\Dump;
 
+use BackupsForRestic\Database\Privileges;
 use BackupsForRestic\Exception\DatabaseFailed;
 
 defined( 'ABSPATH' ) || exit;
@@ -47,6 +48,28 @@ final class Catalog {
 	 */
 	public function view_names( string $prefix ): array {
 		return $this->names( 'VIEW', $prefix, [] );
+	}
+
+	/**
+	 * Records selected tables that depend on triggers. The dump has no trigger bodies,
+	 * so a future swap needs to distinguish a verified empty set from hidden metadata.
+	 *
+	 * @param list<string> $tables Selected tables.
+	 * @return list<string>|null Table names, or null when discovery is incomplete.
+	 */
+	public function trigger_tables( array $tables ): ?array {
+		if ( ! in_array( 'TRIGGER', Privileges::database( $this->connection ), true ) ) {
+			return null;
+		}
+		try {
+			$rows = $this->connection->rows( 'SELECT DISTINCT EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() ORDER BY EVENT_OBJECT_TABLE LIMIT 10001' );
+			if ( count( $rows ) > 10000 ) {
+				return null;
+			}
+			return array_values( array_intersect( $tables, array_column( $rows, 'EVENT_OBJECT_TABLE' ) ) );
+		} catch ( DatabaseFailed ) {
+			return null;
+		}
 	}
 
 	/**
