@@ -35,8 +35,9 @@ final class RestServer {
 	 * @param bool $append_only Whether deletions are refused (--append-only).
 	 * @param int  $max_size    Repository size limit in bytes (--max-size), 0 for none.
 	 * @param bool $localhost_certificate Whether the positive socket-transport fixture needs a DNS SAN.
+	 * @param bool $private_repos Require authenticated usernames as the first repository path component.
 	 */
-	public function __construct( public bool $append_only = false, public readonly int $max_size = 0, bool $localhost_certificate = false ) {
+	public function __construct( public bool $append_only = false, public readonly int $max_size = 0, bool $localhost_certificate = false, private readonly bool $private_repos = false ) {
 		$this->directory   = TempDir::create( 'rest-server' );
 		$this->certificate = $this->directory . '/cert.pem';
 		$key               = $this->directory . '/key.pem';
@@ -80,6 +81,9 @@ final class RestServer {
 
 	private function start(): void {
 		$command = [ self::binary( 'rest-server' ), '--path', $this->directory . '/data', '--listen', '127.0.0.1:' . $this->port, '--tls', '--tls-cert', $this->certificate, '--tls-key', $this->directory . '/key.pem' ];
+		if ( $this->private_repos ) {
+			$command[] = '--private-repos';
+		}
 		if ( $this->append_only ) {
 			$command[] = '--append-only';
 		}
