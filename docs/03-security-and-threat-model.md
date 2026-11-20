@@ -485,14 +485,15 @@ release. `readme.txt` links to the policy.
       nightly fuzzing without open crashes; self-review checklist
       ([`04-development-and-quality.md`](04-development-and-quality.md) §9.1) completed for
       every security-relevant change.
-- [ ] Live smoke tests green against a TLS rest-server with a self-signed CA and against
-      BorgBase free-tier repositories (normal and append-only). These tests do not exist
-      yet; they need an account and are planned for Milestone 3.
+- [ ] Live smoke tests pass against a TLS rest-server with a private CA and against
+      operator-provisioned BorgBase repositories in normal and append-only mode.
+      [Operator smoke procedure](../tests/Live/README.md).
 - [ ] Nonce-uniqueness and MAC-failure tests green; tests of the size limits green (the
       limits are in T-19).
 - [ ] Log fixtures from integration runs contain no secret value.
-- [ ] HTTP probe behaves on Apache and nginx fixtures. No such fixtures exist yet: the test
-      site is PHP's built-in server with a router that imitates `.htaccess`.
+- [ ] On Apache and nginx the real WordPress HTTP probe identifies both protected and
+      exposed storage, removes its temporary file and permits plaintext staging only for
+      protected storage. [Native server test](../tests/Hosting/private-directory.sh).
 - [ ] The release passes file-plan and apply tests for symlinks, `..`, outside-root destinations and protected startup paths.
 - [ ] Append-only run against `rest-server --append-only`: a forget or prune job ends as
       `skipped: append_only`, retention switches to `external`, and lock release still works.
