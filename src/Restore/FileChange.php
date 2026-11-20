@@ -203,7 +203,14 @@ final readonly class FileChange {
 				throw new StorageFailed( 'The prepared replacement changed before publication.' );
 			}
 			if ( 'replace' === $action ) {
+				$live = ApplyManifest::identity( $path );
 				$this->require_original( $path, $record );
+				if ( ! $this->retained_original( $old, $record ) ) {
+					throw new StorageFailed( 'The retained undo copy changed before the live file could be replaced.' );
+				}
+				if ( ApplyManifest::identity( $path ) !== $live ) {
+					throw new StorageFailed( 'The live original changed during verification of its undo copy.' );
+				}
 				self::publish( $next, $path );
 			} else {
 				if ( ! function_exists( 'link' ) || ! link( $next, $path ) ) {
@@ -273,8 +280,7 @@ final readonly class FileChange {
 		if ( 'create' === $action ) {
 			return 'remove';
 		}
-		$old = $this->item_directory . '/original';
-		return self::at( $old, $record['backup'] ) && $this->matches( $old, $record['original'] ) ? 'restore' : 'refuse';
+		return $this->retained_original( $this->item_directory . '/original', $record ) ? 'restore' : 'refuse';
 	}
 
 	/**
@@ -462,6 +468,22 @@ final readonly class FileChange {
 	}
 
 	/**
+	 * Verifies the same recoverable private inode and bytes at publication and undo.
+	 * Large originals share the verifier's identity-bound, resumable block checkpoints.
+	 *
+	 * @param string $path Private undo copy.
+	 * @param Record $record Original intent and recorded inode.
+	 * @return bool Whether the approved preimage is still intact.
+	 */
+	private function retained_original( string $path, array $record ): bool {
+		if ( ! self::at( $path, $record['backup'] ) ) {
+			return false;
+		}
+		$before = ApplyManifest::identity( $path );
+		return $this->matches( $path, $record['original'] ) && self::at( $path, $record['backup'] ) && ApplyManifest::identity( $path ) === $before;
+	}
+
+	/**
 	 * Opens a bounded-memory copy at the durable length of its private scratch file.
 	 *
 	 * @param string $source Canonical regular source.
@@ -593,8 +615,10 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Checks whether a name still refers to the recorded object.
+	 * Checks whether a name still refers to the recorded object. Concurrent rename or
+	 * unlink can change the result between two checks with the same arguments.
 	 *
+	 * @phpstan-impure
 	 * @param string        $path Path to inspect.
 	 * @param Identity|null $id Expected identity.
 	 * @return bool Identity matches at the canonical path.

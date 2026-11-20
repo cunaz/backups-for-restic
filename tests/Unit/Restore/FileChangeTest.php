@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Restore;
 
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\StorageFailed;
+use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\FileChange;
@@ -98,6 +99,76 @@ final class FileChangeTest extends TestCase {
 			self::assertGreaterThan( 2, $ticks );
 			self::assertSame( 'apply' === $operation ? $new_sha : $old_sha, hash_file( 'sha256', $this->path ) );
 		}
+	}
+
+	public function test_a_different_preimage_inode_cannot_authorize_the_replacement_even_with_identical_bytes(): void {
+		$new = str_repeat( 'n', ChunkDigest::BLOCK + 1 );
+		file_put_contents( $this->path, 'old' );
+		file_put_contents( $this->staging . $this->path, $new );
+		$source   = hash( 'sha256', $new );
+		$original = hash( 'sha256', 'old' );
+		self::assertFalse( $this->change->apply( $this->path, 'replace', $source, $original, 0.0 ) );
+		$backup = $this->journal . '/original';
+		self::assertSame( 'old', file_get_contents( $backup ) );
+		$inode = fileinode( $backup );
+		file_put_contents( $this->journal . '/another', 'old' );
+		rename( $this->journal . '/another', $backup );
+		clearstatcache( true, $backup );
+		self::assertNotSame( $inode, fileinode( $backup ) );
+		try {
+			$this->change->apply( $this->path, 'replace', $source, $original, INF );
+			self::fail( 'The reviewed undo inode must exist when the live original is replaced.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'retained undo copy', $refused->getMessage() );
+		}
+		self::assertSame( 'old', file_get_contents( $this->path ) );
+	}
+
+	public function test_restarted_workers_recheck_a_damaged_large_preimage_in_bounded_blocks_before_publication(): void {
+		$old = str_repeat( 'a', 3 * ChunkDigest::BLOCK + 1 );
+		$new = str_repeat( 'b', 2 * ChunkDigest::BLOCK + 1 );
+		file_put_contents( $this->path, $old );
+		file_put_contents( $this->staging . $this->path, $new );
+		$cursor     = [];
+		$original   = ChunkDigest::advance( $this->path, INF, $cursor );
+		$cursor     = [];
+		$source     = ChunkDigest::advance( $this->staging . $this->path, INF, $cursor );
+		$backup     = $this->journal . '/original';
+		$checkpoint = $this->journal . '/verify-' . hash( 'sha256', 'apply' . "\0" . $backup . "\0" . $original . "\0" . '1' ) . '.json';
+		$changed    = null;
+		$offsets    = [];
+		$refused    = false;
+		$limit      = microtime( true ) + 20;
+		do {
+			$change = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, 'apply' );
+			try {
+				self::assertFalse( $change->apply( $this->path, 'replace', $source, $original, 0.0 ) );
+			} catch ( StorageFailed $error ) {
+				self::assertStringContainsString( 'retained undo copy', $error->getMessage() );
+				$refused = true;
+				break;
+			}
+			$intent = json_decode( file_get_contents( $this->journal . '/entry.json' ), true, 512, JSON_THROW_ON_ERROR );
+			if ( null === $changed && null !== $intent['backup'] ) {
+				$handle = fopen( $backup, 'r+b' );
+				fwrite( $handle, 'x' );
+				fclose( $handle );
+				touch( $backup, time() - 60 );
+				$changed = ApplyManifest::identity( $backup );
+			}
+			if ( null !== $changed && is_file( $checkpoint ) ) {
+				$proof = json_decode( file_get_contents( $checkpoint ), true, 512, JSON_THROW_ON_ERROR );
+				if ( $changed === $proof['identity'] && true === $proof['stable'] ) {
+					$offsets[] = $proof['offset'];
+				}
+			}
+			usleep( 20000 );
+		} while ( microtime( true ) < $limit );
+		self::assertTrue( $refused, 'The damaged preimage must stop the live rename.' );
+		self::assertContains( ChunkDigest::BLOCK, $offsets );
+		self::assertContains( 2 * ChunkDigest::BLOCK, $offsets );
+		self::assertContains( 3 * ChunkDigest::BLOCK, $offsets );
+		self::assertSame( $old, file_get_contents( $this->path ) );
 	}
 
 	public function test_recovery_recognizes_a_completed_rename_on_both_sides(): void {
