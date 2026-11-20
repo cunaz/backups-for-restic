@@ -18,7 +18,10 @@ concurrency:
 
 jobs:
   check:
-    name: Verify owner signature and check package
+    name: Verify owner signature, test results and package
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     outputs:
@@ -40,6 +43,23 @@ jobs:
           git checkout --detach "$commit"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Verify completed release checks on the signed revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          for workflow in ci.yml conformance.yml integration.yml; do
+            runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" -f head_sha="$RELEASE_COMMIT" -f branch=main -F per_page=100)"
+            state="$(jq -r --arg sha "$RELEASE_COMMIT" --arg repo "$GITHUB_REPOSITORY" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_repository.full_name == $repo and .head_branch == "main")
+               | select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")]
+              | max_by(.id) | if .status == "completed" then .conclusion else (.status // "missing") end
+            ' <<< "$runs")"
+            if [[ "$state" != success ]]; then
+              echo "::error::$workflow must pass on $RELEASE_COMMIT before deployment (current state: $state)."
+              exit 1
+            fi
+          done
       - id: package
         run: |
           bin/build-package.sh --zip
