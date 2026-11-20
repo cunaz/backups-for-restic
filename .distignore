@@ -20,6 +20,7 @@
 /composer.lock
 /eslint.config.mjs
 /infection.json5.dist
+/infection-planner.json5.dist
 /package.json
 /package-lock.json
 /playwright.config.js

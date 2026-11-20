@@ -16,8 +16,10 @@
 /composer.lock        export-ignore
 /eslint.config.mjs    export-ignore
 /infection.json5.dist export-ignore
+/infection-planner.json5.dist export-ignore
 /package.json         export-ignore
 /package-lock.json    export-ignore
+/playwright.config.js export-ignore
 /phpcs.xml.dist       export-ignore
 /phpstan.neon.dist    export-ignore
 /phpunit.xml.dist     export-ignore

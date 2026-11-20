@@ -75,6 +75,10 @@
             "@test:unit"
         ],
         "mutation": ".tools/bin/infection --threads=max",
+        "mutation:planner": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --configuration=infection-planner.json5.dist --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"
+        ],
         "fuzz": "php bin/fuzz.php --seconds=10",
         "bench": "php -d opcache.enable_cli=0 bin/bench.php",
         "pot": [

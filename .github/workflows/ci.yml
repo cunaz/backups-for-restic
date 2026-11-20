@@ -280,3 +280,31 @@ jobs:
           name: mutation-logs
           path: .tools/infection/
           retention-days: 14
+
+  planner-mutation:
+    name: Mutation testing (file apply planner)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: pcov
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: bin/install-test-tools.sh infection
+      - run: composer mutation:planner -- --threads=max --no-progress
+      - name: Require a measured planner mutation score
+        if: always()
+        run: |
+          cat .tools/infection-planner/summary.log
+          grep -Eq '^Total: [1-9]' .tools/infection-planner/summary.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: planner-mutation-logs
+          path: .tools/infection-planner/
+          retention-days: 14

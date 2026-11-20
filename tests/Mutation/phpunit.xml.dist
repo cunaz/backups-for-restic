@@ -26,6 +26,11 @@
             <file>../Unit/Engine/ForgetTest.php</file>
             <file>../Unit/Engine/ForgetRunTest.php</file>
         </testsuite>
+        <testsuite name="planner">
+            <file>../Unit/Restore/ApplyPlanTest.php</file>
+            <file>../Unit/Restore/PlannerPolicyTest.php</file>
+            <file>../Unit/Restore/SiteLayoutTest.php</file>
+        </testsuite>
     </testsuites>
     <groups>
         <exclude>
