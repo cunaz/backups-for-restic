@@ -29,7 +29,13 @@ final class FileMaintenanceGate {
 	 * @return float Timestamp for core's maintenance check; zero admits this request.
 	 */
 	public static function stamp( string $id, string $grant, string $plugin, string $api, string $admin, int $updated ): float {
-		$worker = ( defined( 'DOING_CRON' ) && DOING_CRON ) || ( defined( 'WP_CLI' ) && WP_CLI );
+		// An expired marker must relinquish the cron queue and extension bootstrap
+		// as well as allowing normal public requests through core's grace period.
+		if ( time() - $updated >= 600 ) {
+			return (float) $updated;
+		}
+		$cron   = function_exists( 'wp_doing_cron' ) && wp_doing_cron();
+		$worker = $cron || ( defined( 'WP_CLI' ) && true === WP_CLI );
 		if ( ! $worker && ! self::admitted( $id, $grant, $api, $admin, $_SERVER, $_GET, $_COOKIE ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This controls early boot only. WordPress verifies the REST nonce at the route.
 			// A float still expires under core's ten-minute grace period. Core reserves
 			// integer timestamps for its extension-editor scrape workflow.
@@ -40,7 +46,7 @@ final class FileMaintenanceGate {
 		add_filter( 'pre_option_active_plugins', static fn (): array => [ $plugin ], PHP_INT_MAX );
 		add_filter( 'template_directory', static fn (): string => __DIR__, PHP_INT_MAX );
 		add_filter( 'stylesheet_directory', static fn (): string => __DIR__, PHP_INT_MAX );
-		if ( defined( 'DOING_CRON' ) && DOING_CRON ) {
+		if ( $cron ) {
 			// Other extensions did not register their callbacks. Leave their due events
 			// scheduled for the first normal cron boot after the job ends.
 			add_filter( 'pre_get_ready_cron_jobs', self::ready_events( ... ), PHP_INT_MAX );

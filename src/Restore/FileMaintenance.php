@@ -97,7 +97,7 @@ final readonly class FileMaintenance {
 		$expected  = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
 		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < 8192 && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
 		$active    = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
-		if ( $unchanged && false !== $active && false !== $ours && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] && ! unlink( $marker ) ) {
+		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] && ! unlink( $marker ) ) {
 			throw new StorageFailed( 'The site could not leave maintenance mode.' );
 		}
 		if ( ! unlink( $temp ) ) {

@@ -255,7 +255,7 @@ final class Staging {
 	private function remove_one( string $id, float $deadline ): ?bool {
 		$this->require_root();
 		if ( isset( $this->jobs->pinned_restores( $this->clock->now()[0] )[ $id ] ) ) {
-			throw new JobConflict( 'A live file change still needs this staging for apply or undo.' );
+			throw new JobConflict( 'A restore operation still needs this staging for apply or undo.' );
 		}
 		// The ID becomes part of a path: nothing but the form of a job ID gets that far.
 		if ( 1 !== preg_match( JobStore::ID_PATTERN, $id ) ) {
@@ -315,6 +315,41 @@ final class Staging {
 	}
 
 	/**
+	 * Removes a background preview's private data after cancellation.
+	 *
+	 * @param string $restore Source restore.
+	 * @param string $plan Preview job.
+	 * @param float  $deadline Deletion deadline.
+	 * @return bool Finished.
+	 */
+	public function remove_plan( string $restore, string $plan, float $deadline ): bool {
+		return $this->guard( fn (): bool => $this->delete_plan( $restore, $plan, $deadline ) );
+	}
+
+	/**
+	 * Removes only a plan directory whose complete parent chain remains canonical.
+	 *
+	 * @param string $restore Restore ID.
+	 * @param string $plan Preview ID.
+	 * @param float  $deadline Worker deadline.
+	 * @return bool Finished.
+	 * @throws StorageFailed If a component is ambiguous.
+	 */
+	private function delete_plan( string $restore, string $plan, float $deadline ): bool {
+		if ( 1 !== preg_match( JobStore::ID_PATTERN, $restore ) || 1 !== preg_match( JobStore::ID_PATTERN, $plan ) ) {
+			throw new StorageFailed( 'The preview has an invalid storage identity.' );
+		}
+		$parent = $this->directory . '/' . $restore . '/plans';
+		if ( ! self::exists( $parent ) ) {
+			return true;
+		}
+		if ( realpath( $parent ) !== $parent || ! is_dir( $parent ) ) {
+			throw new StorageFailed( 'The preview storage parent is not canonical.' );
+		}
+		return $this->delete( $parent . '/' . $plan, $deadline );
+	}
+
+	/**
 	 * Deletes due staging and expired undo workspaces under the lifecycle lock.
 	 *
 	 * @param int   $hours Staging lifetime.
@@ -322,12 +357,20 @@ final class Staging {
 	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
 	 */
 	private function expire( int $hours, float $deadline ): array {
-		$active = $this->jobs->active();
+		$active       = $this->jobs->active();
+		$now          = $this->clock->now()[0];
+		$pinned_plans = $this->jobs->pinned_file_plans( $now );
 		foreach ( $this->jobs->file_changes() as $job ) {
 			if ( $this->late( $deadline ) ) {
 				break;
 			}
-			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) ) {
+			if ( JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
+				if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
+					unset( $job->data['plan_retained'] );
+					$this->jobs->save( $job );
+				}
+			}
+			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) || ( JobType::FilePlan === $active?->type && true === ( $active->data['undo'] ?? false ) && $job->id === ( $active->data['subject'] ?? null ) ) ) {
 				continue;
 			}
 			$undo = $this->jobs->directory( $job ) . '/undo';

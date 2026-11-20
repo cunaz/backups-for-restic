@@ -26,14 +26,23 @@ defined( 'ABSPATH' ) || exit;
 final readonly class FileChange {
 
 	/**
+	 * Checks reviewed file contents within the active worker budget.
+	 *
+	 * @var FileVerification
+	 */
+	private FileVerification $proofs;
+
+	/**
 	 * Binds a change to its staged tree and its private undo journal.
 	 *
 	 * @param ApplyPlan   $plan Current site policy.
 	 * @param string      $files Canonical staging files directory.
 	 * @param string      $item_directory Unique private directory for this manifest row.
 	 * @param string|null $source_path Original snapshot path when the live target is mapped.
+	 * @param string      $scope Current job for independent verification checkpoints.
 	 */
-	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null ) {
+	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null, string $scope = 'legacy' ) {
+		$this->proofs = new FileVerification( $item_directory, $scope );
 	}
 
 	/**
@@ -60,6 +69,28 @@ final readonly class FileChange {
 	 * @throws StorageFailed If the reviewed action cannot be performed safely.
 	 */
 	public function apply( string $path, string $action, ?string $source_hash, ?string $original_hash, float $deadline, ?int $mode = null ): bool {
+		$this->proofs->deadline = $deadline;
+		try {
+			return $this->apply_entry( $path, $action, $source_hash, $original_hash, $deadline, $mode );
+		} catch ( FileWorkPending ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Advances one reviewed change. The file digests bind the bytes to the confirmed plan.
+	 *
+	 * @param string      $path Absolute snapshot and destination path.
+	 * @param string      $action mkdir, create or replace.
+	 * @param string|null $source_hash SHA-256 of a staged regular file.
+	 * @param string|null $original_hash SHA-256 of the existing file for a replacement.
+	 * @param float       $deadline Unix time to stop copying.
+	 * @param int|null    $mode Original snapshot permissions for new entries.
+	 * @return bool Whether the entry is published.
+	 * @throws StorageFailed If the reviewed action cannot be performed safely.
+	 * @throws FileWorkPending If the current file verification requires another tick.
+	 */
+	private function apply_entry( string $path, string $action, ?string $source_hash, ?string $original_hash, float $deadline, ?int $mode = null ): bool {
 		if ( ! in_array( $action, [ 'mkdir', 'create', 'replace' ], true )
 			|| ( 'mkdir' === $action ? null !== $source_hash : ! self::digest( $source_hash ) )
 			|| ( 'replace' === $action ? ! self::digest( $original_hash ) : null !== $original_hash ) ) {
@@ -115,13 +146,13 @@ final readonly class FileChange {
 			$this->require_action( $path, $action );
 			if ( null !== $original_hash && null === $record['backup'] ) {
 				$this->require_original( $path, $record );
-				if ( ! self::copy_file( $path, $old, $original_hash, $deadline ) ) {
+				if ( ! $this->copy_file( $path, $old, $original_hash, $deadline ) ) {
 					return false;
 				}
 				$record['backup'] = self::identity( self::regular( $old ) );
 				$this->save( $record );
 			}
-			if ( null === $source_hash || ! self::copy_file( $this->files . ( $this->source_path ?? $path ), $next, $source_hash, $deadline ) ) {
+			if ( null === $source_hash || ! $this->copy_file( $this->files . ( $this->source_path ?? $path ), $next, $source_hash, $deadline ) ) {
 				return false;
 			}
 			self::set_attributes( $next, $record, false );
@@ -139,7 +170,7 @@ final readonly class FileChange {
 		if ( ! self::at( $path, $record['candidate'] ) ) {
 			$this->require_action( $path, $action );
 			$this->require_parent( $path, $record );
-			if ( ! self::at( $next, $record['candidate'] ) || self::metadata( $next ) !== $record['installed'] || ! self::matches( $next, $source_hash ) ) {
+			if ( ! self::at( $next, $record['candidate'] ) || self::metadata( $next ) !== $record['installed'] || ! $this->matches( $next, $source_hash ) ) {
 				throw new StorageFailed( 'The prepared replacement changed before publication.' );
 			}
 			if ( 'replace' === $action ) {
@@ -153,7 +184,7 @@ final readonly class FileChange {
 			}
 		}
 		$this->require_action( $path, 'replace' );
-		if ( self::metadata( $path ) !== $record['installed'] || ! self::matches( $path, $source_hash ) ) {
+		if ( self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $source_hash ) ) {
 			throw new StorageFailed( 'The published file has changed.' );
 		}
 		$record['phase'] = 'done';
@@ -166,11 +197,16 @@ final readonly class FileChange {
 	 * Determines what can currently be reversed. Only a file installed by this entry is a
 	 * removal candidate. A missing intent means that no live write was attempted.
 	 *
-	 * @param string $path Reviewed path.
-	 * @param string $action Reviewed forward action.
+	 * @param string     $path Reviewed path.
+	 * @param string     $action Reviewed forward action.
+	 * @param float|null $deadline Deadline of a background preview.
 	 * @return string restore, remove, keep or refuse.
+	 * @throws FileWorkPending If the current file verification requires another tick.
 	 */
-	public function undo_action( string $path, string $action ): string {
+	public function undo_action( string $path, string $action, ?float $deadline = null ): string {
+		if ( null !== $deadline ) {
+			$this->proofs->deadline = $deadline;
+		}
 		$record = $this->read( $path, $action );
 		if ( null === $record || 'undone' === $record['phase'] || 'copy' === $record['phase'] ) {
 			return 'keep';
@@ -187,7 +223,7 @@ final readonly class FileChange {
 		if ( ! self::exists( $path ) ) {
 			return 'create' === $action ? 'keep' : 'refuse';
 		}
-		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) && self::matches( $path, $record['original'] ) ) {
+		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) && $this->matches( $path, $record['original'] ) ) {
 			return 'keep';
 		}
 		if ( 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ! self::at( $path, $record['candidate'] ) ) {
@@ -201,14 +237,14 @@ final readonly class FileChange {
 		if ( ! $unfinished_link && 'replace' !== $this->live_action( $path ) ) {
 			return 'refuse';
 		}
-		if ( ! self::matches( $path, $record['source'], $unfinished_link ? 2 : 1 ) ) {
+		if ( ! $this->matches( $path, $record['source'], $unfinished_link ? 2 : 1 ) ) {
 			return 'refuse';
 		}
 		if ( 'create' === $action ) {
 			return 'remove';
 		}
 		$old = $this->item_directory . '/original';
-		return self::at( $old, $record['backup'] ) && self::matches( $old, $record['original'] ) ? 'restore' : 'refuse';
+		return self::at( $old, $record['backup'] ) && $this->matches( $old, $record['original'] ) ? 'restore' : 'refuse';
 	}
 
 	/**
@@ -221,6 +257,25 @@ final readonly class FileChange {
 	 * @throws StorageFailed If undo would affect unrelated data.
 	 */
 	public function undo( string $path, string $action, float $deadline ): bool {
+		$this->proofs->deadline = $deadline;
+		try {
+			return $this->undo_entry( $path, $action, $deadline );
+		} catch ( FileWorkPending ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Reverses one reviewed change, retaining the original when the live file was edited.
+	 *
+	 * @param string $path Reviewed path.
+	 * @param string $action Original action.
+	 * @param float  $deadline Unix deadline of the tick.
+	 * @return bool Whether this item finished.
+	 * @throws StorageFailed If undo would affect unrelated data.
+	 * @throws FileWorkPending If the current file verification requires another tick.
+	 */
+	private function undo_entry( string $path, string $action, float $deadline ): bool {
 		if ( microtime( true ) >= $deadline ) {
 			return false;
 		}
@@ -239,7 +294,7 @@ final readonly class FileChange {
 			$this->save( $record );
 			$this->require_action( $path, 'replace' );
 			$this->require_parent( $path, $record );
-			if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] || ! self::matches( $path, $record['source'] ) ) {
+			if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $record['source'] ) ) {
 				throw new StorageFailed( 'The live file changed during undo.' );
 			}
 			self::publish( $old, $path );
@@ -370,7 +425,7 @@ final readonly class FileChange {
 	private function require_original( string $path, array $record ): void {
 		$stat = self::regular( $path );
 		if ( self::identity( $stat ) !== $record['previous'] || $stat['uid'] !== $record['uid'] || $stat['gid'] !== $record['gid']
-			|| ( $stat['mode'] & 07777 ) !== $record['mode'] || $stat['mtime'] !== $record['mtime'] || ! self::matches( $path, $record['original'] ) ) {
+			|| ( $stat['mode'] & 07777 ) !== $record['mode'] || $stat['mtime'] !== $record['mtime'] || ! $this->matches( $path, $record['original'] ) ) {
 			throw new StorageFailed( 'The live file no longer matches the reviewed original.' );
 		}
 	}
@@ -385,7 +440,7 @@ final readonly class FileChange {
 	 * @return bool Whether all bytes were written and verified.
 	 * @throws StorageFailed If the checked filesystem operation cannot complete.
 	 */
-	private static function copy_file( string $source, string $target, string $digest, float $deadline ): bool {
+	private function copy_file( string $source, string $target, string $digest, float $deadline ): bool {
 		$before = self::regular( $source );
 		$input  = fopen( $source, 'rb' );
 		if ( false === $input ) {
@@ -397,7 +452,7 @@ final readonly class FileChange {
 				throw new StorageFailed( 'The source changed while opening a file.' );
 			}
 			$offset = self::exists( $target ) ? self::regular( $target )['size'] : 0;
-			if ( $offset === $before['size'] && self::exists( $target ) && self::matches( $target, $digest ) ) {
+			if ( $offset === $before['size'] && self::exists( $target ) && $this->matches( $target, $digest ) ) {
 				return true;
 			}
 			$output = self::open_copy( $target );
@@ -424,7 +479,7 @@ final readonly class FileChange {
 		} finally {
 			fclose( $input );
 		}
-		if ( ! self::matches( $target, $digest ) ) {
+		if ( ! $this->matches( $target, $digest ) ) {
 			throw new StorageFailed( 'A private file copy differs from its reviewed digest.' );
 		}
 		return true;
@@ -464,7 +519,8 @@ final readonly class FileChange {
 			throw new StorageFailed( 'File apply cannot preserve this file owner.' );
 		}
 		if ( ( null !== $record['gid'] && $record['gid'] !== $stat['gid'] && ! chgrp( $path, $record['gid'] ) )
-			|| ! chmod( $path, $record['mode'] ) || ( $undo && null !== $record['mtime'] && ! touch( $path, $record['mtime'] ) ) ) {
+			|| ( ( $stat['mode'] & 07777 ) !== $record['mode'] && ! chmod( $path, $record['mode'] ) )
+			|| ( $undo && null !== $record['mtime'] && $stat['mtime'] !== $record['mtime'] && ! touch( $path, $record['mtime'] ) ) ) {
 			throw new StorageFailed( 'File apply could not preserve file metadata.' );
 		}
 	}
@@ -557,7 +613,7 @@ final readonly class FileChange {
 	 * @return bool Whether correctly encoded.
 	 */
 	private static function digest( ?string $hash ): bool {
-		return null !== $hash && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $hash );
+		return null !== $hash && ( 1 === preg_match( '/\A[0-9a-f]{64}\z/', $hash ) || ChunkDigest::valid( $hash ) );
 	}
 
 	/**
@@ -568,9 +624,9 @@ final readonly class FileChange {
 	 * @param int         $links Expected link count.
 	 * @return bool Whether the content matches.
 	 */
-	private static function matches( string $path, ?string $hash, int $links = 1 ): bool {
+	private function matches( string $path, ?string $hash, int $links = 1 ): bool {
 		self::regular( $path, $links );
-		return null !== $hash && hash_file( 'sha256', $path ) === $hash;
+		return null !== $hash && $this->proofs->matches( $path, $hash, $links );
 	}
 
 	/**

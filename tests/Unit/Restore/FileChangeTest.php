@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Unit\Restore;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Restore\ApplyPlan;
+use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\FileChange;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -61,6 +62,36 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( $old, file_get_contents( $this->path ) );
 		self::assertSame( 0640, fileperms( $this->path ) & 0777 );
 		self::assertSame( 1710000000, filemtime( $this->path ) );
+	}
+
+	public function test_large_chunk_digests_apply_and_undo_after_repeated_worker_restarts(): void {
+		$staged = $this->staging . $this->path;
+		file_put_contents( $staged, str_repeat( 'n', 9 * ChunkDigest::BLOCK + 1 ) );
+		file_put_contents( $this->path, str_repeat( 'o', 8 * ChunkDigest::BLOCK + 1 ) );
+		$cursor   = [];
+		$source   = ChunkDigest::advance( $staged, INF, $cursor );
+		$cursor   = [];
+		$original = ChunkDigest::advance( $this->path, INF, $cursor );
+		$old_sha  = hash_file( 'sha256', $this->path );
+		$new_sha  = hash_file( 'sha256', $staged );
+		foreach ( [ 'apply', 'undo' ] as $operation ) {
+			$time_limit = microtime( true ) + 18;
+			$ticks      = 0;
+			do {
+				$change   = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, $operation );
+				$deadline = microtime( true ) + 0.001;
+				$finished = 'apply' === $operation
+					? $change->apply( $this->path, 'replace', $source, $original, $deadline )
+					: $change->undo( $this->path, 'replace', $deadline );
+				++$ticks;
+				if ( ! $finished ) {
+					usleep( 15000 );
+				}
+			} while ( ! $finished && microtime( true ) < $time_limit );
+			self::assertTrue( $finished, $operation . ' stalled after worker restart' );
+			self::assertGreaterThan( 2, $ticks );
+			self::assertSame( 'apply' === $operation ? $new_sha : $old_sha, hash_file( 'sha256', $this->path ) );
+		}
 	}
 
 	public function test_recovery_recognizes_a_completed_rename_on_both_sides(): void {

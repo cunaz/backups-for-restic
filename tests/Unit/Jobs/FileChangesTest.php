@@ -321,4 +321,111 @@ final class FileChangesTest extends TestCase {
 		$this->expectException( InvalidArgument::class );
 		$this->changes->preview( $this->restore, true );
 	}
+	private function queue_large_preview(): Job {
+		for ( $index = 0; $index < 111; ++$index ) {
+			$name = $this->live . '/same-' . $index;
+			file_put_contents( $name, 'already current' );
+			file_put_contents( $this->files . $name, 'already current' );
+		}
+		$this->write_report( $this->live . '/skipped-link' );
+		$queued = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $queued );
+		self::assertSame( JobType::FilePlan, $queued->type );
+		return $queued;
+	}
+
+	public function test_disk_preview_is_paged_and_authenticated_then_large_apply_and_undo_use_it(): void {
+		$original    = str_repeat( 'before', 500000 );
+		$replacement = str_repeat( 'after', 800000 );
+		file_put_contents( $this->live . '/a-existing', $original );
+		file_put_contents( $this->files . $this->live . '/a-existing', $replacement );
+		$plan  = $this->queue_large_preview();
+		$again = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $again );
+		self::assertSame( $plan->id, $again->id );
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		self::assertSame( 'planning', $this->jobs->get( $plan->id )?->step );
+		$this->run_job( $plan );
+		$page = $this->changes->request_preview( $this->restore, false, false, $plan->id );
+		self::assertIsArray( $page );
+		self::assertCount( 100, $page['entries'] );
+		self::assertTrue( $page['applicable'] );
+		self::assertSame( 100, $page['next_offset'] );
+		$last = $this->changes->request_preview( $this->restore, false, false, $plan->id, 100 );
+		self::assertIsArray( $last );
+		self::assertNull( $last['next_offset'] );
+		self::assertSame( $last['digest'], $page['digest'] );
+		$apply    = $this->changes->start_apply( $this->restore, false, $page['digest'], '', $plan->id );
+		$finished = $this->run_job( $apply );
+		self::assertSame( 3, $finished->result['files_changed'] );
+		self::assertSame( hash( 'sha256', $replacement ), hash_file( 'sha256', $this->live . '/a-existing' ) );
+		$this->clock->advance( 3601 );
+		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
+		$undo_plan = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $undo_plan );
+		$this->run_job( $undo_plan );
+		$undo = $this->changes->request_preview( $apply->id, true, false, $undo_plan->id );
+		self::assertIsArray( $undo );
+		self::assertTrue( $undo['applicable'] );
+		$this->run_job( $this->changes->start_undo( $apply->id, $undo['digest'], '', $undo_plan->id ) );
+		self::assertSame( hash( 'sha256', $original ), hash_file( 'sha256', $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( dirname( $this->files ) );
+	}
+
+	public function test_background_preflight_refuses_changed_files_before_the_first_live_write(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id );
+		file_put_contents( $this->files . $this->live . '/b-new/new.txt', 'subsequent modification' );
+		$this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+	}
+
+	public function test_background_preview_rejects_a_different_report_after_its_first_checkpoint(): void {
+		$plan = $this->queue_large_preview();
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		$saved = $this->jobs->get( $plan->id );
+		self::assertNotNull( $saved );
+		self::assertArrayHasKey( 'report_identity', $saved->data );
+		$report = dirname( $this->files ) . '/entries.jsonl';
+		copy( $report, $report . '.next' );
+		rename( $report . '.next', $report );
+		$this->run_job( $plan, JobState::Failed );
+		self::assertDirectoryDoesNotExist( dirname( $report ) . '/plans/' . $plan->id );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_background_undo_preflight_preserves_new_directory_children_before_its_first_write(): void {
+		$plan   = $this->run_job( $this->queue_large_preview() );
+		$apply  = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		$undo   = $this->changes->start_undo( $apply->id, $review->result['digest'], '', $review->id );
+		file_put_contents( $this->live . '/b-new/added-after-review', 'independent data' );
+		$this->run_job( $undo, JobState::Failed );
+		self::assertFileExists( $this->live . '/b-new/new.txt' );
+		self::assertSame( 'independent data', file_get_contents( $this->live . '/b-new/added-after-review' ) );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_background_pages_refuse_tampering_and_expire_without_a_consumer(): void {
+		$plan = $this->run_job( $this->queue_large_preview() );
+		$dir  = dirname( $this->files ) . '/plans/' . $plan->id;
+		file_put_contents( $dir . '/rows-0', '[]' );
+		try {
+			$this->changes->request_preview( $this->restore, false, false, $plan->id );
+			self::fail( 'A tampered page was returned.' );
+		} catch ( \BackupsForRestic\Exception\StorageFailed ) {
+			self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		}
+		$this->clock->advance( 3601 );
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( $dir );
+		self::assertDirectoryExists( $this->files );
+	}
 }

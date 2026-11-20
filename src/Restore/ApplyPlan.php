@@ -26,8 +26,15 @@ defined( 'ABSPATH' ) || exit;
  */
 final class ApplyPlan {
 
-	/** Bounded case-folded sibling indexes. Larger directories are checked by a scan. */
-	private const int CACHED_NAMES = 4096;
+	/** Number of sibling spellings retained across a read-only batch. */
+	private const int CACHED_NAMES = 16384;
+
+	/**
+	 * Bounded sibling indexes shared only within one read-only worker.
+	 *
+	 * @var array<string,array<string,string|false>>
+	 */
+	private array $review_names = [];
 
 	/**
 	 * Live directories in their canonical form.
@@ -109,17 +116,22 @@ final class ApplyPlan {
 	}
 
 	/**
-	 * Rechecks one entry against the current filesystem, with no cache from an earlier call.
+	 * Rechecks an entry. Read-only previews can share sibling indexes within a worker.
+	 * Every mutation uses a fresh enumeration immediately before publication.
 	 *
 	 * @param string $files Canonical private staging files/ directory.
 	 * @param string $path  Absolute snapshot path.
+	 * @param bool   $review Whether reusing this worker's read-only name index is allowed.
 	 * @return Action Current decision.
 	 */
-	public function inspect( string $files, string $path ): array {
+	public function inspect( string $files, string $path, bool $review = false ): array {
 		$cache = [];
 		clearstatcache( true );
 		if ( ! is_dir( $files ) || realpath( $files ) !== $files || '/' === $files ) {
 			return self::decision( $path, null, 'refuse', 'staging_unavailable' );
+		}
+		if ( $review ) {
+			return $this->check( $files, $path, $this->review_names );
 		}
 		return $this->check( $files, $path, $cache );
 	}
@@ -284,8 +296,8 @@ final class ApplyPlan {
 	}
 
 	/**
-	 * Checks names by exact bytes and simple Unicode case folding. Retains at most eight
-	 * small directory indexes. Large directories are scanned on demand in bounded memory.
+	 * Checks names by exact bytes and simple Unicode case folding. Bounds the aggregate and
+	 * individual sibling indexes. Larger directories are scanned in bounded memory.
 	 *
 	 * @param string                                     $directory Existing parent directory.
 	 * @param string                                     $name      Requested spelling.
@@ -322,8 +334,17 @@ final class ApplyPlan {
 			closedir( $handle );
 		}
 		if ( $small ) {
-			if ( count( $cache ) >= 8 ) {
+			if ( count( $cache ) >= 32 ) {
 				array_shift( $cache );
+			}
+			// Bound the aggregate as well as an individual directory. A large flat
+			// uploads folder should fit without retaining dozens of similar indexes.
+			$total = count( $names );
+			foreach ( $cache as $index ) {
+				$total += count( $index );
+			}
+			while ( $total > 2 * self::CACHED_NAMES && [] !== $cache ) {
+				$total -= count( array_shift( $cache ) );
 			}
 			$cache[ $directory ] = $names;
 		}

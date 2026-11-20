@@ -36,11 +36,12 @@ final class ApplyManifest {
 	 * @param string    $files Canonical staging root.
 	 * @param resource  $report Staging report.
 	 * @param int       $device Private journal filesystem.
+	 * @param int       $byte_limit Maximum content read synchronously.
 	 * @return list<Row> Sorted, encoded entries.
 	 * @throws InvalidArgument If the report is incomplete or exceeds a limit.
 	 * @throws StorageFailed If a file cannot be verified.
 	 */
-	public static function build( ApplyPlan $plan, string $files, $report, int $device ): array {
+	public static function build( ApplyPlan $plan, string $files, $report, int $device, int $byte_limit = self::MAX_BYTES ): array {
 		$inventory = [];
 		$blocked   = [];
 		$seen      = [];
@@ -49,7 +50,7 @@ final class ApplyManifest {
 		foreach ( self::report( $report ) as $entry ) {
 			$key = Bytes::base64url_encode( $entry['path'] );
 			if ( strlen( $entry['path'] ) > 4095 || count( $inventory ) >= self::MAX_ENTRIES || isset( $inventory[ $key ] ) ) {
-				throw new InvalidArgument( 'File apply supports up to 1000 distinct staged entries with paths of at most 4095 bytes.' );
+				InvalidArgument::raise( 'This selection needs a background file preview.', [ 'code' => 'file_plan_large' ] );
 			}
 			$inventory[ $key ] = $entry;
 			if ( ! in_array( $entry['type'], [ 'file', 'dir' ], true ) ) {
@@ -82,10 +83,10 @@ final class ApplyManifest {
 				}
 				$row['identity'] = self::identity( $files . $path );
 				if ( 'mkdir' !== $row['action'] ) {
-					$row['source'] = self::hash( $files . $path, $bytes );
+					$row['source'] = self::hash( $files . $path, $bytes, $byte_limit );
 				}
 				if ( 'replace' === $row['action'] ) {
-					$row['original']  = self::hash( $target, $bytes );
+					$row['original']  = self::hash( $target, $bytes, $byte_limit );
 					$row['identity'] .= '/' . self::identity( $target );
 					if ( $row['original'] === $row['source'] ) {
 						$row['action'] = 'keep';
@@ -116,11 +117,12 @@ final class ApplyManifest {
 			}
 			$key = ApplyPlan::fold( Bytes::base64url_decode( $row['destination'] ) );
 			if ( isset( $destinations[ $key ] ) ) {
-				$previous                    = $destinations[ $key ];
-				$rows[ $previous ]['action'] = 'refuse';
-				$rows[ $previous ]['reason'] = 'overlapping_destinations';
-				$rows[ $index ]['action']    = 'refuse';
-				$rows[ $index ]['reason']    = 'overlapping_destinations';
+				$previous          = $destinations[ $key ];
+				$target            = Bytes::base64url_decode( $row['destination'] );
+				$prior             = $rows[ $previous ];
+				$prior_target      = null === $prior['destination'] ? null : Bytes::base64url_decode( $prior['destination'] );
+				$rows[ $previous ] = self::row( $prior['path'], $prior_target, 'refuse', 'overlapping_destinations' );
+				$rows[ $index ]    = self::row( $row['path'], $target, 'refuse', 'overlapping_destinations' );
 			} else {
 				$destinations[ $key ] = $index;
 			}
@@ -188,7 +190,7 @@ final class ApplyManifest {
 	 * @param string      $reason Decision.
 	 * @return Row Entry.
 	 */
-	private static function row( string $key, ?string $target, string $action, string $reason ): array {
+	public static function row( string $key, ?string $target, string $action, string $reason ): array {
 		return [
 			'path'        => $key,
 			'destination' => null === $target ? null : Bytes::base64url_encode( $target ),
@@ -199,6 +201,56 @@ final class ApplyManifest {
 			'original'    => null,
 			'parent'      => '',
 			'identity'    => '',
+		];
+	}
+
+	/**
+	 * Verifies the shape of a row read from private disk. Previous inline manifests
+	 * stored the same absolute path for source and destination in a single field.
+	 *
+	 * @param mixed $row Decoded record.
+	 * @return Row Verified row.
+	 * @throws StorageFailed If a field is invalid.
+	 */
+	public static function checked( mixed $row ): array {
+		if ( ! is_array( $row ) || ! is_string( $row['path'] ?? null ) || ! is_string( $row['action'] ?? null ) || ! is_string( $row['reason'] ?? null ) || ! is_string( $row['parent'] ?? null ) || ! is_string( $row['identity'] ?? null ) ) {
+			throw new StorageFailed( 'The confirmed file plan has an invalid record.' );
+		}
+		$target   = array_key_exists( 'destination', $row ) ? $row['destination'] : $row['path'];
+		$mode     = $row['mode'] ?? null;
+		$source   = $row['source'] ?? null;
+		$original = $row['original'] ?? null;
+		if ( ( null !== $target && ! is_string( $target ) ) || ( null !== $mode && ! is_int( $mode ) ) || ( null !== $source && ! is_string( $source ) ) || ( null !== $original && ! is_string( $original ) ) ) {
+			throw new StorageFailed( 'The confirmed file plan has invalid metadata.' );
+		}
+		return [
+			'path'        => $row['path'],
+			'destination' => $target,
+			'action'      => $row['action'],
+			'reason'      => $row['reason'],
+			'mode'        => $mode,
+			'source'      => $source,
+			'original'    => $original,
+			'parent'      => $row['parent'],
+			'identity'    => $row['identity'],
+		];
+	}
+
+	/**
+	 * Returns the printable source and destination without exposing private file hashes.
+	 *
+	 * @param Row $row Reviewed entry.
+	 * @return array{action:string,path:string,source:string,destination:string|null,reason:string} Public entry.
+	 */
+	public static function display( array $row ): array {
+		$source = GoQuote::quote( Bytes::base64url_decode( $row['path'] ) );
+		$target = null === $row['destination'] ? null : GoQuote::quote( Bytes::base64url_decode( $row['destination'] ) );
+		return [
+			'action'      => $row['action'],
+			'path'        => $target ?? $source,
+			'source'      => $source,
+			'destination' => $target,
+			'reason'      => $row['reason'],
 		];
 	}
 
@@ -255,15 +307,16 @@ final class ApplyManifest {
 	 *
 	 * @param string $path File to verify.
 	 * @param int    $bytes Bytes charged to this preview.
+	 * @param int    $limit Sync byte allowance.
 	 * @return string Hex digest.
 	 * @throws InvalidArgument If the selection exceeds the byte budget.
 	 * @throws StorageFailed If the file changed or cannot be read.
 	 */
-	private static function hash( string $path, int &$bytes ): string {
+	private static function hash( string $path, int &$bytes, int $limit ): string {
 		$expected = self::identity( $path );
 		$size     = filesize( $path );
-		if ( false === $size || $size > self::MAX_BYTES - $bytes ) {
-			throw new InvalidArgument( 'A writable preview is limited to 64 MiB of staged and current file contents combined.' );
+		if ( false === $size || $size > $limit - $bytes ) {
+			InvalidArgument::raise( 'This selection needs a background file preview.', [ 'code' => 'file_plan_large' ] );
 		}
 		$handle = fopen( $path, 'rb' );
 		if ( false === $handle ) {

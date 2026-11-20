@@ -169,6 +169,7 @@ final class StagingTest extends TestCase {
 				'archive'         => false,
 				'file'            => null,
 				'database_report' => false,
+				'fresh_install'   => false,
 			],
 			$list[0]->to_array()
 		);
@@ -197,6 +198,7 @@ final class StagingTest extends TestCase {
 				'archive'         => false,
 				'file'            => null,
 				'database_report' => false,
+				'fresh_install'   => false,
 			],
 			$list[0]->to_array()
 		);
