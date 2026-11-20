@@ -175,6 +175,49 @@ final class SnapshotManifestTest extends TestCase {
 		}
 	}
 
+	/** @return iterable<string, array{string, bool}> */
+	public static function excluded_spool_parents(): iterable {
+		yield 'cache marker' => [ '/content/cache-location', true ];
+		yield 'user exclude' => [ '/content/excluded', false ];
+		yield 'default cache exclude' => [ '/content/cache', false ];
+	}
+
+	#[DataProvider( 'excluded_spool_parents' )]
+	public function test_an_excluded_parent_keeps_only_the_path_to_the_virtual_dump( string $excluded_dir, bool $marker ): void {
+		$root = TempDir::create( 'manifest-excluded' );
+		try {
+			$site   = $root . '/site';
+			$excluded_dir = $site . $excluded_dir;
+			mkdir( $excluded_dir . '/child/private/spool/database', 0700, true );
+			file_put_contents( $excluded_dir . '/other', 'excluded' );
+			file_put_contents( $excluded_dir . '/child/other', 'excluded' );
+			file_put_contents( $excluded_dir . '/child/private/spool/old.sql', 'stale spool file' );
+			file_put_contents( $excluded_dir . '/child/private/spool/database/old.sql', 'stale table file' );
+			if ( $marker ) {
+				touch( $excluded_dir . '/.nobackup' );
+			}
+			$paths      = new SitePaths( $site, $site . '/content', $site . '/content/uploads', 'https://example.com', 'wp_', '6.7', '0.3.0' );
+			$private    = new PrivateDirectory( $excluded_dir . '/child/private' );
+			$clock      = new FrozenClock();
+			$dump       = static fn (): array => [ new VirtualFile( 'dump.sql', static fn (): ByteSource => new StringByteSource( 'SELECT 1;' ), $clock->seconds, 0600 ) ];
+			$plan       = ( new PlanFactory( $paths, Settings::from_stored( [] ), $private, [], [ 'excluded' ], $dump, 'test-job', $clock->seconds ) )->plan();
+			$identity   = new Identity( $paths->hostname() );
+			$repository = Repository::initialize( new InMemoryBackend(), 'test password', $identity, new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+			$run        = BackupRun::start( $repository, $plan, $root . '/work', $identity, $clock );
+			self::assertTrue( $run->advance( INF ) );
+			$id = $run->snapshot_id();
+			self::assertNotNull( $id );
+			$reader = new Reader( $repository, $identity, $clock );
+			$names  = static fn ( string $path ): array => array_map( static fn ( Node $node ): string => $node->name, $reader->directory( $id, $path ) );
+			self::assertSame( [ 'child' ], $names( $excluded_dir ) );
+			self::assertSame( [ 'private' ], $names( $excluded_dir . '/child' ) );
+			self::assertSame( [ 'database', 'manifest.json' ], $names( $private->path . '/spool' ) );
+			self::assertSame( [ 'dump.sql' ], $names( $private->path . '/spool/database' ) );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
 	/** @return iterable<string, array{list<string>}> */
 	public static function invalid_locators(): iterable {
 		yield 'bad base64' => [ [ Manifest::TAG_PREFIX . '!' ] ];

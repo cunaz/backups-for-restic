@@ -86,22 +86,11 @@ final class PlanFactory {
 			$this->ensure( $database );
 		}
 
-		$roots  = array_merge( [ $this->site->abspath, $this->site->content_dir, $this->site->uploads_dir ], $this->roots );
-		$roots  = array_values( array_filter( $roots, static fn ( string $root ): bool => '' !== $root && is_dir( $root ) ) );
-		$inside = false;
-		foreach ( $roots as $root ) {
-			$inside = $inside || str_starts_with( $private_dir . '/', BackupPlan::normalize( [ $root ] )[0] . '/' );
-		}
-		if ( ! $inside ) {
-			$roots[] = $spool;
-		}
-
+		$roots    = array_merge( [ $this->site->abspath, $this->site->content_dir, $this->site->uploads_dir ], $this->roots );
+		$roots    = array_values( array_filter( $roots, static fn ( string $root ): bool => '' !== $root && is_dir( $root ) ) );
 		$patterns = $this->exclude_patterns();
 		$caches   = $this->settings->bool( 'backup.exclude_caches' );
-		$exclude  = static function ( string $path, bool $is_dir ) use ( $private_dir, $spool, $patterns, $caches ): bool {
-			if ( str_starts_with( $path . '/', $private_dir . '/' ) && $path !== $private_dir ) {
-				return $path !== $spool && ! str_starts_with( $path, $spool . '/' );
-			}
+		$excluded = static function ( string $path, bool $is_dir ) use ( $patterns, $caches ): bool {
 			if ( $is_dir && $caches && self::is_cache( $path ) ) {
 				return true;
 			}
@@ -111,6 +100,38 @@ final class PlanFactory {
 				}
 			}
 			return false;
+		};
+
+		// If a normal exclusion covers the virtual dump, walk only the chain of directories
+		// leading to it. Its siblings still belong to the excluded subtree. Determine this
+		// from the plan on every tick, since a tick can resume inside that subtree.
+		$excluded_parent = null;
+		$inside          = false;
+		foreach ( BackupPlan::normalize( $roots ) as $root ) {
+			if ( str_starts_with( $private_dir . '/', $root . '/' ) ) {
+				$inside = true;
+				for ( $dir = $private_dir; $dir !== $root; $dir = dirname( $dir ) ) {
+					if ( $excluded( $dir, true ) ) {
+						$excluded_parent = $dir;
+					}
+				}
+				break;
+			}
+		}
+		if ( ! $inside ) {
+			$roots[] = $spool;
+		}
+
+		$dump_dir = null === $this->database ? null : $database;
+		$exclude  = static function ( string $path, bool $is_dir ) use ( $private_dir, $spool, $dump_dir, $excluded_parent, $excluded ): bool {
+			if ( str_starts_with( $path, $private_dir . '/' ) ) {
+				// Everything else under spool is virtual, including the database files.
+				return $path !== $spool && $path !== $dump_dir;
+			}
+			if ( str_starts_with( $private_dir . '/', $path . '/' ) ) {
+				return false;
+			}
+			return ( null !== $excluded_parent && str_starts_with( $path, $excluded_parent . '/' ) ) || $excluded( $path, $is_dir );
 		};
 
 		$manifest = $this->manifest( $roots, $patterns );

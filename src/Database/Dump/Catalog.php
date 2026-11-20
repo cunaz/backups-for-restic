@@ -62,12 +62,18 @@ final class Catalog {
 		if ( ! isset( $create[0]['Create Table'] ) ) {
 			DatabaseFailed::raise( 'The table structure cannot be read.', [ 'table' => $name ] );
 		}
-		$columns = [];
+		$columns      = [];
+		$integer_keys = [];
 		foreach ( $this->connection->rows( 'SHOW COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
 			$extra = strtoupper( $column['Extra'] ?? '' );
 			if ( ! str_contains( $extra, 'VIRTUAL GENERATED' ) && ! str_contains( $extra, 'STORED GENERATED' ) ) {
-				$columns[ (string) $column['Field'] ] = SqlFormatter::kind( (string) $column['Type'] );
+				$field             = (string) $column['Field'];
+				$type              = (string) $column['Type'];
+				$columns[ $field ] = SqlFormatter::kind( $type );
+				if ( 1 === preg_match( '/\A(tinyint|smallint|mediumint|int|integer|bigint)\b/i', $type ) ) {
+					$integer_keys[] = $field;
+				}
 			}
 		}
 		$primary = [];
@@ -76,7 +82,7 @@ final class Catalog {
 		}
 		ksort( $primary );
 		$primary = array_values( $primary );
-		$key     = 1 === count( $primary ) && SqlFormatter::NUMERIC === ( $columns[ $primary[0] ] ?? '' ) ? $primary[0] : null;
+		$key     = 1 === count( $primary ) && in_array( $primary[0], $integer_keys, true ) ? $primary[0] : null;
 		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $primary );
 	}
 

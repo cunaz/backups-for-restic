@@ -142,6 +142,28 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( '6000.00', $target->rows( 'SELECT doubled FROM bfr_posts WHERE id = 3000' )[0]['doubled'], 'Generated columns are computed again.' );
 	}
 
+	public function test_resuming_after_a_floating_point_primary_key_in_exponent_notation_preserves_every_row(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'CREATE TABLE float_pages (id DOUBLE PRIMARY KEY, body TEXT)' );
+		$rows = [];
+		for ( $id = 1; $id <= 800; ++$id ) {
+			$rows[] = '(' . $id . "e-100, REPEAT('x', 200))";
+		}
+		$db->execute( 'INSERT INTO float_pages VALUES ' . implode( ',', $rows ) );
+		$dump = new DatabaseDump( $db, $this->directory . '/float.json', 'float_', [], 1 );
+		foreach ( $dump->files() as $file ) {
+			if ( '010-float_pages.sql' === $file->name ) {
+				$sql = $this->read( $file->source, 1 );
+				self::assertStringContainsString( '-- end table rows=800 ', $sql );
+				file_put_contents( $this->directory . '/float.sql', $sql );
+				MysqliConnection::import( self::$target, [ $this->directory . '/float.sql' ] );
+				self::assertSame( $db->rows( 'SELECT id,body FROM float_pages ORDER BY id' ), self::database( self::$target )->rows( 'SELECT id,body FROM float_pages ORDER BY id' ) );
+				return;
+			}
+		}
+		self::fail( 'The dump is missing the table.' );
+	}
+
 	public function test_resumed_and_uninterrupted_dumps_are_identical(): void {
 		$whole   = '';
 		$resumed = '';
