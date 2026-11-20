@@ -492,7 +492,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		const configuration = fs.readFileSync( configFile );
 		const upload = path.join( target.root, 'wp-content/uploads', SOURCE_UPLOAD );
 		const owner = wordpress( target.root,
-			'echo wp_insert_user( [ "user_login" => $argv[2], "user_pass" => $argv[3], "user_email" => "destination-owner@example.test", "role" => "administrator" ] );', [ DESTINATION_ADMIN.login, DESTINATION_ADMIN.password ] );
+			'echo wp_insert_user( [ "user_login" => $argv[2], "user_pass" => $argv[3], "user_email" => "destination-owner@example.com", "role" => "administrator" ] );', [ DESTINATION_ADMIN.login, DESTINATION_ADMIN.password ] );
 		expect( Number( owner ) ).toBeGreaterThan( 1 );
 		publishPost( target.root, 'bfr-migration-destination' );
 		await signIn( destination, DESTINATION_ADMIN );

@@ -63,7 +63,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$db->execute( 'CREATE TABLE wp_posts (id INT PRIMARY KEY,title TEXT) ENGINE=InnoDB COMMENT=\'posts comment\'' );
 		$db->execute( 'CREATE TABLE wp_snapshot_only (id INT PRIMARY KEY) ENGINE=InnoDB' );
 		$db->execute( "INSERT INTO wp_options (option_name,option_value) VALUES ('home','snapshot-home'),('siteurl','snapshot-url'),('cron','snapshot-cron'),('active_plugins','snapshot-plugins'),('db_version','12345'),('wp_user_roles','snapshot-roles'),('backups_for_restic_settings','snapshot-settings'),('front_page','snapshot-page')" );
-		$db->execute( "INSERT INTO wp_users (ID,user_login,user_pass,user_email) VALUES (1,'admin','snapshot-pass','admin@fixture.test'),(2,'editor','editor-pass','editor@fixture.test')" );
+		$db->execute( "INSERT INTO wp_users (ID,user_login,user_pass,user_email) VALUES (1,'admin','snapshot-pass','admin@example.com'),(2,'editor','editor-pass','editor@example.com')" );
 		$db->execute( "INSERT INTO wp_usermeta (user_id,meta_key,meta_value) VALUES (1,'wp_capabilities','snapshot-caps'),(1,'session_tokens','snapshot-sessions'),(2,'wp_capabilities','editor')" );
 		$db->execute( "INSERT INTO wp_posts VALUES (1,'snapshot-post')" );
 		$dump = new DatabaseDump( $db, $this->directory . '/state', 'wp_', [], 1767225600 );

@@ -111,7 +111,7 @@ jobs:
         run: |
           pot=languages/backups-for-restic.pot
           echo "$(grep -c '^msgid ' "$pot") entries; $(grep -c 'assets/js/admin.js:' "$pot") lines refer to the admin script."
-          grep -F 'msgid "Keep this tab open to speed up the backup on slow hosts."' "$pot"
+          grep -F 'msgid "Keep this tab open to speed up the job on slow hosts."' "$pot"
           grep -F 'msgid "Plugin activation refused"' "$pot"
           grep -B 3 -F 'msgid "Data that no snapshot uses is deleted next on %s."' "$pot" | grep -F '#. translators: %s: date and time.'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

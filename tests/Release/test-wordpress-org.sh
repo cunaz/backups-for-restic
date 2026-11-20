@@ -46,13 +46,13 @@ echo 'SVN initial release, retry, immutable conflict, upgrade, deletion, downgra
 mkdir "$tmp/git" "$tmp/keys"
 chmod 700 "$tmp/keys"
 export GNUPGHOME="$tmp/keys"
-gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Local release fixture <release@example.test>' ed25519 sign 2d >/dev/null 2>&1
+gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Local release fixture <release@example.com>' ed25519 sign 2d >/dev/null 2>&1
 export RELEASE_SIGNING_PUBLIC_KEY
 RELEASE_SIGNING_PUBLIC_KEY="$(gpg --armor --export)"
 cd "$tmp/git"
 git init -q -b main
 git config user.name "Release fixture"
-git config user.email release@example.test
+git config user.email release@example.com
 git config gpg.program "$(command -v gpg)"
 git -c commit.gpgsign=false commit --quiet --allow-empty -m fixture
 git update-ref refs/remotes/origin/main HEAD
@@ -66,6 +66,6 @@ git switch -qc off-main
 git -c commit.gpgsign=false commit --allow-empty --quiet -m 'off main'
 git tag -s v1.2.6 -m 'Signed side branch'
 if "$root/bin/verify-release-tag.sh" v1.2.6; then exit 1; fi
-gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Other fixture <other@example.test>' ed25519 sign 2d >/dev/null 2>&1
-if RELEASE_SIGNING_PUBLIC_KEY="$(gpg --armor --export other@example.test)" "$root/bin/verify-release-tag.sh" v1.2.3; then exit 1; fi
+gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Other fixture <other@example.com>' ed25519 sign 2d >/dev/null 2>&1
+if RELEASE_SIGNING_PUBLIC_KEY="$(gpg --armor --export other@example.com)" "$root/bin/verify-release-tag.sh" v1.2.3; then exit 1; fi
 echo 'Authorized signed release verified. Unsigned, lightweight, off-main and untrusted signing keys refused.'
