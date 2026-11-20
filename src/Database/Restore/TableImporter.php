@@ -12,7 +12,6 @@ namespace BackupsForRestic\Database\Restore;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
-use BackupsForRestic\Exception\JobConflict;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -54,7 +53,7 @@ final readonly class TableImporter {
 			throw new FormatException( 'Database restore requires a resolved private staging directory.' );
 		}
 		$this->directory = $directory;
-		$this->tables    = new OwnedTables( $connection, $manifest, $token );
+		$this->tables    = new OwnedTables( $connection, $manifest->prefix, $manifest->fingerprint, $token );
 	}
 
 	/**
@@ -63,61 +62,29 @@ final readonly class TableImporter {
 	 * @param int   $maximum_units Maximum CREATE, INSERT or completion units in this call.
 	 * @param float $maximum_seconds Time budget, checked between units; at least one unit can run.
 	 * @return array{tables: int, total_tables: int, rows: int, bytes: int, done: bool} Committed progress.
+	 * @throws FormatException If the work budget is invalid.
 	 * @throws \Throwable If a file, SQL statement, transaction or ownership check fails.
 	 */
 	public function tick( int $maximum_units = 10, float $maximum_seconds = 5.0 ): array {
 		if ( $maximum_units < 1 || $maximum_units > 1000 || ! is_finite( $maximum_seconds ) || $maximum_seconds <= 0.0 || $maximum_seconds > 20.0 ) {
 			throw new FormatException( 'The database import work budget is invalid.' );
 		}
-		$session = new Session( $this->connection, $this->manifest );
-		$lock    = 'bfr-restore-' . hash( 'sha256', $this->tables->progress() );
-		// MySQL limits advisory lock names to 64 characters.
-		$lock   = substr( $lock, 0, 64 );
-		$locked = false;
-		$error  = null;
-		$state  = null;
-		try {
-			$acquired = $this->connection->rows( 'SELECT GET_LOCK(' . Session::literal( $lock ) . ', 0) AS acquired' );
-			if ( ( $acquired[0]['acquired'] ?? null ) !== '1' ) {
-				throw new JobConflict( 'Another request is importing this staged database.' );
-			}
-			$locked   = true;
-			$ledger   = new Ledger( $this->connection, $this->tables, $this->manifest, $this->directory );
-			$state    = $ledger->read();
-			$deadline = microtime( true ) + $maximum_seconds;
-			for ( $unit = 0; $unit < $maximum_units && 'done' !== $state['phase']; ++$unit ) {
-				$this->unit( $ledger, $state );
-				$state = $ledger->read();
-				if ( microtime( true ) >= $deadline ) {
-					break;
-				}
-			}
-		} catch ( \Throwable $failure ) {
-			$error = $failure;
-		} finally {
-			try {
-				// Roll back before releasing the lock, including when COMMIT's outcome is unknown.
-				$session->close();
-			} catch ( \Throwable $failure ) {
-				$error ??= $failure;
-			}
-			if ( $locked ) {
-				try {
-					$released = $this->connection->rows( 'SELECT RELEASE_LOCK(' . Session::literal( $lock ) . ') AS released' );
-					if ( ( $released[0]['released'] ?? null ) !== '1' ) {
-						throw new DatabaseFailed( 'The database import lock could not be released.' );
+		$state = $this->tables->locked(
+			$this->manifest,
+			function () use ( $maximum_units, $maximum_seconds ): array {
+				$ledger   = new Ledger( $this->connection, $this->tables, $this->manifest, $this->directory );
+				$state    = $ledger->read();
+				$deadline = microtime( true ) + $maximum_seconds;
+				for ( $unit = 0; $unit < $maximum_units && 'done' !== $state['phase']; ++$unit ) {
+					$this->unit( $ledger, $state );
+					$state = $ledger->read();
+					if ( microtime( true ) >= $deadline ) {
+						break;
 					}
-				} catch ( \Throwable $failure ) {
-					$error ??= $failure;
 				}
+				return $state;
 			}
-		}
-		if ( null !== $error ) {
-			throw $error;
-		}
-		if ( null === $state ) {
-			throw new DatabaseFailed( 'The database import did not return committed progress.' );
-		}
+		);
 		return [
 			'tables'       => $state['table'],
 			'total_tables' => count( $this->manifest->tables ),

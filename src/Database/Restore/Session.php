@@ -39,11 +39,11 @@ final class Session {
 	/**
 	 * Takes exclusive use of the caller's connection until close, without a global change.
 	 *
-	 * @param Connection $connection Non-reconnecting database session.
-	 * @param Manifest   $manifest Validated dump with a numeric time-zone offset.
+	 * @param Connection    $connection Non-reconnecting database session.
+	 * @param Manifest|null $manifest Validated dump, or null during cleanup.
 	 * @throws DatabaseFailed If settings cannot be read, a foreign transaction is active, or setup fails.
 	 */
-	public function __construct( private readonly Connection $connection, Manifest $manifest ) {
+	public function __construct( private readonly Connection $connection, ?Manifest $manifest ) {
 		$fields = array_map( static fn ( string $name ): string => '@@SESSION.' . $name . ' AS ' . $name, self::VARIABLES );
 		$rows   = $connection->rows( 'SELECT @@SESSION.autocommit AS autocommit, ' . implode( ', ', $fields ) );
 		if ( 1 !== count( $rows ) || ( $rows[0]['autocommit'] ?? null ) !== '1' ) {
@@ -67,7 +67,7 @@ final class Session {
 		$connection->execute( 'ROLLBACK' );
 		try {
 			$connection->execute( 'SET NAMES utf8mb4' );
-			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1' );
+			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ?? '+00:00' ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1' );
 		} catch ( \Throwable $error ) {
 			$this->close();
 			throw $error;
@@ -77,6 +77,7 @@ final class Session {
 	/**
 	 * Rolls back an unfinished owned batch and restores each setting, attempting all of them.
 	 *
+	 * @throws DatabaseFailed If the server rejected or did not restore a session setting.
 	 * @throws \Throwable If rollback or restoration fails; all settings are still attempted.
 	 */
 	public function close(): void {
@@ -94,7 +95,15 @@ final class Session {
 				// Boolean variables accept numeric 0/1 or the names OFF/ON. Hex string
 				// literals containing the characters "0"/"1" are not those numbers.
 				$literal = in_array( $name, self::BOOLEANS, true ) ? $value : ( null === $value ? 'NULL' : self::literal( $value ) );
-				$this->connection->execute( 'SET SESSION ' . $name . ' = ' . $literal );
+				try {
+					$this->connection->execute( 'SET SESSION ' . $name . ' = ' . $literal );
+				} catch ( DatabaseFailed $failure ) {
+					// MySQL warns when WordPress's existing legacy SQL modes are set again.
+					// Read back the exact setting before accepting that metadata-only warning.
+					if ( 'sql_mode' !== $name || ! isset( $failure->context()['warnings'] ) || $value !== ( $this->connection->rows( 'SELECT @@SESSION.sql_mode AS mode' )[0]['mode'] ?? null ) ) {
+						throw $failure;
+					}
+				}
 			} catch ( \Throwable $error ) {
 				$first ??= $error;
 			}

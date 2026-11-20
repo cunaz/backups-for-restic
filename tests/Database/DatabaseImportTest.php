@@ -145,6 +145,27 @@ final class DatabaseImportTest extends TestCase {
 		self::assertSame( $ledger, $this->db->rows( $ledger_query ) );
 	}
 
+	public function test_bounded_cleanup_replays_a_lost_cursor_and_leaves_other_tables_untouched(): void {
+		$manifest = StagedDump::write( $this->directory );
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$owned   = $importer->tables;
+		$foreign = $owned->shadow( 1 );
+		$this->db->execute( 'CREATE TABLE wp_live (n INT)' );
+		$this->db->execute( 'CREATE TABLE `' . $foreign . '` (n INT)' );
+		$this->db->execute( 'INSERT INTO `' . $foreign . '` VALUES (99)' );
+		// A killed cleanup tick lost its job-file update. Replaying the removed shadow
+		// and later a name occupied by a foreign object never removes that object.
+		self::assertSame( 1, $owned->clean( 2, 0, 0.0 ) );
+		self::assertSame( 1, $owned->clean( 2, 0, 0.0 ) );
+		self::assertSame( 2, $owned->clean( 2, 1, 0.0 ) );
+		self::assertTrue( $owned->exists( $owned->progress() ) );
+		self::assertSame( 3, $owned->clean( 2, 2, 0.0 ) );
+		self::assertFalse( $owned->exists( $owned->progress() ) );
+		self::assertSame( [ [ 'n' => '99' ] ], $this->db->rows( 'SELECT * FROM `' . $foreign . '`' ) );
+		self::assertSame( [], $this->db->rows( 'SELECT * FROM wp_live' ) );
+	}
+
 	public function test_generated_only_tables_restore_empty_tables_and_duplicate_rows(): void {
 		$this->db->execute( 'CREATE TABLE wp_generated (g INT AS (42) STORED) ENGINE=InnoDB' );
 		$this->db->execute( 'CREATE TABLE wp_generated_empty (g INT AS (42) STORED) ENGINE=InnoDB' );
@@ -163,6 +184,13 @@ final class DatabaseImportTest extends TestCase {
 		$before = $this->db->rows( $query );
 		$this->importer( $manifest )->tick( 1 );
 		self::assertSame( $before, $this->db->rows( $query ) );
+	}
+
+	public function test_the_wordpress_mysql_mode_is_restored_even_when_setting_it_reports_a_deprecation(): void {
+		$this->db->execute( "SET SESSION sql_mode='NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'" );
+		$before = $this->db->rows( 'SELECT @@SESSION.sql_mode AS mode' );
+		$this->finish( $this->importer( StagedDump::write( $this->directory ) ) );
+		self::assertSame( $before, $this->db->rows( 'SELECT @@SESSION.sql_mode AS mode' ) );
 	}
 
 	public function test_an_active_foreign_transaction_is_neither_committed_nor_rolled_back(): void {
