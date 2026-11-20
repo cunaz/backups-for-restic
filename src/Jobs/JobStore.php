@@ -391,13 +391,36 @@ final class JobStore {
 	 *
 	 * @param bool $uninstall Also finish cleanup for interrupted, deactivated jobs.
 	 * @return \Generator<int, Job> Jobs holding their original cleanup identity.
+	 * @throws StorageFailed If uninstall cannot verify a stored job's ownership records.
 	 */
 	public function pending_database_cleanups( bool $uninstall ): \Generator {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
+			if ( $uninstall && null === $job && $this->has_document( $id ) ) {
+				throw new StorageFailed( 'An unreadable job must be recovered before uninstalling.' );
+			}
 			if ( null !== $job && JobType::Restore === $job->type && isset( $job->data['database_binding'] ) && ( $uninstall || $job->state->is_terminal() ) ) {
 				yield $job;
 			}
+		}
+	}
+
+	/**
+	 * Finds the marker of an interrupted live restore while the runner lock holds.
+	 *
+	 * @return \Generator<int, Job> Jobs whose private maintenance file still exists.
+	 * @throws StorageFailed If the job owning a marker cannot be recovered.
+	 */
+	public function maintenance_jobs(): \Generator {
+		foreach ( $this->ids() as $id ) {
+			if ( ! is_file( $this->directory . '/' . $id . '/maintenance.php' ) ) {
+				continue;
+			}
+			$job = $this->get( $id );
+			if ( null === $job || ! $job->state->is_terminal() ) {
+				throw new StorageFailed( 'Finish the interrupted maintenance job before uninstalling.' );
+			}
+			yield $job;
 		}
 	}
 
@@ -451,6 +474,7 @@ final class JobStore {
 	 * Job IDs, newest first.
 	 *
 	 * @return list<string> IDs.
+	 * @throws StorageFailed If the directory cannot be listed safely.
 	 */
 	private function ids(): array {
 		if ( ! is_dir( $this->directory ) ) {

@@ -233,12 +233,21 @@ final readonly class PrivateDirectory {
 	}
 
 	/**
+	 * Checks the installation marker or its previous protection files without claiming a path.
+	 *
+	 * @return bool Whether the plugin owns its working files here.
+	 */
+	public function owns_contents(): bool {
+		return $this->dedicated_path() && is_dir( $this->path ) && ( $this->marked() || $this->legacy_directory() );
+	}
+
+	/**
 	 * Deletes everything the plugin put into the directory, then the directory if it is empty.
 	 * Only known names are touched, so a directory chosen with BACKUPS_FOR_RESTIC_PRIVATE_DIR that
 	 * also holds other files keeps them.
 	 */
 	public function remove_contents(): void {
-		if ( ! $this->dedicated_path() || ! is_dir( $this->path ) || ( ! $this->marked() && ! $this->legacy_directory() ) ) {
+		if ( ! $this->owns_contents() ) {
 			return;
 		}
 		foreach ( [ ...self::SUBDIRECTORIES, 'spool' ] as $name ) {

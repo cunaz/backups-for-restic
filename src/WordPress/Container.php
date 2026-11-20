@@ -390,9 +390,18 @@ final class Container {
 			$this->clock(),
 			$this->settings()->int( 'restore.staging_expiry_hours' ),
 			$this->apply_plan( ... ),
-			new FileMaintenance( $this->site()->abspath, plugin_basename( $this->plugin_file ), rest_url( RestRoutes::NAMESPACE ), admin_url( 'admin.php' ) ),
+			$this->file_maintenance(),
 			static fn (): bool => wp_is_file_mod_allowed( 'backups_for_restic_apply' )
 		);
+	}
+
+	/**
+	 * Owns the live marker for this WordPress installation.
+	 *
+	 * @return FileMaintenance Marker manager.
+	 */
+	private function file_maintenance(): FileMaintenance {
+		return new FileMaintenance( $this->site()->abspath, plugin_basename( $this->plugin_file ), rest_url( RestRoutes::NAMESPACE ), admin_url( 'admin.php' ) );
 	}
 
 	/**
@@ -625,20 +634,27 @@ final class Container {
 	 * or refused DROP. An uninstall may also finish an interrupted active preview. Each
 	 * committed cursor is saved while the runner lock is held. Staging is unnecessary.
 	 *
-	 * @param bool  $uninstall Include active restores during uninstall.
-	 * @param float $deadline End of this request's cleanup budget.
+	 * @param bool                  $uninstall Include active restores during uninstall.
+	 * @param float                 $deadline End of this request's cleanup budget.
+	 * @param PrivateDirectory|null $directory An earlier working directory during uninstall.
 	 * @return bool Whether cleanup finished under the runner lock.
 	 */
-	public function clean_database_previews( bool $uninstall, float $deadline ): bool {
-		if ( ! is_dir( $this->private_dir()->subdirectory( 'jobs' ) ) ) {
+	public function clean_database_previews( bool $uninstall, float $deadline, ?PrivateDirectory $directory = null ): bool {
+		$directory ??= $this->private_dir();
+		if ( ! $directory->owns_contents() || ! is_dir( $directory->subdirectory( 'jobs' ) ) ) {
 			return true;
 		}
-		$lock = $this->runner_lock();
+		$lock = new RunnerLock( $directory->path . '/runner.lock' );
 		if ( ! $lock->acquire() ) {
 			return false;
 		}
 		try {
-			$store = $this->jobs();
+			$store = new JobStore( $directory->subdirectory( 'jobs' ), $this->redactor(), $this->random() );
+			if ( $uninstall ) {
+				foreach ( $store->maintenance_jobs() as $job ) {
+					$this->file_maintenance()->release( $job->id, $store->directory( $job ) );
+				}
+			}
 			foreach ( $store->pending_database_cleanups( $uninstall ) as $job ) {
 				do {
 					$done = $this->database_preview()->clean( $job, $deadline );

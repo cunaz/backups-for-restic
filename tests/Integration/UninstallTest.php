@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Integration;
 use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Tests\Support\TestSite;
+use BackupsForRestic\Tests\Support\TempDir;
 
 /**
  * Deleting the plugin from the Plugins screen: everything it stored on the site goes, and
@@ -57,22 +58,49 @@ final class UninstallTest extends TestCase {
 		self::assertTrue( is_dir( $staged ) || mkdir( $staged, 0700, true ) );
 		file_put_contents( $staged . '/index.php', '<?php // A restored file.' );
 
+		$foreign = TempDir::create( 'uninstall-foreign' );
+		mkdir( $foreign . '/jobs' );
+		file_put_contents( $foreign . '/jobs/owner.txt', 'another application' );
+		$unknown = TestSite::private_dir() . '/jobs/20370115T030000Z-ffffff';
+		mkdir( $unknown );
+		file_put_contents( $unknown . '/job.json', '{"schema":9999}' );
 		try {
+			// The previous directory still holds job ownership, even after a filter moves new jobs.
+			$blocked = TestSite::php(
+				'
+				require_once ABSPATH . "wp-admin/includes/plugin.php";
+				add_filter( "backups_for_restic_private_dir", static fn () => $arguments[1], PHP_INT_MAX );
+				add_filter( "wp_die_handler", static fn () => static function () { throw new RuntimeException( "cleanup-deferred" ); } );
+				try { uninstall_plugin( $arguments[0] ); } catch ( RuntimeException $e ) { echo $e->getMessage(); }
+				',
+				[ TestSite::PLUGIN, $foreign ]
+			);
+			self::assertStringContainsString( 'cleanup-deferred', $blocked );
+			self::assertFileExists( $unknown . '/job.json' );
+			self::assertContains( 'backups_for_restic_secrets', self::stored() );
+			unlink( $unknown . '/job.json' );
+			rmdir( $unknown );
+
 			// What the Plugins screen does on "Delete", without removing the plugin's own files.
 			TestSite::php(
 				'
 				require_once ABSPATH . "wp-admin/includes/plugin.php";
 				deactivate_plugins( $arguments[0] );
+				add_filter( "backups_for_restic_private_dir", static fn () => $arguments[1], PHP_INT_MAX );
 				uninstall_plugin( $arguments[0] );
 				',
-				[ TestSite::PLUGIN ]
+				[ TestSite::PLUGIN, $foreign ]
 			);
 
 			self::assertSame( [], self::stored(), 'No option, transient or cron event of the plugin is left.' );
 			self::assertDirectoryDoesNotExist( TestSite::private_dir(), 'The private directory held nothing but the plugin\'s files.' );
+			self::assertSame( [ '.', '..', 'jobs' ], scandir( $foreign ) );
+			self::assertSame( 'another application', file_get_contents( $foreign . '/jobs/owner.txt' ) );
 			self::assertSame( $snapshots, TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), 'The repository is not touched.' );
 			self::assertStringContainsString( 'no errors were found', TestSite::restic()->must( [ 'check' ] ) );
 		} finally {
+			TempDir::remove( $foreign );
+			TempDir::remove( $unknown );
 			TestSite::plugin( true );
 		}
 

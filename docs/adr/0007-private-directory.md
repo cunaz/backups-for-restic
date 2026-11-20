@@ -79,3 +79,7 @@ The first use claims an empty directory. A marker records ownership for subseque
 requests and uninstall. Existing installations are recognized by their working
 directories and the plugin's Apache or IIS protection file. Uninstall skips unrelated
 directories and preserves protection files customized by the operator.
+Uninstall checks both the current filtered location and the previous default or configured
+location for outstanding database cleanup before deleting options or local files. If an
+owned job document cannot be read, or a live restore still owns the maintenance marker,
+the job history and recovery material stay in place for a retry.

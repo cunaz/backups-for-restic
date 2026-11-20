@@ -99,7 +99,7 @@ final class Cron {
 	 * @param Container $container Services.
 	 */
 	public static function stop( Container $container ): void {
-		if ( ! is_dir( $container->private_dir()->subdirectory( 'jobs' ) ) ) {
+		if ( ! $container->private_dir()->owns_contents() || ! is_dir( $container->private_dir()->subdirectory( 'jobs' ) ) ) {
 			// Never set up: no job, and no reason to create the private directory now.
 			return;
 		}
