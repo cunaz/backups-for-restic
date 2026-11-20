@@ -11,7 +11,7 @@ use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\RestServer;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
-use BackupsForRestic\Tests\Support\Vectors;
+use BackupsForRestic\Tests\Support\WordPressBackupFixture;
 
 /**
  * Milestone 1 acceptance against a real WordPress (docs/05-roadmap.md), as a black box over
@@ -72,24 +72,10 @@ final class WordPressSiteTest extends TestCase {
 			self::assertSame( 'backups_for_restic_wrong_user_password', $refused['code'] ?? null, $raw );
 		}
 
-		// The fixture: files in uploads and a large table.
 		$uploads = TestSite::root() . '/wp-content/uploads/fixture';
-		TempDir::remove( $uploads );
-		mkdir( $uploads, 0755, true );
-		$megabytes = (int) MysqliConnection::environment( 'BFR_SITE_FIXTURE_MB', '64' );
-		for ( $i = 0; $i < $megabytes; $i += 8 ) {
-			file_put_contents( $uploads . '/file-' . $i . '.bin', Vectors::hash_stream( 'site-' . $i, 8 * 1048576 ) );
-		}
+		WordPressBackupFixture::write_uploads( $uploads, (int) MysqliConnection::environment( 'BFR_SITE_FIXTURE_MB', '64' ) );
 		$db = self::site_database();
-		$db->execute( 'DELETE FROM wp_postmeta WHERE meta_key = "_fixture"' );
-		$rows = (int) MysqliConnection::environment( 'BFR_DB_FIXTURE_MB', '32' ) * 1024;
-		for ( $offset = 0; $offset < $rows; $offset += 1000 ) {
-			$values = [];
-			for ( $i = $offset; $i < $offset + 1000; $i++ ) {
-				$values[] = sprintf( "(1, '_fixture', '%s')", str_repeat( hash( 'sha256', (string) $i ), 16 ) );
-			}
-			$db->execute( 'INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES ' . implode( ',', $values ) );
-		}
+		WordPressBackupFixture::write_database( $db, (int) MysqliConnection::environment( 'BFR_DB_FIXTURE_MB', '32' ) );
 
 		TestSite::idle( 600 );
 		[ $status, $started, $raw ] = TestSite::api( 'POST', '/jobs' );
@@ -100,27 +86,17 @@ final class WordPressSiteTest extends TestCase {
 
 		$cli = TestSite::restic();
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
-		$target = TempDir::create( 'site-restore' );
-		$cli->must( [ 'restore', 'latest', '--target', $target ] );
-		self::assertSame( TempDir::describe( $uploads ), TempDir::describe( $target . $uploads ) );
-
-		$private  = TestSite::root() . '/wp-content/backups-for-restic';
-		$restored = 'bfr_site_restored_' . bin2hex( random_bytes( 3 ) );
-		$admin    = MysqliConnection::connect();
-		self::assertNotNull( $admin );
-		$admin->execute( 'CREATE DATABASE `' . $restored . '` CHARACTER SET utf8mb4' );
-		$files = array_map( 'strval', (array) glob( $target . $private . '/spool/database/*.sql' ) );
-		self::assertNotSame( [], $files, 'The snapshot contains the database dump.' );
-		// With the client, like the recovery guide: one request with the whole dump exceeds
-		// the server's max_allowed_packet at the acceptance size.
-		MysqliConnection::import( $restored, $files );
-		$copy = MysqliConnection::connect( $restored );
-		self::assertNotNull( $copy );
-		foreach ( [ 'wp_postmeta', 'wp_posts', 'wp_users' ] as $table ) {
-			self::assertSame( $db->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $copy->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $table );
+		$private = TestSite::root() . '/wp-content/backups-for-restic';
+		$target  = TempDir::create( 'site-restore' );
+		try {
+			$cli->must( [ 'restore', 'latest', '--target', $target ] );
+			self::assertSame( TempDir::describe( $uploads ), TempDir::describe( $target . $uploads ) );
+			// The upload comparison is complete. Free the restored media before importing the database.
+			TempDir::remove( $target . $uploads );
+			WordPressBackupFixture::assert_restored_database( $db, $target . $private . '/spool/database' );
+		} finally {
+			TempDir::remove( $target );
 		}
-		$admin->execute( 'DROP DATABASE `' . $restored . '`' );
-		TempDir::remove( $target );
 
 		// No secret in job files or REST responses.
 		$responses = '';
@@ -134,6 +110,155 @@ final class WordPressSiteTest extends TestCase {
 		foreach ( [ TestSite::$repository_password, RestServer::PASSWORD ] as $secret ) {
 			self::assertStringNotContainsString( $secret, $responses );
 		}
+	}
+
+	/**
+	 * The entry with a name in a directory of a snapshot, read page by page.
+	 *
+	 * @param string $path Path or token of the directory.
+	 * @return array<string, mixed>
+	 */
+	private static function snapshot_entry( string $snapshot, string $path, string $name ): array {
+		$offset = 0;
+		do {
+			[ $status, $page, $raw ] = TestSite::api( 'GET', '/snapshots/' . $snapshot . '/tree&path=' . rawurlencode( $path ) . '&limit=50&offset=' . $offset );
+			self::assertSame( 200, $status, $raw );
+			self::assertLessThanOrEqual( 50, count( $page['entries'] ?? [] ), $raw );
+			foreach ( $page['entries'] ?? [] as $entry ) {
+				if ( $name === ( $entry['name'] ?? null ) ) {
+					return $entry;
+				}
+			}
+			$offset = $page['next'] ?? null;
+		} while ( is_int( $offset ) );
+		self::fail( 'The directory ' . $path . ' of the snapshot has no entry ' . $name . '.' );
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_snapshots_are_listed_read_and_browsed_down_to_an_uploaded_file(): void {
+		TestSite::idle( 600 );
+		$in_repository = json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true );
+		self::assertIsArray( $in_repository );
+		$expected = array_map( 'strval', array_column( $in_repository, 'id' ) );
+		sort( $expected );
+
+		[ $status, $all, $raw ] = TestSite::api( 'GET', '/snapshots&scope=repository&fresh=1' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'repository', $all['scope'] ?? null, $raw );
+		$listed = array_column( $all['snapshots'] ?? [], 'id' );
+		sort( $listed );
+		self::assertSame( $expected, $listed, $raw );
+
+		[ $status, $site, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'site', $site['scope'] ?? null, $raw );
+		self::assertNotSame( [], $site['snapshots'] ?? [], $raw );
+		$host = (string) parse_url( TestSite::url(), PHP_URL_HOST );
+		foreach ( $site['snapshots'] as $snapshot ) {
+			self::assertContains( $snapshot['id'] ?? null, $expected, $raw );
+			self::assertSame( $host, $snapshot['hostname'] ?? null, $raw );
+			self::assertContains( 'backups-for-restic', $snapshot['tags'] ?? [], $raw );
+		}
+		// The cached list of one scope is not the answer for the other.
+		[ , $cached ] = TestSite::api( 'GET', '/snapshots&scope=repository' );
+		self::assertSame( $all['snapshots'], $cached['snapshots'] ?? null );
+		[ , $cached ] = TestSite::api( 'GET', '/snapshots' );
+		self::assertSame( $site['snapshots'], $cached['snapshots'] ?? null );
+
+		// The newest snapshot of the site, with the manifest of the backup that wrote it.
+		$id                      = (string) $site['snapshots'][0]['id'];
+		[ $status, $read, $raw ] = TestSite::api( 'GET', '/snapshots/' . $id );
+		self::assertSame( 200, $status, $raw );
+		$uploads = TestSite::root() . '/wp-content/uploads';
+		self::assertSame( [ $id, $site['snapshots'][0]['time'], $host ], [ $read['snapshot']['id'] ?? null, $read['snapshot']['time'] ?? null, $read['snapshot']['hostname'] ?? null ], $raw );
+		self::assertSame( 64, strlen( (string) ( $read['snapshot']['tree'] ?? '' ) ), $raw );
+		self::assertNotSame( [], $read['snapshot']['paths'] ?? [], $raw );
+		self::assertSame( 'found', $read['snapshot']['manifest_state'] ?? null, $raw );
+		self::assertStringEndsWith( '/spool/manifest.json', (string) ( $read['snapshot']['manifest']['path'] ?? '' ), $raw );
+		self::assertSame( 'backups-for-restic-site/1', $read['snapshot']['manifest']['data']['format'] ?? null, $raw );
+		self::assertSame( $uploads, $read['snapshot']['manifest']['data']['uploads'] ?? null, $raw );
+		self::assertTrue( $read['snapshot']['manifest']['data']['database'] ?? null, $raw );
+
+		// From the root down to a file of the fixture, one directory per request, by the tokens of the entries.
+		$token = '/';
+		$entry = [];
+		foreach ( explode( '/', ltrim( $uploads . '/fixture/file-0.bin', '/' ) ) as $name ) {
+			$entry = self::snapshot_entry( $id, $token, $name );
+			$token = (string) ( $entry['token'] ?? '' );
+		}
+		self::assertSame( [ 'file-0.bin', true, 'file', 8 * 1048576, null, false ], [ $entry['name'] ?? null, $entry['exact'] ?? null, $entry['type'] ?? null, $entry['size'] ?? null, $entry['target'] ?? null, $entry['incomplete'] ?? null ], (string) json_encode( $entry ) );
+		self::assertMatchesRegularExpression( '/^[0-7]{4}$/', (string) ( $entry['mode'] ?? '' ) );
+		self::assertMatchesRegularExpression( '/^\d{4}-\d\d-\d\dT/', (string) ( $entry['mtime'] ?? '' ) );
+		// The path and its token name the same directory.
+		[ $status, $by_path, $raw ] = TestSite::api( 'GET', '/snapshots/' . $id . '/tree&path=' . rawurlencode( $uploads . '/fixture' ) );
+		self::assertSame( 200, $status, $raw );
+		self::assertContains( 'file-0.bin', array_column( $by_path['entries'] ?? [], 'name' ), $raw );
+		self::assertSame( $uploads . '/fixture', $by_path['path'] ?? null, $raw );
+		self::assertSame( count( $by_path['entries'] ?? [] ), min( 200, (int) ( $by_path['total'] ?? -1 ) ), $raw );
+
+		$refusals = [
+			'/snapshots&scope=everything'                 => [ 400, 'invalid_snapshot_query' ],
+			'/snapshots/latest'                           => [ 400, 'invalid_snapshot_id' ],
+			'/snapshots/' . str_repeat( 'ab', 32 )        => [ 404, 'snapshot_not_found' ],
+			'/snapshots/' . str_repeat( 'ab', 32 ) . '/tree' => [ 404, 'snapshot_not_found' ],
+			'/snapshots/' . $id . '/tree&path=wp-content' => [ 400, 'invalid_snapshot_path' ],
+			'/snapshots/' . $id . '/tree&path=' . rawurlencode( '/a/../b' ) => [ 400, 'invalid_snapshot_path' ],
+			'/snapshots/' . $id . '/tree&path=b64:!'      => [ 400, 'invalid_snapshot_path' ],
+			'/snapshots/' . $id . '/tree&limit=0'         => [ 400, 'invalid_snapshot_query' ],
+			'/snapshots/' . $id . '/tree&offset=-1'       => [ 400, 'invalid_snapshot_query' ],
+			'/snapshots/' . $id . '/tree&path=' . rawurlencode( '/no/such/dir' ) => [ 404, 'snapshot_path_not_found' ],
+			'/snapshots/' . $id . '/tree&path=' . rawurlencode( $uploads . '/fixture/file-0.bin' ) => [ 404, 'snapshot_path_not_found' ],
+		];
+		foreach ( $refusals as $route => [ $expected_status, $code ] ) {
+			[ $status, $error, $raw ] = TestSite::api( 'GET', $route );
+			self::assertSame( [ $expected_status, 'backups_for_restic_' . $code ], [ $status, $error['code'] ?? null ], $route . ': ' . $raw );
+			self::assertNotSame( '', $error['message'] ?? '', $raw );
+		}
+		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ), 'Reading leaves no lock in the repository.' );
+	}
+
+	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_the_list_of_this_sites_snapshots_previews_the_next_forget_and_follows_the_settings(): void {
+		TestSite::idle( 600 );
+		[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'plugin' ] ] );
+		self::assertSame( 200, $status, $raw );
+		try {
+			[ $status, $site, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );
+			self::assertSame( 200, $status, $raw );
+			self::assertNotSame( [], $site['snapshots'] ?? [], $raw );
+			foreach ( $site['snapshots'] as $snapshot ) {
+				self::assertContains( $snapshot['retention'] ?? null, [ 'keep', 'remove' ], $raw );
+			}
+			self::assertSame( 'keep', $site['snapshots'][0]['retention'] ?? null, 'The newest snapshot is among those that are always kept.' );
+
+			// No forget of this site decides about the list of the whole repository, and the
+			// preview removed nothing: every snapshot it marked is still there.
+			[ $status, $all, $raw ] = TestSite::api( 'GET', '/snapshots&scope=repository&fresh=1' );
+			self::assertSame( 200, $status, $raw );
+			foreach ( $all['snapshots'] ?? [] as $snapshot ) {
+				self::assertArrayHasKey( 'retention', $snapshot, $raw );
+				self::assertNull( $snapshot['retention'], $raw );
+			}
+			self::assertSame( [], array_diff( array_column( $site['snapshots'], 'id' ), array_column( $all['snapshots'] ?? [], 'id' ) ), $raw );
+
+			// While another computer removes old snapshots there is nothing to preview. Saving
+			// the setting drops the cached list, so the answer needs no fresh=1.
+			[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'external' ] ] );
+			self::assertSame( 200, $status, $raw );
+			[ $status, $external, $raw ] = TestSite::api( 'GET', '/snapshots' );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( array_column( $site['snapshots'], 'id' ), array_column( $external['snapshots'] ?? [], 'id' ), $raw );
+			foreach ( $external['snapshots'] ?? [] as $snapshot ) {
+				self::assertArrayHasKey( 'retention', $snapshot, $raw );
+				self::assertNull( $snapshot['retention'], $raw );
+			}
+		} finally {
+			// Whatever the assertions say, the later tests expect this site to remove old snapshots.
+			TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'plugin' ] ] );
+		}
+		[ $status, $again, $raw ] = TestSite::api( 'GET', '/snapshots' );
+		self::assertSame( 200, $status, $raw );
+		self::assertSame( 'keep', $again['snapshots'][0]['retention'] ?? null, 'The cached list went with the saved setting: ' . $raw );
 	}
 
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
@@ -247,24 +372,31 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 0, $cleared['cache_bytes'] ?? null, $raw );
 	}
 
-	/** @return iterable<string, array{string|list<int>}> */
+	/**
+	 * Values of the layout marker as get_option() returns them. Null stands for a row that
+	 * holds a serialized null (N;), which WordPress decodes to what it answers for a missing
+	 * option; such a row exists and is therefore malformed, not the layout before numbers.
+	 *
+	 * @return iterable<string, array{string|list<int>|null}>
+	 */
 	public static function unsupported_layouts(): iterable {
 		yield 'newer' => [ '2' ];
 		yield 'damaged numeral' => [ '2x' ];
 		yield 'empty' => [ '' ];
 		yield 'zero' => [ '0' ];
 		yield 'array' => [ [ 2 ] ];
+		yield 'serialized null' => [ null ];
 	}
 
-	/** @param string|list<int> $value Unsupported option value. */
+	/** @param string|list<int>|null $value Unsupported option value. */
 	#[DataProvider( 'unsupported_layouts' )]
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
-	public function test_an_unsupported_options_layout_keeps_the_plugin_inert( string|array $value ): void {
+	public function test_an_unsupported_options_layout_keeps_the_plugin_inert( string|array|null $value ): void {
 		TestSite::idle( 600 );
 		$db        = self::site_database();
 		$select    = "SELECT option_value FROM wp_options WHERE option_name = 'backups_for_restic_schema_version'";
 		$stored    = $db->rows( $select )[0]['option_value'] ?? null;
-		$raw_value = is_array( $value ) ? serialize( $value ) : $value;
+		$raw_value = is_string( $value ) ? $value : serialize( $value );
 		self::assertSame( '1', $stored, 'The plugin recorded the layout of its options on its first request.' );
 
 		try {
@@ -400,10 +532,10 @@ final class WordPressSiteTest extends TestCase {
 		}
 	}
 
-	/** @param string|list<int> $value Unsupported option value. */
+	/** @param string|list<int>|null $value Unsupported option value. */
 	#[DataProvider( 'unsupported_layouts' )]
 	#[Depends( 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
-	public function test_deactivation_leaves_jobs_alone_when_the_options_layout_is_unsupported( string|array $value ): void {
+	public function test_deactivation_leaves_jobs_alone_when_the_options_layout_is_unsupported( string|array|null $value ): void {
 		TestSite::idle( 600 );
 		$output = TestSite::php(
 			'
@@ -414,7 +546,18 @@ final class WordPressSiteTest extends TestCase {
 			$directory = $store->directory( $job );
 			$before = file_get_contents( $directory . "/job.json" );
 			try {
-				update_option( "backups_for_restic_schema_version", json_decode( $arguments[1], true, 512, JSON_THROW_ON_ERROR ), true );
+				$value = json_decode( $arguments[1], true, 512, JSON_THROW_ON_ERROR );
+				if ( null === $value ) {
+					// update_option() cannot store a null. The row is written as a tool or a
+					// hand writes it, and the caches of this request forget the old value.
+					global $wpdb;
+					$wpdb->update( $wpdb->options, [ "option_value" => "N;" ], [ "option_name" => "backups_for_restic_schema_version" ] );
+					wp_cache_delete( "backups_for_restic_schema_version", "options" );
+					wp_cache_delete( "alloptions", "options" );
+					wp_cache_delete( "notoptions", "options" );
+				} else {
+					update_option( "backups_for_restic_schema_version", $value, true );
+				}
 				deactivate_plugins( $arguments[0] );
 				echo "\n", json_encode( [
 					$before === file_get_contents( $directory . "/job.json" ),

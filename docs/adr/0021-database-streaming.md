@@ -20,6 +20,10 @@ and makes an interrupted dump start from zero.
   table file ends with `-- end table rows=<n> bytes=<n>`. Views lose their `DEFINER`
   clause so that they import on other servers; generated columns are left out of the
   INSERT statements and computed again on import.
+  The writer now enforces the importer's 16 MiB maximum SQL statement size, including
+  escaping, table/column names and the semicolon, excluding LF (ADR 0035). An oversized
+  row fails the backup explicitly. Generated-only tables select a constant to count rows
+  and emit one empty INSERT tuple per row.
 - **Resumable per page.** A table is read in pages: along an integer primary key where one
   exists, otherwise by offset in primary-key order. When a tick's deadline passes, the table
   source finishes the current page, the chunker emits the bytes it holds as a final chunk,
@@ -47,6 +51,17 @@ and makes an interrupted dump start from zero.
 - Per-table files make partial restores (one table) natural and the manual CLI path simple
   (`restic dump` of the directory, then import in file order).
 - Many tables mean many small blobs; harmless for restic.
+
+## As built during Milestone 3 (2026-11)
+The writer selects every insertable column explicitly, so invisible columns are included.
+An expression default (`DEFAULT_GENERATED`) does not make a column generated; only virtual
+and stored generated columns are omitted from INSERTs.
+
+The first table importer is specified in [ADR 0035](0035-transactional-shadow-import.md).
+It validates the SQL grammar, uses owned InnoDB shadows and commits each row batch together
+with its progress. It uses the existing mysqli session without `$wpdb` retries or filters;
+maintenance and plugin-state preservation belong to the separate confirmed swap. Schema
+mapping, job integration and live apply remain open.
 
 ## Alternatives considered
 - **Single dump file spooled to disk** (ADR 0005): plaintext on disk, restart from zero,

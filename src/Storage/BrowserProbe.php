@@ -31,6 +31,8 @@ final class BrowserProbe {
 	/** Seconds a browser has to report on a probe file. */
 	public const int PENDING_SECONDS = 300;
 
+	public const int RESULT_SECONDS = 86400;
+
 	private const string ENTRY = 'exposure_browser';
 
 	/**
@@ -53,17 +55,19 @@ final class BrowserProbe {
 	 * Writes a probe file for a browser to request. A probe that was begun before and never
 	 * reported on is given up.
 	 *
+	 * @param string $location Public URL prefix whose protection is being checked.
 	 * @return string Name of the file in the subdirectory probe/.
 	 * @throws StorageFailed If the file cannot be written.
 	 */
-	public function begin(): string {
+	public function begin( string $location = '' ): string {
 		$entry = $this->state->get( self::ENTRY );
 		$this->remove( $entry );
 		$probe            = $this->directory->write_probe( $this->random );
 		$entry['pending'] = [
-			'file'  => basename( $probe['file'] ),
-			'token' => $probe['token'],
-			'at'    => $this->clock->now()[0],
+			'location' => $this->location( $location ),
+			'file'     => basename( $probe['file'] ),
+			'token'    => $probe['token'],
+			'at'       => $this->clock->now()[0],
 		];
 		$this->state->set( self::ENTRY, $entry );
 		return basename( $probe['file'] );
@@ -97,10 +101,16 @@ final class BrowserProbe {
 			return null;
 		}
 		// Whatever the status says: who got the content has read the file.
-		$exposed         = str_contains( $body, $token );
+		$exposed = self::classify( $status, $body, $token );
+		if ( null === $exposed ) {
+			unset( $entry['result'] );
+			$this->state->set( self::ENTRY, $entry );
+			return null;
+		}
 		$entry['result'] = [
-			'exposed' => $exposed,
-			'at'      => $now,
+			'location' => $pending['location'] ?? null,
+			'exposed'  => $exposed,
+			'at'       => $now,
 		];
 		$this->state->set( self::ENTRY, $entry );
 		return $exposed;
@@ -109,12 +119,43 @@ final class BrowserProbe {
 	/**
 	 * What the last report said.
 	 *
-	 * @return bool|null True if the directory was served, false if not, null without a report.
+	 * @param string $location Current public URL prefix.
+	 * @return bool|null True if the directory was served, false if protected, null without a current report.
 	 */
-	public function result(): ?bool {
+	public function result( string $location = '' ): ?bool {
 		$result  = $this->state->get( self::ENTRY )['result'] ?? null;
 		$exposed = is_array( $result ) ? ( $result['exposed'] ?? null ) : null;
-		return is_bool( $exposed ) ? $exposed : null;
+		if ( ! is_bool( $exposed ) || $this->location( $location ) !== ( $result['location'] ?? null ) || $this->clock->now()[0] - Decoded::int( $result['at'] ?? null ) >= self::RESULT_SECONDS ) {
+			return null;
+		}
+		return $exposed;
+	}
+
+	/**
+	 * Interprets either HTTP probe. A redirect, busy proxy or maintenance page gives no
+	 * evidence that a normal request cannot retrieve files.
+	 *
+	 * @param int    $status HTTP response status.
+	 * @param string $body Response body.
+	 * @param string $token Content of the probe file.
+	 * @return bool|null True if served, false on denial, otherwise unknown.
+	 */
+	public static function classify( int $status, string $body, string $token ): ?bool {
+		if ( str_contains( $body, $token ) ) {
+			return true;
+		}
+		return in_array( $status, [ 403, 404, 410 ], true ) ? false : null;
+	}
+
+	/**
+	 * Identifies both the directory and its public mapping.
+	 *
+	 * @param string $location Public URL prefix.
+	 * @return string Cache key.
+	 */
+	public function location( string $location ): string {
+		$real = realpath( $this->directory->path );
+		return hash( 'sha256', ( false === $real ? $this->directory->path : $real ) . "\0" . $location );
 	}
 
 	/**

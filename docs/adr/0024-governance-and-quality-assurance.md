@@ -88,5 +88,7 @@ can operate.
   ([development guide](../04-development-and-quality.md) §5.6). For the code it measures it
   stays the merge gate of point 3.
 - `readme.txt` has no donation link. Adding one is not planned yet.
-- The release checklist does not exist as a file. It comes with the release tooling of
-  Milestone 3.
+- A release review uses the [pre-release security checklist](../03-security-and-threat-model.md#15-pre-release-security-checklist)
+  and the [publishing procedure](../04-development-and-quality.md). The release candidate's
+  [verification record](../benchmarks/2026-11-20-release-candidate.md) records the local
+  results and outstanding operator approvals.

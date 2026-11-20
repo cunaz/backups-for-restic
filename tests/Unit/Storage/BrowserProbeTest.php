@@ -72,11 +72,28 @@ final class BrowserProbeTest extends TestCase {
 	}
 
 	public function test_a_report_without_the_content_means_protected(): void {
-		foreach ( [ [ 403, 'Forbidden' ], [ 404, '' ], [ 200, 'the front page, served for any path' ], [ 302, '' ] ] as [ $status, $body ] ) {
+		foreach ( [ [ 403, 'Forbidden' ], [ 404, '' ], [ 410, '' ] ] as [ $status, $body ] ) {
 			$this->begin();
 			self::assertFalse( $this->finish( $status, $body ), (string) $status );
 			self::assertFalse( $this->probe()->result() );
 		}
+	}
+
+	public function test_an_inconclusive_http_response_cannot_authorize_staging(): void {
+		foreach ( [ 200, 301, 429, 503 ] as $status ) {
+			$this->begin();
+			self::assertNull( $this->finish( $status, 'proxy response' ) );
+			self::assertNull( $this->probe()->result() );
+		}
+	}
+
+	public function test_a_denial_only_counts_for_the_tested_location_and_lifetime(): void {
+		$this->begun = $this->probe()->begin( '/one/' );
+		self::assertFalse( $this->finish( 403, '' ) );
+		self::assertNull( $this->probe()->result( '/two/' ) );
+		self::assertFalse( $this->probe()->result( '/one/' ) );
+		$this->clock->advance( BrowserProbe::RESULT_SECONDS );
+		self::assertNull( $this->probe()->result( '/one/' ) );
 	}
 
 	public function test_the_content_under_any_status_means_that_the_file_was_read(): void {
@@ -120,7 +137,7 @@ final class BrowserProbeTest extends TestCase {
 		$second = $this->begin();
 
 		self::assertFileDoesNotExist( $this->file( $first ) );
-		self::assertFalse( $this->finish( 200, $token ), 'The first file\'s content is not the pending one\'s.' );
+		self::assertNull( $this->finish( 200, $token ), 'The first file\'s content is not the pending one\'s.' );
 		self::assertFileDoesNotExist( $this->file( $second ) );
 	}
 

@@ -93,11 +93,7 @@ final class BackupSteps implements StepProvider {
 	 */
 	public function preflight( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services;
-		if ( '' === $services->settings->string( 'repository.url' ) ) {
-			InvalidArgument::raise( 'No repository is configured.', [ 'code' => 'no_repository' ] );
-		}
-		$services->access->password();
-		$services->private_dir->ensure();
+		$this->require_configured();
 
 		$free = $services->private_dir->free_space();
 		if ( null !== $free && $free < self::MIN_FREE_BYTES + 2 * $services->pack_size() ) {
@@ -107,14 +103,46 @@ final class BackupSteps implements StepProvider {
 		if ( $memory > 0 && $memory < self::MIN_MEMORY_BYTES ) {
 			StorageFailed::raise( 'The PHP memory limit is too low for a backup.', [ 'memory_limit' => $memory ] );
 		}
-		if ( true === $services->exposure?->exposed() ) {
+		$this->require_reachable();
+		$log->write( 'info', 'Preflight passed.' );
+		return true;
+	}
+
+	/**
+	 * The part of the preflight that every job with a repository needs before anything else:
+	 * an address, a repository password that can be read, and the private directory.
+	 *
+	 * @throws InvalidArgument If no repository is configured.
+	 * @throws StorageFailed If the private directory cannot be created.
+	 */
+	public function require_configured(): void {
+		$services = $this->services;
+		if ( '' === $services->settings->string( 'repository.url' ) ) {
+			InvalidArgument::raise( 'No repository is configured.', [ 'code' => 'no_repository' ] );
+		}
+		$services->access->password();
+		$services->private_dir->ensure();
+	}
+
+	/**
+	 * The part of the preflight that asks over the network: the private directory must not be
+	 * served, and the repository must answer and hold a config file.
+	 *
+	 * @param bool $staging Require verified protection before restoring plaintext.
+	 * @throws StorageFailed If the private directory cannot protect the job data.
+	 * @throws NotFound If the repository does not exist.
+	 */
+	public function require_reachable( bool $staging = false ): void {
+		$services = $this->services;
+		if ( $staging && false === $services->exposure?->permits_staging() ) {
+			StorageFailed::raise( 'Protection of the restore staging directory could not be verified.', [ 'code' => 'staging_unverified' ] );
+		}
+		if ( ! $staging && true === $services->exposure?->exposed() ) {
 			StorageFailed::raise( 'The private directory can be read from the web.' );
 		}
 		if ( null === $services->access->backend()->size( ObjectType::Config, 'config' ) ) {
 			NotFound::raise( 'The repository has no config file.' );
 		}
-		$log->write( 'info', 'Preflight passed.' );
-		return true;
 	}
 
 	/**

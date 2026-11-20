@@ -34,14 +34,31 @@ final class InMemoryOptions implements Options {
 	/** @var array<string, mixed> */
 	private array $read = [];
 
+	/**
+	 * Whether each option that was read existed then; a stored null reads like a missing one.
+	 *
+	 * @var array<string, bool>
+	 */
+	private array $present = [];
+
 	public function get( string $name ): mixed {
 		if ( ! $this->request_cache ) {
 			return $this->values[ $name ] ?? null;
 		}
 		if ( ! array_key_exists( $name, $this->read ) ) {
-			$this->read[ $name ] = $this->values[ $name ] ?? null;
+			$this->read[ $name ]    = $this->values[ $name ] ?? null;
+			$this->present[ $name ] = array_key_exists( $name, $this->values );
 		}
 		return $this->read[ $name ];
+	}
+
+	public function exists( string $name ): bool {
+		if ( ! $this->request_cache ) {
+			return array_key_exists( $name, $this->values );
+		}
+		// As WordPress within one request: what the first read found, also about absence.
+		$this->get( $name );
+		return $this->present[ $name ] ?? false;
 	}
 
 	/** Number of calls of fresh(). */
@@ -50,14 +67,15 @@ final class InMemoryOptions implements Options {
 	/** Runs before fresh() answers: what another request wrote since this one read. */
 	public ?\Closure $meanwhile = null;
 
-	public function fresh( string $name ): mixed {
+	public function fresh( string $name, bool $autoload = false ): mixed {
 		++$this->fresh;
 		if ( null !== $this->meanwhile ) {
 			$meanwhile       = $this->meanwhile;
 			$this->meanwhile = null;
 			$meanwhile( $this );
 		}
-		$this->read[ $name ] = $this->values[ $name ] ?? null;
+		$this->read[ $name ]    = $this->values[ $name ] ?? null;
+		$this->present[ $name ] = array_key_exists( $name, $this->values );
 		return $this->read[ $name ];
 	}
 
@@ -90,19 +108,21 @@ final class InMemoryOptions implements Options {
 		++$this->writes;
 		$this->values[ $name ]   = $value;
 		$this->read[ $name ]     = $value;
+		$this->present[ $name ]  = true;
 		$this->autoload[ $name ] = $autoload;
 		return true;
 	}
 
 	public function initialize( string $name, mixed $value, bool $autoload ): bool {
 		if ( array_key_exists( $name, $this->values ) ) {
-			$this->read[ $name ] = $this->values[ $name ];
+			$this->read[ $name ]    = $this->values[ $name ];
+			$this->present[ $name ] = true;
 			return $value === $this->values[ $name ] || ( is_scalar( $value ) && is_scalar( $this->values[ $name ] ) && (string) $value === (string) $this->values[ $name ] );
 		}
 		return $this->set( $name, $value, $autoload );
 	}
 
 	public function delete( string $name ): void {
-		unset( $this->values[ $name ], $this->autoload[ $name ], $this->read[ $name ] );
+		unset( $this->values[ $name ], $this->autoload[ $name ], $this->read[ $name ], $this->present[ $name ] );
 	}
 }

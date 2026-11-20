@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Integration;
 use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Tests\Support\TestSite;
+use BackupsForRestic\Tests\Support\TempDir;
 
 /**
  * Deleting the plugin from the Plugins screen: everything it stored on the site goes, and
@@ -52,23 +53,82 @@ final class UninstallTest extends TestCase {
 			self::assertContains( $name, $stored );
 		}
 		self::assertDirectoryExists( TestSite::private_dir() . '/jobs' );
+		// A staged restore that nobody removed: uninstalling takes it along.
+		$staged = TestSite::private_dir() . '/restores/20270115T030000Z-abcdef/files/var/www';
+		self::assertTrue( is_dir( $staged ) || mkdir( $staged, 0700, true ) );
+		file_put_contents( $staged . '/index.php', '<?php // A restored file.' );
 
+		$foreign = TempDir::create( 'uninstall-foreign' );
+		mkdir( $foreign . '/jobs' );
+		file_put_contents( $foreign . '/jobs/owner.txt', 'another application' );
+		$unknown = TestSite::private_dir() . '/jobs/20370115T030000Z-ffffff';
+		mkdir( $unknown );
+		file_put_contents( $unknown . '/job.json', '{"schema":9999}' );
 		try {
+			// The previous directory still holds job ownership, even after a filter moves new jobs.
+			$blocked = TestSite::php(
+				'
+				require_once ABSPATH . "wp-admin/includes/plugin.php";
+				add_filter( "backups_for_restic_private_dir", static fn () => $arguments[1], PHP_INT_MAX );
+				add_filter( "wp_die_handler", static fn () => static function () { throw new RuntimeException( "cleanup-deferred" ); } );
+				try { uninstall_plugin( $arguments[0] ); } catch ( RuntimeException $e ) { echo $e->getMessage(); }
+				',
+				[ TestSite::PLUGIN, $foreign ]
+			);
+			self::assertStringContainsString( 'cleanup-deferred', $blocked );
+			self::assertFileExists( $unknown . '/job.json' );
+			self::assertContains( 'backups_for_restic_secrets', self::stored() );
+			unlink( $unknown . '/job.json' );
+			rmdir( $unknown );
+
+			// The previous directory owns a real private InnoDB table from an interrupted rehearsal.
+			$ledger = TestSite::last_line(
+				TestSite::php(
+					'
+					global $wpdb;
+					$store = (new BackupsForRestic\WordPress\Container(WP_PLUGIN_DIR . "/" . $arguments[0]))->jobs();
+					$sql = new BackupsForRestic\Database\Restore\MysqliConnection($wpdb->dbh);
+					$token = bin2hex(random_bytes(16));
+					$digest = hash("sha256", $token);
+					$owned = new BackupsForRestic\Database\Restore\OwnedTables($sql, $wpdb->prefix, $digest, $token);
+					$binding = ["site" => home_url(), "path" => "/database", "prefix" => $wpdb->prefix,
+						"fingerprint" => $digest, "count" => 0, "token" => $token];
+					$job = $store->create(BackupsForRestic\Jobs\JobType::Restore, "cli", time(), ["database_binding" => $binding]);
+					$job->state = BackupsForRestic\Jobs\JobState::Failed;
+					$store->save($job);
+					$sql->execute("CREATE TABLE " . $owned->progress() . " (id INT) ENGINE=InnoDB COMMENT=" .
+						BackupsForRestic\Database\Dump\SqlFormatter::value($owned->owner, BackupsForRestic\Database\Dump\SqlFormatter::TEXT));
+					echo "\n", $owned->progress();
+					',
+					[ TestSite::PLUGIN ]
+				)
+			);
+			self::assertMatchesRegularExpression( '/\A_bfr_r_[0-9a-f]{32}_p\z/', $ledger );
+
 			// What the Plugins screen does on "Delete", without removing the plugin's own files.
 			TestSite::php(
 				'
 				require_once ABSPATH . "wp-admin/includes/plugin.php";
 				deactivate_plugins( $arguments[0] );
+				add_filter( "backups_for_restic_private_dir", static fn () => $arguments[1], PHP_INT_MAX );
 				uninstall_plugin( $arguments[0] );
 				',
-				[ TestSite::PLUGIN ]
+				[ TestSite::PLUGIN, $foreign ]
 			);
 
 			self::assertSame( [], self::stored(), 'No option, transient or cron event of the plugin is left.' );
 			self::assertDirectoryDoesNotExist( TestSite::private_dir(), 'The private directory held nothing but the plugin\'s files.' );
+			self::assertSame( [ '.', '..', 'jobs' ], scandir( $foreign ) );
+			self::assertSame( 'another application', file_get_contents( $foreign . '/jobs/owner.txt' ) );
+			self::assertSame(
+				'0',
+				TestSite::last_line( TestSite::php( 'global $wpdb; echo "\n", $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", $arguments[0]));', [ $ledger ] ) )
+			);
 			self::assertSame( $snapshots, TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), 'The repository is not touched.' );
 			self::assertStringContainsString( 'no errors were found', TestSite::restic()->must( [ 'check' ] ) );
 		} finally {
+			TempDir::remove( $foreign );
+			TempDir::remove( $unknown );
 			TestSite::plugin( true );
 		}
 

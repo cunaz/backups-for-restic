@@ -50,32 +50,7 @@ final class SchedulePolicy {
 	 * @return int|null Unix time of the slot, or null for manual backups only.
 	 */
 	public static function last_backup_slot( Settings $settings, \DateTimeZone $zone, int $now ): ?int {
-		$frequency = $settings->string( 'schedule.backup.frequency' );
-		$hour      = $settings->int( 'schedule.backup.hour' );
-		$minute    = $settings->int( 'schedule.backup.minute' );
-		$local     = ( new \DateTimeImmutable( '@' . $now ) )->setTimezone( $zone );
-		$today     = $local->setTime( $hour, $minute );
-
-		switch ( $frequency ) {
-			case 'daily':
-				$slot = $today <= $local ? $today : $today->modify( '-1 day' );
-				return $slot->getTimestamp();
-			case 'twice_daily':
-				$candidates = [ $today, $today->modify( '+12 hours' ), $today->modify( '-12 hours' ), $today->modify( '-1 day' ) ];
-				$best       = null;
-				foreach ( $candidates as $candidate ) {
-					if ( $candidate <= $local && ( null === $best || $candidate > $best ) ) {
-						$best = $candidate;
-					}
-				}
-				return $best?->getTimestamp();
-			case 'weekly':
-				$days = ( (int) $local->format( 'w' ) - $settings->int( 'schedule.backup.weekday' ) + 7 ) % 7;
-				$slot = $today->modify( '-' . $days . ' days' );
-				return ( $slot <= $local ? $slot : $slot->modify( '-7 days' ) )->getTimestamp();
-			default:
-				return null;
-		}
+		return self::backup_slot( $settings, $zone, $now, false );
 	}
 
 	/**
@@ -87,16 +62,7 @@ final class SchedulePolicy {
 	 * @return int|null Unix time, or null for manual backups only.
 	 */
 	public static function next_backup_slot( Settings $settings, \DateTimeZone $zone, int $now ): ?int {
-		$last = self::last_backup_slot( $settings, $zone, $now );
-		if ( null === $last ) {
-			return null;
-		}
-		$step = match ( $settings->string( 'schedule.backup.frequency' ) ) {
-			'twice_daily' => '+12 hours',
-			'weekly'      => '+7 days',
-			default       => '+1 day',
-		};
-		return ( new \DateTimeImmutable( '@' . $last ) )->setTimezone( $zone )->modify( $step )->getTimestamp();
+		return self::backup_slot( $settings, $zone, $now, true );
 	}
 
 	/**
@@ -113,25 +79,7 @@ final class SchedulePolicy {
 	 * @return int|null Unix time of the slot, or null if the task runs only on demand.
 	 */
 	public static function last_maintenance_slot( Settings $settings, \DateTimeZone $zone, int $now, string $task ): ?int {
-		$frequency = $settings->string( 'schedule.' . $task . '.frequency' );
-		$hour      = $settings->int( 'schedule.' . $task . '.hour' );
-		$weekday   = $settings->int( 'schedule.prune.weekday' );
-		$local     = ( new \DateTimeImmutable( '@' . $now ) )->setTimezone( $zone );
-
-		if ( 'weekly' === $frequency ) {
-			$days = ( (int) $local->format( 'w' ) - $weekday + 7 ) % 7;
-			$slot = $local->setTime( $hour, 0 )->modify( '-' . $days . ' days' );
-			return ( $slot <= $local ? $slot : $slot->modify( '-7 days' ) )->getTimestamp();
-		}
-		if ( 'monthly' !== $frequency ) {
-			return null;
-		}
-		$month = $local->modify( 'first day of this month' )->setTime( $hour, 0 );
-		$slot  = self::monthly( $month, $task, $weekday, $settings );
-		if ( $slot > $local ) {
-			$slot = self::monthly( $month->modify( 'first day of previous month' ), $task, $weekday, $settings );
-		}
-		return $slot->getTimestamp();
+		return self::maintenance_slot( $settings, $zone, $now, $task, false );
 	}
 
 	/**
@@ -144,31 +92,109 @@ final class SchedulePolicy {
 	 * @return int|null Unix time of the slot, or null if the task runs only on demand.
 	 */
 	public static function next_maintenance_slot( Settings $settings, \DateTimeZone $zone, int $now, string $task ): ?int {
-		$last = self::last_maintenance_slot( $settings, $zone, $now, $task );
-		if ( null === $last ) {
-			return null;
-		}
-		$local = ( new \DateTimeImmutable( '@' . $last ) )->setTimezone( $zone );
-		if ( 'weekly' === $settings->string( 'schedule.' . $task . '.frequency' ) ) {
-			return $local->modify( '+7 days' )->getTimestamp();
-		}
-		$month = $local->modify( 'first day of next month' )->setTime( $settings->int( 'schedule.' . $task . '.hour' ), 0 );
-		return self::monthly( $month, $task, $settings->int( 'schedule.prune.weekday' ), $settings )->getTimestamp();
+		return self::maintenance_slot( $settings, $zone, $now, $task, true );
 	}
 
 	/**
-	 * The slot of a maintenance task within one month.
+	 * Chooses the previous or next slot from dates on the local calendar. Setting the
+	 * configured time independently on each date keeps the normalization of a missing
+	 * spring-forward hour on that date alone.
 	 *
-	 * @param \DateTimeImmutable $first    First day of the month at the task's hour.
-	 * @param string             $task     prune or check.
-	 * @param int                $weekday  Prune weekday, 0 for Sunday.
-	 * @param Settings           $settings Settings.
-	 * @return \DateTimeImmutable Slot.
+	 * @param Settings      $settings Settings.
+	 * @param \DateTimeZone $zone     Site time zone.
+	 * @param int           $now      Unix time.
+	 * @param bool          $next     Whether to choose a future slot.
+	 * @return int|null Unix time.
 	 */
-	private static function monthly( \DateTimeImmutable $first, string $task, int $weekday, Settings $settings ): \DateTimeImmutable {
-		if ( 'check' === $task ) {
-			return $first->modify( '+' . ( $settings->int( 'schedule.check.day' ) - 1 ) . ' days' );
+	private static function backup_slot( Settings $settings, \DateTimeZone $zone, int $now, bool $next ): ?int {
+		$frequency = $settings->string( 'schedule.backup.frequency' );
+		if ( 'manual' === $frequency ) {
+			return null;
 		}
-		return $first->modify( '+' . ( ( $weekday - (int) $first->format( 'w' ) + 7 ) % 7 ) . ' days' );
+		$day    = ( new \DateTimeImmutable( '@' . $now ) )->setTimezone( $zone )->setTime( 12, 0 );
+		$hour   = $settings->int( 'schedule.backup.hour' );
+		$minute = $settings->int( 'schedule.backup.minute' );
+		if ( 'weekly' === $frequency ) {
+			return self::weekly_slot( $day, $settings->int( 'schedule.backup.weekday' ), $hour, $minute, $now, $next );
+		}
+		$hours = 'twice_daily' === $frequency ? [ $hour, ( $hour + 12 ) % 24 ] : [ $hour ];
+		$slots = [];
+		foreach ( [ $day->modify( '-1 day' ), $day, $day->modify( '+1 day' ) ] as $date ) {
+			foreach ( $hours as $scheduled_hour ) {
+				$slots[] = $date->setTime( $scheduled_hour, $minute )->getTimestamp();
+			}
+		}
+		return self::nearest( $slots, $now, $next );
+	}
+
+	/**
+	 * Computes a maintenance slot directly from the configured weekday or month day.
+	 *
+	 * @param Settings      $settings Settings.
+	 * @param \DateTimeZone $zone     Site time zone.
+	 * @param int           $now      Unix time.
+	 * @param string        $task     prune or check.
+	 * @param bool          $next     Whether to choose a future slot.
+	 * @return int|null Unix time.
+	 */
+	private static function maintenance_slot( Settings $settings, \DateTimeZone $zone, int $now, string $task, bool $next ): ?int {
+		$frequency = $settings->string( 'schedule.' . $task . '.frequency' );
+		$day       = ( new \DateTimeImmutable( '@' . $now ) )->setTimezone( $zone )->setTime( 12, 0 );
+		$hour      = $settings->int( 'schedule.' . $task . '.hour' );
+		$weekday   = $settings->int( 'schedule.prune.weekday' );
+		if ( 'weekly' === $frequency ) {
+			return self::weekly_slot( $day, $weekday, $hour, 0, $now, $next );
+		}
+		if ( 'monthly' !== $frequency ) {
+			return null;
+		}
+		$first = $day->modify( 'first day of this month' );
+		$slots = [];
+		foreach ( [ $first->modify( '-1 month' ), $first, $first->modify( '+1 month' ) ] as $month ) {
+			$offset  = 'check' === $task ? $settings->int( 'schedule.check.day' ) - 1 : ( $weekday - (int) $month->format( 'w' ) + 7 ) % 7;
+			$slots[] = $month->modify( '+' . $offset . ' days' )->setTime( $hour, 0 )->getTimestamp();
+		}
+		return self::nearest( $slots, $now, $next );
+	}
+
+	/**
+	 * Chooses a weekly slot on the given weekday.
+	 *
+	 * @param \DateTimeImmutable $day     Local date at noon.
+	 * @param int                $weekday Scheduled weekday.
+	 * @param int                $hour    Scheduled hour.
+	 * @param int                $minute  Scheduled minute.
+	 * @param int                $now     Unix time.
+	 * @param bool               $next    Whether to choose a future slot.
+	 * @return int|null Unix time.
+	 */
+	private static function weekly_slot( \DateTimeImmutable $day, int $weekday, int $hour, int $minute, int $now, bool $next ): ?int {
+		$offset = ( $weekday - (int) $day->format( 'w' ) + 7 ) % 7;
+		$date   = $day->modify( '+' . $offset . ' days' );
+		$slots  = [];
+		foreach ( [ $date->modify( '-7 days' ), $date, $date->modify( '+7 days' ) ] as $scheduled ) {
+			$slots[] = $scheduled->setTime( $hour, $minute )->getTimestamp();
+		}
+		return self::nearest( $slots, $now, $next );
+	}
+
+	/**
+	 * Picks the most recent due slot or the earliest future one.
+	 *
+	 * @param list<int> $slots Candidates on both sides of now.
+	 * @param int       $now   Unix time.
+	 * @param bool      $next  Whether to choose a future slot.
+	 * @return int|null Unix time.
+	 */
+	private static function nearest( array $slots, int $now, bool $next ): ?int {
+		sort( $slots, SORT_NUMERIC );
+		$last = null;
+		foreach ( $slots as $slot ) {
+			if ( $slot > $now ) {
+				return $next ? $slot : $last;
+			}
+			$last = $slot;
+		}
+		return $next ? null : $last;
 	}
 }

@@ -6,18 +6,16 @@ restic CLI and against real servers.
 
 ## Milestone 0 — Engine core and conformance
 
-**Status (2026-11-10): implemented and verified, except the BorgBase measurements, which
-need the owner's two free-tier repositories. An audit of the code against this plan
-(2026-11-10) found two deviations in the engine, both fixed: a paused run refreshed a lock
-other clients no longer honoured instead of taking it again, and the key derivation table
-was not created with mode 0600. What the audit could not close is phase 0 of the
-[plan for Milestone 3](07-milestone-3-plan.md).**
+**Implemented and verified.** The 2026-11-10 audit led to two engine fixes. A paused
+run now reacquires an expired lock, and the key derivation table is created with mode
+0600. On 2026-11-20 the hosted measurements passed with normal and append-only access
+on two dedicated BorgBase repositories. [Release-candidate verification](benchmarks/2026-11-20-release-candidate.md).
 
 | Acceptance criterion | Result |
 | --- | --- |
-| Plugin-written repository passes `restic check --read-data`, restore byte for byte | Met: a 20 MB fixture tree, checked by restic 0.19.1, 0.18.1 and 0.14.0, and a 300 MB streamed database dump, checked and restored by restic 0.19.1; incremental backups diff correctly in restic |
-| Restic-written repositories restore identically in PHP | Met for format 1 (restic 0.19.1 and 0.14.0), with zero new data when the plugin backs up the same files. Format 2 needs `ext-zstd` (see below); CI covers it in a second job |
-| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 24 MiB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Append-only behaviour green on rest-server. BorgBase pending |
+| Plugin-written repository passes `restic check --read-data`, restore byte for byte | Met: a 20 MB fixture tree checked by restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0, and a 300 MB streamed database dump checked and restored by restic 0.20.0; incremental backups diff correctly in restic |
+| Restic-written repositories restore identically in PHP | Met for format 1 (restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0), with zero new data when the plugin backs up the same files. Format 2 needs `ext-zstd` (see below); CI covers it in a second job |
+| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 24 MiB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Both modes passed on dedicated BorgBase repositories on 2026-11-20, including refusal to forget the append-only snapshot. The local private rest-server also passed |
 | Mutation score of `Crypto` and `Format` ≥ 90 %; fuzzing without open findings | Met. Mutation: 97 % of 2627 mutants in `Crypto`, `Format` and `Engine\Forget` killed or timed out, 70 escaped, none uncovered (CI, 2026-11-09). Fuzzing: 54 million inputs across 17 parsers in a 30-second-per-parser campaign, no findings |
 | Benchmark gates on PHP 8.3 without JIT | Met with wide margins for what was measured: chunker 24 MB/s, scrypt 1.4 s in memory, backup 1.3 CPU minutes per GB, extrapolated from 256 MB written to an in-memory backend by one process ([benchmarks](benchmarks/2026-11-milestone-0.md)). CPU time across ticks to a real server, and the file-backed key derivation that the plugin uses, are not measured yet |
 
@@ -79,9 +77,12 @@ in a real WordPress 7.1.4 on PHP 8.3: setup through the REST API, a backup drive
 server that is stopped in the middle of a tick. Until 2026-11-10 the suite failed, because
 the CI setup switches on PHP's tracing JIT for the built-in web server and PHP 8.3 then
 crashed in backup ticks; the test server now runs without the JIT, as PHP does by default.
-The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
-which GitHub starts from `main` only: for the first time in the night after the merge of
-2026-11-10. Its result is not recorded here yet.**
+An earlier local run under these limits passed on WordPress 7.1.4 in 46 minutes.**
+
+On 2026-11-20 the final ZIP on WordPress 7.1.5 passed the full acceptance run in
+11 min 26 s against a local TLS rest-server and 14 min 18 s against a normal BorgBase
+repository. Both runs verified 2 GiB of uploads and at least 300 MiB of SQL values
+through independent restic reads, restores and SQL imports. [Measurements](benchmarks/2026-11-20-release-candidate.md#large-wordpress-backups).
 
 **Found by the audit of 2026-11-10 and fixed:** a cancel request was lost when it arrived
 while a tick ran; after the setup the recovery kit could be had without the WordPress
@@ -97,7 +98,7 @@ how to switch the PHP version were promised and do not exist.
 
 | Acceptance criterion | Result |
 | --- | --- |
-| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration` passed in CI on 2026-11-10 with 64 MB of files and 32 MB of database, the restore compared for the uploads directory and the checksums for the fixture tables; the run with 2 GB plus 300 MB is nightly and has not run yet. BorgBase pending |
+| Large site through `wp-cron.php` with 30 s and 128 MiB, to BorgBase and a TLS rest-server | Passed on both backends. WordPress completed 20 local ticks and 24 hosted ticks without warnings. restic 0.20.0 read all stored data and restored the uploads byte for byte. The imported SQL matched the source checksums for `wp_postmeta`, `wp_posts` and `wp_users`. |
 | A tick killed at any point leaves a resumable job; no stale lock | Engine and runner verified: every step can be interrupted, a killed tick's lease is taken over, and cleanup releases the lock a checkpoint names on every path. Every run writes its checkpoint with its number before it takes its first lock, so a lock left by a request that died at any point is recognised and removed ([ADR 0030](adr/0030-lock-continuity.md)). Through `wp-cron.php` in CI: the web server is stopped a few seconds after a cron request started a backup; the job finishes after the restart, `restic check` passes and no lock is left. The test neither asserts that a tick was running when the server stopped nor chooses the step |
 | No secret in files under `jobs/`, in REST responses or in HTML | `jobs/` verified in the job test and in CI; the integration suite searches the responses of four routes (status, settings, jobs, job log) for the two passwords; the admin HTML contains no settings or secrets by construction, which no test checks |
 
@@ -116,8 +117,8 @@ Findings that changed the design:
 - The core is separated from WordPress by one namespace and two PHPStan rules
   ([ADR 0029](adr/0029-wordpress-free-core.md)).
 
-Not done in this milestone: time estimates (progress shows files and bytes so far) and
-BorgBase measurements. The name was settled before the first public commit
+Progress reports show files and bytes processed. Time estimates remain open.
+The name was settled before the first public commit
 ([ADR 0015](adr/0015-naming-and-license.md)).
 
 Scope
@@ -196,9 +197,10 @@ Acceptance
 
 ## Milestone 3 — Restore (0.3.0)
 
-**Status (2026-11-10): planned. Work packages, order, tests and the owner's decisions are in
-the [plan for Milestone 3](07-milestone-3-plan.md); its phase 0 closes what Milestones 0 to
-2 left open. "Connect to an existing repository" below already exists since Milestone 1.**
+**Release candidate, 2026-11-20.** The staged restore, live file review and undo, fresh-site
+mapping, database rehearsal, and eligible MySQL exchange and undo are implemented. Packaged
+two-site browser tests verify preservation of the receiving administrator, site address and
+backup settings. MariaDB uses the documented manual SQL import. The normal BorgBase repository passed the full WordPress backup and restore. The append-only repository retained both snapshots from its two smoke runs. WordPress.org publication requires owner approval. [Restore work packages](07-milestone-3-plan.md).
 
 Scope
 - Snapshot browser (tree walk per directory), manifest view.
@@ -216,6 +218,9 @@ Acceptance
   decides the submission date; the planning default is the end of this milestone.
 
 ## Milestone 4 — 1.0.0
+
+The release candidate passed local recovery and packaging checks, a full hosted WordPress backup and restore, and the append-only BorgBase retention test. Directory approval and the first public SVN comparison are pending.
+[Release-candidate verification](benchmarks/2026-11-20-release-candidate.md).
 
 Scope
 - Hardening against the pre-release checklist; an internal security pass over `Crypto`,
@@ -289,7 +294,7 @@ Architecture decisions taken during Milestone 0:
 | The PHP 8.3 floor excludes many sites at launch (45 % reach in November 2026) | high | medium | Reach grows until 1.0 in 2027; WordPress blocks installation on older PHP gracefully; `readme.txt` explains how to switch PHP |
 | Hosts block loopback requests or outbound HTTPS | medium | medium / high | Doctor detects both; cron-ping documentation; outbound HTTPS is a stated requirement |
 | Self-hosted servers vary in setup quality (TLS, versions, proxies) | medium | low | Connection test checks Range reads, listing and append-only first; clear errors; rest-server documentation |
-| restic changes its format | low | medium | Format 1 is frozen; the conformance suite runs nightly against pinned restic releases (0.19.1, 0.18.1, 0.14.0), and a new release is added by a reviewed pull request. Automatic notice of new releases is planned |
+| restic changes its format | low | medium | Format 1 is frozen; the conformance suite runs nightly against pinned restic releases (0.20.0, 0.19.1, 0.18.1, 0.14.0), and a new release is added by a reviewed pull request. Automatic notice of new releases is planned |
 | First backups take many hours on large sites | high | low | Documented; incremental runs are fast; chaining and cron ping |
 | Operators lose the repository password | medium | critical | Mandatory recovery kit acknowledgement; re-display after re-authentication; constants option; DR guide |
 | WordPress.org review questions the cryptographic code or filesystem access | medium | medium | FAQ answers prepared; readable, documented code; Plugin Check clean; screenshots of graceful failures |

@@ -5,6 +5,9 @@ namespace BackupsForRestic\Tests\Integration;
 
 use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Jobs\JobStore;
+use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
 
 /**
@@ -54,6 +57,67 @@ final class CliTest extends TestCase {
 		return array_values( array_map( 'strval', array_column( $listed, 'id' ) ) );
 	}
 
+	public function test_an_empty_fixture_uses_the_installed_wp_cli_and_can_supply_its_own(): void {
+		$site     = TestSite::root();
+		$previous = getenv( 'BFR_SITE_TOOLS_DIR' );
+		$fixture  = TempDir::create( 'cli-tools' );
+		try {
+			putenv( 'BFR_SITE_TOOLS_DIR=' . $fixture );
+			self::assertTrue( TestSite::has_wp_cli() );
+			[ $status, $output ] = TestSite::wp( [ '--version' ], $site );
+			self::assertSame( 0, $status, $output );
+			self::assertMatchesRegularExpression( '/^WP-CLI [0-9]+\.[0-9]+\.[0-9]+/m', $output );
+
+			mkdir( $fixture . '/bin' );
+			file_put_contents( $fixture . '/bin/wp', '<?php echo "fixture WP-CLI";' );
+			self::assertTrue( TestSite::has_wp_cli() );
+			self::assertSame( [ 0, 'fixture WP-CLI' ], TestSite::wp( [ '--version' ], $site ) );
+		} finally {
+			putenv( false === $previous ? 'BFR_SITE_TOOLS_DIR' : 'BFR_SITE_TOOLS_DIR=' . $previous );
+			TempDir::remove( $fixture );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_job_creation_reports_a_private_storage_error_without_a_trace(): void {
+		$fixture = TempDir::create( 'cli-job-storage' );
+		$private = new PrivateDirectory( $fixture . '/private' );
+		try {
+			$private->ensure();
+			$override = $fixture . '/private-dir.php';
+			file_put_contents( $override, '<?php define( "BACKUPS_FOR_RESTIC_PRIVATE_DIR", ' . var_export( $private->path, true ) . ' );' );
+			$jobs = $private->subdirectory( 'jobs' );
+			// A directory cannot be opened as a writable lock file, even when testing as root.
+			mkdir( $jobs . '/' . JobStore::CREATE_LOCK );
+			[ $status, $output ] = self::command( [ 'backup', '--require=' . $override ] );
+			self::assertSame( 1, $status, $output );
+			self::assertSame( 'Error: The job could not be started. Check free space and write permissions in the private working directory.', TestSite::last_line( $output ) );
+			self::assertStringNotContainsString( $private->path, $output );
+			self::assertStringNotContainsString( 'Stack trace:', $output );
+			self::assertStringNotContainsString( 'Warning:', $output );
+			self::assertSame( [ '.', '..', JobStore::CREATE_LOCK ], scandir( $jobs ) );
+		} finally {
+			TempDir::remove( $fixture );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
+		$before            = TestSite::state( 'recovery_kit' );
+		[ $exit, $output ] = self::command( [ 'recovery-kit' ] );
+		self::assertNotSame( 0, $exit );
+		self::assertFalse( str_contains( $output, TestSite::$repository_password ) );
+		self::assertSame( $before, TestSite::state( 'recovery_kit' ) );
+
+		[ $exit, $kit ] = self::command( [ 'recovery-kit', '--force' ] );
+		self::assertSame( 0, $exit );
+		self::assertTrue( str_contains( $kit, "RESTIC_PASSWORD='" . TestSite::$repository_password . "'" ) );
+		$history = TestSite::state( 'recovery_kit' );
+		self::assertSame( 'cli', $history['views'][0]['via'] ?? null );
+		self::assertSame( 'WP-CLI', $history['views'][0]['login'] ?? null );
+		self::assertFalse( str_contains( (string) json_encode( $history ), TestSite::$repository_password ) );
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_doctor_status_and_snapshots_report_the_site(): void {
 		TestSite::idle( 600 );
@@ -81,6 +145,60 @@ final class CliTest extends TestCase {
 		sort( $listed );
 		sort( $expected );
 		self::assertSame( $expected, $listed, $output );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_ls_lists_a_directory_of_a_snapshot(): void {
+		TestSite::idle( 600 );
+		$ids = self::snapshots();
+		self::assertNotSame( [], $ids );
+		// restic lists the oldest first; every backup of the site holds the fixture.
+		$id      = $ids[ count( $ids ) - 1 ];
+		$fixture = TestSite::root() . '/wp-content/uploads/fixture';
+
+		[ $status, $output ] = self::command( [ 'ls', substr( $id, 0, 8 ), $fixture ] );
+		self::assertSame( 0, $status, $output );
+		self::assertMatchesRegularExpression( '/^- [0-7]{4} +8388608  \S+ +file-0\.bin$/m', $output );
+
+		[ $status, $output ] = self::command( [ 'ls', $id ] );
+		self::assertSame( 0, $status, $output );
+		self::assertMatchesRegularExpression( '/^d [0-7]{4} +-  \S+ +\S+\/$/m', $output, 'The root of the snapshot holds a directory.' );
+
+		$refusals = [
+			'The snapshot has no directory with this path.' => [ $id, $fixture . '/file-0.bin' ],
+			'This is not a path inside a snapshot.'        => [ $id, 'wp-content' ],
+			'This is not a snapshot ID.'                   => [ 'latest' ],
+			'The repository has no snapshot with this ID.' => [ str_repeat( 'ab', 32 ) ],
+		];
+		foreach ( $refusals as $message => $arguments ) {
+			[ $status, $output ] = self::command( [ 'ls', ...$arguments ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: ' . $message, $output );
+		}
+		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ) );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_restore_stages_only_the_selected_file(): void {
+		TestSite::idle( 600 );
+		$ids                 = self::snapshots();
+		$id                  = $ids[ count( $ids ) - 1 ];
+		$path                = TestSite::root() . '/wp-content/uploads/fixture/file-0.bin';
+		[ $status, $output ] = self::command( [ 'restore', $id, '../outside' ] );
+		self::assertSame( 1, $status, $output );
+		self::assertStringNotContainsString( 'created.', $output );
+
+		[ $status, $output ] = self::command( [ 'restore', substr( $id, 0, 8 ), $path, '--wait' ] );
+		self::assertSame( 0, $status, $output );
+		$job = self::created( $output );
+		try {
+			self::assertStringContainsString( 'Files staged in restores/' . $job, $output );
+			$files = TestSite::private_dir() . '/restores/' . $job . '/files';
+			self::assertFileEquals( $path, $files . $path );
+			self::assertFileDoesNotExist( $files . TestSite::root() . '/wp-config.php' );
+		} finally {
+			TestSite::api( 'DELETE', '/restores/' . $job );
+		}
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
@@ -206,6 +324,19 @@ final class CliTest extends TestCase {
 		}
 	}
 
+	/**
+	 * @return non-empty-list<string> Recent jobs, newest first.
+	 */
+	private static function recent_job_ids(): array {
+		[ $status, $result ] = TestSite::api( 'GET', '/jobs' );
+		self::assertSame( 200, $status );
+		self::assertIsArray( $result['jobs'] );
+		$ids = array_column( $result['jobs'], 'id' );
+		self::assertNotEmpty( $ids );
+		self::assertContainsOnlyString( $ids );
+		return $ids;
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_logs_prints_what_a_job_did_and_cancel_stops_one(): void {
 		TestSite::idle( 600 );
@@ -230,14 +361,24 @@ final class CliTest extends TestCase {
 
 			[ $status, $output ] = self::command( [ 'logs', $id ] );
 			self::assertSame( 0, $status, $output );
-			self::assertStringStartsWith( $id . ' Backup Cancelled', $output );
-			self::assertMatchesRegularExpression( '/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d info +Job created\./m', $output );
+			// WP-CLI can emit its own PHP startup diagnostics before invoking the plugin command.
+			$header = preg_quote( $id . ' Backup Cancelled', '/' );
+			self::assertMatchesRegularExpression( '/^' . $header . '\n\d{4}-\d\d-\d\d \d\d:\d\d:\d\d info +Job created\./m', $output );
 			self::assertStringContainsString( 'Cancellation requested. {"user":"wp-cli"}', $output );
 			self::assertStringContainsString( 'Job finished. {"state":"cancelled"}', $output );
+			[ $status, $tail ] = self::command( [ 'logs', $id, '--lines=2' ] );
+			self::assertSame( 0, $status, $tail );
+			self::assertMatchesRegularExpression( '/^' . $header . '\n[^\n]+\n[^\n]+\z/m', trim( $tail ), 'The selected heading and exactly two log entries.' );
+
+			// The heartbeat may start another job while the external CLI process is booting.
+			$before              = self::recent_job_ids();
 			[ $status, $latest ] = self::command( [ 'logs', '--lines=2' ] );
+			$after               = self::recent_job_ids();
 			self::assertSame( 0, $status, $latest );
-			self::assertStringStartsWith( $id, $latest, 'Without an ID it is the latest job.' );
-			self::assertCount( 3, explode( "\n", trim( $latest ) ), 'The heading and two entries.' );
+			self::assertSame( 1, preg_match( '/^(\d{8}T\d{6}Z-[a-f0-9]{6}) /m', $latest, $match ) );
+			$previous = array_search( $before[0], $after, true );
+			self::assertIsInt( $previous );
+			self::assertContains( $match[1], array_slice( $after, 0, $previous + 1 ), 'A job that was the latest during the command.' );
 
 			[ $status, $output ] = self::command( [ 'logs', '20200101T000000Z-abcdef' ] );
 			self::assertSame( 1, $status, $output );

@@ -17,6 +17,9 @@ use BackupsForRestic\Backend\RestBackend;
 use BackupsForRestic\Backend\ListingFile;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\MasterKey;
+use BackupsForRestic\Database\Restore\CreateStatement;
+use BackupsForRestic\Database\Restore\InsertStatement;
+use BackupsForRestic\Database\Restore\Manifest as DumpManifest;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Engine\Restore\Selection;
 use BackupsForRestic\Engine\Snapshot\Manifest;
@@ -44,17 +47,13 @@ use BackupsForRestic\Tests\Support\WholeIndexDecoder;
 final class Targets {
 
 	/**
-	 * All targets.
+	 * Target factories. Discovering PHPUnit data sets must not execute the parsers being tested.
 	 *
-	 * @return array<string, Target> Targets by name.
+	 * @return array<string, \Closure(): Target> Factories by target name.
 	 */
-	public static function all(): array {
-		$cipher  = Vectors::cipher();
-		$packs   = self::packs( $cipher );
-		$targets = [
-
-			new Target(
-				'restore-selection',
+	public static function factories(): array {
+		return [
+			'restore-selection'  => static fn (): Target => new Target(
 				[ '/', "/a\n/a-b\n/a/child", "/raw-\xff\n/other", "/a\n/a", '/wp-content/uploads/' ],
 				false,
 				static function ( string $input ): void {
@@ -78,72 +77,87 @@ final class Targets {
 					}
 				}
 			),
-			new Target(
-				'snapshot-path',
+			'snapshot-path'      => static fn (): Target => new Target(
 				[ '/', '/site/wp-content/uploads', "/raw\xff/quoted\"name" ],
 				false,
 				static function ( string $input ): void {
 					Path::parts( $input );
 				}
 			),
-			new Target(
-				'manifest-locator',
+			'manifest-locator'   => static fn (): Target => new Target(
 				[ Manifest::tag( '/private/spool/manifest.json' ) ],
 				false,
 				static function ( string $input ): void {
 					Manifest::path( [ $input ] );
 				}
 			),
-			new Target(
-				'site-manifest',
+			'site-manifest'      => static fn (): Target => new Target(
 				[ (string) file_get_contents( Vectors::fixtures() . '/site-manifest.json' ) ],
 				true,
 				static function ( string $input ): void {
 					Manifest::decode( $input );
 				}
 			),
-			new Target(
-				'config',
+			'dump-create'        => static fn (): Target => new Target(
+				[
+					"CREATE TABLE `wp_rows` (`id` int, `text` varchar(255) COMMENT 'comma, ; quoted text', `g` int AS (`id` * 2) STORED, KEY `k` (`text`(32)), CONSTRAINT `c` CHECK (`id` >= 0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+					'CREATE TABLE `wp_rows` (`g` int AS (42) STORED) ENGINE=MyISAM ROW_FORMAT=FIXED;',
+				],
+				false,
+				static function ( string $input ): void {
+					CreateStatement::parse( $input, 'wp_rows', 'shadow', 'owner' );
+				}
+			),
+			'dump-insert'        => static fn (): Target => new Target(
+				[ "INSERT INTO `wp_rows` (`id`,`text`) VALUES (0,'a ; comma, and \\n newline'),(-1,NULL),(2,0xff00);", 'INSERT INTO `wp_rows` () VALUES (),();' ],
+				false,
+				static function ( string $input ): void {
+					InsertStatement::parse( $input, 'wp_rows', 'shadow' );
+				}
+			),
+			'dump-manifest'      => static fn (): Target => new Target(
+				[ '{"format":"backups-for-restic-dump/1","created":"2026-01-01T00:00:00Z","server":"fixture","charset":"utf8mb4","time_zone":"+00:00","prefix":"wp_","tables":[{"name":"wp_rows","file":"010-wp_rows.sql","rows":4,"bytes":500}],"views":[]}' ],
+				true,
+				static function ( string $input ): void {
+					DumpManifest::parse( $input, 'wp_' );
+				}
+			),
+			'config'             => static fn (): Target => new Target(
 				[ Vectors::restic( 'config.json' ) ],
 				true,
 				static function ( string $input ): void {
 					Config::from_json( $input );
 				}
 			),
-			new Target(
-				'key-file',
+			'key-file'           => static fn (): Target => new Target(
 				self::raw( 'keys/*' ),
 				true,
 				static function ( string $input ): void {
 					KeyFile::from_json( $input );
 				}
 			),
-			new Target(
-				'master-key',
+			'master-key'         => static fn (): Target => new Target(
 				[ Vectors::restic( 'masterkey.json' ) ],
 				true,
 				static function ( string $input ): void {
 					MasterKey::from_json( $input );
 				}
 			),
-			new Target(
-				'snapshot',
+			'snapshot'           => static fn (): Target => new Target(
 				[ Vectors::restic( 'snapshot.json' ) ],
 				true,
 				static function ( string $input ): void {
 					Snapshot::from_json( $input );
 				}
 			),
-			new Target(
-				'lock',
+			'lock'               => static fn (): Target => new Target(
 				[ ( new Lock( '2026-11-09T12:00:00.123456789+01:00', true, 'example.com', 'www-data', 4242, 33, 33 ) )->to_json() ],
 				true,
 				static function ( string $input ): void {
 					Lock::from_json( $input );
 				}
 			),
-			new Target(
-				'index',
+			'index'              => static fn (): Target => new Target(
 				[
 					Vectors::restic( 'index.json' ),
 					// Shapes that the cutting into packs must not get wrong: a second "packs" member, an
@@ -157,9 +171,8 @@ final class Targets {
 					WholeIndexDecoder::compare( $input );
 				}
 			),
-			new Target(
-				'tree',
-				[ Vectors::restic( 'root-tree.bin' ), ...$packs['trees'] ],
+			'tree'               => static fn (): Target => new Target(
+				[ Vectors::restic( 'root-tree.bin' ), ...self::packs()['trees'] ],
 				true,
 				static function ( string $input ): void {
 					$previous = null;
@@ -171,16 +184,14 @@ final class Targets {
 					}
 				}
 			),
-			new Target(
-				'json',
+			'json'               => static fn (): Target => new Target(
 				[ Vectors::restic( 'snapshot.json' ), Vectors::restic( 'index.json' ) ],
 				true,
 				static function ( string $input ): void {
 					GoJson::decode( $input );
 				}
 			),
-			new Target(
-				'unpacked',
+			'unpacked'           => static fn (): Target => new Target(
 				[ Vectors::restic( 'snapshot.json' ), "\x02" . 'not zstd', "\x01" ],
 				false,
 				static function ( string $input ): void {
@@ -188,33 +199,30 @@ final class Targets {
 					Unpacked::decode( $input, 2 );
 				}
 			),
-			new Target(
-				'pack-header',
-				$packs['headers'],
+			'pack-header'        => static fn (): Target => new Target(
+				self::packs()['headers'],
 				false,
-				static function ( string $input ) use ( $cipher ): void {
+				static function ( string $input ): void {
+					$cipher = self::cipher();
 					$sealed = $cipher->seal( $input );
 					PackReader::read_header( $cipher, $sealed, PackWriter::MAX_HEADER_SIZE + strlen( $sealed ) + 4 );
 				}
 			),
-			new Target(
-				'pack-header-length',
+			'pack-header-length' => static fn (): Target => new Target(
 				[ pack( 'V', 4096 ), pack( 'V', 0 ), "\xff\xff\xff\xff" ],
 				false,
 				static function ( string $input ): void {
 					PackReader::header_length( $input, 16777216 );
 				}
 			),
-			new Target(
-				'sealed',
+			'sealed'             => static fn (): Target => new Target(
 				[ ...self::raw( 'index/*' ), ...self::raw( 'snapshots/*' ), Vectors::restic( 'raw/config' ) ],
 				false,
-				static function ( string $input ) use ( $cipher ): void {
-					$cipher->open( $input );
+				static function ( string $input ): void {
+					self::cipher()->open( $input );
 				}
 			),
-			new Target(
-				'listing',
+			'listing'            => static fn (): Target => new Target(
 				[ '[{"name":"' . str_repeat( 'ab', 32 ) . '","size":42}]', '["' . str_repeat( 'cd', 32 ) . '"]', 'null', '[]' ],
 				true,
 				static function ( string $input ): void {
@@ -223,8 +231,7 @@ final class Targets {
 					}
 				}
 			),
-			new Target(
-				'listing-file',
+			'listing-file'       => static fn (): Target => new Target(
 				[ '[{"name":"' . str_repeat( 'ab', 32 ) . '","size":42}]', '["' . str_repeat( 'cd', 32 ) . '"]', 'null', '[]' ],
 				true,
 				static function ( string $input ): void {
@@ -244,8 +251,7 @@ final class Targets {
 					}
 				}
 			),
-			new Target(
-				'chunked-file',
+			'chunked-file'       => static fn (): Target => new Target(
 				[ "2\r\n[]\r\n0\r\n\r\n", "4;ext=yes\r\nnull\r\n0\r\nDigest: ignored\r\n\r\n" ],
 				false,
 				static function ( string $input ): void {
@@ -258,32 +264,28 @@ final class Targets {
 					}
 				}
 			),
-			new Target(
-				'go-quote',
+			'go-quote'           => static fn (): Target => new Target(
 				[ '"hello"', '"ü\n\x00\\\\ \"quoted\""', '"\xff\xfe"', '"日本"' ],
 				false,
 				static function ( string $input ): void {
 					GoQuote::unquote( $input );
 				}
 			),
-			new Target(
-				'rfc3339',
+			'rfc3339'            => static fn (): Target => new Target(
 				[ '2026-11-09T12:00:00.123456789+01:00', '2026-11-09T12:00:00Z', '0001-01-01T00:00:00Z' ],
 				false,
 				static function ( string $input ): void {
 					Rfc3339::parse( $input );
 				}
 			),
-			new Target(
-				'duration',
+			'duration'           => static fn (): Target => new Target(
 				[ '1y2m3d4h', '30d', '0h' ],
 				false,
 				static function ( string $input ): void {
 					Duration::parse( $input );
 				}
 			),
-			new Target(
-				'id',
+			'id'                 => static fn (): Target => new Target(
 				[ trim( Vectors::restic( 'snapshot.id' ) ) ],
 				false,
 				static function ( string $input ): void {
@@ -291,12 +293,6 @@ final class Targets {
 				}
 			),
 		];
-
-		$by_name = [];
-		foreach ( $targets as $target ) {
-			$by_name[ $target->name ] = $target;
-		}
-		return $by_name;
 	}
 
 	/**
@@ -310,13 +306,21 @@ final class Targets {
 	}
 
 	/**
+	 * The cipher for the recorded restic repository.
+	 */
+	private static function cipher(): Cipher {
+		static $cipher   = null;
+		return $cipher ??= Vectors::cipher();
+	}
+
+	/**
 	 * Plaintext pack headers and tree blobs from the recorded packs.
 	 *
-	 * @param Cipher $cipher Cipher with the recorded master key.
 	 * @return array{headers: list<string>, trees: list<string>} Seeds.
 	 */
-	private static function packs( Cipher $cipher ): array {
-		$seeds = [
+	private static function packs(): array {
+		$cipher = self::cipher();
+		$seeds  = [
 			'headers' => [],
 			'trees'   => [],
 		];

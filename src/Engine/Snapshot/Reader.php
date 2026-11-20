@@ -19,6 +19,8 @@ use BackupsForRestic\Engine\TreeCache;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\ManifestNotLocated;
+use BackupsForRestic\Exception\UnreadableManifest;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexSet;
@@ -41,7 +43,9 @@ final class Reader {
 
 	/**
 	 * Default time one request may spend on that search. Each directory can cost a request to
-	 * the server, and a request the web server ends cannot release its lock.
+	 * the server, and a request the web server ends cannot release its lock. Loading the index
+	 * is not counted: every call loads it again, so a load as long as this time would let each
+	 * call read one directory only.
 	 */
 	public const int MANIFEST_SEARCH_SECONDS = 5;
 
@@ -58,6 +62,13 @@ final class Reader {
 	 * @var (\Closure(): void)|null
 	 */
 	private ?\Closure $keep_lock = null;
+
+	/**
+	 * Seconds the current locked operation spent loading the index.
+	 *
+	 * @var float
+	 */
+	private float $index_seconds = 0.0;
 
 	/**
 	 * Opens a reader. Cache directories must belong to this repository's private directory.
@@ -154,16 +165,26 @@ final class Reader {
 		return $this->locked(
 			function () use ( $id, $path ): ?array {
 				$snapshot = $this->load_snapshot( $id );
-				$path   ??= Manifest::path( $snapshot->tags );
+				try {
+					$path ??= Manifest::path( $snapshot->tags );
+				} catch ( FormatException $error ) {
+					UnreadableManifest::raise( 'The site manifest locator is invalid.', [], $error );
+				}
 				if ( null === $path ) {
 					$path = $this->find_manifest( $snapshot->tree );
 				}
 				if ( null === $path ) {
 					return null;
 				}
+				$bytes = $this->file( $snapshot->tree, $path );
+				try {
+					$data = Manifest::decode( $bytes );
+				} catch ( FormatException $error ) {
+					UnreadableManifest::raise( 'The site manifest content is invalid.', $error->context(), $error );
+				}
 				return [
 					'path' => $path,
-					'data' => Manifest::decode( $this->file( $snapshot->tree, $path ) ),
+					'data' => $data,
 				];
 			}
 		);
@@ -174,18 +195,20 @@ final class Reader {
 	 *
 	 * @param Id $root Root tree.
 	 * @return string|null Unique spool/manifest.json path, or null.
-	 * @throws InvalidArgument If discovery is too large, takes too long or is ambiguous.
+	 * @throws ManifestNotLocated If discovery is too large, takes too long or is ambiguous.
 	 */
 	private function find_manifest( Id $root ): ?string {
 		$pending = [ [ $root, '' ] ];
 		$visited = 0;
 		$found   = null;
 		$started = $this->clock->now();
+		$loading = $this->index_seconds;
 		while ( [] !== $pending ) {
 			// Checked before each directory, where its read also checks the lock: the refusal
 			// leaves through the caller's finally, which a request ended from outside would not.
-			$now = $this->clock->now();
-			if ( $now[0] - $started[0] + ( $now[1] - $started[1] ) / 1000000000 >= $this->search_seconds ) {
+			// The time of an index load during the search is taken off: the first directory that
+			// misses the tree cache pays it in every call, whatever the search has read so far.
+			if ( self::elapsed( $started, $this->clock->now() ) - ( $this->index_seconds - $loading ) >= $this->search_seconds ) {
 				self::refuse_search();
 			}
 			[ $tree, $path ] = array_pop( $pending );
@@ -194,15 +217,19 @@ final class Reader {
 				$child = $path . '/' . $node->name;
 				if ( NodeType::File === $node->type && 'manifest.json' === $node->name && str_ends_with( $path, '/spool' ) ) {
 					if ( null !== $found ) {
-						throw new InvalidArgument( 'The snapshot contains several spool manifests; select the site manifest explicitly.' );
+						throw new ManifestNotLocated( 'The snapshot contains several spool manifests; select the site manifest explicitly.' );
 					}
 					$found = $child;
 				}
 				if ( NodeType::Dir === $node->type ) {
 					if ( '' !== $node->error || null === $node->subtree ) {
-						throw new FormatException( 'An incomplete snapshot directory prevents a complete manifest search.' );
+						throw new UnreadableManifest( 'An incomplete snapshot directory prevents a complete manifest search.' );
 					}
-					Path::parts( $child );
+					try {
+						Path::parts( $child );
+					} catch ( InvalidArgument $error ) {
+						ManifestNotLocated::raise( 'The manifest search exceeds the snapshot path limits.', [], $error );
+					}
 					if ( $visited + count( $pending ) >= self::MANIFEST_SEARCH_LIMIT ) {
 						self::refuse_search();
 					}
@@ -217,10 +244,10 @@ final class Reader {
 	 * Ends a search that cannot finish in this request, by its size or by its time. It is
 	 * never reported as an absent manifest.
 	 *
-	 * @throws InvalidArgument Always.
+	 * @throws ManifestNotLocated Always.
 	 */
 	private static function refuse_search(): never {
-		throw new InvalidArgument( 'The snapshot is too large to locate its manifest in one request; select the manifest explicitly.' );
+		throw new ManifestNotLocated( 'The snapshot is too large to locate its manifest in one request; select the manifest explicitly.' );
 	}
 
 	/**
@@ -229,48 +256,56 @@ final class Reader {
 	 * @param Id     $tree Root tree.
 	 * @param string $path Manifest path.
 	 * @return string Verified file bytes.
-	 * @throws InvalidArgument If the path does not name a regular file.
-	 * @throws FormatException If its content is incomplete or exceeds the manifest limit.
+	 * @throws ManifestNotLocated If the path does not name a regular file.
+	 * @throws UnreadableManifest If its content is incomplete or exceeds the manifest limit.
+	 * @throws FormatException If a referenced blob is absent from the index.
 	 */
 	private function file( Id $tree, string $path ): string {
-		$parts = Path::parts( $path );
-		$name  = array_pop( $parts );
+		try {
+			$parts = Path::parts( $path );
+		} catch ( InvalidArgument $error ) {
+			ManifestNotLocated::raise( 'The manifest path exceeds the snapshot path limits.', [], $error );
+		}
+		$name = array_pop( $parts );
 		if ( null === $name || str_ends_with( $path, '/' ) ) {
-			throw new InvalidArgument( 'The site manifest path must name a regular file.' );
+			throw new ManifestNotLocated( 'The site manifest path must name a regular file.' );
 		}
 		foreach ( $parts as $part ) {
 			$node = $this->find( $tree, $part );
 			if ( null === $node || NodeType::Dir !== $node->type || null === $node->subtree ) {
-				throw new InvalidArgument( 'The site manifest path is absent or passes through a link.' );
+				throw new ManifestNotLocated( 'The site manifest path is absent or passes through a link.' );
 			}
 			if ( '' !== $node->error ) {
-				throw new FormatException( 'A directory containing the site manifest was recorded with a read error.' );
+				throw new UnreadableManifest( 'A directory containing the site manifest was recorded with a read error.' );
 			}
 			$tree = $node->subtree;
 		}
 		$node = $this->find( $tree, $name );
 		if ( null === $node || NodeType::File !== $node->type ) {
-			throw new InvalidArgument( 'The site manifest path must name a regular file.' );
+			throw new ManifestNotLocated( 'The site manifest path must name a regular file.' );
 		}
 		if ( '' !== $node->error || $node->size > Manifest::MAX_BYTES || null === $node->content || count( $node->content ) > Manifest::MAX_BLOBS ) {
-			throw new FormatException( 'The site manifest file is incomplete or exceeds its one MiB or 128-blob limit.' );
+			throw new UnreadableManifest( 'The site manifest file is incomplete or exceeds its one MiB or 128-blob limit.' );
 		}
 		$plain = '';
 		$index = $this->index();
 		foreach ( $node->content as $blob ) {
 			$this->keep_lock?->__invoke();
 			$location = $index->find( $blob, BlobType::Data );
-			if ( null === $location || $location->entry->length > Manifest::MAX_BYTES + Cipher::OVERHEAD || $location->entry->uncompressed_length > Manifest::MAX_BYTES ) {
-				throw new FormatException( 'A site manifest blob is absent or exceeds its one MiB limit.' );
+			if ( null === $location ) {
+				throw new FormatException( 'A site manifest blob is absent from the index.' );
+			}
+			if ( $location->entry->length > Manifest::MAX_BYTES + Cipher::OVERHEAD || $location->entry->uncompressed_length > Manifest::MAX_BYTES ) {
+				throw new UnreadableManifest( 'A site manifest blob exceeds its one MiB limit.' );
 			}
 			$part = $this->repository->load_blob( $index, BlobType::Data, $blob );
 			if ( strlen( $part ) > Manifest::MAX_BYTES - strlen( $plain ) ) {
-				throw new FormatException( 'The site manifest file exceeds its one MiB limit.' );
+				throw new UnreadableManifest( 'The site manifest file exceeds its one MiB limit.' );
 			}
 			$plain .= $part;
 		}
 		if ( strlen( $plain ) !== $node->size ) {
-			throw new FormatException( 'The site manifest length does not match its tree entry.' );
+			throw new UnreadableManifest( 'The site manifest length does not match its tree entry.' );
 		}
 		return $plain;
 	}
@@ -317,12 +352,29 @@ final class Reader {
 	}
 
 	/**
-	 * Loads the index only when a tree or file misses the cache.
+	 * Loads the index only when a tree or file misses the cache, and measures the load so that
+	 * the manifest search can leave it out of its time budget.
 	 *
 	 * @return IndexSet Index valid under the current lock.
 	 */
 	private function index(): IndexSet {
-		return $this->index ??= $this->index_cache?->load( $this->repository ) ?? $this->repository->load_index();
+		if ( null === $this->index ) {
+			$started             = $this->clock->now();
+			$this->index         = $this->index_cache?->load( $this->repository ) ?? $this->repository->load_index();
+			$this->index_seconds = self::elapsed( $started, $this->clock->now() );
+		}
+		return $this->index;
+	}
+
+	/**
+	 * The time between two readings of the clock.
+	 *
+	 * @param array{int, int} $from Earlier reading: seconds and nanoseconds.
+	 * @param array{int, int} $to   Later reading.
+	 * @return float Seconds.
+	 */
+	private static function elapsed( array $from, array $to ): float {
+		return $to[0] - $from[0] + ( $to[1] - $from[1] ) / 1000000000;
 	}
 
 	/**
@@ -368,8 +420,9 @@ final class Reader {
 			$keep_lock();
 			return $result;
 		} finally {
-			$this->index     = null;
-			$this->keep_lock = null;
+			$this->index         = null;
+			$this->index_seconds = 0.0;
+			$this->keep_lock     = null;
 			$locking->release( $lock );
 		}
 	}

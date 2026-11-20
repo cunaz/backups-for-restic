@@ -15,7 +15,7 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 - `BACKUPS_FOR_RESTIC_PRIVATE_DIR` may point outside the web root; the wizard and Doctor
   recommend it.
 - Protection is **verified, not assumed**: the Doctor writes a random probe file and fetches
-  its URL; a 200 response fails the check and blocks setup and backups until fixed.
+  its URL. Receiving the random content blocks setup and backups until access is denied.
 - Content is ciphertext wherever possible: caches are stored as on the server or encrypted
   with the master key; packs under construction are ciphertext. Plaintext exists only in
   restore staging and database import files (explicit actions, `0600`, expiring) and in the
@@ -49,25 +49,37 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
   2026-11-11, `state.lock` and `notify.lock`: empty files that serialise changes to the
   state, the notifications and the secrets in the database, and the sending of notices
   ([ADR 0014](0014-file-based-job-store.md), As built). A pack under construction is held
-  in memory, so there is no pack temp file. `tmp/`,
-  `logs/` and `restores/` are created and still empty; restore staging and import files
-  come with Milestone 3.
+  in memory. Finished restores keep their plaintext files and reports in `restores/` until deletion or expiry.
 - The probe has three results for a directory inside the web root. An answer of 200 with
   the probe's content is the critical finding `exposed`: the wizard does not continue, and
   the preflight of a backup fails. An answer that shows the directory protected is reported
   as `protected_inside_web_root`. A probe that cannot run, because the site cannot request
-  itself, is reported as `unverified` with the status "recommended" and blocks nothing.
-  Blocking there would shut out the hosts the plugin is made for.
+  itself, is reported as `unverified` with the status "recommended". Backups can proceed. Plaintext staging requires a confirmed denial for each public mapping.
 - On such hosts the administrator's browser makes the request (`Storage\BrowserProbe`). It
   reaches the site from outside, which is also where an attacker would come from. The
   wizard's environment step and the Environment tab ask for a probe file, request its URL
   without credentials and report what came back. A report with the file's content proves
   that the directory is served, and counts like the site's own finding: the Doctor is
-  critical, the setup cannot be completed and backups stop. Any other answer counts as
-  protected; that is taken on trust from an administrator's session. A report is accepted
+  critical, the setup cannot be completed and backups stop. HTTP 403, 404 or 410 without the token confirm a denial. Other responses leave the check inconclusive. A report is accepted
   for five minutes after its probe file was written, once, and the file is deleted with it.
-  The result stays until the next report, because nothing but a browser can renew it; the
-  admin page asks for a new one whenever the environment is checked.
+  The result is bound to the physical path and URL and expires after 24 hours.
 - The wizard's script stops at a critical finding, and `POST /setup/complete` refuses with
-  `environment_blocked` while the Doctor has one; the routes before it do not ask. Of the
-  jobs, only the backup asks the probe before it starts; forget, prune and check do not.
+  `environment_blocked` while the Doctor has one; the routes before it do not ask. Backup and restore preflight both check the private directory.
+
+## Private staging and directory ownership
+
+A restore writes plaintext. Before a restore starts, a probe of the working directory
+under a public WordPress path must receive a denial (403, 404 or 410). The probe also
+checks custom content and upload directories. If a host blocks loopback requests, a
+browser report for the same physical directory and URL is accepted for 24 hours.
+Redirects and service errors provide no confirmation. Move the private directory outside
+public roots or repeat the check on the Environment tab if staging is refused. Where no WordPress URL maps the directory, the Environment tab checks the actual web server document root. A CLI worker without that information can use the result for the same site and directory for 24 hours.
+
+The first use claims an empty directory. A marker records ownership for subsequent
+requests and uninstall. Existing installations are recognized by their working
+directories and the plugin's Apache or IIS protection file. Uninstall skips unrelated
+directories and preserves protection files customized by the operator.
+Uninstall checks both the current filtered location and the previous default or configured
+location for outstanding database cleanup before deleting options or local files. If an
+owned job document cannot be read, or a live restore still owns the maintenance marker,
+the job history and recovery material stay in place for a retry.

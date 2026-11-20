@@ -103,3 +103,74 @@
 	list-style: disc;
 	margin-left: 1.5em;
 }
+
+.backups-for-restic .bfr-scope {
+	margin: 1rem 0 0.5rem;
+}
+
+.backups-for-restic .bfr-scope legend {
+	font-weight: 600;
+	margin-bottom: 0.25rem;
+}
+
+.backups-for-restic .bfr-scope label {
+	margin-right: 1.5rem;
+}
+
+.backups-for-restic .bfr-tags,
+.backups-for-restic .bfr-paths {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.backups-for-restic .bfr-tags li,
+.backups-for-restic .bfr-paths li,
+.backups-for-restic .bfr-name {
+	overflow-wrap: anywhere;
+}
+
+.backups-for-restic .bfr-details {
+	max-width: 60rem;
+}
+
+.backups-for-restic .bfr-details th {
+	font-weight: 600;
+	width: 14rem;
+}
+
+.backups-for-restic .bfr-trail ol {
+	display: flex;
+	flex-wrap: wrap;
+	list-style: none;
+	margin: 0.75rem 0;
+	padding: 0;
+}
+
+.backups-for-restic .bfr-trail li {
+	margin: 0;
+}
+
+.backups-for-restic .bfr-trail li + li::before {
+	color: #50575e;
+	content: "/";
+	margin: 0 0.4rem;
+}
+
+.backups-for-restic .bfr-entries .bfr-select {
+	width: 2rem;
+}
+
+.backups-for-restic .bfr-inexact {
+	font-style: italic;
+}
+
+.backups-for-restic .bfr-file-actions td,
+.backups-for-restic .bfr-staging td,
+.backups-for-restic .bfr-database-tables td {
+	overflow-wrap: anywhere;
+}
+
+.backups-for-restic .bfr-database-tables {
+	margin: 0.75rem 0;
+}

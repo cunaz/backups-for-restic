@@ -87,6 +87,7 @@ final class JobTypeAndErrorTest extends TestCase {
 		yield 'append-only' => [ new AppendOnlyRefused( 'refused' ), 'repository_append_only' ];
 		yield 'an index beyond the memory limit' => [ new IndexTooLarge( 'too large' ), 'index_too_large' ];
 		yield 'damage' => [ new FormatException( 'damaged', [ 'code' => 'repository_damaged' ] ), 'repository_damaged' ];
+		yield 'online file review capacity' => [ new InvalidArgument( 'too large', [ 'code' => 'file_plan_too_large' ] ), 'file_plan_too_large' ];
 		yield 'no snapshots' => [ new InvalidArgument( 'empty', [ 'code' => 'no_snapshots' ] ), 'no_snapshots' ];
 		yield 'other context codes do not override' => [ new InvalidArgument( 'bad', [ 'code' => 'something_else' ] ), 'configuration' ];
 	}

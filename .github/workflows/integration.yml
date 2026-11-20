@@ -1,7 +1,24 @@
-# Milestone 1 acceptance against a real WordPress (tests/Integration): setup through the REST
-# API, backups driven by wp-cron.php with max_execution_time = 30 and memory_limit = 128M, a
-# killed tick, restic check and restore, and a database import with identical checksums.
-# A second job drives the admin page in a browser (tests/E2E), on a site of its own.
+# Three groups of jobs, each on a WordPress site of its own.
+#
+# The WordPress compatibility matrix runs the acceptance suite against a real WordPress
+# (tests/Integration): setup through the REST API, backups driven by wp-cron.php with
+# max_execution_time = 30 and memory_limit = 128M, a killed tick, restic check and restore,
+# and a database import with identical checksums.
+#
+# "WordPress memory" is a matrix of three repository sizes (500000, 1000000 and 2000000
+# blobs) that runs with every trigger. bin/bench-wordpress-memory.php builds a history of
+# that size and drives a complete backup, check and prune job of the plugin, every tick in a
+# new PHP process with memory_limit = 128M, max_execution_time = 30, set_time_limit()
+# disabled and a full WordPress. The site is installed with BFR_DISABLE_WP_CRON=1, so that
+# no request starts a tick that is not measured; the script refuses any other site. A size
+# passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job
+# ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack,
+# a check that succeeds finds no error, and restic check --read-data accepts the repository
+# before and after. At 500000 blobs all three jobs must succeed; at the larger sizes each
+# must succeed or fail with index_too_large. The reports of every tick and the logs are
+# uploaded as the artifact wordpress-memory-<blobs>, also when the job fails.
+#
+# "Admin page in a browser" runs the browser tests (tests/E2E).
 name: Integration
 
 on:
@@ -26,10 +43,24 @@ concurrency:
 
 jobs:
   wordpress:
-    name: WordPress on PHP 8.3
+    name: WordPress ${{ matrix.wordpress }} on PHP ${{ matrix.php }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { wordpress: '7.1.5', php: '8.3', memory: '128', large: true }
+          - { wordpress: '7.1.5', php: '8.5', memory: '128', large: false }
+          - { wordpress: '7.1.5', php: '8.6', memory: '128', large: false }
+          - { wordpress: '7.0.9', php: '8.3', memory: '128', large: false }
+          - { wordpress: '7.0.9', php: '8.5', memory: '128', large: true }
+          - { wordpress: '6.7.12', php: '8.3', memory: '128', large: true }
+          - { wordpress: '6.7.12', php: '8.5', memory: '96', large: false }
     env:
+      BFR_WP_VERSION: ${{ matrix.wordpress }}
+      BFR_SITE_MEMORY_MIB: ${{ matrix.memory }}
+      BFR_TEST_PLUGIN_DIR: ${{ github.workspace }}/build/backups-for-restic
       BFR_DB_HOST: 127.0.0.1
       BFR_DB_ADMIN_USER: root
       BFR_DB_ADMIN_PASSWORD: root
@@ -44,7 +75,7 @@ jobs:
           persist-credentials: false
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
-          php-version: '8.3'
+          php-version: ${{ matrix.php }}
           extensions: mbstring, openssl, mysqli, curl
           ini-values: opcache.enable_cli=0
           coverage: none
@@ -62,13 +93,30 @@ jobs:
           key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh restic rest-server wp-cli
+      - run: bin/build-package.sh
+      - name: Lint every packaged PHP file with all diagnostics enabled
+        if: matrix.php == '8.6'
+        run: |
+          diagnostics="$RUNNER_TEMP/package-php-lint.log"
+          if ! find "$BFR_TEST_PLUGIN_DIR" -type f -name '*.php' \
+            -exec php -d error_reporting=-1 -d display_errors=stderr -d log_errors=0 -l {} + \
+            > /dev/null 2> "$diagnostics" || [ -s "$diagnostics" ]; then
+            cat "$diagnostics" >&2
+            exit 1
+          fi
       - run: bin/test-site.sh install
+      - name: Check private storage on Apache and nginx
+        if: matrix.wordpress == '7.1.5' && matrix.php == '8.3'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends apache2-bin nginx
+          tests/Hosting/private-directory.sh .tools/site "$BFR_TEST_PLUGIN_DIR"
       - run: bin/test-site.sh install-multisite
       - run: ulimit -c "$(ulimit -Hc)" && bin/test-site.sh start
       - name: Integration tests
         env:
-          BFR_SITE_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
-          BFR_DB_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
+          BFR_SITE_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
+          BFR_DB_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
         # The killed-tick test restarts the server from PHPUnit, which passes the limit on.
         run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist
       - name: How the server's workers ended
@@ -101,11 +149,12 @@ jobs:
           cp .tools/strace.log logs/ 2>/dev/null || true
           # Workers that died by a signal or exited with an error, if any.
           grep -E 'killed by|exited with [1-9]|--- SIG' .tools/strace.log 2>/dev/null | grep -v 'SIGCHLD' | head -n 50 || true
-          cp -r .tools/site/wp-content/backups-for-restic/jobs logs/jobs 2>/dev/null || true
+          # Only operator-facing diagnostics. Undo journals and staged source bytes stay private.
+          rsync -r --prune-empty-dirs --include='/*/' --include='/*/job.json' --include='/*/events.log' --exclude='*' .tools/site/wp-content/backups-for-restic/jobs/ logs/jobs/ 2>/dev/null || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
-          name: integration-logs
+          name: integration-logs-wp-${{ matrix.wordpress }}-php-${{ matrix.php }}
           path: logs/
           retention-days: 14
 
@@ -167,6 +216,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      BFR_E2E_EXPECT_DATABASE_SWAP: "1"
       BFR_DB_HOST: 127.0.0.1
       BFR_DB_ADMIN_USER: root
       BFR_DB_ADMIN_PASSWORD: root
@@ -190,8 +240,14 @@ jobs:
           path: .tools/bin
           key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
       - run: bin/install-test-tools.sh rest-server
-      # A WordPress that was just installed: the tests begin with the setup wizard.
-      - run: bin/test-site.sh install
+      # Install a copy at its normal location so live restore exercises the package's path protections.
+      - run: bin/build-package.sh
+      - run: BFR_TEST_PLUGIN_DIR="$PWD/build/backups-for-restic" bin/test-site.sh install
+      # The disposable MySQL account needs to see inbound relationships across schemas.
+      - name: Grant dictionary inspection to the browser fixture
+        env:
+          MYSQL_PWD: ${{ env.BFR_DB_ADMIN_PASSWORD }}
+        run: mysql -h "$BFR_DB_HOST" -u "$BFR_DB_ADMIN_USER" -e "GRANT PROCESS ON *.* TO 'bfr_site'@'localhost', 'bfr_site'@'%';"
       - run: bin/test-site.sh start
       # Exactly the packages of package-lock.json, without their install scripts; the browser
       # is then fetched by the Playwright version that the lock file names.
@@ -209,7 +265,8 @@ jobs:
           cp -r .tools/e2e-results logs/ 2>/dev/null || true
           cp .tools/site-server.log .tools/php-errors.log .tools/requests.log logs/ 2>/dev/null || true
           cp .tools/site/wp-content/debug.log logs/ 2>/dev/null || true
-          cp -r .tools/site/wp-content/backups-for-restic/jobs logs/jobs 2>/dev/null || true
+          # Only operator-facing diagnostics. Undo journals and staged source bytes stay private.
+          rsync -r --prune-empty-dirs --include='/*/' --include='/*/job.json' --include='/*/events.log' --exclude='*' .tools/site/wp-content/backups-for-restic/jobs/ logs/jobs/ 2>/dev/null || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

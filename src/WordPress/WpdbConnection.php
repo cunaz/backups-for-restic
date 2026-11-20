@@ -15,8 +15,8 @@ use BackupsForRestic\Exception\DatabaseFailed;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Runs the dump's read-only queries through WordPress' own connection, so the dump sees the
- * same server, character set and credentials as the site.
+ * Runs the dump's reads and scoped session settings through WordPress' own connection, so
+ * the dump sees the same server, character set and credentials as the site.
  */
 final class WpdbConnection implements Connection {
 
@@ -37,7 +37,7 @@ final class WpdbConnection implements Connection {
 	 */
 	public function rows( string $sql ): array {
 		$suppressed = $this->wpdb->suppress_errors( true );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- The dump reads every table; identifiers are quoted by SqlFormatter and cursors are validated numbers.
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- The dump builders quote identifiers, validate numeric seek keys and hex-encode string literals before passing their SQL to this adapter.
 		$result = $this->wpdb->get_results( $sql, ARRAY_A );
 		$error  = $this->wpdb->last_error;
 		$this->wpdb->suppress_errors( $suppressed );

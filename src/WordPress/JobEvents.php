@@ -43,7 +43,7 @@ final class JobEvents implements JobObserver {
 		 * Fires when a job of the backup plugin starts or ends.
 		 *
 		 * @param string $job_id   Job ID.
-		 * @param string $type     backup, unlock, forget, prune or check.
+		 * @param string $type     backup, unlock, forget, prune, check or restore.
 		 * @param string $state    New state: running, succeeded, failed or cancelled.
 		 * @param string $previous State before: queued or running.
 		 */

@@ -1,0 +1,121 @@
+name: Deploy a signed stable release to WordPress.org
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed stable tag on main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wordpress-org-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Verify owner signature, test results and package
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - id: release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ vars.RELEASE_SIGNING_PUBLIC_KEY }}
+        run: |
+          commit="$(bin/verify-release-tag.sh "$TAG")"
+          git checkout --detach "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Verify completed release checks on the signed revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          for workflow in ci.yml conformance.yml integration.yml; do
+            runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" -f head_sha="$RELEASE_COMMIT" -f branch=main -F per_page=100)"
+            state="$(jq -r --arg sha "$RELEASE_COMMIT" --arg repo "$GITHUB_REPOSITORY" '
+              [.workflow_runs[] | select(.head_sha == $sha and .head_repository.full_name == $repo and .head_branch == "main")
+               | select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")]
+              | max_by(.id) | if .status == "completed" then .conclusion else (.status // "missing") end
+            ' <<< "$runs")"
+            if [[ "$state" != success ]]; then
+              echo "::error::$workflow must pass on $RELEASE_COMMIT before deployment (current state: $state)."
+              exit 1
+            fi
+          done
+      - id: package
+        run: |
+          bin/build-package.sh --zip
+          echo "sha256=$(sha256sum build/backups-for-restic.zip | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/check-package
+
+  deploy:
+    name: Publish and compare SVN tag
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: wordpress-org
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      EXPECTED_SHA256: ${{ needs.check.outputs.sha256 }}
+      SVN_URL: https://plugins.svn.wordpress.org/backups-for-restic
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+      - name: Rebuild verified archive and prepare working copy
+        run: |
+          if ! command -v svn >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y subversion; fi
+          bin/build-package.sh --zip
+          echo "$EXPECTED_SHA256  build/backups-for-restic.zip" | sha256sum --check
+          python3 bin/prepare-wordpress-org.py "${TAG#v}" build/backups-for-restic .wordpress-org "$SVN_URL" "$RUNNER_TEMP/wporg"
+      - name: Commit trunk, immutable tag and listing assets together
+        env:
+          SVN_USERNAME: ${{ secrets.WORDPRESS_ORG_SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.WORDPRESS_ORG_SVN_PASSWORD }}
+        run: |
+          status="$(svn status --quiet "$RUNNER_TEMP/wporg")"
+          if [[ -n "$status" ]]; then
+            : "${SVN_USERNAME:?Set the WordPress.org SVN username in the environment.}"
+            : "${SVN_PASSWORD:?Set its dedicated SVN password in the environment.}"
+            printf '%s\n' "$SVN_PASSWORD" | svn commit --non-interactive --no-auth-cache --username "$SVN_USERNAME" --password-from-stdin -m "Release $TAG" "$RUNNER_TEMP/wporg"
+          fi
+      - name: Verify public SVN bytes against the signed source package
+        run: |
+          svn export --non-interactive --ignore-externals "$SVN_URL/tags/${TAG#v}" "$RUNNER_TEMP/published"
+          diff -qr --no-dereference build/backups-for-restic "$RUNNER_TEMP/published"
+
+  notes:
+    name: Publish release notes
+    needs: [check, deploy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          fi

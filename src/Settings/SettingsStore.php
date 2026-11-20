@@ -11,6 +11,7 @@ namespace BackupsForRestic\Settings;
 
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Storage\Options;
 
 defined( 'ABSPATH' ) || exit;
@@ -27,17 +28,19 @@ final class SettingsStore {
 	 *
 	 * @param Options               $options   Options table.
 	 * @param array<string, string> $constants Defined override constants by constant name.
+	 * @param FileLock|null         $lock      Shared lock for changes to the settings option.
 	 */
-	public function __construct( private readonly Options $options, private readonly array $constants = [] ) {
+	public function __construct( private readonly Options $options, private readonly array $constants = [], private readonly ?FileLock $lock = null ) {
 	}
 
 	/**
 	 * Loads the settings.
 	 *
+	 * @param bool $fresh Bypass the request cache before changing settings.
 	 * @return Settings Settings, with defaults for anything missing or invalid.
 	 */
-	public function load(): Settings {
-		$stored = $this->options->get( self::OPTION );
+	public function load( bool $fresh = false ): Settings {
+		$stored = $fresh ? $this->options->fresh( self::OPTION, true ) : $this->options->get( self::OPTION );
 		$values = [];
 		if ( is_array( $stored ) ) {
 			foreach ( $stored as $path => $value ) {
@@ -58,10 +61,13 @@ final class SettingsStore {
 	 * @throws StorageFailed If the options table did not take the settings: who saves them goes on only with what is stored.
 	 */
 	public function update( array $changes ): Settings {
-		$settings = $this->load()->with( $changes );
-		if ( ! $this->options->set( self::OPTION, $settings->to_stored(), true ) ) {
-			StorageFailed::raise( 'The settings could not be saved.', [ 'option' => self::OPTION ] );
-		}
-		return $settings;
+		$apply = function () use ( $changes ): Settings {
+			$settings = $this->load( true )->with( $changes );
+			if ( ! $this->options->set( self::OPTION, $settings->to_stored(), true ) ) {
+				StorageFailed::raise( 'The settings could not be saved.', [ 'option' => self::OPTION ] );
+			}
+			return $settings;
+		};
+		return null === $this->lock ? $apply() : $this->lock->hold( $apply, true );
 	}
 }

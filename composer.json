@@ -12,6 +12,7 @@
         "ext-pcre": "*"
     },
     "require-dev": {
+        "ext-sodium": "*",
         "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
         "phpstan/phpstan": "^2",
         "phpstan/phpstan-strict-rules": "^2",
@@ -60,10 +61,19 @@
         "lint": "phpcs",
         "fix": "phpcbf",
         "analyse": "phpstan.phar analyse --memory-limit=1G",
-        "test:unit": "phpunit --testsuite unit",
+        "test:unit": [
+            "Composer\\Config::disableProcessTimeout",
+            "phpunit --testsuite unit"
+        ],
         "test:database": "phpunit --testsuite database",
-        "test:conformance": "phpunit --testsuite conformance",
-        "test:integration": "phpunit -c phpunit-integration.xml.dist",
+        "test:conformance": [
+            "Composer\\Config::disableProcessTimeout",
+            "phpunit --testsuite conformance"
+        ],
+        "test:integration": [
+            "Composer\\Config::disableProcessTimeout",
+            "phpunit -c phpunit-integration.xml.dist"
+        ],
         "test": [
             "@test:unit",
             "@test:database",
@@ -74,7 +84,14 @@
             "@analyse",
             "@test:unit"
         ],
-        "mutation": ".tools/bin/infection --threads=max",
+        "mutation": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --threads=max"
+        ],
+        "mutation:planner": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --configuration=infection-planner.json5.dist --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"
+        ],
         "fuzz": "php bin/fuzz.php --seconds=10",
         "bench": "php -d opcache.enable_cli=0 bin/bench.php",
         "pot": [

@@ -15,8 +15,44 @@ if ( version_compare( PHP_VERSION, '8.3', '<' ) ) {
 	return;
 }
 
+if ( PHP_INT_SIZE < 8 ) {
+	wp_die( esc_html__( 'Switch to 64-bit PHP before deleting Backups for restic so it can safely clean up local restore data.', 'backups-for-restic' ) );
+}
+
 require_once __DIR__ . '/src/autoload.php';
 
+$backups_for_restic_container = new \BackupsForRestic\WordPress\Container( __DIR__ . '/backups-for-restic.php' );
+// A filter may have moved the working directory since a previous restore.
+$backups_for_restic_uploads     = wp_upload_dir( null, false );
+$backups_for_restic_directories = [
+	$backups_for_restic_container->private_dir(),
+	\BackupsForRestic\Storage\PrivateDirectory::locate(
+		defined( 'BACKUPS_FOR_RESTIC_PRIVATE_DIR' ) ? \BackupsForRestic\WordPress\Container::constant_string( 'BACKUPS_FOR_RESTIC_PRIVATE_DIR' ) : null,
+		WP_CONTENT_DIR,
+		$backups_for_restic_uploads['basedir']
+	),
+];
+$backups_for_restic_deadline    = microtime( true ) + 15.0;
+$backups_for_restic_paths       = [];
+try {
+	$backups_for_restic_clean = true;
+	foreach ( $backups_for_restic_directories as $backups_for_restic_directory ) {
+		$backups_for_restic_path = realpath( $backups_for_restic_directory->path );
+		if ( false === $backups_for_restic_path || isset( $backups_for_restic_paths[ $backups_for_restic_path ] ) ) {
+			continue;
+		}
+		$backups_for_restic_paths[ $backups_for_restic_path ] = $backups_for_restic_directory;
+		if ( ! $backups_for_restic_container->clean_database_previews( true, $backups_for_restic_deadline, $backups_for_restic_directory ) ) {
+			$backups_for_restic_clean = false;
+			break;
+		}
+	}
+} catch ( \BackupsForRestic\Exception\PluginException ) {
+	$backups_for_restic_clean = false;
+}
+if ( ! $backups_for_restic_clean ) {
+	wp_die( esc_html__( 'Restore cleanup could not finish. Check the job history, database connection and DROP permission. Reactivate the plugin to finish an interrupted job, then retry deletion.', 'backups-for-restic' ) );
+}
 foreach ( [ 'backups_for_restic_settings', 'backups_for_restic_secrets', 'backups_for_restic_state', 'backups_for_restic_notifications', 'backups_for_restic_schema_version' ] as $backups_for_restic_option ) {
 	delete_option( $backups_for_restic_option );
 }
@@ -26,16 +62,6 @@ foreach ( [ 'backups_for_restic_snapshots', 'backups_for_restic_poll', 'backups_
 wp_clear_scheduled_hook( 'backups_for_restic_heartbeat' );
 wp_clear_scheduled_hook( 'backups_for_restic_tick' );
 
-// The directory the plugin worked in: the constant, the backups_for_restic_private_dir filter,
-// then wp-content or uploads (ADR 0007). Uninstalling runs with the other plugins loaded, so
-// the filter answers as it did while the plugin ran.
-( new \BackupsForRestic\WordPress\Container( __DIR__ . '/backups-for-restic.php' ) )->private_dir()->remove_contents();
-
-// And the one from before a filter was added, if that is another one. remove_contents() only
-// deletes what the plugin created, so a second call for the same directory finds nothing.
-$backups_for_restic_uploads = wp_upload_dir( null, false );
-\BackupsForRestic\Storage\PrivateDirectory::locate(
-	defined( 'BACKUPS_FOR_RESTIC_PRIVATE_DIR' ) ? \BackupsForRestic\WordPress\Container::constant_string( 'BACKUPS_FOR_RESTIC_PRIVATE_DIR' ) : null,
-	WP_CONTENT_DIR,
-	$backups_for_restic_uploads['basedir']
-)->remove_contents();
+foreach ( $backups_for_restic_paths as $backups_for_restic_directory ) {
+	$backups_for_restic_directory->remove_contents();
+}

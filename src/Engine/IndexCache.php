@@ -37,19 +37,29 @@ defined( 'ABSPATH' ) || exit;
  * file and the number of the piece, so that pieces cannot be left out, repeated, reordered
  * or mixed with those of another file without the cache being discarded. The first piece
  * holds the names of the covered index files, the others are those of IndexSet::export().
+ * The lengths are not sealed: one that neither kind of piece can have discards the cache
+ * too, before the memory budget is asked whether the piece fits.
  *
  * If an index file disappeared from the server (restic prune or rebuild-index ran elsewhere),
  * the cache cannot tell which entries became stale, so it is rebuilt from scratch. An index
  * larger than the cache limit (advanced.cache_limit_mib) is not kept: every tick then reads
- * the index files again, which is slower but never fills the disk.
+ * the index files again, which is slower but never fills the disk. A request that is ended
+ * while it writes leaves its temporary file, which no limit counts; every load removes such
+ * files once they are older than a minute.
  */
 final class IndexCache {
 
 	/** Bytes of the random value that marks the pieces of one file. */
 	private const int MARK_BYTES = 16;
 
-	/** No sealed piece is larger than this; export() makes pieces of about one megabyte plus one bucket. */
+	/** Bytes that sealing, the mark and the number add to the content of a piece. */
+	private const int PIECE_OVERHEAD = Cipher::OVERHEAD + self::MARK_BYTES + 4;
+
+	/** The piece of names is not read beyond this, however many index files the server lists. */
 	private const int MAX_PIECE = 67108864;
+
+	/** Age after which a temporary file belongs to a request that ended before publishing it. */
+	private const int TEMPORARY_SECONDS = 60;
 
 	/**
 	 * Uses a cache directory.
@@ -93,6 +103,9 @@ final class IndexCache {
 				$repository->memory()?->check_index();
 			}
 		}
+		// Before the write: a cache directory that holds nothing else can then be removed when
+		// the index does not fit, and an index that fits finds the room its leftovers took.
+		$this->remove_stale_temporaries();
 		if ( [] !== $new || ! $readable || count( $covered ) !== count( $listed ) ) {
 			$this->write( $repository, $index, $listed );
 		}
@@ -108,6 +121,27 @@ final class IndexCache {
 	 */
 	public function clear(): void {
 		Files::remove_tree( $this->directory );
+	}
+
+	/**
+	 * Removes the temporary index files of requests that ended while they wrote one. Such a
+	 * file can be as large as the cache limit and is outside it, and an index above the limit
+	 * writes one on every load, so nothing else would bound what ended requests leave. A file
+	 * younger than a minute may belong to a request that is still writing.
+	 */
+	private function remove_stale_temporaries(): void {
+		$names = is_dir( $this->directory ) ? scandir( $this->directory ) : false;
+		foreach ( false === $names ? [] : $names as $name ) {
+			$file = $this->directory . '/' . $name;
+			if ( 1 !== preg_match( '/^index\.bin\.[0-9a-f]{8}\.tmp$/D', $name ) || is_link( $file ) || ! is_file( $file ) ) {
+				continue;
+			}
+			clearstatcache( true, $file );
+			$modified = @filemtime( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Its writer or another load may have removed it meanwhile.
+			if ( false !== $modified && time() - $modified > self::TEMPORARY_SECONDS ) {
+				@unlink( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Another load may already have removed it.
+			}
+		}
 	}
 
 	/**
@@ -130,7 +164,7 @@ final class IndexCache {
 			return null;
 		}
 		try {
-			$pieces = $this->pieces( $handle, $repository->cipher(), $repository->memory() );
+			$pieces = $this->pieces( $handle, $repository->cipher(), $repository->memory(), count( $listed ) );
 			$names  = $pieces->valid() ? $pieces->current() : '';
 			if ( 'N' !== ( $names[0] ?? '' ) || 1 !== strlen( $names ) % 32 ) {
 				return null;
@@ -165,11 +199,14 @@ final class IndexCache {
 	 * @param resource          $handle Open cache file.
 	 * @param Cipher            $cipher Cipher with the repository key.
 	 * @param MemoryBudget|null $memory Current process budget, if limited.
+	 * @param int               $listed Number of index files the server lists now.
 	 * @return \Generator<int, string> The content of each piece, without mark and number.
-	 * @throws FormatException If the file is truncated or its pieces do not belong together.
+	 * @throws FormatException If the file is truncated, a length is one that no piece has, or
+	 *                         its pieces do not belong together.
 	 * @throws AuthenticationFailed If a piece was changed.
+	 * @throws IndexTooLarge If a piece of a possible length does not fit into the memory budget.
 	 */
-	private function pieces( $handle, Cipher $cipher, ?MemoryBudget $memory ): \Generator {
+	private function pieces( $handle, Cipher $cipher, ?MemoryBudget $memory, int $listed ): \Generator {
 		$mark = null;
 		for ( $number = 0; ; $number++ ) {
 			$head = (string) fread( $handle, 4 );
@@ -178,7 +215,12 @@ final class IndexCache {
 			}
 			$fields = 4 === strlen( $head ) ? unpack( 'Vlength', $head ) : false;
 			$length = is_array( $fields ) ? $fields['length'] : 0;
-			if ( $length < Cipher::OVERHEAD + self::MARK_BYTES + 4 || $length > self::MAX_PIECE ) {
+			// The length is not authenticated. One that no writer produces is damage, to be
+			// answered by reading the index files again, and must not reach the memory budget:
+			// its refusal would end every job until someone cleared the cache by hand. The
+			// first piece of a cache that can still be used names only listed index files.
+			$content = 0 === $number ? 1 + 32 * $listed : IndexSet::MAX_PIECE_BYTES;
+			if ( $length < self::PIECE_OVERHEAD || $length > min( self::MAX_PIECE, self::PIECE_OVERHEAD + $content ) ) {
 				throw new FormatException( 'The cached index is damaged.' );
 			}
 			$stat     = fstat( $handle );

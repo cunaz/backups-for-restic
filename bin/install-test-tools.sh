@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the development tools that are not Composer packages into .tools/bin:
-#   restic       restic CLI 0.19.1, 0.18.1 and 0.14.0, the conformance oracle (ADR 0023)
+#   restic       restic CLI 0.20.0, 0.19.1, 0.18.1 and 0.14.0, the conformance oracle (ADR 0023)
 #   rest-server  restic's REST server, the local repository server for the conformance suite
 #   infection    Infection, for mutation testing (ADR 0024)
 #   wp-cli       WP-CLI as .tools/bin/wp, for "wp i18n make-pot" (composer pot); it needs no
@@ -25,6 +25,7 @@ mkdir -p "$BIN"
 
 # version|asset|sha256
 RESTIC_RELEASES=(
+	"0.20.0|restic_0.20.0_linux_amd64.bz2|0ccd9fa7885074a24603b051e01bf9bd8b5e45d6a1791e9d9887e9e9372107f7"
 	"0.19.1|restic_0.19.1_linux_amd64.bz2|f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"
 	"0.18.1|restic_0.18.1_linux_amd64.bz2|680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d"
 	"0.14.0|restic_0.14.0_linux_amd64.bz2|c8da7350dc334cd5eaf13b2c9d6e689d51e7377ba1784cc6d65977bd44ee1165"
@@ -44,17 +45,25 @@ download() {
 }
 
 install_restic() {
-	local entry version asset sum target
+	local entry version asset sum target release
 	for entry in "${RESTIC_RELEASES[@]}"; do
 		IFS='|' read -r version asset sum <<<"$entry"
 		target="$BIN/restic-$version"
 		if [ ! -x "$target" ]; then
-			download "https://github.com/restic/restic/releases/download/v$version/$asset" "$sum" "$target.bz2"
+			release="https://github.com/restic/restic/releases/download/v$version"
+			if ! curl -fsSL --retry 3 "$release/SHA256SUMS" | awk -v name="$asset" -v hash="$sum" '
+				$2 == name || $2 == "*" name { matches++; if ($1 != hash) bad = 1 }
+				END { exit !(matches == 1 && !bad) }
+			'; then
+				echo "The pinned checksum for $asset does not match the upstream SHA256SUMS." >&2
+				return 1
+			fi
+			download "$release/$asset" "$sum" "$target.bz2"
 			bzip2 -d -f "$target.bz2"
 			chmod 0755 "$target"
 		fi
 	done
-	ln -sf "restic-0.19.1" "$BIN/restic"
+	ln -sf "restic-${RESTIC_RELEASES[0]%%|*}" "$BIN/restic"
 	"$BIN/restic" version
 }
 

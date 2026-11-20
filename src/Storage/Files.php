@@ -27,15 +27,7 @@ final class Files {
 	 * @throws StorageFailed If the file cannot be written.
 	 */
 	public static function write_atomic( string $file, string $content ): void {
-		$temporary = $file . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
-		if ( false === file_put_contents( $temporary, $content ) ) {
-			StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
-		}
-		chmod( $temporary, 0600 );
-		if ( ! rename( $temporary, $file ) ) {
-			unlink( $temporary );
-			StorageFailed::raise( 'A file in the private directory could not be replaced.', [ 'file' => basename( $file ) ] );
-		}
+		self::write_atomic_pieces( $file, [ $content ] );
 	}
 
 	/**
@@ -50,7 +42,12 @@ final class Files {
 	 */
 	public static function write_atomic_pieces( string $file, iterable $pieces, int $limit = PHP_INT_MAX ): bool {
 		$temporary = $file . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
-		$handle    = fopen( $temporary, 'xb' );
+		$umask     = umask( 0077 );
+		try {
+			$handle = @fopen( $temporary, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A checked storage error replaces PHP's warning about the private path.
+		} finally {
+			umask( $umask );
+		}
 		if ( false === $handle ) {
 			StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
 		}
@@ -65,9 +62,12 @@ final class Files {
 				if ( $written > $limit ) {
 					return false;
 				}
-				if ( strlen( $piece ) !== fwrite( $handle, $piece ) ) {
+				if ( strlen( $piece ) !== @fwrite( $handle, $piece ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A full filesystem can also emit a notice for a short write.
 					StorageFailed::raise( 'A file in the private directory could not be written.', [ 'file' => basename( $file ) ] );
 				}
+			}
+			if ( ! fflush( $handle ) ) {
+				StorageFailed::raise( 'A file in the private directory could not be flushed.', [ 'file' => basename( $file ) ] );
 			}
 			$closed = fclose( $handle );
 			$handle = null;

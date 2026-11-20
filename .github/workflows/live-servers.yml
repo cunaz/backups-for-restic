@@ -1,0 +1,58 @@
+# Manually dispatch on main for pre-release evidence. Each hosted fixture belongs
+# exclusively to this workflow and its operator. See tests/Live/README.md.
+name: Private repository smoke
+
+on:
+  schedule:
+    - cron: '43 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-repository-smoke
+  cancel-in-progress: false
+
+jobs:
+  local:
+    name: Disposable private TLS rest-server
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: curl, mbstring, openssl
+          coverage: none
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: bin/install-test-tools.sh rest-server
+      - run: php tests/Live/run.php --local
+
+  hosted:
+    name: Operator-configured private repositories
+    needs: local
+    if: github.ref == 'refs/heads/main' && vars.BFR_LIVE_SMOKE_ENABLED == 'true'
+    environment: live-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: curl, mbstring, openssl, zstd
+          coverage: none
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Exercise dedicated normal and append-only repositories
+        env:
+          BFR_LIVE_REPOSITORIES: ${{ secrets.BFR_LIVE_REPOSITORIES }}
+        run: php -d memory_limit=768M -d display_errors=0 -d log_errors=0 -d zend.exception_ignore_args=1 tests/Live/run.php --hosted

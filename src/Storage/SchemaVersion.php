@@ -45,7 +45,10 @@ final class SchemaVersion {
 	public function stored(): ?int {
 		$value = $this->options->get( self::OPTION );
 		if ( null === $value ) {
-			return 0;
+			// A marker that decodes to null, such as a serialized null a tool wrote, reads
+			// like a missing one. It is malformed all the same: taken for the legacy case it
+			// would let this version act under a layout it cannot identify.
+			return $this->options->exists( self::OPTION ) ? null : 0;
 		}
 		if ( is_int( $value ) ) {
 			return $value > 0 ? $value : null;

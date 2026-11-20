@@ -3,12 +3,13 @@
 #
 # Creates a small repository with a known password, backs up a deterministic fixture tree and
 # stores the raw repository files next to the plaintexts restic reports for them. Unit tests
-# then decrypt the raw files with the plugin's code and compare. Re-run when a new restic
-# version enters the test matrix.
+# then decrypt the raw files with the plugin's code and compare. Set RESTIC explicitly to
+# record a separate fixture directory for a different release.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RESTIC="${RESTIC:-$ROOT/.tools/bin/restic}"
+# The checked-in vectors record this release, independently of the latest test oracle.
+RESTIC="${RESTIC:-$ROOT/.tools/bin/restic-0.19.1}"
 VERSION="$("$RESTIC" version --json | php -r 'echo json_decode(stream_get_contents(STDIN))->version;')"
 OUT="$ROOT/tests/Fixtures/restic-$VERSION"
 WORK="$(mktemp -d)"

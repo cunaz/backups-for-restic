@@ -34,7 +34,7 @@ if ( 'disabled' !== TestSite::php( 'echo defined( "DISABLE_WP_CRON" ) && DISABLE
 	throw new RuntimeException( 'Install the benchmark site with BFR_DISABLE_WP_CRON=1 before creating jobs.' );
 }
 $root   = dirname( __DIR__ );
-$report = $root . '/.tools/memory-' . $blobs . '.jsonl';
+$report = TestSite::tools_dir() . '/memory-' . $blobs . '.jsonl';
 if ( file_exists( $report ) ) {
 	throw new RuntimeException( 'A memory report already exists; use a fresh test site.' );
 }
@@ -55,8 +55,8 @@ $drive  = static function ( string $id, string $operation ) use ( $root, $record
 	$peak    = 0;
 	$seconds = 0.0;
 	for ( $tick = 0; $tick < 600; ++$tick ) {
-		$command = [ PHP_BINARY, '-d', 'memory_limit=128M', '-d', 'max_execution_time=30', '-d', 'disable_functions=set_time_limit', '-d', 'opcache.enable_cli=0', $root . '/bin/bench-wordpress-memory-tick.php', $id ];
-		$process = proc_open( $command, [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'file', $root . '/.tools/memory-worker-errors.log', 'a' ] ], $pipes );
+		$command = [ PHP_BINARY, '-d', 'memory_limit=128M', '-d', 'max_execution_time=30', '-d', 'disable_functions=set_time_limit', '-d', 'opcache.enable_cli=0', $root . '/bin/bench-wordpress-memory-tick.php', $id, TestSite::root() ];
+		$process = proc_open( $command, [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'file', TestSite::tools_dir() . '/memory-worker-errors.log', 'a' ] ], $pipes );
 		if ( false === $process ) {
 			throw new RuntimeException( 'Cannot start the measured WordPress process.' );
 		}

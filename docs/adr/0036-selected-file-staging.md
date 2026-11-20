@@ -23,7 +23,8 @@ collisions, useful progress, and recovery after a killed request.
   otherwise hide a removal by another client from every later call. After a lock gap,
   reacquire it at the start of a call, verify that the snapshot remains, and load the
   current index: cooperating prune may have moved blobs to different packs without
-  changing their content IDs.
+  changing their content IDs. The checkpoint names the new lock only after the snapshot
+  was seen under it, so a call that ends in between is followed by one that looks again.
 - A first resumable traversal validates the selected entries and counts files and bytes.
   It must also find every requested path. It writes no restored file until the complete
   selection and available space have been checked. Throttle applies during both traversals.

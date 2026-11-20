@@ -126,6 +126,35 @@ final class SchemaVersionTest extends TestCase {
 		self::assertSame( 0, $options->writes );
 	}
 
+	public function test_a_marker_that_holds_null_is_malformed_and_not_taken_for_a_missing_one(): void {
+		$options                                  = new InMemoryOptions();
+		$options->values[ SchemaVersion::OPTION ] = null;
+		$version                                  = new SchemaVersion( $options );
+
+		self::assertNull( $version->stored(), 'A row exists, so this is not the layout before numbers.' );
+		self::assertFalse( $version->is_supported() );
+		self::assertFalse( $version->upgrade() );
+		self::assertSame( [ SchemaVersion::OPTION => null ], $options->values, 'The marker is neither replaced nor inserted again.' );
+		self::assertSame( 0, $options->writes );
+
+		$options->delete( SchemaVersion::OPTION );
+		self::assertSame( 0, $version->stored(), 'Without the row the options have the layout before numbers.' );
+		self::assertTrue( $version->upgrade() );
+	}
+
+	public function test_a_null_marker_written_after_a_cached_missing_read_is_not_replaced(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$version                = new SchemaVersion( $options );
+		self::assertSame( 0, $version->stored() );
+		$options->values[ SchemaVersion::OPTION ] = null;
+
+		self::assertFalse( $version->upgrade() );
+		self::assertSame( [ SchemaVersion::OPTION => null ], $options->values );
+		self::assertSame( 0, $options->writes );
+		self::assertNull( $version->stored(), 'The insert that changed nothing read the row again.' );
+	}
+
 	#[DataProvider( 'not_numbers' )]
 	public function test_a_malformed_marker_written_after_a_cached_missing_read_is_not_replaced( mixed $value ): void {
 		$options                = new InMemoryOptions();

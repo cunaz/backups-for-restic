@@ -84,18 +84,18 @@ the milestone.
 | FR-01 | Guided first-run setup: environment check with hosting guidance, choice of repository server (own rest-server or BorgBase), credentials, connection test, append-only detection, repository creation or connection, unlock with progress, recovery kit acknowledgement, schedule, first backup |
 | FR-02 | Back up the site's files (all distinct roots) and the database into one restic snapshot |
 | FR-03 | Scheduled backups in the site's time zone: daily by default, configurable as twice daily, daily or weekly, or manual only. Hourly backups are not offered and not planned yet |
-| FR-04 | Manual backup from the admin UI (and WP-CLI where available) with live progress. Progress shows files and bytes so far; totals and time estimates are planned for Milestone 3 |
+| FR-04 | Manual backup from the admin UI (and WP-CLI where available) with live progress. Progress shows files and bytes processed, with estimates based on the last backup |
 | FR-05 | Retention with restic's policy semantics, or marked as externally managed for append-only repositories |
 | FR-06 | Periodic integrity checks: structural plus a configurable sample of data |
-| FR-07 | Snapshot browser: list snapshots, browse directories, view the manifest. The list exists; browsing and the manifest view arrive with Milestone 3 |
-| FR-08 | Restore: single file download, selected paths to staging, database restore, guarded apply to the live site (Milestone 3; until then with the restic CLI and the recovery kit) |
+| FR-07 | The snapshot browser lists backups, pages through directories and displays the site manifest |
+| FR-08 | Restore selected paths into private staging, download files and archives, review and undo live file changes, and rehearse database recovery. Eligible MySQL installations support a confirmed live exchange. The recovery kit covers independent CLI recovery |
 | FR-09 | Notifications on failure and stale backups by e-mail; webhook later |
 | FR-10 | Site Health tests and debug information |
-| FR-11 | WP-CLI commands with parity where a terminal makes sense; nothing requires WP-CLI. Today: `doctor`, starting backup, forget, prune and check, `tick`, `status` and `snapshots`; settings, cancelling, logs and the recovery kit are planned for Milestone 3 |
+| FR-11 | WP-CLI commands with parity where a terminal makes sense; nothing requires WP-CLI. Commands cover job control, status and logs, snapshot browsing, staging and undo, settings, diagnostics and recovery kit export |
 | FR-12 | Redacted logs per job. They are shown in the admin area (Logs tab); a download does not exist and is not planned yet |
 | FR-13 | Recovery kit: everything needed to restore with the restic CLI, shown once and after re-authentication |
 | FR-14 | Include/exclude configuration with safe defaults |
-| FR-15 | Uninstall removes all local plugin data; the repository on the server is untouched |
+| FR-15 | Uninstall cleans owned local data after checking for live recovery records. Administrators resolve outstanding recovery or ownership issues before deletion. The remote repository retains its backups |
 | FR-16 | Repositories created by the plugin are readable, checkable and restorable by the restic CLI; repositories created by restic can be connected: format 1 always, format 2 when PHP has `ext-zstd` |
 
 ## 7. Non-functional requirements
@@ -104,8 +104,8 @@ the milestone.
 | --- | --- |
 | NFR-01 | Every operation runs in slices that fit a 30-second PHP request; no step assumes a long-lived process except WP-CLI `--wait` |
 | NFR-02 | A killed request, a lost WP-Cron run or a host restart loses at most one slice of work and never leaves an inconsistent repository |
-| NFR-03 | Peak memory of the plugin's code does not grow with the size of files or tables. It does grow with the number of blobs in the repository: the index takes 60 to 80 bytes per blob, 33 MB for half a million and 61 MB for a million (measured, [benchmark](benchmarks/2026-11-index-memory.md)), and a backup needs about 20 MiB and three packs besides it. These measurements suggest capacity for roughly a million blobs under `memory_limit=128M`, depending on the WordPress baseline; full-job measurements at that count remain open. The budget reduces pack sizes and refuses an accumulated index that is too large with `index_too_large` ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)). The checkpoints of prune and check still grow by about 150 bytes per tree and pack |
-| NFR-04 | No secret ever appears in process arguments (there are none), URLs, logs, notices, e-mails, HTML or REST responses |
+| NFR-03 | Peak memory of the plugin's code does not grow with the size of files or tables. It does grow with the number of blobs in the repository: the index takes 60 to 80 bytes per blob, 33 MB for half a million and 61 MB for a million (measured, [benchmark](benchmarks/2026-11-index-memory.md)), and a backup needs about 20 MiB and three packs besides it. On the WordPress 7.1.5 fixture with a 128 MiB limit, backup, check and prune succeeded at 500,000 blobs and refused one and two million with `index_too_large`. [Full-job measurements](benchmarks/2026-11-20-release-candidate.md). The budget reduces pack sizes and refuses an accumulated index that is too large with `index_too_large` ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)). The checkpoints of prune and check still grow by about 150 bytes per tree and pack |
+| NFR-04 | Keep credentials out of process arguments, URLs, diagnostics, ordinary pages and API responses. The authenticated recovery-kit flows deliberately deliver them to the authorised operator and record the delivery ([recovery kit](03-security-and-threat-model.md#55-recovery-kit)) |
 | NFR-05 | All admin actions require `manage_options` and a nonce or REST authentication |
 | NFR-06 | 100 % of strings translatable; English source strings, German translation maintained on translate.wordpress.org. Not met yet for three kinds of text that the admin page shows in English: job log lines, job warnings and byte units; closing that gap is not planned yet |
 | NFR-07 | Admin UI accessible (keyboard, screen readers, admin colour schemes) |

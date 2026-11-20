@@ -58,3 +58,10 @@ algorithm deduplicates against snapshots written by restic.
   the next job. The recovery kit and the site manifest name the same version.
 - The fallback chunking rule was never written, and no switch for it exists. The gate that
   would have called for it was met with 24 MB/s.
+- Before calling ext-zstd, the reader checks frame boundaries, block sizes, the decoding
+  window and the declared output size. For frames without a declared size it bounds the
+  output from their blocks. It accepts concatenated frames and skips complete padding
+  frames. Pack entries must also decode to the size in the pack header and match their
+  SHA-256. The absolute limit is 128 MiB per object. On a host with a PHP memory limit,
+  the reader also reserves space for the native buffers and the returned PHP string.
+  A job that reaches either limit reports `decompression_limit`.

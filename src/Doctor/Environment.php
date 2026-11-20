@@ -26,7 +26,7 @@ final readonly class Environment {
 	 * @param int          $max_execution_time Seconds, 0 for unlimited.
 	 * @param int|null     $free_space         Free disk space of the private directory, if known.
 	 * @param bool|null    $exposed            Whether the private directory answered over HTTP; null if not checkable.
-	 * @param bool         $inside_web_root    Whether the private directory lies inside ABSPATH.
+	 * @param bool         $inside_web_root    Whether exposure checks are needed for a mapped or unverified private location.
 	 * @param int          $salt_constants     Number of the eight salt constants defined in wp-config.php.
 	 * @param bool         $cron_disabled      Whether DISABLE_WP_CRON is set.
 	 * @param bool|null    $loopback           Whether a loopback request worked; null if not tested.
@@ -34,6 +34,7 @@ final readonly class Environment {
 	 * @param int          $repository_format  Format version of the connected repository, 0 if none.
 	 * @param bool         $jit                Whether PHP's JIT compiler is switched on.
 	 * @param bool|null    $repository_reached Whether the repository server answered a request; null if none is configured or none was sent yet.
+	 * @param bool         $private_ready      Whether the plugin could initialize its private directory.
 	 */
 	public function __construct(
 		public array $missing_extensions,
@@ -49,7 +50,8 @@ final readonly class Environment {
 		public bool $secrets_readable,
 		public int $repository_format,
 		public bool $jit = false,
-		public ?bool $repository_reached = null
+		public ?bool $repository_reached = null,
+		public bool $private_ready = true
 	) {
 	}
 }

@@ -13,7 +13,7 @@
 #            served: the tests of the multisite refusal (ADR 0026) use it through WP-CLI.
 #            Needs `install` (for the WordPress archive) and bin/install-test-tools.sh wp-cli.
 #   start    starts PHP's built-in web server with several workers and the limits of the
-#            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
+#            acceptance criteria: max_execution_time = 30, memory_limit = 128M by default, and
 #            set_time_limit() disabled, as on many shared hosts. The JIT compiler is off, as
 #            it is by default in PHP 8.3: with PHP's tracing JIT (which setup-php switches on
 #            in CI) the server's processes died by SIGSEGV in backup ticks, on PHP 8.3.6 and
@@ -29,6 +29,9 @@
 # Needs a running MySQL or MariaDB server. The database administrator defaults to root over
 # the local socket; set BFR_DB_ADMIN_USER and BFR_DB_ADMIN_PASSWORD (and BFR_DB_HOST) to
 # override, as CI does. Everything else lives under .tools/site/. Development tooling only.
+# Set BFR_TEST_PLUGIN_DIR to install a copy of a built plugin package in both sites.
+# A second site can use separate BFR_SITE_TOOLS_DIR, BFR_DB_NAME and BFR_SITE_PORT values.
+# BFR_WP_VERSION selects one of the checksum-pinned releases below.
 # BFR_DISABLE_WP_CRON=1 at install disables automatic cron for measured-worker benchmarks.
 #
 # The WordPress checksum was recorded after verifying the tarball against the SHA-1 that
@@ -36,15 +39,29 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOOLS="$ROOT/.tools"
+TOOLS="${BFR_SITE_TOOLS_DIR:-$ROOT/.tools}"
 SITE="$TOOLS/site"
-WP_VERSION="7.1.4"
-WP_SHA256="881e53a4681ff2cd911651b11cccdede5ae477ddf0765af5d6a1a8b219a1d835"
+MEMORY_MIB="${BFR_SITE_MEMORY_MIB:-128}"
+if [[ ! "$MEMORY_MIB" =~ ^[1-9][0-9]*$ ]]; then
+	echo "BFR_SITE_MEMORY_MIB must be a positive number of MiB." >&2
+	exit 2
+fi
+WP_VERSION="${BFR_WP_VERSION:-7.1.5}"
+case "$WP_VERSION" in
+	7.1.5) WP_SHA256=053857d980eaee8702c617c685948becb9be2523ba0dcbc98e4dbb2300367c79 ;;
+	7.0.9) WP_SHA256=786bf2fc7b2dfa0e2cc5d7833b1e360bfec304d56bae841626b5bb9863e5ac8c ;;
+	6.7.12) WP_SHA256=6a04d2e7f63a01c36f4ad042acb8d70064d5f29db443c18fb10577bbd23c85bc ;;
+	*) echo "Unsupported test fixture version: $WP_VERSION" >&2; exit 2 ;;
+esac
 DB_HOST="${BFR_DB_HOST:-localhost}"
 DB_NAME="${BFR_DB_NAME:-bfr_site}"
 DB_USER="${BFR_DB_USER:-bfr_site}"
 DB_PASSWORD="${BFR_DB_PASSWORD:-bfr-site-test-only}"
 PORT="${BFR_SITE_PORT:-8890}"
+if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PORT < 1 || 10#$PORT > 65535 )); then
+	echo "BFR_SITE_PORT must be a valid loopback port." >&2
+	exit 2
+fi
 URL="http://127.0.0.1:$PORT"
 PID_FILE="$TOOLS/site-server.pid"
 MS_SITE="$TOOLS/site-ms"
@@ -61,17 +78,29 @@ admin_sql() {
 	mysql "${args[@]}" -e "$1"
 }
 
+install_test_plugin() {
+	local destination="$1/wp-content/plugins/backups-for-restic"
+	if [ -n "${BFR_TEST_PLUGIN_DIR:-}" ]; then
+		test -f "$BFR_TEST_PLUGIN_DIR/backups-for-restic.php"
+		mkdir "$destination"
+		cp -R "$BFR_TEST_PLUGIN_DIR/." "$destination/"
+	else
+		ln -s "$ROOT" "$destination"
+	fi
+}
+
 install_site() {
-	mkdir -p "$TOOLS"
-	local archive="$TOOLS/wordpress-$WP_VERSION.tar.gz"
+	mkdir -p "$TOOLS" "$ROOT/.tools"
+	local archive="$ROOT/.tools/wordpress-$WP_VERSION.tar.gz"
 	if [ ! -f "$archive" ]; then
 		local work
-		work="$(mktemp -d "$TOOLS/download.XXXXXX")"
+		work="$(mktemp -d "$ROOT/.tools/download.XXXXXX")"
 		curl -fsSL --retry 3 -o "$work/file" "https://wordpress.org/wordpress-$WP_VERSION.tar.gz"
 		echo "$WP_SHA256  $work/file" | sha256sum --check --quiet -
 		mv "$work/file" "$archive"
 		rmdir "$work"
 	fi
+	echo "$WP_SHA256  $archive" | sha256sum --check --quiet -
 
 	rm -rf "$SITE"
 	mkdir -p "$SITE"
@@ -85,7 +114,7 @@ install_site() {
 		FLUSH PRIVILEGES;"
 
 	php -r '
-		[ , $site, $host, $name, $user, $password, $url ] = $argv;
+		[ , $site, $host, $name, $user, $password, $url, $memory_limit ] = $argv;
 		$config = file_get_contents( $site . "/wp-config-sample.php" );
 		$config = str_replace(
 			[ "database_name_here", "username_here", "password_here", "\x27localhost\x27" ],
@@ -102,15 +131,15 @@ install_site() {
 			. "define( \x27WP_DEBUG_DISPLAY\x27, false );\n"
 			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n"
 			// Ticks call wp_raise_memory_limit(); without this they would run with 256M.
-			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, \x27128M\x27 );\n";
+			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, " . var_export( $memory_limit, true ) . " );\n";
 		if ( "1" === getenv( "BFR_DISABLE_WP_CRON" ) ) {
 			$extra .= "if ( ! defined( \x27DISABLE_WP_CRON\x27 ) ) { define( \x27DISABLE_WP_CRON\x27, true ); }\n";
 		}
 		$config = str_replace( "/* That\x27s all, stop editing!", $extra . "\n/* That\x27s all, stop editing!", $config );
 		file_put_contents( $site . "/wp-config.php", $config );
-	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"
+	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL" "${MEMORY_MIB}M"
 
-	ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
+	install_test_plugin "$SITE"
 	mkdir -p "$SITE/wp-content/mu-plugins"
 	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
 	ln -s "$ROOT/bin/test-site-hostile-filters.php" "$SITE/wp-content/mu-plugins/test-site-hostile-filters.php"
@@ -144,13 +173,18 @@ install_site() {
 }
 
 install_multisite() {
-	local archive="$TOOLS/wordpress-$WP_VERSION.tar.gz"
-	if [ ! -f "$archive" ] || [ ! -x "$TOOLS/bin/wp" ]; then
+	local archive="$ROOT/.tools/wordpress-$WP_VERSION.tar.gz"
+	local wp_cli="$TOOLS/bin/wp"
+	if [ ! -f "$wp_cli" ] || [ ! -r "$wp_cli" ]; then
+		wp_cli="$ROOT/.tools/bin/wp"
+	fi
+	if [ ! -f "$archive" ] || [ ! -f "$wp_cli" ] || [ ! -r "$wp_cli" ]; then
 		echo "Run bin/test-site.sh install and bin/install-test-tools.sh wp-cli first." >&2
 		exit 1
 	fi
 	rm -rf "$MS_SITE"
 	mkdir -p "$MS_SITE"
+	echo "$WP_SHA256  $archive" | sha256sum --check --quiet -
 	tar -xzf "$archive" -C "$MS_SITE" --strip-components=1
 
 	admin_sql "DROP DATABASE IF EXISTS \`$MS_DB_NAME\`;
@@ -159,12 +193,12 @@ install_multisite() {
 		GRANT ALL PRIVILEGES ON \`$MS_DB_NAME\`.* TO '$DB_USER'@'%';
 		FLUSH PRIVILEGES;"
 
-	local wp=(php -d opcache.jit=disable "$TOOLS/bin/wp" --path="$MS_SITE")
+	local wp=(php -d opcache.jit=disable "$wp_cli" --path="$MS_SITE")
 	"${wp[@]}" config create --dbname="$MS_DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASSWORD" --dbhost="$DB_HOST" --skip-check
 	# Without a port: a network's address has none, and this site is never served.
 	"${wp[@]}" core multisite-install --url="http://127.0.0.1" --title="Backup test network" \
 		--admin_user=admin --admin_password=admin-password-test-only --admin_email=admin@example.com --skip-email
-	ln -s "$ROOT" "$MS_SITE/wp-content/plugins/backups-for-restic"
+	install_test_plugin "$MS_SITE"
 }
 
 start_server() {
@@ -180,7 +214,7 @@ start_server() {
 	# The log is appended, so that a restart keeps what happened before it.
 	BFR_SITE_REQUEST_LOG="$TOOLS/requests.log" PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup "${trace[@]}" php \
 		-d max_execution_time=30 \
-		-d memory_limit=128M \
+		-d "memory_limit=${MEMORY_MIB}M" \
 		-d disable_functions=set_time_limit \
 		-d opcache.jit=disable \
 		-d log_errors=1 \

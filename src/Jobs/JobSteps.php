@@ -12,17 +12,21 @@ namespace BackupsForRestic\Jobs;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Routes maintenance jobs to their steps and everything else to the backup steps.
+ * Routes maintenance jobs and restore jobs to their steps and everything else to the backup
+ * steps.
  */
 final class JobSteps implements StepProvider {
 
 	/**
 	 * Creates the router.
 	 *
-	 * @param StepProvider $backup      Steps of backup and unlock jobs.
-	 * @param StepProvider $maintenance Steps of forget, prune and check jobs.
+	 * @param StepProvider      $backup      Steps of backup and unlock jobs.
+	 * @param StepProvider      $maintenance Steps of forget, prune and check jobs.
+	 * @param StepProvider      $restore     Steps of restore jobs.
+	 * @param StepProvider|null $changes Live file apply and undo steps.
+	 * @param StepProvider|null $database Confirmed database exchange steps.
 	 */
-	public function __construct( private readonly StepProvider $backup, private readonly StepProvider $maintenance ) {
+	public function __construct( private readonly StepProvider $backup, private readonly StepProvider $maintenance, private readonly StepProvider $restore, private readonly ?StepProvider $changes = null, private readonly ?StepProvider $database = null ) {
 	}
 
 	/**
@@ -33,6 +37,15 @@ final class JobSteps implements StepProvider {
 	 * @return Step Step.
 	 */
 	public function step( JobType $type, string $name ): Step {
+		if ( null !== $this->database && in_array( $type, [ JobType::DatabaseApply, JobType::DatabaseUndo ], true ) ) {
+			return $this->database->step( $type, $name );
+		}
+		if ( in_array( $type, [ JobType::Apply, JobType::Undo, JobType::FilePlan ], true ) && null !== $this->changes ) {
+			return $this->changes->step( $type, $name );
+		}
+		if ( JobType::Restore === $type ) {
+			return $this->restore->step( $type, $name );
+		}
 		return $type->is_maintenance() ? $this->maintenance->step( $type, $name ) : $this->backup->step( $type, $name );
 	}
 }

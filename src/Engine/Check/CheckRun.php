@@ -76,6 +76,9 @@ final class CheckRun {
 	/** How often the check starts over because the repository changed while its lock did not hold. */
 	public const int MAX_RESTARTS = 3;
 
+	/** How often a run downloads the pack listing again because the stored answer was invalid. */
+	public const int MAX_LISTING_RETRIES = 3;
+
 	/** The phases in their order. */
 	private const array PHASES = [ 'index', 'packs', 'parse_packs', 'compare_packs', 'unindexed_packs', 'list_snapshots', 'snapshots', 'trees', 'read', 'done' ];
 
@@ -130,7 +133,7 @@ final class CheckRun {
 	/**
 	 * Checkpoint fields; see persist() for the shape.
 	 *
-	 * @var array{pid: int, lock: string, locked_at: int, begun: bool, restarts: int, phase: string, position: int, percent: int, piece: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
+	 * @var array{pid: int, lock: string, locked_at: int, begun: bool, restarts: int, listing_retries: int, phase: string, position: int, percent: int, piece: int, seed: string, index_files: list<string>, packs: array<string, array{int, int}>, missing: array<string, true>, snapshot_names: list<string>, roots: array<string, true>, frontier: list<string>, seen: array<string, true>, sample: list<string>, findings: list<array{severity: string, code: string, object: string, message: string}>, counts: array<string, int>, stats: array<string, int>}
 	 */
 	private array $state;
 
@@ -167,27 +170,28 @@ final class CheckRun {
 			];
 		}
 		$this->state = [
-			'pid'            => Decoded::int( $fields['pid'] ?? null, random_int( 100000, 2147483647 ) ),
-			'lock'           => Decoded::string( $fields['lock'] ?? null ),
-			'locked_at'      => Decoded::int( $fields['locked_at'] ?? null ),
-			'begun'          => true === ( $fields['begun'] ?? null ),
-			'restarts'       => Decoded::count( $fields['restarts'] ?? null ),
-			'phase'          => Decoded::string( $fields['phase'] ?? null, 'index' ),
-			'position'       => Decoded::count( $fields['position'] ?? null ),
-			'percent'        => Decoded::count( $fields['percent'] ?? null ),
-			'piece'          => max( 1, Decoded::int( $fields['piece'] ?? null, self::READ_PIECE ) ),
-			'seed'           => Decoded::string( $fields['seed'] ?? null ),
-			'index_files'    => Decoded::strings( $fields['index_files'] ?? [] ),
-			'packs'          => $packs,
-			'missing'        => array_fill_keys( Decoded::strings( $fields['missing'] ?? [] ), true ),
-			'snapshot_names' => Decoded::strings( $fields['snapshot_names'] ?? [] ),
-			'roots'          => array_fill_keys( Decoded::strings( $fields['roots'] ?? [] ), true ),
-			'frontier'       => Decoded::strings( $fields['frontier'] ?? [] ),
-			'seen'           => array_fill_keys( Decoded::strings( $fields['seen'] ?? [] ), true ),
-			'sample'         => Decoded::strings( $fields['sample'] ?? [] ),
-			'findings'       => $findings,
-			'counts'         => self::int_map( $fields['counts'] ?? [] ),
-			'stats'          => self::int_map( $fields['stats'] ?? [] ),
+			'pid'             => Decoded::int( $fields['pid'] ?? null, random_int( 100000, 2147483647 ) ),
+			'lock'            => Decoded::string( $fields['lock'] ?? null ),
+			'locked_at'       => Decoded::int( $fields['locked_at'] ?? null ),
+			'begun'           => true === ( $fields['begun'] ?? null ),
+			'restarts'        => Decoded::count( $fields['restarts'] ?? null ),
+			'listing_retries' => Decoded::count( $fields['listing_retries'] ?? null ),
+			'phase'           => Decoded::string( $fields['phase'] ?? null, 'index' ),
+			'position'        => Decoded::count( $fields['position'] ?? null ),
+			'percent'         => Decoded::count( $fields['percent'] ?? null ),
+			'piece'           => max( 1, Decoded::int( $fields['piece'] ?? null, self::READ_PIECE ) ),
+			'seed'            => Decoded::string( $fields['seed'] ?? null ),
+			'index_files'     => Decoded::strings( $fields['index_files'] ?? [] ),
+			'packs'           => $packs,
+			'missing'         => array_fill_keys( Decoded::strings( $fields['missing'] ?? [] ), true ),
+			'snapshot_names'  => Decoded::strings( $fields['snapshot_names'] ?? [] ),
+			'roots'           => array_fill_keys( Decoded::strings( $fields['roots'] ?? [] ), true ),
+			'frontier'        => Decoded::strings( $fields['frontier'] ?? [] ),
+			'seen'            => array_fill_keys( Decoded::strings( $fields['seen'] ?? [] ), true ),
+			'sample'          => Decoded::strings( $fields['sample'] ?? [] ),
+			'findings'        => $findings,
+			'counts'          => self::int_map( $fields['counts'] ?? [] ),
+			'stats'           => self::int_map( $fields['stats'] ?? [] ),
 		];
 		if ( ! in_array( $this->state['phase'], self::PHASES, true ) ) {
 			FormatException::raise( 'The check checkpoint names an unknown phase.', [ 'phase' => $this->state['phase'] ] );
@@ -501,9 +505,31 @@ final class CheckRun {
 		$this->state['phase']    = 'parse_packs';
 	}
 
-	/** Validates bounded batches, preserving the last occurrence of duplicate pack IDs. */
+	/**
+	 * Validates bounded batches, preserving the last occurrence of duplicate pack IDs. A stored
+	 * answer that is not a listing fails at the same offset in every later call, so the
+	 * checkpoint goes back to the download before the error ends this one.
+	 *
+	 * The caller counts only failures that follow each other, and a download that ends its
+	 * call normally lies between two of these. The run therefore counts the listings it
+	 * discarded itself. After MAX_LISTING_RETRIES the checkpoint stays at the failing batch:
+	 * every later call fails there at once, and the caller gives up.
+	 *
+	 * @throws BackendException If the stored listing is invalid; the next call downloads it
+	 *                          again, unless the server already answered so too often.
+	 */
 	private function parse_packs(): void {
-		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->state['position'] );
+		try {
+			$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->state['position'] );
+		} catch ( BackendException $exception ) {
+			if ( $this->state['listing_retries'] < self::MAX_LISTING_RETRIES ) {
+				++$this->state['listing_retries'];
+				$this->state['phase']    = 'packs';
+				$this->state['position'] = 0;
+			}
+			$this->persist();
+			throw $exception;
+		}
 		$table = new PackTable( $this->work_dir . '/packs.table' );
 		try {
 			foreach ( $batch['entries'] as [ $name, $size ] ) {
@@ -514,7 +540,8 @@ final class CheckRun {
 		}
 		$this->state['position'] = $batch['done'] ? 0 : $batch['offset'];
 		if ( $batch['done'] ) {
-			$this->state['phase'] = 'compare_packs';
+			$this->state['phase']           = 'compare_packs';
+			$this->state['listing_retries'] = 0;
 		}
 	}
 

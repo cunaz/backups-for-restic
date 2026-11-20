@@ -90,6 +90,9 @@ final class PruneRun {
 	/** How often marking starts over because other clients changed the repository meanwhile. */
 	public const int MAX_RESTARTS = 3;
 
+	/** How often a run downloads the pack listing again because the stored answer was invalid. */
+	public const int MAX_LISTING_RETRIES = 3;
+
 	/** Locks older than 30 minutes are stale for restic; the run refreshes well before. */
 	public const int CONTINUITY_SECONDS = 1500;
 
@@ -323,6 +326,13 @@ final class PruneRun {
 	private int $restarts;
 
 	/**
+	 * Number of invalid pack listings that were discarded since the last valid one.
+	 *
+	 * @var int
+	 */
+	private int $listing_retries;
+
+	/**
 	 * Creates the run from a state.
 	 *
 	 * @param Repository           $repository Repository.
@@ -380,6 +390,7 @@ final class PruneRun {
 		$this->packs_deleted       = Decoded::count( $state['packs_deleted'] ?? null );
 		$this->bytes_deleted       = Decoded::count( $state['bytes_deleted'] ?? null );
 		$this->restarts            = Decoded::count( $state['restarts'] ?? null );
+		$this->listing_retries     = Decoded::count( $state['listing_retries'] ?? null );
 		foreach ( is_array( $state['unused'] ?? null ) ? $state['unused'] : [] as $pack => $size ) {
 			$this->unused[ (string) $pack ] = Decoded::int( $size, -1 );
 		}
@@ -928,9 +939,32 @@ final class PruneRun {
 		$this->position = 0;
 	}
 
-	/** Validates a bounded batch and stores its packs before checkpointing the byte cursor. */
+	/**
+	 * Validates a bounded batch and stores its packs before checkpointing the byte cursor. A
+	 * stored answer that is not a listing fails at the same offset in every later call, so the
+	 * checkpoint goes back to the download before the error ends this one. Nothing was deleted
+	 * yet: classification starts only after the entire listing was validated.
+	 *
+	 * The caller counts only failures that follow each other, and a download that ends its
+	 * call normally lies between two of these. The run therefore counts the listings it
+	 * discarded itself. After MAX_LISTING_RETRIES the checkpoint stays at the failing batch:
+	 * every later call fails there at once, and the caller gives up.
+	 *
+	 * @throws BackendException If the stored listing is invalid; the next call downloads it
+	 *                          again, unless the server already answered so too often.
+	 */
 	private function parse_listing(): void {
-		$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->position );
+		try {
+			$batch = ListingFile::batch( $this->work_dir . '/packs.json', $this->position );
+		} catch ( BackendException $exception ) {
+			if ( $this->listing_retries < self::MAX_LISTING_RETRIES ) {
+				++$this->listing_retries;
+				$this->phase    = 'download';
+				$this->position = 0;
+			}
+			$this->persist();
+			throw $exception;
+		}
 		$table = new PackTable( $this->work_dir . '/packs.table' );
 		try {
 			foreach ( $batch['entries'] as [ $name, $size ] ) {
@@ -941,7 +975,8 @@ final class PruneRun {
 		}
 		$this->position = $batch['done'] ? 0 : $batch['offset'];
 		if ( $batch['done'] ) {
-			$this->phase = 'classify';
+			$this->phase           = 'classify';
+			$this->listing_retries = 0;
 		}
 	}
 
@@ -1165,6 +1200,7 @@ final class PruneRun {
 					'packs_deleted'       => $this->packs_deleted,
 					'bytes_deleted'       => $this->bytes_deleted,
 					'restarts'            => $this->restarts,
+					'listing_retries'     => $this->listing_retries,
 				],
 				JSON_THROW_ON_ERROR
 			)

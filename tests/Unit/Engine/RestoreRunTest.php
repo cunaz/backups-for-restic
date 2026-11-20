@@ -14,6 +14,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Restore\Files;
 use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Engine\Restore\State;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
@@ -916,6 +917,40 @@ final class RestoreRunTest extends TestCase {
 		}
 		$this->finish( $resumed );
 		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
+	}
+
+	public function test_a_lock_taken_again_is_recorded_only_after_the_snapshot_was_seen(): void {
+		$snapshot   = $this->repeated_file();
+		$outage     = false;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$outage ): void {
+				// The server stops answering right after the new lock was written.
+				if ( $outage && ( ( 'size' === $method && ObjectType::Snapshots === $type ) || ( 'delete' === $method && ObjectType::Locks === $type ) ) ) {
+					throw new BackendException( 'The server does not answer.' );
+				}
+			}
+		);
+		$repository = Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+		$run        = $this->start( $snapshot, repository: $repository );
+		$this->plan( $run );
+		// Another client removes the lock and forgets the snapshot between two calls.
+		$this->backend->objects['locks'] = [];
+		$this->backend->delete( ObjectType::Snapshots, $snapshot->hex() );
+		$outage = true;
+		try {
+			$run->advance( INF );
+			self::fail( 'The call cannot go on without an answer about the snapshot.' );
+		} catch ( BackendException ) {
+			self::assertCount( 1, $this->backend->list( ObjectType::Locks ), 'The lock of this call stays: its release failed as well.' );
+		}
+		$outage  = false;
+		$resumed = RestoreRun::resume( $this->repository, $this->work, $this->clock );
+		// The checkpoint must not name the lock of the call that never saw the snapshot, or
+		// this call would find it, skip the check and restore a snapshot that was forgotten.
+		$this->expectException( RepositoryChanged::class );
+		$this->expectExceptionMessage( 'The selected snapshot no longer exists.' );
+		$resumed->advance( INF );
 	}
 
 	public function test_a_refresh_inside_a_tick_asks_for_the_old_lock_and_the_new_one(): void {

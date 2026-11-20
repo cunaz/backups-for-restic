@@ -1,15 +1,14 @@
 # Backups for restic
 
-> **Project status: Milestones 0 to 2 are implemented; nothing is released yet.** The restic
-> format engine in pure PHP is verified against the restic CLI. On top of it come the setup
-> wizard, scheduled and resumable backup jobs on WP-Cron, the streamed database dump, and
-> maintenance: retention with restic's semantics, prune without repacking, a repository check
-> that reads a share of the data, append-only detection, e-mail notifications and a gentle CPU
-> mode. The plugin cannot restore yet: that is Milestone 3, and until then every backup is
-> restored with the restic command line ([guide](docs/06-disaster-recovery.md)). Also open
-> and planned for Milestone 3: a preview of what retention would remove, how the repository
-> grows over time, and measurements against a hosted server, which has not been tested yet ([roadmap](docs/05-roadmap.md)).
-> The design documents explain *why* things are built the way they are.
+> **Release candidate 0.3.0-rc.1.** Back up files and the database to an encrypted
+> restic repository. In **Backups → Snapshots**, select a file or directory to restore.
+> Download the result from private staging, or review the proposed file changes before
+> applying them to this installation. A separate confirmation reverses eligible changes
+> within 24 hours. A fresh installation can connect to the repository with its recovery kit,
+> stage content and uploads under their new paths, and rehearse the database import.
+> Eligible MySQL installations can apply the reviewed database and undo it for 24 hours.
+> MariaDB and incompatible schemas use the rehearsed SQL and the manual recovery guide.
+> See the [recovery guide](docs/06-disaster-recovery.md) and [release criteria](docs/05-roadmap.md).
 >
 > **Distribution:** the plugin will be published in the
 > [WordPress.org plugin directory](https://wordpress.org/plugins/), which is the only
@@ -73,6 +72,11 @@ An unreadable job document also blocks new jobs and repository changes and is ke
 compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
 explains how to proceed.
 
+Database backups limit each encoded SQL statement to 16 MiB. A single row that exceeds
+that limit stops the backup with a database error; binary and escaped values can be larger
+in SQL than in the source table. Use an external database export for such tables rather
+than expecting an incomplete backup to count as successful.
+
 ## Documents
 
 | Document | What it answers |
@@ -109,7 +113,7 @@ explains how to proceed.
 | Maintenance | Forget with restic's semantics; prune without repacking, including unindexed packs left by interrupted backups; structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
 | Conformance | The restic CLI is the oracle in CI; every release passes `restic check --read-data` and restore parity | [0023](docs/adr/0023-restic-cli-as-conformance-oracle.md) |
 | Admin UI | Vanilla JavaScript, no build step, REST API as the only data channel | [0012](docs/adr/0012-admin-ui-without-build-step.md) |
-| Restore (Milestone 3, not built yet) | Staging first; applying to the live site is a separate, guarded step | [0013](docs/adr/0013-restore-safety.md) |
+| Restore | Stage files, download them, review live changes and undo them. Rehearse SQL and exchange eligible InnoDB tables after confirmation | [0041](docs/adr/0041-guarded-file-changes.md), [0043](docs/adr/0043-atomic-mysql-database-exchange.md) |
 | Executables | The plugin never downloads, bundles or updates executables | [0016](docs/adr/0016-no-binary-provisioning.md) |
 | Distribution | WordPress.org plugin directory is the only release channel; GitHub holds source, issues and CI | [0017](docs/adr/0017-distribution-via-wordpress-org.md) |
 | Name and license | Backups for restic, slug `backups-for-restic`; GPL-2.0-or-later | [0015](docs/adr/0015-naming-and-license.md) |
@@ -118,13 +122,13 @@ explains how to proceed.
 | Multisite | Not supported in 1.0; activation is refused; planned for 1.1 | [0026](docs/adr/0026-multisite-deferred.md) |
 | Governance | Solo maintainer, free plugin, internal quality assurance with compensating controls | [0024](docs/adr/0024-governance-and-quality-assurance.md) |
 
-## Requirements (planned)
+## Requirements
 
 | Component | Minimum | Recommended |
 | --- | --- | --- |
-| PHP | 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache. The JIT is not part of the recommendation: it makes chunking about five times faster, but on PHP 8.3 its tracing mode has crashed PHP during backups in the project's tests |
+| PHP | 64-bit PHP 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache. The JIT is not part of the recommendation: it makes chunking about five times faster, but on PHP 8.3 its tracing mode has crashed PHP during backups in the project's tests |
 | WordPress | 6.7, single site (multisite planned for 1.1) | current release |
-| Hosting | outbound HTTPS to the repository server; a few hundred MB of disk for caches and restores | a control-panel cron fetching `wp-cron.php` every 1–5 minutes |
+| Hosting | outbound HTTPS to the repository server; private writable disk space for caches, staging and undo copies | a control-panel cron fetching `wp-cron.php` every 1–5 minutes |
 | Server software | none | none |
 | Repository server | a restic REST server with TLS, one repository per site: self-hosted rest-server or a hosted service | append-only mode enabled |
 | restic CLI | not needed on the server; to restore on another computer, restic 0.16.1 or newer, which the recovery kit's commands need (the repository format itself is readable since 0.9) | current release |

@@ -44,11 +44,16 @@ final class EventLog {
 		if ( $size >= self::MAX_BYTES ) {
 			return;
 		}
+		foreach ( $context as $key => $value ) {
+			if ( is_string( $value ) ) {
+				$context[ $key ] = $this->redactor->redact( $value );
+			}
+		}
 		$line = json_encode(
 			[
 				'time'    => time(),
 				'level'   => $level,
-				'message' => $message,
+				'message' => $this->redactor->redact( $message ),
 				'context' => $context,
 			],
 			JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
@@ -56,13 +61,12 @@ final class EventLog {
 		if ( false === $line ) {
 			return;
 		}
-		$line = $this->redactor->redact( $line );
 		if ( $size + strlen( $line ) + 1 > self::MAX_BYTES ) {
 			$line = '{"level":"warning","message":"The log reached its size limit; later entries are dropped."}';
 		}
 		// The result is not checked on purpose: a line that cannot be written must not fail the
 		// job it tells about. The job document, which decides what happens next, is checked.
-		file_put_contents( $this->file, $line . "\n", FILE_APPEND | LOCK_EX );
+		@file_put_contents( $this->file, $line . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- This best-effort append may fail after the job document has been committed.
 	}
 
 	/**

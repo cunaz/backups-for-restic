@@ -64,9 +64,21 @@ final class Messages {
 				'message' => __( 'The server refused to delete data because the repository is append-only.', 'backups-for-restic' ),
 				'hint'    => __( 'That protects your backups. Clean up old snapshots from another computer.', 'backups-for-restic' ),
 			],
+			'file_plan_too_large'            => [
+				'message' => __( 'Online review supports up to one million selected entries and up to one million names in each folder.', 'backups-for-restic' ),
+				'hint'    => __( 'Review a smaller selection. If a single folder exceeds the limit, restore its files offline with restic.', 'backups-for-restic' ),
+			],
+			'file_space'                     => [
+				'message' => __( 'There is too little disk space to complete these file changes.', 'backups-for-restic' ),
+				'hint'    => __( 'Free space on the destination, then open a new preview to check the estimate and available space.', 'backups-for-restic' ),
+			],
 			'index_too_large'                => [
 				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
 				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),
+			],
+			'decompression_limit'            => [
+				'message' => __( 'A repository object is too large for PHP to decompress safely.', 'backups-for-restic' ),
+				'hint'    => __( 'For a trusted repository, ask your host to increase the PHP memory limit. You can also use restic on another computer to verify the repository and restore the snapshot.', 'backups-for-restic' ),
 			],
 			'quota_exceeded'                 => [
 				'message' => __( 'The repository server has no space left.', 'backups-for-restic' ),
@@ -96,9 +108,65 @@ final class Messages {
 				'message' => __( 'The stored passwords can no longer be decrypted.', 'backups-for-restic' ),
 				'hint'    => __( 'The security keys in wp-config.php probably changed. Enter the passwords again.', 'backups-for-restic' ),
 			],
+			'staging_unverified'             => [
+				'message' => __( 'The restore stopped because the privacy of its staging directory could not be verified.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
+			],
 			'environment'                    => [
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
 				'hint'    => __( 'The checks on the Environment tab show what is missing.', 'backups-for-restic' ),
+			],
+			'database_preview_missing'       => [
+				'message' => __( 'The staged selection does not contain the complete database dump.', 'backups-for-restic' ),
+				'hint'    => __( 'Select the whole database directory or restore the whole snapshot.', 'backups-for-restic' ),
+			],
+			'database_restore_prefix'        => [
+				'message' => __( 'The database dump uses another table prefix.', 'backups-for-restic' ),
+				'hint'    => __( 'Rehearse on a site with the original table prefix. For a manual import, open the snapshot again, stage the database directory with rehearsal disabled, and download the SQL files or request a ZIP.', 'backups-for-restic' ),
+			],
+			'database_restore_collation'     => [
+				'message' => __( 'The destination database cannot use a character set or collation in this snapshot.', 'backups-for-restic' ),
+				'hint'    => __( 'Compare the source and destination database versions. Open the snapshot again, stage its database directory with rehearsal disabled, and download the SQL files or request a ZIP for import on a compatible server.', 'backups-for-restic' ),
+			],
+			'database_restore_privilege'     => [
+				'message' => __( 'The database account lacks permission to rehearse this snapshot.', 'backups-for-restic' ),
+				'hint'    => __( 'The rehearsal creates, reads, inserts, updates and drops its own temporary InnoDB tables in the WordPress database. Your database administrator can verify the account permissions.', 'backups-for-restic' ),
+			],
+			'database_restore_format'        => [
+				'message' => __( 'The SQL dump could not be verified by the database rehearsal.', 'backups-for-restic' ),
+				'hint'    => __( 'The job log explains which part of the dump was refused. Stage the snapshot without a database rehearsal to download its SQL files.', 'backups-for-restic' ),
+			],
+			'database_restore_failed'        => [
+				'message' => __( 'The database rehearsal could not finish.', 'backups-for-restic' ),
+				'hint'    => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
+			],
+			'database_restore_busy' => [
+				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
+				'hint'    => __( 'The job retries automatically using its saved database progress and operation witness.', 'backups-for-restic' ),
+			],
+			'database_admin_collision' => [
+				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the administrator’s ID, login, email and local role assignments in both installations. Resolve the conflict before starting a new rehearsal.', 'backups-for-restic' ),
+			],
+			'database_wordpress_version' => [
+				'message' => __( 'The snapshot and destination use different WordPress database versions.', 'backups-for-restic' ),
+				'hint'    => __( 'Use a destination with a matching WordPress schema, or import the staged SQL into a separate database and run the WordPress upgrade there.', 'backups-for-restic' ),
+			],
+			'database_review_required' => [
+				'message' => __( 'This restore needs a new verified database rehearsal.', 'backups-for-restic' ),
+				'hint'    => __( 'Stage the complete database with the rehearsal option, then review its table plan before applying it.', 'backups-for-restic' ),
+			],
+			'database_exchange_changed' => [
+				'message' => __( 'The reviewed database exchange is no longer available.', 'backups-for-restic' ),
+				'hint'    => __( 'Open a new review and check the destination, permissions, administrator account and recovery window.', 'backups-for-restic' ),
+			],
+			'database_exchange_failed' => [
+				'message' => __( 'The database could not complete the reviewed table exchange.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the job result and log for the recorded generation and the database operation that stopped. Use the staged SQL files for a manual restore if the server cannot support this exchange.', 'backups-for-restic' ),
+			],
+			'database_exchange_cleanup' => [
+				'message' => __( 'The database restore could not finish its cleanup.', 'backups-for-restic' ),
+				'hint'    => __( 'Keep the private job directory, reconnect the original database with its restore permissions, and allow the next heartbeat to retry.', 'backups-for-restic' ),
 			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
@@ -124,6 +192,39 @@ final class Messages {
 				'message' => __( 'An unexpected error stopped the job.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job has the details. Please report it if it happens again.', 'backups-for-restic' ),
 			],
+		};
+	}
+
+	/**
+	 * Message and hint for a code of a read of snapshots (Restore\SnapshotBrowser); every
+	 * other code is a job error.
+	 *
+	 * @param string $code Error code.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function snapshot_error( string $code ): array {
+		return match ( $code ) {
+			'invalid_snapshot_id'     => [
+				'message' => __( 'This is not a snapshot ID.', 'backups-for-restic' ),
+				'hint'    => __( 'A snapshot ID has 64 characters: the digits 0 to 9 and the letters a to f. The command line also takes its first 8 or more characters if only one snapshot starts with them.', 'backups-for-restic' ),
+			],
+			'invalid_snapshot_path'   => [
+				'message' => __( 'This is not a path inside a snapshot.', 'backups-for-restic' ),
+				'hint'    => __( 'A path starts with a slash and names one directory after the other, without "." and "..".', 'backups-for-restic' ),
+			],
+			'invalid_snapshot_query'  => [
+				'message' => __( 'The request for snapshots has a value that is not allowed.', 'backups-for-restic' ),
+				'hint'    => __( 'The scope is "site" or "repository". Offset and limit are whole numbers, and the limit is at least 1.', 'backups-for-restic' ),
+			],
+			'snapshot_not_found'      => [
+				'message' => __( 'The repository has no snapshot with this ID.', 'backups-for-restic' ),
+				'hint'    => __( 'It may have been removed since the list was loaded. Load the list of snapshots again.', 'backups-for-restic' ),
+			],
+			'snapshot_path_not_found' => [
+				'message' => __( 'The snapshot has no directory with this path.', 'backups-for-restic' ),
+				'hint'    => __( 'The path does not exist in this snapshot, or it is a file or a link. Links are not followed.', 'backups-for-restic' ),
+			],
+			default                   => self::job_error( $code ),
 		};
 	}
 
@@ -168,6 +269,10 @@ final class Messages {
 				__( 'Not enough free disk space for backups', 'backups-for-restic' ),
 				/* translators: %s: size such as 50 MB. */
 				sprintf( __( 'Only %s are free; at least 128 MB are needed.', 'backups-for-restic' ), $bytes )
+			),
+			'private_directory/unavailable'              => self::pair(
+				__( 'The private working directory could not be initialized', 'backups-for-restic' ),
+				__( 'Set BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php to a dedicated, writable directory outside the web root. Use an empty directory for a new installation.', 'backups-for-restic' )
 			),
 			'private_directory/exposed'                  => self::pair(
 				__( 'The working directory can be read from the web', 'backups-for-restic' ),
@@ -253,21 +358,32 @@ final class Messages {
 	 * Name of a job step.
 	 *
 	 * @param string $step Step.
+	 * @param string $type Job type when a step has a type-specific label.
 	 * @return string Name.
 	 */
-	public static function step( string $step ): string {
+	public static function step( string $step, string $type = '' ): string {
+		if ( 'file_plan' === $type && 'planning' === $step ) {
+			return __( 'Preparing the live file preview', 'backups-for-restic' );
+		}
 		return match ( $step ) {
-			'preflight'   => __( 'Checking the environment', 'backups-for-restic' ),
-			'unlocking'   => __( 'Unlocking the repository', 'backups-for-restic' ),
-			'backing_up'  => __( 'Backing up files and database', 'backups-for-restic' ),
-			'detecting'   => __( 'Checking whether the server allows deletions', 'backups-for-restic' ),
-			'forgetting'  => __( 'Removing old snapshots', 'backups-for-restic' ),
-			'pruning'     => __( 'Deleting data no snapshot uses', 'backups-for-restic' ),
-			'checking'    => __( 'Checking the repository', 'backups-for-restic' ),
-			'recording'   => __( 'Recording the result', 'backups-for-restic' ),
-			'releasing'   => __( 'Releasing the repository', 'backups-for-restic' ),
-			'cleaning_up' => __( 'Cleaning up', 'backups-for-restic' ),
-			default       => __( 'Waiting to start', 'backups-for-restic' ),
+			'preflight'          => __( 'Checking the environment', 'backups-for-restic' ),
+			'unlocking'          => __( 'Unlocking the repository', 'backups-for-restic' ),
+			'backing_up'         => __( 'Backing up files and database', 'backups-for-restic' ),
+			'detecting'          => __( 'Checking whether the server allows deletions', 'backups-for-restic' ),
+			'forgetting'         => __( 'Removing old snapshots', 'backups-for-restic' ),
+			'pruning'            => __( 'Deleting data no snapshot uses', 'backups-for-restic' ),
+			'checking'           => __( 'Checking the repository', 'backups-for-restic' ),
+			'planning'           => __( 'Counting the files to restore', 'backups-for-restic' ),
+			'restoring'          => __( 'Restoring files to the staging directory', 'backups-for-restic' ),
+			'applying'           => __( 'Applying the reviewed live file changes', 'backups-for-restic' ),
+			'undoing'            => __( 'Restoring the previous live files', 'backups-for-restic' ),
+			'importing_database' => __( 'Importing the rehearsed database tables', 'backups-for-restic' ),
+			'preparing_database' => __( 'Verifying the database exchange', 'backups-for-restic' ),
+			'swapping_database'  => __( 'Switching the live database tables', 'backups-for-restic' ),
+			'recording'          => __( 'Recording the result', 'backups-for-restic' ),
+			'releasing'          => __( 'Releasing the repository', 'backups-for-restic' ),
+			'cleaning_up'        => __( 'Cleaning up', 'backups-for-restic' ),
+			default              => __( 'Waiting to start', 'backups-for-restic' ),
 		};
 	}
 
@@ -303,12 +419,18 @@ final class Messages {
 	 */
 	public static function job_type( string $type ): string {
 		return match ( $type ) {
-			'backup'  => __( 'Backup', 'backups-for-restic' ),
-			'unlock'  => __( 'Unlock', 'backups-for-restic' ),
-			'forget'  => __( 'Remove old snapshots', 'backups-for-restic' ),
-			'prune'   => __( 'Prune', 'backups-for-restic' ),
-			'check'   => __( 'Check', 'backups-for-restic' ),
-			default   => $type,
+			'backup'         => __( 'Backup', 'backups-for-restic' ),
+			'unlock'         => __( 'Unlock', 'backups-for-restic' ),
+			'forget'         => __( 'Remove old snapshots', 'backups-for-restic' ),
+			'prune'          => __( 'Prune', 'backups-for-restic' ),
+			'check'          => __( 'Check', 'backups-for-restic' ),
+			'restore'        => __( 'Restore', 'backups-for-restic' ),
+			'file_plan'      => __( 'Preview file changes', 'backups-for-restic' ),
+			'apply'          => __( 'Apply staged files', 'backups-for-restic' ),
+			'undo'           => __( 'Undo file changes', 'backups-for-restic' ),
+			'database_apply' => __( 'Apply staged database', 'backups-for-restic' ),
+			'database_undo'  => __( 'Undo database changes', 'backups-for-restic' ),
+			default          => $type,
 		};
 	}
 

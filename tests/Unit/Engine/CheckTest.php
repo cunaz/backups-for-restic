@@ -488,6 +488,90 @@ final class CheckTest extends TestCase {
 		}
 	}
 
+	/**
+	 * Answers that are stored as the pack listing although they are not one.
+	 *
+	 * @return array<string, array{string}> The stored answer.
+	 */
+	public static function invalid_listings(): array {
+		$names = '';
+		for ( $i = 0; $i < 300; ++$i ) {
+			$names .= '"' . hash( 'sha256', 'listed only once:' . $i ) . '",';
+		}
+		return [
+			'an error page instead of a listing'    => [ '<html><body>502 Bad Gateway</body></html>' ],
+			'a negative size after the first batch' => [ '[' . $names . '{"name":"' . hash( 'sha256', 'negative' ) . '","size":-1}]' ],
+		];
+	}
+
+	#[\PHPUnit\Framework\Attributes\DataProvider( 'invalid_listings' )]
+	public function test_an_invalid_stored_pack_listing_is_downloaded_again_and_the_check_completes( string $invalid ): void {
+		$entries = [];
+		foreach ( $this->backend->list( ObjectType::Data ) as $name => $size ) {
+			$entries[] = [
+				'name' => (string) $name,
+				'size' => $size,
+			];
+		}
+		$downloads                   = 0;
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( &$downloads, $invalid, $entries ): void {
+			self::assertSame( ObjectType::Data, $type );
+			file_put_contents( $path, 1 === ++$downloads ? $invalid : json_encode( $entries, JSON_THROW_ON_ERROR ) );
+		};
+		$work                        = $this->work_dir();
+		$run                         = CheckRun::start( $this->repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		$failures                    = 0;
+		$ticks                       = 0;
+		do {
+			try {
+				$done = $run->advance( 0.0 );
+			} catch ( BackendException ) {
+				// The job treats this as a transport error and resumes from the checkpoint.
+				self::assertSame( 1, ++$failures, 'Only the tick that parsed the invalid answer fails.' );
+				$done = false;
+			}
+			if ( ! $done ) {
+				$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+			}
+			self::assertLessThan( 100000, ++$ticks );
+		} while ( ! $done );
+
+		self::assertSame( 1, $failures );
+		self::assertSame( 2, $downloads, 'The next tick asks the server again instead of parsing the stored answer.' );
+		self::assertSame( [], $run->result()['findings'], 'Nothing of the invalid answer reaches the comparison.' );
+		self::assertSame( count( $entries ), $run->result()['stats']['packs'] );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock is released.' );
+	}
+
+	#[\PHPUnit\Framework\Attributes\DataProvider( 'invalid_listings' )]
+	public function test_a_pack_listing_that_stays_invalid_is_downloaded_a_bounded_number_of_times( string $invalid ): void {
+		$downloads                   = 0;
+		$this->backend->listing_file = static function ( ObjectType $type, string $path ) use ( &$downloads, $invalid ): void {
+			self::assertSame( ObjectType::Data, $type );
+			++$downloads;
+			file_put_contents( $path, $invalid );
+		};
+		$work                        = $this->work_dir();
+		$run                         = CheckRun::start( $this->repository, $work, $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		// The job gives up after failures that follow each other; a call that ends normally,
+		// as the one that only downloads does, starts its count again.
+		$consecutive = 0;
+		$ticks       = 0;
+		while ( $consecutive < 5 ) {
+			try {
+				self::assertFalse( $run->advance( 0.0 ), 'A check without a valid listing never completes.' );
+				$consecutive = 0;
+			} catch ( BackendException ) {
+				++$consecutive;
+			}
+			$run = CheckRun::resume( $this->repository, $work, $this->identity, new SystemClock() );
+			self::assertLessThan( 2000, ++$ticks, 'The failures must follow each other once the run stops asking again.' );
+		}
+
+		self::assertSame( 1 + CheckRun::MAX_LISTING_RETRIES, $downloads );
+		self::assertSame( 'parse_packs', $run->progress()['phase'], 'The checkpoint stays at the batch that fails.' );
+	}
+
 	public function test_a_missing_pack_is_not_read_again_when_the_findings_list_is_full(): void {
 		for ( $i = 0; $i <= CheckRun::MAX_FINDINGS; $i++ ) {
 			$this->backend->objects['index'][ hash( 'sha256', 'damaged ' . $i ) ] = 'damaged ' . $i;

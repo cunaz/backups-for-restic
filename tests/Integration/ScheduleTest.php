@@ -6,6 +6,9 @@ namespace BackupsForRestic\Tests\Integration;
 use PHPUnit\Framework\Attributes\Depends;
 use PHPUnit\Framework\Attributes\DependsExternal;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Jobs\JobStore;
+use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
 
 /**
@@ -54,6 +57,26 @@ final class ScheduleTest extends TestCase {
 		self::fail( 'The heartbeat started no job; handled slots: ' . (string) json_encode( TestSite::schedule_state() ) );
 	}
 
+	public function test_unavailable_storage_leaves_other_cron_callbacks_running(): void {
+		$fixture = TempDir::create( 'cron-storage' );
+		try {
+			$override = $fixture . '/private-dir.php';
+			// This existing file cannot be used as a private directory.
+			file_put_contents( $override, '<?php define( "BACKUPS_FOR_RESTIC_PRIVATE_DIR", __FILE__ );' );
+			$worker              = 'foreach (["backups_for_restic_tick","backups_for_restic_heartbeat"] as $hook) {
+				add_action($hook, static function () use ($hook) { echo $hook, " returned\n"; }, 99);
+				do_action($hook);
+			}';
+			[ $status, $output ] = TestSite::wp( [ '--require=' . $override, 'eval', $worker ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'backups_for_restic_tick returned', $output );
+			self::assertStringContainsString( 'backups_for_restic_heartbeat returned', $output );
+			self::assertStringNotContainsString( $fixture, $output );
+		} finally {
+			TempDir::remove( $fixture );
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_the_first_slot_after_the_setup_is_only_recorded(): void {
 		TestSite::idle( 600 );
@@ -86,6 +109,22 @@ final class ScheduleTest extends TestCase {
 		TestSite::add_upload( 'scheduled.bin', 8 );
 		// As if the last backup that the schedule started was long ago.
 		TestSite::schedule_state( [ 'backup_slot' => 1 ] );
+
+		$fixture = TempDir::create( 'blocked-schedule' );
+		try {
+			$private = new PrivateDirectory( $fixture . '/private' );
+			$private->ensure();
+			// Obstruct only this worker's creation lock. Other WordPress cron callbacks must still run.
+			mkdir( $private->subdirectory( 'jobs' ) . '/' . JobStore::CREATE_LOCK );
+			$override = $fixture . '/private-dir.php';
+			file_put_contents( $override, '<?php define( "BACKUPS_FOR_RESTIC_PRIVATE_DIR", ' . var_export( $private->path, true ) . ' );' );
+			[ $status, $output ] = TestSite::wp( [ '--require=' . $override, 'eval', 'do_action("backups_for_restic_heartbeat"); echo "heartbeat returned";' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertSame( 'heartbeat returned', TestSite::last_line( $output ) );
+			self::assertSame( 1, TestSite::schedule_state()['backup_slot'] ?? null );
+		} finally {
+			TempDir::remove( $fixture );
+		}
 
 		$backup = self::started_by_the_heartbeat( self::known() );
 		self::assertSame( [ 'backup', 'schedule', 'succeeded' ], [ $backup['type'], $backup['trigger'], $backup['state'] ], (string) json_encode( $backup ) );

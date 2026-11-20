@@ -27,6 +27,23 @@ final class SchedulePolicyTest extends TestCase {
 		yield 'daily, after the time' => [ $daily, '2026-11-09 10:00', '2026-11-09 03:17', '2026-11-10 03:17' ];
 		yield 'daily, exactly' => [ $daily, '2026-11-09 03:17', '2026-11-09 03:17', '2026-11-10 03:17' ];
 		yield 'daily across the switch to winter time' => [ $daily, '2026-10-25 10:00', '2026-10-25 03:17', '2026-10-26 03:17' ];
+		$spring = [ 'schedule.backup.hour' => 2 ] + $daily;
+		yield 'spring gap is due after the clocks move forward' => [ $spring, '2026-03-29 03:00', '2026-03-28 02:17', '2026-03-29 03:17' ];
+		// The repeated hour belongs to one slot. Both occurrences of 02:05 must show the
+		// same upcoming 02:17, also after the clock moved back for the second occurrence.
+		yield 'before the repeated hour' => [ $spring, '2026-10-25 02:05:00+02:00', '2026-10-24 02:17', '2026-10-25 02:17:00+01:00' ];
+		yield 'after the clock moved back' => [ $spring, '2026-10-25 02:05:00+01:00', '2026-10-24 02:17', '2026-10-25 02:17:00+01:00' ];
+		yield 'daily after a spring gap' => [ $spring, '2026-03-29 04:00', '2026-03-29 03:17', '2026-03-30 02:17' ];
+		yield 'twice daily on the spring change' => [ [ 'schedule.backup.frequency' => 'twice_daily' ] + $spring, '2026-03-29 14:30', '2026-03-29 14:17', '2026-03-30 02:17' ];
+		yield 'weekly after a spring gap' => [
+			[
+				'schedule.backup.frequency' => 'weekly',
+				'schedule.backup.weekday'   => 0,
+			] + $spring,
+			'2026-03-29 04:00',
+			'2026-03-29 03:17',
+			'2026-04-05 02:17',
+		];
 		yield 'twice daily, afternoon' => [ [ 'schedule.backup.frequency' => 'twice_daily' ] + $daily, '2026-11-09 20:00', '2026-11-09 15:17', '2026-11-10 03:17' ];
 		yield 'twice daily, early morning' => [ [ 'schedule.backup.frequency' => 'twice_daily' ] + $daily, '2026-11-09 01:00', '2026-11-08 15:17', '2026-11-09 03:17' ];
 		yield 'weekly on Sunday, on Monday' => [
@@ -72,6 +89,7 @@ final class SchedulePolicyTest extends TestCase {
 			'schedule.prune.weekday'   => 0,
 			'schedule.prune.hour'      => 4,
 		];
+		yield 'weekly prune after a spring gap' => [ 'prune', [ 'schedule.prune.hour' => 2 ] + $prune, '2026-03-29 04:00', '2026-03-29 03:00', '2026-04-05 02:00' ];
 		yield 'prune weekly on Sunday, on Monday' => [ 'prune', $prune, '2026-11-09 12:00', '2026-11-08 04:00', '2026-11-15 04:00' ];
 		yield 'prune weekly on Monday, early on Monday' => [ 'prune', [ 'schedule.prune.weekday' => 1 ] + $prune, '2026-11-09 03:00', '2026-11-02 04:00', '2026-11-09 04:00' ];
 		yield 'prune monthly on the first Sunday' => [ 'prune', [ 'schedule.prune.frequency' => 'monthly' ] + $prune, '2026-11-09 12:00', '2026-11-01 04:00', '2026-12-06 04:00' ];

@@ -13,6 +13,7 @@ use BackupsForRestic\Backend\AppendOnlyProbe;
 use BackupsForRestic\Backend\AppendOnlyStatus;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\TickReport;
 use BackupsForRestic\Scheduling\SchedulePolicy;
@@ -34,6 +35,9 @@ final class Cron {
 	/** Seconds the deactivation may spend on ending the active job. */
 	private const float STOP_SECONDS = 10.0;
 
+	/** Seconds a heartbeat may spend on deleting restore staging that is due (ADR 0040). */
+	private const float STAGING_SECONDS = 5.0;
+
 	/**
 	 * Registers the hooks.
 	 *
@@ -41,18 +45,23 @@ final class Cron {
 	 */
 	public static function register( Container $container ): void {
 		add_filter( 'cron_schedules', [ self::class, 'schedules' ] ); // phpcs:ignore WordPress.WP.CronInterval.CronSchedulesInterval -- The heartbeat runs every five minutes on purpose (ADR 0011).
-		add_action(
-			self::TICK,
-			static function () use ( $container ): void {
-				self::tick( $container );
-			}
-		);
-		add_action(
-			self::HEARTBEAT,
-			static function () use ( $container ): void {
-				self::heartbeat( $container );
-			}
-		);
+		$workers = [
+			self::TICK      => self::tick( ... ),
+			self::HEARTBEAT => self::heartbeat( ... ),
+		];
+		foreach ( $workers as $hook => $worker ) {
+			add_action(
+				$hook,
+				static function () use ( $worker, $container ): void {
+					try {
+						$worker( $container );
+					} catch ( StorageFailed ) {
+						// Keep unrelated WP-Cron events running. The heartbeat retries from durable state.
+						return;
+					}
+				}
+			);
+		}
 		add_action( 'init', [ self::class, 'ensure_heartbeat' ] );
 	}
 
@@ -96,7 +105,7 @@ final class Cron {
 	 * @param Container $container Services.
 	 */
 	public static function stop( Container $container ): void {
-		if ( ! is_dir( $container->private_dir()->subdirectory( 'jobs' ) ) ) {
+		if ( ! $container->private_dir()->owns_contents() || ! is_dir( $container->private_dir()->subdirectory( 'jobs' ) ) ) {
 			// Never set up: no job, and no reason to create the private directory now.
 			return;
 		}
@@ -117,6 +126,7 @@ final class Cron {
 		ignore_user_abort( true );
 		$budget = $container->tick_budget( $budget );
 		if ( function_exists( 'set_time_limit' ) ) {
+			// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged -- A worker needs a bounded grace period to checkpoint and release its lock after the tick budget expires.
 			set_time_limit( (int) ceil( $budget ) + 30 );
 		}
 		$report = $container->runner()->tick( $budget );
@@ -160,7 +170,7 @@ final class Cron {
 
 	/**
 	 * Probes for append-only mode once a day, starts scheduled jobs, advances jobs whose chain
-	 * broke, and sends the stale notice when it is due.
+	 * broke, sends the stale notice when it is due, and removes restore staging that expired.
 	 *
 	 * @param Container $container Services.
 	 */
@@ -173,6 +183,35 @@ final class Cron {
 			self::tick( $container );
 		}
 		self::exclusively( $container, static fn () => $container->notifier()->heartbeat( time() ) );
+		self::expire_staging( $container );
+		try {
+			$container->clean_database_previews( false, microtime( true ) + self::STAGING_SECONDS );
+		} catch ( PluginException ) {
+			// The job retains the ownership evidence until the database accepts cleanup.
+			return;
+		}
+	}
+
+	/**
+	 * Removes the restore staging that is due: what expired, and what jobs that did not
+	 * succeed left behind (ADR 0040). It comes last and has a few seconds, so it neither
+	 * delays a scheduled job nor a notice; what a large tree needs beyond that, the next
+	 * heartbeats do.
+	 *
+	 * It does not wait for the runner lock, which a long backup holds tick after tick while
+	 * staged plaintext would stay past its time. It needs none: the directory of a job that
+	 * has not ended is never touched, and a job's document says that it ended only after its
+	 * last step.
+	 *
+	 * @param Container $container Services.
+	 */
+	private static function expire_staging( Container $container ): void {
+		try {
+			$container->staging()->remove_due( $container->settings()->int( 'restore.staging_expiry_hours' ), microtime( true ) + self::STAGING_SECONDS );
+		} catch ( PluginException ) {
+			// The directory could not be listed. The next heartbeat tries again.
+			return;
+		}
 	}
 
 	/**
@@ -291,7 +330,8 @@ final class Cron {
 		try {
 			$container->jobs()->create( $type, $trigger, $now );
 			return true;
-		} catch ( JobConflict ) {
+		} catch ( JobConflict | StorageFailed ) {
+			// Leave the slot due so a later heartbeat can retry once storage is writable.
 			return false;
 		}
 	}

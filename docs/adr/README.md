@@ -54,4 +54,11 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0032](0032-run-checkpoint-files-and-cleanup.md) | Complete working-file writes and cleanup by run ownership |
 | [0033](0033-prune-listing-on-disk.md) | Prune validates the server pack listing on disk before deleting |
 | [0034](0034-snapshot-reader.md) | Read snapshots under shared locks and locate manifests independently of the live site |
+| [0035](0035-transactional-shadow-import.md) | Import database batches and their progress in one transaction |
 | [0036](0036-selected-file-staging.md) | Plan selected files before restoring into an owned staging directory |
+| [0037](0037-restore-job.md) | A restore is a job that blocks other jobs and stages into a directory of its own |
+| [0038](0038-download-zip-and-tokens.md) | Downloads: a stored zip written by the plugin, and one-time tokens in a file |
+| [0039](0039-snapshot-routes.md) | Snapshot routes show names as text and address paths by a lossless token |
+| [0040](0040-restore-staging-expiry.md) | Restore staging expires, and a removal sets the directory aside first |
+| [0041](0041-guarded-file-changes.md) | Review staged files, apply them under a renewable WordPress maintenance lease, and retain undo records |
+| [0043](0043-atomic-mysql-database-exchange.md) | Exchange confirmed MySQL database generations under a write lock and retain undo state |

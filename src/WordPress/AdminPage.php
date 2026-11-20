@@ -22,7 +22,7 @@ final class AdminPage {
 
 	public const string SLUG = 'backups-for-restic';
 
-	private const array TABS = [ 'dashboard', 'snapshots', 'settings', 'environment', 'logs' ];
+	private const array TABS = [ 'dashboard', 'snapshots', 'restores', 'settings', 'environment', 'logs' ];
 
 	/**
 	 * Registers the menu and assets.
@@ -33,12 +33,10 @@ final class AdminPage {
 		add_action(
 			'admin_menu',
 			static function () use ( $container ): void {
-				/** This filter is documented in src/WordPress/RestRoutes.php */
-				$capability = apply_filters( 'backups_for_restic_capability', 'manage_options' );
 				add_menu_page(
 					__( 'Backups', 'backups-for-restic' ),
 					__( 'Backups', 'backups-for-restic' ),
-					is_string( $capability ) ? $capability : 'manage_options',
+					RestRoutes::capability(),
 					self::SLUG,
 					static function () use ( $container ): void {
 						self::render( $container );
@@ -132,6 +130,7 @@ final class AdminPage {
 		$labels    = [
 			'dashboard'   => __( 'Dashboard', 'backups-for-restic' ),
 			'snapshots'   => __( 'Snapshots', 'backups-for-restic' ),
+			'restores'    => __( 'Restores', 'backups-for-restic' ),
 			'settings'    => __( 'Settings', 'backups-for-restic' ),
 			'environment' => __( 'Environment', 'backups-for-restic' ),
 			'logs'        => __( 'Logs', 'backups-for-restic' ),
@@ -149,7 +148,7 @@ final class AdminPage {
 			<noscript>
 				<div class="notice notice-error inline"><p><?php esc_html_e( 'This page needs JavaScript.', 'backups-for-restic' ); ?></p></div>
 			</noscript>
-			<div id="backups-for-restic-app" data-view="<?php echo esc_attr( $setup ? $tab : 'setup' ); ?>" aria-live="polite">
+			<div id="backups-for-restic-app" data-view="<?php echo esc_attr( $setup ? $tab : 'setup' ); ?>">
 				<p class="backups-for-restic-loading"><?php esc_html_e( 'Loading…', 'backups-for-restic' ); ?></p>
 			</div>
 		</div>

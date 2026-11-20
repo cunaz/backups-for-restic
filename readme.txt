@@ -4,7 +4,7 @@ Tags: backup, restic, encryption, database backup, restore
 Requires at least: 6.7
 Tested up to: 7.1
 Requires PHP: 8.3
-Stable tag: 0.1.0-dev
+Stable tag: 0.3.0-rc.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -25,13 +25,16 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * **Retention and maintenance.** Old snapshots are removed by a restic-compatible policy, data that no snapshot uses any more is deleted weekly, and a monthly check downloads and verifies a share of the stored data. Data in packs that still hold used data stays until a full `restic prune` from another computer; the dashboard shows how much that is.
 * **Append-only aware.** If your server is append-only, nobody who takes over the website can delete your backups. The plugin notices it, stops deleting, and tells you how to clean up from another computer.
 * **E-mail notifications** when a backup or a maintenance job (removing old snapshots, deleting unused data, the check) fails, when no backup succeeded for too long, when it works again, when a check finds damage, and when the plugin stops removing old snapshots because the server became append-only.
+* **Restore selected files.** Browse a snapshot and stage files in a private directory. Download a file, a ZIP archive or the restore report. Staging expires after 24 hours by default.
+* **Review before live changes.** Compare staged files with the receiving site, confirm the exact changes and undo eligible changes for 24 hours. WordPress startup files and configuration have a separate offline recovery procedure.
+* **Rehearse the database.** Verify snapshot tables in private shadow tables. On an eligible MySQL installation, confirm the table exchange and keep the destination administrator, site address and backup settings. MariaDB and incompatible schemas use the manual SQL import guide.
 * **Recovery kit.** One page with everything needed to restore without the website: repository address, passwords, the CA certificate of a server with its own certificate authority, and the exact restic commands.
-* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`). Setup and settings are done in the admin area.
+* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`, `ls`, `restore`, `apply-plan`). Use `undo` for a reviewed file reversal and `recovery-kit` for offline credentials. Setup and settings are done in the admin area.
 * **Site Health** checks and debug information.
 
 = Requirements =
 
-* PHP 8.3 or newer with the OpenSSL, JSON and mbstring extensions (standard on hosting), and a PHP memory limit of at least 96 MB.
+* 64-bit PHP 8.3 or newer with the OpenSSL, JSON and mbstring extensions, and a PHP memory limit of at least 96 MB.
 * At least 128 MB of free disk space for the plugin's working files.
 * Outbound HTTPS to the repository server.
 * For an existing repository in restic's format 2 with compressed data, the zstd PHP extension. Repositories that the plugin creates do not need it.
@@ -55,6 +58,12 @@ The project is independent and not affiliated with restic or BorgBase. Both name
 
 On hosts where WordPress cannot call itself, or that disable WP-Cron, set up a cron job in the hosting control panel that requests `wp-cron.php` every five minutes: see [Running backups with a real cron job](https://github.com/cunaz/backups-for-restic/blob/main/docs/guides/cron.md).
 
+== Screenshots ==
+
+1. The dashboard shows the last successful snapshot, the next scheduled backup and repository maintenance.
+2. The snapshot list shows the files and size of each backup and whether the retention policy will keep it.
+3. The database rehearsal compares verified snapshot row counts, table engines and collations with the live database before changes are approved.
+
 == Frequently Asked Questions ==
 
 = Do I need the restic program or shell access? =
@@ -67,7 +76,11 @@ Yes. Every backup is a normal restic repository. The recovery kit lists the comm
 
 = Can I restore from the WordPress admin area? =
 
-Not yet. This version lists your snapshots under **Backups > Snapshots**; restoring is done with the restic command line and the recovery kit, on any computer. Restore from the admin area is planned for a later version.
+Yes. In **Backups > Snapshots**, select the files or directories you need. Download them from private staging, or review the file changes and confirm your site address and password to apply them. You can review an undo for 24 hours. On a replacement WordPress installation, connect with the recovery kit and select **Restore from an existing snapshot** to stage content, map uploads to their new location and rehearse the database import. The database report shows whether the destination supports a confirmed live table exchange and undo. MariaDB users can import the verified SQL into a separate database using the recovery guide. The recovery kit also works on a separate computer with the restic CLI.
+
+= Why does the plugin use direct filesystem access? =
+
+Backups read files in chunks. Restores write each selection to a private directory, verify its contents and stream large downloads. Applying an approved file change uses a same-filesystem atomic operation and retains the original for undo. These operations require local file handles. The receiving site must permit WordPress file modifications for live changes. Staging requires a verified private location.
 
 = Why does this plugin contain encryption code? =
 
@@ -91,7 +104,7 @@ Set **Settings > Advanced > Processor use** to "Gentle". Jobs then work in short
 
 = Where are the passwords stored? =
 
-Encrypted in the database with a key derived from the security keys in `wp-config.php`, or, if you prefer, as constants in `wp-config.php`. They never appear in logs or URLs. The setup wizard shows the recovery kit once, right after it creates or connects the repository; later it is shown only after you re-enter your WordPress password.
+Encrypted in the database with a key derived from the security keys in `wp-config.php`, or, if you prefer, as constants in `wp-config.php`. They never appear in logs or URLs. The setup wizard shows the recovery kit once, right after it creates or connects the repository; later, viewing it in the admin area requires your WordPress password. A shell operator can export it with `wp backups-for-restic recovery-kit`. Each delivery records the time and account.
 
 = What happens to my backups when I uninstall the plugin? =
 
@@ -103,7 +116,7 @@ Not yet. Network support is planned for version 1.1.
 
 = My hosting runs an older PHP version. How do I switch? =
 
-The plugin needs PHP 8.3 or newer, and WordPress does not install it on older versions. Most hosts let you choose the PHP version per site in the control panel: in cPanel under **MultiPHP Manager** or **Select PHP Version**, in Plesk under **PHP Settings** of the domain. Other panels have a similar page, and your host's support can switch it for you. **Tools > Site Health > Info > Server** shows the version your site runs now.
+The plugin needs 64-bit PHP 8.3 or newer. Most hosts let you choose the PHP version per site in the control panel: in cPanel under **MultiPHP Manager** or **Select PHP Version**, in Plesk under **PHP Settings** of the domain. Other panels have a similar page, and your host's support can switch it for you. **Tools > Site Health > Info > Server** shows the version your site runs now.
 
 = Where do I get help, and where do I report a bug? =
 
@@ -127,4 +140,4 @@ What is sent and when: encrypted repository files (file contents, directory list
 
 = Unreleased =
 
-* Not released yet. The [changelog on GitHub](https://github.com/cunaz/backups-for-restic/blob/main/CHANGELOG.md) lists the work in progress.
+* Release candidate 0.3.0-rc.1 adds guarded file restore and undo, fresh-site path mapping, database rehearsal and confirmed live database exchange on eligible MySQL installations. See the [full changelog](https://github.com/cunaz/backups-for-restic/blob/main/CHANGELOG.md).

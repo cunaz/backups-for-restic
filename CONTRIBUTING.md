@@ -37,8 +37,11 @@ npm ci
 npm run lint:js
 ```
 
-The database suite needs a MySQL or MariaDB server (root over the local socket, or
-`BFR_TEST_MYSQL_HOST`, `BFR_TEST_MYSQL_USER` and `BFR_TEST_MYSQL_PASSWORD`):
+Run the database suite on a disposable MySQL or MariaDB server. It uses root over
+the local socket by default. Set `BFR_TEST_MYSQL_HOST`, `BFR_TEST_MYSQL_USER` and
+`BFR_TEST_MYSQL_PASSWORD` for a different test server. The suite creates and drops
+temporary schemas. The MySQL exchange test also creates a temporary login, grants and
+revokes its database privileges and global PROCESS, and drops the login when it finishes.
 
 ```bash
 composer test:database
@@ -71,8 +74,8 @@ composer mutation
 `composer fuzz` fuzzes every parser for ten seconds. A finding is saved under
 `.tools/fuzz-findings/` with the command that replays it; after the fix, copy the input to
 `tests/Fixtures/fuzz/<target>/` so the unit suite replays it forever. `composer mutation`
-needs pcov or Xdebug and checks that the tests of `Crypto`, `Format` and `Engine\Forget`
-kill at least 90 % of the covered mutants. In CI it runs on `main` and on pull requests
+needs pcov or Xdebug. It requires a covered mutation score of at least 90 % across
+`Crypto`, `Format`, `Engine\Forget` and `Database\Restore`. In CI it runs on `main` and on pull requests
 that change the engine, the code below it, the tests or the tools
 ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
 
@@ -89,6 +92,11 @@ bin/install-test-tools.sh wp-cli
 ```bash
 composer pot
 ```
+
+Run `bin/build-package.sh --zip` to produce `build/backups-for-restic.zip` for the
+**Plugins → Add Plugin → Upload Plugin** screen. This option also needs Python 3.
+The ZIP contains the plugin in its own directory and uses fixed entry timestamps,
+permissions and filename order. The `.wordpress-org/` directory holds listing artwork.
 
 `bin/build-package.sh` copies the files that Git tracks, without the paths in `.distignore`,
 into `build/backups-for-restic/` (needs Git and rsync). CI runs Plugin Check, the scanner

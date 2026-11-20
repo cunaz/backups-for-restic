@@ -17,9 +17,10 @@ use BackupsForRestic\WordPress\Cron;
 define( 'DISABLE_WP_CRON', true );
 define( 'DOING_CRON', true );
 $started = microtime( true );
-require dirname( __DIR__ ) . '/.tools/site/wp-load.php';
+$site    = $argv[2] ?? dirname( __DIR__ ) . '/.tools/site';
+require $site . '/wp-load.php';
 $baseline  = memory_get_usage( true );
-$container = new Container( dirname( __DIR__ ) . '/backups-for-restic.php' );
+$container = new Container( WP_PLUGIN_DIR . '/backups-for-restic/backups-for-restic.php' );
 Cron::tick( $container, chain: false );
 $job = $container->jobs()->get( $argv[1] ?? '' );
 if ( null === $job ) {

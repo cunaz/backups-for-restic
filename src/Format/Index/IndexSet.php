@@ -52,6 +52,16 @@ final class IndexSet {
 	private const int PACKS_PER_PIECE = 32768;
 
 	/**
+	 * The longest piece export() yields for any index a PHP process can hold. A piece of pack
+	 * IDs is one byte longer than PIECE_BYTES. A piece of buckets stays below PIECE_BYTES
+	 * until its last bucket, so it passes twice that only with a bucket of more than a
+	 * megabyte: 21845 blobs that agree in the two ID bytes drawn at random for this index,
+	 * which evenly spread IDs reach beyond a billion blobs. A reader may treat a longer
+	 * piece as damage; an index that did write one is then read from its source again.
+	 */
+	public const int MAX_PIECE_BYTES = 2 * self::PIECE_BYTES;
+
+	/**
 	 * Positions of the two ID bytes that choose a bucket.
 	 *
 	 * @var int
@@ -240,7 +250,7 @@ final class IndexSet {
 	/**
 	 * Serializes the index for the local cache in pieces of about one megabyte, so that the
 	 * cache can be written without a second copy of the index in memory. Each piece is
-	 * complete in itself; import() takes them in this order.
+	 * complete in itself and at most MAX_PIECE_BYTES long; import() takes them in this order.
 	 *
 	 * The first piece is the magic line, the two bucket positions and the numbers of packs
 	 * and blobs. Pieces that begin with "P" hold pack IDs in the order of their numbers.

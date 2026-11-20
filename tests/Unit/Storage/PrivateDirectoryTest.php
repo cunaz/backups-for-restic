@@ -38,6 +38,27 @@ final class PrivateDirectoryTest extends TestCase {
 		self::assertSame( 0600, fileperms( $directory->path . '/.htaccess' ) & 0777 );
 	}
 
+	public function test_only_absolute_paths_without_dot_segments_can_claim_private_storage(): void {
+		foreach ( [ 'relative-backups', 'file://' . $this->root, $this->root . '/scratch/../claimed' ] as $path ) {
+			try {
+				( new PrivateDirectory( $path ) )->ensure();
+				self::fail( 'An ambiguous private storage path was accepted.' );
+			} catch ( StorageFailed ) {
+				self::assertDirectoryDoesNotExist( $this->root . '/scratch' );
+			}
+		}
+	}
+
+	public function test_uninstall_handles_a_configured_directory_symlink(): void {
+		mkdir( $this->root . '/outside' );
+		symlink( $this->root . '/outside', $this->root . '/working' );
+		$directory = new PrivateDirectory( $this->root . '/working' );
+		$directory->ensure();
+		$directory->remove_contents();
+		self::assertSame( [ '.', '..' ], scandir( $this->root . '/outside' ) );
+		self::assertTrue( is_link( $directory->path ) );
+	}
+
 	public function test_location_prefers_the_constant_then_wp_content_then_uploads(): void {
 		mkdir( $this->root . '/content' );
 		mkdir( $this->root . '/uploads' );
@@ -76,6 +97,7 @@ final class PrivateDirectoryTest extends TestCase {
 	public function test_probe_file_and_web_root_check(): void {
 		$directory = new PrivateDirectory( $this->root . '/site/wp-content/' . PrivateDirectory::NAME );
 		$probe     = $directory->write_probe( new SystemRandom() );
+		self::assertSame( 0600, fileperms( $probe['file'] ) & 0777 );
 		self::assertSame( $probe['token'], file_get_contents( $probe['file'] ) );
 		self::assertStringStartsWith( $directory->subdirectory( 'probe' ) . '/', $probe['file'] );
 		self::assertTrue( $directory->is_inside( $this->root . '/site/' ) );
@@ -95,6 +117,38 @@ final class PrivateDirectoryTest extends TestCase {
 		$directory->remove_contents();
 
 		self::assertDirectoryDoesNotExist( $directory->path );
+	}
+
+	public function test_unclaimed_directory_with_a_foreign_cache_is_left_alone(): void {
+		$directory = new PrivateDirectory( $this->root . '/shared' );
+		mkdir( $directory->path . '/cache', 0755, true );
+		chmod( $directory->path, 0755 );
+		file_put_contents( $directory->path . '/cache/keep', 'foreign cache' );
+
+		try {
+			$directory->ensure();
+			self::fail( 'A nonempty location must not be claimed.' );
+		} catch ( StorageFailed $error ) {
+			self::assertStringContainsString( 'empty directory', $error->getMessage() );
+		}
+		$directory->remove_contents();
+		self::assertSame( 'foreign cache', file_get_contents( $directory->path . '/cache/keep' ) );
+		self::assertSame( 0755, fileperms( $directory->path ) & 0777 );
+		self::assertFileDoesNotExist( $directory->path . '/.htaccess' );
+	}
+
+	public function test_a_legacy_directory_is_recognized_and_custom_protection_survives_uninstall(): void {
+		$directory = new PrivateDirectory( $this->root . '/legacy' );
+		$directory->ensure();
+		unlink( $directory->path . '/.backups-for-restic' );
+		file_put_contents( $directory->path . '/.htaccess', 'host-specific deny rule' );
+		file_put_contents( $directory->subdirectory( 'jobs' ) . '/keep', 'job data' );
+		$directory->ensure();
+		self::assertSame( 'job data', file_get_contents( $directory->subdirectory( 'jobs' ) . '/keep' ) );
+
+		$directory->remove_contents();
+		self::assertSame( 'host-specific deny rule', file_get_contents( $directory->path . '/.htaccess' ) );
+		self::assertDirectoryDoesNotExist( $directory->subdirectory( 'jobs' ) );
 	}
 
 	public function test_uninstalling_keeps_files_that_are_not_the_plugins(): void {

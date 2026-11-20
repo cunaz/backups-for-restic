@@ -268,6 +268,9 @@ final class NotifierTest extends TestCase {
 	public function test_unlock_and_cancelled_jobs_are_not_reported(): void {
 		$notifier = $this->notifier();
 		$notifier->job_finished( $this->job( JobType::Unlock, JobState::Failed, self::SETUP + 10, 'wrong_password' ), self::SETUP + 10 );
+		// A restore, too, runs while an administrator watches it (ADR 0037).
+		$notifier->job_finished( $this->job( JobType::Restore, JobState::Failed, self::SETUP + 12, 'repository_missing' ), self::SETUP + 12 );
+		$notifier->job_finished( $this->job( JobType::Restore, JobState::Succeeded, self::SETUP + 14 ), self::SETUP + 14 );
 		$notifier->job_finished( $this->job( JobType::Backup, JobState::Cancelled, self::SETUP + 20 ), self::SETUP + 20 );
 		$notifier->job_finished( $this->job( JobType::Backup, JobState::Running, self::SETUP + 30 ), self::SETUP + 30 );
 		self::assertSame( [], $this->mailer->kinds() );

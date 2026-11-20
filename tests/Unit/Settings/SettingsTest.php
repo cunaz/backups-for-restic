@@ -10,6 +10,9 @@ use BackupsForRestic\Exception\ValidationFailed;
 use BackupsForRestic\Settings\Schema;
 use BackupsForRestic\Settings\Settings;
 use BackupsForRestic\Settings\SettingsStore;
+use BackupsForRestic\Storage\FileLock;
+use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 
 final class SettingsTest extends TestCase {
@@ -23,6 +26,7 @@ final class SettingsTest extends TestCase {
 		self::assertSame( '2d', $settings->string( 'retention.keep.within' ) );
 		self::assertSame( 20, $settings->int( 'advanced.tick_budget_seconds' ) );
 		self::assertSame( 16, $settings->int( 'advanced.pack_size_mib' ) );
+		self::assertSame( 24, $settings->int( 'restore.staging_expiry_hours' ), 'Staged plaintext is kept for a day unless an administrator decides otherwise.' );
 		self::assertTrue( $settings->bool( 'backup.database.enabled' ) );
 		self::assertFalse( $settings->bool( 'setup.completed' ) );
 		self::assertSame( [], $settings->list( 'backup.excludes' ) );
@@ -30,7 +34,7 @@ final class SettingsTest extends TestCase {
 	}
 
 	public function test_only_what_an_administrator_decides_can_be_changed_after_the_setup(): void {
-		foreach ( [ 'schedule.backup.hour', 'retention.mode', 'backup.extra_roots', 'notifications.email.recipients', 'advanced.cpu_throttle' ] as $path ) {
+		foreach ( [ 'schedule.backup.hour', 'retention.mode', 'backup.extra_roots', 'restore.staging_expiry_hours', 'notifications.email.recipients', 'advanced.cpu_throttle' ] as $path ) {
 			self::assertTrue( Schema::editable( $path ), $path );
 		}
 		// What the setup and the jobs write: an edit would point the backups elsewhere or pass the wizard by.
@@ -60,6 +64,38 @@ final class SettingsTest extends TestCase {
 		self::assertEquals( $saved, $store->load() );
 	}
 
+	public function test_reading_an_option_leaves_the_directory_unclaimed_and_writing_claims_it_first(): void {
+		$root      = TempDir::create( 'settings-lock' );
+		$directory = new PrivateDirectory( $root );
+		$lock      = new FileLock(
+			static function () use ( $directory ): string {
+				$directory->ensure();
+				return $directory->path . '/state.lock';
+			}
+		);
+		$options   = new InMemoryOptions();
+		$store     = new SettingsStore( $options, [], $lock );
+		try {
+			$store->load();
+			self::assertSame( [ '.', '..' ], scandir( $root ) );
+			file_put_contents( $root . '/unrelated', 'keep' );
+			try {
+				$store->update( [ 'advanced.tick_budget_seconds' => 25 ] );
+				self::fail( 'A change without an exclusive lock must be refused.' );
+			} catch ( StorageFailed ) {
+				self::assertSame( [ '.', '..', 'unrelated' ], scandir( $root ) );
+				self::assertNull( $options->get( SettingsStore::OPTION ) );
+			}
+			unlink( $root . '/unrelated' );
+			$store->update( [ 'advanced.tick_budget_seconds' => 25 ] );
+			self::assertFileExists( $root . '/state.lock' );
+			$directory->ensure();
+			self::assertSame( 25, $store->load()->int( 'advanced.tick_budget_seconds' ) );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
 	public function test_settings_that_the_options_table_refused_do_not_pass_for_saved(): void {
 		$options = new InMemoryOptions();
 		$store   = new SettingsStore( $options );
@@ -74,6 +110,21 @@ final class SettingsTest extends TestCase {
 		} catch ( StorageFailed ) {
 			self::assertSame( 20, $store->load()->int( 'advanced.tick_budget_seconds' ) );
 		}
+	}
+
+	public function test_a_settings_write_keeps_a_concurrent_change_to_retention(): void {
+		$options                = new InMemoryOptions();
+		$options->request_cache = true;
+		$store                  = new SettingsStore( $options );
+		$store->load();
+
+		$options->values[ SettingsStore::OPTION ] = [ 'retention.mode' => 'external' ];
+
+		$saved = $store->update( [ 'schedule.backup.hour' => 3 ] );
+
+		self::assertSame( 'external', $saved->string( 'retention.mode' ) );
+		self::assertSame( 'external', $options->values[ SettingsStore::OPTION ]['retention.mode'] );
+		self::assertSame( 3, $saved->int( 'schedule.backup.hour' ) );
 	}
 
 	public function test_durations_and_e_mail_addresses_are_normalized(): void {
@@ -94,6 +145,8 @@ final class SettingsTest extends TestCase {
 	public static function invalid_input(): iterable {
 		yield 'number too small' => [ 'advanced.tick_budget_seconds', 1, 'out_of_range' ];
 		yield 'number as words' => [ 'advanced.pack_size_mib', 'sixteen', 'out_of_range' ];
+		yield 'staging that expires at once' => [ 'restore.staging_expiry_hours', 0, 'out_of_range' ];
+		yield 'staging kept longer than a week' => [ 'restore.staging_expiry_hours', 169, 'out_of_range' ];
 		yield 'unknown choice' => [ 'repository.server', 's3', 'not_a_choice' ];
 		yield 'not a boolean' => [ 'backup.exclude_caches', 'maybe', 'not_a_boolean' ];
 		yield 'control characters' => [ 'repository.url', "https://a.example/\n", 'invalid_characters' ];

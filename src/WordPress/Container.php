@@ -23,10 +23,17 @@ use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Database\Dump\DatabaseDump;
+use BackupsForRestic\Database\Restore\MysqliConnection;
+use BackupsForRestic\Exception\DatabaseFailed;
+use BackupsForRestic\Jobs\Restore\DatabasePreview;
 use BackupsForRestic\Doctor\Doctor;
 use BackupsForRestic\Doctor\Environment;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
+use BackupsForRestic\Engine\MemoryBudget;
+use BackupsForRestic\Engine\Snapshot\Reader;
+use BackupsForRestic\Engine\TreeCache;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
@@ -37,9 +44,15 @@ use BackupsForRestic\Format\Config;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
+use BackupsForRestic\Jobs\Apply\FileChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
+use BackupsForRestic\Jobs\Restore\RestoreServices;
+use BackupsForRestic\Jobs\Restore\RestoreSteps;
 use BackupsForRestic\Jobs\Maintenance\RetentionGuard;
+use BackupsForRestic\Jobs\Maintenance\RetentionSettings;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
@@ -47,6 +60,11 @@ use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Notifications\Notifier;
 use BackupsForRestic\Plugin;
+use BackupsForRestic\Restore\ApplyPlan;
+use BackupsForRestic\Restore\FileMaintenance;
+use BackupsForRestic\Restore\SiteLayout;
+use BackupsForRestic\Restore\SnapshotBrowser;
+use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Secrets\ConstantOverrideStore;
 use BackupsForRestic\Secrets\EncryptedOptionStore;
 use BackupsForRestic\Secrets\Secret;
@@ -158,7 +176,7 @@ final class Container {
 	 * @return SettingsStore Store.
 	 */
 	public function settings_store(): SettingsStore {
-		return new SettingsStore( $this->options(), self::constants( array_values( Schema::CONSTANTS ) ) );
+		return new SettingsStore( $this->options(), self::constants( array_values( Schema::CONSTANTS ) ), $this->state_lock() );
 	}
 
 	/**
@@ -178,9 +196,18 @@ final class Container {
 	 * @throws ValidationFailed If a value is invalid; nothing is saved then.
 	 */
 	public function save_settings( array $changes ): Settings {
-		$mode  = $this->settings()->string( 'retention.mode' );
-		$saved = $this->settings_store()->update( $changes );
-		if ( $saved->string( 'retention.mode' ) !== $mode ) {
+		$store = $this->settings_store();
+		$mode  = array_key_exists( 'retention.mode', $changes ) ? $store->load( true )->string( 'retention.mode' ) : null;
+		$saved = $store->update( $changes );
+		// Every path is one of the schema here: the update refuses any other.
+		foreach ( array_keys( $changes ) as $path ) {
+			if ( str_starts_with( $path, 'retention.' ) ) {
+				// The cached list of this site's snapshots previews the policy from before the change.
+				delete_transient( 'backups_for_restic_snapshots' );
+				break;
+			}
+		}
+		if ( null !== $mode && $saved->string( 'retention.mode' ) !== $mode ) {
 			// An administrator chose the mode: that answers the proposal and the switch notice.
 			$this->state()->set( 'retention_proposal', [] );
 			$this->state()->set( 'retention_switch', [] );
@@ -302,6 +329,127 @@ final class Container {
 	}
 
 	/**
+	 * What finished restores left in the private directory, and its removal (ADR 0040).
+	 *
+	 * @return Staging Staging directories.
+	 */
+	public function staging(): Staging {
+		return new Staging( $this->private_dir()->subdirectory( 'restores' ), $this->jobs(), $this->clock() );
+	}
+
+	/**
+	 * The three destination roots belong to this installation. A snapshot's manifest and
+	 * its extra backup roots cannot grant write access to a different location.
+	 *
+	 * @param bool        $include_config Explicitly include the live configuration file.
+	 * @param string|null $restore ID of the original restore with its verified layout binding.
+	 * @throws InvalidArgument If the restore metadata required for file apply has expired.
+	 * @return ApplyPlan Read-only planner.
+	 */
+	public function apply_plan( bool $include_config = false, ?string $restore = null ): ApplyPlan {
+		$site   = $this->site();
+		$layout = null;
+		if ( null !== $restore ) {
+			$job = $this->jobs()->get( $restore );
+			if ( null === $job ) {
+				throw new InvalidArgument( 'The restore job metadata needed to verify live file destinations is unavailable.' );
+			}
+			$layout = SiteLayout::from_job( $job, $site->content_dir, $site->uploads_dir );
+		}
+		// Core, configuration and drop-ins execute before the worker can isolate active
+		// extensions. Their restoration requires a controller outside this installation.
+		$bootstrap = [
+			$site->abspath . '/wp-admin',
+			$site->abspath . '/wp-includes',
+			defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : $site->content_dir . '/mu-plugins',
+			dirname( $site->abspath ) . '/wp-config.php',
+		];
+		foreach ( [ 'index.php', 'wp-blog-header.php', 'wp-settings.php', 'wp-load.php', 'wp-config.php', 'wp-cron.php', 'wp-login.php', 'wp-signup.php', 'wp-activate.php', 'wp-comments-post.php', 'wp-links-opml.php', 'wp-mail.php', 'wp-trackback.php', 'xmlrpc.php', '.htaccess', '.user.ini', 'web.config', 'php.ini' ] as $name ) {
+			$bootstrap[] = $site->abspath . '/' . $name;
+		}
+		foreach ( [ 'advanced-cache.php', 'object-cache.php', 'db.php', 'db-error.php', 'fatal-error-handler.php', 'php-error.php', 'maintenance.php', 'sunrise.php', 'install.php' ] as $name ) {
+			$bootstrap[] = $site->content_dir . '/' . $name;
+		}
+		return new ApplyPlan(
+			[ $site->abspath, $site->content_dir, $site->uploads_dir ],
+			[ dirname( $this->plugin_file ), $this->private_dir()->path, $site->abspath . '/.maintenance' ],
+			[ $site->abspath . '/wp-config.php', dirname( $site->abspath ) . '/wp-config.php' ],
+			$include_config,
+			$layout,
+			$bootstrap
+		);
+	}
+
+	/**
+	 * Builds the guarded apply and undo job service.
+	 *
+	 * @return FileChanges File change service.
+	 */
+	public function file_changes(): FileChanges {
+		return new FileChanges(
+			$this->jobs(),
+			$this->staging(),
+			$this->clock(),
+			$this->settings()->int( 'restore.staging_expiry_hours' ),
+			$this->apply_plan( ... ),
+			$this->file_maintenance(),
+			static fn (): bool => wp_is_file_mod_allowed( 'backups_for_restic_apply' )
+		);
+	}
+
+	/**
+	 * Owns the live marker for this WordPress installation.
+	 *
+	 * @return FileMaintenance Marker manager.
+	 */
+	private function file_maintenance(): FileMaintenance {
+		return new FileMaintenance( $this->site()->abspath, plugin_basename( $this->plugin_file ), rest_url( RestRoutes::REST_NAMESPACE ), admin_url( 'admin.php' ) );
+	}
+
+	/**
+	 * Builds confirmed database jobs without opening SQL on unrelated runner requests.
+	 * During uninstall the supplied store and directory identify a previous private path.
+	 *
+	 * @param PrivateDirectory|null $directory Private job directory for retained generations.
+	 * @param JobStore|null         $store Corresponding validated store.
+	 * @return DatabaseChanges Reviewed database operations.
+	 */
+	public function database_changes( ?PrivateDirectory $directory = null, ?JobStore $store = null ): DatabaseChanges {
+		$directory ??= $this->private_dir();
+		$store     ??= $this->jobs();
+		return new DatabaseChanges(
+			$store,
+			new Staging( $directory->subdirectory( 'restores' ), $store, $this->clock() ),
+			$this->clock(),
+			$this->random(),
+			$this->settings()->int( 'restore.staging_expiry_hours' ),
+			self::wpdb()->prefix,
+			$this->database_connection( ... ),
+			static function ( int $user ): array {
+				$blockers = [];
+				if ( ! RestRoutes::database_user_allowed( $user ) ) {
+					$blockers[] = 'database_account';
+				}
+				$wpdb = self::wpdb();
+				if ( is_multisite() || \wpdb::class !== $wpdb::class || $wpdb->users !== $wpdb->prefix . 'users' || $wpdb->usermeta !== $wpdb->prefix . 'usermeta' || file_exists( WP_CONTENT_DIR . '/db.php' ) ) {
+					$blockers[] = 'wordpress_environment';
+				}
+				if ( wp_using_ext_object_cache() || file_exists( WP_CONTENT_DIR . '/object-cache.php' ) ) {
+					$blockers[] = 'persistent_object_cache';
+				}
+				return $blockers;
+			},
+			$this->file_maintenance(),
+			static function (): void {
+				if ( ! wp_cache_flush() ) {
+					throw new DatabaseFailed( 'The WordPress object cache could not be refreshed after the exchange.' );
+				}
+				Cron::ensure_heartbeat();
+			}
+		);
+	}
+
+	/**
 	 * The cache directory.
 	 *
 	 * @return CacheDirectory Cache.
@@ -326,7 +474,24 @@ final class Container {
 	 * @return FileLock Lock.
 	 */
 	private function state_lock(): FileLock {
-		return $this->state_lock ??= new FileLock( $this->private_dir()->path . '/state.lock' );
+		return $this->state_lock ??= $this->private_lock( 'state.lock' );
+	}
+
+	/**
+	 * Claims the configured directory before a writer creates its lock file.
+	 * Reading options and constructing services leaves the filesystem untouched.
+	 *
+	 * @param string $name Lock filename.
+	 * @return FileLock Lock.
+	 */
+	private function private_lock( string $name ): FileLock {
+		return new FileLock(
+			function () use ( $name ): string {
+				$directory = $this->private_dir();
+				$directory->ensure();
+				return $directory->path . '/' . $name;
+			}
+		);
 	}
 
 	/**
@@ -336,8 +501,8 @@ final class Container {
 	 * @return HttpClient Client.
 	 */
 	public function http( ?int $timeout = null ): HttpClient {
-		$ca = $this->private_dir()->path . '/ca.pem';
-		$ca = 'uploaded' === $this->settings()->string( 'repository.ca_certificate' ) && is_file( $ca ) ? $ca : null;
+		// A missing configured trust bundle makes the HTTPS request fail.
+		$ca = 'uploaded' === $this->settings()->string( 'repository.ca_certificate' ) ? $this->private_dir()->path . '/ca.pem' : null;
 		return new WpHttpClient( $timeout ?? $this->settings()->int( 'advanced.upload_timeout_seconds' ), $ca );
 	}
 
@@ -348,6 +513,30 @@ final class Container {
 	 */
 	public function access(): RepositoryAccess {
 		return new RepositoryAccess( $this->settings(), $this->secrets(), $this->http(), $this->random(), $this->user_agent() );
+	}
+
+	/**
+	 * The snapshot browser of the REST routes and the command line. Its reader shares the
+	 * index and tree cache of the jobs and takes a repository lock of its own for every read.
+	 * This site's snapshots are those with its host name and the two tags that the retention
+	 * selects them by (MaintenanceServices::retention_tags()). The browser gets the policy of
+	 * the next forget, so that the list of this site's snapshots previews what it removes.
+	 *
+	 * @return SnapshotBrowser|null Browser, or null if the repository has to be unlocked first.
+	 */
+	public function snapshot_browser(): ?SnapshotBrowser {
+		$repository = $this->access()->open_cached();
+		if ( null === $repository ) {
+			return null;
+		}
+		$this->private_dir()->ensure();
+		// A request has PHP's memory limit as a job has: an index that does not fit is refused, not fatal.
+		$repository->limit_memory( MemoryBudget::from_ini( ini_get( 'memory_limit' ) ) );
+		$site   = $this->site();
+		$cache  = $this->cache()->path . '/' . $repository->config()->id;
+		$limit  = $this->settings()->int( 'advanced.cache_limit_mib' ) * 1048576;
+		$reader = new Reader( $repository, $this->identity(), $this->clock(), new IndexCache( $cache, $limit ), new TreeCache( $cache, $limit ) );
+		return new SnapshotBrowser( $reader, $site->hostname(), [ PlanFactory::TAG, $site->site_tag() ], RetentionSettings::preview( $this->settings() ), $this->clock() );
 	}
 
 	/**
@@ -430,16 +619,22 @@ final class Container {
 			 *
 			 * @param list<string> $tables Table names from the settings.
 			 */
-			$exclude  = apply_filters( 'backups_for_restic_database_tables_excluded', $settings->list( 'backup.database.exclude_tables' ) );
-			$prefix   = 'all' === $settings->string( 'backup.database.table_scope' ) ? '' : $wpdb->prefix;
-			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, self::strings( $exclude ), $job->created_at );
+			$exclude = apply_filters( 'backups_for_restic_database_tables_excluded', $settings->list( 'backup.database.exclude_tables' ) );
+			$prefix  = 'all' === $settings->string( 'backup.database.table_scope' ) ? '' : $wpdb->prefix;
+			$exclude = self::strings( $exclude );
+			if ( '' === $prefix ) {
+				foreach ( $this->jobs()->database_owners() as $owner ) {
+					array_push( $exclude, ...DatabaseGeneration::exclusions( $this->database_connection(), $owner ) );
+				}
+			}
+			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, $exclude, $job->created_at );
 			$database = $dump->files( ... );
 		}
 		return ( new PlanFactory( $this->site(), $settings, $this->private_dir(), self::strings( $roots ), self::strings( $excludes ), $database, $job->id, $job->created_at ) )->plan();
 	}
 
 	/**
-	 * The job runner with the backup and maintenance steps.
+	 * The job runner with the backup, maintenance and restore steps.
 	 *
 	 * @return Runner Runner.
 	 */
@@ -466,7 +661,73 @@ final class Container {
 		);
 		$backup      = new BackupSteps( $services );
 		$maintenance = new MaintenanceSteps( new MaintenanceServices( $services, $this->switch_retention( ... ), $this->site()->site_tag() ), $backup );
-		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance ), $this->clock(), $this->random(), new JobEvents( $this ) );
+		$restore     = new RestoreSteps( new RestoreServices( $services, $this->database_preview( ... ) ), $backup );
+		return new Runner( $jobs, $this->runner_lock(), new JobSteps( $backup, $maintenance, $restore, $this->file_changes(), $this->database_changes( $this->private_dir(), $jobs ) ), $this->clock(), $this->random(), new JobEvents( $this ) );
+	}
+
+	/**
+	 * Uses the WordPress connection without automatic retries during transactions.
+	 *
+	 * @return DatabasePreview Preview importer.
+	 * @throws DatabaseFailed If the site's database adapter does not expose a mysqli handle.
+	 */
+	private function database_preview(): DatabasePreview {
+		return new DatabasePreview( $this->database_connection(), self::wpdb()->prefix );
+	}
+
+	/**
+	 * Obtains the single WordPress connection without its query retry machinery.
+	 *
+	 * @return MysqliConnection Current SQL session.
+	 * @throws DatabaseFailed If a drop-in does not expose a usable mysqli handle.
+	 */
+	private function database_connection(): MysqliConnection {
+		$handle = self::wpdb()->__get( 'dbh' );
+		if ( ! $handle instanceof \mysqli ) {
+			throw new DatabaseFailed( 'Database preview requires the WordPress mysqli connection.' );
+		}
+		return new MysqliConnection( $handle );
+	}
+
+	/**
+	 * Retries preview cleanup whose job reached a terminal state after a dropped connection
+	 * or refused DROP. An uninstall may also finish an interrupted active preview. Each
+	 * committed cursor is saved while the runner lock is held. Staging is unnecessary.
+	 *
+	 * @param bool                  $uninstall Include active restores during uninstall.
+	 * @param float                 $deadline End of this request's cleanup budget.
+	 * @param PrivateDirectory|null $directory An earlier working directory during uninstall.
+	 * @return bool Whether cleanup finished under the runner lock.
+	 */
+	public function clean_database_previews( bool $uninstall, float $deadline, ?PrivateDirectory $directory = null ): bool {
+		$directory ??= $this->private_dir();
+		if ( ! $directory->owns_contents() || ! is_dir( $directory->subdirectory( 'jobs' ) ) ) {
+			return true;
+		}
+		$lock = new RunnerLock( $directory->path . '/runner.lock' );
+		if ( ! $lock->acquire() ) {
+			return false;
+		}
+		try {
+			$store = new JobStore( $directory->subdirectory( 'jobs' ), $this->redactor(), $this->random() );
+			if ( $uninstall ) {
+				foreach ( $store->maintenance_jobs() as $job ) {
+					$this->file_maintenance()->release( $job->id, $store->directory( $job ) );
+				}
+			}
+			foreach ( $store->pending_database_cleanups( $uninstall ) as $job ) {
+				do {
+					$done = $this->database_preview()->clean( $job, $deadline );
+					$store->save( $job );
+					if ( microtime( true ) >= $deadline ) {
+						return false;
+					}
+				} while ( ! $done );
+			}
+			return $this->database_changes( $directory, $store )->expire( $uninstall, $deadline );
+		} finally {
+			$lock->release();
+		}
 	}
 
 	/**
@@ -496,6 +757,8 @@ final class Container {
 	public function switch_retention( string $mode ): void {
 		$this->settings_store()->update( [ 'retention.mode' => $mode ] );
 		$this->refresh();
+		// The cached list of this site's snapshots previews the mode from before the switch.
+		delete_transient( 'backups_for_restic_snapshots' );
 	}
 
 	/**
@@ -523,7 +786,7 @@ final class Container {
 	 * @return Notifier Notifier.
 	 */
 	public function notifier(): Notifier {
-		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ), $this->state_lock(), new FileLock( $this->private_dir()->path . '/notify.lock' ) );
+		return new Notifier( $this->options(), $this->state(), $this->settings(), new WpMailer( $this->settings() ), $this->state_lock(), $this->private_lock( 'notify.lock' ) );
 	}
 
 	/**
@@ -581,10 +844,15 @@ final class Container {
 			$value  = self::constant_string( $constant );
 			$salts += '' !== $value && 'put your unique phrase here' !== $value ? 1 : 0;
 		}
-		$directory = $this->private_dir();
+		$directory       = $this->private_dir();
+		$directory_ready = false;
+		$inside_web_root = true;
 		try {
 			$directory->ensure();
-			$exposed = $this->exposure()->exposed( $fresh );
+			$directory_ready = true;
+			$probe           = $this->exposure();
+			$inside_web_root = ! $probe->outside_web_root();
+			$exposed         = $probe->exposed( $fresh );
 		} catch ( \Throwable ) {
 			$exposed = null;
 		}
@@ -593,16 +861,17 @@ final class Container {
 			function_exists( 'zstd_uncompress' ),
 			self::bytes( ini_get( 'memory_limit' ) ),
 			(int) ini_get( 'max_execution_time' ),
-			is_dir( $directory->path ) ? $directory->free_space() : null,
+			$directory_ready ? $directory->free_space() : null,
 			$exposed,
-			$directory->is_inside( ABSPATH ),
+			$inside_web_root,
 			$salts,
 			defined( 'DISABLE_WP_CRON' ) && true === constant( 'DISABLE_WP_CRON' ),
 			Cron::loopback_works( $fresh ),
 			$this->access()->passwords_readable(),
 			$this->settings()->int( 'repository.format_version' ),
 			self::jit_enabled(),
-			$this->repository_reached( $fresh )
+			$this->repository_reached( $fresh ),
+			$directory_ready
 		);
 	}
 

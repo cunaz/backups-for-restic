@@ -67,6 +67,17 @@ final class DoctorTest extends TestCase {
 		}
 	}
 
+	public function test_an_unusable_directory_outside_the_web_root_blocks_setup(): void {
+		$environment = self::environment(
+			[
+				'inside_web_root' => false,
+				'private_ready'   => false,
+			]
+		);
+		self::assertSame( 'critical:unavailable', self::statuses( $environment )['private_directory'] );
+		self::assertTrue( Doctor::blocked( Doctor::check( $environment ) ) );
+	}
+
 	public function test_an_enabled_jit_and_a_silent_repository_server_are_hints_that_block_nothing(): void {
 		$statuses = self::statuses( self::environment() );
 		self::assertSame( 'good:off', $statuses['jit'] );

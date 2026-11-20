@@ -24,4 +24,11 @@ interface ExposureCheck {
 	 *                   (for example because the directory lies outside the web root).
 	 */
 	public function exposed(): ?bool;
+
+	/**
+	 * Whether plaintext restore staging can safely be written at the configured location.
+	 *
+	 * @return bool True outside public paths or after verifying protection.
+	 */
+	public function permits_staging(): bool;
 }

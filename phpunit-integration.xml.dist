@@ -17,8 +17,12 @@ because they need the site, a database server and the restic tools; CI runs them
             <file>tests/Integration/AccessTest.php</file>
             <file>tests/Integration/WordPressSiteTest.php</file>
             <file>tests/Integration/HttpStreamingTest.php</file>
+            <file>tests/Integration/StorageExposureTest.php</file>
             <file>tests/Integration/JobControlTest.php</file>
             <file>tests/Integration/ScheduleTest.php</file>
+            <!-- Before RestoreStagingTest: it clears restores/ when it is done, and the next class counts what is there. -->
+            <file>tests/Integration/RestoreJobTest.php</file>
+            <file>tests/Integration/RestoreStagingTest.php</file>
             <file>tests/Integration/CliTest.php</file>
             <file>tests/Integration/AppendOnlyTest.php</file>
             <file>tests/Integration/MultisiteTest.php</file>

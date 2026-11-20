@@ -27,13 +27,23 @@ interface Options {
 	public function get( string $name ): mixed;
 
 	/**
+	 * Tells whether an option exists. get() answers null for a missing option and for one
+	 * whose stored value decodes to null; who has to tell the two apart asks here.
+	 *
+	 * @param string $name Option name.
+	 * @return bool True if the option exists, whatever its value is.
+	 */
+	public function exists( string $name ): bool;
+
+	/**
 	 * Reads an option as the database holds it now. get() may answer with what this request
 	 * read before; who changes a value that other requests change as well starts from this.
 	 *
-	 * @param string $name Option name.
+	 * @param string $name     Option name.
+	 * @param bool   $autoload Whether the value is in WordPress's alloptions cache.
 	 * @return mixed Stored value, or null if the option does not exist.
 	 */
-	public function fresh( string $name ): mixed;
+	public function fresh( string $name, bool $autoload = false ): mixed;
 
 	/**
 	 * Writes an option.

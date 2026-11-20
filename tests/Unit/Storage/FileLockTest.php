@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Storage;
 
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\FileLock;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -95,6 +96,12 @@ final class FileLockTest extends TestCase {
 		self::assertTrue( $lock->hold_if_free( $work ) );
 		self::assertSame( 1, $runs );
 		fclose( $this->other_request() );
+	}
+
+	public function test_a_required_inner_change_cannot_inherit_an_unavailable_optional_lock(): void {
+		$lock = new FileLock( $this->directory . '/missing/state.lock' );
+		$this->expectException( StorageFailed::class );
+		$lock->hold( static fn () => $lock->hold( static fn () => self::fail( 'No lock was held.' ), true ) );
 	}
 
 	public function test_without_a_directory_the_work_runs_all_the_same(): void {

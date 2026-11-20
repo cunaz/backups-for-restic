@@ -33,7 +33,8 @@ final class JobStore {
 	/** In a job's directory once an administrator asked to cancel it. */
 	public const string CANCEL_MARKER = 'cancel-requested';
 
-	private const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
+	/** What a job ID looks like: the time of its creation in UTC and six random characters. */
+	public const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
 
 	/**
 	 * Whether while_idle() holds the lock of create() in this process.
@@ -73,9 +74,15 @@ final class JobStore {
 		$lock = $this->held ? null : $this->lock();
 		try {
 			$this->require_idle();
-			$job       = new Job( gmdate( 'Ymd\THis\Z', $now ) . '-' . bin2hex( $this->random->bytes( 3 ) ), $type, $trigger, $now );
+			$job       = new Job( $this->reserve_id( $now ), $type, $trigger, $now );
 			$job->data = $data;
-			$this->save( $job );
+			try {
+				$this->save( $job );
+			} catch ( StorageFailed $error ) {
+				// Only remove our empty reservation, while the creation lock still holds.
+				@rmdir( $this->directory . '/' . $job->id ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Preserve the write error and leave any unexpected contents intact.
+				throw $error;
+			}
 		} finally {
 			if ( null !== $lock ) {
 				flock( $lock, LOCK_UN );
@@ -91,6 +98,32 @@ final class JobStore {
 			]
 		);
 		return $job;
+	}
+
+	/**
+	 * Claims an unused ID under the creation lock. A retained staging directory can
+	 * outlive its job history, particularly if the system clock moves backwards.
+	 *
+	 * @param int $now Unix time.
+	 * @return string Reserved ID.
+	 * @throws StorageFailed If an unused job directory cannot be created.
+	 */
+	private function reserve_id( int $now ): string {
+		$prefix = gmdate( 'Ymd\THis\Z', $now ) . '-';
+		for ( $attempt = 0; $attempt < 8; ++$attempt ) {
+			$id      = $prefix . bin2hex( $this->random->bytes( 3 ) );
+			$path    = $this->directory . '/' . $id;
+			$staging = dirname( $this->directory ) . '/restores/' . $id;
+			clearstatcache( true );
+			if ( file_exists( $path ) || is_link( $path ) || file_exists( $staging ) || is_link( $staging ) ) {
+				continue;
+			}
+			if ( ! @mkdir( $path, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Report storage exhaustion without PHP's path-bearing warning.
+				throw new StorageFailed( 'The new job directory could not be reserved.' );
+			}
+			return $id;
+		}
+		throw new StorageFailed( 'An unused job ID could not be allocated.' );
 	}
 
 	/**
@@ -145,7 +178,12 @@ final class JobStore {
 		if ( 1 !== preg_match( self::ID_PATTERN, $id ) ) {
 			return null;
 		}
-		$json = is_file( $this->directory . '/' . $id . '/job.json' ) ? file_get_contents( $this->directory . '/' . $id . '/job.json' ) : false;
+		$path = $this->directory . '/' . $id;
+		$file = $path . '/job.json';
+		if ( is_link( $this->directory ) || is_link( $path ) || is_link( $file ) ) {
+			return null;
+		}
+		$json = is_file( $file ) ? file_get_contents( $file ) : false;
 		if ( false === $json ) {
 			return null;
 		}
@@ -155,10 +193,37 @@ final class JobStore {
 		} catch ( FormatException ) {
 			return null;
 		}
-		if ( null !== $job && ! $job->cancel_requested ) {
+		if ( null === $job || $job->id !== $id ) {
+			return null;
+		}
+		if ( ! $job->cancel_requested ) {
 			$job->cancel_requested = $this->cancel_requested( $job );
 		}
 		return $job;
+	}
+
+	/**
+	 * Whether a document is stored for a job ID, readable by this version or not. Together
+	 * with get() it tells a job that is gone from one whose state cannot be established.
+	 *
+	 * @param string $id Job ID.
+	 * @return bool True if the job has a document.
+	 */
+	public function has_document( string $id ): bool {
+		$file = $this->directory . '/' . $id . '/job.json';
+		// Jobs are created and pruned by other requests: never answer from PHP's stat cache.
+		clearstatcache( true, $file );
+		return 1 === preg_match( self::ID_PATTERN, $id ) && is_file( $file );
+	}
+
+	/**
+	 * Redacts a diagnostic before a step retains it in its data or copies it to site state.
+	 *
+	 * @param string $message Diagnostic text.
+	 * @return string Text safe to include in the job report.
+	 */
+	public function diagnostic( string $message ): string {
+		return $this->redactor->redact( $message );
 	}
 
 	/**
@@ -168,8 +233,20 @@ final class JobStore {
 	 * @param Job $job Job.
 	 */
 	public function save( Job $job ): void {
-		$json = json_encode( $job->to_array(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR );
-		Files::write_atomic( $this->directory( $job ) . '/job.json', $this->redactor->redact( $json ) . "\n" );
+		// Only diagnostics can contain credentials. Replacing text in serialized state also
+		// replaces JSON syntax, IDs and step names when a password happens to match them.
+		$fields             = $job->to_array();
+		$fields['warnings'] = array_map( $this->redactor->redact( ... ), $job->warnings );
+		if ( null !== $job->error ) {
+			$fields['error']            = $job->error->to_array();
+			$fields['error']['message'] = $this->redactor->redact( $job->error->message );
+		}
+		if ( is_string( $job->progress['current'] ?? null ) ) {
+			$fields['progress']            = $job->progress;
+			$fields['progress']['current'] = $this->redactor->redact( $job->progress['current'] );
+		}
+		$json = json_encode( $fields, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR );
+		Files::write_atomic( $this->directory( $job ) . '/job.json', $json . "\n" );
 	}
 
 	/**
@@ -221,6 +298,29 @@ final class JobStore {
 	}
 
 	/**
+	 * Returns the filesystem location holding file-change journals and their payloads.
+	 *
+	 * @return string Private jobs directory.
+	 */
+	public function storage_directory(): string {
+		return $this->directory;
+	}
+
+	/**
+	 * Returns the filesystem that will hold the private file-change journals.
+	 *
+	 * @return int Device number.
+	 * @throws StorageFailed If the jobs directory is unavailable.
+	 */
+	public function device(): int {
+		$stat = is_dir( $this->directory ) ? stat( $this->directory ) : false;
+		if ( false === $stat ) {
+			throw new StorageFailed( 'The private jobs directory is unavailable.' );
+		}
+		return $stat['dev'];
+	}
+
+	/**
 	 * The job's directory, created on demand.
 	 *
 	 * @param Job $job Job.
@@ -229,6 +329,9 @@ final class JobStore {
 	 */
 	public function directory( Job $job ): string {
 		$path = $this->directory . '/' . $job->id;
+		if ( 1 !== preg_match( self::ID_PATTERN, $job->id ) || is_link( $this->directory ) || is_link( $path ) ) {
+			throw new StorageFailed( 'The job directory is invalid.' );
+		}
 		if ( ! is_dir( $path ) && ! mkdir( $path, 0700, true ) && ! is_dir( $path ) ) {
 			StorageFailed::raise( 'A job directory could not be created in the private directory.', [ 'job' => $job->id ] );
 		}
@@ -246,22 +349,130 @@ final class JobStore {
 	}
 
 	/**
+	 * Streams apply and undo jobs without keeping every job document in memory.
+	 *
+	 * @return \Generator<int, Job> Jobs newest first.
+	 */
+	public function file_changes(): \Generator {
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null !== $job && in_array( $job->type->value, [ 'apply', 'undo', 'file_plan', 'database_apply' ], true ) ) {
+				yield $job;
+			}
+		}
+	}
+
+	/**
+	 * Restore jobs whose source must survive until an active change or its undo window
+	 * ends. The private undo workspace stays independent of ordinary job-history pruning.
+	 *
+	 * @param int $now Current timestamp.
+	 * @return array<string, true> Pinned restore IDs.
+	 */
+	public function pinned_restores( int $now ): array {
+		$pins = [];
+		foreach ( $this->file_changes() as $job ) {
+			$id = $job->data['restore'] ?? null;
+			if ( is_string( $id ) && ( ! $job->state->is_terminal() || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $this->directory . '/' . $job->id . '/undo/attempted' ) && ! is_file( $this->directory . '/' . $job->id . '/undo/reverted' ) ) ) ) {
+				$pins[ $id ] = true;
+			}
+		}
+		return $pins;
+	}
+
+	/**
+	 * Sealed disk plans in use by an active apply, its undo preview or the undo window.
+	 *
+	 * @param int $now Current time.
+	 * @return array<string,true> Pinned plan IDs.
+	 */
+	public function pinned_file_plans( int $now ): array {
+		$pins    = [];
+		$active  = $this->active();
+		$undoing = null === $active ? null : ( JobType::Undo === $active->type ? ( $active->data['apply'] ?? null ) : ( ( $active->data['undo'] ?? false ) === true ? ( $active->data['subject'] ?? null ) : null ) );
+		foreach ( $this->file_changes() as $job ) {
+			$plan = $job->data['plan_job'] ?? null;
+			if ( ! is_string( $plan ) ) {
+				continue;
+			}
+			$workspace = $this->directory . '/' . $job->id . '/undo';
+			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $workspace . '/attempted' ) && ! is_file( $workspace . '/reverted' ) ) ) {
+				$pins[ $plan ] = true;
+			}
+		}
+		return $pins;
+	}
+
+	/**
 	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
 	 * know whether its job has finished.
 	 *
-	 * @param int $keep Number of jobs to keep.
+	 * @param int      $keep Number of jobs to keep.
+	 * @param int|null $now Current Unix time.
 	 * @return int Number of deleted jobs.
 	 */
-	public function prune( int $keep ): int {
+	public function prune( int $keep, ?int $now = null ): int {
 		$deleted = 0;
+		$pins    = $this->pinned_restores( $now ?? time() );
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && $job->state->is_terminal() ) {
+			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}
 		}
 		return $deleted;
+	}
+
+	/**
+	 * Enumerates every owning apply, including jobs beyond the visible history list.
+	 *
+	 * @return \Generator<int, Job> Jobs with active or retained SQL ownership.
+	 */
+	public function database_owners(): \Generator {
+		foreach ( $this->file_changes() as $job ) {
+			if ( JobType::DatabaseApply === $job->type && isset( $job->data['database_owner'] ) ) {
+				yield $job;
+			}
+		}
+	}
+
+	/**
+	 * Finds private database tables still awaiting deletion after a failed cleanup.
+	 *
+	 * @param bool $uninstall Also finish cleanup for interrupted, deactivated jobs.
+	 * @return \Generator<int, Job> Jobs holding their original cleanup identity.
+	 * @throws StorageFailed If uninstall cannot verify a stored job's ownership records.
+	 */
+	public function pending_database_cleanups( bool $uninstall ): \Generator {
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( $uninstall && null === $job && $this->has_document( $id ) ) {
+				throw new StorageFailed( 'An unreadable job must be recovered before uninstalling.' );
+			}
+			if ( null !== $job && JobType::Restore === $job->type && isset( $job->data['database_binding'] ) && ( $uninstall || $job->state->is_terminal() ) ) {
+				yield $job;
+			}
+		}
+	}
+
+	/**
+	 * Finds the marker of an interrupted live restore while the runner lock holds.
+	 *
+	 * @return \Generator<int, Job> Jobs whose private maintenance file still exists.
+	 * @throws StorageFailed If the job owning a marker cannot be recovered.
+	 */
+	public function maintenance_jobs(): \Generator {
+		foreach ( $this->ids() as $id ) {
+			if ( ! is_file( $this->directory . '/' . $id . '/maintenance.php' ) ) {
+				continue;
+			}
+			$job = $this->get( $id );
+			if ( null === $job || ! $job->state->is_terminal() ) {
+				throw new StorageFailed( 'Finish the interrupted maintenance job before uninstalling.' );
+			}
+			yield $job;
+		}
 	}
 
 	/**
@@ -283,6 +494,15 @@ final class JobStore {
 					]
 				);
 			}
+			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {
+				JobConflict::raise(
+					'An interrupted database restore must finish cleaning its owned tables before another job starts.',
+					[
+						'job'  => $id,
+						'code' => 'database_exchange_cleanup',
+					]
+				);
+			}
 			if ( null !== $job && ! $job->state->is_terminal() ) {
 				JobConflict::raise( 'Another job is still running.', [ 'job' => $id ] );
 			}
@@ -296,10 +516,10 @@ final class JobStore {
 	 * @throws StorageFailed If the jobs directory cannot be created or locked.
 	 */
 	private function lock() {
-		if ( ! is_dir( $this->directory ) && ! mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) {
+		if ( ! is_dir( $this->directory ) && ! @mkdir( $this->directory, 0700, true ) && ! is_dir( $this->directory ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A concurrent creator is harmless and a real write refusal is reported.
 			StorageFailed::raise( 'The jobs directory could not be created.' );
 		}
-		$handle = fopen( $this->directory . '/' . self::CREATE_LOCK, 'c' );
+		$handle = @fopen( $this->directory . '/' . self::CREATE_LOCK, 'c' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A checked error replaces PHP's path-bearing warning.
 		if ( false === $handle ) {
 			StorageFailed::raise( 'The jobs directory could not be locked.' );
 		}
@@ -314,9 +534,16 @@ final class JobStore {
 	 * Job IDs, newest first.
 	 *
 	 * @return list<string> IDs.
+	 * @throws StorageFailed If the directory cannot be listed safely.
 	 */
 	private function ids(): array {
-		$entries = is_dir( $this->directory ) ? scandir( $this->directory, SCANDIR_SORT_DESCENDING ) : false;
-		return array_values( array_filter( false === $entries ? [] : $entries, static fn ( string $entry ): bool => 1 === preg_match( self::ID_PATTERN, $entry ) ) );
+		if ( ! is_dir( $this->directory ) ) {
+			return [];
+		}
+		$entries = is_link( $this->directory ) ? false : scandir( $this->directory, SCANDIR_SORT_DESCENDING );
+		if ( false === $entries ) {
+			throw new StorageFailed( 'The private jobs directory could not be listed.' );
+		}
+		return array_values( array_filter( $entries, static fn ( string $entry ): bool => 1 === preg_match( self::ID_PATTERN, $entry ) ) );
 	}
 }

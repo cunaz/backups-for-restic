@@ -22,11 +22,11 @@ final class SiteState {
 	public const string OPTION = 'backups_for_restic_state';
 
 	/**
-	 * Entries that describe one repository: the last backup and the last forget, prune and
-	 * check, the alert of a check that found damage, and how much the repository holds. They
-	 * are dropped when the jobs turn to another repository.
+	 * Entries that describe one repository: the last backup and the last forget, prune, check
+	 * and restore, the alert of a check that found damage, and how much the repository holds.
+	 * They are dropped when the jobs turn to another repository.
 	 */
-	public const array OF_THE_REPOSITORY = [ 'last_backup', 'last_forget', 'last_prune', 'last_check', 'check_alert', 'usage' ];
+	public const array OF_THE_REPOSITORY = [ 'last_backup', 'last_forget', 'last_prune', 'last_check', 'last_restore', 'check_alert', 'usage' ];
 
 	/**
 	 * Uses the options table.
@@ -75,11 +75,13 @@ final class SiteState {
 	 * Changes one entry, starting from what is stored now: for an entry that more than one
 	 * request adds to, such as a list.
 	 *
-	 * @param string                                               $key    Entry name.
-	 * @param \Closure(array<string, mixed>): array<string, mixed> $change Gets the entry, empty if unknown, and returns what replaces it.
+	 * @param string                                               $key      Entry name.
+	 * @param \Closure(array<string, mixed>): array<string, mixed> $change   Gets the entry, empty if unknown, and returns what replaces it.
+	 * @param bool                                                 $required Whether the caller depends on a durable update.
+	 * @throws StorageFailed If the required lock or option write fails.
 	 */
-	public function update( string $key, \Closure $change ): void {
-		$this->change(
+	public function update( string $key, \Closure $change, bool $required = false ): void {
+		$saved = $this->change(
 			static function ( array $state ) use ( $key, $change ): array {
 				$entry = [];
 				foreach ( is_array( $state[ $key ] ?? null ) ? $state[ $key ] : [] as $field => $value ) {
@@ -87,8 +89,12 @@ final class SiteState {
 				}
 				$state[ $key ] = $change( $entry );
 				return $state;
-			}
+			},
+			$required
 		);
+		if ( $required && ! $saved ) {
+			throw new StorageFailed( 'The database refused a required site state update.' );
+		}
 	}
 
 	/**
@@ -128,7 +134,8 @@ final class SiteState {
 				];
 				$rebound             = ! $adopted;
 				return $state;
-			}
+			},
+			true
 		);
 		if ( ! $stored ) {
 			// Results of the repository before would pass for facts about this one.
@@ -144,17 +151,18 @@ final class SiteState {
 	 * lock keeps two changes from crossing.
 	 *
 	 * @param \Closure(array<mixed>): (array<mixed>|null) $change Gets the document and returns what to store; null to store nothing.
+	 * @param bool                                        $required Whether correctness requires exclusive access to change this entry.
 	 * @return bool False if the options table did not take the document. Most entries are
 	 *              facts for the dashboard, and a job that did its work is not failed over
 	 *              one of them; bind() is the caller that cannot go on.
 	 */
-	private function change( \Closure $change ): bool {
+	private function change( \Closure $change, bool $required = false ): bool {
 		$apply = function () use ( $change ): bool {
 			$stored = $this->options->fresh( self::OPTION );
 			$next   = $change( is_array( $stored ) ? $stored : [] );
 			return null === $next || $this->options->set( self::OPTION, $next, false );
 		};
-		return null === $this->lock ? $apply() : $this->lock->hold( $apply );
+		return null === $this->lock ? $apply() : $this->lock->hold( $apply, $required );
 	}
 
 	/**

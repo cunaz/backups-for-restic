@@ -21,14 +21,14 @@ final class FuzzTargetsTest extends TestCase {
 	 * @return iterable<string, array{string}>
 	 */
 	public static function targets(): iterable {
-		foreach ( array_keys( Targets::all() ) as $name ) {
+		foreach ( array_keys( Targets::factories() ) as $name ) {
 			yield $name => [ $name ];
 		}
 	}
 
 	#[DataProvider( 'targets' )]
 	public function test_parser_rejects_malformed_input_only_with_plugin_exceptions( string $name ): void {
-		$fuzzer      = new Fuzzer( Targets::all()[ $name ], new Randomizer( new Xoshiro256StarStar( 20261109 ) ) );
+		$fuzzer      = new Fuzzer( Targets::factories()[ $name ](), new Randomizer( new Xoshiro256StarStar( 20261109 ) ) );
 		$regressions = glob( Vectors::fixtures() . '/fuzz/' . $name . '/*' );
 		foreach ( false === $regressions ? [] : $regressions as $file ) {
 			$fuzzer->execute( (string) file_get_contents( $file ) );

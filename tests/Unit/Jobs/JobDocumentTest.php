@@ -4,10 +4,12 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
@@ -54,6 +56,35 @@ final class JobDocumentTest extends TestCase {
 		self::assertSame( 'schema', array_key_first( $document ) );
 		self::assertSame( Job::SCHEMA, $document['schema'] );
 		self::assertSame( Job::SCHEMA, $job->to_array()['schema'] );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_partial_first_write_releases_the_job_reservation_for_retry(): void {
+		if ( ! function_exists( 'posix_setrlimit' ) || ! function_exists( 'pcntl_signal_get_handler' ) || ! defined( 'POSIX_RLIMIT_FSIZE' ) ) {
+			self::markTestSkipped( 'This failure injection needs POSIX file-size limits and signals.' );
+		}
+		$limits = posix_getrlimit();
+		if ( false === $limits ) {
+			self::fail( 'The process file-size limits could not be read.' );
+		}
+		$soft    = is_int( $limits['soft filesize'] ) ? $limits['soft filesize'] : POSIX_RLIMIT_INFINITY;
+		$hard    = is_int( $limits['hard filesize'] ) ? $limits['hard filesize'] : POSIX_RLIMIT_INFINITY;
+		$handler = pcntl_signal_get_handler( SIGXFSZ );
+		$store   = $this->store();
+		pcntl_signal( SIGXFSZ, SIG_IGN );
+		try {
+			self::assertTrue( posix_setrlimit( POSIX_RLIMIT_FSIZE, 128, $hard ) );
+			$store->create( JobType::Backup, 'cli', 1767225600 );
+			self::fail( 'A partially written job document was accepted.' );
+		} catch ( StorageFailed $error ) {
+			self::assertSame( 'environment', JobError::from_throwable( $error )->code );
+		} finally {
+			posix_setrlimit( POSIX_RLIMIT_FSIZE, $soft, $hard );
+			pcntl_signal( SIGXFSZ, $handler );
+		}
+		self::assertSame( [ '.', '..', JobStore::CREATE_LOCK ], scandir( $this->directory ) );
+		$job = $store->create( JobType::Backup, 'cli', 1767225600 );
+		self::assertSame( $job->id, $store->active()?->id );
 	}
 
 	public function test_a_document_from_before_the_number_existed_has_the_first_layout(): void {
@@ -121,6 +152,28 @@ final class JobDocumentTest extends TestCase {
 		self::assertFalse( $changed );
 	}
 
+	public function test_an_unfinished_database_cleanup_survives_pruning_and_blocks_another_backup(): void {
+		$store      = $this->store();
+		$job        = $store->create( JobType::Restore, 'cli', 1767225600, [ 'database_binding' => [ 'pending' => true ] ] );
+		$job->state = JobState::Failed;
+		$store->save( $job );
+		$newer        = new Job( '20260102T000000Z-abcdef', JobType::Backup, 'manual', 1767312000 );
+		$newer->state = JobState::Succeeded;
+		$store->save( $newer );
+		self::assertSame( 0, $store->prune( 1 ) );
+		self::assertSame( [ $job->id ], array_map( static fn ( Job $pending ): string => $pending->id, iterator_to_array( $store->pending_database_cleanups( false ) ) ) );
+		try {
+			$store->create( JobType::Backup, 'manual', 1767312100 );
+			self::fail( 'A backup must not see temporary tables of an interrupted preview.' );
+		} catch ( JobConflict $expected ) {
+			self::assertSame( $job->id, $expected->context()['job'] );
+		}
+		unset( $job->data['database_binding'] );
+		$store->save( $job );
+		self::assertSame( [], iterator_to_array( $store->pending_database_cleanups( false ) ) );
+		self::assertSame( 1, $store->prune( 1 ) );
+	}
+
 	public function test_a_newer_document_is_kept_even_if_its_raw_state_looks_terminal(): void {
 		$store = $this->store();
 		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );
@@ -139,6 +192,14 @@ final class JobDocumentTest extends TestCase {
 
 		self::assertSame( 0, $store->prune( 1 ) );
 		self::assertSame( $before, file_get_contents( $this->directory . '/' . $job->id . '/job.json' ) );
+		$this->assert_blocks_changes( $store, $job );
+	}
+
+	public function test_a_document_filed_under_another_job_id_blocks_changes(): void {
+		$store = $this->store();
+		$job   = $store->create( JobType::Restore, 'manual', 1767225600 );
+		$this->rewrite( $job, static fn ( array $fields ): array => [ 'id' => '20260102T000000Z-abcdef' ] + $fields );
+		self::assertNull( $store->get( $job->id ) );
 		$this->assert_blocks_changes( $store, $job );
 	}
 

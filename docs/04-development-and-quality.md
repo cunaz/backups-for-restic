@@ -17,7 +17,7 @@ backups-for-restic/
 ├── composer.json / composer.lock    dev tooling only; PSR-4 for tests
 ├── package.json / package-lock.json ESLint and its WordPress rulesets, dev tooling only; nothing from npm ships
 ├── phpcs.xml.dist, phpstan.neon.dist, phpunit.xml.dist, phpunit-integration.xml.dist, infection.json5.dist, eslint.config.mjs, .editorconfig, .gitattributes, .distignore, .coderabbit.yaml
-├── .wordpress-org/                  (M3) listing assets synced to SVN `assets/`: banners, icon, screenshots
+├── .wordpress-org/                  listing assets synced to SVN `assets/`: banners, icon, screenshots
 ├── src/                             production code (see 02-architecture §3); src/WordPress/ is the only WordPress-facing part
 │   └── autoload.php                 ~20-line PSR-4 autoloader for the BackupsForRestic\ namespace
 ├── assets/js/, assets/css/          admin.js (classic script on wp-api-fetch, no bundler) and a scoped stylesheet
@@ -36,35 +36,32 @@ backups-for-restic/
 │   └── Fixtures/                    restic vectors per version, Go and libsodium vectors, fuzz regressions
 ├── bin/                             install-test-tools.sh, test-site.sh with its router, diagnostics and the filters that switch TLS verification off for a test, record-vectors.sh, record-forget-vectors.sh, bench.php, fuzz.php, build-package.sh
 ├── docs/                            design documents, ADRs, guides/, benchmarks/
-└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; ISSUE_TEMPLATE/bug_report.md; (M3) live-servers.yml, codeql.yml; (release) deploy-wordpress-org.yml
+└── .github/                         workflows ci.yml, conformance.yml, integration.yml, fuzz.yml; dependabot.yml; pull_request_template.md; ISSUE_TEMPLATE/bug_report.md; codeql.yml; live-servers.yml; deploy-wordpress-org.yml
 ```
 
-Entries marked (M3) are not in the repository yet; they are planned for Milestone 3
-([roadmap](05-roadmap.md)): `.wordpress-org/` and the workflows `live-servers.yml` and
-`codeql.yml`. `deploy-wordpress-org.yml` comes with the
-first release.
+The [release-candidate report](benchmarks/2026-11-20-release-candidate.md) records the local test results. The [roadmap](05-roadmap.md) tracks the hosted provider and directory approval gates.
 
 ## 2. Toolchain (development only)
 
 | Tool | Purpose |
 | --- | --- |
-| PHP 8.3–8.5, 8.6 once released (CI matrix; 8.3 without JIT is the performance baseline) | runtime floor 8.3 ([ADR 0003](adr/0003-version-floors.md)) |
-| Composer 2 | dev dependencies and scripts; no `vendor/` in the release |
+| PHP 8.3, 8.4, 8.5 and 8.6 (CI matrix, performance baseline on PHP 8.3 without JIT) | runtime floor 8.3 ([ADR 0003](adr/0003-version-floors.md)) |
+| Composer 2 | Installs the development dependencies and checks for native Sodium, which the unit suite uses outside WordPress. The release package omits `vendor/`. |
 | `wp-coding-standards/wpcs` 3, PHP_CodeSniffer | WordPress Coding Standards |
 | `phpstan/phpstan` 2 + `szepeviktor/phpstan-wordpress` + strict rules | static analysis at level `max`, with three rules of the project: the WordPress-free core, the dependencies of the engine and the `reveal()` allow-list (§4) |
 | `phpunit/phpunit` 12 | unit, database, conformance and integration tests |
 | Node.js 22 with npm | runs ESLint; `node --check assets/js/admin.js` stays as a syntax check that needs no packages |
 | ESLint 10 with `@wordpress/eslint-plugin` 28 (two packages with exact versions in `package.json`; `package-lock.json` pins the about 400 packages they bring) | lints `assets/js` with the rulesets `esnext`, `custom` and `i18n` (§3); development only, nothing from npm ships |
-| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format` and `Engine\Forget`; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
+| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format`, `Engine\Forget` and the database import filter; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
 | Built-in fuzzer (`bin/fuzz.php`, `tests/Fuzz/`) | structure-aware fuzzing of every parser that reads server data ([ADR 0028](adr/0028-built-in-fuzzer.md)) |
-| **restic CLI** 0.19.1, 0.18.1 and 0.14.0 (upstream releases, checksum-verified by `bin/install-test-tools.sh`) | conformance oracle ([ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md)); never shipped |
+| **restic CLI** 0.20.0, 0.19.1, 0.18.1 and 0.14.0 (upstream releases, checksum-verified by `bin/install-test-tools.sh`) | conformance oracle ([ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md)); never shipped |
 | **rest-server** 0.14.0 (upstream release, checksum-verified), with TLS, normal, `--append-only` and `--max-size` | local repository server for conformance and integration tests |
-| WordPress 7.1.4 (pinned and checksum-verified by `bin/test-site.sh`) | the real WordPress of the integration suite, served by PHP's built-in server. The project uses no WordPress test library, no function mocking and no `@wordpress/env`: the adapters are tested against a running WordPress or not at all ([ADR 0029](adr/0029-wordpress-free-core.md)) |
+| WordPress 7.1.5, 7.0.9 and 6.7.12 (checksum-pinned in `bin/test-site.sh`, selectable with `BFR_WP_VERSION`) | the real WordPress of the integration suite, served by PHP's built-in server. The project uses no WordPress test library, no function mocking and no `@wordpress/env`: the adapters are tested against a running WordPress or not at all ([ADR 0029](adr/0029-wordpress-free-core.md)) |
 | Plugin Check through `wordpress/plugin-check-action` (pinned SHA) | the WordPress.org review team's scanner, in CI on the built package (§5.8). The action installs the current Plugin Check and the current WordPress, so a new check can fail a pull request that did not cause it |
 | WP-CLI 2.12.0 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh wp-cli`) | `wp i18n make-pot` for the translation template (§5.8); it needs no WordPress for that |
 | `@playwright/test` 1.63.0 (pinned in `package.json`) | the browser tests of §5.5; its browser is installed in CI by the same version |
-| (M3) CodeQL | JavaScript analysis; not set up yet |
-| (release) `10up/action-wordpress-plugin-deploy` (pinned SHA) | SVN deployment of tagged releases |
+| CodeQL | JavaScript analysis of the shipped admin interface on changes and weekly |
+| Git, GnuPG and Subversion | Verify the release signature, deploy the package and compare the exported SVN tree with the artifact |
 
 Composer scripts: `lint`, `fix`, `analyse`, `test:unit`, `test:database`,
 `test:conformance`, `test:integration`, `test` (unit, database and conformance), `check`
@@ -166,23 +163,24 @@ no subject any more, because all adapters live in the one namespace `WordPress`.
 | `Engine\Prune`, `Engine\Check` | against `InMemoryBackend`: unreferenced packs deleted, index rewritten, partially used packs kept; corrupted pack detected |
 | `Engine\Backup` and `Restore` | an interrupted backup produces the same snapshot tree as an uninterrupted one; unchanged files are reused, changed ones read again, identical files share blobs; restore refuses names that leave the target |
 | `Engine\Locking`, `KeyUnlock`, `IndexCache` | leftovers of a dead refresh, conflicts between runs and hosts; unlock resumed across ticks and key files; the cache fetches only new index files and respects its limit |
-| `Backend\RestBackend` | request shapes (method, path, headers, Range), status mapping (400/401/403/404/507), a retried read, no credentials in URLs. Retries of uploads, the limit of five attempts and the back-off have no test |
+| `Backend\RestBackend` | request methods, paths, headers and ranges, status mapping, credential handling, retry of reads and streamed listings, identical upload bytes across five attempts and delays of 0.5, 1, 2 and 4 seconds. Ambiguous uploads, configuration writes and quota errors are checked for a single attempt |
 | `Jobs\Runner`, `JobType`, `JobError`, `TickReport`, `RetentionGuard` | steps in order across ticks; cleanup after success, failure and cancellation; back-off of retryable errors; lease and runner lock; one active job; redacted job files; the error codes; which ticks chain; the switching rules of the retention modes |
+| `Storage\Zip\ZipWriter`, `ZipRecords`, `Crc32`, `Storage\DownloadTokens` | archives read back by `unzip -t`, `unzip -l` and an unpacking where `unzip` is installed, by `ZipArchive` where the extension is loaded, and always by a reader of the central directory in the test; the same bytes whether written in one call, in calls that stop at once, by a new object per call or after a kill between two checkpoints; zip64 with lowered limits; links, second hard links and unsafe names refused. Tokens: redeemed once, wrong token or subject, expiry, a full and a damaged store, no token in the file, every access under the lock |
 | `Secrets`, `Settings`, `Storage`, `Support`, `Doctor`, `Scheduling\SchedulePolicy`, `Notifications\Notifier`, `Connection\ServerProfile` | their own test classes under `tests/Unit/` |
 | Fuzz targets | 2000 deterministic inputs per parser and the saved regression inputs (§5.6) |
 
-Not unit tested: `Support\Redactor` has no test class of its own (the runner test and the
-job test check that a plain secret value is masked); `Backup\PlanFactory` with its roots and
-excludes and `Database\Dump` are covered by the conformance and database suites (§5.2,
-§5.3), not by unit tests; no test loads a class of `src/WordPress` (§5.3). Tests for
-`Database\Restore\Importer` and `Restore\Apply` arrive with those classes in Milestone 3.
+`Support\Redactor` has dedicated tests for raw, URL-encoded and Base64-encoded
+credentials, including Basic authentication. The conformance and database suites cover
+backup roots, exclusions and the database dump. The database suite also imports into
+shadow tables. The file-plan tests exercise path policy and preconditions, and the
+WordPress integration suite verifies live application and undo (§5.2–5.3).
 
 ### 5.2 Conformance suite (restic CLI + rest-server)
 
 Defined in [ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md): PHP-written
-repositories pass `restic check --read-data` (restic 0.19.1, 0.18.1 and 0.14.0) and restore
-byte-identically, including a 300 MB streamed database dump; repositories written by restic
-0.19.1 and 0.14.0 are read, restored and deduplicated against by PHP; format 2 repositories
+repositories must pass `restic check --read-data` on all four releases and restore
+byte-identically, including a 300 MB streamed database dump. PHP also reads, restores
+and deduplicates against repositories written by each pinned restic release. Format 2 repositories
 need `ext-zstd`, which a second CI job installs; a key calibrated by restic unlocks; restic
 respects the plugin's lock; append-only behaviour and every server status code of
 [ADR 0025](adr/0025-repository-servers.md) are asserted against a running rest-server.
@@ -200,11 +198,15 @@ Chunk-boundary and forget parity run in the unit suite against recorded vectors 
 chunker's parity with the restic CLI is tested here indirectly: after restic backed up the
 fixture, a plugin backup of the same files must add no data blob, which holds only if both
 cut the same chunks. Runs on every change under `src/` and `tests/`, and nightly. Vectors
-are re-recorded with `bin/record-vectors.sh` and `bin/record-forget-vectors.sh` when a new
-restic version enters the matrix; the versions are pinned in `bin/install-test-tools.sh`,
-and nothing picks up a new restic release by itself (planned for Milestone 3).
+recorded with restic 0.19.1 can be regenerated with `bin/record-vectors.sh` and
+`bin/record-forget-vectors.sh`. The live conformance matrix uses the versions pinned in
+`bin/install-test-tools.sh`.
 
 ### 5.3 Database and integration tests
+
+Set `BFR_SITE_MEMORY_MIB=96` for both `bin/test-site.sh install` and `start` to run
+the HTTP fixture at the supported minimum. The default is 128 MiB. When running multiple fixtures, pass the same `BFR_SITE_TOOLS_DIR` and `BFR_SITE_PORT` to the installer, server and PHPUnit, and give each fixture its own `BFR_DB_NAME`. The launcher sets
+both the PHP ceiling and WordPress's administrative ceiling, so cron uses the same limit.
 
 The **database suite** dumps tables that exercise every code path (keyset and offset
 paging, composite and missing keys, binary data, `BIT`, a latin1 column, NUL bytes, line
@@ -213,9 +215,18 @@ the files with the `mariadb` client exactly as the disaster-recovery guide says,
 `CHECKSUM TABLE` results. The conformance suite's `BackupJobTest` runs the whole backup job
 without WordPress against a TLS rest-server and the database.
 
-The **integration suite** (`phpunit-integration.xml.dist`) needs a real WordPress:
+The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
+checksums, including invisible columns and expression defaults, and check that live tables
+stay unchanged. A parent sends SIGKILL at six DDL/transaction boundaries, then resumes the
+import and verifies duplicate rows exactly once. Foreign table collisions, an active
+transaction, session restoration, truncation warnings and wrong INSERT destinations are
+also exercised ([ADR 0035](adr/0035-transactional-shadow-import.md)).
+
+The **integration suite** (`phpunit-integration.xml.dist`) uses real WordPress installations.
 `bin/test-site.sh install` downloads a pinned, checksum-verified WordPress, creates its
-database, links the plugin and writes an application password; `bin/test-site.sh start`
+database and writes an application password. The CI matrix sets `BFR_TEST_PLUGIN_DIR`
+to the built package and installs a physical copy in both the single site and the multisite
+network. A local run without the variable links the checkout. `bin/test-site.sh start`
 serves it with PHP's built-in server and several workers, `max_execution_time = 30`,
 `memory_limit = 128M` and `set_time_limit()` disabled. A router script enforces "deny all"
 `.htaccess` files as Apache would. Two notes on that server:
@@ -225,6 +236,12 @@ serves it with PHP's built-in server and several workers, `max_execution_time = 
 - A tick raises its own memory limit to `WP_MAX_MEMORY_LIMIT` (architecture §4.2). The test
   site's `wp-config.php` therefore sets that constant to 128M; without it ticks would run
   with 256M and the 128M of the acceptance criterion would not be in force.
+
+The current WordPress row on PHP 8.3 also runs `tests/Hosting/private-directory.sh`.
+It serves only a temporary document root on loopback. The packaged plugin checks its
+private directory through WordPress HTTP on Apache with and without working overrides,
+and on nginx with and without an explicit deny rule. The test checks the staging decision
+and removal of probe files after each request.
 
 The tests reach the site over HTTP, as a browser and a cron service do. Where an
 administrator acts outside the plugin's own interface (deactivating or deleting it, creating
@@ -255,6 +272,16 @@ installed is skipped:
   browser makes it, on a site that the same file keeps from requesting itself; a setup
   that is not completed, and a backup that does not run, while the private directory is
   served.
+- **`RestoreJobTest`**: after a backup of its own, a restore job started with `POST /jobs`
+  stages one directory with bytes identical to the source, leaves no lock in the repository
+  and nothing that the web server hands out; invalid snapshot IDs and paths are refused
+  with 400 and a code; a schedule slot that comes due while a restore is active stays
+  unhandled and starts its backup once the restore has ended.
+- **`RestoreStagingTest`**: a finished restore is listed by `GET /restores` with what its
+  job recorded and `DELETE /restores/{id}` removes it, with 400, 404 and 409 for a name
+  that is no job ID, a job without staging and a restore that has not ended; staging whose
+  job document says it ended before the configured hours leaves the list, and a heartbeat
+  deletes it.
 - **`ScheduleTest`**: the heartbeat, run through `wp-cron.php`, records the first slot,
   starts a backup whose slot has come and forget after it, prune and check on their slots,
   and nothing for manual schedules.
@@ -277,9 +304,26 @@ installed is skipped:
 the nightly CI run uses 2048 and 300. The tests that catch a backup in the middle add
 256 or 512 MiB of random data of their own.
 
-What the suite does not reach: Site Health, and the loopback chain as such, because the
-tests request `wp-cron.php` themselves. The admin page itself has the browser tests of
-§5.5.
+The integration tests request `wp-cron.php` directly to control the timing of jobs.
+A separate acceptance run on 2026-11-20 exercised visitor-triggered cron with the
+release ZIP (SHA-256 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`).
+It used WordPress 7.1.5, PHP 8.3.36, a 128 MiB memory limit, a 30-second request
+limit, a five-second tick budget and automatic loopback chaining. The fixture marked
+the previous daily backup slot as missed and waited for the heartbeat already on
+WordPress's schedule. One anonymous `GET /` triggered WordPress to send the heartbeat
+request. The plugin then sent three loopback requests. A passive observer matched each
+outbound request to the receiving cron hook. The scheduled backup finished in four
+ticks and 23.92 seconds from the page visit, with zero warnings.
+
+Native restic 0.20.0 verified all repository data before and after the scheduled
+backup. Restoring the baseline and the changed WordPress files reproduced the expected
+SHA-256 hashes, modes and modification times for a 32 MiB upload and its marker file.
+The restored SQL imported into a separate database and matched the source checksums
+for `wp_posts`, `wp_postmeta` and `wp_users`. The local repository contained both
+snapshots and zero locks. The restored SQL and the job and server logs contained no
+matches for the test credentials across 18 files (124,828 bytes).
+
+The browser tests in §5.5 cover the admin page. The suite has no Site Health test.
 
 ### 5.4 Benchmarks
 
@@ -300,8 +344,10 @@ to a rest-server and times nothing.
 ### 5.5 End-to-end (Playwright)
 
 `tests/E2E/admin.spec.js` drives the admin page in Chromium against the test site of §5.3,
-on a WordPress that was just installed (`npm run test:e2e`; in CI the job "Admin page in a
-browser" of `integration.yml`). The tests click and read what an administrator clicks and
+with the installed distribution at its normal path. Build it with `bin/build-package.sh`,
+then run `BFR_TEST_PLUGIN_DIR="$PWD/build/backups-for-restic" bin/test-site.sh install`,
+`bin/test-site.sh start` and `npm run test:e2e`. CI uses the same sequence in the
+"Admin page in a browser" job. The tests click and read what an administrator clicks and
 reads, and send no request of their own. `tests/E2E/global-setup.js` starts a TLS
 rest-server with a certificate of its own authority for them. They run one after the other
 on one site, without retries:
@@ -312,6 +358,10 @@ on one site, without retries:
   successfully";
 - the dashboard with the last backup, the repository and the recent jobs, and the snapshot
   list with that one snapshot;
+- the snapshot browser: the retention preview of the list, the switch to the whole
+  repository and back, the newest snapshot with its manifest, the walk from the top
+  directory down to the one of WordPress, a file that is ticked and stays selected while
+  another directory is open, and the selection cleared;
 - settings that are saved and still there after a reload, an invalid retention window that
   is refused with a message at its field, and the recovery kit, which needs the WordPress
   password;
@@ -321,48 +371,56 @@ on one site, without retries:
   of the working directory, and the check says "protected";
 - a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.
 
-Still to come with the restore of Milestone 3: snapshot browsing, single-file restore and
-download, and the acceptance test of that milestone. Site Health has no browser test.
+The restore tests download the selected file, ZIP and report. On a disposable site they
+exercise rejected and accepted live-file confirmations, a stale preview, undo and staged
+deletion. The two-installation test uses a second real WordPress, database, URL and content
+directory, created for that test from the same package.
 
 ### 5.6 Mutation testing and fuzzing
 
-Infection runs on `Crypto`, `Format` and `Engine\Forget`; the covered mutation score
+Infection runs on `Crypto`, `Format`, `Engine\Forget` and covered `Database\Restore` code;
+the covered mutation score
 indicator must stay at or above 90 % (`infection.json5.dist`). The run takes about 40
 minutes. It runs on every push to `main`, and on every pull request that changes a file the
 result can depend on: anything under `src/Crypto`, `src/Format`, `src/Engine`,
-`src/Support`, `src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets` or `tests/`,
+`src/Support`, `src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets`, `src/Database` or `tests/`,
 or one of `infection.json5.dist`, `composer.json`, `composer.lock`, `phpunit.xml.dist`,
 `bin/install-test-tools.sh` and `.github/workflows/ci.yml`. The list is wider than the
 mutated code on purpose. On any other pull request the job says in a notice that it skipped
 the run, and ends green, so that it can stay a required check. When the job cannot list the
 files of a pull request, it runs.
 
-The built-in
-fuzzer ([ADR 0028](adr/0028-built-in-fuzzer.md)) drives every parser that reads server data,
-with 17 targets: config, key file, master key, snapshot, lock, index, tree, the JSON decoder,
-unpacked files, pack header and its length, the encryption envelope, the REST listing, Go
-string quoting, RFC 3339 times, durations and ids. The unit suite runs 2000 deterministic
-inputs per parser; `fuzz.yml` runs two minutes per parser every night. Every finding is
-saved with a replay command and becomes a regression input in
-`tests/Fixtures/fuzz/<target>/`. Both compensate for the missing second reviewer and
-external audit ([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
+A separate file-planner job runs on every pull request and push to `main`.
+`composer mutation:planner` exercises `Restore\ApplyPlan` and `Restore\SiteLayout`
+using the real filesystem and the planner PHPUnit suite. It sets its own minimum covered
+mutation score of 90 % in `infection-planner.json5.dist`. Each mutation job checks for a
+nonempty report. The planner log and score appear in the `planner-mutation-logs` artifact.
+
+The [built-in fuzzer](adr/0028-built-in-fuzzer.md) exercises 26 parsers. It covers
+repository metadata, pack framing and decryption, REST listings, persisted listings and
+chunks, Go quoting, timestamps, durations and IDs. Restore targets cover selections,
+snapshot paths, manifest locators, site manifests, and SQL dump schemas, rows and
+manifests. The unit suite runs 2,000 deterministic inputs per target. The nightly
+workflow runs each target for two minutes. It saves each finding with a replay command
+so that a reproducible input can be added to `tests/Fixtures/fuzz/<target>/`.
 
 ### 5.7 Live smoke tests
 
-Not built yet. No workflow `live-servers.yml` exists and no test has run against a hosted
-service: every server behaviour the suites assert was measured on a local rest-server
-(§5.2, §5.3), and the answers of BorgBase are not yet measured
-([ADR 0025](adr/0025-repository-servers.md)). The tests need an account at the hosted
-service and are planned for Milestone 3. The design so far, not yet confirmed by the
-owner:
+The private smoke workflow runs on Monday at 04:43 UTC and on manual dispatch from
+`main`. Its first job starts two disposable TLS rest-server 0.14.0 instances with
+`--private-repos` and self-signed certificates, one with append-only access. Using the
+plugin's core it creates a backup under a lock, checks v2 listing sizes and ranged pack
+bytes, restores the canary and compares its contents. It confirms that deleting its own
+snapshot fails on the append-only server. A second append-only run verifies earlier
+test snapshots can remain in place. These checks have passed locally.
 
-`live-servers.yml` runs weekly, on manual dispatch and before every release. Against a
-rest-server with TLS, a self-signed CA and `--private-repos` it runs init or connect, a
-backup of a small fixture, the v2 listing, ranged reads, the append-only probe, lock
-creation and deletion, a refused forget in append-only mode and a restore. Against two
-BorgBase repositories (normal and append-only) it runs the same flow. Credentials are
-repository secrets available only to scheduled and manually dispatched runs on `main`. A
-hosted service's behaviour is verified this way instead of by vendor statements.
+The hosted job runs only after the local job passes and the operator enables
+`BFR_LIVE_SMOKE_ENABLED` as a repository variable. Configure the protected
+`live-smoke` environment with the `BFR_LIVE_REPOSITORIES` secret. Each provider needs
+a pair of dedicated, initialized repositories and the expected authenticated repository
+IDs. The job removes only objects it created in the normal fixture and leaves the
+append-only history in place. Dispatch the workflow on the candidate's `main` commit
+before a release and record the passing provider/mode pairs. On 2026-11-20 the same hosted command passed directly on the owner's normal and append-only BorgBase fixtures. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
 
 ### 5.8 Checks on the package
 
@@ -391,11 +449,14 @@ the settings:
   `mb_ord()` there as functions that need WordPress 7.1, while they are PHP's own, from
   the mbstring extension that the plugin requires and the Doctor checks.
 
-Two warnings remain and are known: `set_time_limit()` in `WordPress\Cron`, with which a
-tick extends its time limit where the host allows it, and the SQL string that
-`WordPress\WpdbConnection` passes to `$wpdb` for the dump, whose identifiers `SqlFormatter`
-quotes. The reviewers at WordPress.org run the scanner without these settings and will see
-the 59 errors; `readme.txt` has no answer about direct file access yet (§7).
+Three calls carry individual annotations. `WordPress\Cron` requests a finite grace period
+to checkpoint the worker and release its lock. `Restore\FileChange` preserves the reviewed
+group on a temporary file before renaming it into place. `WordPress\WpdbConnection`
+executes SQL assembled by the dump builders, which quote identifiers, hex-encode string
+literals and validate every numeric seek key, including keys read from a changing table.
+On 2026-11-20, Plugin Check 2.2.0 reported zero errors and zero warnings on the installed
+0.3.0 release candidate with the workflow settings above. The FAQ in `readme.txt` explains
+direct filesystem access for directory reviewers.
 
 **Translation template.** `composer pot` builds the package and runs `wp i18n make-pot` on
 it. The result, `languages/backups-for-restic.pot`, holds the strings of the PHP files and
@@ -413,23 +474,21 @@ copy would only go stale.
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4 and 8.5 with OPcache switched off for the CLI, so also without JIT (8.6 once released); the database suite against MySQL; mutation testing with its gate, skipped on pull requests that cannot change its result (§5.6) |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled; the database suite against MySQL and MariaDB; the repository mutation gate and a separate file-planner mutation gate (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
 | `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
-| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | the integration suite against WordPress 7.1.4 on PHP 8.3; nightly and on request with the acceptance sizes; records with `strace` and core dumps how the server's PHP processes ended. A second job runs the browser tests (§5.5) on a site of its own. WordPress latest-1 and PHP 8.5 are acceptance criteria of Milestone 4 and not in the matrix yet |
-| (M3) `live-servers.yml` | weekly, manual dispatch, before every release | live smoke tests against a TLS rest-server and BorgBase repositories (§5.7) |
-| (M3) `codeql.yml` | push, weekly | JavaScript analysis |
-| (release) `deploy-wordpress-org.yml` | tag `v*` | build with `.distignore`, Plugin Check, manual approval, SVN deploy (`trunk`, `tags/x.y.z`, `assets/`), post-deploy diff, GitHub release notes only |
+| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; records with `strace` and core dumps how the server's PHP processes ended. **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5). |
+| `live-servers.yml` | weekly and manual dispatch on main, manual pre-release verification | disposable TLS rest-server pair and opt-in operator-configured repository pairs (§5.7) |
+| `codeql.yml` | admin script changes on main or pull requests, weekly, manual dispatch | CodeQL against the shipped JavaScript in `assets/js` |
+| `deploy-wordpress-org.yml` | stable signed tag, manual retry | build with `.distignore`, Plugin Check, manual approval, SVN deploy (`trunk`, `tags/x.y.z`, `assets/`), post-deploy diff, GitHub release notes only |
 
-The four workflows without a mark exist; those marked (M3) are planned for Milestone 3 and
-`deploy-wordpress-org.yml` comes with the first release. Actions are pinned to commit SHAs;
+The release workflow is prepared for the approved WordPress.org repository. Actions are pinned to commit SHAs;
 Dependabot proposes updates of the actions and of the Composer lock file every week. For
 npm it is set to the lock file only as well. `package.json` names exact versions, so that
 weekly run proposes no new version of ESLint or of its WordPress plugin: a new version is
 a change of `package.json` and the lock file by hand, like a new PHPStan or restic.
 Whether Dependabot's security updates, which can replace a vulnerable package in a lock
-file, are switched on is a setting of the repository that no file here records. Every
-workflow has read-only permissions and uses no secret. CI installs the npm packages with
+file, are switched on is a setting of the repository that no file here records. The quality jobs use read-only repository access. CodeQL publishes its analysis to code scanning. The release workflow uses its protected environment for SVN and a separate write token for release notes. CI installs the npm packages with
 `npm ci --ignore-scripts`, so only what the lock file names is installed and no package
 runs a script while it is installed.
 
@@ -454,17 +513,32 @@ WordPress.org is the only place users obtain the plugin
 for code; the SVN repository on WordPress.org is the distribution artefact, written only by
 CI.
 
-No release exists yet, and most of the release tooling is not in the repository. What
-exists: `bin/build-package.sh` builds the package from `.distignore`, and CI runs Plugin
-Check on it on every pull request (§5.8). What does not: `deploy-wordpress-org.yml` is not
-written, there is no `.wordpress-org/` directory, and the release checklist of step 2 does
-not exist as a file. The steps below are the plan. The listing assets are planned for
-Milestone 3 and the deployment workflow for Milestone 4 ([roadmap](05-roadmap.md)).
+The package builder produces the WordPress.org plugin tree. Run `bin/build-package.sh --zip`
+for an installable archive. CI runs Plugin Check against the packaged files. Directory artwork
+lives in `.wordpress-org/` and is excluded from the plugin ZIP. The owner approves the
+listing artwork, signs the release tag and authorizes deployment to WordPress.org.
+
+After WordPress.org grants access to the plugin's SVN repository, configure the GitHub
+`wordpress-org` environment to require the owner's review. Store the dedicated credentials
+as environment secrets `WORDPRESS_ORG_SVN_USERNAME` and `WORDPRESS_ORG_SVN_PASSWORD`.
+Set the repository variable `RELEASE_SIGNING_PUBLIC_KEY` to the owner's ASCII-armored
+OpenPGP public key, including its signing subkeys. The workflow verifies the signature in
+an isolated keyring and checks that the tagged commit is on `main`. It verifies successful
+CI, conformance and integration runs for that exact commit on the repository's main branch.
+If conformance was skipped by path filters, dispatch it on the release revision before
+tagging. The deployment job rebuilds the ZIP
+after approval and compares its SHA-256 with the archive that passed Plugin Check. The
+SVN transaction publishes the package and listing together. Repeating a successful run
+verifies the existing tag. A different tag with a lower version is refused. [GitHub workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow).
+
+`tests/Release/test-wordpress-org.sh` rehearses signing and publication with temporary
+local Git and SVN repositories, including changes and deletions between releases. It
+requires Git, GnuPG, Subversion, rsync and Python 3. [WordPress SVN handbook](https://developer.wordpress.org/plugins/wordpress-org/how-to-use-subversion/) · [GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 
 1. Update `CHANGELOG.md` and the `== Changelog ==` section of `readme.txt`; bump the version
    in the plugin header, `readme.txt` (`Stable tag`) and `Plugin::VERSION`; verify `Tested up
    to`, `Requires PHP`, `Requires at least`; attach the benchmark results. Between releases
-   the three places name the same development version, for example `0.1.0-dev`.
+   the three places name the same prerelease version, for example `0.3.0-rc.1`.
 2. Pull request "Release x.y.z" with the completed release checklist (self-review, live
    smoke tests green, benchmarks attached); CI runs Plugin Check on the built package and
    the full conformance suite.
@@ -486,8 +560,8 @@ external service; the answers are prepared in the `readme.txt` FAQ ("why does th
 contain encryption code?" → it implements restic's published format with PHP's OpenSSL and
 hash functions, plus Poly1305, scrypt and restic's chunker, which PHP does not offer, as
 textbook code tested against reference implementations) and in code comments. An answer
-about direct filesystem access is not written yet, and it will be needed: the reviewers'
-scanner reports 59 errors for native file functions in the core (§5.8). The slug
+about direct filesystem access is in the plugin FAQ. The release workflow retains the
+project's documented scanner exceptions for native core file functions (§5.8). The slug
 `backups-for-restic` ([ADR 0015](adr/0015-naming-and-license.md)) becomes permanent at
 approval. Pre-release builds are never published. Testers copy the directory that
 `bin/build-package.sh` builds into `wp-content/plugins/`, or link a checkout of the
@@ -500,8 +574,8 @@ repository there; the plugin needs no build step and no `composer install` to ru
 - `readme.txt` (WordPress.org): description, installation, FAQ with review-relevant answers,
   **External services** section (the repository server the user configures, what data is
   sent and when, the user's own rest-server, and for the BorgBase preset its address form
-  and the links to its terms and privacy policy), changelog. Reviewed like code. A
-  screenshots section comes with the listing assets in Milestone 3.
+  and the links to its terms and privacy policy), changelog. Reviewed like code. The
+  screenshots section captions the packaged UI as shown in the listing assets.
 - `docs/`: architecture, security, development, roadmap, disaster recovery, appendix, ADRs,
   benchmarks. Updated in the same pull request as the code they describe.
 - Format documentation: the class headers in `Format` and `Crypto` describe the byte layout
@@ -562,8 +636,9 @@ for every point that applies, "not affected" for the others.
    test shows what is not deleted.
 5. **Files.** The plugin writes files only inside the private directory, with owner-only
    permissions. A path that comes from the repository, a request or a setting is checked to
-   stay inside its root before it is used. No password and no database content is written
-   to disk in plain text.
+   stay inside its root before it is used. No password is written to disk in plain text,
+   and backups never spool plaintext database content. Restore staging necessarily holds
+   plaintext files under the protected, expiring directory of security §8.
 6. **HTTP.** Requests go to the configured repository server only, over HTTPS with
    certificate verification, with the credentials in the `Authorization` header and never
    in the URL. The requests to the site itself (the tick chain, the loopback test and the
@@ -571,9 +646,11 @@ for every point that applies, "not affected" for the others.
 7. **WordPress surface.** Every REST route has a `permission_callback` that checks the
    capability, and a route that returns a secret asks for the WordPress password again
    ([security](03-security-and-threat-model.md) §5.5). Input is validated against
-   `Settings\Schema`, output is escaped, and WP-CLI prints no secret.
+   `Settings\Schema` and output is escaped. WP-CLI restricts recovery-kit delivery to
+   the authorised, audited `recovery-kit` command. Redirected output requires `--force`.
 8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`
-   or `Engine` the conformance run is green; for `Crypto`, `Format` and `Engine\Forget` the
+   or `Engine` the conformance run is green; for `Crypto`, `Format`, `Engine\Forget` and the
+   database import filter the
    covered mutation score stays at or above 90 %. Documents and decision records say what
    changed.
 9. **Cooling-off.** A change to `Crypto`, `Format` or `Engine` is merged no earlier than 24

@@ -70,15 +70,15 @@ final class PlanFactory {
 	 * @return BackupPlan Plan.
 	 */
 	public function plan(): BackupPlan {
-		// The archiver walks lexically normalized roots, so everything that is compared with the
-		// paths it reports, and the manifest locator, uses the private directory in that form.
-		$private_dir = BackupPlan::normalize( [ $this->private_dir->path ] )[0];
+		// The archiver does not enter a symbolic link, so every directory it reports is free of
+		// links. Everything that is compared with those paths, and the manifest locator, uses
+		// the resolved private directory: a path through a link would never match, and as a
+		// root of its own it would be recorded as a link without the manifest below it. For a
+		// clean path without links the resolved path is the same string.
 		$real        = realpath( $this->private_dir->path );
-		if ( false !== $real && realpath( $private_dir ) !== $real ) {
-			// A symbolic link before a ".." component: the clean path names another directory
-			// than the one the plugin writes to. The resolved path is clean and names the right one.
-			$private_dir = $real;
-		}
+		$private_dir = false !== $real ? $real : BackupPlan::normalize( [ $this->private_dir->path ] )[0];
+		// The lexically normalized form remains for a directory that does not exist yet or that
+		// open_basedir keeps realpath() from resolving; it is the form the archiver walks.
 		$spool    = $private_dir . '/spool';
 		$database = $spool . '/database';
 		$this->ensure( $spool );
@@ -86,22 +86,11 @@ final class PlanFactory {
 			$this->ensure( $database );
 		}
 
-		$roots  = array_merge( [ $this->site->abspath, $this->site->content_dir, $this->site->uploads_dir ], $this->roots );
-		$roots  = array_values( array_filter( $roots, static fn ( string $root ): bool => '' !== $root && is_dir( $root ) ) );
-		$inside = false;
-		foreach ( $roots as $root ) {
-			$inside = $inside || str_starts_with( $private_dir . '/', BackupPlan::normalize( [ $root ] )[0] . '/' );
-		}
-		if ( ! $inside ) {
-			$roots[] = $spool;
-		}
-
+		$roots    = array_merge( [ $this->site->abspath, $this->site->content_dir, $this->site->uploads_dir ], $this->roots );
+		$roots    = array_values( array_filter( $roots, static fn ( string $root ): bool => '' !== $root && is_dir( $root ) ) );
 		$patterns = $this->exclude_patterns();
 		$caches   = $this->settings->bool( 'backup.exclude_caches' );
-		$exclude  = static function ( string $path, bool $is_dir ) use ( $private_dir, $spool, $patterns, $caches ): bool {
-			if ( str_starts_with( $path . '/', $private_dir . '/' ) && $path !== $private_dir ) {
-				return $path !== $spool && ! str_starts_with( $path, $spool . '/' );
-			}
+		$excluded = static function ( string $path, bool $is_dir ) use ( $patterns, $caches ): bool {
 			if ( $is_dir && $caches && self::is_cache( $path ) ) {
 				return true;
 			}
@@ -111,6 +100,38 @@ final class PlanFactory {
 				}
 			}
 			return false;
+		};
+
+		// If a normal exclusion covers the virtual dump, walk only the chain of directories
+		// leading to it. Its siblings still belong to the excluded subtree. Determine this
+		// from the plan on every tick, since a tick can resume inside that subtree.
+		$excluded_parent = null;
+		$inside          = false;
+		foreach ( BackupPlan::normalize( $roots ) as $root ) {
+			if ( str_starts_with( $private_dir . '/', $root . '/' ) ) {
+				$inside = true;
+				for ( $dir = $private_dir; $dir !== $root; $dir = dirname( $dir ) ) {
+					if ( $excluded( $dir, true ) ) {
+						$excluded_parent = $dir;
+					}
+				}
+				break;
+			}
+		}
+		if ( ! $inside ) {
+			$roots[] = $spool;
+		}
+
+		$dump_dir = null === $this->database ? null : $database;
+		$exclude  = static function ( string $path, bool $is_dir ) use ( $private_dir, $spool, $dump_dir, $excluded_parent, $excluded ): bool {
+			if ( str_starts_with( $path, $private_dir . '/' ) ) {
+				// Everything else under spool is virtual, including the database files.
+				return $path !== $spool && $path !== $dump_dir;
+			}
+			if ( str_starts_with( $private_dir . '/', $path . '/' ) ) {
+				return false;
+			}
+			return ( null !== $excluded_parent && str_starts_with( $path, $excluded_parent . '/' ) ) || $excluded( $path, $is_dir );
 		};
 
 		$manifest = $this->manifest( $roots, $patterns );

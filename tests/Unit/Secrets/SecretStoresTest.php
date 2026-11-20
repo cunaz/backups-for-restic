@@ -75,8 +75,12 @@ final class SecretStoresTest extends TestCase {
 				return $this->value;
 			}
 
-			public function fresh( string $name ): mixed {
+			public function fresh( string $name, bool $autoload = false ): mixed {
 				return $this->value;
+			}
+
+			public function exists( string $name ): bool {
+				return null !== $this->value;
 			}
 
 			public function initialize( string $name, mixed $value, bool $autoload ): bool {

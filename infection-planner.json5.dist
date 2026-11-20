@@ -1,0 +1,24 @@
+// Separate 90% gate for reviewed file destinations and fresh-install path mapping.
+// composer mutation:planner selects the two planner files from this source root.
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": ["src/Restore"]
+    },
+    "bootstrap": "tests/bootstrap.php",
+    "phpUnit": {
+        "configDir": "tests/Mutation"
+    },
+    "testFrameworkOptions": "--testsuite=planner",
+    "timeout": 15,
+    "tmpDir": ".tools/infection-planner-tmp",
+    "logs": {
+        "text": ".tools/infection-planner/infection.log",
+        "summary": ".tools/infection-planner/summary.log",
+        "github": true
+    },
+    "minCoveredMsi": 90,
+    "mutators": {
+        "@default": true
+    }
+}

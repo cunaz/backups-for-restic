@@ -7,15 +7,45 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Eligible MySQL installations can exchange a reviewed snapshot database in one atomic operation, preserve the destination administrator, address and backup configuration, and undo the exchange for 24 hours. The database report explains manual recovery on MariaDB and other incompatible installations.
+- File review runs as a resumable job, serves entries in pages, and checks identities and contents before applying or reversing an approved change. WP-CLI can resume an interrupted job and undo file changes if an installed plugin breaks WordPress.
+- `wp backups-for-restic recovery-kit` exports an audited copy of the recovery instructions. Writing credentials to a file or pipe requires `--force`.
+- Selected files can be staged from the snapshot browser or WP-CLI and downloaded through single-use forms. Completed restores can include ZIP archives and a database rehearsal report.
+- Administrators can preview and confirm live file changes and review an undo within 24 hours. The fresh-install wizard maps verified snapshot content and uploads to the receiving site's paths.
+- The package builder can produce a reproducible ZIP for installation from the WordPress dashboard.
 - A snapshot reader for the upcoming restore browser: filter by site, read one directory
   without following links, and read the site's manifest under a shared repository lock.
   Encrypted tree caches share the existing cache limit with the index. New backups record
   where their manifest lives so that a different installation can find it after a move.
   Long snapshot lists refresh their shared lock while reading and keep only matching site
   metadata. Repeated tree-cache reads avoid rescanning the cache directory. The search for
-  the manifest of an older snapshot stops after five seconds per call and continues from
-  the tree cache on the next one. An index too large for the cache limit no longer removes
-  the cached trees, and temporary tree files of ended requests are removed after a minute.
+  the manifest of an older snapshot stops after five seconds per call, not counting the
+  time to load the index, and continues from the tree cache on the next one. An index too
+  large for the cache limit no longer removes the cached trees, and temporary tree and
+  index files of ended requests are removed after a minute. A private directory reached
+  through a symbolic link is backed up under its real path, so that the manifest and the
+  database dump are in the snapshot and the recorded location names them.
+- Snapshot details report damaged repository trees. The command-line listing preserves
+  original link-target bytes and omits malformed modification times.
+- REST routes and a command that read snapshots: `GET /snapshots` takes a scope (this
+  site's snapshots by default, or all of the repository), `GET /snapshots/<id>` answers
+  one snapshot with the site's manifest, and `GET /snapshots/<id>/tree` answers one
+  directory in pages of at most 1000 entries. Names that are not valid UTF-8 are shown
+  with replacement characters, and every entry carries a token that names its path byte
+  for byte. `wp backups-for-restic ls <snapshot> [<path>]` prints a directory and quotes
+  names that could control the terminal.
+- A snapshot browser in the Snapshots tab: this site's snapshots or the whole repository,
+  a snapshot's details and the site it holds, and its directories one at a time with
+  further pages and a path back up. Links are shown with their target and are not
+  followed, and a name that cannot be shown exactly is marked. Files and directories can
+  be ticked; the selection is listed and kept for the restore that follows in a later
+  version. What lies in a ticked directory is shown as ticked with it and counted once, and
+  the selection ends at the 256 paths that a restore takes. A locked repository gets its
+  own message and a button to try again.
+- The list of this site's snapshots says for each one whether the next cleanup keeps or
+  removes it (`retention` in `GET /snapshots`). The preview uses the policy and the
+  grouping of the forget job, removes nothing, and is renewed when a retention setting is
+  saved: a cached list is only used under the retention settings it was read with.
 - Restore engine foundation: several selected paths retain their original layout in empty
   private staging, with resumable planning and disk-space checks before writing. Reads hold
   a shared repository lock, grouped downloads authenticate every blob, and links/special
@@ -24,6 +54,28 @@ All notable changes are documented here. The format follows
   repository lock is asked for once per tick and before and after a refresh, as backups do,
   so a refresh never replaces a lock that another client removed. WordPress restore jobs
   and screens still follow.
+- Restore jobs: `POST /jobs` with `type: restore`, a snapshot ID and optional paths restores
+  the selection into a staging directory of the job in the private directory, with
+  progress, in resumable steps like a backup. A restore that fails or is cancelled removes
+  what it staged and releases its repository lock. While a restore runs, scheduled jobs
+  wait. Screens, the WP-CLI command and the download of staged files still follow.
+- Restored files do not stay: they are removed 24 hours after the restore finished, or
+  after the number of hours set under Settings → Restore (1 to 168). The heartbeat removes
+  them, and also what a restore that did not succeed left behind. `GET /restores` lists
+  what is staged with its size and time of expiry, and `DELETE /restores/{id}` removes one
+  directory at once.
+- Building blocks for downloading restored files, without a visible function yet: a zip
+  writer of the plugin's own that needs no PHP extension and continues after an interrupted
+  request, and download tokens that are valid once and for one hour.
+- The dump catalog temporarily requests quoted table/view definitions, including when the
+  server disables `sql_quote_show_create`, and restores the site's session setting afterwards.
+  It reads schema under the dump's SQL mode so compatibility modes cannot omit table options.
+  Database imports also enable quoting for their ownership checks and restore it after each tick.
+- Database rehearsal imports staged table data into separate InnoDB tables, with checked
+  SQL and resumable transactions. The administrator can download its comparison report.
+  It also handles tables containing only generated columns and fixed-format MyISAM
+  sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
+  cannot report success with a row that the bounded importer cannot read.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses
@@ -95,6 +147,12 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Changed
+- Backups for restic requires 64-bit PHP. On 32-bit PHP, activation stops before the
+  first backup. Existing installations retain their settings and local restore data.
+- The snapshot list of the admin page shows the snapshots of this site; those of other
+  sites and clients in the same repository are listed with `scope=repository`. Listing
+  snapshots now takes a shared repository lock, so it answers "repository locked" while a
+  prune holds its exclusive lock.
 - Prune and check examine index files one pack at a time, and prune rewrites them without
   retaining every decoded blob. Prune loads its index cache under the repository lock and
   releases the blob index after marking. Check streams the server's pack listing to a
@@ -131,6 +189,8 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- Compressed repository objects have their zstd frame sizes, windows and cumulative output checked before allocation. Verified pack data must also match its expected size and SHA-256.
+- Uninstall checks all plugin-owned recovery records before deleting local data, including records in the default working directory after a change of configuration.
 - The plugin reads no more of a server's answer than a repository file of that kind can
   hold. Before, a broken or malicious server could answer the request for a lock or a
   snapshot with a body larger than PHP's memory.
@@ -155,10 +215,26 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
+- Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
+- A pack listing that the server answered with something else, such as the error page of a
+  proxy, is downloaded again when a check or prune is retried; before, every retry read the
+  same stored answer and failed. A server that keeps answering so is asked at most four
+  times; then the job ends with the error instead of downloading the listing without end.
+  A damaged length in the local index cache makes the cache
+  be rebuilt instead of ending every backup, check and prune with `index_too_large`. A
+  settings layout number whose stored value is a serialized null counts as malformed and
+  keeps the plugin inactive, as other malformed numbers do, instead of passing for an
+  installation without a number.
+- A file name that ends in a line break is written to a snapshot's tree with the break
+  escaped, as restic writes it. It was written unescaped before.
 - Initial layout recording no longer overwrites a number another request has inserted.
   Newer and malformed settings layout numbers are preserved and keep the plugin inactive;
   deactivation leaves their jobs and repository locks alone. Only a missing layout option
   is treated as a legacy installation.
+- Database backups preserve invisible columns and columns with expression defaults such
+  as `CURRENT_TIMESTAMP`. They were previously emitted as NULL or omitted from INSERTs;
+  values already missing from old snapshots cannot be recovered by this correction.
 - Reading a snapshot now refuses directory listings with duplicate or out-of-order names,
   including differently escaped copies of the same name. The repository check reports
   these trees as damaged before a restore can use their entries.

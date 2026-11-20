@@ -29,17 +29,34 @@ final class WpOptions implements Options {
 	}
 
 	/**
-	 * Reads an option from the database, past what this request has cached.
+	 * Tells whether an option exists.
 	 *
 	 * @param string $name Option name.
+	 * @return bool True if the options table has the option, whatever its value decodes to.
+	 */
+	public function exists( string $name ): bool {
+		// A row that holds a serialized null decodes to the null that get() also answers for
+		// a missing option. Only a default that no stored value can be tells the two apart.
+		$absent = new \stdClass();
+		return $absent !== get_option( $name, $absent );
+	}
+
+	/**
+	 * Reads an option from the database, past what this request has cached.
+	 *
+	 * @param string $name     Option name.
+	 * @param bool   $autoload Whether the value is in WordPress's alloptions cache.
 	 * @return mixed Value, or null if missing.
 	 */
-	public function fresh( string $name ): mixed {
+	public function fresh( string $name, bool $autoload = false ): mixed {
 		// Where get_option() keeps an option that is not autoloaded, and where it remembers
 		// that an option did not exist. With a persistent object cache other requests read the
 		// database once more; nothing is lost.
 		wp_cache_delete( $name, 'options' );
 		wp_cache_delete( 'notoptions', 'options' );
+		if ( $autoload ) {
+			wp_cache_delete( 'alloptions', 'options' );
+		}
 		return get_option( $name, null );
 	}
 

@@ -141,7 +141,7 @@ src/
 ├── Exception/                     PluginException and one subclass per failure the UI explains
 ├── Settings/                      Schema (every field once), Field, Settings (immutable), SettingsStore (option + wp-config.php overrides)
 ├── Secrets/                       Secret (value hidden in a closure), SecretName, SecretStore, EncryptedOptionStore (HKDF over the salts + secretbox), ConstantOverrideStore
-├── Storage/                       Options port, PrivateDirectory, SiteState, SchemaVersion (layout number of the options, §18), Files, CacheDirectory, ExposureCheck port
+├── Storage/                       Options port, PrivateDirectory, SiteState, SchemaVersion (layout number of the options, §18), Files, CacheDirectory, ExposureCheck port, DownloadTokens (one-time tokens for downloads, hashed in a file; ADR 0038), Zip/ (ZipWriter: a stored zip of a directory tree in resumable calls; ZipRecords; Crc32)
 ├── Crypto/                        restic primitives
 │   ├── Cipher.php                 seal()/open(): nonce ‖ AES-256-CTR ‖ Poly1305-AES tag
 │   ├── Poly1305.php               pure-PHP Poly1305 (ADR 0027)
@@ -169,16 +169,17 @@ src/
 │   └── Check/                     CheckRun: structural check plus a sampled share of packs read
 ├── Jobs/                          Job, JobState, JobType, JobError (stable codes), JobStore, EventLog, RunnerLock, Runner, JobObserver, Step, ClosureStep, StepProvider, JobSteps, TickReport
 │   ├── Backup/                    BackupSteps (preflight, unlocking, backing_up, recording, releasing, cleaning_up), BackupServices
-│   └── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010)
+│   ├── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
+│   └── Restore/                   RestoreSteps (preflight, planning, restoring, recording, releasing, cleaning_up), RestoreServices, RestoreRequest (ADR 0037)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
 ├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
-├── Restore/                       (M3) Staging, Selection, Apply, database Importer
+├── Restore/                       SnapshotBrowser (snapshot lists with the retention preview, details and directory pages as response data, §13.2); Staging (list, expiry and removal, ADR 0040), StagedRestore; (M3) Selection, Apply, database Importer
 └── Notifications/                 Notifier (first failure, stale once, recovery once; outbox with retries), Notice, NoticeKind, Mailer port
 ```
 
-The entry marked (M3) arrives with that milestone. Dependency rules:
+The entries marked (M3) arrive with that milestone. Dependency rules:
 
 - Only `WordPress\*` and `Plugin` call WordPress functions or use WordPress classes
   ([ADR 0029](adr/0029-wordpress-free-core.md)). The core receives paths, settings values,
@@ -217,8 +218,8 @@ more than one bounded slice at a time and never relies on a particular trigger.
 
 ### 4.2 Jobs and ticks
 
-A **job** (`Jobs\JobType`: backup, unlock, forget, prune or check; restore joins in
-Milestone 3) is a JSON document in the private directory
+A **job** (`Jobs\JobType`: backup, unlock, forget, prune, check or restore) is a JSON
+document in the private directory
 ([ADR 0014](adr/0014-file-based-job-store.md)). A **tick** loads the active job, advances it
 for at most the budget, writes a checkpoint and arranges the next tick. Every engine
 operation is written as a **resumable step**: it can stop after any blob, any directory, any
@@ -256,7 +257,7 @@ directly and keep the limit of the CLI process.
 | **WP-Cron on traffic** | Due events run at the end of ordinary page loads. | Baseline; speed depends on visitors |
 | **External cron ping** | cPanel/Plesk cron or an external cron service fetching `wp-cron.php?doing_wp_cron` every 1–5 minutes, with `DISABLE_WP_CRON` optionally set. No plugin-specific URL or token is involved. | Recommended; see [`guides/cron.md`](guides/cron.md) |
 | **Admin polling** | While the admin page follows a running job it requests `GET /jobs/{id}` every 3 s; such a request runs a tick of at most 5 s, at most once per 5 s, and does not chain. "Keep this tab open to speed up the backup on slow hosts." | Always available |
-| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive, and at once when the repository of the settings has no probe result yet, for example after another server was saved) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Last it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
+| **Heartbeat** | Recurring `backups_for_restic_heartbeat` every 5 minutes (`Cron::heartbeat()`). Once setup is completed it probes for append-only mode once a day (hourly while the last answer was inconclusive, and at once when the repository of the settings has no probe result yet, for example after another server was saved) and creates the one job that is due: a scheduled backup first, then forget after a successful backup, then prune and check. If a job is active it then runs one tick, which takes up a job whose chain broke once its lease has expired or its back-off has passed. Then it lets the notifier send the stale notice when due and retry unsent ones. The probe and the notifier run under the runner lock and wait for the next heartbeat while a tick holds it. Last, for at most five seconds and without that lock, it removes restore staging that is due: what expired and what jobs that did not succeed left behind (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)); what a large tree needs beyond that, the next heartbeats do. The heartbeat has no duties of its own for leases, repository locks or logs: leases and locks are handled inside the tick, and nothing rotates logs (§14). | Needs any of the above to fire |
 | **WP-CLI** (`wp backups-for-restic …`) | `tick` runs one tick with the budget of §4.2; `tick --until-idle` repeats such ticks until no job is left. `backup`, `forget`, `prune` and `check` with `--wait` run the job in the same process in ticks of 300 s each, which do not pass through `Container::tick_budget()`: neither `max_execution_time` nor the gentle mode shortens them. Without `--wait` these commands create the job and return; the other drivers advance it. | Where the host offers WP-CLI |
 
 Only one runner may advance a job at a time: `flock()` on `<private>/runner.lock`
@@ -277,6 +278,7 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 | `forget` | `preflight` → `unlocking` → `detecting` → `forgetting` → `recording` | `releasing` → `cleaning_up` |
 | `prune` | `preflight` → `unlocking` → `detecting` → `pruning` → `recording` | `releasing` → `cleaning_up` |
 | `check` | `preflight` → `unlocking` → `checking` → `recording` | `releasing` → `cleaning_up` |
+| `restore` | `preflight` → `unlocking` → `planning` → `restoring` → `recording` | `releasing` → `cleaning_up` |
 
 ```
  queued → running: regular steps → cleanup steps → succeeded
@@ -291,8 +293,8 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   ([ADR 0020](adr/0020-unlocking-and-kdf.md)). The `unlock` job exists for the wizard when it
   connects an existing repository.
 - No step of its own takes the repository lock, scans, uploads or writes the snapshot: the
-  engine run inside `backing_up`, `forgetting`, `pruning` or `checking` does all of that and
-  keeps its own checkpoint (§4.5). `releasing` releases the lock of a run that did not
+  engine run inside `backing_up`, `forgetting`, `pruning`, `checking`, or `planning` and
+  `restoring`, does all of that and keeps its own checkpoint (§4.5). `releasing` releases the lock of a run that did not
   finish, which rest-server allows even in append-only mode.
 - `detecting` is the append-only probe of forget and prune jobs
   ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
@@ -300,7 +302,28 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 - An error with a retryable code (`repository_unreachable`, `repository_locked`) does not
   fail the job at once: the runner waits 30 s, then twice as long after each further failure
   in a row, and fails the job at the sixth.
-- Restore jobs join in Milestone 3 with their own step list.
+- A **restore job** ([ADR 0037](adr/0037-restore-job.md)) carries its request in the job
+  document from its creation: `data.snapshot`, the full ID, and `data.paths`, the selected
+  snapshot paths (`Jobs\Restore\RestoreRequest`; an invalid request creates no job).
+  `preflight` asks for a completed setup, a valid request, a private directory that is not
+  served and a repository that answers; the free space is checked by the run once it knows
+  how much the selection holds. `planning` and `restoring` drive one
+  `Engine\Restore\RestoreRun` ([ADR 0036](adr/0036-selected-file-staging.md)): started once,
+  resumed from its checkpoint in every later tick, with the throttle of the other jobs.
+  `planning` ends when the selection is counted, `restoring` when every file is staged. The
+  job's progress holds `phase`, `files`, `bytes`, `total_files`, `total_bytes`, `skipped`
+  and `percent`. A run whose repository lock did not hold gives up its tick and is resumed
+  by the next one, at most three times; a snapshot that the repository does not hold fails
+  the job at once. `recording` moves the report of the entries beside
+  the staged files, writes the job's result (`snapshot`, `files`, `bytes`, `skipped` for
+  entries such as links that are recorded but not created, `staging` and `report` as names
+  relative to the private directory) and the `last_restore` entry of the state.
+  `releasing` aborts the run, which releases its repository lock, on every path.
+  `cleaning_up` removes the run's working files, and after a failure or a cancellation the
+  staging directory too: only a restore that succeeded leaves files behind. While a restore
+  is queued or running, no other job starts, scheduled ones included: the heartbeat leaves
+  the schedule slot unhandled and tries again. The notifier does not report restore jobs;
+  an administrator started the job and watches it.
 - Exactly one job is active at a time; creating another is rejected (HTTP 409), cancel is
   always possible.
 - **Creating a job** (`JobStore::create()`): the check for an active job and the write of
@@ -416,8 +439,8 @@ blob; identical chunks are stored once. The repository polynomial is generated a
 the same GF(2) arithmetic and Ben-Or irreducibility test restic uses. The unit suite
 compares the 17 boundaries of a 24 MiB stream with a vector recorded from restic's chunker
 library (`tests/Fixtures/vectors/go-strings-and-chunker.json`). Parity with the CLI is tested
-indirectly: when the plugin backs up files that restic 0.19.1 or 0.14.0 backed up before, it
-adds no data blob.
+indirectly. The same files backed up using restic 0.20.0, 0.19.1, 0.18.1 or 0.14.0 add no
+new data blobs when the plugin backs them up.
 
 ### 5.6 Packs
 
@@ -449,7 +472,10 @@ an uploaded pack is recorded only in the job's checkpoint. Reading merges all in
 merged set so later runs load one file instead of all index files. The cache file is a row
 of pieces of about one megabyte, each sealed with the master key and carrying a mark of its
 file and its number; reading and writing need one piece in memory besides the index, and a
-file whose pieces do not belong together is discarded.
+file whose pieces do not belong together is discarded. The length before each piece is not
+sealed: one that no piece can have (more than the names of the listed index files, or more
+than `IndexSet::MAX_PIECE_BYTES` of index) discards the file as well, before the memory
+budget is asked, so that a damaged length cannot end every job with `index_too_large`.
 Prune-lite rewrites index files without the deleted packs.
 
 ### 5.8 Trees and nodes
@@ -605,7 +631,15 @@ running SHA-256 cannot be carried across ticks ([ADR 0021](adr/0021-database-str
 
 Format `backups-for-restic-dump/1`: one SQL statement per line, escaped values, hex-encoded
 binary, ≈ 1 MiB `INSERT` batches, and a trailer line `-- end table rows=<n> bytes=<n>` per
-file ([ADR 0021](adr/0021-database-streaming.md)). The importer never needs an SQL parser.
+file ([ADR 0021](adr/0021-database-streaming.md)). The importer reads bounded lines and
+validates a constrained CREATE/INSERT grammar; it never executes an arbitrary SQL script
+([ADR 0035](adr/0035-transactional-shadow-import.md)).
+
+The writer and reader share a hard 16 MiB SQL statement limit, including the semicolon
+and excluding LF. An encoded row that cannot fit causes a database error before the dump
+is completed. Binary hex encoding can roughly double the source row size. Generated-only
+tables use empty INSERT tuples to preserve their row counts without assigning generated
+values. These files remain importable by a normal MySQL/MariaDB client.
 
 Streaming and resumability: a table is produced page by page and fed to the chunker like a
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
@@ -617,12 +651,19 @@ table and the tables themselves are read at different moments. That holds in eve
 WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
 remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
 
-Import in the plugin arrives with restore in Milestone 3: files are restored to
-`<private>/restores/<job>/database/`, each trailer verified, then executed statement by
-statement in time-budgeted batches with maintenance mode on and the plugin's own options
-preserved (`PluginStatePreserver`). The manual path with the restic
-CLI exists today: `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` in
-file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
+Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
+rows, cursor and content transcript commit in one transaction. The report compares
+engine, charset, collation and rows with the current site and lists compatibility blockers.
+Its digest and the original snapshot bind a subsequent live review to the same source.
+
+A separately confirmed database apply reimports the source on supported MySQL sites,
+compares its transcript and checks native table identities. One multi-table RENAME
+under WRITE locks swaps every selected table and its operation witness. The destination
+keeps its site address, active plugins, plugin options, cron and confirming administrator.
+The previous generation remains available for undo for 24 hours. Undo retains the entire
+post-apply generation for another 24 hours and supports manual recovery of later edits.
+MariaDB sites and sites with unsupported grants or table dependencies can export the SQL
+and import it into a separate database. [Database exchange](adr/0043-atomic-mysql-database-exchange.md), [manual recovery](06-disaster-recovery.md).
 
 ## 8. Retention, integrity checks and maintenance
 
@@ -634,8 +675,10 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   not push the others out (restic's `findLatestTimestamp`); `--keep-tag`. The forget job
   selects the snapshots with this site's host name and the tags `backups-for-restic` and
   `site:<hash>` and applies the policy to them as one group (`--group-by host`); the tag of
-  the job that wrote a snapshot never splits them. A preview of what the policy would remove
-  (a dry run) does not exist yet; it is planned with the snapshot browser of Milestone 3.
+  the job that wrote a snapshot never splits them. The list of this site's snapshots
+  previews the decision (§13.2): `Restore\SnapshotBrowser` applies `Forget::apply()` to the
+  same group with the policy that `Jobs\Maintenance\RetentionSettings` builds for the forget
+  job too, so the two cannot decide differently. The preview only reads.
   Deletion is `DELETE snapshots/<id>`; HTTP 403 → `repository_append_only`
   ([ADR 0010](adr/0010-retention-and-append-only.md)).
 - **Append-only detection** ([ADR 0010](adr/0010-retention-and-append-only.md)): a `DELETE`
@@ -680,7 +723,15 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
   pack. Classification counts distinct live names across batches; a missing pack stops the
   run as repository damage, preserving unindexed packs that may hold recovery copies.
   Unindexed packs never enter the JSON checkpoint: classification and deletion resume by
-  table slot. Both files
+  table slot. A stored answer that is not a valid listing, such as the error page of a
+  proxy, sends the checkpoint back to the download before the error ends the request, so
+  the retry asks the server again instead of parsing the same file; check does the same
+  with its listing. The run counts the listings it discarded in its checkpoint, because
+  the job counts only failures that follow each other and a request that only downloads
+  ends normally between two of them. A run downloads again three times in a row at most;
+  with the fourth invalid answer the checkpoint stays at the failing batch, every later
+  request fails there at once, and the job gives up after its usual number of attempts.
+  Both files
   have mode 0600 before content is written. This bounds the new listing path, while the
   existing tree/index sets still need the full-job memory work ([ADR 0033](adr/0033-prune-listing-on-disk.md)).
   If the lock was lost, or not refreshed for 25 minutes, prune takes it again and compares
@@ -724,27 +775,25 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
 ## 9. Restore
 
-Restore in the plugin arrives with Milestone 3; this section is its plan. Today the engine
-has `Engine\Restore\RestoreRun`, which restores a snapshot or a part of it into a directory
-in resumable slices and validates every name from the repository. Only the unit and
-conformance suites use it: the admin area, the REST API and WP-CLI have no restore yet, and
-until then a restore is done with the recovery kit and the restic CLI
-([`06-disaster-recovery.md`](06-disaster-recovery.md)).
-
-Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores will be jobs with progress.
+A restore job reads selected paths from a snapshot under a shared repository lock, verifies
+their content and writes them into a private staging directory. The admin page and WP-CLI
+can start the job. The administrator can download staged files and reports, compare
+changes against the receiving site, and separately confirm a live file or database
+operation. Staging, review, application and undo each have their own lifetime. For offline
+recovery the same snapshot can be opened with restic. [Recovery procedures](06-disaster-recovery.md).
 
 The first reader is `Engine\Snapshot\Reader` ([ADR 0034](adr/0034-snapshot-reader.md)):
 snapshot metadata with optional host/tag filters, one directory by snapshot path, and the
 site manifest. Each operation takes a shared repository lock before reading and discards
 its lazy index before releasing the lock. Longer reads refresh the lock; a lapsed lock
 refuses the result and requires a fresh read. It preserves raw name bytes, rejects ambiguous
-path components and never follows a link. The REST and browser integration follows in
-Milestone 3 phases 1.2 and 1.3.
+path components and never follows a link. The REST snapshot routes and the admin snapshot browser both use this reader.
 
 New snapshots record their manifest's original snapshot path in an encrypted locator tag,
-built from the normalized private directory path that the archiver walks;
+built from the resolved private directory (the lexically normalized path only where it
+cannot be resolved), which is the path the archiver records;
 old snapshots use a search for a unique `spool/manifest.json` that is bounded to 4096
-directories and to five seconds per call. An incomplete or
+directories and to five seconds per call, not counting the loading of the index. An incomplete or
 ambiguous search requires an explicit snapshot path; one that ran out of time gets further
 when it is repeated, because the tree cache keeps what it read. Manifests are limited to 1 MiB and
 128 blobs, authenticated and checked against their declared file size and schema. Their
@@ -755,15 +804,15 @@ authentication and tree ID on every hit. Index and published tree files share th
 cache limit, with the index taking priority. Either writer evicts trees as needed; clearing
 the cache removes both. An index too large for the limit is not cached and leaves the trees
 in place. Trees over 4 MiB are read without caching. Temporary ciphertext
-needs additional disk space during atomic publication; a temporary tree file that a request
-left behind is removed once it is a minute old.
+needs additional disk space during atomic publication; a temporary tree or index file that
+a request left behind is removed once it is a minute old.
 
 | Scenario | Flow |
 | --- | --- |
-| **Single file** | tree walk → blob ids → ranged `GET`s (adjacent blobs of one pack merged into one request) → open → verify → write to `<private>/restores/<job>/`; served through a one-time token; deleted after download or 1 h |
-| **Selected paths to staging** | same per file, directories recursively, metadata applied where the PHP user may |
-| **Apply to live site** | guarded step: dry-run report, `realpath` containment, symlinks refused, plugin directory and `wp-config.php` skipped unless chosen, maintenance mode, rename-or-copy |
-| **Database** | `database/` files to staging → trailers verified → import (§7) after a typed confirmation |
+| **Single file** | Verify and stage the selected bytes, then stream them on a single-use authenticated download. Staged contents expire after the configured interval (24 hours by default). |
+| **Selected paths to staging** | same per file, directories recursively; staging is owner-only (`0600` files, `0700` directories) and gets the modification time only, the modes of the snapshot are in the report ([ADR 0036](adr/0036-selected-file-staging.md)) |
+| **Apply to live site** | Paginated review, confirmed scope and a maintenance window. Live destinations and file identities are checked again. Startup files and configuration require offline recovery. Replaced files are retained for undo. |
+| **Database** | Verify and import staged SQL into private shadow tables. A separately reviewed operation can atomically exchange and undo compatible MySQL generations. Other installations use the manual SQL procedure. |
 | **Full site (plugin works)** | files to staging → apply → database, guided |
 | **Full site (server lost)** | plain restic CLI procedure, or the wizard's "connect to existing repository" path on a fresh installation followed by the full-site flow |
 
@@ -780,14 +829,31 @@ left behind is removed once it is a minute old.
 ├── cache/<repo-id>/trees/<tree-id>.bin    tree blobs for browsing, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
-├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check)
+├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
-└── restores/<job-id>/                     (M3) staging, expires after 24 h; the directory exists empty today
+├── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
+│   ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; owner-only (directories 0700, files 0600) whatever the snapshot recorded
+│   └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
+└── restores/.removing-<job-id>/           a staging directory whose removal has begun: renamed first, so that no list shows it, then deleted (ADR 0040)
 ```
 
+Staging does not stay ([ADR 0040](adr/0040-restore-staging-expiry.md), `Restore\Staging`).
+A staging directory expires `restore.staging_expiry_hours` (default 24) after its job
+finished, by `finished_at` of the job document. From then on it is not listed, and the
+next heartbeat removes it. The heartbeat also removes leftovers at once: the directory of
+a job that failed or was cancelled, and a directory that no job accounts for. It never
+touches the directory of a job that has not ended, nor that of a job whose document this
+version cannot read. A directory whose job document was pruned with the old jobs is kept
+while it holds the report; its expiry then counts from the creation time in the job ID,
+and its counts are unknown. An administrator removes one directory with
+`DELETE /restores/{id}`. Every removal renames the directory to `.removing-<job-id>` before
+it deletes anything, deletes until a deadline (five seconds in a heartbeat, ten in a
+request) and is continued by the next heartbeat; symbolic links are removed, never
+followed.
+
 No plaintext site data is written to the private directory except restore staging and
-database import files, both explicit admin actions that arrive with Milestone 3. The
+database import files, both explicit admin actions; the import arrives with Milestone 3. The
 database holds five options:
 `backups_for_restic_settings` (autoload yes, small), `backups_for_restic_secrets` (autoload no,
 ciphertext including the cached master key), `backups_for_restic_state` (autoload no: the
@@ -838,6 +904,8 @@ backup:
   excludes: []
   exclude_caches: true
   database: { enabled: true, table_scope: prefix, exclude_tables: [] }
+restore:
+  staging_expiry_hours: 24               # 1–168; hours after the end of a restore job at which its staged files are removed (§10, ADR 0040)
 notifications:
   email: { on_failure: true, on_stale: true, stale_after_hours: 36, recipients: [] }
 advanced:
@@ -975,17 +1043,17 @@ conformance and integration suites.
 ### 13.1 Admin UI
 
 Menu "Backups" (`manage_options`, filterable; multisite is refused in 1.0). One admin page
-with five tabs (`AdminPage::TABS`): Dashboard (cards for the last backup, the next backup and
+with six tabs (`AdminPage::TABS`): Dashboard (cards for the last backup, the next backup and
 the repository host with its append-only status, the running job with progress and a "keep this
 tab open" hint, recent jobs, Back up now; maintenance cards for old snapshots, unused data
 with the space only a full prune reclaims, and the repository check, each with its last
 result, next run and a button; notices that stay until their cause is gone: check findings,
-a switch to retention mode `external`, and the proposal to switch back), Snapshots (a list
-with time, id, host, files, size and new data; browsing and restoring arrive with
-Milestone 3), Settings (Schedule, Old snapshots, Maintenance, Notifications, What to back
-up, Advanced, and Repository with the address, the working directory, the cache and the
-recovery kit; saving sends only changed fields, so an open page cannot undo an automatic
-switch), Environment (the Doctor's checks) and Logs (the recent jobs and, for a chosen job,
+a switch to retention mode `external`, and the proposal to switch back), Snapshots (the
+snapshot browser described below), Restores (private staging, downloads, rehearsals,
+live reviews and undo), Settings (Schedule, Old snapshots, Maintenance,
+Notifications, What to back up, Advanced, and Repository with the address, the working
+directory, the cache and the recovery kit; saving sends only changed fields, so an open
+page cannot undo an automatic switch), Environment (the Doctor's checks) and Logs (the recent jobs and, for a chosen job,
 its events and warnings on the page; there is no download). Until setup is completed the
 page shows the setup wizard instead
 (Environment → Repository server → Password, with the unlock progress when an existing
@@ -1019,11 +1087,20 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune; a job asks for that listing once, so a listing that outlasts the request cannot keep a finished job from ending), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
 | `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
-| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job. Refused with 400 `invalid_job_type`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
+| `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job, or with `type: restore` a restore to staging: `snapshot` is the full 64-character ID, `paths` a list of at most 256 absolute paths as the snapshot holds them, the whole snapshot without it. Refused with 400 `invalid_job_type`, `invalid_snapshot` or `invalid_paths`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
-| `GET /snapshots` | snapshots of the repository, cached for 5 minutes |
-| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, notifications and advanced fields; GET also reports the cache size |
+| `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` and `retention` (the retention preview described below) |
+| `GET /snapshots/{id}` | one snapshot by its full ID: the fields of the list, `paths`, `tree`, and `manifest` with the site's manifest (`path`, `token`, `data`) or null. `manifest_state` is `found`, `none`, or `unreadable` for a manifest that cannot be located or is not valid |
+| `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
+| `GET /restores` | what finished restores staged, newest first (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)): for each `job`, `snapshot`, `finished`, `expires`, `files`, `bytes`, `staging` and `report`, the last two as names relative to the private directory. Snapshot, counts and `finished` come from the job document and are null once it was pruned. Also `expiry_hours`, the setting, and `removing`, the number of directories that are due or being deleted. Staging that expired and the directory of a restore that has not ended are not listed |
+| `DELETE /restores/{id}` | removes the staging directory of one job, whatever became of the job. It leaves the list at once; `removed.complete` is false when deleting takes longer than ten seconds, and the heartbeat finishes it. The answer carries the list as `GET /restores` gives it. 400 `invalid_job_id` for a name that is no job ID, 404 `restore_not_found` if nothing is staged for the job, 409 `restore_active` while the job is a restore that has not ended (an active job of another type has no staging and answers 404), 409 `job_unreadable` if its document cannot be read |
+| `POST /restores/{id}/download` | Issues a single-use browser POST form for a file, ZIP, restore report or database rehearsal report. The browser submits the grant to WordPress for streaming. |
+| `POST /restores/{id}/database/plan`, `POST /restores/{id}/database/apply` | Review a rehearsed database exchange and confirm the exact table generations. |
+| `GET /database-changes`, `POST /database-changes/{id}/undo-plan`, `POST /database-changes/{id}/undo` | Discover retained database generations, review an undo and queue it. |
+| `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. The optional JSON boolean `include_config` includes configuration in the detailed review. Startup files, including wp-config.php, require offline recovery. |
+| `GET /undo`, `POST /undo/{id}/plan`, `POST /undo/{id}` | List reversible apply jobs, review the original files to recover, then queue the reviewed undo. |
+| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
 | `POST /repository/test`, `POST /repository/save` | connection test; test and save. For an own server both take an optional `ca_certificate` (PEM): the test uses it from a file of its own under `tmp/` in the private directory, removed after the test, `save` stores it as the server's certificate once the server is saved, and saving a server of the preset removes a stored one. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent. `save` changes nothing while a job is active (409 `job_conflict`). A save that fails half way, also because the options table refused a write without an error (`Options::set()` answers false, `SettingsStore::update()` and `SiteState::bind()` raise `StorageFailed`), tries to put back what it changed: the settings, the REST password, the cached key and the certificate. Each part is tried on its own; while the database keeps refusing writes, a part can stay as the failed save left it, and the request answers with the error either way. Where `wp-config.php` defines the address, the certificate of a tested address that is another one is not stored; saving another address empties `repository.id` and drops the results remembered for the old repository |
 | `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; neither stores anything while a job is active (409 `job_conflict`). `create` stores the repository password before the repository exists and puts the earlier one back if the repository does not come to exist; `connect` keeps an entered password apart until the unlock job has opened the repository with it, and only then replaces the stored password and the cached key; a wrong password leaves both in place, and the kit in its answer names the entered one. `connect` without a password unlocks with the stored one. Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
@@ -1031,10 +1108,39 @@ first backup: an estimate needs a backup to measure against (§14).
 | `POST /setup/complete` | finish the wizard after the recovery kit is acknowledged; 409 `environment_blocked` while the Doctor has a critical finding |
 | `POST /recovery-kit` | the recovery kit, only with the administrator's WordPress password as `user_password` (403 `wrong_user_password`); 409 `ca_certificate_missing` as above |
 
-All routes: capability check in `permission_callback` (`backups_for_restic_capability`,
-`manage_options` by default); cookie + nonce or Application Passwords; no secrets in
-responses except the recovery kit, which is sent with `Cache-Control: no-store`. Restore
-routes arrive with Milestone 3.
+Every REST endpoint requires the configured backup capability (default `manage_options`).
+WordPress authenticates cookie requests with its REST nonce and also accepts Application
+Passwords. Download grants, review tokens and recovery kits carry `Cache-Control: no-store`.
+
+A restore accepts JSON flags `archive` and `database_preview`. To import on another
+installation, send `fresh_install: true`, `database_preview: true` and the full snapshot
+ID. Omit `paths` so the worker selects content, uploads and the database spool from the
+verified source manifest. The staging list reports `fresh_install`, `archive`, the sole
+downloadable `file` when one was selected, and availability of the `database_report`.
+The fresh-install file preview includes original source and mapped destination paths.
+Both file preview routes may return HTTP 202 with a `file_plan` job. Poll that job as
+usual. Once it succeeds, send the same preview request with its `plan_job` ID and
+`offset: 0`. Each response contains at most 100 entries, `total`, `offset` and
+`next_offset`; a null next offset indicates the final page. Confirm with the same
+`plan_job` ID and digest. Completed previews expire after one hour.
+
+Live file apply and undo also require `update_core` and permission to modify files under the
+site's `wp_is_file_mod_allowed()` policy. Preview reports list actions and their reasons.
+Confirmation uses the preview digest, a review token bound to the authenticated session,
+source job, site URL and configuration choice, explicit acknowledgment, the site's exact
+home URL and the account's WordPress password. Send those fields in a JSON POST body.
+The initiating response returns a short-lived `control_token` and sets it in an HttpOnly,
+SameSite=Strict cookie. HTTPS adds Secure. During the job's maintenance window the
+initiating client can poll or cancel the job using the cookie or the
+`X-Backups-For-Restic-Control` header. The normal WordPress capability and nonce checks
+also apply.
+
+Live database apply and undo require the configured backup capability plus
+`manage_options`, `edit_users`, `promote_users` and `update_core`. The worker checks the
+confirming user again before exchanging the tables. Database changes use a distinct
+session-bound review token, the typed home URL and the user's WordPress password.
+Staging, downloads and rehearsal use the configured backup capability. A database
+preview can report `applicable: false` with compatibility or privilege blockers.
 
 The recovery kit is in the answer of three routes. During the setup `create` and `connect`
 return it freely, which is how the wizard shows it once; from then on all three ask for the
@@ -1046,17 +1152,110 @@ has to carry the password. A REST password defined in `wp-config.php` goes to an
 server only if the request carries that same password, and saving a server without a user
 name deletes a stored REST password.
 
-`GET /snapshots` and the WP-CLI command `snapshots` list every snapshot in the repository,
-also those of other hosts that share it. A list limited to this site is planned for
-Milestone 3. Errors of the routes carry the codes of §14 with the prefix
-`backups_for_restic_`.
+The Snapshots tab reads the three snapshot routes of §13.2. A switch chooses between this
+site's snapshots and the whole repository, and a button reads the list again past the
+cache. The list has time, id, host, tags, files, size and new data, and for this site's
+snapshots what the next cleanup does with each: "Will be kept" or "Will be removed at the
+next cleanup". Without a preview the tab says that this site removes no snapshots at the
+moment. Opening a snapshot shows its details, then the site it holds as the manifest
+describes it (site address, the versions of WordPress, PHP and the plugin, table prefix,
+whether the database is included, the directories and the exclude patterns), or a sentence
+that the snapshot has no manifest or that it cannot be read. Below that is the directory
+browser: one directory per request, a button for the next page, and a path from the top
+directory to the open one whose steps lead back up. An entry shows its name, type, size
+and time; a link shows its target as text and leads nowhere. The script asks for a
+directory by the token of its entry and never builds a path from names, and it marks a
+name that is not exact. Every entry has a checkbox. The ticked paths are listed below the
+browser with their count and live in `restoreSelection` of `assets/js/admin.js`: the full
+ID of the snapshot and a map from the token of each entry to its shown path, whether that
+text is exact, and its type. Opening another snapshot empties it. The restore controls use this selection to start the staging job. While a request runs, the
+tab says what it loads inside the page's live region. A locked repository
+(`repository_locked`) gets a sentence of its own and a button to try again, every other
+error the message and hint of the route. Names, tags, link targets and manifest fields come
+from the repository and enter the page as text nodes only.
+
+The three snapshot routes read through `Restore\SnapshotBrowser`, which turns what
+`Engine\Snapshot\Reader` returns into response data
+([ADR 0034](adr/0034-snapshot-reader.md), [ADR 0039](adr/0039-snapshot-routes.md)). Every
+read takes a shared repository lock of its own and releases it, and uses the index and tree
+cache of the jobs within `advanced.cache_limit_mib`. A request knows PHP's memory limit as
+a job does, so an index that does not fit is refused with `index_too_large`
+([ADR 0031](adr/0031-compact-index-and-memory-budget.md)).
+
+- **Scope.** The snapshots of this site are those with the site's host name and the two
+  tags that the retention selects them by, `backups-for-restic` and `site:<hash>` (§8).
+  `scope=repository` also lists the snapshots of other sites and of other restic clients
+  that share the repository; all of them can be read and browsed. Both lists live in the
+  one transient `backups_for_restic_snapshots`, each with the time it was read, so
+  everything that deletes the transient (a finished backup, forget or prune, a saved,
+  created or connected repository, a job that opens another repository, a saved retention
+  setting, an automatic switch of the retention mode) drops both. A
+  request that stores its list reads the transient again first, so it never writes back
+  the other list from before such a deletion. Each list also names the retention settings
+  it was read under (`RetentionSettings::fingerprint()`: the rules of the previewed policy,
+  or `none`), and a list of other settings counts as missing. The deletion alone would miss
+  a list that a request was still reading when the setting was saved, and a retention
+  setting that `wp-config.php` overrides. The WP-CLI command `snapshots` lists every
+  snapshot of the repository.
+- **Retention preview.** In the site scope every snapshot has `retention`: `keep` if the
+  next forget of this site keeps it, `remove` if that forget removes it. The decision is
+  `Forget::apply()` over the listed snapshots as one group, which is the group of the
+  forget job (§8), with the policy of `RetentionSettings::policy()` and the clock of the
+  request. `retention` is null where no forget of this site decides: for every snapshot of
+  the repository scope, in retention mode `external`, and with a stored policy that a
+  forget job refuses (`configuration`, §14). The answer of one snapshot has no such field.
+  The preview writes nothing and removes nothing; it is as old as the cached list, and a
+  snapshot that it marks `keep` today can fall out of its day, week or month later.
+- **Directories.** `GET /snapshots/{id}/tree` answers one directory per request and never
+  follows a link. The answer has `snapshot`, `path`, `exact`, `token`, `parent` (the token
+  of the directory above, null for the root), `total`, `offset`, `limit`, `next` (the
+  offset of the next page, or null) and `entries` in the order the snapshot stores them.
+  `limit` is 200 by default and at most 1000: a larger value is lowered to 1000, and the
+  answer names the limit that applied. An entry has `name`, `exact`, `token`, `type`
+  (`file`, `dir`, `symlink`, or `other` for devices, pipes, sockets and irregular files),
+  `size` (bytes of a file, null otherwise), `mtime` (RFC 3339 as stored, null if the
+  stored text is no timestamp), `mode` (permission bits with setuid, setgid and sticky as
+  four octal digits), `target` (of a link, null otherwise) and `incomplete` (true if the
+  backup recorded a read error for it).
+- **Names and path tokens.** A name in a restic repository is a sequence of bytes, and
+  JSON carries only UTF-8. `name` is therefore a text to show: the stored name if it is
+  valid UTF-8 (`exact` is true), otherwise the name with U+FFFD in place of every byte
+  that belongs to no valid sequence (`exact` is false). The same holds for `path` and for
+  the `target` of a link. `token` names the entry's path byte for byte: `b64:` followed by
+  the base64url form, without padding, of the absolute path's bytes. The `path` parameter
+  takes either an absolute path starting with `/`, which reaches every entry whose path is
+  valid UTF-8, or a token, which reaches every entry. A client walks a snapshot by sending
+  back the tokens it was given and never builds a path from names that are not exact.
+  Paths keep the limits of the reader: 4096 bytes and 256 components.
+- **Errors.** A malformed ID or path is 400 (`invalid_snapshot_id`,
+  `invalid_snapshot_path`), as is a scope, offset or limit that is not allowed
+  (`invalid_snapshot_query`). An unknown snapshot is 404 (`snapshot_not_found`), and so is
+  a path that does not exist in the snapshot, or that is a file or a link
+  (`snapshot_path_not_found`). The two routes of one snapshot check the ID, the path and
+  the paging before they open the repository, so these refusals do not depend on its
+  state. A repository under an exclusive lock, as during a prune, is 409
+  `repository_locked`. That holds for the list too: it is read under the shared lock of
+  the reader like every other read, so the Snapshots tab shows this error instead of a
+  list that a running prune may be changing. Without a cached key the routes answer 409
+  `configuration`; every other error of the repository is 502 with its code of §14.
+
+Errors of the routes carry the codes of §14 with the prefix `backups_for_restic_`.
 
 ### 13.3 WP-CLI (`wp backups-for-restic …`, optional surface)
 
 Commands that exist (`WordPress\CliCommand`): `doctor`, `backup [--wait]`,
 `forget [--wait]`, `prune [--wait]`, `check [--read-data-subset=<percent>] [--wait]`,
-`tick [--until-idle]`, `status`, `snapshots`, `settings list|get|set`, `cancel [<job>]` and
-`logs [<job>] [--lines=<number>]`. `settings set` changes what the settings page can change
+`tick [--until-idle]`, `status`, `snapshots`, `ls <snapshot> [<path>]`,
+`settings list|get|set`, `cancel [<job>]` and `logs [<job>] [--lines=<number>]`. `ls` prints
+one directory of a snapshot, `/` by default, through the same `Restore\SnapshotBrowser` as
+the REST routes (§13.2): one line per entry with the type (`-`, `d`, `l`, or `?` for a
+special file), the mode, the size, the modification time and the name, a `/` after a
+directory and the target after a link. The snapshot is its full ID or the first 8 or more
+characters, as `snapshots` prints them, if exactly one snapshot starts with them; the path
+is an absolute path or a token. A name or target with control characters, a quote, a
+backslash or invalid UTF-8 is printed in double quotes with Go's escapes (`\x1b`, `\xff`),
+so that a stored name cannot send control sequences to the terminal.
+`settings set` changes what the settings page can change
 (`Settings\Schema::editable()`), with the same validation; `cancel` asks the active or the
 named job to stop and runs one tick for its cleanup; `logs` prints a job's event log,
 which is redacted when it is written. The four commands that start a job end
@@ -1064,12 +1263,14 @@ with an error under the same conditions as `POST /jobs` (§13.2): before the set
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. `status` prints the last backup and the active job only.
 
-Not built yet: `forget --dry-run` (a retention preview is planned for Milestone 3);
-`ls <snapshot> [<path>]`, `restore …` and `apply …`, which arrive with restore in
-Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
-list without a milestone. There is no command for the setup or for the recovery kit: both
-are in the admin area, where the kit asks for the WordPress password. Nothing requires
-WP-CLI.
+`restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
+private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
+records. Configuration and startup files require offline recovery. `undo <apply-job>`
+reviews and confirms reversal of live file changes. The recovery guide includes the
+`--skip-plugins` procedure for a site whose active plugin prevents normal startup.
+Use the admin page to initiate live changes, configure a repository or review retention.
+`recovery-kit` exports credentials on an interactive terminal after setup. The explicit
+`--force` option permits a pipe or file. Every delivery is audited.
 
 ### 13.4 Site Health
 
@@ -1087,8 +1288,7 @@ file, requests the file's URL without credentials, waits at most ten seconds for
 and reports status and body under the probe's name to `POST /environment/probe/report`. A
 report on another probe than the pending one, as from a second tab, changes nothing. A
 report with the file's content is the finding
-`exposed`; any other answer counts as protected. The site's own probe, where it gets an
-answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
+`exposed`. HTTP 403, 404 and 410 without the token count as protected. Other answers leave the result unknown. The site's own probe, where it gets a conclusive answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
 compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
 when the repository server did not answer a request from this host. The latter is asked
 only when the checks are run afresh, with one request that waits ten seconds at most, and
@@ -1136,7 +1336,7 @@ translated message and a hint. The codes:
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
 | `database_dump_failed` | a query of the dump failed |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
-| `setup_incomplete` | a backup, forget, prune or check was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
+| `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |
@@ -1148,6 +1348,8 @@ that runs out of time simply continues in the next one. Codes for restore
 
 The REST API has codes of its own for requests it refuses: `not_found` (unknown job),
 `not_editable` (a setting that `PUT /settings` does not accept), `invalid_job_type`,
+`invalid_job_id`, `restore_not_found` and `restore_active` (`DELETE /restores/{id}` with a
+name that is no job ID, for a job without staging, and for a restore that has not ended),
 `invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password` (the recovery
 kit was asked for without the right WordPress password), `password_required` (a request
 names a server or user name that the stored REST password is not for and carries no
@@ -1156,7 +1358,10 @@ password), `password_too_short` (a chosen repository password of fewer than 12 c
 a recovery kit would be incomplete), `environment_blocked` (the setup cannot be completed
 while the Doctor has a critical finding), `invalid_settings` (with one message per field) and
 `invalid_url` for the connection test, which also covers a server without ranged reads
-(`server_incompatible`). The messages of `invalid_settings` come from the validation codes
+(`server_incompatible`). The snapshot routes and the `ls` command add `invalid_snapshot_id`,
+`invalid_snapshot_path`, `invalid_snapshot_query`, `snapshot_not_found` and
+`snapshot_path_not_found` (§13.2); `Restore\SnapshotBrowser::failure()` assigns them and
+their HTTP status. The messages of `invalid_settings` come from the validation codes
 of the settings (`Settings::with()`), among them `retention_floor`: `retention.keep.within`
 must be at least one day, or `retention.keep.last` at least 1. The rule is checked when one
 of the two fields changes.
@@ -1273,7 +1478,7 @@ and schedules are slots in the site's time zone.
   secrets (`v1.` prefix), the cached index (its magic line), the options and `job.json`.
 - The options carry one layout number for settings, state and notifications in
   `backups_for_restic_schema_version` (`Storage\SchemaVersion`, 1 today), and every `job.json`
-  carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 1 today). A number is raised with
+  carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 3 since database exchange jobs began recording retained generations, with layouts 1 and 2 still readable). A number is raised with
   every change that a version without the change would misread. Options without a number
   and job documents without the field have the first layout; the plugin records the number
   on its first request. This first recording is an atomic insert that never changes an
@@ -1291,6 +1496,8 @@ and schedules are slots in the site's time zone.
   events but leaves jobs and their repository locks alone when the options have a newer
   or malformed layout number. A missing option is the only legacy case: zero, negative,
   empty and non-numeric values are unknown layouts, preserved without starting the plugin.
+  So is a row whose value decodes to null, which `get_option()` cannot tell from a missing
+  option: `Options::exists()` asks with a default that no stored value can be.
   `WpOptions::initialize()` uses a prepared insert with a no-op duplicate-key clause,
   because WordPress' `add_option()` can update an existing row after a stale existence
   check. This operation does not use the `add_option()` or `update_option()` hooks; normal
@@ -1310,7 +1517,9 @@ and schedules are slots in the site's time zone.
   Deactivation never fails over this. If the cleanup could not finish, for example because
   the server did not answer, the job stays in `jobs/` and is cleaned up by the first tick
   after reactivation, and its lock is stale for every restic client after 30 minutes. All
-  data is kept.
+  data is kept. That includes the staged files of finished restores: without the heartbeat
+  nothing expires, so they stay in `restores/` until the plugin is activated again, whose
+  first heartbeat removes what is due, or uninstalled ([ADR 0040](adr/0040-restore-staging-expiry.md)).
 - Uninstall (`uninstall.php`) deletes the plugin's options, its three transients, both cron
   events and what the plugin put into the private directory; it touches known names only, so
   a directory that also holds other files keeps them. The directory is found as at run time:

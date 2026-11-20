@@ -9,19 +9,66 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\WordPress;
 
+use BackupsForRestic\Backup\PlanFactory;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\SecretsUndecryptable;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Plugin;
 use BackupsForRestic\Secrets\SecretName;
+use BackupsForRestic\Support\Decoded;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
  * Everything needed to restore without this site (docs/03-security-and-threat-model.md §5.5):
  * repository address, credentials, password and a short restic recipe. It is shown, never
- * stored, and only to an administrator who just entered their WordPress password.
+ * stored. The web routes confirm authorization before delivery. WP-CLI requires an
+ * interactive terminal or an explicit request for redirected output.
  */
 final class RecoveryKit {
+
+	/** Number of kit deliveries retained for the administrator's audit history. */
+	private const int KIT_VIEWS = 20;
+
+	/**
+	 * Records the delivery before returning the kit. Shell access without a selected
+	 * WordPress user is recorded as WP-CLI with user ID zero.
+	 *
+	 * @param Container $container Site services.
+	 * @param string    $via create, connect, settings or cli.
+	 * @return string Recovery kit.
+	 * @throws PluginException If the kit or the audit entry cannot be produced.
+	 */
+	public static function deliver( Container $container, string $via ): string {
+		$kit  = self::text( $container, 'connect' === $via );
+		$user = wp_get_current_user();
+		$view = [
+			'at'    => time(),
+			'user'  => $user->ID,
+			'login' => 'cli' === $via && 0 === $user->ID ? 'WP-CLI' : $user->user_login,
+			'via'   => $via,
+		];
+		$container->state()->update( 'recovery_kit', static fn ( array $entry ): array => [ 'views' => array_slice( [ $view, ...Decoded::arrays( $entry['views'] ?? null ) ], 0, self::KIT_VIEWS ) ], true );
+		/**
+		 * Fires when the recovery kit has been prepared for an authorized recipient.
+		 *
+		 * @param int    $user_id WordPress user ID, or zero for a local shell operator.
+		 * @param string $via     create, connect, settings or cli.
+		 */
+		do_action( 'backups_for_restic_recovery_kit_shown', $user->ID, $via );
+		return $kit;
+	}
+
+	/**
+	 * Quotes one argument for the POSIX shell used in the recovery instructions. The
+	 * destination shell may differ from the server's OS and locale.
+	 *
+	 * @param string $value Text to reproduce literally.
+	 * @return string Quoted argument.
+	 */
+	private static function shell_word( string $value ): string {
+		return "'" . str_replace( "'", "'\\''", $value ) . "'";
+	}
 
 	/**
 	 * The CA certificate the kit has to carry: a self-signed server needs it for restic too. It
@@ -53,7 +100,8 @@ final class RecoveryKit {
 		$rest     = $secrets->get( SecretName::RestPassword )?->reveal() ?? '';
 		$url      = $settings->string( 'repository.url' );
 		$username = $settings->string( 'repository.rest_username' );
-		$hostname = $container->site()->hostname();
+		$site     = $container->site();
+		$filter   = ' --host ' . self::shell_word( $site->hostname() ) . ' --tag ' . self::shell_word( PlanFactory::TAG . ',' . $site->site_tag() );
 		$ca       = self::ca_certificate( $container );
 		$cacert   = '' === $ca ? '' : ' --cacert ca.pem';
 		$lines    = [
@@ -78,14 +126,17 @@ final class RecoveryKit {
 			sprintf( __( 'Repository format: %d', 'backups-for-restic' ), $settings->int( 'repository.format_version' ) ),
 			'',
 			__( 'Restore without WordPress, on any computer with restic 0.16.1 or newer:', 'backups-for-restic' ),
-			"  export RESTIC_REPOSITORY='rest:" . $url . "'",
-			"  export RESTIC_REST_USERNAME='" . $username . "'",
-			"  export RESTIC_REST_PASSWORD='" . $rest . "'",
-			"  export RESTIC_PASSWORD='" . $password . "'",
-			'  restic snapshots --host ' . $hostname . $cacert,
-			'  restic restore latest --host ' . $hostname . $cacert . ' --target ./restore',
+			'  export RESTIC_REPOSITORY=' . self::shell_word( 'rest:' . $url ),
+			'  export RESTIC_REST_USERNAME=' . self::shell_word( $username ),
+			'  export RESTIC_REST_PASSWORD=' . self::shell_word( $rest ),
+			'  export RESTIC_PASSWORD=' . self::shell_word( $password ),
+			'  restic snapshots' . $filter . $cacert,
+			'  restic restore latest' . $filter . $cacert . ' --target ./restore',
 			'',
-			__( 'The database is in the snapshot under the plugin\'s spool/database folder. Import its .sql files in name order, for example: cat *.sql | mariadb <database>', 'backups-for-restic' ),
+			/* translators: %s: restic command listing all snapshots in the repository. */
+			sprintf( __( 'To recover a site with another address, use %s to list the repository. Verify the source host, tags and date, then restore its full snapshot ID without the host and tag filters.', 'backups-for-restic' ), 'restic snapshots' . $cacert ),
+			'',
+			__( 'The database is in the snapshot under the plugin\'s spool/database folder. In that directory, import the .sql files into an empty database in name order. Replace recovered_site with its name: cat ./*.sql | mariadb recovered_site', 'backups-for-restic' ),
 			__( 'Keep this kit away from the website, for example in a password manager.', 'backups-for-restic' ),
 		];
 		if ( '' !== $ca ) {

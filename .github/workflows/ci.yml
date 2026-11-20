@@ -73,35 +73,11 @@ jobs:
           persist-credentials: false
       # The scanner of the WordPress.org review team sees what would ship, not the repository.
       - run: bin/build-package.sh
-      # Errors fail the job; warnings are listed as annotations and in the log.
-      - uses: WordPress/plugin-check-action@10857da14b6c2246d15402b3e69f777edcf8c12e # v1.1.9
-        with:
-          build-dir: build/backups-for-restic
-          # The action would use a token only to comment on the pull request, which the
-          # read-only token of this workflow cannot do.
-          repo-token: ''
-          # Native file functions and parse_url() in the WordPress-free core. The core must
-          # not call WordPress (ADR 0029), and it streams and renames files in ways that
-          # WP_Filesystem does not offer. The project's own PHPCS run keeps this sniff on for
-          # src/WordPress and src/Plugin.php (phpcs.xml.dist).
-          ignore-codes: |-
-            WordPress.WP.AlternativeFunctions.file_system_operations_chmod
-            WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-            WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-            WordPress.WP.AlternativeFunctions.file_system_operations_fread
-            WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
-            WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
-            WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
-            WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
-            WordPress.WP.AlternativeFunctions.file_system_operations_touch
-            WordPress.WP.AlternativeFunctions.parse_url_parse_url
-            WordPress.WP.AlternativeFunctions.rename_rename
-            WordPress.WP.AlternativeFunctions.unlink_unlink
-          # mb_chr() and mb_ord() in this file are PHP's own, from the mbstring extension that
-          # the plugin requires (readme.txt, Doctor). The check reports them as WordPress
-          # functions that need WordPress 7.1. The file is plain PHP without WordPress calls,
-          # so the check has nothing else to find in it.
-          exclude-files: src/Support/GoQuote.php
+      - name: Rehearse a signed release in local Git and SVN repositories
+        run: |
+          if ! command -v svnadmin >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y subversion; fi
+          tests/Release/test-wordpress-org.sh
+      - uses: ./.github/actions/check-package
 
   pot:
     name: Translation template (POT)
@@ -135,7 +111,7 @@ jobs:
         run: |
           pot=languages/backups-for-restic.pot
           echo "$(grep -c '^msgid ' "$pot") entries; $(grep -c 'assets/js/admin.js:' "$pot") lines refer to the admin script."
-          grep -F 'msgid "Keep this tab open to speed up the backup on slow hosts."' "$pot"
+          grep -F 'msgid "Keep this tab open to speed up the job on slow hosts."' "$pot"
           grep -F 'msgid "Plugin activation refused"' "$pot"
           grep -B 3 -F 'msgid "Data that no snapshot uses is deleted next on %s."' "$pot" | grep -F '#. translators: %s: date and time.'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -186,7 +162,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.3', '8.4', '8.5']
+        php: ['8.3', '8.4', '8.5', '8.6']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -194,7 +170,7 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
-          extensions: mbstring, openssl
+          extensions: mbstring, openssl, sodium
           # Shared hosting rarely runs OPcache or JIT for CLI; test the slow path.
           ini-values: opcache.enable_cli=0
           coverage: none
@@ -203,11 +179,34 @@ jobs:
       - run: vendor/bin/phpunit --testsuite unit
 
   database:
-    name: Database dump against MySQL
+    name: Database dump and restore (${{ matrix.database }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: MySQL 8.4
+            image: mysql:8.4
+            health: mysqladmin ping -h 127.0.0.1 -proot --silent
+          - database: MariaDB 11.4
+            image: mariadb:11.4
+            health: healthcheck.sh --connect --innodb_initialized
+    services:
+      database:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 33306:3306
+        options: >-
+          --health-cmd="${{ matrix.health }}"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     env:
-      BFR_TEST_MYSQL_HOST: 127.0.0.1
+      BFR_TEST_MYSQL_HOST: 127.0.0.1:33306
       BFR_TEST_MYSQL_USER: root
       BFR_TEST_MYSQL_PASSWORD: root
     steps:
@@ -220,13 +219,11 @@ jobs:
           extensions: mbstring, openssl, mysqli
           coverage: none
           tools: composer:v2
-      - name: Start MySQL
-        run: sudo systemctl start mysql.service
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpunit --testsuite database
 
   mutation:
-    name: Mutation testing (Crypto, Format, Forget)
+    name: Mutation testing (Crypto, Format, Forget, database import)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -245,7 +242,7 @@ jobs:
         id: changes
         env:
           EVENT_NAME: ${{ github.event_name }}
-          WATCHED: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
+          WATCHED: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets|Database)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
         run: |
           run=true
           if [ "$EVENT_NAME" = 'pull_request' ]; then
@@ -253,7 +250,7 @@ jobs:
               echo 'The files of the pull request could not be listed: running in full.'
             elif ! tr '\0' '\n' < "$RUNNER_TEMP/changed-files" | grep -Eq "$WATCHED"; then
               run=false
-              echo '::notice::Mutation testing skipped: this pull request changes none of the files the run depends on (src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml). A push to main always runs it.'
+              echo '::notice::Mutation testing skipped: this pull request changes none of the files the run depends on (src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, src/Database, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml). A push to main always runs it.'
             fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
@@ -282,4 +279,32 @@ jobs:
         with:
           name: mutation-logs
           path: .tools/infection/
+          retention-days: 14
+
+  planner-mutation:
+    name: Mutation testing (file apply planner)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          coverage: pcov
+          tools: composer:v2
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: bin/install-test-tools.sh infection
+      - run: composer mutation:planner -- --threads=max --no-progress
+      - name: Require a measured planner mutation score
+        if: always()
+        run: |
+          cat .tools/infection-planner/summary.log
+          grep -Eq '^Total: [1-9]' .tools/infection-planner/summary.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: planner-mutation-logs
+          path: .tools/infection-planner/
           retention-days: 14

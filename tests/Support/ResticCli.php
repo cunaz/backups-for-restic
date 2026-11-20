@@ -14,11 +14,14 @@ namespace BackupsForRestic\Tests\Support;
  */
 final class ResticCli {
 
+	/** Supported conformance oracles, newest first. */
+	public const array VERSIONS = [ '0.20.0', '0.19.1', '0.18.1', '0.14.0' ];
+
 	public function __construct(
 		private readonly RestServer $server,
 		private readonly string $repository,
 		private readonly string $password,
-		private readonly string $version = '0.19.1'
+		private readonly string $version = self::VERSIONS[0]
 	) {
 	}
 
