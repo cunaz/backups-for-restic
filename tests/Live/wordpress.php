@@ -8,6 +8,7 @@
 declare( strict_types=1 );
 
 use BackupsForRestic\Connection\ServerProfile;
+use BackupsForRestic\Tests\Live\WordPressOutputScan;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\ResticCli;
 use BackupsForRestic\Tests\Support\RestServer;
@@ -170,10 +171,15 @@ try {
 		TempDir::remove( $target . $uploads );
 
 		$begin( 'Import the recovered SQL and compare table checksums' );
-		$checksums = WordPressBackupFixture::assert_restored_database( $db, $target . TestSite::private_dir() . '/spool/database' );
+		$dump      = $target . TestSite::private_dir() . '/spool/database';
+		$checksums = WordPressBackupFixture::assert_restored_database( $db, $dump );
 		foreach ( $checksums as $table => $checksum ) {
 			fwrite( STDOUT, sprintf( "Source and restored CHECKSUM TABLE %s EXTENDED both yielded %s.\n", $table, $checksum ) );
 		}
+		$begin( 'Check the recovered SQL and WordPress diagnostics for exposed credentials' );
+		$scan = WordPressOutputScan::inspect( $dump, $fixture );
+		fwrite( STDOUT, sprintf( "Scanned %d files and %d bytes. Credential matches in %d files.\n", $scan['files'], $scan['bytes'], $scan['matches'] ) );
+		Assert::assertSame( 0, $scan['matches'] );
 		Assert::assertSame( '', trim( $restic( [ '--no-lock', 'list', 'locks' ] ) ) );
 		fwrite( STDOUT, "Passed. The normal repository retains one verified snapshot and no locks.\n" );
 	}

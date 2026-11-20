@@ -98,6 +98,9 @@ BorgBase repository. A successful run retains one encrypted snapshot. The comman
 verifies the authenticated repository ID before WordPress connects, sets retention to
 external and selects manual schedules. The independent restic CLI reads every pack,
 restores the exact snapshot and compares file digests and restored SQL table checksums.
+It scans the recovered SQL, job files and WordPress diagnostics for the two passwords
+and HTTP Basic credentials in raw, URL-encoded and Base64-encoded forms. The summary
+reports file and byte counts and how many files contained a match.
 
 Use a fresh disposable single-site WordPress installation, PHP 8.3 with a 128 MiB
 worker limit and a 30-second execution limit. Allow space for the original uploads,
