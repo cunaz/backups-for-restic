@@ -145,6 +145,8 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Changed
+- Backups for restic requires 64-bit PHP. On 32-bit PHP, activation stops before the
+  first backup. Existing installations retain their settings and local restore data.
 - The snapshot list of the admin page shows the snapshots of this site; those of other
   sites and clients in the same repository are listed with `scope=repository`. Listing
   snapshots now takes a shared repository lock, so it answers "repository locked" while a
