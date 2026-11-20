@@ -100,10 +100,7 @@ final class PackReader {
 
 		$plaintext = $cipher->open( $sealed );
 		if ( $entry->uncompressed_length > 0 ) {
-			$plaintext = Compression::decompress( $plaintext );
-			if ( strlen( $plaintext ) !== $entry->uncompressed_length ) {
-				throw new FormatException( 'Decompressed blob has an unexpected length.' );
-			}
+			$plaintext = Compression::decompress( $plaintext, $entry->uncompressed_length );
 		}
 
 		if ( ! Id::of( $plaintext )->equals( $entry->id ) ) {

@@ -41,7 +41,7 @@ defined( 'ABSPATH' ) || exit;
 final readonly class JobError {
 
 	/** Context codes that replace the code derived from the exception class. */
-	private const array CONTEXT_CODES = [ 'no_snapshots', 'retention_external', 'job_unreadable', 'staging_unverified', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed' ];
+	private const array CONTEXT_CODES = [ 'decompression_limit', 'no_snapshots', 'retention_external', 'job_unreadable', 'staging_unverified', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed' ];
 
 	/**
 	 * Creates the error.
