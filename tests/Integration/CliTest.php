@@ -308,8 +308,7 @@ final class CliTest extends TestCase {
 			self::assertStringContainsString( 'Job finished. {"state":"cancelled"}', $output );
 			[ $status, $latest ] = self::command( [ 'logs', '--lines=2' ] );
 			self::assertSame( 0, $status, $latest );
-			self::assertStringStartsWith( $id, $latest, 'Without an ID it is the latest job.' );
-			self::assertCount( 3, explode( "\n", trim( $latest ) ), 'The heading and two entries.' );
+			self::assertMatchesRegularExpression( '/^' . $header . '\n[^\n]+\n[^\n]+\z/m', trim( $latest ), 'The latest job heading and exactly two log entries.' );
 
 			[ $status, $output ] = self::command( [ 'logs', '20200101T000000Z-abcdef' ] );
 			self::assertSame( 1, $status, $output );
