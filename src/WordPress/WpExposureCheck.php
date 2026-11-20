@@ -217,7 +217,7 @@ final class WpExposureCheck implements ExposureCheck {
 	 * @return list<string> Known public directory URLs.
 	 */
 	private function public_urls(): array {
-		$path      = $this->directory->path;
+		$path      = $this->directory->configured;
 		$real_path = realpath( $path );
 		$urls      = [];
 		$uploads   = wp_upload_dir( null, false );

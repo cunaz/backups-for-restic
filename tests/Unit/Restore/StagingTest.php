@@ -15,6 +15,7 @@ use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Restore\StagedRestore;
 use BackupsForRestic\Restore\Staging;
+use BackupsForRestic\Storage\PrivateDirectory;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
@@ -559,6 +560,66 @@ final class StagingTest extends TestCase {
 		self::assertFileExists( $this->restores . '/' . $job->id . '/entries.jsonl' );
 		self::assertDirectoryExists( $this->restores . '/' . Staging::REMOVING . '20260101T000000Z-0a1b2c' );
 		self::assertDirectoryExists( $this->directory . '/private/jobs/' . $job->id );
+	}
+
+	/**
+	 * A file preview job that ended and keeps its private plan in the staging of a restore.
+	 */
+	private function retained_plan( JobStore $jobs, string $restores, Job $restore, int $finished ): Job {
+		$plan                        = $jobs->create( JobType::FilePlan, 'manual', $this->created );
+		$this->created              += 60;
+		$plan->state                 = JobState::Failed;
+		$plan->finished_at           = $finished;
+		$plan->data['restore']       = $restore->id;
+		$plan->data['plan_retained'] = true;
+		$jobs->save( $plan );
+		mkdir( $restores . '/' . $restore->id . '/plans/' . $plan->id, 0700, true );
+		file_put_contents( $restores . '/' . $restore->id . '/plans/' . $plan->id . '/plan.bin', 'rows' );
+		return $plan;
+	}
+
+	public function test_a_private_directory_named_through_a_link_expires_preview_data_and_staging(): void {
+		mkdir( $this->directory . '/usr/home', 0700, true );
+		if ( ! symlink( $this->directory . '/usr/home', $this->directory . '/home' ) ) {
+			self::markTestSkipped( 'Symbolic links cannot be created here.' );
+		}
+		// As the plugin builds them from BACKUPS_FOR_RESTIC_PRIVATE_DIR=<...>/home/acme/private.
+		$private = PrivateDirectory::locate( $this->directory . '/home/acme/private', $this->directory, $this->directory );
+		$private->ensure();
+		$jobs     = new JobStore( $private->subdirectory( 'jobs' ), new Redactor(), new SystemRandom() );
+		$restores = $private->subdirectory( 'restores' );
+		$staging  = new Staging( $restores, $jobs, $this->clock );
+		$restored = function ( int $finished ) use ( $jobs, $restores ): Job {
+			$job              = $jobs->create( JobType::Restore, 'manual', $this->created );
+			$this->created   += 60;
+			$job->state       = JobState::Succeeded;
+			$job->finished_at = $finished;
+			$jobs->save( $job );
+			mkdir( $restores . '/' . $job->id . '/files', 0700, true );
+			file_put_contents( $restores . '/' . $job->id . '/files/one.txt', 'one!' );
+			file_put_contents( $restores . '/' . $job->id . '/entries.jsonl', "{}\n" );
+			return $job;
+		};
+		$expired  = $restored( $this->clock->seconds - 3 * 86400 );
+		$kept     = $restored( $this->clock->seconds - 60 );
+		// A large preview that failed an hour ago and keeps its plan, as the cleanup of a failed preview may.
+		$plan = $this->retained_plan( $jobs, $restores, $kept, $this->clock->seconds - 3601 );
+
+		self::assertSame( realpath( $restores ), $restores, 'The plugin works with the real path.' );
+		self::assertSame(
+			[
+				'removed' => 1,
+				'pending' => 0,
+				'failed'  => 0,
+			],
+			$staging->remove_due( 24, self::NO_DEADLINE )
+		);
+
+		self::assertDirectoryDoesNotExist( $restores . '/' . $kept->id . '/plans/' . $plan->id );
+		self::assertArrayNotHasKey( 'plan_retained', $jobs->get( $plan->id )?->data ?? [ 'plan_retained' => true ] );
+		self::assertDirectoryDoesNotExist( $restores . '/' . $expired->id );
+		self::assertFileExists( $restores . '/' . $kept->id . '/files/one.txt' );
+		self::assertSame( [ $kept->id ], array_map( static fn ( StagedRestore $restore ): string => $restore->job, $staging->listing( 24 ) ) );
 	}
 
 	public function test_nothing_is_listed_before_the_private_directory_has_its_folder(): void {

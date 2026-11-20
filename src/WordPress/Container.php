@@ -372,7 +372,7 @@ final class Container {
 		}
 		return new ApplyPlan(
 			[ $site->abspath, $site->content_dir, $site->uploads_dir ],
-			[ dirname( $this->plugin_file ), $this->private_dir()->path, $site->abspath . '/.maintenance' ],
+			[ dirname( $this->plugin_file ), $this->private_dir()->configured, $site->abspath . '/.maintenance' ],
 			[ $site->abspath . '/wp-config.php', dirname( $site->abspath ) . '/wp-config.php' ],
 			$include_config,
 			$layout,
