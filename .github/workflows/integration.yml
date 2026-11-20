@@ -59,6 +59,7 @@ jobs:
     env:
       BFR_WP_VERSION: ${{ matrix.wordpress }}
       BFR_SITE_MEMORY_MIB: ${{ matrix.memory }}
+      BFR_TEST_PLUGIN_DIR: ${{ github.workspace }}/build/backups-for-restic
       BFR_DB_HOST: 127.0.0.1
       BFR_DB_ADMIN_USER: root
       BFR_DB_ADMIN_PASSWORD: root
@@ -91,6 +92,7 @@ jobs:
           key: tools-${{ runner.os }}-${{ hashFiles('bin/install-test-tools.sh') }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh restic rest-server wp-cli
+      - run: bin/build-package.sh
       - run: bin/test-site.sh install
       - run: bin/test-site.sh install-multisite
       - run: ulimit -c "$(ulimit -Hc)" && bin/test-site.sh start

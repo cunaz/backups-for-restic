@@ -29,7 +29,7 @@
 # Needs a running MySQL or MariaDB server. The database administrator defaults to root over
 # the local socket; set BFR_DB_ADMIN_USER and BFR_DB_ADMIN_PASSWORD (and BFR_DB_HOST) to
 # override, as CI does. Everything else lives under .tools/site/. Development tooling only.
-# Set BFR_TEST_PLUGIN_DIR to install a copy of a built plugin package for browser tests.
+# Set BFR_TEST_PLUGIN_DIR to install a copy of a built plugin package in both sites.
 # A second site can use separate BFR_SITE_TOOLS_DIR, BFR_DB_NAME and BFR_SITE_PORT values.
 # BFR_WP_VERSION selects one of the checksum-pinned releases below.
 # BFR_DISABLE_WP_CRON=1 at install disables automatic cron for measured-worker benchmarks.
@@ -72,6 +72,17 @@ admin_sql() {
 		args+=(-h "$DB_HOST")
 	fi
 	mysql "${args[@]}" -e "$1"
+}
+
+install_test_plugin() {
+	local destination="$1/wp-content/plugins/backups-for-restic"
+	if [ -n "${BFR_TEST_PLUGIN_DIR:-}" ]; then
+		test -f "$BFR_TEST_PLUGIN_DIR/backups-for-restic.php"
+		mkdir "$destination"
+		cp -R "$BFR_TEST_PLUGIN_DIR/." "$destination/"
+	else
+		ln -s "$ROOT" "$destination"
+	fi
 }
 
 install_site() {
@@ -124,12 +135,7 @@ install_site() {
 		file_put_contents( $site . "/wp-config.php", $config );
 	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL" "${MEMORY_MIB}M"
 
-	if [ -n "${BFR_TEST_PLUGIN_DIR:-}" ]; then
-		test -f "$BFR_TEST_PLUGIN_DIR/backups-for-restic.php"
-		cp -R "$BFR_TEST_PLUGIN_DIR" "$SITE/wp-content/plugins/backups-for-restic"
-	else
-		ln -s "$ROOT" "$SITE/wp-content/plugins/backups-for-restic"
-	fi
+	install_test_plugin "$SITE"
 	mkdir -p "$SITE/wp-content/mu-plugins"
 	ln -s "$ROOT/bin/test-site-diagnostics.php" "$SITE/wp-content/mu-plugins/test-site-diagnostics.php"
 	ln -s "$ROOT/bin/test-site-hostile-filters.php" "$SITE/wp-content/mu-plugins/test-site-hostile-filters.php"
@@ -184,7 +190,7 @@ install_multisite() {
 	# Without a port: a network's address has none, and this site is never served.
 	"${wp[@]}" core multisite-install --url="http://127.0.0.1" --title="Backup test network" \
 		--admin_user=admin --admin_password=admin-password-test-only --admin_email=admin@example.com --skip-email
-	ln -s "$ROOT" "$MS_SITE/wp-content/plugins/backups-for-restic"
+	install_test_plugin "$MS_SITE"
 }
 
 start_server() {
