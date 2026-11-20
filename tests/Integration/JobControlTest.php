@@ -388,7 +388,7 @@ final class JobControlTest extends TestCase {
 	private static function probe_as_a_browser(): array {
 		[ $status, $probe, $raw ] = TestSite::api( 'POST', '/environment/probe' );
 		self::assertSame( 200, $status, $raw );
-		self::assertStringStartsWith( TestSite::URL . '/wp-content/backups-for-restic/probe/', (string) ( $probe['url'] ?? '' ), $raw );
+		self::assertStringStartsWith( TestSite::url() . '/wp-content/backups-for-restic/probe/', (string) ( $probe['url'] ?? '' ), $raw );
 		[ $seen, $body ]           = TestSite::visit( (string) $probe['url'] );
 		[ $status, $report, $raw ] = TestSite::api(
 			'POST',

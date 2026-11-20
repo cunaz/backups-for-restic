@@ -14,8 +14,6 @@ use BackupsForRestic\Storage\PrivateDirectory;
  */
 final class TestSite {
 
-	public const string URL = 'http://127.0.0.1:8890';
-
 	/** The administrator's WordPress password, as bin/test-site.sh install sets it. */
 	public const string ADMIN_PASSWORD = 'admin-password-test-only';
 
@@ -60,11 +58,29 @@ final class TestSite {
 		];
 	}
 
+	/** The local URL used by bin/test-site.sh. */
+	public static function url(): string {
+		$port = getenv( 'BFR_SITE_PORT' );
+		if ( false === $port || '' === $port ) {
+			$port = '8890';
+		}
+		if ( ! ctype_digit( $port ) || (int) $port < 1 || (int) $port > 65535 ) {
+			throw new \RuntimeException( 'BFR_SITE_PORT must be a valid loopback port.' );
+		}
+		return 'http://127.0.0.1:' . (int) $port;
+	}
+
+	/** Directory containing the selected WordPress installations, credentials and diagnostics. */
+	public static function tools_dir(): string {
+		$path = getenv( 'BFR_SITE_TOOLS_DIR' );
+		return false === $path || '' === $path ? dirname( __DIR__, 2 ) . '/.tools' : $path;
+	}
+
 	/**
 	 * The site's directory.
 	 */
 	public static function root(): string {
-		return dirname( __DIR__, 2 ) . '/.tools/site';
+		return self::tools_dir() . '/site';
 	}
 
 	/**
@@ -79,7 +95,7 @@ final class TestSite {
 	 * bin/test-site.sh install.
 	 */
 	public static function administrator(): string {
-		$file        = dirname( __DIR__, 2 ) . '/.tools/site-app-password';
+		$file        = self::tools_dir() . '/site-app-password';
 		$credentials = is_file( $file ) ? file_get_contents( $file ) : false;
 		return false === $credentials ? '' : trim( $credentials );
 	}
@@ -91,7 +107,7 @@ final class TestSite {
 		if ( '' === self::administrator() || ! RestServer::available() ) {
 			return false;
 		}
-		$handle = curl_init( self::URL . '/wp-login.php' );
+		$handle = curl_init( self::url() . '/wp-login.php' );
 		curl_setopt_array(
 			$handle,
 			[
@@ -112,7 +128,7 @@ final class TestSite {
 	 */
 	public static function api( string $method, string $route, ?array $data = null, ?string $credentials = null ): array {
 		$credentials ??= self::administrator();
-		$handle        = curl_init( self::URL . '/?rest_route=/backups-for-restic/v1' . $route );
+		$handle        = curl_init( self::url() . '/?rest_route=/backups-for-restic/v1' . $route );
 		$options       = [
 			CURLOPT_RETURNTRANSFER => true,
 			CURLOPT_CUSTOMREQUEST  => $method,
@@ -141,7 +157,7 @@ final class TestSite {
 	 * @param int $timeout Seconds to wait for the answer; the request goes on without the client.
 	 */
 	public static function cron( int $timeout = 60 ): void {
-		$handle = curl_init( self::URL . '/wp-cron.php?doing_wp_cron' );
+		$handle = curl_init( self::url() . '/wp-cron.php?doing_wp_cron' );
 		curl_setopt_array(
 			$handle,
 			[
@@ -198,7 +214,7 @@ final class TestSite {
 			// A server that is gone never finishes the job: say so now instead of at the deadline.
 			$unanswered = 0 === $status ? $unanswered + 1 : 0;
 			if ( $unanswered >= 30 ) {
-				Assert::fail( 'The site stopped answering; see .tools/site-server.log.' );
+				Assert::fail( 'The site stopped answering; see ' . self::tools_dir() . '/site-server.log.' );
 			}
 			sleep( 1 );
 		} while ( time() < $deadline );
@@ -319,7 +335,7 @@ final class TestSite {
 		exec( escapeshellarg( dirname( __DIR__, 2 ) . '/bin/test-site.sh' ) . ' stop 2>&1', $output, $status );
 		Assert::assertSame( 0, $status, implode( "\n", $output ) );
 		// Written so that the shell that runs pgrep does not match its own command line.
-		$pattern = '[-]S 127[.]0[.]0[.]1:' . (string) parse_url( self::URL, PHP_URL_PORT );
+		$pattern = '[-]S 127[.]0[.]0[.]1:' . (string) parse_url( self::url(), PHP_URL_PORT ) . '([[:space:]]|$)';
 		for ( $attempt = 0; $attempt < 100; $attempt++ ) {
 			$left = [];
 			exec( 'pgrep -f -- ' . escapeshellarg( $pattern ), $left );
@@ -434,14 +450,14 @@ final class TestSite {
 	 * The directory of the multisite network (bin/test-site.sh install-multisite).
 	 */
 	public static function network_root(): string {
-		return dirname( __DIR__, 2 ) . '/.tools/site-ms';
+		return self::tools_dir() . '/site-ms';
 	}
 
 	/**
 	 * Whether WP-CLI is installed (bin/install-test-tools.sh wp-cli).
 	 */
 	public static function has_wp_cli(): bool {
-		return is_file( dirname( __DIR__, 2 ) . '/.tools/bin/wp' );
+		return is_file( self::tools_dir() . '/bin/wp' );
 	}
 
 	/**
@@ -452,7 +468,7 @@ final class TestSite {
 	 * @return array{int, string} Exit status and everything the command printed.
 	 */
 	public static function wp( array $arguments, ?string $path = null ): array {
-		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( dirname( __DIR__, 2 ) . '/.tools/bin/wp' ) . ' --no-color --path=' . escapeshellarg( $path ?? self::root() );
+		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( self::tools_dir() . '/bin/wp' ) . ' --no-color --path=' . escapeshellarg( $path ?? self::root() );
 		foreach ( $arguments as $argument ) {
 			$command .= ' ' . escapeshellarg( $argument );
 		}

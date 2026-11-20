@@ -163,7 +163,7 @@ final class RestoreJobTest extends TestCase {
 		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ), 'The restore released its lock.' );
 
 		// What is staged is as private as the rest of the directory.
-		$handle = curl_init( TestSite::URL . '/wp-content/' . PrivateDirectory::NAME . '/restores/' . $job['id'] . '/entries.jsonl' );
+		$handle = curl_init( TestSite::url() . '/wp-content/' . PrivateDirectory::NAME . '/restores/' . $job['id'] . '/entries.jsonl' );
 		curl_setopt_array(
 			$handle,
 			[

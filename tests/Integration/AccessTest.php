@@ -161,7 +161,7 @@ final class AccessTest extends TestCase {
 
 	public function test_database_writes_require_explicit_confirmation_in_the_json_body(): void {
 		foreach ( [ '/restores/' . self::JOB . '/database/apply', '/database-changes/' . self::JOB . '/undo' ] as $route ) {
-			[ $status, $error, $raw ] = TestSite::api( 'POST', $route . '&reviewed=true&site_url=' . rawurlencode( TestSite::URL ), [] );
+			[ $status, $error, $raw ] = TestSite::api( 'POST', $route . '&reviewed=true&site_url=' . rawurlencode( TestSite::url() ), [] );
 			self::assertSame( 400, $status, $raw );
 			self::assertSame( 'backups_for_restic_live_confirmation', $error['code'] ?? null, $raw );
 		}
@@ -255,7 +255,7 @@ final class AccessTest extends TestCase {
 
 		foreach ( [ '/', '/index.php', '/.htaccess', '/web.config', '/jobs/', '/cache/', '/restores/' ] as $path ) {
 			self::assertFileExists( TestSite::private_dir() . $path );
-			$handle = curl_init( TestSite::URL . '/wp-content/' . PrivateDirectory::NAME . $path );
+			$handle = curl_init( TestSite::url() . '/wp-content/' . PrivateDirectory::NAME . $path );
 			curl_setopt_array(
 				$handle,
 				[

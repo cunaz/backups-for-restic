@@ -205,7 +205,7 @@ recorded with restic 0.19.1 can be regenerated with `bin/record-vectors.sh` and
 ### 5.3 Database and integration tests
 
 Set `BFR_SITE_MEMORY_MIB=96` for both `bin/test-site.sh install` and `start` to run
-the HTTP fixture at the supported minimum. The default is 128 MiB. The launcher sets
+the HTTP fixture at the supported minimum. The default is 128 MiB. When running multiple fixtures, pass the same `BFR_SITE_TOOLS_DIR` and `BFR_SITE_PORT` to the installer, server and PHPUnit, and give each fixture its own `BFR_DB_NAME`. The launcher sets
 both the PHP ceiling and WordPress's administrative ceiling, so cron uses the same limit.
 
 The **database suite** dumps tables that exercise every code path (keyset and offset

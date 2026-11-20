@@ -120,7 +120,7 @@ final class RestoreStagingTest extends TestCase {
 	 */
 	private function redeem( array $form ): array {
 		$url = $form['url'] ?? null;
-		self::assertSame( TestSite::URL . '/wp-admin/admin-post.php', $url );
+		self::assertSame( TestSite::url() . '/wp-admin/admin-post.php', $url );
 		self::assertIsArray( $form['fields'] ?? null );
 		$handle  = curl_init( $url );
 		$headers = '';
