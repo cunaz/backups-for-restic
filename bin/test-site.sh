@@ -13,7 +13,7 @@
 #            served: the tests of the multisite refusal (ADR 0026) use it through WP-CLI.
 #            Needs `install` (for the WordPress archive) and bin/install-test-tools.sh wp-cli.
 #   start    starts PHP's built-in web server with several workers and the limits of the
-#            acceptance criteria: max_execution_time = 30, memory_limit = 128M, and
+#            acceptance criteria: max_execution_time = 30, memory_limit = 128M by default, and
 #            set_time_limit() disabled, as on many shared hosts. The JIT compiler is off, as
 #            it is by default in PHP 8.3: with PHP's tracing JIT (which setup-php switches on
 #            in CI) the server's processes died by SIGSEGV in backup ticks, on PHP 8.3.6 and
@@ -41,6 +41,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS="${BFR_SITE_TOOLS_DIR:-$ROOT/.tools}"
 SITE="$TOOLS/site"
+MEMORY_MIB="${BFR_SITE_MEMORY_MIB:-128}"
+if [[ ! "$MEMORY_MIB" =~ ^[1-9][0-9]*$ ]]; then
+	echo "BFR_SITE_MEMORY_MIB must be a positive number of MiB." >&2
+	exit 2
+fi
 WP_VERSION="${BFR_WP_VERSION:-7.1.5}"
 case "$WP_VERSION" in
 	7.1.5) WP_SHA256=053857d980eaee8702c617c685948becb9be2523ba0dcbc98e4dbb2300367c79 ;;
@@ -94,7 +99,7 @@ install_site() {
 		FLUSH PRIVILEGES;"
 
 	php -r '
-		[ , $site, $host, $name, $user, $password, $url ] = $argv;
+		[ , $site, $host, $name, $user, $password, $url, $memory_limit ] = $argv;
 		$config = file_get_contents( $site . "/wp-config-sample.php" );
 		$config = str_replace(
 			[ "database_name_here", "username_here", "password_here", "\x27localhost\x27" ],
@@ -111,13 +116,13 @@ install_site() {
 			. "define( \x27WP_DEBUG_DISPLAY\x27, false );\n"
 			. "define( \x27FS_METHOD\x27, \x27direct\x27 );\n"
 			// Ticks call wp_raise_memory_limit(); without this they would run with 256M.
-			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, \x27128M\x27 );\n";
+			. "define( \x27WP_MAX_MEMORY_LIMIT\x27, " . var_export( $memory_limit, true ) . " );\n";
 		if ( "1" === getenv( "BFR_DISABLE_WP_CRON" ) ) {
 			$extra .= "if ( ! defined( \x27DISABLE_WP_CRON\x27 ) ) { define( \x27DISABLE_WP_CRON\x27, true ); }\n";
 		}
 		$config = str_replace( "/* That\x27s all, stop editing!", $extra . "\n/* That\x27s all, stop editing!", $config );
 		file_put_contents( $site . "/wp-config.php", $config );
-	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL"
+	' "$SITE" "$DB_HOST" "$DB_NAME" "$DB_USER" "$DB_PASSWORD" "$URL" "${MEMORY_MIB}M"
 
 	if [ -n "${BFR_TEST_PLUGIN_DIR:-}" ]; then
 		test -f "$BFR_TEST_PLUGIN_DIR/backups-for-restic.php"
@@ -195,7 +200,7 @@ start_server() {
 	# The log is appended, so that a restart keeps what happened before it.
 	BFR_SITE_REQUEST_LOG="$TOOLS/requests.log" PHP_CLI_SERVER_WORKERS="${BFR_SITE_WORKERS:-4}" nohup "${trace[@]}" php \
 		-d max_execution_time=30 \
-		-d memory_limit=128M \
+		-d "memory_limit=${MEMORY_MIB}M" \
 		-d disable_functions=set_time_limit \
 		-d opcache.jit=disable \
 		-d log_errors=1 \

@@ -50,11 +50,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { wordpress: '7.1.5', php: '8.3' }
-          - { wordpress: '7.0.9', php: '8.5' }
-          - { wordpress: '6.7.12', php: '8.3' }
+          - { wordpress: '7.1.5', php: '8.3', memory: '128', large: true }
+          - { wordpress: '7.1.5', php: '8.5', memory: '128', large: false }
+          - { wordpress: '7.0.9', php: '8.3', memory: '128', large: false }
+          - { wordpress: '7.0.9', php: '8.5', memory: '128', large: true }
+          - { wordpress: '6.7.12', php: '8.3', memory: '128', large: true }
+          - { wordpress: '6.7.12', php: '8.5', memory: '96', large: false }
     env:
       BFR_WP_VERSION: ${{ matrix.wordpress }}
+      BFR_SITE_MEMORY_MIB: ${{ matrix.memory }}
       BFR_DB_HOST: 127.0.0.1
       BFR_DB_ADMIN_USER: root
       BFR_DB_ADMIN_PASSWORD: root
@@ -92,8 +96,8 @@ jobs:
       - run: ulimit -c "$(ulimit -Hc)" && bin/test-site.sh start
       - name: Integration tests
         env:
-          BFR_SITE_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
-          BFR_DB_FIXTURE_MB: ${{ (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
+          BFR_SITE_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
+          BFR_DB_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
         # The killed-tick test restarts the server from PHPUnit, which passes the limit on.
         run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist
       - name: How the server's workers ended
