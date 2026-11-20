@@ -3,12 +3,9 @@
 Security is a design input, not a review step. This document lists what we protect, from
 whom, and which control addresses each threat. Every control has an owner in the module map
 of [`02-architecture.md`](02-architecture.md). The controls of the WordPress-free core have
-tests in the unit and conformance suites. The controls of the WordPress layer (the
-capability check of each route, the password check of the recovery kit, the multisite
-refusal, uninstall) are tested only where the integration suite reaches them: it calls one
-route without credentials and searches four responses for secrets. Tests for that layer are
-planned for Milestone 3. Controls for restore (T-10, download tokens, T-24) arrive with
-restore in Milestone 3.
+tests in the unit and conformance suites. The WordPress integration suite enumerates the registered REST routes and their
+capability checks. Packaged browser tests cover staged downloads, reviewed live changes,
+cancellation, undo and recovery across independently installed sites.
 
 Contents: 1 Principles · 2 Assets · 3 Actors and trust boundaries · 4 Threats and controls ·
 5 Secrets · 6 Cryptography and format implementation · 7 Network · 8 Filesystem ·
@@ -85,8 +82,8 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 
 | ID | Threat | Control(s) | Residual |
 | --- | --- | --- | --- |
-| T-01 | Unauthorised user starts a backup/restore, changes settings, downloads staged files [E, T] | One capability, `manage_options`, filterable through `backups_for_restic_capability`. There is no helper class: the filter is applied in two places, `RestRoutes::allowed()`, which is the `permission_callback` of every route, and the menu registration in `AdminPage`. Core's REST nonce for cookie sessions; no public endpoint. One-time download tokens arrive with restore in Milestone 3 | compromised admin account |
-| T-02 | CSRF on destructive actions (restore, apply, prune, unlock) [T] | every state change is a REST request that needs core's REST nonce or an Application Password; the plugin has no forms and no `admin-post` or `admin-ajax` handlers; core `SameSite` cookies. Forget and prune start with one click: typed confirmation words do not exist and are planned with the restore confirmations in Milestone 3 | — |
+| T-01 | Unauthorised user starts a backup/restore, changes settings or downloads staged files [E, T] | The menu and every REST route enforce the configured backup capability. Live file writes also require `update_core` and permission under the host file modification policy. Live database writes require `manage_options`, `edit_users`, `promote_users` and `update_core` alongside the backup capability. A download grant authorizes one exact staged subject. | Compromised administrator account or unredeemed download grant |
+| T-02 | CSRF on destructive actions [T] | WordPress authenticates REST requests with its cookie nonce or an Application Password. File and database apply/undo each require an operation-specific signed review, explicit acknowledgment, the exact home URL and the confirming user’s WordPress password in the JSON body. The download form uses a one-time POST token. | An authenticated administrator can intentionally authorize a destructive change. |
 | T-03 | Secrets leak through the database (SQL injection elsewhere, leaked DB dump) [I] | repository password, REST password and cached master key encrypted with a key derived from `wp-config.php` salts (§5); `autoload = no`; constants in `wp-config.php` as an alternative | attacker with DB **and** `wp-config.php` |
 | T-04 | Secrets leak via logs, notices, e-mails, REST responses, HTML forms [I] | `Secret` type redacts itself; `Redactor` masks the registered secret values in job files and event lines (§12); REST errors and e-mails are built from codes, not from log lines; secret fields are write-only; after the setup the recovery kit is sent only with the administrator's WordPress password (§5.5); the stored REST password goes only to the server it was saved for (T-28); tests search the files under `jobs/` and four REST responses for both passwords | browser extensions on the admin's machine |
 | T-05 | Web access to the private directory (caches, checkpoints, staging, KDF checkpoint) [I, T] | directory outside the web root recommended and supported; otherwise `.htaccess`, `web.config`, `index.php`, `0700`; **active HTTP probe**: if it reads its file back, the Doctor is critical and backups stop; the cache is encrypted with the master key; from Milestone 3 staging and import files `0600` and short-lived | servers that serve dotfiles and ignore modes, caught by the probe when it can run. Where the site cannot request itself, the administrator's browser makes the request and reports the answer; until one has, the finding is `unverified`; a restore requires a verified denial before it stages plaintext under a public path |
@@ -94,7 +91,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | T-07 | Tampered or corrupted repository objects accepted (malicious server, MITM, disk error) [T] | Poly1305 tag verified before any decryption (constant time); blob id (SHA-256 of plaintext) verified after decryption; the names of index, snapshot and lock files verified against their content on download, the name of a pack when the check reads the whole pack; index and tree JSON validated against expected shapes; a failed tag aborts the job with `authentication_failed`, a wrong id or shape with `repository_damaged` | — |
 | T-08 | Weak password brute-forced from a leaked key file [I] | generated passwords are 192-bit random; a password that somebody chose for a new repository, in the request or in `wp-config.php`, must have at least 12 characters, which the core enforces (`Connection\Setup::create()` refuses a shorter one with `password_too_short`); scrypt with `N ≥ 16384, r = 8` (restic's default); key files live only on the repository server | weak user passwords remain weak; the password of an existing repository is taken as it is |
 | T-09 | Cached master key or KDF checkpoint read from disk [I] | master key only in the encrypted secret store (DB), never on disk; the scrypt ROMix table is written to the private directory only during an unlock, created with mode `0600` under a umask of `077` (`Crypto\Scrypt::open_table()`), and deleted afterwards; the table alone does not reveal the password | same-user attacker during an unlock |
-| T-10 | Path traversal or symlink attack during restore/apply [T] | staging first; `realpath` containment; symlinks in staging refused; `wp-config.php` and the plugin directory skipped unless chosen; dry-run report | malicious content inside a legitimate backup (documented) |
+| T-10 | Path traversal or symlink attack during restore/apply [T] | Private staging, verified parent directories, live-root containment, checked source and destination identities, reviewed file hashes and an undo journal. The controller excludes its own plugin and private state. Core startup paths, configuration, must-use plugins and drop-ins require offline recovery. | Malicious content in a legitimately authorized backup. |
 | T-11 | Attacker on the server deletes or corrupts backups (ransomware) [T, D] | recommend **append-only** on the repository server (rest-server `--append-only`, or the repository option of BorgBase) with retention mode `external`; `--keep-within` guard; prune-lite and forget only in `plugin` mode; stale-backup alerts of the server's operator, where offered, as independent monitoring | in `plugin` mode the credentials can delete; operator's documented choice |
 | T-12 | Fake snapshots injected to expire real ones through count-based retention [T] | `keep-within 2d` default, and a floor the core enforces: `keep-within` of at least one day or `keep-last` of at least 1 (§13); forget selects only the snapshots with this site's host name that carry the tags `backups-for-restic` and `site:<hash>` and treats them as one group ([ADR 0010](adr/0010-retention-and-append-only.md)); monthly check | noise within the window |
 | T-13 | Network attacker intercepts or modifies traffic [I, T] | only `https://`; TLS verified against WordPress' CA bundle or an uploaded CA certificate for a self-hosted server, never disabled; redirects disabled so credentials never follow a redirect to another host; every object is encrypted and authenticated end-to-end anyway | — |
@@ -108,7 +105,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | T-21 | On multisite, a site administrator backs up or restores the whole network [E] | activation refused on multisite in 1.0, network-wide and per site; runtime guard keeps the plugin inert if activated otherwise ([ADR 0026](adr/0026-multisite-deferred.md)) | — |
 | T-22 | Races: two ticks, two jobs, two uploads of the same pack [T, D] | `flock` on `runner.lock` for ticks; lease with expiry; single-active-job invariant: the check for an active job and the write of a new one happen under an exclusive `flock` on `jobs/create.lock`; after its creation only the holder of `runner.lock` writes a job's `job.json`, and a request to cancel is a marker file of its own, `jobs/<id>/cancel-requested`, which a tick reads before every step, so neither can overwrite or lose the other; content-addressed names make duplicate uploads harmless (server answers 403 for an existing object, treated as success after a `HEAD` size check) | NFS without `flock` (documented) |
 | T-23 | Plugin update introduces malicious code (maintainer account, CI, WordPress.org credentials) [T] | signed tags; SVN deployment only from CI in a protected environment that the owner approves per release; dedicated WordPress.org SVN password as an environment secret, rotated yearly and on suspicion; 2FA on the owner's WordPress.org and GitHub accounts; no runtime third-party code; Dependabot; post-deploy diff of the SVN tag against the built package | compromise of GitHub or WordPress.org infrastructure; **accepted**: bus factor 1 for releases ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
-| T-24 | WP-CLI `recovery-kit` output captured in shell history or logs [I] | the command does not exist yet (planned for Milestone 3); when it comes: refuses non-TTY output without `--force`; logged as an event (who, when) | shell access as the PHP user already implies full access |
+| T-24 | WP-CLI `recovery-kit` output captured in shell history or logs [I] | interactive terminal required unless the operator passes `--force`. An explicitly selected user needs the backup-management capability. Delivery requires a successful audit write (§5.5) | shell access as the PHP user already implies full access |
 | T-25 | Timing side channels in PHP code touching secrets [I] | Poly1305 without secret-dependent branches or table lookups, tags compared with `hash_equals` ([ADR 0027](adr/0027-poly1305-in-pure-php.md)); comparisons of ids with `hash_equals`; scrypt's Salsa20/8 is add-rotate-xor only; table lookups in the chunker depend on file data, not secrets | PHP's own variability — no known practical attack |
 | T-26 | An administrator-configured server URL makes the site send requests to internal services (SSRF) [I, T] | only administrators configure the URL; HTTPS only; redirects disabled; responses are parsed as restic objects and never shown raw; errors show status codes only; the BorgBase preset restricts the host to `*.repo.borgbase.com` ([ADR 0025](adr/0025-repository-servers.md)) | administrators can usually run arbitrary code anyway |
 | T-27 | An uploaded CA certificate weakens TLS for other requests [I, T] | the certificate applies only to requests to the configured repository server (per-request `sslcertificates`), never globally; PEM validated with `openssl_x509_parse`; stored in the private directory | — |
@@ -124,7 +121,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | Repository master key | derived once from the password via the key file | changes only with `restic copy` to a new repository | every seal/open; cached in the secret store |
 | REST password | the `.htpasswd` of the rest-server, or the BorgBase control panel | change it on the server. After setup the plugin takes the new one under Settings → Repository, where it is tested against the server before it is saved, or through the constant `BACKUPS_FOR_RESTIC_REST_PASSWORD` | `Authorization` header |
 | REST username | the `.htpasswd` of the rest-server, or the BorgBase control panel; stored as a plain setting, not as a secret, and not masked in logs | with the password; after setup through the constant `BACKUPS_FOR_RESTIC_REST_USERNAME` | `Authorization` header |
-| Download tokens (Milestone 3) | 256 random bits per download, issued by `Storage\DownloadTokens` ([ADR 0038](adr/0038-download-zip-and-tokens.md)) | one-time, 1 h; at most 256 at once, the oldest gives way | download URL. Only the SHA-256 hashes of the token and of what it allows to download are stored, with the expiry, in one owner-only file of the private directory that is written atomically. Redeeming compares in constant time and removes the token under a file lock before it answers, so of two requests with one token one is served. The routes that issue and redeem tokens follow with package 2.4 |
+| Download tokens | 256 random bits per download from `Storage\DownloadTokens` | Single use, one hour, at most 256 outstanding | An authenticated REST request issues a grant for the exact job, download kind and file path. Only token and subject hashes plus expiry are stored in an owner-only file. The POST download redeems the grant atomically and reopens the checked staged file. Token and file name stay out of the URL. |
 
 ### 5.2 Storage: encrypted option, or constants
 
@@ -174,8 +171,7 @@ Settings → Repository ([disaster-recovery guide](06-disaster-recovery.md)).
 1. The `Authorization` header of HTTPS requests to the repository host (TLS protected). The
    stored REST password is sent only to the host, port and user name it was saved for
    (T-28).
-2. The recovery kit, in the answers of three REST routes (§5.5). There is no WP-CLI command
-   for it yet; one is planned for Milestone 3 (T-24).
+2. The recovery kit, in the answers of three REST routes and on explicit WP-CLI export (§5.5, T-24).
 3. The fields of the setup wizard in which an administrator types the REST password or the
    password of an existing repository, and the requests that carry them to the site. After
    the setup the Settings tab has the same two fields, to enter the passwords again; the
@@ -198,7 +194,7 @@ carries `Cache-Control: no-store`.
   download (`text/plain`). `POST /setup/complete` requires the checkbox "I have stored the
   recovery kit outside this server"; until then no backup and no maintenance job can be
   started, neither by the heartbeat nor through REST or WP-CLI (`setup_incomplete`).
-- **After the setup** the kit is shown only to an administrator who sends the WordPress
+- **In the admin area after setup**, the kit is shown only to an administrator who sends the WordPress
   password of the current user with the request (`wp_check_password`): through
   `POST /recovery-kit`, which the Settings tab uses, and equally through `create` and
   `connect`, which otherwise answer 403 `wrong_user_password`. The password is asked for in
@@ -206,8 +202,11 @@ carries `Cache-Control: no-store`.
 - If the settings name an uploaded CA certificate that is missing from the private
   directory, the kit is refused with `ca_certificate_missing`: without the certificate
   restic could not reach the server, and the kit would be useless.
-- Every delivery of the kit is recorded: time, user and way (`create`, `connect` or
-  `settings`), the last twenty in the state option, and the action
+- The local WP-CLI command requires completed setup. A selected WordPress user needs the
+  backup-management capability. An invocation by the shell operator without a selected
+  user is recorded as WP-CLI (user ID 0). A pipe or redirected file requires `--force`.
+- Every delivery requires a durable audit entry with time, user and method (`create`, `connect`,
+  `settings` or `cli`), the last twenty in the state option, and the action
   `backups_for_restic_recovery_kit_shown` fires for audit plugins. The Settings tab shows
   the latest one, so an administrator sees when somebody else looked at the kit. A refused
   request is not recorded.
@@ -322,8 +321,8 @@ carries `Cache-Control: no-store`.
   document this version cannot read, for example after a downgrade, is neither listed nor
   removed, because nothing proves that its job has ended; it goes with a version that can
   read the document, or with the uninstall.
-  Planned: deletion after a successful apply. Database import files follow the same rules
-  when they arrive.
+  Active review, apply and undo jobs can pin their source while they run. Database
+  rehearsal reports and ZIP downloads share staging's ownership and expiry rules.
 - Restore staging is owner-only whatever the snapshot recorded: every staged file is `0600`
   and every staged directory `0700`. A snapshot's `0644` or `0666` file and its `0755` or
   `0777` directory are never staged with those modes; the original mode is kept in the
@@ -341,8 +340,9 @@ carries `Cache-Control: no-store`.
   nodes are recorded outside the payload, never created. Local flock, creation intents and
   committed file/report offsets make interrupted ticks repeatable (ADR 0036). These checks
   rely on the caller keeping staging private; portable PHP cannot eliminate races with a
-  local process that controls those directories. The later apply planner must also enforce
-  live-root containment; no apply or public staging-download route exists yet.
+  local process that controls those directories. The live planner binds each operation
+  to the verified source and destination. The worker rechecks the reviewed state before
+  writing. Browser downloads require a single-use grant and a still-eligible staged file.
 - The zip writer for downloads (`Storage\Zip\ZipWriter`, ADR 0038) reads staging the same
   way: it inspects every entry with `lstat()` and ends on a symbolic link, a second hard
   link or a special file. It refuses names that are not valid UTF-8 or that could leave the
@@ -352,15 +352,14 @@ carries `Cache-Control: no-store`.
 
 ## 9. WordPress layer
 
-One capability (`manage_options`, filterable through `backups_for_restic_capability`;
-multisite refused in 1.0). No helper class wraps it: the filter is applied in
-`RestRoutes::allowed()`, the `permission_callback` of every route, and where `AdminPage`
-registers the menu. The plugin has no forms, so there are no form nonces: every action is a
-REST request with core's REST nonce or an Application Password. Validate-then-reject for
-anything that reaches the engine or the filesystem; escape on output; one read of a
-superglobal, the sanitised `tab` parameter of the admin page; `ABSPATH` guard in every file;
-`uninstall.php` guarded by `WP_UNINSTALL_PLUGIN`; no `eval`, dynamic includes, `unserialize`
-or remote code; assets enqueued only on the plugin's screen; no third-party assets or CDNs.
+The admin menu, REST routes and worker authorization share the configured backup
+capability (default `manage_options`). Live file and database operations apply the
+additional checks in T-01 and T-02. Staging and rehearsal use the backup capability.
+Multisite is refused. The download handler accepts a one-time bearer grant issued through
+the authenticated REST API. It uses POST, streams the verified descriptor and disables
+caching. File-change maintenance admits the initiating control cookie or header to the
+ordinary WordPress authorization checks for that job. The plugin enqueues admin assets
+only on its own screen and uses local WordPress scripts.
 
 The routes and the command that read snapshots (`GET /snapshots…`, `ls`) treat every name,
 link target, time and tag of a snapshot as untrusted: another client of the repository, or
@@ -478,8 +477,8 @@ release. `readme.txt` links to the policy.
 - [ ] `reveal(` call sites equal the allow-list.
 - [ ] Banned-function sniff passes (`exec`, `shell_exec`, `system`, `passthru`, `popen`,
       `proc_open`, `eval`, `unserialize`, `extract`).
-- [ ] Every REST route has a `permission_callback`. A test that enumerates the routes does
-      not exist yet and is planned for Milestone 3; the plugin has no forms.
+- [ ] The release passes `tests/Integration/AccessTest.php`, including anonymous,
+      delegated-role and registered-route coverage, and its packaged download test.
 - [ ] Conformance suite green against the pinned restic releases (0.19.1, 0.18.1, 0.14.0)
       and the latest release at that time.
 - [ ] Covered mutation score of `Crypto`, `Format` and `Engine\Forget` at or above 90 %;
@@ -494,7 +493,7 @@ release. `readme.txt` links to the policy.
 - [ ] Log fixtures from integration runs contain no secret value.
 - [ ] HTTP probe behaves on Apache and nginx fixtures. No such fixtures exist yet: the test
       site is PHP's built-in server with a router that imitates `.htaccess`.
-- [ ] Apply refuses symlinks, `..` and outside-root destinations (Milestone 3).
+- [ ] The release passes file-plan and apply tests for symlinks, `..`, outside-root destinations and protected startup paths.
 - [ ] Append-only run against `rest-server --append-only`: a forget or prune job ends as
       `skipped: append_only`, retention switches to `external`, and lock release still works.
 - [ ] Plugin Check reports no errors; remaining warnings are the documented ones.

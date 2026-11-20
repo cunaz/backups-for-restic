@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Backups for restic
  * Description:       Encrypted, deduplicated backups of files and database in the restic repository format, written in pure PHP.
- * Version:           0.1.0-dev
+ * Version:           0.3.0-rc.1
  * Requires at least: 6.7
  * Requires PHP:      8.3
  * License:           GPL-2.0-or-later

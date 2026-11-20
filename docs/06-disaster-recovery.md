@@ -40,6 +40,16 @@ certificate: save it as `ca.pem` and add `--cacert ca.pem` to every restic comma
 kit's recipe does. The kit carries the certificate of the saved server; one that was only
 used for a connection test is not in it until that server is saved.
 
+After setup, a shell operator can display another copy with
+`wp backups-for-restic recovery-kit`. Use a private terminal. To export a new file,
+choose a previously unused path outside the website, on storage you control:
+
+```sh
+(umask 077 && set -C && wp backups-for-restic recovery-kit --force > /private/path/recovery-kit.txt)
+```
+
+The site records each delivery. Store the file with the other offline recovery material.
+
 | Lost item | Recoverable? | How |
 | --- | --- | --- |
 | REST username/password | yes | add a new `.htpasswd` entry on your rest-server; a hosted service such as BorgBase issues new ones in its control panel |
@@ -59,7 +69,14 @@ used for a connection test is not in it until that server is saved.
    **Preview live file changes**. Read the actions and live paths. A site administrator
    who can update WordPress core can acknowledge the preview, type the site's address and
    enter their WordPress password to apply the files. The site's file modification policy
-   must permit this operation. Review a fresh preview if the files changed.
+   must permit this operation. A large selection gets a background preview. Keep the tab
+   open to advance it, or reopen the preview in the same tab to resume. Use **Next file
+   changes** and **Previous file changes** to inspect the pages. A single review accepts
+   up to one million entries. Stage larger selections as separate restore jobs. A finished
+   background preview is available for one hour while its source remains available. Review a fresh
+   preview if the files changed. Use the recovery kit offline for WordPress core,
+   configuration, must-use plugins and early-loaded drop-ins. The preview identifies
+   these startup paths.
 5. The **Restores** tab lists available undo jobs and their expiry times. Choose
    **Preview undo**, review the actions, then confirm to return the affected files to
    their previous state. Use **Delete staged files** to remove the private downloads
@@ -72,6 +89,18 @@ snapshot ID and file path with the ones from your backup.
 wp backups-for-restic snapshots
 wp backups-for-restic restore 0123abcd /var/www/html/index.php --wait
 ```
+
+If a restored plugin prevents WordPress from starting, run WP-CLI from the destination.
+Use the affected plugin's slug and the ID of the file apply job. Keep Backups for restic
+loaded. The command presents the reviewed undo and asks for confirmation.
+
+```sh
+wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
+```
+
+If the database or a worker goes away during a confirmed operation, restore service and
+resume the same job with `wp backups-for-restic tick --until-idle`. Its journal records
+completed changes and checks their identities during recovery.
 
 ## Scenario B — the server is gone
 
@@ -159,11 +188,24 @@ snapshot**. The same action is available under **Backups → Restores**.
    import as described in Scenario D.
 3. Preview the staged files. The **Snapshot path** and **Live path** columns show how the
    source content and uploads map to this installation. Review and confirm the file apply
-   as in Scenario A. Preview and apply cover up to 1,000 entries and 64 MiB of staged
-   and existing file contents combined.
-4. To move the database into production, use the separate database recovery procedure with
-   the staged dump and verify the retained site address, administrator and plugin settings
-   before directing visitors to the recovered site.
+   as in Scenario A. The background job hashes large files in chunks and presents
+   up to 100 actions per page.
+4. Expand **Restore tables to the live database** and choose **Preview live database
+   changes**. Review each table marked for replacement or creation and any compatibility
+   findings. On an eligible MySQL installation, acknowledge the plan, type the destination
+   home URL, enter your WordPress password and choose **Apply database restore**. The
+   exchange keeps this site's address, the confirming administrator and active sessions,
+   roles, active plugins, cron and backup configuration. Open the site and verify its
+   content after the job succeeds.
+5. **Undo live database changes** lists the previous table generations and their expiry.
+   Choose **Preview database undo**, review the tables and confirm with the site's URL and
+   your WordPress password. Reverting returns the earlier generation to service. Changes
+   visitors made to the replaced tables after the apply belong to the generation being
+   taken out of service. Keep any new data you need before undoing.
+6. If the preview reports a blocker, use the staged SQL dump and the manual import
+   procedure in Scenario D. MariaDB's write-lock behavior requires manual import.
+   An automatic exchange requires the configured backup capability and all four WordPress
+   capabilities `manage_options`, `edit_users`, `promote_users` and `update_core`.
 
 ## Scenario C — a single file or folder
 
@@ -185,7 +227,100 @@ restic dump -a zip <snapshot-id> /var/www/html/wp-content/uploads/2026/11 > nov.
 restic dump -a tar <snapshot-id> /var/www/html/wp-content/backups-for-restic/spool/database > database.tar
 ```
 
-Extract, check the trailer lines, import in name order.
+Extract the archive into a private directory outside the web root, or unpack the
+database directory from the staging ZIP there. Create an empty recovery database and
+give its account access only to that database. Each table dump starts with a
+`DROP TABLE IF EXISTS` statement. Keep the current live database available for rollback.
+
+In Bash, change into the directory containing `000-header.sql` and `manifest.json`.
+Check the table file names against the manifest, then import in name order using one
+database connection. Replace `recovery_user` and `recovery_database` with the account
+and new database you created.
+
+```bash
+set -euo pipefail
+for table in 010-*.sql; do
+    tail -n 1 -- "$table" | grep -Eq '^-- end table rows=[0-9]+ bytes=[0-9]+$' || {
+        echo "Incomplete table dump: $table" >&2
+        exit 1
+    }
+done
+cat -- 000-header.sql 010-*.sql 900-views.sql |
+    mariadb --user=recovery_user --password recovery_database
+```
+
+Use the `mysql` client for MySQL. Check the imported table counts against the rehearsal
+or dump manifest, and start a private WordPress copy against the recovered database with
+the snapshot's table prefix. Confirm its home URL, administrator login and content
+before switching production. A manual SQL import restores the source accounts and
+options. Use the destination's recovery kit to reconnect backups if its salts differ.
+
+### Applying a rehearsed database on a running installation
+
+Open the successful database rehearsal under **Backups > Restores** and review the
+database table plan. It distinguishes replacement, creation and tables kept on the
+destination. On a compatible host the initiating WordPress administrator confirms the
+current site address and password. The job imports verified data into private tables
+first. WordPress enters maintenance during the final write-locked exchange. The current
+home and site URLs, active plugins, roles, confirming administrator and sessions, backup
+configuration and cron schedule carry across.
+
+The automatic exchange supports writable MySQL 8.0.13 or later, InnoDB tables, a
+matching prefix and WordPress schema version, and a standard single-site connection
+with a local object cache. MariaDB supports the rehearsal and the manual recovery
+procedure above. Missing source trigger information, views, foreign keys, triggers,
+CHECK constraints, incompatible accounts or unsupported database permissions can also
+require that procedure. The MySQL account needs direct access to the affected schema
+with SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, LOCK TABLES and TRIGGER, and
+global PROCESS for the physical table dictionary. If external applications or cross-schema
+views depend on the WordPress tables, use a database administrator for recovery. On shared hosting, ask the database
+administrator to perform a manual import where these grants are unavailable.
+[Full compatibility conditions](adr/0043-atomic-mysql-database-exchange.md).
+
+**Undo and edits made after apply.** An apply job records a 24-hour undo deadline.
+Within it, review and confirm the undo on the Restores screen. Undo brings the original
+generation live and copies across the current protected administrator and site state.
+New posts, users and ordinary settings created in the intervening live generation then
+remain in private database tables for a further 24 hours. Export any required newer
+data before the undo job's reported retention deadline. The plugin's heartbeat expires
+those private copies. Uninstall also removes them.
+
+**Selective recovery by a database administrator.** Use the original database apply job
+ID to open its private `jobs/<apply-job-id>/job.json`. The following command prints the
+logical name, retained physical name and expected InnoDB table ID. It reads the stored
+generation because undo changes which set of tables is retained.
+
+```bash
+jq -r '
+  .data as $d
+  | select($d.database_generation == "applied" or $d.database_generation == "undone")
+  | ($d.database_owner.prefix | startswith("_")) as $underscore
+  | ((if $underscore then "bfr_r_" else "_bfr_r_" end) + $d.database_owner.token) as $base
+  | $d.exchange_plan.pairs | to_entries[]
+  | (if $d.database_generation == "applied"
+     then [.value.before, "_b"]
+     else [.value.after, "_t"] end) as $kept
+  | select($kept[0] != null)
+  | [.value.name, ($base + $kept[1] + (.key | tostring)), $kept[0]]
+  | @tsv
+' /private/path/jobs/APPLY_JOB_ID/job.json
+```
+
+Check the original schema name and server UUID in `data.exchange_plan` against
+`SELECT DATABASE(), @@server_uuid`. For each retained name, verify its physical
+`TABLE_ID` in `information_schema.INNODB_TABLES` under `database/retained_name`.
+Export the verified tables to private storage before the retention deadline. For
+example, substitute the verified schema and physical name below. The command prompts
+for a password.
+
+```bash
+mysqldump --user=recovery_user --password --single-transaction --no-tablespaces --set-gtid-purged=OFF \
+    --skip-triggers recovery_source_database retained_table_name > retained-table.sql
+```
+
+Import the exported files into an isolated recovery database and select the rows that
+must be reconciled. Keep the job's logical-to-physical mapping with the export.
+Deleting or renaming live tables manually would bypass the plugin's generation checks.
 
 ## Scenario E — "secrets cannot be decrypted"
 

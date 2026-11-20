@@ -651,14 +651,19 @@ table and the tables themselves are read at different moments. That holds in eve
 WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
 remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
 
-The first Milestone 3 import component, `Database\Restore\TableImporter`, reads completed
-files from `<private>/restores/<job>/database/` into owned InnoDB shadows. Every row batch
-and its progress commit together; table trailers and the manifest must agree before that
-table finishes. Live tables stay unchanged. Job integration, mapped constraints and views,
-cleanup, report, maintenance during the confirmed swap, original-engine finalization and
-plugin-option preservation (`PluginStatePreserver`) are still pending. The manual path with the restic
-CLI exists today: `restic dump` of the directory as a tar, then `cat *.sql | mariadb …` in
-file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
+Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
+rows, cursor and content transcript commit in one transaction. The report compares
+engine, charset, collation and rows with the current site and lists compatibility blockers.
+Its digest and the original snapshot bind a subsequent live review to the same source.
+
+A separately confirmed database apply reimports the source on supported MySQL sites,
+compares its transcript and checks native table identities. One multi-table RENAME
+under WRITE locks swaps every selected table and its operation witness. The destination
+keeps its site address, active plugins, plugin options, cron and confirming administrator.
+The previous generation remains available for undo for 24 hours. Undo retains the entire
+post-apply generation for another 24 hours and supports manual recovery of later edits.
+MariaDB sites and sites with unsupported grants or table dependencies can export the SQL
+and import it into a separate database. [Database exchange](adr/0043-atomic-mysql-database-exchange.md), [manual recovery](06-disaster-recovery.md).
 
 ## 8. Retention, integrity checks and maintenance
 
@@ -770,26 +775,19 @@ file order ([`06-disaster-recovery.md`](06-disaster-recovery.md)).
 
 ## 9. Restore
 
-Restore in the plugin arrives with Milestone 3; this section is its plan where it is not
-built yet. Built are the engine's `Engine\Restore\RestoreRun`, which restores selected
-paths of a snapshot into a directory in resumable slices and validates every name from the
-repository, and the job type `restore` (§4.4, [ADR 0037](adr/0037-restore-job.md)), which
-`POST /jobs` starts and which stages the files in `<private>/restores/<job-id>/`, and
-`Restore\Staging` ([ADR 0040](adr/0040-restore-staging-expiry.md)), which lists what is
-staged, lets it expire and removes it (§10, `GET /restores` and `DELETE /restores/{id}` in
-§13.2). The admin area and WP-CLI have no restore yet, nothing downloads or applies what is
-staged, and a lost site is restored with the recovery kit and the restic CLI
-([`06-disaster-recovery.md`](06-disaster-recovery.md)).
-
-Safety model in [ADR 0013](adr/0013-restore-safety.md). Restores are jobs with progress.
+A restore job reads selected paths from a snapshot under a shared repository lock, verifies
+their content and writes them into a private staging directory. The admin page and WP-CLI
+can start the job. The administrator can download staged files and reports, compare
+changes against the receiving site, and separately confirm a live file or database
+operation. Staging, review, application and undo each have their own lifetime. For offline
+recovery the same snapshot can be opened with restic. [Recovery procedures](06-disaster-recovery.md).
 
 The first reader is `Engine\Snapshot\Reader` ([ADR 0034](adr/0034-snapshot-reader.md)):
 snapshot metadata with optional host/tag filters, one directory by snapshot path, and the
 site manifest. Each operation takes a shared repository lock before reading and discards
 its lazy index before releasing the lock. Longer reads refresh the lock; a lapsed lock
 refuses the result and requires a fresh read. It preserves raw name bytes, rejects ambiguous
-path components and never follows a link. The REST and browser integration follows in
-Milestone 3 phases 1.2 and 1.3.
+path components and never follows a link. The REST snapshot routes and the admin snapshot browser both use this reader.
 
 New snapshots record their manifest's original snapshot path in an encrypted locator tag,
 built from the resolved private directory (the lexically normalized path only where it
@@ -811,10 +809,10 @@ a request left behind is removed once it is a minute old.
 
 | Scenario | Flow |
 | --- | --- |
-| **Single file** | tree walk → blob ids → ranged `GET`s (adjacent blobs of one pack merged into one request) → open → verify → write to `<private>/restores/<job>/`; served through a one-time token; deleted after download or 1 h |
+| **Single file** | Verify and stage the selected bytes, then stream them on a single-use authenticated download. Staged contents expire after the configured interval (24 hours by default). |
 | **Selected paths to staging** | same per file, directories recursively; staging is owner-only (`0600` files, `0700` directories) and gets the modification time only, the modes of the snapshot are in the report ([ADR 0036](adr/0036-selected-file-staging.md)) |
-| **Apply to live site** | guarded step: dry-run report, `realpath` containment, symlinks refused, plugin directory and `wp-config.php` skipped unless chosen, maintenance mode, rename-or-copy |
-| **Database** | `database/` files to staging → trailers verified → import (§7) after a typed confirmation |
+| **Apply to live site** | Paginated review, confirmed scope and a maintenance window. Live destinations and file identities are checked again. Startup files and configuration require offline recovery. Replaced files are retained for undo. |
+| **Database** | Verify and import staged SQL into private shadow tables. A separately reviewed operation can atomically exchange and undo compatible MySQL generations. Other installations use the manual SQL procedure. |
 | **Full site (plugin works)** | files to staging → apply → database, guided |
 | **Full site (server lost)** | plain restic CLI procedure, or the wizard's "connect to existing repository" path on a fresh installation followed by the full-site flow |
 
@@ -1045,13 +1043,14 @@ conformance and integration suites.
 ### 13.1 Admin UI
 
 Menu "Backups" (`manage_options`, filterable; multisite is refused in 1.0). One admin page
-with five tabs (`AdminPage::TABS`): Dashboard (cards for the last backup, the next backup and
+with six tabs (`AdminPage::TABS`): Dashboard (cards for the last backup, the next backup and
 the repository host with its append-only status, the running job with progress and a "keep this
 tab open" hint, recent jobs, Back up now; maintenance cards for old snapshots, unused data
 with the space only a full prune reclaims, and the repository check, each with its last
 result, next run and a button; notices that stay until their cause is gone: check findings,
 a switch to retention mode `external`, and the proposal to switch back), Snapshots (the
-snapshot browser described below), Settings (Schedule, Old snapshots, Maintenance,
+snapshot browser described below), Restores (private staging, downloads, rehearsals,
+live reviews and undo), Settings (Schedule, Old snapshots, Maintenance,
 Notifications, What to back up, Advanced, and Repository with the address, the working
 directory, the cache and the recovery kit; saving sends only changed fields, so an open
 page cannot undo an automatic switch), Environment (the Doctor's checks) and Logs (the recent jobs and, for a chosen job,
@@ -1097,7 +1096,9 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /restores` | what finished restores staged, newest first (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)): for each `job`, `snapshot`, `finished`, `expires`, `files`, `bytes`, `staging` and `report`, the last two as names relative to the private directory. Snapshot, counts and `finished` come from the job document and are null once it was pruned. Also `expiry_hours`, the setting, and `removing`, the number of directories that are due or being deleted. Staging that expired and the directory of a restore that has not ended are not listed |
 | `DELETE /restores/{id}` | removes the staging directory of one job, whatever became of the job. It leaves the list at once; `removed.complete` is false when deleting takes longer than ten seconds, and the heartbeat finishes it. The answer carries the list as `GET /restores` gives it. 400 `invalid_job_id` for a name that is no job ID, 404 `restore_not_found` if nothing is staged for the job, 409 `restore_active` while the job is a restore that has not ended (an active job of another type has no staging and answers 404), 409 `job_unreadable` if its document cannot be read |
 | `POST /restores/{id}/download` | Issues a single-use browser POST form for a file, ZIP, restore report or database rehearsal report. The browser submits the grant to WordPress for streaming. |
-| `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. Use JSON boolean `include_config` to include wp-config.php explicitly. |
+| `POST /restores/{id}/database/plan`, `POST /restores/{id}/database/apply` | Review a rehearsed database exchange and confirm the exact table generations. |
+| `GET /database-changes`, `POST /database-changes/{id}/undo-plan`, `POST /database-changes/{id}/undo` | Discover retained database generations, review an undo and queue it. |
+| `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. The optional JSON boolean `include_config` includes configuration in the detailed review. Startup files, including wp-config.php, require offline recovery. |
 | `GET /undo`, `POST /undo/{id}/plan`, `POST /undo/{id}` | List reversible apply jobs, review the original files to recover, then queue the reviewed undo. |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
@@ -1117,8 +1118,13 @@ ID. Omit `paths` so the worker selects content, uploads and the database spool f
 verified source manifest. The staging list reports `fresh_install`, `archive`, the sole
 downloadable `file` when one was selected, and availability of the `database_report`.
 The fresh-install file preview includes original source and mapped destination paths.
+Both file preview routes may return HTTP 202 with a `file_plan` job. Poll that job as
+usual. Once it succeeds, send the same preview request with its `plan_job` ID and
+`offset: 0`. Each response contains at most 100 entries, `total`, `offset` and
+`next_offset`; a null next offset indicates the final page. Confirm with the same
+`plan_job` ID and digest. Completed previews expire after one hour.
 
-Live apply and undo also require `update_core` and permission to modify files under the
+Live file apply and undo also require `update_core` and permission to modify files under the
 site's `wp_is_file_mod_allowed()` policy. Preview reports list actions and their reasons.
 Confirmation uses the preview digest, a review token bound to the authenticated session,
 source job, site URL and configuration choice, explicit acknowledgment, the site's exact
@@ -1128,6 +1134,13 @@ SameSite=Strict cookie. HTTPS adds Secure. During the job's maintenance window t
 initiating client can poll or cancel the job using the cookie or the
 `X-Backups-For-Restic-Control` header. The normal WordPress capability and nonce checks
 also apply.
+
+Live database apply and undo require the configured backup capability plus
+`manage_options`, `edit_users`, `promote_users` and `update_core`. The worker checks the
+confirming user again before exchanging the tables. Database changes use a distinct
+session-bound review token, the typed home URL and the user's WordPress password.
+Staging, downloads and rehearsal use the configured backup capability. A database
+preview can report `applicable: false` with compatibility or privilege blockers.
 
 The recovery kit is in the answer of three routes. During the setup `create` and `connect`
 return it freely, which is how the wizard shows it once; from then on all three ask for the
@@ -1155,8 +1168,7 @@ directory by the token of its entry and never builds a path from names, and it m
 name that is not exact. Every entry has a checkbox. The ticked paths are listed below the
 browser with their count and live in `restoreSelection` of `assets/js/admin.js`: the full
 ID of the snapshot and a map from the token of each entry to its shown path, whether that
-text is exact, and its type. Opening another snapshot empties it. The restore controls of
-phase 2.5 start from that selection; until then nothing does. While a request runs, the
+text is exact, and its type. Opening another snapshot empties it. The restore controls use this selection to start the staging job. While a request runs, the
 tab says what it loads inside the page's live region. A locked repository
 (`repository_locked`) gets a sentence of its own and a button to try again, every other
 error the message and hint of the route. Names, tags, link targets and manifest fields come
@@ -1251,12 +1263,14 @@ with an error under the same conditions as `POST /jobs` (§13.2): before the set
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. `status` prints the last backup and the active job only.
 
-Not built yet: `forget --dry-run` (the retention preview exists in the snapshot list of the
-admin page and of `GET /snapshots`, not on the command line);
-`restore …` and `apply …`, which arrive with restore in Milestone 3. `unlock --yes`, which would remove stale locks of other hosts, stays on the
-list without a milestone. There is no command for the setup or for the recovery kit: both
-are in the admin area, where the kit asks for the WordPress password. Nothing requires
-WP-CLI.
+`restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
+private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
+records. Configuration and startup files require offline recovery. `undo <apply-job>`
+reviews and confirms reversal of live file changes. The recovery guide includes the
+`--skip-plugins` procedure for a site whose active plugin prevents normal startup.
+Use the admin page to initiate live changes, configure a repository or review retention.
+`recovery-kit` exports credentials on an interactive terminal after setup. The explicit
+`--force` option permits a pipe or file. Every delivery is audited.
 
 ### 13.4 Site Health
 
@@ -1464,7 +1478,7 @@ and schedules are slots in the site's time zone.
   secrets (`v1.` prefix), the cached index (its magic line), the options and `job.json`.
 - The options carry one layout number for settings, state and notifications in
   `backups_for_restic_schema_version` (`Storage\SchemaVersion`, 1 today), and every `job.json`
-  carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 2 since database rehearsal jobs began recording private-table ownership). A number is raised with
+  carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 3 since database exchange jobs began recording retained generations, with layouts 1 and 2 still readable). A number is raised with
   every change that a version without the change would misread. Options without a number
   and job documents without the field have the first layout; the plugin records the number
   on its first request. This first recording is an atomic insert that never changes an

@@ -25,7 +25,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Plugin {
 
-	public const string VERSION = '0.1.0-dev';
+	public const string VERSION = '0.3.0-rc.1';
 
 	/**
 	 * Registers the hooks the plugin needs.

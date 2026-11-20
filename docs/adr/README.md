@@ -60,3 +60,5 @@ corrected in place; where the implementation differs from the decision, a last s
 | [0038](0038-download-zip-and-tokens.md) | Downloads: a stored zip written by the plugin, and one-time tokens in a file |
 | [0039](0039-snapshot-routes.md) | Snapshot routes show names as text and address paths by a lossless token |
 | [0040](0040-restore-staging-expiry.md) | Restore staging expires, and a removal sets the directory aside first |
+| [0041](0041-guarded-file-changes.md) | Review staged files, apply them under a renewable WordPress maintenance lease, and retain undo records |
+| [0043](0043-atomic-mysql-database-exchange.md) | Exchange confirmed MySQL database generations under a write lock and retain undo state |

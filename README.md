@@ -1,12 +1,13 @@
 # Backups for restic
 
-> **Development version, unreleased.** Back up files and the database to an encrypted
+> **Release candidate 0.3.0-rc.1.** Back up files and the database to an encrypted
 > restic repository. In **Backups → Snapshots**, select a file or directory to restore.
 > Download the result from private staging, or review the proposed file changes before
 > applying them to this installation. A separate confirmation reverses eligible changes
 > within 24 hours. A fresh installation can connect to the repository with its recovery kit,
-> stage the original content and uploads under their new paths, and rehearse the database
-> import. For a lost server, the kit also works directly with the restic CLI.
+> stage content and uploads under their new paths, and rehearse the database import.
+> Eligible MySQL installations can apply the reviewed database and undo it for 24 hours.
+> MariaDB and incompatible schemas use the rehearsed SQL and the manual recovery guide.
 > See the [recovery guide](docs/06-disaster-recovery.md) and [release criteria](docs/05-roadmap.md).
 >
 > **Distribution:** the plugin will be published in the
@@ -112,7 +113,7 @@ than expecting an incomplete backup to count as successful.
 | Maintenance | Forget with restic's semantics; prune without repacking, including unindexed packs left by interrupted backups; structural check with sampled data | [0022](docs/adr/0022-maintenance-scope.md), [0010](docs/adr/0010-retention-and-append-only.md) |
 | Conformance | The restic CLI is the oracle in CI; every release passes `restic check --read-data` and restore parity | [0023](docs/adr/0023-restic-cli-as-conformance-oracle.md) |
 | Admin UI | Vanilla JavaScript, no build step, REST API as the only data channel | [0012](docs/adr/0012-admin-ui-without-build-step.md) |
-| Restore | Browse snapshots, stage selected files in a private directory, download and remove the staged copies | [0013](docs/adr/0013-restore-safety.md) |
+| Restore | Stage files, download them, review live changes and undo them. Rehearse SQL and exchange eligible InnoDB tables after confirmation | [0041](docs/adr/0041-guarded-file-changes.md), [0043](docs/adr/0043-atomic-mysql-database-exchange.md) |
 | Executables | The plugin never downloads, bundles or updates executables | [0016](docs/adr/0016-no-binary-provisioning.md) |
 | Distribution | WordPress.org plugin directory is the only release channel; GitHub holds source, issues and CI | [0017](docs/adr/0017-distribution-via-wordpress-org.md) |
 | Name and license | Backups for restic, slug `backups-for-restic`; GPL-2.0-or-later | [0015](docs/adr/0015-naming-and-license.md) |
@@ -127,7 +128,7 @@ than expecting an incomplete backup to count as successful.
 | --- | --- | --- |
 | PHP | 8.3 with OpenSSL, JSON, mbstring; `memory_limit` ≥ 96 MB; `max_execution_time` ≥ 30 s | 8.4 or newer, `ext-curl`, 256 MB, OPcache. The JIT is not part of the recommendation: it makes chunking about five times faster, but on PHP 8.3 its tracing mode has crashed PHP during backups in the project's tests |
 | WordPress | 6.7, single site (multisite planned for 1.1) | current release |
-| Hosting | outbound HTTPS to the repository server; a few hundred MB of disk for caches and restores | a control-panel cron fetching `wp-cron.php` every 1–5 minutes |
+| Hosting | outbound HTTPS to the repository server; private writable disk space for caches, staging and undo copies | a control-panel cron fetching `wp-cron.php` every 1–5 minutes |
 | Server software | none | none |
 | Repository server | a restic REST server with TLS, one repository per site: self-hosted rest-server or a hosted service | append-only mode enabled |
 | restic CLI | not needed on the server; to restore on another computer, restic 0.16.1 or newer, which the recovery kit's commands need (the repository format itself is readable since 0.9) | current release |

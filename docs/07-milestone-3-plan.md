@@ -5,7 +5,7 @@ the owner's. The scope and acceptance criteria are those of the
 [roadmap](05-roadmap.md#milestone-3--restore-030); this document says how the work is cut,
 in which order it is built and tested, and what must be settled first.
 
-## 1. Where the project stands
+## 1. Starting point on 2026-11-10
 
 Milestones 0 to 2 are merged into `main` (six pull requests, 2026-11-10). An audit
 of all code and documents against the plan (2026-11-10) found the engine and the job layer
@@ -36,7 +36,7 @@ owner's instruction on the day of the last engine fixes, so without the 24 hours
 engine and the merge; every one of those fixes has a test that fails without it, and the
 conformance, integration and mutation runs were green on each pull request.
 
-## 2. What exists for restore, and what does not
+## 2. Restore implementation at the start of the milestone
 
 | Part | State |
 |---|---|
@@ -106,11 +106,13 @@ changes to `Crypto`, `Format` or `Engine`, the cooling-off period of
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 3.1 | `Database\Restore\Importer` | L, in progress | Restore jobs can rehearse base tables in owned InnoDB shadows with transactional progress and bounded cleanup (ADR 0035). Kill tests cover six DDL/transaction boundaries on MySQL and MariaDB. Mapped foreign keys and views remain open. |
-| 3.2 | Report before the swap | S, in progress | The rehearsal reports the site address, prefix, verified snapshot row counts, current table names and estimated live counts. An unsupported charset currently fails the rehearsal. Detailed compatibility diagnostics and a final swap plan remain open. |
-| 3.3 | Swap and state | M | One `RENAME TABLE` statement exchanges live and shadow tables; maintenance mode lasts for that statement. Before it, the plugin's own options and its cron events are copied into the shadow options table (`PluginStatePreserver`), and, if chosen, this site's address and the current administrator's account. Afterwards the object cache is flushed and the events are scheduled again. |
-| 3.4 | Undo | S | The replaced tables stay under temporary names for 24 hours; one job swaps them back; the heartbeat removes them afterwards. |
-| 3.5 | Confirmation | S | The swap needs the WordPress password and the typed site address. |
+| 3.1 | Transactional base-table import | L, built for supported schemas | Restore rehearsals use owned InnoDB shadows, transactional row and content progress, and bounded cleanup. Kill tests exercise DDL and transaction boundaries. Mapped foreign keys and source views require a manual restore. |
+| 3.2 | Report before the swap | S, built | Verified source row counts, live estimates, engines, charsets, collations, trigger information and compatibility blockers appear in the rehearsal. The final review binds the source transcript, account, live schema and physical identities. |
+| 3.3 | Swap and state | M, built for compatible MySQL sites | One write-locked, atomic RENAME exchanges the verified generations and a recovery witness. The current address, active plugins, plugin state, cron and administrator account survive. MariaDB and incompatible sites use the manual procedure. |
+| 3.4 | Undo | S, built | The previous generation is retained for 24 hours. A separately confirmed undo restores it and retains the replaced generation, including subsequent edits, for a fresh 24 hours. The heartbeat removes verified private objects in bounded batches. |
+| 3.5 | Confirmation | S, built | The WordPress administrator confirms the current password and typed home URL against a session- and direction-bound review. The worker rechecks permissions, identity, live data structures and protected account state at commit. |
+
+[Supported engines, permissions and recovery protocol](adr/0043-atomic-mysql-database-exchange.md).
 
 The first version refuses a dump whose table prefix differs from the site's (decision D3).
 
@@ -118,7 +120,7 @@ The first version refuses a dump whose table prefix differs from the site's (dec
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 4.1 | Apply planner | M, built | WP-CLI streams the staged actions with `wp backups-for-restic apply-plan <restore-job-id>`. It checks the configured site roots, both chains of parent directories, aliases, file types and permissions. Special snapshot entries are reported as skipped. The writable preview binds source and live file hashes, parent identities and the reviewed options to the confirmation digest. It supports up to 1,000 reported entries and 64 MiB of staged and existing file contents combined. |
+| 4.1 | Apply planner | M, built | WP-CLI streams the staged actions with `wp backups-for-restic apply-plan <restore-job-id>`. It checks the configured site roots, both chains of parent directories, aliases, file types and permissions. Special snapshot entries are reported as skipped. The writable preview binds source and live file hashes, parent identities and the reviewed options to the confirmation digest. Selections over 100 entries or 8 MiB of staged and existing content use a resumable background preview. Its pages hold up to 100 actions. |
 | 4.2 | Job type `apply` | L, built | The worker repeats the confirmed preflight before writing. It keeps private copies and per-entry journals on the destination filesystem. A new regular file is linked exclusively, a replacement is renamed atomically, and a new directory is created exclusively. WordPress maintenance mode covers the mutation phase across ticks. The initiating administrator can poll and cancel the job. Only the worker plugin and its own cron events run on admitted control requests. Bootstrap-critical core, configuration, must-use plugins and drop-ins require offline restoration. A partial apply records its progress and retains its undo materials. |
 | 4.3 | Undo | S, built | A second confirmed job reverses attempted changes in reverse order for 24 hours after an apply ends. It verifies installed identities and contents, including after cancellation or interruption. Changed files and a new directory containing unrelated entries block the undo. Staging required by an apply or its undo survives ordinary staging expiry and history pruning. Downloads still expire on schedule. |
 | 4.4 | Screens | M, built | Paginated file actions, reviewed session-bound previews, site-address confirmation with the current administrator password, progress, and a separately confirmed undo. Packaged Chromium acceptance covers rejected confirmation, stale previews and exact live file contents before and after undo. |
@@ -127,10 +129,10 @@ The first version refuses a dump whose table prefix differs from the site's (dec
 
 | # | Package | Size | Notes |
 |---|---|---|---|
-| 5.1 | Import on a fresh installation | In progress | The setup wizard connects to an existing repository and stages content, uploads and a database rehearsal from the verified snapshot manifest. File preview maps the original paths to the receiving installation and protects its configuration. The live database step depends on phase 3. |
+| 5.1 | Import on a fresh installation | Built | The wizard connects an existing repository, selects the verified source manifest and maps content and uploads to the receiving installation. Staging rehearses the database before the administrator separately confirms file and database changes. Eligible MySQL sites can exchange and undo tables. The report identifies manual recovery steps for incompatible sites. |
 | 5.2 | Recovery guide | S | Every command of [06](06-disaster-recovery.md) is run by the conformance suite against rest-server; the BorgBase column is run once by the owner. |
-| 5.3 | Acceptance test | In progress | The packaged browser test connects a second WordPress installation with separate salts, path and database. It restores an upload and verifies its bytes, rehearses SQL, and checks that the receiving configuration and retention setting survive. The live database round trip remains to be verified. |
-| 5.4 | Submission package | In progress | The package builder can produce a reproducible installable ZIP. Draft directory icons and banners live in `.wordpress-org/`. The readme explains direct file access. Final Plugin Check, screenshots and owner approval remain release tasks. |
+| 5.3 | Acceptance test | Built and run locally | A packaged Chromium test connects a second WordPress 7.1.5 installation with independent salts, paths, database and administrator. On MySQL 8.4.11 it verifies a real upload, paginated file review, live database exchange and undo, public posts in each generation, and preservation of the destination login, home URL and backup setting. |
+| 5.4 | Submission package | In progress | The builder produces a reproducible installable ZIP. Directory icons, banners and three screenshots live in `.wordpress-org/`. The readme explains direct file access. The release workflow checks the staged package and verifies the bytes after SVN deployment. Submission and the public release require the owner. |
 
 ## 5. Order and pull requests
 

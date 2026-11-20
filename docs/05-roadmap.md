@@ -79,9 +79,7 @@ in a real WordPress 7.1.4 on PHP 8.3: setup through the REST API, a backup drive
 server that is stopped in the middle of a tick. Until 2026-11-10 the suite failed, because
 the CI setup switches on PHP's tracing JIT for the built-in web server and PHP 8.3 then
 crashed in backup ticks; the test server now runs without the JIT, as PHP does by default.
-The sizes of the criterion (2 GB of files, 300 MB of database) run in the nightly workflow,
-which GitHub starts from `main` only: for the first time in the night after the merge of
-2026-11-10. Its result is not recorded here yet.**
+On 2026-11-20 the full local acceptance fixture passed on WordPress 7.1.4, PHP 8.3.36 and MariaDB 11.4.13 with a TLS rest-server. The run took 46 minutes for 2,048 MiB of generated uploads and 300 MiB of database data, including `restic check --read-data`, byte comparison after restore, and a separate SQL import with matching checksums for `wp_posts`, `wp_postmeta` and `wp_users`. The hosted BorgBase check remains open.**
 
 **Found by the audit of 2026-11-10 and fixed:** a cancel request was lost when it arrived
 while a tick ran; after the setup the recovery kit could be had without the WordPress
@@ -97,7 +95,7 @@ how to switch the PHP version were promised and do not exist.
 
 | Acceptance criterion | Result |
 | --- | --- |
-| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration` passed in CI on 2026-11-10 with 64 MB of files and 32 MB of database, the restore compared for the uploads directory and the checksums for the fixture tables; the run with 2 GB plus 300 MB is nightly and has not run yet. BorgBase pending |
+| Large site through `wp-cron.php` with 30 s and 128M, to BorgBase and a TLS rest-server; `restic check --read-data`; CLI restore; database import with identical checksums | Without WordPress, verified: the whole backup job from settings and encrypted secrets to a resumable unlock and a 20,000-row table, in many short ticks against a TLS rest-server and MariaDB, passes `restic check --read-data`, restores, and imports with identical checksums. With WordPress and `wp-cron.php`: `tests/Integration` passed in CI on 2026-11-10 with 64 MB of files and 32 MB of database, the restore compared for the uploads directory and the checksums for the fixture tables; the local run with 2,048 MiB of files plus 300 MiB of database data passed on 2026-11-20. BorgBase pending |
 | A tick killed at any point leaves a resumable job; no stale lock | Engine and runner verified: every step can be interrupted, a killed tick's lease is taken over, and cleanup releases the lock a checkpoint names on every path. Every run writes its checkpoint with its number before it takes its first lock, so a lock left by a request that died at any point is recognised and removed ([ADR 0030](adr/0030-lock-continuity.md)). Through `wp-cron.php` in CI: the web server is stopped a few seconds after a cron request started a backup; the job finishes after the restart, `restic check` passes and no lock is left. The test neither asserts that a tick was running when the server stopped nor chooses the step |
 | No secret in files under `jobs/`, in REST responses or in HTML | `jobs/` verified in the job test and in CI; the integration suite searches the responses of four routes (status, settings, jobs, job log) for the two passwords; the admin HTML contains no settings or secrets by construction, which no test checks |
 
@@ -196,9 +194,11 @@ Acceptance
 
 ## Milestone 3 — Restore (0.3.0)
 
-**Status (2026-11-10): planned. Work packages, order, tests and the owner's decisions are in
-the [plan for Milestone 3](07-milestone-3-plan.md); its phase 0 closes what Milestones 0 to
-2 left open. "Connect to an existing repository" below already exists since Milestone 1.**
+**Release candidate, 2026-11-20.** The staged restore, live file review and undo, fresh-site
+mapping, database rehearsal, and eligible MySQL exchange and undo are implemented. Packaged
+two-site browser tests verify preservation of the receiving administrator, site address and
+backup settings. MariaDB uses the documented manual SQL import. External provider testing
+and WordPress.org approval remain release gates. [Restore work packages](07-milestone-3-plan.md).
 
 Scope
 - Snapshot browser (tree walk per directory), manifest view.

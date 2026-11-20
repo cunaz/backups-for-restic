@@ -7,6 +7,9 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Eligible MySQL installations can exchange a reviewed snapshot database in one atomic operation, preserve the destination administrator, address and backup configuration, and undo the exchange for 24 hours. The database report explains manual recovery on MariaDB and other incompatible installations.
+- File review runs as a resumable job, serves entries in pages, and checks identities and contents before applying or reversing an approved change. WP-CLI can resume an interrupted job and undo file changes if an installed plugin breaks WordPress.
+- `wp backups-for-restic recovery-kit` exports an audited copy of the recovery instructions. Writing credentials to a file or pipe requires `--force`.
 - Selected files can be staged from the snapshot browser or WP-CLI and downloaded through single-use forms. Completed restores can include ZIP archives and a database rehearsal report.
 - Administrators can preview and confirm live file changes and review an undo within 24 hours. The fresh-install wizard maps verified snapshot content and uploads to the receiving site's paths.
 - The package builder can produce a reproducible ZIP for installation from the WordPress dashboard.
@@ -66,9 +69,8 @@ All notable changes are documented here. The format follows
   server disables `sql_quote_show_create`, and restores the site's session setting afterwards.
   It reads schema under the dump's SQL mode so compatibility modes cannot omit table options.
   Database imports also enable quoting for their ownership checks and restore it after each tick.
-- The first database restore component imports staged table data into separate InnoDB
-  tables, with checked SQL and resumable transactions. It is not yet exposed in the admin
-  page; the schema/apply/undo workflows remain in development.
+- Database rehearsal imports staged table data into separate InnoDB tables, with checked
+  SQL and resumable transactions. The administrator can download its comparison report.
   It also handles tables containing only generated columns and fixed-format MyISAM
   sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
   cannot report success with a row that the bounded importer cannot read.
@@ -183,6 +185,8 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- Compressed repository objects have their zstd frame sizes, windows and cumulative output checked before allocation. Verified pack data must also match its expected size and SHA-256.
+- Uninstall checks all plugin-owned recovery records before deleting local data, including records in the default working directory after a change of configuration.
 - The plugin reads no more of a server's answer than a repository file of that kind can
   hold. Before, a broken or malicious server could answer the request for a lock or a
   snapshot with a body larger than PHP's memory.
