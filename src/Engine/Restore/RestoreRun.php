@@ -17,6 +17,7 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\RepositoryChanged;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Id;
@@ -44,6 +45,12 @@ final class RestoreRun {
 	 * not hold. A caller that retries after a lost lock need not retry this.
 	 */
 	public const string SNAPSHOT_MISSING = 'snapshot_missing';
+
+	/**
+	 * The bytes that the free-space check keeps beyond the files for the report and the
+	 * checkpoints, besides a rounding of every entry.
+	 */
+	private const int RESERVE = 16777216;
 
 	/**
 	 * Index loaded under the current lease.
@@ -93,7 +100,7 @@ final class RestoreRun {
 	 * @param State                                  $state Checkpoint.
 	 * @param Clock                                  $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
-	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe; native by default.
+	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe; disk_free_space() by default, unknown where a host disables it.
 	 */
 	private function __construct(
 		private readonly Repository $repository,
@@ -102,8 +109,10 @@ final class RestoreRun {
 		private readonly ?Throttle $throttle,
 		?\Closure $free_space
 	) {
-		$this->locking    = new Locking( $repository, new Identity( $state->hostname ), $clock, $state->pid );
-		$this->free_space = $free_space ?? disk_free_space( ... );
+		$this->locking = new Locking( $repository, new Identity( $state->hostname ), $clock, $state->pid );
+		// PHP treats a function in disable_functions as undefined: it is looked for when the
+		// space is checked, not taken as a callable here, which would end every restore.
+		$this->free_space = $free_space ?? static fn ( string $path ): float|false => function_exists( 'disk_free_space' ) ? disk_free_space( $path ) : false;
 		$this->verify_state();
 	}
 
@@ -263,6 +272,16 @@ final class RestoreRun {
 			'total_bytes' => $this->state->planned_bytes,
 			'skipped'     => $this->state->skipped,
 		];
+	}
+
+	/**
+	 * Whether the host did not report the free space when the plan was checked against it.
+	 * The run went on then, and only its checked writes stop it if the disk is full.
+	 *
+	 * @return bool True if the free space was unknown.
+	 */
+	public function space_unknown(): bool {
+		return $this->state->space_unknown;
 	}
 
 	/**
@@ -518,6 +537,7 @@ final class RestoreRun {
 	 * Finishes preflight before writing; completion checks actual bytes against the plan.
 	 *
 	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws StorageFailed With the code staging_space if the files are known not to fit.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
 	private function finish_pass(): void {
@@ -529,16 +549,10 @@ final class RestoreRun {
 				throw new InvalidArgument( 'A selected path does not exist in the snapshot.' );
 			}
 			Files::empty_directory( $this->state->target['path'] );
-			$free = ( $this->free_space )( $this->state->target['path'] );
 			// Round each entry up generously and reserve room for the report/checkpoint.
-			$needed = $this->state->planned_bytes + (float) $this->state->planned_entries * 8192 + 16777216;
-			if ( false === $free || ! is_finite( $free ) || $free < $needed ) {
-				throw new FormatException( 'The staging filesystem has insufficient or unknown free space for this restore.' );
-			}
-			$work_free = ( $this->free_space )( $this->state->work['path'] );
-			if ( false === $work_free || ! is_finite( $work_free ) || $work_free < (float) $this->state->planned_entries * 8192 + 16777216 ) {
-				throw new FormatException( 'The working filesystem has insufficient or unknown free space for the restore report.' );
-			}
+			$reserve = (float) $this->state->planned_entries * 8192 + self::RESERVE;
+			$this->require_space( $this->state->target['path'], $this->state->planned_bytes + $reserve, 'The staging filesystem has too little free space for this restore.' );
+			$this->require_space( $this->state->work['path'], $reserve, 'The working filesystem has too little free space for the restore report.' );
 			$this->state->phase = 'restore';
 			$this->reset_stack();
 			return;
@@ -547,6 +561,34 @@ final class RestoreRun {
 			throw new FormatException( 'The restored payload does not match its planned totals.' );
 		}
 		$this->state->phase = 'complete';
+	}
+
+	/**
+	 * Refuses a restore that is known not to fit. Free space that the host does not report,
+	 * or reports as no number, is unknown, not too little: the run notes it and goes on, as
+	 * the rest of the plugin does, and every write it makes is checked all the same.
+	 *
+	 * @param string $path    Directory on the filesystem in question.
+	 * @param float  $needed  Bytes the restore needs there.
+	 * @param string $refusal Constant message of the refusal.
+	 * @throws StorageFailed With the code staging_space if less is free.
+	 */
+	private function require_space( string $path, float $needed, string $refusal ): void {
+		$free = ( $this->free_space )( $path );
+		if ( false === $free || ! is_finite( $free ) || $free < 0 ) {
+			$this->state->space_unknown = true;
+			return;
+		}
+		if ( $free < $needed ) {
+			StorageFailed::raise(
+				$refusal,
+				[
+					'code'   => 'staging_space',
+					'needed' => $needed,
+					'free'   => $free,
+				]
+			);
+		}
 	}
 
 	/**

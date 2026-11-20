@@ -57,6 +57,13 @@ final class RestoreStepsTest extends TestCase {
 
 	private FrozenClock $clock;
 
+	/**
+	 * The free-space probe that the restore services get; the host's by default.
+	 *
+	 * @var (\Closure(string): (float|false))|null
+	 */
+	private ?\Closure $space = null;
+
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'restore-steps' );
 		$this->site      = $this->directory . '/site';
@@ -105,7 +112,9 @@ final class RestoreStepsTest extends TestCase {
 				new SystemRandom(),
 				new Identity( 'example.com', 'www-data' ),
 				static fn ( Job $job ): BackupPlan => new BackupPlan( [ $site ] )
-			)
+			),
+			null,
+			$this->space
 		);
 	}
 
@@ -344,6 +353,46 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( 'configuration', $job->error?->code );
 		self::assertSame( [], $this->locks() );
 		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
+	public function test_a_restore_that_is_known_not_to_fit_fails_with_a_space_error_before_a_file_is_written(): void {
+		$snapshot    = $this->backup();
+		$this->space = static fn ( string $path ): float => 1048576.0;
+
+		$job = $this->drive( $this->restore_job( $snapshot ) );
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'staging_space', $job->error?->code, 'Not "the repository contains data the plugin cannot read".' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
+	public function test_a_restore_without_a_free_space_figure_goes_on_and_says_so_once(): void {
+		$snapshot    = $this->backup();
+		$this->space = static fn ( string $path ): bool => false;
+
+		$job = $this->drive( $this->restore_job( $snapshot ) );
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertCount( 1, $job->warnings );
+		self::assertStringContainsString( 'free disk space is unknown', $job->warnings[0] );
+		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+	}
+
+	public function test_an_error_of_php_while_a_finished_restore_releases_its_lock_keeps_the_staged_files(): void {
+		$snapshot = $this->backup();
+		$job      = $this->drive( $this->restore_job( $snapshot ), static fn ( Job $now ): bool => 'recording' === $now->step );
+		self::assertFalse( $job->state->is_terminal() );
+		// As where a host disabled a function that the request releasing the lock calls.
+		$this->server->before = static function ( string $method, string $path ): never {
+			throw new \Error( 'Call to undefined function disk_free_space()' );
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertFileEquals( $this->site . '/hello.txt', $this->staging( $job ) . '/files' . $this->site . '/hello.txt' );
+		self::assertStringContainsString( 'could not be asked for leftover locks', (string) file_get_contents( $this->directory . '/private/jobs/' . $job->id . '/events.log' ) );
 	}
 
 	/**

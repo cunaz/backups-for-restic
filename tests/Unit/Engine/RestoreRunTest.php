@@ -19,6 +19,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\RepositoryChanged;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexSet;
@@ -26,6 +27,7 @@ use BackupsForRestic\Format\Snapshot;
 use BackupsForRestic\Format\Tree\Node;
 use BackupsForRestic\Format\Tree\NodeType;
 use BackupsForRestic\Format\Tree\TreeCodec;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Support\GoJson;
 use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Throttle;
@@ -239,31 +241,126 @@ final class RestoreRunTest extends TestCase {
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
 
-	/** @return iterable<string, array{float|false}> */
+	/** @return iterable<string, array{float}> */
 	public static function insufficient_space(): iterable {
 		yield 'full' => [ 0.0 ];
-		yield 'unknown' => [ false ];
-		yield 'infinity' => [ INF ];
-		yield 'not-a-number' => [ NAN ];
 		yield 'data-only' => [ 9.0 ];
 	}
 
 	#[DataProvider( 'insufficient_space' )]
-	public function test_disk_space_preflight_prevents_payload_writes( float|false $free ): void {
-		$run = $this->start( $this->repeated_file(), space: static fn (): float|false => $free );
+	public function test_disk_space_preflight_prevents_payload_writes( float $free ): void {
+		$run = $this->start( $this->repeated_file(), space: static fn (): float => $free );
 		try {
 			$run->advance( INF );
 			self::fail( 'Staging must have a known reserve beyond the logical file size.' );
-		} catch ( FormatException $error ) {
+		} catch ( StorageFailed $error ) {
 			self::assertStringContainsString( 'free space', $error->getMessage() );
+			self::assertSame( 'staging_space', JobError::from_throwable( $error )->code, 'Too little space is a local problem, not damage in the repository.' );
 		}
 		self::assertSame( [], TempDir::describe( $this->target ) );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	/** @return iterable<string, array{float|false}> */
+	public static function unknown_space(): iterable {
+		yield 'not reported' => [ false ];
+		yield 'infinity' => [ INF ];
+		yield 'not-a-number' => [ NAN ];
+		yield 'negative' => [ -1.0 ];
+	}
+
+	#[DataProvider( 'unknown_space' )]
+	public function test_free_space_that_the_host_does_not_report_is_unknown_and_the_restore_goes_on( float|false $free ): void {
+		$run = $this->finish( $this->start( $this->repeated_file(), space: static fn (): float|false => $free ), false );
+
+		self::assertTrue( $run->space_unknown() );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
+		self::assertTrue( RestoreRun::resume( $this->repository, $this->work, $this->clock )->space_unknown(), 'The checkpoint keeps the note for the job.' );
+	}
+
+	public function test_known_free_space_that_suffices_leaves_no_note(): void {
+		$run = $this->finish( $this->start( $this->repeated_file(), space: static fn (): float => 1073741824.0 ), false );
+
+		self::assertFalse( $run->space_unknown() );
+		self::assertSame( 'abcabcabc', file_get_contents( $this->target . '/repeated.txt' ) );
 	}
 
 	public function test_working_filesystem_space_is_checked_separately(): void {
 		$run = $this->start( $this->repeated_file(), space: fn ( string $path ): float => $this->work === $path ? 0.0 : 1073741824.0 );
-		$this->expectExceptionMessage( 'working filesystem' );
-		$run->advance( INF );
+		try {
+			$run->advance( INF );
+			self::fail( 'The report needs room of its own.' );
+		} catch ( StorageFailed $error ) {
+			self::assertStringContainsString( 'working filesystem', $error->getMessage() );
+			self::assertSame( 'staging_space', JobError::from_throwable( $error )->code );
+		}
+	}
+
+	public function test_a_host_that_disables_the_free_space_function_restores_with_the_space_unknown(): void {
+		$scratch = $this->scratch . '/disabled';
+		mkdir( $scratch, 0700 );
+		$script = $scratch . '/restore.php';
+		file_put_contents(
+			$script,
+			<<<'PHP'
+			<?php
+			declare( strict_types=1 );
+			define( 'ABSPATH', $argv[1] . '/' );
+			require $argv[1] . '/vendor/autoload.php';
+			use BackupsForRestic\Backend\ObjectType;
+			use BackupsForRestic\Crypto\ScryptParameters;
+			use BackupsForRestic\Crypto\SystemRandom;
+			use BackupsForRestic\Engine\BlobStore;
+			use BackupsForRestic\Engine\Identity;
+			use BackupsForRestic\Engine\Repository;
+			use BackupsForRestic\Engine\Restore\RestoreRun;
+			use BackupsForRestic\Format\BlobType;
+			use BackupsForRestic\Format\Index\IndexSet;
+			use BackupsForRestic\Format\Snapshot;
+			use BackupsForRestic\Format\Tree\Node;
+			use BackupsForRestic\Format\Tree\NodeType;
+			use BackupsForRestic\Format\Tree\TreeCodec;
+			use BackupsForRestic\Tests\Support\FrozenClock;
+			use BackupsForRestic\Tests\Support\InMemoryBackend;
+			$repository = Repository::initialize( new InMemoryBackend(), 'test password', new Identity( 'example.test' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+			$store      = new BlobStore( $repository, new IndexSet() );
+			$body       = 'Restored on a host without disk_free_space().';
+			$file       = new Node( 'file.txt', NodeType::File, 0644, '2026-01-01T00:00:00Z', size: strlen( $body ), content: [ $store->save( BlobType::Data, $body ) ] );
+			$tree       = $store->save( BlobType::Tree, TreeCodec::encode( [ $file ] ) );
+			$store->flush();
+			$store->write_index();
+			$snapshot = $repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( '2026-01-01T00:00:00Z', $tree, [ '/' ] ) )->to_json() );
+			mkdir( $argv[2] . '/target', 0700 );
+			mkdir( $argv[2] . '/work', 0700 );
+			RestoreRun::start( $repository, $snapshot, $argv[2] . '/target', $argv[2] . '/work', [ '/' ], new Identity( 'example.test' ), new FrozenClock() );
+			// The next request resumes the run, as one under another PHP configuration would.
+			$run = RestoreRun::resume( $repository, $argv[2] . '/work', new FrozenClock() );
+			echo json_encode( [ 'disabled' => ! function_exists( 'disk_free_space' ), 'complete' => $run->advance( INF ), 'unknown' => $run->space_unknown(), 'content' => file_get_contents( $argv[2] . '/target/file.txt' ) ] );
+			PHP
+		);
+		$process = proc_open(
+			[ PHP_BINARY, '-d', 'disable_functions=disk_free_space', '-d', 'display_errors=stderr', $script, dirname( __DIR__, 3 ), $scratch ],
+			[
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'pipe', 'w' ],
+			],
+			$pipes
+		);
+		self::assertIsResource( $process );
+		$output = (string) stream_get_contents( $pipes[1] );
+		$errors = (string) stream_get_contents( $pipes[2] );
+		self::assertSame( 0, proc_close( $process ), $output . $errors );
+
+		self::assertSame(
+			[
+				'disabled' => true,
+				'complete' => true,
+				'unknown'  => true,
+				'content'  => 'Restored on a host without disk_free_space().',
+			],
+			json_decode( $output, true ),
+			$output . $errors
+		);
 	}
 
 	public function test_nonempty_target_is_refused_without_changing_existing_content(): void {

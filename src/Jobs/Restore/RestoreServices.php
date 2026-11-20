@@ -35,10 +35,26 @@ final readonly class RestoreServices {
 	/**
 	 * Creates the services.
 	 *
-	 * @param BackupServices                     $common Shared services.
-	 * @param (\Closure(): DatabasePreview)|null $preview Opens a database preview on demand.
+	 * @param BackupServices                         $common  Shared services.
+	 * @param (\Closure(): DatabasePreview)|null     $preview Opens a database preview on demand.
+	 * @param (\Closure(string): (float|false))|null $space   Free bytes on the filesystem of a directory, false if unknown; disk_free_space() where the host offers it by default.
 	 */
-	public function __construct( public BackupServices $common, public ?\Closure $preview = null ) {
+	public function __construct( public BackupServices $common, public ?\Closure $preview = null, public ?\Closure $space = null ) {
+	}
+
+	/**
+	 * Free bytes on the filesystem of a directory.
+	 *
+	 * @param string $path Directory.
+	 * @return float|null Bytes, or null where the host does not tell.
+	 */
+	public function free_space( string $path ): ?float {
+		if ( null !== $this->space ) {
+			$free = ( $this->space )( $path );
+		} else {
+			$free = function_exists( 'disk_free_space' ) ? disk_free_space( $path ) : false;
+		}
+		return false === $free || ! is_finite( $free ) || $free < 0 ? null : $free;
 	}
 
 	/**

@@ -112,6 +112,10 @@ final class Messages {
 				'message' => __( 'The restore stopped because the privacy of its staging directory could not be verified.', 'backups-for-restic' ),
 				'hint'    => __( 'Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
 			],
+			'staging_space'                  => [
+				'message' => __( 'There is too little free disk space for the files of this restore.', 'backups-for-restic' ),
+				'hint'    => __( 'A restore needs the size of the selected files, and a reserve, free where the working directory lies. Free disk space there, ask your host for a larger quota, or restore fewer files.', 'backups-for-restic' ),
+			],
 			'environment'                    => [
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
 				'hint'    => __( 'The checks on the Environment tab show what is missing.', 'backups-for-restic' ),
