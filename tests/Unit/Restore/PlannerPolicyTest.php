@@ -306,6 +306,76 @@ final class PlannerPolicyTest extends TestCase {
 		self::assertSame( 'existing_file', $plan->inspect( $this->files, $target )['reason'] );
 	}
 
+	public function test_a_replacement_is_refused_when_the_apply_could_not_keep_owner_group_or_mode(): void {
+		$target = $this->live . '/deployed.php';
+		file_put_contents( $this->staged . '/deployed.php', 'restored' );
+		file_put_contents( $target, 'live' );
+		clearstatcache( true );
+		$stat = lstat( $target );
+		self::assertIsArray( $stat );
+		$decide = fn ( array|false $process ): string => ( new ApplyPlan( [ $this->live ], [], [], false, null, [], $process ) )->inspect( $this->files, $target )['reason'];
+		// Files deployed by another user: the apply would create its copy as itself.
+		self::assertSame( 'foreign_owner', $decide( self::writer( $stat['uid'] + 1, null ) ) );
+		// A group the process is not a member of, and that it could not give the copy.
+		self::assertSame( 'foreign_group', $decide( self::writer( $stat['uid'], [ $stat['gid'] + 1 ] ) ) );
+		self::assertSame( 'existing_file', $decide( self::writer( $stat['uid'], [ $stat['gid'] + 1, $stat['gid'] ] ) ) );
+		// Root can give any group to a file it owns.
+		self::assertSame( 'existing_file', $decide( self::writer( $stat['uid'], null ) ) );
+		// Without the POSIX extension the identity is unknown; the apply checks before each replacement.
+		self::assertSame( 'existing_file', $decide( false ) );
+		self::assertSame( 'refuse', ( new ApplyPlan( [ $this->live ], [], [], false, null, [], self::writer( $stat['uid'] + 1, null ) ) )->inspect( $this->files, $target )['action'] );
+		// The apply never replaces a file with setuid, setgid or sticky bits.
+		foreach ( [ 04644, 02644, 01644 ] as $mode ) {
+			chmod( $target, $mode );
+			clearstatcache( true );
+			if ( ( lstat( $target )['mode'] & 07777 ) !== $mode ) {
+				continue;
+			}
+			self::assertSame( 'special_permissions', $decide( false ), sprintf( '%o', $mode ) );
+			self::assertSame( 'special_permissions', $decide( self::writer( $stat['uid'] + 1, null ) ), sprintf( '%o', $mode ) );
+		}
+		chmod( $target, 04644 );
+		clearstatcache( true );
+		self::assertSame( 04644, lstat( $target )['mode'] & 07777, 'The owner can always set the setuid bit.' );
+		// A new file has no owner to keep; only its directory must be writable.
+		file_put_contents( $this->staged . '/new.php', 'new' );
+		self::assertSame( 'missing_destination', ( new ApplyPlan( [ $this->live ], [], [], false, null, [], self::writer( $stat['uid'] + 1, [] ) ) )->inspect( $this->files, $this->live . '/new.php' )['reason'] );
+	}
+
+	public function test_the_writing_identity_comes_from_the_posix_extension(): void {
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			self::assertFalse( ApplyPlan::process() );
+			return;
+		}
+		$groups = posix_getgroups();
+		self::assertIsArray( $groups );
+		self::assertSame(
+			[
+				'uid'    => posix_geteuid(),
+				'groups' => 0 === posix_geteuid() ? null : array_merge( [ posix_getegid() ], $groups ),
+			],
+			ApplyPlan::process()
+		);
+		// The default identity is this process, which owns the files the tests create.
+		file_put_contents( $this->staged . '/own.php', 'restored' );
+		file_put_contents( $this->live . '/own.php', 'live' );
+		self::assertSame( 'existing_file', ( new ApplyPlan( [ $this->live ], [] ) )->inspect( $this->files, $this->live . '/own.php' )['reason'] );
+	}
+
+	/**
+	 * An identity that writes the replacements.
+	 *
+	 * @param int            $uid    Effective user.
+	 * @param list<int>|null $groups Groups it can give a file, null for any.
+	 * @return array{uid: int, groups: list<int>|null} Identity.
+	 */
+	private static function writer( int $uid, ?array $groups ): array {
+		return [
+			'uid'    => $uid,
+			'groups' => $groups,
+		];
+	}
+
 	public function test_comparing_an_unreadable_regular_file_reports_the_comparison_failure(): void {
 		$plan   = new ApplyPlan( [ $this->live ], [] );
 		$target = $this->live . '/unreadable';

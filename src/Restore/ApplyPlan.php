@@ -23,6 +23,7 @@ defined( 'ABSPATH' ) || exit;
  * exists during inspection; a writer must check again immediately before changing it.
  *
  * @phpstan-type Action array{path: string, destination: string|null, action: string, reason: string}
+ * @phpstan-type Writer array{uid: int, groups: list<int>|null}
  */
 final class ApplyPlan {
 
@@ -55,21 +56,31 @@ final class ApplyPlan {
 	private array $guards = [];
 
 	/**
+	 * Effective user of this process and the groups it can give a file it owns, null for any
+	 * group; false where the POSIX extension is missing.
+	 *
+	 * @var Writer|false
+	 */
+	private array|false $process;
+
+	/**
 	 * Opens the destination policy.
 	 *
-	 * @param list<string>    $roots          Allowed live roots, absolute existing directories.
-	 * @param list<string>    $excluded      Private state and the running plugin.
-	 * @param list<string>    $config_files   Live configuration files skipped by default.
-	 * @param bool            $include_config Whether configuration files were explicitly requested.
-	 * @param SiteLayout|null $layout Optional mapping for a verified fresh-site restore.
-	 * @param list<string>    $bootstrap Bootstrap locations requiring an offline restore.
+	 * @param list<string>      $roots          Allowed live roots, absolute existing directories.
+	 * @param list<string>      $excluded      Private state and the running plugin.
+	 * @param list<string>      $config_files   Live configuration files skipped by default.
+	 * @param bool              $include_config Whether configuration files were explicitly requested.
+	 * @param SiteLayout|null   $layout Optional mapping for a verified fresh-site restore.
+	 * @param list<string>      $bootstrap Bootstrap locations requiring an offline restore.
+	 * @param Writer|false|null $process Identity that writes the files, false when it is unknown, null to ask the POSIX extension.
 	 * @throws InvalidArgument If the site has no usable live root or a protected location is not
 	 *                         an absolute path without dot segments.
 	 */
-	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, array $bootstrap = [] ) {
+	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, array $bootstrap = [], array|false|null $process = null ) {
 		if ( $include_config && null !== $layout ) {
 			throw new InvalidArgument( 'A fresh-site import preserves the current installation configuration.' );
 		}
+		$this->process = $process ?? self::process();
 		foreach ( $roots as $root ) {
 			$root = rtrim( $root, '/' );
 			if ( '' !== $root && str_starts_with( $root, '/' ) && is_dir( $root ) && realpath( $root ) === $root ) {
@@ -297,7 +308,54 @@ final class ApplyPlan {
 		if ( $directory || false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) || 1 !== $stat['nlink'] ) {
 			return self::decision( $path, $target, 'refuse', 'type_conflict' );
 		}
-		return is_writable( dirname( $target ) ) ? self::decision( $path, $target, 'replace', 'existing_file' ) : self::decision( $path, $target, 'refuse', 'unwritable_destination' );
+		if ( ! is_writable( dirname( $target ) ) ) {
+			return self::decision( $path, $target, 'refuse', 'unwritable_destination' );
+		}
+		$conflict = $this->metadata_conflict( $stat );
+		return null === $conflict ? self::decision( $path, $target, 'replace', 'existing_file' ) : self::decision( $path, $target, 'refuse', $conflict );
+	}
+
+	/**
+	 * The identity that writes the replacements: the process's effective user, which owns
+	 * every file it creates, and the groups that user can give a file it owns. Root can give
+	 * any group.
+	 *
+	 * @return Writer|false Identity, or false without the POSIX extension.
+	 */
+	public static function process(): array|false {
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			return false;
+		}
+		$uid    = posix_geteuid();
+		$groups = posix_getgroups();
+		return [
+			'uid'    => $uid,
+			'groups' => 0 === $uid ? null : array_merge( [ posix_getegid() ], false === $groups ? [] : $groups ),
+		];
+	}
+
+	/**
+	 * Predicts whether the apply can keep the owner, group and mode of a file it replaces.
+	 * The apply builds each replacement as its own effective user, gives it the group of
+	 * the live file, and refuses to publish it when either differs; it never replaces a file
+	 * with setuid, setgid or sticky bits. The review refuses such a file up front, before an
+	 * apply could stop half-way. Without the POSIX extension the user and its groups are
+	 * unknown, and the apply-time check before each replacement remains the only one.
+	 *
+	 * @param array<int|string, int> $stat Live regular file.
+	 * @return string|null Reason of the refusal, or null when the replacement keeps them.
+	 */
+	private function metadata_conflict( array $stat ): ?string {
+		if ( 0 !== ( $stat['mode'] & 07000 ) ) {
+			return 'special_permissions';
+		}
+		if ( false === $this->process ) {
+			return null;
+		}
+		if ( $stat['uid'] !== $this->process['uid'] ) {
+			return 'foreign_owner';
+		}
+		return null === $this->process['groups'] || in_array( $stat['gid'], $this->process['groups'], true ) ? null : 'foreign_group';
 	}
 
 	/**
