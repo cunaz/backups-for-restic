@@ -400,7 +400,7 @@ what a restore accepts is checked on the server when one is started.
   by Dependabot with CI gates, as are the GitHub Actions. PHPStan is the exception: it is
   installed from its release PHAR through an inline Composer package without a checksum,
   which Dependabot cannot update. The tools outside Composer are pinned by hand with SHA-256
-  checksums: the restic CLI (0.19.1, 0.18.1, 0.14.0), rest-server, Infection and WP-CLI in
+  checksums: the restic CLI (0.20.0, 0.19.1, 0.18.1, 0.14.0), rest-server, Infection and WP-CLI in
   `bin/install-test-tools.sh`, WordPress for the test site in `bin/test-site.sh`. A version
   bump is a reviewed pull request; nothing picks up a new release by itself (planned for
   Milestone 3). The linter for the admin script comes from npm: ESLint and
@@ -458,7 +458,7 @@ chosen repository password, the read-back of stored secrets and the retention fl
 | HTTPS to the repository server | URL validation: `https://` only, for both server options |
 | Strong repository password | generated (32 characters, 192 bits). Enforced by the core: a password that somebody chose for a new repository, in the request or in `wp-config.php`, must have at least 12 characters, else `Setup::create()` refuses with `password_too_short` |
 | Recovery kit acknowledged | required before the first backup and before enabling the schedule; enforced by the core: jobs are refused with `setup_incomplete` until the setup is completed |
-| Private directory protected | the HTTP probe must not read its file back: then the Doctor is critical, the wizard does not continue, `POST /setup/complete` refuses with `environment_blocked` and backups stop. Where the site cannot request itself, the wizard's environment step makes the request from the browser; a probe that neither could make is reported as `unverified` and blocks nothing |
+| Private directory protected | When the probe reads back its random token, the Doctor reports a critical finding, setup refuses with `environment_blocked` and backups stop. If the site cannot reach itself, the wizard requests the probe from the browser. An inconclusive result allows backups. Plaintext staging requires a verified denial at every public URL or verified storage outside the document root. |
 | Secrets decryptable | enforced by the core: `EncryptedOptionStore::set()` reads every secret back after it stored it; if the secret is not there or comes back changed, saving fails with `secrets_undecryptable` |
 | Retention floor | enforced by the core (`Schema::retention_floor()`): `retention.keep.within` of at least one day, or `retention.keep.last` of at least 1. The settings refuse a change below it with `retention_floor`; a forget job that finds such a pair stored fails with `configuration` and deletes nothing |
 | Sensible schedule | daily backup at a randomised minute, weekly prune-lite, monthly check |
@@ -479,7 +479,7 @@ release. `readme.txt` links to the policy.
       `proc_open`, `eval`, `unserialize`, `extract`).
 - [ ] The release passes `tests/Integration/AccessTest.php`, including anonymous,
       delegated-role and registered-route coverage, and its packaged download test.
-- [ ] Conformance suite green against the pinned restic releases (0.19.1, 0.18.1, 0.14.0)
+- [ ] Conformance suite green against the pinned restic releases (0.20.0, 0.19.1, 0.18.1, 0.14.0)
       and the latest release at that time.
 - [ ] Covered mutation score of `Crypto`, `Format` and `Engine\Forget` at or above 90 %;
       nightly fuzzing without open crashes; self-review checklist

@@ -1,5 +1,8 @@
 # 08 · Handoff (2026-11-12)
 
+This handoff records the state on November 12. The November 20 release candidate and
+remaining publication steps are documented in the [release verification](benchmarks/2026-11-20-release-candidate.md).
+
 Where the work stands, what is open, and what whoever continues has to know that the code
 and the other documents do not say. The plan itself is in
 [07-milestone-3-plan.md](07-milestone-3-plan.md); this file is a snapshot of one day and is

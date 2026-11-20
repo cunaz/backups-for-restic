@@ -27,7 +27,8 @@ shared hosting does not have.
   registering workers. A 32-bit PHP installation refuses activation and uninstall.
 - The plugin carries its own implementation of the restic format (ADR 0018) with the testing
   burden that implies (ADR 0023).
-- Archives for downloads use PHP's `ZipArchive` when available, otherwise per-file downloads.
+- Staged files can be downloaded individually or together as a ZIP. The plugin writes
+  ZIP and ZIP64 records in PHP. [Download format](0038-download-zip-and-tokens.md).
 
 ## Alternatives considered
 - **Composer autoloader with zero packages**: `vendor/` noise for nothing.
@@ -40,5 +41,3 @@ shared hosting does not have.
 - The admin interface is one classic script, `assets/js/admin.js`, not ES modules. ADR 0012
   gives the reason: WordPress delivers translations to classic script handles. The decision
   stands: no JavaScript package ships.
-- Nothing uses `ZipArchive`: downloads from a snapshot do not exist yet. They come with
-  restore in Milestone 3.
