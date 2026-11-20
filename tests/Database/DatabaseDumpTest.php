@@ -233,6 +233,19 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( $before, $db->rows( $settings ), 'The site connection keeps its character set.' );
 	}
 
+	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
+		$db = self::database( self::$source );
+		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().
+		$db->execute( "CREATE TABLE utf_archive (id INT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT 'Архив', `Åtgärd` ENUM('内容','à la carte','Архив') NOT NULL DEFAULT '内容' COMMENT '内容 Архив', `note` VARCHAR(40) NOT NULL DEFAULT 'Åtgärd: архив', KEY `Åtgärd_index` (`Åtgärd`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Архив 内容'" );
+		$db->execute( "INSERT INTO utf_archive (`Åtgärd`, note) VALUES ('Архив', 'х'), ('à la carte', DEFAULT), (DEFAULT, '内')" );
+
+		$this->dump_and_import( $db, 'utf_' );
+
+		$target = self::database( self::$target );
+		self::assertSame( $db->rows( 'SHOW CREATE TABLE utf_archive' ), $target->rows( 'SHOW CREATE TABLE utf_archive' ) );
+		self::assertSame( $db->rows( 'SELECT * FROM utf_archive ORDER BY id' ), $target->rows( 'SELECT * FROM utf_archive ORDER BY id' ) );
+	}
+
 	/**
 	 * Dumps the tables with a prefix in pages with a stop after every read, writes the files
 	 * and imports them into the target database with the command-line client.
