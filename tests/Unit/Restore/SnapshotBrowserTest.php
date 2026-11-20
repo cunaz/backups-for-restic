@@ -581,7 +581,7 @@ final class SnapshotBrowserTest extends TestCase {
 		self::assertSame( $ids[1], $this->browser()->resolve( substr( $ids[1], 0, 8 ) ) );
 		self::assertSame( $ids[2], $this->browser()->resolve( substr( $ids[2], 0, 40 ) ) );
 		self::assertSame( [ 'snapshot_not_found', 404 ], self::refused( fn () => $this->browser()->resolve( '0123456789abcdef' === substr( $ids[0], 0, 16 ) ? 'fedcba9876543210' : '0123456789abcdef' ) ) );
-		foreach ( [ '', substr( $ids[0], 0, 7 ), 'latest', strtoupper( substr( $ids[0], 0, 12 ) ), str_repeat( 'a', 65 ) ] as $given ) {
+		foreach ( [ '', substr( $ids[0], 0, 7 ), 'latest', 'ABCDEF012345', str_repeat( 'a', 65 ) ] as $given ) {
 			self::assertSame( [ 'invalid_snapshot_id', 400 ], self::refused( fn () => $this->browser()->resolve( $given ) ), $given );
 		}
 	}

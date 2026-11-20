@@ -186,7 +186,7 @@ final class SnapshotManifestTest extends TestCase {
 	public function test_an_excluded_parent_keeps_only_the_path_to_the_virtual_dump( string $excluded_dir, bool $marker ): void {
 		$root = TempDir::create( 'manifest-excluded' );
 		try {
-			$site   = $root . '/site';
+			$site         = $root . '/site';
 			$excluded_dir = $site . $excluded_dir;
 			mkdir( $excluded_dir . '/child/private/spool/database', 0700, true );
 			file_put_contents( $excluded_dir . '/other', 'excluded' );
