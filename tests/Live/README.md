@@ -89,3 +89,41 @@ A killed runner or a failed consistency check can leave the current run's object
 a lock on the dedicated fixture. Inspect that repository with the restic CLI and
 provider tools before authorizing operator cleanup. The next run never assumes it
 owns objects from the previous process.
+
+## Full WordPress backup on BorgBase
+
+The separate operator command runs a WordPress cron backup with 2 GiB of synthetic
+uploads and at least 300 MiB of SQL values. It writes to a dedicated, empty **normal**
+BorgBase repository. A successful run retains one encrypted snapshot. The command
+verifies the authenticated repository ID before WordPress connects, sets retention to
+external and selects manual schedules. The independent restic CLI reads every pack,
+restores the exact snapshot and compares file digests and restored SQL table checksums.
+
+Use a fresh disposable single-site WordPress installation, PHP 8.3 with a 128 MiB
+worker limit and a 30-second execution limit. Allow space for the original uploads,
+the restored snapshot and two databases. Install the Composer development dependencies
+and the pinned restic CLI with `bin/install-test-tools.sh restic`. Use your local test
+database administrator configuration from the integration harness.
+
+Save the `borgbase.normal` fixture using the JSON object format above in a mode-0600
+file outside the site. Supply its path through `BFR_LIVE_WORDPRESS_FIXTURE_FILE`.
+Start the site from the extracted release ZIP using the integration installer.
+
+```sh
+export BFR_TEST_PLUGIN_DIR=/path/to/extracted/backups-for-restic
+export BFR_DB_NAME=bfr_borgbase_acceptance
+export BFR_WP_VERSION=7.1.5 BFR_SITE_MEMORY_MIB=128
+export BFR_LIVE_WORDPRESS_FIXTURE_FILE=/private/path/normal.json
+bin/test-site.sh install
+bin/test-site.sh start
+php tests/Live/wordpress.php --preflight
+php tests/Live/wordpress.php --backup
+bin/test-site.sh stop
+```
+
+The preflight reads the repository with the native restic CLI and checks the fresh
+site. A preceding local acceptance run can supply its completed 256 synthetic upload
+files through `BFR_LIVE_PREPARED_UPLOADS`. The operator command verifies each file
+against its deterministic SHA-256 digest and hard-links it into the new site. Put
+the source and destination on the same filesystem and keep the original files intact
+throughout both tests.

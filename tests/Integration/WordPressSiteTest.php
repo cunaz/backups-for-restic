@@ -11,7 +11,7 @@ use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\RestServer;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\TestSite;
-use BackupsForRestic\Tests\Support\Vectors;
+use BackupsForRestic\Tests\Support\WordPressBackupFixture;
 
 /**
  * Milestone 1 acceptance against a real WordPress (docs/05-roadmap.md), as a black box over
@@ -72,24 +72,10 @@ final class WordPressSiteTest extends TestCase {
 			self::assertSame( 'backups_for_restic_wrong_user_password', $refused['code'] ?? null, $raw );
 		}
 
-		// The fixture: files in uploads and a large table.
 		$uploads = TestSite::root() . '/wp-content/uploads/fixture';
-		TempDir::remove( $uploads );
-		mkdir( $uploads, 0755, true );
-		$megabytes = (int) MysqliConnection::environment( 'BFR_SITE_FIXTURE_MB', '64' );
-		for ( $i = 0; $i < $megabytes; $i += 8 ) {
-			file_put_contents( $uploads . '/file-' . $i . '.bin', Vectors::hash_stream( 'site-' . $i, 8 * 1048576 ) );
-		}
+		WordPressBackupFixture::write_uploads( $uploads, (int) MysqliConnection::environment( 'BFR_SITE_FIXTURE_MB', '64' ) );
 		$db = self::site_database();
-		$db->execute( 'DELETE FROM wp_postmeta WHERE meta_key = "_fixture"' );
-		$rows = (int) MysqliConnection::environment( 'BFR_DB_FIXTURE_MB', '32' ) * 1024;
-		for ( $offset = 0; $offset < $rows; $offset += 1000 ) {
-			$values = [];
-			for ( $i = $offset; $i < $offset + 1000; $i++ ) {
-				$values[] = sprintf( "(1, '_fixture', '%s')", str_repeat( hash( 'sha256', (string) $i ), 16 ) );
-			}
-			$db->execute( 'INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES ' . implode( ',', $values ) );
-		}
+		WordPressBackupFixture::write_database( $db, (int) MysqliConnection::environment( 'BFR_DB_FIXTURE_MB', '32' ) );
 
 		TestSite::idle( 600 );
 		[ $status, $started, $raw ] = TestSite::api( 'POST', '/jobs' );
@@ -107,7 +93,7 @@ final class WordPressSiteTest extends TestCase {
 			self::assertSame( TempDir::describe( $uploads ), TempDir::describe( $target . $uploads ) );
 			// The upload comparison is complete. Free the restored media before importing the database.
 			TempDir::remove( $target . $uploads );
-			self::assert_restored_database( $db, $target . $private . '/spool/database' );
+			WordPressBackupFixture::assert_restored_database( $db, $target . $private . '/spool/database' );
 		} finally {
 			TempDir::remove( $target );
 		}
@@ -123,26 +109,6 @@ final class WordPressSiteTest extends TestCase {
 		}
 		foreach ( [ TestSite::$repository_password, RestServer::PASSWORD ] as $secret ) {
 			self::assertStringNotContainsString( $secret, $responses );
-		}
-	}
-
-	private static function assert_restored_database( MysqliConnection $original, string $dump_directory ): void {
-		$files = array_map( 'strval', (array) glob( $dump_directory . '/*.sql' ) );
-		self::assertNotSame( [], $files, 'The snapshot contains the database dump.' );
-		$admin = MysqliConnection::connect();
-		self::assertNotNull( $admin );
-		$restored = 'bfr_site_restored_' . bin2hex( random_bytes( 3 ) );
-		$admin->execute( 'CREATE DATABASE `' . $restored . '` CHARACTER SET utf8mb4' );
-		try {
-			// Use the recovery guide's client so the full dump can exceed max_allowed_packet.
-			MysqliConnection::import( $restored, $files );
-			$copy = MysqliConnection::connect( $restored );
-			self::assertNotNull( $copy );
-			foreach ( [ 'wp_postmeta', 'wp_posts', 'wp_users' ] as $table ) {
-				self::assertSame( $original->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $copy->rows( 'CHECKSUM TABLE ' . $table . ' EXTENDED' )[0]['Checksum'], $table );
-			}
-		} finally {
-			$admin->execute( 'DROP DATABASE `' . $restored . '`' );
 		}
 	}
 
@@ -187,7 +153,7 @@ final class WordPressSiteTest extends TestCase {
 		self::assertSame( 200, $status, $raw );
 		self::assertSame( 'site', $site['scope'] ?? null, $raw );
 		self::assertNotSame( [], $site['snapshots'] ?? [], $raw );
-		$host = (string) parse_url( TestSite::URL, PHP_URL_HOST );
+		$host = (string) parse_url( TestSite::url(), PHP_URL_HOST );
 		foreach ( $site['snapshots'] as $snapshot ) {
 			self::assertContains( $snapshot['id'] ?? null, $expected, $raw );
 			self::assertSame( $host, $snapshot['hostname'] ?? null, $raw );
