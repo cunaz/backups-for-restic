@@ -38,7 +38,7 @@ final class DatabaseExchangeTest extends TestCase {
 
 	private MysqliConnection $admin;
 	private MysqliConnection $db;
-	private string $database = '';
+	private string $database  = '';
 	private string $directory = '';
 	private Direct $direct;
 	private Manifest $manifest;
@@ -70,8 +70,10 @@ final class DatabaseExchangeTest extends TestCase {
 		foreach ( $dump->files() as $file ) {
 			$source = ( $file->source )( null );
 			$fp     = fopen( $this->directory . '/' . $file->name, 'wb' );
-			while ( '' !== ( $bytes = $source->read( 65536 ) ) ) {
+			$bytes  = $source->read( 65536 );
+			while ( '' !== $bytes ) {
 				fwrite( $fp, $bytes );
+				$bytes = $source->read( 65536 );
 			}
 			fclose( $fp );
 		}
@@ -212,10 +214,20 @@ final class DatabaseExchangeTest extends TestCase {
 
 	public function test_killing_the_worker_on_either_side_of_rename_resumes_from_the_physical_witness(): void {
 		$this->mysql_only();
-		$plan   = $this->prepared();
-		$worker = new TableExchange( $this->direct );
+		$plan                      = $this->prepared();
+		$worker                    = new TableExchange( $this->direct );
 		[ , $token, $fingerprint ] = explode( ':', $plan->owned->owner );
-		file_put_contents( $this->directory . '/exchange-plan.json', json_encode( [ 'plan' => $plan->document, 'token' => $token, 'fingerprint' => $fingerprint ], JSON_THROW_ON_ERROR ) );
+		file_put_contents(
+			$this->directory . '/exchange-plan.json',
+			json_encode(
+				[
+					'plan'        => $plan->document,
+					'token'       => $token,
+					'fingerprint' => $fingerprint,
+				],
+				JSON_THROW_ON_ERROR
+			)
+		);
 		$marker = $this->directory . '/exchange-kill';
 		foreach ( [ 'apply', 'undo' ] as $phase ) {
 			$undo = 'undo' === $phase;
@@ -315,17 +327,26 @@ final class DatabaseExchangeTest extends TestCase {
 			'source_directory' => '/source/database',
 			'manifest_sha256'  => $this->manifest->fingerprint,
 		] + ( new RehearsalReport( $this->direct ) )->read( $this->manifest, $this->importer->tables );
-		$bytes = json_encode( $report, JSON_THROW_ON_ERROR );
+		$bytes  = json_encode( $report, JSON_THROW_ON_ERROR );
 		file_put_contents( $root . '/database-preview.json', $bytes );
-		$source->result = [ 'database_report_sha256' => hash( 'sha256', $bytes ), 'snapshot' => $source->data['snapshot'] ];
-		$source->state = JobState::Succeeded;
+		$source->result      = [
+			'database_report_sha256' => hash( 'sha256', $bytes ),
+			'snapshot'               => $source->data['snapshot'],
+		];
+		$source->state       = JobState::Succeeded;
 		$source->finished_at = $clock->seconds;
 		$jobs->save( $source );
 		$site    = $this->directory . '/site';
 		$flushes = 0;
 		mkdir( $site );
 		$changes = new DatabaseChanges(
-			$jobs, $staging, $clock, $random, 1, 'wp_', fn (): Direct => $this->direct,
+			$jobs,
+			$staging,
+			$clock,
+			$random,
+			1,
+			'wp_',
+			fn (): Direct => $this->direct,
 			static fn ( int $id ): array => 1 === $id ? [] : [ 'database_account' ],
 			new FileMaintenance( $site ),
 			static function () use ( &$flushes, $site ): void {
@@ -333,8 +354,8 @@ final class DatabaseExchangeTest extends TestCase {
 				++$flushes;
 			}
 		);
-		$runner = new Runner( $jobs, new RunnerLock( $this->directory . '/runner.lock' ), $changes, $clock, $random );
-		$finish = static function ( Job $queued ) use ( $runner, $site ): Job {
+		$runner  = new Runner( $jobs, new RunnerLock( $this->directory . '/runner.lock' ), $changes, $clock, $random );
+		$finish  = static function ( Job $queued ) use ( $runner, $site ): Job {
 			for ( $i = 0; $i < 100; ++$i ) {
 				$job = $runner->tick( 0.08 )->job;
 				self::assertNotNull( $job );
@@ -350,7 +371,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$preview = $changes->preview( $source->id, 1 );
 		self::assertTrue( $preview['applicable'], implode( ',', $preview['blockers'] ) );
 		self::assertFalse( $changes->preview( $source->id, 2 )['applicable'] );
-		$queued = $changes->start_apply( $source->id, 1, $preview['digest'] );
+		$queued          = $changes->start_apply( $source->id, 1, $preview['digest'] );
 		$clock->seconds += 3601;
 		try {
 			$staging->remove( $source->id, microtime( true ) + 1 );
@@ -365,14 +386,14 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertCount( 5, DatabaseGeneration::exclusions( $this->direct, $apply ) );
 		self::assertTrue( $staging->remove( $source->id, microtime( true ) + 2 ) );
 		$clock->seconds += 1;
-		$backup = $jobs->create( JobType::Backup, 'schedule', $clock->seconds );
-		$backup->state = JobState::Succeeded;
+		$backup          = $jobs->create( JobType::Backup, 'schedule', $clock->seconds );
+		$backup->state   = JobState::Succeeded;
 		$jobs->save( $backup );
 		$jobs->prune( 1, $clock->seconds );
 		self::assertNotNull( $jobs->get( $apply->id ) );
 		$undo = $changes->preview_undo( $apply->id, 1 );
 		self::assertTrue( $undo['applicable'], implode( ',', $undo['blockers'] ) );
-		$queued = $changes->start_undo( $apply->id, 1, $undo['digest'] );
+		$queued          = $changes->start_undo( $apply->id, 1, $undo['digest'] );
 		$clock->seconds += 86401;
 		self::assertTrue( $changes->expire( false, microtime( true ) + 2 ) );
 		$undone = $finish( $queued );
@@ -382,11 +403,87 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertTrue( $changes->expire( false, microtime( true ) + 2 ) );
 		self::assertCount( 6, DatabaseGeneration::exclusions( $this->direct, $jobs->get( $apply->id ) ) );
 		$clock->seconds += 86401;
-		for ( $i = 0; $i < 16 && isset( $jobs->get( $apply->id )->data['database_owner'] ); ++$i ) {
+		for ( $i = 0; $i < 16; ++$i ) {
+			if ( ! isset( $jobs->get( $apply->id )->data['database_owner'] ) ) {
+				break;
+			}
 			$changes->expire( false, microtime( true ) + 0.01 );
 		}
 		self::assertArrayNotHasKey( 'database_owner', $jobs->get( $apply->id )->data );
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	public function test_a_site_account_with_only_the_documented_grants_can_apply_undo_and_expire(): void {
+		$this->mysql_only();
+		$user = 'bfr_grants_' . bin2hex( random_bytes( 5 ) );
+		$host = $this->admin->rows( "SELECT SUBSTRING_INDEX(USER(), '@', -1) AS host" )[0]['host'];
+		self::assertMatchesRegularExpression( '/\A[A-Za-z0-9.:-]+\z/', $host );
+		$account   = "'" . $user . "'@'" . $host . "'";
+		$password  = bin2hex( random_bytes( 24 ) );
+		$endpoint  = getenv( 'BFR_TEST_MYSQL_HOST' );
+		$endpoint  = is_string( $endpoint ) && '' !== $endpoint ? $endpoint : 'localhost';
+		$connect   = fn (): Direct => new Direct( new \mysqli( $endpoint, $user, $password, $this->database ) );
+		$wildcards = '0' === $this->admin->rows( 'SELECT @@GLOBAL.partial_revokes AS enabled' )[0]['enabled'];
+		$scope     = $wildcards ? str_replace( '_', '\\_', $this->database ) : $this->database;
+		$this->admin->execute( 'CREATE USER ' . $account . " IDENTIFIED BY '" . $password . "'" );
+		try {
+			$this->admin->execute( 'GRANT ' . implode( ', ', SwapCatalog::PRIVILEGES ) . ' ON `' . $scope . '`.* TO ' . $account );
+			$names        = array_column( $this->manifest->tables, 'name' );
+			$this->direct = $connect();
+			$missing      = ( new SwapCatalog( $this->direct ) )->inspect( $names );
+			self::assertSame( [ 'PROCESS' ], $missing['missing_privileges'] );
+			self::assertSame( [ 'dictionary_privilege' ], $missing['blockers'] );
+
+			// Rehearsal completes even without access to the native InnoDB dictionary.
+			$this->importer = new TableImporter( $this->direct, $this->manifest, $this->directory, bin2hex( random_bytes( 16 ) ) );
+			for ( $i = 0; $i < 100; ++$i ) {
+				$progress = $this->importer->tick( 16 );
+				if ( $progress['done'] ) {
+					break;
+				}
+			}
+			self::assertTrue( $progress['done'] );
+			$this->admin->execute( 'GRANT PROCESS ON *.* TO ' . $account );
+			$this->direct = $connect(); // Global privileges take effect on a new connection.
+			$catalog      = new SwapCatalog( $this->direct );
+			self::assertSame( [], $catalog->inspect( $names )['blockers'] );
+			$this->db->execute( 'CREATE VIEW reporting_posts AS SELECT title FROM wp_posts' );
+			self::assertContains( 'SHOW VIEW', $catalog->inspect( $names )['missing_privileges'] );
+			$this->admin->execute( 'GRANT SHOW VIEW ON `' . $scope . '`.* TO ' . $account );
+			$this->direct = $connect();
+			self::assertContains( 'live_views', ( new SwapCatalog( $this->direct ) )->inspect( $names )['blockers'] );
+			$this->db->execute( 'DROP VIEW reporting_posts' );
+			$this->admin->execute( 'REVOKE SHOW VIEW ON `' . $scope . '`.* FROM ' . $account );
+			$this->direct = $connect();
+			$plan         = $this->prepared();
+			$this->admin->execute( 'REVOKE TRIGGER ON `' . $scope . '`.* FROM ' . $account );
+			$worker = new TableExchange( $connect() );
+			try {
+				$worker->run( $plan, 1, false );
+				self::fail( 'The apply accepted a grant revoked after confirmation.' );
+			} catch ( DatabaseFailed ) {
+				self::assertSame( 'prepared', $worker->status( $plan ) );
+				self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+			}
+			$this->admin->execute( 'GRANT TRIGGER ON `' . $scope . '`.* TO ' . $account );
+			$worker = new TableExchange( $connect() );
+			$worker->run( $plan, 1, false );
+			self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+			$worker->review_undo( $plan, 1 );
+			$worker->run( $plan, 1, true );
+			self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+			$end = count( $plan->document['pairs'] ) + 1;
+			self::assertSame( $end, $worker->clean( $plan, 'undone', 0, microtime( true ) + 15 ) );
+
+			if ( $wildcards ) {
+				// Multiple overlapping wildcard GRANTs do not add up to a broader grant.
+				$overlap = substr( $scope, 0, -1 ) . '%';
+				$this->admin->execute( 'GRANT SELECT ON `' . $overlap . '`.* TO ' . $account );
+				self::assertContains( 'TRIGGER', ( new SwapCatalog( $connect() ) )->inspect( $names )['missing_privileges'] );
+			}
+		} finally {
+			$this->admin->execute( 'DROP USER ' . $account );
+		}
 	}
 
 	public function test_a_target_view_created_after_approval_blocks_the_exchange(): void {
@@ -402,5 +499,4 @@ final class DatabaseExchangeTest extends TestCase {
 			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
 		}
 	}
-
 }

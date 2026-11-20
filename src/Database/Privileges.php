@@ -32,15 +32,33 @@ final class Privileges {
 			if ( false === $separator ) {
 				return [];
 			}
-			$user   = str_replace( "'", "''", substr( $account, 0, $separator ) );
-			$host   = str_replace( "'", "''", substr( $account, $separator + 1 ) );
-			$filter = 'GRANTEE=0x' . bin2hex( "'$user'@'$host'" );
-			$query  = 'SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES WHERE TABLE_SCHEMA=DATABASE() AND ' . $filter;
-			$mode   = $connection->rows( "SHOW VARIABLES LIKE 'partial_revokes'" );
-			if ( [] === $mode || 'OFF' === ( $mode[0]['Value'] ?? '' ) ) {
-				$query .= ' UNION SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE ' . $filter;
+			$user     = str_replace( "'", "''", substr( $account, 0, $separator ) );
+			$host     = str_replace( "'", "''", substr( $account, $separator + 1 ) );
+			$filter   = 'GRANTEE=0x' . bin2hex( "'$user'@'$host'" );
+			$mode     = $connection->rows( "SHOW VARIABLES LIKE 'partial_revokes'" );
+			$patterns = [] === $mode || 'OFF' === ( $mode[0]['Value'] ?? '' );
+			$schema   = $patterns
+				? 'CAST(DATABASE() AS BINARY) LIKE CAST(TABLE_SCHEMA AS BINARY) ESCAPE 0x5c'
+				: 'CAST(DATABASE() AS BINARY)=CAST(TABLE_SCHEMA AS BINARY)';
+			$rows     = $connection->rows( 'SELECT TABLE_SCHEMA,PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES WHERE ' . $schema . ' AND ' . $filter );
+			$sets     = [];
+			foreach ( $rows as $row ) {
+				if ( is_string( $row['TABLE_SCHEMA'] ?? null ) && is_string( $row['PRIVILEGE_TYPE'] ?? null ) ) {
+					$sets[ $row['TABLE_SCHEMA'] ][] = $row['PRIVILEGE_TYPE'];
+				}
 			}
-			return array_values( array_filter( array_column( $connection->rows( $query ), 'PRIVILEGE_TYPE' ), 'is_string' ) );
+			// Multiple schema patterns can match, but MySQL honors only one of them.
+			// Only a privilege shared by every possible match is safe to rely on.
+			$sets   = array_values( $sets );
+			$grants = array_shift( $sets ) ?? [];
+			foreach ( $sets as $set ) {
+				$grants = array_intersect( $grants, $set );
+			}
+			if ( $patterns ) {
+				$global = $connection->rows( 'SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE ' . $filter );
+				$grants = array_merge( $grants, array_filter( array_column( $global, 'PRIVILEGE_TYPE' ), 'is_string' ) );
+			}
+			return array_values( array_unique( $grants ) );
 		} catch ( DatabaseFailed ) {
 			return [];
 		}

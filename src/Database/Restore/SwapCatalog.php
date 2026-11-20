@@ -86,8 +86,14 @@ final readonly class SwapCatalog {
 	 */
 	public function inspect( array $names ): array {
 		$facts   = $this->facts();
-		$missing = array_values( array_diff( self::PRIVILEGES, Privileges::database( $this->connection ) ) );
-		$issues  = [];
+		$grants  = Privileges::database( $this->connection );
+		$missing = array_values( array_diff( self::PRIVILEGES, $grants ) );
+		// A schema-wide SELECT sees every local view name. MySQL can still hide its
+		// dependencies when another account defined the view and SHOW VIEW is absent.
+		if ( ! $facts['mariadb'] && ! in_array( 'SHOW VIEW', $grants, true ) && [] !== $this->connection->rows( "SELECT 1 AS present FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='VIEW' LIMIT 1" ) ) {
+			$missing[] = 'SHOW VIEW';
+		}
+		$issues = [];
 		if ( ! $facts['atomic'] || $facts['read_only'] ) {
 			$issues[] = 'server_configuration';
 		}

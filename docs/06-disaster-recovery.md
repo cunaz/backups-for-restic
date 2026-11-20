@@ -272,7 +272,8 @@ procedure above. Missing source trigger information, views, foreign keys, trigge
 CHECK constraints, incompatible accounts or unsupported database permissions can also
 require that procedure. The MySQL account needs direct access to the affected schema
 with SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, LOCK TABLES and TRIGGER, and
-global PROCESS for the physical table dictionary. If external applications or cross-schema
+global PROCESS for the physical table dictionary. A schema containing views also needs
+SHOW VIEW so MySQL can reveal their dependencies. If external applications or cross-schema
 views depend on the WordPress tables, use a database administrator for recovery. On shared hosting, ask the database
 administrator to perform a manual import where these grants are unavailable.
 [Full compatibility conditions](adr/0043-atomic-mysql-database-exchange.md).

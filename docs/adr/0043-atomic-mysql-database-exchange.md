@@ -31,7 +31,12 @@ views outside that account's visibility need a database administrator to plan re
 [MySQL view dependency visibility](https://dev.mysql.com/doc/refman/8.4/en/information-schema-view-table-usage-table.html).
 
 The preflight verifies database-wide SELECT, INSERT, UPDATE, DELETE, CREATE, DROP,
-ALTER, LOCK TABLES and TRIGGER privileges. It also verifies dictionary access requiring
+ALTER, LOCK TABLES and TRIGGER privileges. If the current database contains a view,
+it also requires SHOW VIEW to inspect dependencies created by another account. Overlapping
+database grant patterns establish only the rights shared by every matching pattern.
+[MySQL database grants](https://dev.mysql.com/doc/refman/8.4/en/grant.html).
+
+The preflight also verifies dictionary access requiring
 global PROCESS. PROCESS exposes server-wide metadata, so a shared host may reserve it
 for its database administrators. Current verification recognizes direct database grants
 and applicable direct global grants. Global grants alone cannot establish schema access
@@ -92,5 +97,8 @@ WordPress state, post-apply writes retained after undo and expiry replay. The jo
 exercise the normal filesystem store, timeout, confirmation digest, staging pin, history
 pruning and recovery windows. A local real WordPress 7.1.4, PHP 8.4 and MySQL 8.4.11
 restore also verified authentication state, addresses, active plugins and the heartbeat.
+A separate MySQL 8.4.11 account restricted to the privileges listed above rehearsed,
+applied, undid and expired its own private tables. Removing PROCESS or withholding
+SHOW VIEW on a schema containing a view produced specific preflight blockers.
 
 The server behavior is described in the MySQL manual. [RENAME TABLE](https://dev.mysql.com/doc/refman/8.4/en/rename-table.html), [LOCK TABLES](https://dev.mysql.com/doc/refman/8.4/en/lock-tables.html), [atomic DDL](https://dev.mysql.com/doc/refman/8.4/en/atomic-ddl.html).
