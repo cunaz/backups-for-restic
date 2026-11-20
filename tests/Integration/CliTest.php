@@ -277,6 +277,19 @@ final class CliTest extends TestCase {
 		}
 	}
 
+	/**
+	 * @return non-empty-list<string> Recent jobs, newest first.
+	 */
+	private static function recent_job_ids(): array {
+		[ $status, $result ] = TestSite::api( 'GET', '/jobs' );
+		self::assertSame( 200, $status );
+		self::assertIsArray( $result['jobs'] );
+		$ids = array_column( $result['jobs'], 'id' );
+		self::assertNotEmpty( $ids );
+		self::assertContainsOnlyString( $ids );
+		return $ids;
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_logs_prints_what_a_job_did_and_cancel_stops_one(): void {
 		TestSite::idle( 600 );
@@ -306,9 +319,19 @@ final class CliTest extends TestCase {
 			self::assertMatchesRegularExpression( '/^' . $header . '\n\d{4}-\d\d-\d\d \d\d:\d\d:\d\d info +Job created\./m', $output );
 			self::assertStringContainsString( 'Cancellation requested. {"user":"wp-cli"}', $output );
 			self::assertStringContainsString( 'Job finished. {"state":"cancelled"}', $output );
+			[ $status, $tail ] = self::command( [ 'logs', $id, '--lines=2' ] );
+			self::assertSame( 0, $status, $tail );
+			self::assertMatchesRegularExpression( '/^' . $header . '\n[^\n]+\n[^\n]+\z/m', trim( $tail ), 'The selected heading and exactly two log entries.' );
+
+			// The heartbeat may start another job while the external CLI process is booting.
+			$before              = self::recent_job_ids();
 			[ $status, $latest ] = self::command( [ 'logs', '--lines=2' ] );
+			$after               = self::recent_job_ids();
 			self::assertSame( 0, $status, $latest );
-			self::assertMatchesRegularExpression( '/^' . $header . '\n[^\n]+\n[^\n]+\z/m', trim( $latest ), 'The latest job heading and exactly two log entries.' );
+			self::assertSame( 1, preg_match( '/^(\d{8}T\d{6}Z-[a-f0-9]{6}) /m', $latest, $match ) );
+			$previous = array_search( $before[0], $after, true );
+			self::assertIsInt( $previous );
+			self::assertContains( $match[1], array_slice( $after, 0, $previous + 1 ), 'A job that was the latest during the command.' );
 
 			[ $status, $output ] = self::command( [ 'logs', '20200101T000000Z-abcdef' ] );
 			self::assertSame( 1, $status, $output );
