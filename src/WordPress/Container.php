@@ -403,7 +403,7 @@ final class Container {
 	 * @return FileMaintenance Marker manager.
 	 */
 	private function file_maintenance(): FileMaintenance {
-		return new FileMaintenance( $this->site()->abspath, plugin_basename( $this->plugin_file ), rest_url( RestRoutes::NAMESPACE ), admin_url( 'admin.php' ) );
+		return new FileMaintenance( $this->site()->abspath, plugin_basename( $this->plugin_file ), rest_url( RestRoutes::REST_NAMESPACE ), admin_url( 'admin.php' ) );
 	}
 
 	/**

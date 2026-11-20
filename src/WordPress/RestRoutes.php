@@ -43,7 +43,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class RestRoutes {
 
-	public const string NAMESPACE = 'backups-for-restic/v1';
+	public const string REST_NAMESPACE = 'backups-for-restic/v1';
 
 	/** Seconds a request may spend on deleting a staging directory; the heartbeat finishes the rest. */
 	private const float REMOVAL_SECONDS = 10.0;
@@ -113,7 +113,7 @@ final class RestRoutes {
 					],
 				];
 			}
-			register_rest_route( self::NAMESPACE, $path, $endpoints );
+			register_rest_route( self::REST_NAMESPACE, $path, $endpoints );
 		}
 	}
 
