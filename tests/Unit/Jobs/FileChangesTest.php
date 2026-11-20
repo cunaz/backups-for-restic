@@ -288,6 +288,32 @@ final class FileChangesTest extends TestCase {
 		self::assertFalse( $this->changes->preview_undo( $job->id )['applicable'] );
 	}
 
+	public function test_a_worker_killed_after_publishing_a_directory_lets_the_apply_and_its_undo_finish(): void {
+		$job = $this->start();
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		self::assertDirectoryExists( $this->live . '/b-new' );
+		// The state of a worker killed after the rename and before it recorded the result.
+		$entry  = $this->jobs->directory( $job ) . '/undo/item-1/entry.json';
+		$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertSame( 'done', $record['phase'] );
+		self::assertNotNull( $record['candidate'] );
+		$record['phase'] = 'ready';
+		file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
+		$saved = $this->jobs->get( $job->id );
+		self::assertNotNull( $saved );
+		self::assertSame( 2, $saved->progress['done'] );
+		$saved->progress['done'] = 1;
+		$this->jobs->save( $saved );
+		$this->run_job( $job );
+		self::assertSame( 'created', file_get_contents( $this->live . '/b-new/new.txt' ) );
+		$this->undo( $job );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+		self::assertSame( [ '.', '..', 'a-existing' ], scandir( $this->live ) );
+	}
+
 	public function test_edited_files_and_additional_directory_children_block_undo(): void {
 		$job      = $this->run_job( $this->start() );
 		$approved = $this->changes->preview_undo( $job->id );

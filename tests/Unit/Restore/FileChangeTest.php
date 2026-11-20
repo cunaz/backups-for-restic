@@ -324,6 +324,81 @@ final class FileChangeTest extends TestCase {
 		self::assertFileDoesNotExist( $this->journal . '/candidate' );
 	}
 
+	public function test_a_kill_at_any_step_of_a_directory_creation_resumes_and_undo_removes_only_that_directory(): void {
+		$plugin = $this->site . '/plugin';
+		$code   = $plugin . '/main.php';
+		mkdir( $this->staging . $plugin, 0700 );
+		file_put_contents( $this->staging . $code, 'code' );
+		mkdir( $this->site . '/kept' );
+		$plan    = fn (): ApplyPlan => new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$journal = $this->root . '/journal-uninterrupted';
+		$steps   = [];
+		$record  = static function ( string $operation, string $subject ) use ( &$steps ): void {
+			$steps[] = $operation . ' ' . $subject;
+		};
+		$change  = new FileChange( $plan(), $this->staging, $journal, null, 'apply', $record );
+		self::assertTrue( $change->apply( $plugin, 'mkdir', null, null, INF ) );
+		self::assertSame(
+			[
+				'journal copy',
+				'mkdir ' . $journal . '/directory',
+				'sync ' . $journal . '/directory',
+				'journal ready',
+				'rename ' . $plugin,
+				'sync ' . $this->site,
+				'journal done',
+			],
+			$steps
+		);
+		$crash_points = count( $steps );
+		self::assertTrue( $change->undo( $plugin, 'mkdir', INF ) );
+		self::assertDirectoryDoesNotExist( $plugin );
+
+		for ( $stop = 0; $stop < $crash_points; ++$stop ) {
+			$journal = $this->root . '/journal-' . $stop;
+			$seen    = 0;
+			$kill    = static function () use ( &$seen, $stop ): void {
+				if ( $seen++ === $stop ) {
+					throw new \DomainException( 'The worker was killed.' );
+				}
+			};
+			try {
+				( new FileChange( $plan(), $this->staging, $journal, null, 'apply', $kill ) )->apply( $plugin, 'mkdir', null, null, INF );
+				self::fail( 'The worker must stop after step ' . $stop . '.' );
+			} catch ( \DomainException $killed ) {
+				self::assertSame( 'The worker was killed.', $killed->getMessage() );
+			}
+			// The next request completes the entry, owns the directory and publishes a child.
+			$next      = $plan();
+			$directory = new FileChange( $next, $this->staging, $journal );
+			self::assertTrue( $directory->apply( $plugin, 'mkdir', null, null, INF ), 'Step ' . $stop );
+			self::assertSame( 'remove', $directory->undo_action( $plugin, 'mkdir' ), 'Step ' . $stop );
+			$child = new FileChange( $next, $this->staging, $journal . '-child' );
+			self::assertTrue( $child->apply( $code, 'create', hash( 'sha256', 'code' ), null, INF ) );
+			self::assertTrue( $child->undo( $code, 'create', INF ) );
+			self::assertTrue( $directory->undo( $plugin, 'mkdir', INF ) );
+			self::assertSame( [ '.', '..', 'kept' ], scandir( $this->site ), 'Step ' . $stop );
+		}
+	}
+
+	public function test_a_created_directory_keeps_the_permissions_of_one_made_in_place(): void {
+		$shared = $this->site . '/shared';
+		$album  = $shared . '/album';
+		mkdir( $shared );
+		chmod( $shared, 02755 );
+		mkdir( $this->staging . $album, 0700, true );
+		$umask = umask( 027 );
+		try {
+			self::assertTrue( $this->change->apply( $album, 'mkdir', null, null, INF, 0755 ) );
+		} finally {
+			umask( $umask );
+		}
+		clearstatcache();
+		self::assertSame( 02750, fileperms( $album ) & 07777 );
+		self::assertSame( filegroup( $shared ), filegroup( $album ) );
+		self::assertSame( 'remove', $this->change->undo_action( $album, 'mkdir' ) );
+	}
+
 	public function test_undo_review_keeps_entries_created_below_a_removed_directory(): void {
 		$plugin = $this->site . '/plugin';
 		$code   = $plugin . '/main.php';

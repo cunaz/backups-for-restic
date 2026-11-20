@@ -273,7 +273,8 @@ final readonly class FileChange {
 			return 'refuse';
 		}
 		if ( 'mkdir' === $action ) {
-			if ( null === $record['candidate'] ) {
+			if ( null === $record['candidate'] || self::at( $this->item_directory . '/directory', $record['candidate'] ) ) {
+				// Nothing was created, or the prepared directory is still private.
 				return 'keep';
 			}
 			return self::at( $path, $record['candidate'] ) && self::metadata( $path ) === $record['installed'] && 'keep' === $this->live_action( $path, $review ) ? 'remove' : 'refuse';
@@ -404,8 +405,10 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Creates a directory exclusively. If killed after mkdir but before recording its
-	 * identity, a retry can use the directory but never claims ownership for deletion.
+	 * Prepares the directory in the item directory, records its inode and then renames it
+	 * into place, as a replacement file is. A retry after a kill at any step finds the
+	 * recorded inode either still private or published and completes the creation; undo
+	 * removes exactly the directory that this entry created.
 	 *
 	 * @param string $path Reviewed path.
 	 * @param Record $record Intent.
@@ -413,26 +416,71 @@ final readonly class FileChange {
 	 * @throws StorageFailed If the checked filesystem operation cannot complete.
 	 */
 	private function make_directory( string $path, array $record ): bool {
-		if ( 'copy' === $record['phase'] ) {
+		$prepared = $this->item_directory . '/directory';
+		if ( null === $record['candidate'] ) {
+			// Nothing of this entry is live yet. An intent that an earlier version recorded
+			// before its mkdir() also requires the reviewed destination to be missing.
 			$this->require_action( $path, 'mkdir' );
-			$record['phase'] = 'ready';
+			$this->prepare_candidate_directory( $prepared, $record['mode'], dirname( $path ) );
+			$record['candidate'] = self::directory_identity( $prepared );
+			$record['installed'] = self::metadata( $prepared );
+			$record['phase']     = 'ready';
 			$this->save( $record );
 		}
-		if ( self::exists( $path ) ) {
-			$this->require_action( $path, 'keep' );
-		} else {
-			$this->require_action( $path, 'mkdir' );
-			if ( ! mkdir( $path, $record['mode'] | 0700 ) ) {
-				throw new StorageFailed( 'The reviewed directory could not be created.' );
+		if ( ! self::at( $path, $record['candidate'] ) ) {
+			if ( ! self::at( $prepared, $record['candidate'] ) || self::metadata( $prepared ) !== $record['installed'] || [ '.', '..' ] !== scandir( $prepared ) ) {
+				throw new StorageFailed( 'The prepared directory changed before publication.' );
 			}
-			$this->observe( 'mkdir', $path );
-			$record['candidate'] = self::directory_identity( $path );
-			$record['installed'] = self::metadata( $path );
+			$this->require_parent( $path, $record );
+			$this->require_action( $path, 'mkdir' );
+			if ( ! rename( $prepared, $path ) ) {
+				throw new StorageFailed( 'The prepared directory could not be renamed into place.' );
+			}
+			$this->observe( 'rename', $path );
 		}
+		// Also after a retry: the publication is on disk before the record that completes it.
 		$this->sync_directory( dirname( $path ) );
+		$this->require_action( $path, 'keep' );
+		if ( self::metadata( $path ) !== $record['installed'] ) {
+			throw new StorageFailed( 'The published directory has changed.' );
+		}
 		$record['phase'] = 'done';
 		$this->save( $record );
 		return true;
+	}
+
+	/**
+	 * Creates the private directory that becomes the reviewed one, or reuses the empty one
+	 * that a killed worker created before it could record it. It gets the permissions that
+	 * mkdir() in place gave: the reviewed mode narrowed by the process umask and, below a
+	 * set-group-ID parent, that parent's group and the bit, where the worker may set the group.
+	 *
+	 * @param string $prepared Private path in the item directory.
+	 * @param int    $mode Reviewed permissions.
+	 * @param string $live_parent Live parent directory.
+	 * @throws StorageFailed If the private directory cannot be prepared.
+	 */
+	private function prepare_candidate_directory( string $prepared, int $mode, string $live_parent ): void {
+		clearstatcache( true );
+		if ( is_link( $prepared ) || ( file_exists( $prepared ) && ( realpath( $prepared ) !== $prepared || ! is_dir( $prepared ) || [ '.', '..' ] !== scandir( $prepared ) ) ) ) {
+			throw new StorageFailed( 'The private copy of a reviewed directory is not an empty directory.' );
+		}
+		if ( ! is_dir( $prepared ) ) {
+			if ( ! mkdir( $prepared, 0700 ) ) {
+				throw new StorageFailed( 'The reviewed directory could not be prepared.' );
+			}
+			$this->observe( 'mkdir', $prepared );
+		}
+		$mode &= ~umask();
+		$live  = lstat( $live_parent );
+		if ( false !== $live && 0 !== ( $live['mode'] & 02000 ) && @chgrp( $prepared, $live['gid'] ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_chgrp -- A group the worker may not set leaves the worker's group, as for a created file.
+			$mode |= 02000;
+		}
+		if ( ! chmod( $prepared, $mode ) ) {
+			throw new StorageFailed( 'The permissions of a reviewed directory could not be set.' );
+		}
+		// Its permissions are on disk before the record that names them.
+		$this->sync_directory( $prepared );
 	}
 
 	/**
