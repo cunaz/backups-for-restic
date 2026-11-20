@@ -95,7 +95,7 @@ final readonly class PrivateDirectory {
 	 * @throws StorageFailed If the configured location is unsuitable.
 	 */
 	private function claim(): void {
-		if ( '' === $this->path || dirname( $this->path ) === $this->path || in_array( basename( $this->path ), [ '.', '..' ], true ) ) {
+		if ( ! $this->dedicated_path() ) {
 			throw new StorageFailed( 'A dedicated private directory is required.' );
 		}
 		if ( ! is_dir( $this->path ) ) {
@@ -110,20 +110,44 @@ final readonly class PrivateDirectory {
 		}
 		// Empty marker, visible in one operation. A concurrent initializer may have created it.
 		$marker = $this->path . '/' . self::OWNER;
-		if ( ! touch( $marker ) || ! $this->marked() ) {
+		// The exclusive open also refuses dangling symlinks and a concurrently created marker.
+		$handle = @fopen( $marker, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A concurrent initializer may own this marker.
+		if ( false !== $handle ) {
+			fclose( $handle );
+		}
+		if ( ! $this->marked() ) {
 			throw new StorageFailed( 'The private directory could not be marked as owned.' );
 		}
 	}
 
 	/**
+	 * Rejects relative paths, dot segments, filesystem roots and aliases of roots before
+	 * creating directories, changing their permissions or cleaning an installation.
+	 *
+	 * @return bool Whether this path can name a dedicated directory.
+	 */
+	private function dedicated_path(): bool {
+		$path = str_replace( DIRECTORY_SEPARATOR, '/', $this->path );
+		if ( '' === $path || str_contains( $path, "\0" ) || 1 === preg_match( '~(?:^|/)[.]{1,2}(?:/|$)~', $path ) ) {
+			return false;
+		}
+		if ( ! str_starts_with( $path, '/' ) && ( '\\' !== DIRECTORY_SEPARATOR || 1 !== preg_match( '~^[A-Za-z]:/~', $path ) ) ) {
+			return false;
+		}
+		$real = realpath( $this->path );
+		return dirname( $this->path ) !== $this->path && ( false === $real || dirname( $real ) !== $real );
+	}
+
+	/**
 	 * Whether this installation has recorded ownership.
 	 *
+	 * @phpstan-impure Other requests can claim this directory between checks.
 	 * @return bool True for a regular marker.
 	 */
 	private function marked(): bool {
 		$marker = $this->path . '/' . self::OWNER;
 		clearstatcache( true, $marker );
-		return is_file( $marker ) && ! is_link( $marker );
+		return ! is_link( $marker ) && is_file( $marker ) && 0 === filesize( $marker );
 	}
 
 	/**
@@ -166,8 +190,10 @@ final readonly class PrivateDirectory {
 	 * @return bool True if inside or equal.
 	 */
 	public function is_inside( string $root ): bool {
-		$root = rtrim( $root, '/' ) . '/';
-		return str_starts_with( $this->path . '/', $root );
+		$real_path = realpath( $this->path );
+		$real_root = realpath( $root );
+		return str_starts_with( $this->path . '/', rtrim( $root, '/' ) . '/' )
+			|| ( false !== $real_path && false !== $real_root && str_starts_with( $real_path . DIRECTORY_SEPARATOR, rtrim( $real_root, DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR ) );
 	}
 
 	/**
@@ -212,24 +238,28 @@ final readonly class PrivateDirectory {
 	 * also holds other files keeps them.
 	 */
 	public function remove_contents(): void {
-		if ( '' === $this->path || ! is_dir( $this->path ) || ( ! $this->marked() && ! $this->legacy_directory() ) ) {
+		if ( ! $this->dedicated_path() || ! is_dir( $this->path ) || ( ! $this->marked() && ! $this->legacy_directory() ) ) {
 			return;
 		}
 		foreach ( [ ...self::SUBDIRECTORIES, 'spool' ] as $name ) {
 			Files::remove_tree( $this->path . '/' . $name );
 		}
-		foreach ( [ '.htaccess' => self::HTACCESS, 'web.config' => self::WEB_CONFIG, 'index.php' => self::INDEX ] as $name => $content ) {
+		foreach ( [
+			'.htaccess'  => self::HTACCESS,
+			'web.config' => self::WEB_CONFIG,
+			'index.php'  => self::INDEX,
+		] as $name => $content ) {
 			if ( $this->matches( $name, $content ) ) {
 				unlink( $this->path . '/' . $name );
 			}
 		}
-		foreach ( [ 'runner.lock', 'state.lock', 'notify.lock', 'ca.pem', self::OWNER ] as $name ) {
+		foreach ( [ 'runner.lock', 'state.lock', 'notify.lock', 'staging.lock', 'ca.pem', self::OWNER ] as $name ) {
 			if ( is_file( $this->path . '/' . $name ) ) {
 				unlink( $this->path . '/' . $name );
 			}
 		}
 		$entries = is_dir( $this->path ) ? scandir( $this->path ) : false;
-		if ( [ '.', '..' ] === $entries ) {
+		if ( [ '.', '..' ] === $entries && ! is_link( $this->path ) ) {
 			rmdir( $this->path );
 		}
 	}

@@ -38,6 +38,27 @@ final class PrivateDirectoryTest extends TestCase {
 		self::assertSame( 0600, fileperms( $directory->path . '/.htaccess' ) & 0777 );
 	}
 
+	public function test_only_absolute_paths_without_dot_segments_can_claim_private_storage(): void {
+		foreach ( [ 'relative-backups', 'file://' . $this->root, $this->root . '/scratch/../claimed' ] as $path ) {
+			try {
+				( new PrivateDirectory( $path ) )->ensure();
+				self::fail( 'An ambiguous private storage path was accepted.' );
+			} catch ( StorageFailed ) {
+				self::assertDirectoryDoesNotExist( $this->root . '/scratch' );
+			}
+		}
+	}
+
+	public function test_uninstall_handles_a_configured_directory_symlink(): void {
+		mkdir( $this->root . '/outside' );
+		symlink( $this->root . '/outside', $this->root . '/working' );
+		$directory = new PrivateDirectory( $this->root . '/working' );
+		$directory->ensure();
+		$directory->remove_contents();
+		self::assertSame( [ '.', '..' ], scandir( $this->root . '/outside' ) );
+		self::assertTrue( is_link( $directory->path ) );
+	}
+
 	public function test_location_prefers_the_constant_then_wp_content_then_uploads(): void {
 		mkdir( $this->root . '/content' );
 		mkdir( $this->root . '/uploads' );
