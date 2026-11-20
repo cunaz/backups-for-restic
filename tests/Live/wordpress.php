@@ -95,6 +95,10 @@ try {
 	$begin( 'Verify the fresh disposable WordPress site' );
 	$status = hosted_wordpress_api( 'GET', '/status' );
 	Assert::assertFalse( $status['setup_completed'] );
+	$checks = array_column( hosted_wordpress_api( 'GET', '/environment' )['checks'], 'values', 'id' );
+	Assert::assertSame( 134217728, $checks['memory_limit']['bytes'] );
+	Assert::assertSame( 30, $checks['time_limit']['seconds'] );
+	fwrite( STDOUT, "WordPress reports a 128-MiB memory limit and a 30-second execution limit.\n" );
 	$settings = hosted_wordpress_api( 'GET', '/settings' )['values'];
 	Assert::assertSame( '', $settings['repository.url'] );
 	Assert::assertSame( 'none', $settings['repository.ca_certificate'] );
