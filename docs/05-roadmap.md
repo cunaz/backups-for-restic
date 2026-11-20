@@ -17,7 +17,7 @@ was not created with mode 0600. What the audit could not close is phase 0 of the
 | --- | --- |
 | Plugin-written repository passes `restic check --read-data`, restore byte for byte | Met: a 20 MB fixture tree checked by restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0, and a 300 MB streamed database dump checked and restored by restic 0.20.0; incremental backups diff correctly in restic |
 | Restic-written repositories restore identically in PHP | Met for format 1 (restic 0.20.0, 0.19.1, 0.18.1 and 0.14.0), with zero new data when the plugin backs up the same files. Format 2 needs `ext-zstd` (see below); CI covers it in a second job |
-| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 24 MiB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Append-only behaviour green on rest-server. BorgBase pending |
+| Chunk-boundary, forget and append-only parity | Met: 17 of 17 chunk boundaries (one 24 MiB stream from restic's chunker library; with the CLI indirectly, by zero new data blobs) and 11 forget policies over 150 snapshots in 4 time zones match restic's recorded results. The recorded policies are applied to one group; how the forget job selects and groups a site's snapshots is compared with live restic in Milestone 2. Both modes passed on dedicated BorgBase repositories on 2026-11-20, including refusal to forget the append-only snapshot. The local private rest-server also passed |
 | Mutation score of `Crypto` and `Format` ≥ 90 %; fuzzing without open findings | Met. Mutation: 97 % of 2627 mutants in `Crypto`, `Format` and `Engine\Forget` killed or timed out, 70 escaped, none uncovered (CI, 2026-11-09). Fuzzing: 54 million inputs across 17 parsers in a 30-second-per-parser campaign, no findings |
 | Benchmark gates on PHP 8.3 without JIT | Met with wide margins for what was measured: chunker 24 MB/s, scrypt 1.4 s in memory, backup 1.3 CPU minutes per GB, extrapolated from 256 MB written to an in-memory backend by one process ([benchmarks](benchmarks/2026-11-milestone-0.md)). CPU time across ticks to a real server, and the file-backed key derivation that the plugin uses, are not measured yet |
 
@@ -197,8 +197,7 @@ Acceptance
 **Release candidate, 2026-11-20.** The staged restore, live file review and undo, fresh-site
 mapping, database rehearsal, and eligible MySQL exchange and undo are implemented. Packaged
 two-site browser tests verify preservation of the receiving administrator, site address and
-backup settings. MariaDB uses the documented manual SQL import. External provider testing
-and WordPress.org approval remain release gates. [Restore work packages](07-milestone-3-plan.md).
+backup settings. MariaDB uses the documented manual SQL import. A hosted smoke run passed on normal and append-only BorgBase repositories. WordPress.org publication requires owner approval. [Restore work packages](07-milestone-3-plan.md).
 
 Scope
 - Snapshot browser (tree walk per directory), manifest view.
@@ -217,8 +216,7 @@ Acceptance
 
 ## Milestone 4 — 1.0.0
 
-The release candidate has local recovery and packaging evidence. The operator's live
-provider run, directory approval and first public SVN comparison are pending.
+The release candidate has local recovery and packaging evidence plus a successful normal and append-only BorgBase smoke run. Directory approval and the first public SVN comparison are pending.
 [Release-candidate verification](benchmarks/2026-11-20-release-candidate.md).
 
 Scope

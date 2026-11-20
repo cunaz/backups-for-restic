@@ -72,8 +72,7 @@ On 2026-11-20 the hosted smoke ran against dedicated normal and append-only Borg
 repositories with public TLS verification. In both modes the plugin verified the
 repository ID, backed up and restored a random 32 KiB file, and checked the REST v2
 pack size and ranged bytes. The normal repository returned to its original inventory.
-The append-only repository refused deletion and retained its snapshot. Independent
-restic 0.20.0 reads verified both repositories, which held no remaining lock.
+The append-only repository refused deletion, and a second run retained the first snapshot. Independent restic 0.20.0 reads verified both repositories and both append-only snapshots. No locks remained.
 The HTTP status table above records the separate local rest-server tests.
 [Release acceptance](../benchmarks/2026-11-20-release-candidate.md).
 
