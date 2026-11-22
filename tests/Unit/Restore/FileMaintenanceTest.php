@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Unit\Restore;
 
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\WordPress\FileMaintenanceGate;
@@ -295,6 +296,47 @@ final class FileMaintenanceTest extends TestCase {
 		}
 	}
 
+	public function test_later_ticks_keep_the_marker_that_the_first_tick_rendered(): void {
+		$root = TempDir::create( 'maintenance' );
+		try {
+			$token  = bin2hex( random_bytes( 32 ) );
+			$grant  = hash( 'sha256', $token );
+			$dir    = $this->enter( $root, $grant );
+			$marker = $root . '/.maintenance';
+			$script = (string) file_get_contents( $marker );
+			$inode  = fileinode( $marker );
+			// Under the marker a tick boots without the theme and ordinary plugins, whose
+			// rest_url_prefix, home_url or admin_url filters set the URLs of the first tick.
+			$unfiltered = new FileMaintenance( $root, self::PLUGIN, 'https://example.com/?rest_route=/backups-for-restic/v1', 'https://example.com/other/wp-admin/admin.php' );
+			$unfiltered->enter( self::ID, $dir, $grant );
+			clearstatcache( true );
+			self::assertSame( $script, file_get_contents( $marker ) );
+			self::assertSame( $inode, fileinode( $marker ) );
+			$boot = self::boot(
+				$root,
+				[
+					'server'  => [
+						'REQUEST_URI'    => '/wp-json/backups-for-restic/v1/jobs/' . self::ID,
+						'REQUEST_METHOD' => 'GET',
+					],
+					'cookies' => [ 'bfr_file_control' => $token ],
+				]
+			);
+			self::assertSame( 0.0, $boot['upgrading'] );
+
+			// The proof still protects the private copy, which is the live marker as well.
+			file_put_contents( $dir . '/maintenance.php', '<?php $upgrading = 0.0;' . "\n" );
+			$this->assert_unavailable( $unfiltered, $dir, $grant );
+			file_put_contents( $dir . '/maintenance.php', $script );
+			file_put_contents( $dir . '/maintenance.sha256', 'not a proof' );
+			$this->assert_unavailable( $unfiltered, $dir, $grant );
+			unlink( $dir . '/maintenance.sha256' );
+			$this->assert_unavailable( $unfiltered, $dir, $grant );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
 	public function test_unrelated_updater_can_replace_marker_in_place_without_losing_it_at_cleanup(): void {
 		$root = TempDir::create( 'maintenance' );
 		try {
@@ -322,6 +364,15 @@ final class FileMaintenanceTest extends TestCase {
 		mkdir( $dir, 0700, true );
 		( new FileMaintenance( $root, self::PLUGIN, self::API, self::ADMIN ) )->enter( self::ID, $dir, $grant );
 		return $dir;
+	}
+
+	private function assert_unavailable( FileMaintenance $service, string $dir, string $grant ): void {
+		try {
+			$service->enter( self::ID, $dir, $grant );
+			self::fail( 'A private marker without a matching proof must not be renewed.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertSame( 'The private maintenance marker is unavailable.', $refused->getMessage() );
+		}
 	}
 
 	/**

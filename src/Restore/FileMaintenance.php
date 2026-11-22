@@ -18,6 +18,9 @@ defined( 'ABSPATH' ) || exit;
 /** Publishes its marker exclusively and leaves another updater's marker untouched. */
 final readonly class FileMaintenance {
 
+	/** Largest marker the job publishes and later removes. */
+	private const int MAX_BYTES = 8192;
+
 	/**
 	 * Names the live WordPress root.
 	 *
@@ -45,25 +48,27 @@ final readonly class FileMaintenance {
 		}
 		$marker = $this->root . '/.maintenance';
 		$temp   = $directory . '/maintenance.php';
+		$proof  = $directory . '/maintenance.sha256';
 		clearstatcache( true );
-		$gate = dirname( __DIR__ ) . '/WordPress/FileMaintenanceGate.php';
-		// Every value comes from the authorized job or site configuration. var_export
-		// produces PHP string literals even when a path contains quote characters.
-		// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generate quoted PHP literals for the core maintenance file.
-		$args   = array_map( static fn ( string $value ): string => var_export( $value, true ), [ $id, $grant, $this->plugin, $this->api, $this->admin ] );
-		$script = '<?php $upgrading = (float) filemtime(__FILE__); if (is_file(' . var_export( $gate, true ) . ')) { require_once ' . var_export( $gate, true ) . '; $upgrading = \BackupsForRestic\WordPress\FileMaintenanceGate::stamp(' . implode( ',', $args ) . ',(int) $upgrading); }' . "\n";
-		// phpcs:enable WordPress.PHP.DevelopmentFunctions.error_log_var_export
-		$proof = $directory . '/maintenance.sha256';
 		if ( ! is_file( $temp ) ) {
 			if ( file_exists( $marker ) || is_link( $marker ) ) {
 				throw new StorageFailed( 'Another updater owns the maintenance marker.' );
 			}
-
+			// The marker is rendered once, by the job's first tick. Later ticks boot under it,
+			// without the theme and ordinary plugins, whose filters can change these URLs.
+			$gate = dirname( __DIR__ ) . '/WordPress/FileMaintenanceGate.php';
+			// Every value comes from the authorized job or site configuration. var_export
+			// produces PHP string literals even when a path contains quote characters.
+			// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generate quoted PHP literals for the core maintenance file.
+			$args   = array_map( static fn ( string $value ): string => var_export( $value, true ), [ $id, $grant, $this->plugin, $this->api, $this->admin ] );
+			$script = '<?php $upgrading = (float) filemtime(__FILE__); if (is_file(' . var_export( $gate, true ) . ')) { require_once ' . var_export( $gate, true ) . '; $upgrading = \BackupsForRestic\WordPress\FileMaintenanceGate::stamp(' . implode( ',', $args ) . ',(int) $upgrading); }' . "\n";
+			// phpcs:enable WordPress.PHP.DevelopmentFunctions.error_log_var_export
 			Files::write_atomic( $proof, hash( 'sha256', $script ) );
 			Files::write_atomic( $temp, $script );
 		}
-		$ours = is_file( $temp ) && ! is_link( $temp ) ? lstat( $temp ) : false;
-		if ( false === $ours || 0100000 !== ( $ours['mode'] & 0170000 ) || strlen( $script ) !== $ours['size'] || ! hash_equals( hash( 'sha256', $script ), (string) hash_file( 'sha256', $temp ) ) ) {
+		$expected = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
+		$ours     = is_file( $temp ) && ! is_link( $temp ) ? lstat( $temp ) : false;
+		if ( ! is_string( $expected ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $expected ) || false === $ours || 0100000 !== ( $ours['mode'] & 0170000 ) || $ours['size'] >= self::MAX_BYTES || ! hash_equals( $expected, (string) hash_file( 'sha256', $temp ) ) ) {
 			throw new StorageFailed( 'The private maintenance marker is unavailable.' );
 		}
 		if ( ! file_exists( $marker ) && ! is_link( $marker ) && ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) ) {
@@ -95,7 +100,7 @@ final readonly class FileMaintenance {
 		$ours      = lstat( $temp );
 		$proof     = $directory . '/maintenance.sha256';
 		$expected  = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
-		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < 8192 && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
+		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < self::MAX_BYTES && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
 		$active    = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
 		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] && ! unlink( $marker ) ) {
 			throw new StorageFailed( 'The site could not leave maintenance mode.' );
