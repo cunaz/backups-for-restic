@@ -71,6 +71,12 @@ collisions, useful progress, and recovery after a killed request.
   chunks retain restic's 8 MiB maximum; metadata is checked before a download, and a
   response must have exactly the requested length. A generator retains one downloaded
   group and yields plaintext one blob at a time.
+- A compressed chunk may be stored larger than its content, up to libzstd's bound for
+  8 MiB (`Compression::bound()`) and the 32 bytes of encryption (`BlobBatch::max_length()`).
+  restic compresses every data blob of a compressed repository, also data that does not
+  compress, and stores a full chunk of such data in raw zstd blocks, 202 bytes longer than
+  itself. Planning and reading refused that length until 2026-11; it occurs in about one
+  chunk in 1,800 of random data, so in about one conformance run in 200.
 
 ## Run state, reports and recovery
 `RestoreRun` checkpoint version 2 has `plan`, `restore`, `complete` and `aborted` phases.

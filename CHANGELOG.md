@@ -215,6 +215,7 @@ All notable changes are documented here. The format follows
   header carries them.
 
 ### Fixed
+- A file in a compressed repository can be restored when restic stored one of its chunks as a full 8 MiB of data that does not compress, such as part of a photo or a video. Such a chunk is stored 202 bytes longer than itself, and restore refused it as an oversized blob.
 - A compressed index file is decoded beside one copy of itself, and the check before decoding counts what the zstd extension allocates: twice a declared size. Index files of 150,000 blobs, as restic 0.14 to 0.16 write them in compressed repositories, load under 128 MiB with WordPress loaded, and so do 8 MiB data blobs beside a large index in restore and check. An index file that cannot be decoded in the memory left stops the job with `index_too_large` instead of a PHP out-of-memory error.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
