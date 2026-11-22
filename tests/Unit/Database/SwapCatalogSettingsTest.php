@@ -104,7 +104,8 @@ final class SwapCatalogSettingsTest extends TestCase {
 		self::assertSame( $blockers, self::catalog( $variables )->settings() );
 	}
 
-	public function test_none_of_them_keeps_an_expired_private_table(): void {
-		self::assertSame( [ 'performance_schema', 'innodb_table_locks', 'binlog_format', 'wsrep_on' ], SwapCatalog::EXCHANGE_ONLY );
+	public function test_only_disabled_innodb_table_locks_keep_an_expired_private_table(): void {
+		// Expiry drops each table under the exchange's write barrier, which needs them.
+		self::assertSame( [ 'performance_schema', 'binlog_format', 'wsrep_on' ], SwapCatalog::EXCHANGE_ONLY );
 	}
 }

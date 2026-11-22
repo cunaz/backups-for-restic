@@ -254,8 +254,12 @@ The preflight reports `innodb_table_locks` when LOCK TABLES takes no InnoDB tabl
 statement-based logging MySQL 8.4.11 returned note 1592 for the protected copy's
 `INSERT ... SELECT` into AUTO_INCREMENT tables, which the restore port refuses. The values
 come from `SHOW SESSION VARIABLES`, because reading `@@binlog_format` raises a deprecation
-warning. Expiry of private tables depends neither on these settings nor on the Performance
-Schema.
+warning. Expiry needs InnoDB table locks as well: it drops each private table under the
+exchange's write barrier, which locks the table, checks its identity and refuses to start
+without them. One barrier stays the locking contract for every DDL on private tables; a
+generation exists only if the setting was on at the exchange, and when it is switched off
+later, the heartbeat retries and the job log names it. Expiry depends neither on the
+binary log format nor on Galera or the Performance Schema (`SwapCatalog::EXCHANGE_ONLY`).
 
 The importer reads the session's `max_allowed_packet` once per tick and refuses a batch that
 would not fit before sending it (`database_restore_packet`, ADR 0035).
@@ -282,7 +286,8 @@ server UUID during an apply, with a backup, a review, the discard and uninstall;
 to the undo's RENAME followed by cleanup in the same request, a later tick and the heartbeat;
 `OPTIMIZE TABLE` on a live table, on the witness and on a retained table inside the window;
 a stuck newer generation in front of an expired older one; statement-based logging and
-disabled InnoDB table locks; and a batch beyond `max_allowed_packet`. Unit tests cover the
+disabled InnoDB table locks, for the exchange and for expiry; and a batch beyond
+`max_allowed_packet`. Unit tests cover the
 drain's grace period, quiet interval and bounds on an injected clock, the session listing
 and its completeness check, the setting blockers, the plan's
 validation and rebinding, and the job-level handling of foreign bindings and lost sessions.

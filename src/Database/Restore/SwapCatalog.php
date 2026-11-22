@@ -35,8 +35,11 @@ final readonly class SwapCatalog {
 	/** At most this many other sessions of the site's account can be waited for. */
 	public const int MAX_SESSIONS = 4096;
 
-	/** Blockers of a live exchange that do not concern dropping an expired private table. */
-	public const array EXCHANGE_ONLY = [ 'performance_schema', 'innodb_table_locks', 'binlog_format', 'wsrep_on' ];
+	/**
+	 * Blockers of a live exchange that do not concern dropping an expired private table.
+	 * Disabled InnoDB table locks are not among them: every DROP runs in WriteBarrier.
+	 */
+	public const array EXCHANGE_ONLY = [ 'performance_schema', 'binlog_format', 'wsrep_on' ];
 
 	/**
 	 * Creates the catalog for this destination.

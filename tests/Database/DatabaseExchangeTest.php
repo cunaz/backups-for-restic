@@ -952,6 +952,39 @@ final class DatabaseExchangeTest extends TestCase {
 		$this->db->execute( "SET SESSION binlog_format='ROW'" );
 	}
 
+	public function test_expiry_needs_innodb_table_locks_but_not_the_settings_that_only_the_exchange_needs(): void {
+		$this->mysql_only();
+		$plan     = $this->prepared();
+		$exchange = new TableExchange( $this->direct );
+		$exchange->run( $plan, 1, false );
+		$private = $this->private_tables();
+		self::assertNotSame( [], $private );
+		// Every DROP of a private table runs under the write barrier of the exchange.
+		$this->db->execute( 'SET SESSION innodb_table_locks=0' );
+		try {
+			$exchange->clean( $plan, 'applied', 0, microtime( true ) + 15 );
+			self::fail( 'Expiry dropped private tables without InnoDB table locks.' );
+		} catch ( DatabaseFailed ) {
+			self::assertSame( $private, $this->private_tables() );
+		} finally {
+			$this->db->execute( 'SET SESSION innodb_table_locks=1' );
+		}
+		// Statement-based logging only breaks the exchange's copy into AUTO_INCREMENT tables.
+		$binary = 'ON' === ( $this->db->rows( "SHOW VARIABLES LIKE 'log_bin'" )[0]['Value'] ?? 'OFF' );
+		if ( $binary ) {
+			$this->db->execute( "SET SESSION binlog_format='STATEMENT'" );
+			self::assertContains( 'binlog_format', ( new SwapCatalog( $this->direct ) )->settings() );
+		}
+		try {
+			self::assertSame( count( $plan->document['pairs'] ) + 1, $exchange->clean( $plan, 'applied', 0, microtime( true ) + 15 ) );
+		} finally {
+			if ( $binary ) {
+				$this->db->execute( "SET SESSION binlog_format='ROW'" );
+			}
+		}
+		self::assertSame( [], $this->private_tables() );
+	}
+
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
 		$this->mysql_only();
 		$site     = $this->directory . '/site';
