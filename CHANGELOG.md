@@ -389,6 +389,9 @@ All notable changes are documented here. The format follows
   refused uploads after other files had changed.
 - The maintenance marker is readable like WordPress's own, so PHP processes of other
   system users show the maintenance page instead of a fatal error. It is also cleared from
-  OPcache, so hosts without timestamp checks run the current job's marker.
+  OPcache, so hosts without timestamp checks run the current job's marker. Where
+  `opcache.restrict_api` keeps the plugin from clearing it, a host without timestamp checks
+  stops the change before it touches a file (`maintenance_opcache`), and a host with them
+  waits until OPcache has seen the new marker.
 - A file job that the site's file modification policy stops reports `file_writes_refused`
   instead of "Another backup job is still running".

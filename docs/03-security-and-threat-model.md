@@ -300,7 +300,9 @@ carries `Cache-Control: no-store`.
   request. It names the job, the plugin, two URLs and the SHA-256 of the control token; it
   holds no secret. Its content proof, `maintenance.sha256`, is `0600`. Every tick checks
   the private copy against the proof before it renews the marker, and cleanup removes the
-  marker only while it is that inode with that content (ADR 0041).
+  marker only while it is that inode with that content (ADR 0041). Where OPcache refuses to
+  drop the compiled marker (`opcache.restrict_api`) on a server without timestamp checks,
+  the job stops before its next change.
 - The cache holds one file per repository, the merged index, sealed with the master key
   (encrypted and authenticated). A cache that fails authentication is ignored and rebuilt
   from the repository. The lengths between its sealed pieces are not authenticated; a

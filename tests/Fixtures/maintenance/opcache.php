@@ -5,19 +5,63 @@
  * publishes its own marker under the same name, and after its cleanup core's upgrader
  * writes a marker of its own there. Every marker is required as WordPress requires it.
  *
+ * The scenario "refused" runs under the OPcache settings that the test passes, such as an
+ * opcache.restrict_api that leaves this script out: it enters one job's maintenance twice,
+ * reports the refusal code and the duration of each attempt, and releases the marker.
+ *
  * Usage: php -d opcache.enable_cli=1 -d opcache.validate_timestamps=0
- *        -d opcache.file_update_protection=0 opcache.php <root>. Prints the outcome as JSON.
+ *        -d opcache.file_update_protection=0 opcache.php <root> [refused]. Prints the
+ *        outcome as JSON.
  *
  * @package BackupsForRestic\Tests
  */
 
 declare( strict_types=1 );
 
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Restore\FileMaintenance;
 
 $root = $argv[1];
 define( 'ABSPATH', $root . '/' );
 require dirname( __DIR__, 3 ) . '/vendor/autoload.php';
+
+if ( 'refused' === ( $argv[2] ?? null ) ) {
+	if ( ! function_exists( 'opcache_invalidate' ) ) {
+		echo json_encode( [ 'opcache' => false ] );
+		return;
+	}
+	$id      = '20261120T000000Z-333333';
+	$dir     = $root . '/jobs/' . $id;
+	$service = new FileMaintenance( $root );
+	mkdir( $dir, 0700, true );
+	$attempt = static function () use ( $service, $id, $dir ): array {
+		$started = microtime( true );
+		try {
+			$service->enter( $id, $dir, '' );
+			$code = null;
+		} catch ( StorageFailed $refused ) {
+			$code = $refused->context()['code'] ?? 'storage';
+		}
+		return [
+			'code'    => $code,
+			'seconds' => microtime( true ) - $started,
+		];
+	};
+	$result = [
+		'opcache' => true,
+		'first'   => $attempt(),
+		'again'   => $attempt(),
+	];
+	try {
+		$service->release( $id, $dir );
+		$result['released'] = true;
+	} catch ( StorageFailed ) {
+		$result['released'] = false;
+	}
+	$result['left'] = file_exists( $root . '/.maintenance' );
+	echo json_encode( $result, JSON_PRESERVE_ZERO_FRACTION );
+	return;
+}
 
 if ( ! function_exists( 'opcache_invalidate' ) || ! function_exists( 'opcache_is_script_cached' ) || false === opcache_get_status( false ) ) {
 	echo json_encode( [ 'opcache' => false ] );

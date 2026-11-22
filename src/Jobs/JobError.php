@@ -41,7 +41,7 @@ defined( 'ABSPATH' ) || exit;
 final readonly class JobError {
 
 	/** Context codes that replace the code derived from the exception class. */
-	private const array CONTEXT_CODES = [ 'decompression_limit', 'no_snapshots', 'retention_external', 'job_unreadable', 'staging_unverified', 'file_plan_too_large', 'file_space', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_busy', 'database_admin_collision', 'database_wordpress_version', 'database_review_required', 'database_exchange_changed', 'database_exchange_failed', 'database_exchange_cleanup', 'file_writes_refused' ];
+	private const array CONTEXT_CODES = [ 'decompression_limit', 'no_snapshots', 'retention_external', 'job_unreadable', 'staging_unverified', 'file_plan_too_large', 'file_space', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_busy', 'database_admin_collision', 'database_wordpress_version', 'database_review_required', 'database_exchange_changed', 'database_exchange_failed', 'database_exchange_cleanup', 'file_writes_refused', 'maintenance_opcache' ];
 
 	/**
 	 * Creates the error.

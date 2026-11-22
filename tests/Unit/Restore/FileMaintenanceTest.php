@@ -359,37 +359,7 @@ final class FileMaintenanceTest extends TestCase {
 	public function test_opcache_without_timestamp_checks_runs_the_current_marker(): void {
 		$root = TempDir::create( 'maintenance' );
 		try {
-			$process = proc_open(
-				[
-					PHP_BINARY,
-					'-d',
-					'opcache.enable=1',
-					'-d',
-					'opcache.enable_cli=1',
-					'-d',
-					'opcache.validate_timestamps=0',
-					'-d',
-					'opcache.file_update_protection=0',
-					'-d',
-					'opcache.jit=disable',
-					dirname( __DIR__, 2 ) . '/Fixtures/maintenance/opcache.php',
-					$root,
-				],
-				[
-					1 => [ 'pipe', 'w' ],
-					2 => [ 'pipe', 'w' ],
-				],
-				$pipes
-			);
-			self::assertIsResource( $process );
-			$output = (string) stream_get_contents( $pipes[1] );
-			$errors = (string) stream_get_contents( $pipes[2] );
-			self::assertSame( 0, proc_close( $process ), $output . $errors );
-			$result = json_decode( $output, true, 8, JSON_THROW_ON_ERROR );
-			self::assertIsArray( $result );
-			if ( false === $result['opcache'] ) {
-				self::markTestSkipped( 'OPcache is not available to the PHP command line.' );
-			}
+			$result = self::opcache( $root, [ 'opcache.validate_timestamps' => '0' ] );
 			self::assertTrue( $result['cached'], 'The first marker must be in the cache for this test to mean anything.' );
 			self::assertIsFloat( $result['first'] );
 			self::assertGreaterThan( 0.0, $result['first'], 'The first job does not admit the second job\'s controller.' );
@@ -397,6 +367,53 @@ final class FileMaintenanceTest extends TestCase {
 			self::assertSame( 1763600000, $result['core'], 'Core\'s next marker must run, not the second job\'s compiled one.' );
 		} finally {
 			TempDir::remove( $root );
+		}
+	}
+
+	public function test_a_refused_invalidation_stops_the_job_unless_timestamp_checks_end_the_stale_window(): void {
+		// opcache.restrict_api lets only scripts below its path call the OPcache functions.
+		$restricted = [ 'opcache.restrict_api' => '/nonexistent-' . bin2hex( random_bytes( 6 ) ) . '/' ];
+		$runs       = [
+			'without timestamp checks'   => $restricted + [ 'opcache.validate_timestamps' => '0' ],
+			'with a short interval'      => $restricted + [
+				'opcache.validate_timestamps' => '1',
+				'opcache.revalidate_freq'     => '1',
+			],
+			'with a long interval'       => $restricted + [
+				'opcache.validate_timestamps' => '1',
+				'opcache.revalidate_freq'     => '60',
+			],
+			// opcache_invalidate() also fails where the command line has no cache at all.
+			'without a cache in the CLI' => $restricted + [
+				'opcache.enable_cli'          => '0',
+				'opcache.validate_timestamps' => '0',
+			],
+		];
+		foreach ( $runs as $name => $settings ) {
+			$root = TempDir::create( 'maintenance' );
+			try {
+				$result            = self::opcache( $root, $settings, 'refused' );
+				[ $first, $again ] = [ $result['first'], $result['again'] ];
+				if ( 'with a short interval' === $name ) {
+					// The publishing tick waits until OPcache compares the file's time again.
+					self::assertNull( $first['code'], $name );
+					self::assertGreaterThanOrEqual( 2.0, $first['seconds'], $name );
+					self::assertNull( $again['code'], $name );
+					self::assertLessThan( 1.0, $again['seconds'], 'A later tick has nothing to wait for.' );
+				} elseif ( 'without a cache in the CLI' === $name ) {
+					self::assertNull( $first['code'], $name );
+					self::assertLessThan( 1.0, $first['seconds'], $name );
+					self::assertNull( $again['code'], $name );
+				} else {
+					self::assertSame( 'maintenance_opcache', $first['code'], $name );
+					self::assertLessThan( 1.0, $first['seconds'], $name );
+					self::assertSame( 'maintenance_opcache', $again['code'], $name );
+				}
+				self::assertTrue( $result['released'], 'Cleanup removes the marker despite the refusal: ' . $name );
+				self::assertFalse( $result['left'], $name );
+			} finally {
+				TempDir::remove( $root );
+			}
 		}
 	}
 
@@ -436,6 +453,49 @@ final class FileMaintenanceTest extends TestCase {
 		} catch ( StorageFailed $refused ) {
 			self::assertSame( 'The private maintenance marker is unavailable.', $refused->getMessage() );
 		}
+	}
+
+	/**
+	 * Runs the OPcache fixture in a PHP process with OPcache on and the given settings.
+	 *
+	 * @param string                $root WordPress root.
+	 * @param array<string, string> $settings More OPcache settings.
+	 * @param string                $scenario Fixture scenario; empty for the cache sequence.
+	 * @return array<string, mixed> Outcome.
+	 */
+	private static function opcache( string $root, array $settings, string $scenario = '' ): array {
+		$command  = [ PHP_BINARY, '-d', 'display_errors=stderr' ];
+		$settings = $settings + [
+			'opcache.enable'                 => '1',
+			'opcache.enable_cli'             => '1',
+			'opcache.file_update_protection' => '0',
+			'opcache.jit'                    => 'disable',
+		];
+		foreach ( $settings as $setting => $value ) {
+			array_push( $command, '-d', $setting . '=' . $value );
+		}
+		array_push( $command, dirname( __DIR__, 2 ) . '/Fixtures/maintenance/opcache.php', $root );
+		if ( '' !== $scenario ) {
+			$command[] = $scenario;
+		}
+		$process = proc_open(
+			$command,
+			[
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'pipe', 'w' ],
+			],
+			$pipes
+		);
+		self::assertIsResource( $process );
+		$output = (string) stream_get_contents( $pipes[1] );
+		$errors = (string) stream_get_contents( $pipes[2] );
+		self::assertSame( 0, proc_close( $process ), $output . $errors );
+		$result = json_decode( $output, true, 8, JSON_THROW_ON_ERROR );
+		self::assertIsArray( $result );
+		if ( false === $result['opcache'] ) {
+			self::markTestSkipped( 'OPcache is not available to the PHP command line.' );
+		}
+		return $result;
 	}
 
 	/**

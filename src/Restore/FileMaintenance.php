@@ -24,6 +24,9 @@ final readonly class FileMaintenance {
 	/** Largest marker the job publishes and later removes. */
 	private const int MAX_BYTES = 8192;
 
+	/** Longest wait in a request for OPcache to notice a marker that it would not drop. */
+	private const int MAX_STALE_SECONDS = 5;
+
 	/**
 	 * Names the live WordPress root.
 	 *
@@ -42,7 +45,7 @@ final readonly class FileMaintenance {
 	 * @param string $id Job ID.
 	 * @param string $directory Private job directory.
 	 * @param string $grant SHA-256 of the scoped control token, empty for CLI.
-	 * @throws StorageFailed If the job cannot take or refresh maintenance.
+	 * @throws StorageFailed If the job cannot take or refresh maintenance, or this server could keep running an earlier marker.
 	 */
 	public function enter( string $id, string $directory, string $grant ): void {
 		$this->require_directory( $id, $directory );
@@ -81,17 +84,19 @@ final readonly class FileMaintenance {
 		if ( self::MODE !== ( $ours['mode'] & 0777 ) && ! chmod( $temp, self::MODE ) ) {
 			throw new StorageFailed( 'The maintenance marker could not be made readable.' );
 		}
-		if ( ! file_exists( $marker ) && ! is_link( $marker ) && ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) ) {
-			throw new StorageFailed( 'Maintenance requires writable WordPress and private storage on the same filesystem.' );
+		$linked = false;
+		if ( ! file_exists( $marker ) && ! is_link( $marker ) ) {
+			if ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) {
+				throw new StorageFailed( 'Maintenance requires writable WordPress and private storage on the same filesystem.' );
+			}
+			$linked = true;
 		}
 		clearstatcache( true );
 		$active = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
 		if ( false === $active || $ours['dev'] !== $active['dev'] || $ours['ino'] !== $active['ino'] || ! touch( $temp ) ) {
 			throw new StorageFailed( 'The active WordPress maintenance marker has changed.' );
 		}
-		// Every job publishes its marker under the same name. OPcache without timestamp
-		// checks would otherwise keep running an earlier job's marker in this server.
-		self::invalidate( $marker );
+		self::refresh( $marker, $linked );
 	}
 
 	/**
@@ -116,8 +121,11 @@ final readonly class FileMaintenance {
 		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < self::MAX_BYTES && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
 		$active    = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
 		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] ) {
-			// OPcache finds a cached script only while its file exists.
-			self::invalidate( $marker );
+			// OPcache finds a cached script only while its file exists. A refusal does not keep
+			// the site in maintenance: the next marker is checked when it is published.
+			if ( null !== self::opcode_cache() ) {
+				self::invalidate( $marker );
+			}
 			if ( ! unlink( $marker ) ) {
 				throw new StorageFailed( 'The site could not leave maintenance mode.' );
 			}
@@ -128,14 +136,63 @@ final readonly class FileMaintenance {
 	}
 
 	/**
-	 * Drops a compiled marker from this server's OPcache, where the extension is loaded.
+	 * Makes this server's opcode cache run the marker just verified. Every job publishes its
+	 * marker under the same name, so the cache can still hold an earlier job's marker, or
+	 * core's own from a past update, whose old time ends maintenance while files change. A
+	 * command-line process checks only its own cache, which says nothing about the web
+	 * server's.
 	 *
 	 * @param string $marker Live marker path.
+	 * @param bool   $linked Whether this call published the marker.
+	 * @throws StorageFailed If OPcache refused and could keep running an earlier marker.
 	 */
-	private static function invalidate( string $marker ): void {
-		if ( function_exists( 'opcache_invalidate' ) ) {
-			opcache_invalidate( $marker, true );
+	private static function refresh( string $marker, bool $linked ): void {
+		$cache = self::opcode_cache();
+		if ( null === $cache || self::invalidate( $marker ) ) {
+			return;
 		}
+		// opcache.restrict_api refused the call. Without timestamp checks the server runs the
+		// compiled earlier marker for as long as it runs.
+		$wait = $cache['revalidate'] + 1;
+		if ( ! $cache['validate'] || $wait > self::MAX_STALE_SECONDS ) {
+			StorageFailed::raise( 'OPcache refused to invalidate the maintenance marker and could keep running an earlier one.', [ 'code' => 'maintenance_opcache' ] );
+		}
+		if ( $linked ) {
+			// OPcache compares the file's time again at most revalidate_freq seconds later. No
+			// live change may start before every new request runs this marker.
+			$until = microtime( true ) + $wait;
+			while ( microtime( true ) < $until ) {
+				usleep( 100000 );
+			}
+		}
+	}
+
+	/**
+	 * Whether this process has an opcode cache, and how it notices a changed file. On the
+	 * command line it has one only with opcache.enable_cli.
+	 *
+	 * @return array{validate: bool, revalidate: int}|null Timestamp checks and their interval in seconds, or null without a cache.
+	 */
+	private static function opcode_cache(): ?array {
+		$on = static fn ( string $setting ): bool => filter_var( ini_get( $setting ), FILTER_VALIDATE_BOOLEAN );
+		if ( ! function_exists( 'opcache_invalidate' ) || ! $on( 'opcache.enable' ) || ( in_array( php_sapi_name(), [ 'cli', 'phpdbg' ], true ) && ! $on( 'opcache.enable_cli' ) ) ) {
+			return null;
+		}
+		return [
+			'validate'   => $on( 'opcache.validate_timestamps' ),
+			'revalidate' => max( 0, (int) ini_get( 'opcache.revalidate_freq' ) ),
+		];
+	}
+
+	/**
+	 * Drops a compiled marker from this server's OPcache.
+	 *
+	 * @param string $marker Live marker path.
+	 * @return bool False if OPcache refused, as opcache.restrict_api does outside its path.
+	 */
+	private static function invalidate( string $marker ): bool {
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The caller acts on the refusal that PHP also reports as a warning.
+		return @opcache_invalidate( $marker, true );
 	}
 
 	/**
