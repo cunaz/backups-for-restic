@@ -158,13 +158,19 @@ jobs:
           fi
 
   unit:
-    name: Unit tests (PHP ${{ matrix.php }})
+    name: Unit tests (PHP ${{ matrix.php }}${{ matrix.zstd && ', zstd' || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         php: ['8.3', '8.4', '8.5', '8.6']
+        zstd: [false]
+        # Both configurations are supported: with ext-zstd the plugin reads format 2
+        # repositories natively, without it the tests of the refusal run instead.
+        include:
+          - php: '8.3'
+            zstd: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,11 +178,16 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
-          extensions: mbstring, openssl, sodium
+          extensions: ${{ matrix.zstd && 'mbstring, openssl, sodium, zstd' || 'mbstring, openssl, sodium' }}
           # Shared hosting rarely runs OPcache or JIT for CLI; test the slow path.
           ini-values: opcache.enable_cli=0
           coverage: none
           tools: composer:v2
+      - name: The zstd extension is ${{ matrix.zstd && 'loaded' || 'not loaded' }}
+        env:
+          ZSTD: ${{ matrix.zstd }}
+        run: |
+          php -r "exit(extension_loaded('zstd') === (\$argv[1] === 'true') ? 0 : 1);" "$ZSTD"
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpunit --testsuite unit
 
@@ -260,6 +271,8 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         with:
           php-version: '8.3'
+          # With ext-zstd the native decompression of format 2 is mutated and tested too.
+          extensions: zstd
           coverage: pcov
           tools: composer:v2
       - run: composer install --no-interaction --no-progress --prefer-dist
