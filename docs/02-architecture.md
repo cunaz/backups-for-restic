@@ -1093,6 +1093,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job, or with `type: restore` a restore to staging: `snapshot` is the full 64-character ID, `paths` a list of at most 256 absolute paths as the snapshot holds them, the whole snapshot without it. Refused with 400 `invalid_job_type`, `invalid_snapshot` or `invalid_paths`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
+| `GET /jobs/{id}/kept-entries?offset=0` | one page of up to 100 entries that an ended file undo kept, with their reasons, and `total`, `offset` and `next_offset` ([ADR 0041](adr/0041-guarded-file-changes.md)); 404 `not_found` for a job that is not an ended undo, 400 `invalid_plan_page` for an offset outside the list. A file undo reviews every entry on its own: `GET /undo` also lists partly undone applies with `state` and `kept`, an undo review has `totals` by action, and `POST /undo/{id}` answers 409 `undo_nothing_to_revert` when no entry can be reverted |
 | `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` and `retention` (the retention preview described below) |
 | `GET /snapshots/{id}` | one snapshot by its full ID: the fields of the list, `paths`, `tree`, and `manifest` with the site's manifest (`path`, `token`, `data`) or null. `manifest_state` is `found`, `none`, or `unreadable` for a manifest that cannot be located or is not valid |
 | `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
@@ -1271,7 +1272,8 @@ completed, without a repository address, and `forget` and `prune` in retention m
 `restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
 private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
 records. Configuration and startup files require offline recovery. `undo <apply-job>`
-reviews and confirms reversal of live file changes. The recovery guide includes the
+reviews and confirms reversal of live file changes, entry by entry, and lists the entries
+it kept. The recovery guide includes the
 `--skip-plugins` procedure for a site whose active plugin prevents normal startup.
 While a file job holds WordPress maintenance, the plugin's own commands boot like its
 workers, with only this plugin and without the theme. Every other WP-CLI command runs with
