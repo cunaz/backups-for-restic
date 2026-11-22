@@ -72,6 +72,14 @@ final class Messages {
 				'message' => __( 'There is too little disk space to complete these file changes.', 'backups-for-restic' ),
 				'hint'    => __( 'Free space on the destination, then open a new preview to check the estimate and available space.', 'backups-for-restic' ),
 			],
+			'file_writes_refused'            => [
+				'message' => __( 'The site no longer allows these file changes, or the administrator who confirmed them may no longer make them.', 'backups-for-restic' ),
+				'hint'    => __( 'Check that WordPress allows file modifications and that the administrator who confirmed the changes can still manage backups and update WordPress. Changes already made can be undone on the Restores tab.', 'backups-for-restic' ),
+			],
+			'maintenance_opcache'            => [
+				'message' => __( 'OPcache did not let the plugin clear its cached copy of the WordPress maintenance file.', 'backups-for-restic' ),
+				'hint'    => __( 'The PHP setting opcache.restrict_api leaves this site out. With opcache.validate_timestamps off, or with opcache.revalidate_freq above four seconds, the server could keep serving the site from an earlier maintenance file while files change. Add the WordPress directory to opcache.restrict_api, or turn timestamp checks on with a short interval, then start again. Changes already made can be undone on the Restores tab.', 'backups-for-restic' ),
+			],
 			'protected_path_invalid'         => [
 				'message' => __( 'A WordPress location that file apply protects is not an absolute path without "." or ".." segments.', 'backups-for-restic' ),
 				'hint'    => __( 'Check WP_CONTENT_DIR, WPMU_PLUGIN_DIR and BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php, then open the preview again. The staged files remain available for download.', 'backups-for-restic' ),

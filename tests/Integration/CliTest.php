@@ -101,6 +101,122 @@ final class CliTest extends TestCase {
 		}
 	}
 
+	public function test_while_a_file_job_holds_maintenance_only_the_plugins_commands_boot_without_other_plugins(): void {
+		[ $status, $output ] = TestSite::wp( [ 'plugin', 'activate', 'hello' ] );
+		self::assertSame( 0, $status, $output );
+		// The marker and the job's private copy are one inode, so they share a filesystem.
+		$work = dirname( TestSite::root() ) . '/bfr-maintenance-' . bin2hex( random_bytes( 6 ) );
+		$job  = '20261120T120000Z-0a0b0c';
+		mkdir( $work . '/' . $job, 0700, true );
+		file_put_contents(
+			$work . '/probe.php',
+			'<?php WP_CLI::add_wp_hook( "plugins_loaded", static function (): void {
+				require_once ABSPATH . "wp-admin/includes/plugin.php";
+				$stored = update_option( "active_plugins", [] );
+				deactivate_plugins( "backups-for-restic/backups-for-restic.php", true );
+				WP_CLI::log( "probe: hello=" . ( function_exists( "hello_dolly" ) ? "loaded" : "absent" ) . " stored=" . var_export( $stored, true ) );
+			}, PHP_INT_MAX );'
+		);
+		// WP-CLI ignores maintenance, so an eval command can still release the marker.
+		$marker = sprintf(
+			'$marker = new BackupsForRestic\Restore\FileMaintenance( (string) realpath( ABSPATH ), "backups-for-restic/backups-for-restic.php", rest_url( "backups-for-restic/v1" ), admin_url( "admin.php" ) ); $job = %s; $dir = (string) realpath( %s );',
+			var_export( $job, true ),
+			var_export( $work . '/' . $job, true )
+		);
+		try {
+			[ $status, $before ] = TestSite::wp( [ 'option', 'get', 'active_plugins', '--format=json' ] );
+			self::assertSame( 0, $status, $before );
+			[ $status, $output ] = TestSite::wp( [ 'eval', $marker . ' $marker->enter( $job, $dir, "" );' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertFileExists( TestSite::root() . '/.maintenance' );
+
+			[ $status, $output ] = TestSite::wp( [ 'plugin', 'list', '--status=active', '--field=name' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertContains( 'hello', explode( "\n", $output ), 'Another command boots with the site\'s plugins.' );
+			self::assertContains( 'backups-for-restic', explode( "\n", $output ) );
+			foreach ( [ [ 'backups-for-restic', 'status' ], [ '--skip-plugins=hello', '--skip-themes', 'backups-for-restic', 'status' ] ] as $command ) {
+				[ $status, $output ] = TestSite::wp( [ '--require=' . $work . '/probe.php', ...$command ] );
+				self::assertSame( 0, $status, $output );
+				self::assertStringContainsString( 'probe: hello=absent stored=false', $output );
+				self::assertStringContainsString( 'Active job: -', $output );
+			}
+			[ $status, $after ] = TestSite::wp( [ 'option', 'get', 'active_plugins', '--format=json' ] );
+			self::assertSame( 0, $status, $after );
+			self::assertSame( $before, $after, 'No command stored the plugin list that the plugin\'s own commands boot with.' );
+		} finally {
+			[ $status, $output ] = TestSite::wp( [ 'eval', $marker . ' $marker->release( $job, $dir );' ] );
+			TestSite::wp( [ 'plugin', 'deactivate', 'hello' ] );
+			TempDir::remove( $work );
+		}
+		self::assertSame( 0, $status, $output );
+		self::assertFileDoesNotExist( TestSite::root() . '/.maintenance' );
+	}
+
+	public function test_every_tick_of_one_process_reads_the_confirming_administrator_again(): void {
+		$login = 'bfr-confirming-' . bin2hex( random_bytes( 4 ) );
+		TestSite::user( $login, 'administrator' );
+		try {
+			// The policy that FileChanges applies before every tick, asked twice in one process
+			// as by tick --until-idle. Between the two, another request takes the role away:
+			// it writes the database, not this process's object cache.
+			[ $status, $output ] = TestSite::wp(
+				[
+					'eval',
+					sprintf(
+						'$changes = ( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) )->file_changes();
+						$allowed = ( new ReflectionProperty( $changes, "allowed" ) )->getValue( $changes );
+						$user    = get_user_by( "login", %s );
+						$first   = $allowed( $user->ID );
+						global $wpdb;
+						$wpdb->update( $wpdb->usermeta, [ "meta_value" => serialize( [ "editor" => true ] ) ], [ "user_id" => $user->ID, "meta_key" => $wpdb->get_blog_prefix() . "capabilities" ] );
+						echo wp_json_encode( [ $first, $allowed( $user->ID ) ] );',
+						var_export( $login, true )
+					),
+				]
+			);
+			self::assertSame( 0, $status, $output );
+			self::assertSame( '[true,false]', TestSite::last_line( $output ), 'The second tick sees the role that the database holds now.' );
+		} finally {
+			TestSite::wp( [ 'user', 'delete', $login, '--yes' ] );
+		}
+	}
+
+	public function test_a_permission_lost_before_a_file_job_starts_is_reported_as_such(): void {
+		$login = 'bfr-starting-' . bin2hex( random_bytes( 4 ) );
+		TestSite::user( $login, 'administrator' );
+		try {
+			// The confirmation is authorized for the administrator that this process loaded.
+			// Before start_apply() checks the account again, another request takes the role
+			// away in the database, as in a race between the two.
+			[ $status, $output ] = TestSite::wp(
+				[
+					'eval',
+					sprintf(
+						'( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) )->private_dir()->ensure();
+						$user = get_user_by( "login", %s );
+						wp_set_password( "bfr-test-password", $user->ID );
+						wp_set_current_user( $user->ID );
+						$id     = "20261120T000000Z-0d0e0f";
+						$digest = str_repeat( "a", 64 );
+						$token  = wp_create_nonce( implode( "|", [ "backups_for_restic_live", home_url(), "files", "apply", $id, "default", $digest, "" ] ) );
+						global $wpdb;
+						$wpdb->update( $wpdb->usermeta, [ "meta_value" => serialize( [ "editor" => true ] ) ], [ "user_id" => $user->ID, "meta_key" => $wpdb->get_blog_prefix() . "capabilities" ] );
+						$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/restores/" . $id . "/apply" );
+						$request->set_header( "content-type", "application/json" );
+						$request->set_body( wp_json_encode( [ "reviewed" => true, "site_url" => home_url(), "digest" => $digest, "review_token" => $token, "user_password" => "bfr-test-password" ] ) );
+						$response = rest_do_request( $request );
+						echo wp_json_encode( [ $response->get_status(), $response->get_data()["code"] ?? null ] );',
+						var_export( $login, true )
+					),
+				]
+			);
+			self::assertSame( 0, $status, $output );
+			self::assertSame( '[409,"backups_for_restic_file_writes_refused"]', TestSite::last_line( $output ), 'The administrator learns that the permission is gone, not that other work is in the way.' );
+		} finally {
+			TestSite::wp( [ 'user', 'delete', $login, '--yes' ] );
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
 		$before            = TestSite::state( 'recovery_kit' );

@@ -623,6 +623,26 @@ final class RestRoutes {
 		return user_can( $user_id, self::capability() ) && user_can( $user_id, 'manage_options' ) && user_can( $user_id, 'edit_users' ) && user_can( $user_id, 'promote_users' ) && user_can( $user_id, 'update_core' );
 	}
 
+	/**
+	 * Rechecks the account that confirmed a live file change, on every tick of the job. A
+	 * process that runs many ticks, such as `wp backups-for-restic tick --until-idle`, keeps
+	 * the account in WordPress's object cache, so a role that another request took away
+	 * would count until the process ends. The check drops the account's cached row and
+	 * metadata first and reads both from the database. A persistent object cache loses its
+	 * copies too; the next reader stores them again from the database.
+	 *
+	 * @param int $user_id WordPress user who confirmed the change.
+	 * @return bool Whether the account still has the backup capability and update_core.
+	 */
+	public static function live_user_allowed( int $user_id ): bool {
+		if ( $user_id < 1 ) {
+			return false;
+		}
+		wp_cache_delete( $user_id, 'users' );
+		wp_cache_delete( $user_id, 'user_meta' );
+		return user_can( $user_id, self::capability() ) && user_can( $user_id, 'update_core' );
+	}
+
 	/** Lists apply jobs whose changes can still be reversed. */
 	public function undoable(): \WP_REST_Response {
 		return $this->respond( [ 'jobs' => $this->container->file_changes()->undoable() ] );
@@ -820,7 +840,7 @@ final class RestRoutes {
 		$hash                                        = hash( 'sha256', $control );
 		try {
 			$service = $this->container->file_changes();
-			$job     = $undo ? $service->start_undo( $id, $digest, $hash, $plan_job ) : $service->start_apply( $id, $include_config, $digest, $hash, $plan_job );
+			$job     = $undo ? $service->start_undo( $id, $digest, $hash, $plan_job, get_current_user_id() ) : $service->start_apply( $id, $include_config, $digest, $hash, $plan_job, get_current_user_id() );
 		} catch ( InvalidArgument | JobConflict $refused ) {
 			return $this->plan_error( $refused );
 		}
@@ -895,7 +915,7 @@ final class RestRoutes {
 	private function plan_error( InvalidArgument|JobConflict $refused, bool $database = false ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
 			$code = JobError::from_throwable( $refused )->code;
-			return $this->error( $database || 'file_space' === $code ? $code : 'live_plan_conflict', 409 );
+			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused' ], true ) ? $code : 'live_plan_conflict', 409 );
 		}
 		$code = JobError::from_throwable( $refused )->code;
 		return $this->error( $database ? 'database_review_required' : ( 'protected_path_invalid' === $code ? $code : 'live_plan_unavailable' ), 400 );

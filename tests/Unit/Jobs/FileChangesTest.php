@@ -39,6 +39,8 @@ final class FileChangesTest extends TestCase {
 	private Runner $runner;
 	private bool $allowed = true;
 	private ?int $free    = PHP_INT_MAX;
+	/** @var list<int> Users who may still write live files. */
+	private array $administrators = [ 7 ];
 
 	/**
 	 * Every plan that the job service asked for, in order.
@@ -89,17 +91,18 @@ final class FileChangesTest extends TestCase {
 			$this->staging,
 			$this->clock,
 			1,
-			function ( bool $config, string $id ): ApplyPlan {
+			function ( bool $config, string $id, ?string $uploads = null ): ApplyPlan {
 				$restore = $this->jobs->get( $id );
 				self::assertNotNull( $restore );
-				$layout        = SiteLayout::from_job( $restore, $this->live, $this->uploads );
+				$layout        = SiteLayout::from_job( $restore, $this->live, $uploads ?? $this->uploads );
 				$plan          = new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
 				$this->plans[] = $plan;
 				return $plan;
 			},
 			new FileMaintenance( $this->live ),
-			fn (): bool => $this->allowed,
-			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free )
+			fn ( ?int $user = null ): bool => $this->allowed && ( null === $user || in_array( $user, $this->administrators, true ) ),
+			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free ),
+			fn (): string => $this->uploads
 		);
 		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
 	}
@@ -410,8 +413,32 @@ final class FileChangesTest extends TestCase {
 		$job = $this->start();
 		$this->runner->tick( 0.0 );
 		$this->allowed = false;
-		$this->run_job( $job, JobState::Failed );
+		$failed        = $this->run_job( $job, JobState::Failed );
+		self::assertSame( 'file_writes_refused', $failed->error?->code );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_every_tick_rechecks_the_administrator_who_confirmed_in_the_browser(): void {
+		$plan  = $this->changes->preview( $this->restore );
+		$grant = hash( 'sha256', 'control token' );
+		try {
+			$this->changes->start_apply( $this->restore, false, $plan['digest'], $grant );
+			self::fail( 'A browser confirmation needs the user who confirmed it.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'file_writes_refused', $refused->context()['code'] );
+		}
+		$job = $this->changes->start_apply( $this->restore, false, $plan['digest'], $grant, null, 7 );
+		self::assertSame( 7, $job->data['user'] );
+		$this->runner->tick( 0.0 );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		// The account loses its role while the site is in maintenance.
+		$this->administrators = [];
+		$failed               = $this->run_job( $job, JobState::Failed );
+		self::assertSame( 'file_writes_refused', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		// The command line has no WordPress account; the host policy alone applies to it.
+		$this->run_job( $this->start() );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
 	public function test_foreign_maintenance_marker_survives_and_blocks_publication(): void {
@@ -483,6 +510,22 @@ final class FileChangesTest extends TestCase {
 		$this->undo( $job );
 		self::assertDirectoryDoesNotExist( $this->uploads . '/album' );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_a_confirmed_apply_keeps_its_uploads_root_while_its_ticks_boot_without_the_filter(): void {
+		$this->stage_fresh();
+		$confirmed = $this->uploads;
+		$preview   = $this->changes->preview( $this->restore );
+		$job       = $this->changes->start_apply( $this->restore, false, $preview['digest'] );
+		$this->runner->tick( 0.0 );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		// Ticks under the marker boot without the ordinary plugin whose upload_dir filter
+		// chose the uploads root of the review, and WordPress reports its default instead.
+		$this->uploads = $this->live . '/default-uploads';
+		mkdir( $this->uploads );
+		$this->run_job( $job );
+		self::assertSame( 'imported upload', file_get_contents( $confirmed . '/album/photo.txt' ) );
+		self::assertDirectoryDoesNotExist( $this->uploads . '/album' );
 	}
 
 	public function test_overlapping_fresh_destinations_refuse_the_entire_apply(): void {

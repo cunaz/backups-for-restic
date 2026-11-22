@@ -37,7 +37,8 @@ final class CliCommand {
 	 * @param Container $container Services.
 	 */
 	public static function register( Container $container ): void {
-		\WP_CLI::add_command( 'backups-for-restic', new self( $container ) );
+		// The maintenance gate recognises the command by this name before WordPress loads.
+		\WP_CLI::add_command( FileMaintenanceGate::COMMAND, new self( $container ) );
 	}
 
 	/**
