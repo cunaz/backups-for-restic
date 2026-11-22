@@ -381,22 +381,29 @@ final class JobControlTest extends TestCase {
 
 	/**
 	 * What the admin page's script does when it is asked for a browser probe: asks for a
-	 * probe file, requests it without credentials, and reports what came back.
+	 * probe file, requests it and the known file of the plugin beside it without
+	 * credentials, and reports what came back.
 	 *
+	 * @param bool $control Whether the known file is requested; a browser behind a challenge
+	 *                      or a firewall does not get it.
 	 * @return array{int, bool|null} The status the visit got, and what the report made of it.
 	 */
-	private static function probe_as_a_browser(): array {
+	private static function probe_as_a_browser( bool $control = true ): array {
 		[ $status, $probe, $raw ] = TestSite::api( 'POST', '/environment/probe' );
 		self::assertSame( 200, $status, $raw );
 		self::assertStringStartsWith( TestSite::url() . '/wp-content/backups-for-restic/probe/', (string) ( $probe['url'] ?? '' ), $raw );
+		self::assertStringStartsWith( TestSite::url() . '/wp-content/plugins/backups-for-restic/assets/css/admin.css?bfr-control=', (string) ( $probe['control'] ?? '' ), $raw );
 		[ $seen, $body ]           = TestSite::visit( (string) $probe['url'] );
+		[ $known, $bytes ]         = $control ? TestSite::visit( (string) $probe['control'] ) : [ 403, 'Forbidden' ];
 		[ $status, $report, $raw ] = TestSite::api(
 			'POST',
 			'/environment/probe/report',
 			[
-				'probe'  => $probe['probe'] ?? '',
-				'status' => $seen,
-				'body'   => substr( $body, 0, 1024 ),
+				'probe'          => $probe['probe'] ?? '',
+				'status'         => $seen,
+				'body'           => substr( $body, 0, 1024 ),
+				'control_status' => $known,
+				'control_body'   => $bytes,
 			]
 		);
 		self::assertSame( 200, $status, $raw );
@@ -415,6 +422,10 @@ final class JobControlTest extends TestCase {
 			// A probe that such a run left pending keeps its entry: the next one deletes its file.
 			TestSite::state( 'exposure_browser', [ 'result' => null ] );
 			self::assertSame( [ 'recommended', 'unverified', true ], self::private_directory( true ), 'The site\'s own probe gets no answer.' );
+
+			// A refusal without the plugin's own file beside it may come from a challenge or a firewall.
+			self::assertSame( [ 403, null ], self::probe_as_a_browser( false ) );
+			self::assertSame( [ 'recommended', 'unverified', true ], self::private_directory( false ) );
 
 			self::assertSame( [ 403, false ], self::probe_as_a_browser() );
 			self::assertSame( [ 'recommended', 'protected_inside_web_root', true ], self::private_directory( false ), 'The browser saw the directory refused.' );

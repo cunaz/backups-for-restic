@@ -45,6 +45,38 @@ final class UninstallTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
+	public function test_deleting_the_plugin_on_an_older_php_is_refused_and_removes_nothing(): void {
+		$copy = TempDir::create( 'uninstall-older-php' );
+		try {
+			// The branch for a PHP before 8.3, as such a PHP runs it: the main file has kept the
+			// plugin inert, and WordPress deletes the plugin once this file returns.
+			$source = str_replace( 'PHP_VERSION', "'8.2.29'", (string) file_get_contents( dirname( __DIR__, 2 ) . '/uninstall.php' ) );
+			file_put_contents( $copy . '/uninstall.php', $source );
+			$stored = self::stored();
+			$output = TestSite::php(
+				'
+				define( "WP_UNINSTALL_PLUGIN", "backups-for-restic/backups-for-restic.php" );
+				add_filter( "wp_die_handler", static fn () => static function ( $message ) {
+					throw new RuntimeException( "refused: " . ( is_string( $message ) ? $message : "" ) );
+				} );
+				try {
+					include $arguments[0];
+					echo "\nreturned";
+				} catch ( RuntimeException $e ) {
+					echo "\n", $e->getMessage();
+				}
+				',
+				[ $copy . '/uninstall.php' ]
+			);
+			self::assertStringStartsWith( 'refused: Switch back to PHP 8.3 or later before deleting', TestSite::last_line( $output ), $output );
+			self::assertSame( $stored, self::stored(), 'Options, transients and cron events stay.' );
+			self::assertDirectoryExists( TestSite::private_dir() . '/jobs' );
+		} finally {
+			TempDir::remove( $copy );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_uninstalling_removes_what_the_plugin_stored_and_leaves_the_repository(): void {
 		TestSite::idle( 600 );
 		$snapshots = TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] );

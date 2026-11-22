@@ -801,7 +801,7 @@ final class Container {
 	 * @return WpExposureCheck Check.
 	 */
 	public function exposure(): WpExposureCheck {
-		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random(), $this->browser_probe() );
+		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random(), $this->browser_probe(), $this->plugin_file );
 	}
 
 	/**

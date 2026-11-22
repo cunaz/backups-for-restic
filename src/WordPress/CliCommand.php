@@ -291,7 +291,8 @@ final class CliCommand {
 	}
 
 	/**
-	 * Lists the snapshots in the repository.
+	 * Lists the snapshots in the repository. The host name is whatever the client that wrote
+	 * the snapshot chose; it is printed with control characters quoted, as ls prints names.
 	 */
 	public function snapshots(): void {
 		try {
@@ -300,7 +301,7 @@ final class CliCommand {
 				\WP_CLI::error( Messages::job_error( 'configuration' )['message'] );
 			}
 			foreach ( $repository->snapshots() as $id => $snapshot ) {
-				\WP_CLI::line( sprintf( '%s  %s  %s', substr( $id, 0, 8 ), $snapshot->time, $snapshot->hostname ) );
+				\WP_CLI::line( sprintf( '%s  %s  %s', substr( $id, 0, 8 ), $snapshot->time, SnapshotBrowser::printable( $snapshot->hostname ) ) );
 			}
 		} catch ( PluginException $e ) {
 			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $e )->code )['message'] );
