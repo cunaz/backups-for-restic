@@ -36,8 +36,8 @@ final class ApplyPlan {
 	/** Number of staged directories named spool whose examination is remembered. */
 	private const int CACHED_SPOOLS = 256;
 
-	/** Number of entries of a spool's database directory that are examined. */
-	private const int SPOOL_ENTRIES = 256;
+	/** Number of files named like a dump's that are read in one database directory of a spool. */
+	private const int SPOOL_FILES = 1024;
 
 	/** Wider folders share a disk index across read-only worker requests. */
 	private const int DISK_THRESHOLD = 2048;
@@ -540,8 +540,10 @@ final class ApplyPlan {
 	 * writes: a site manifest that declares its format, or a database directory with a dump
 	 * manifest or an SQL file that starts with the dump's format line. Every file of a
 	 * dump starts with that line, so a selection of one table file is recognized as well.
-	 * A file that cannot be read is not shown to be something else and counts as the
-	 * backup's.
+	 * The whole database directory is listed, and the files named as a dump names its
+	 * own (manifest.json, and three digits, a hyphen and a name ending in .sql) are read.
+	 * What cannot be decided counts as the backup's: a file that cannot be read, and a
+	 * directory with more such files than SPOOL_FILES of which none is a dump's.
 	 *
 	 * @param string $directory Staged directory named spool.
 	 * @return bool Whether a backup of this plugin wrote it.
@@ -562,30 +564,35 @@ final class ApplyPlan {
 			return true;
 		}
 		$line = '-- ' . explode( '/', TableSource::FORMAT )[0] . '/';
-		$seen = 0;
+		$read = 0;
 		try {
-			while ( $seen < self::SPOOL_ENTRIES ) {
+			while ( true ) {
 				$name = readdir( $handle );
 				if ( false === $name ) {
-					break;
+					return false;
 				}
-				if ( '.' === $name || '..' === $name ) {
+				// The names the dump gives its files: 000-header.sql, 010-<table>.sql, 900-views.sql.
+				$manifest = 'manifest.json' === $name;
+				if ( ! $manifest && 1 !== preg_match( '/\A[0-9]{3}-.+\.sql\z/s', $name ) ) {
 					continue;
 				}
-				++$seen;
 				$file = $database . '/' . $name;
 				if ( is_link( $file ) || ! is_file( $file ) ) {
 					continue;
 				}
 				// An unreadable file is not shown to be something else.
-				if ( 'manifest.json' === $name ? self::declares( $file, TableSource::FORMAT ) : in_array( self::head( $file, strlen( $line ) ), [ $line, null ], true ) ) {
+				if ( $manifest ? self::declares( $file, TableSource::FORMAT ) : in_array( self::head( $file, strlen( $line ) ), [ $line, null ], true ) ) {
+					return true;
+				}
+				++$read;
+				if ( $read >= self::SPOOL_FILES ) {
+					// Too many to read them all, and a later one could be a dump's.
 					return true;
 				}
 			}
 		} finally {
 			closedir( $handle );
 		}
-		return false;
 	}
 
 	/**

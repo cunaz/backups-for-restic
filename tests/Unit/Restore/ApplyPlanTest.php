@@ -107,6 +107,35 @@ final class ApplyPlanTest extends TestCase {
 		}
 	}
 
+	public function test_a_dump_file_is_found_among_any_number_of_other_entries(): void {
+		$old      = $this->live . '/backups-for-restic';
+		$database = $this->files . $old . '/spool/database';
+		mkdir( $database, 0700, true );
+		// Entries that no dump writes are not read, however many there are.
+		for ( $i = 0; $i < 1500; $i++ ) {
+			file_put_contents( $database . '/note-' . $i . '.txt', '' );
+		}
+		self::assertSame( 'create', $this->plan->inspect( $this->files, $old . '/spool/database/note-7.txt' )['action'] );
+		file_put_contents( $database . '/010-wp_users.sql', "-- backups-for-restic-dump/1 table `wp_users`\n" );
+		$plan = new ApplyPlan( [ $this->live ], [ $this->live . '/private' ], [ $this->live . '/wp-config.php' ] );
+		foreach ( [ '/spool/database/010-wp_users.sql', '/spool/database/note-7.txt', '/spool' ] as $suffix ) {
+			self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, $old . $suffix )['reason'], $suffix );
+		}
+	}
+
+	public function test_more_files_named_like_a_dumps_than_can_be_read_count_as_the_backups(): void {
+		$database = $this->files . $this->live . '/exports/spool/database';
+		mkdir( $database, 0700, true );
+		for ( $i = 0; $i < 1023; $i++ ) {
+			file_put_contents( $database . '/' . sprintf( '%03d', $i % 1000 ) . '-export-' . $i . '.sql', "-- another tool's export\n" );
+		}
+		// Up to the limit every file was read and none is a dump's.
+		self::assertSame( 'create', $this->plan->inspect( $this->files, $this->live . '/exports/spool/database/000-export-0.sql' )['action'] );
+		file_put_contents( $database . '/999-export-last.sql', "-- another tool's export\n" );
+		$plan = new ApplyPlan( [ $this->live ], [ $this->live . '/private' ], [ $this->live . '/wp-config.php' ] );
+		self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, $this->live . '/exports/spool/database/000-export-0.sql' )['reason'] );
+	}
+
 	public function test_a_plan_remembers_only_a_bounded_number_of_examined_spools(): void {
 		$stage = $this->files . $this->live;
 		for ( $i = 0; $i < 300; $i++ ) {

@@ -476,6 +476,31 @@ final class PlannerPolicyTest extends TestCase {
 		self::assertSame( 'existing_file', ( new ApplyPlan( [ $this->live ], [] ) )->inspect( $this->files, $this->live . '/own.php' )['reason'] );
 	}
 
+	public function test_a_host_that_disables_one_posix_function_has_no_known_identity(): void {
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			self::markTestSkipped( 'The POSIX extension is not loaded.' );
+		}
+		// PHP leaves a disabled function undefined, which only another process can show.
+		$code = 'require ' . var_export( dirname( __DIR__, 2 ) . '/bootstrap.php', true ) . '; echo json_encode( \\BackupsForRestic\\Restore\\ApplyPlan::process( sys_get_temp_dir() ) );';
+		foreach ( [ 'posix_geteuid', 'posix_getegid', 'posix_getgroups' ] as $function ) {
+			$process = proc_open(
+				[ PHP_BINARY, '-d', 'disable_functions=' . $function, '-r', $code ],
+				[
+					1 => [ 'pipe', 'w' ],
+					2 => [ 'pipe', 'w' ],
+				],
+				$pipes
+			);
+			self::assertIsResource( $process );
+			$output = stream_get_contents( $pipes[1] );
+			$errors = stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			self::assertSame( 0, proc_close( $process ), $function . ': ' . $errors );
+			self::assertSame( 'false', $output, $function );
+		}
+	}
+
 	/**
 	 * An identity that writes the replacements.
 	 *

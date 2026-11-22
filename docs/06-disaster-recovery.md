@@ -80,10 +80,11 @@ The site records each delivery. Store the file with the other offline recovery m
    is restored separately: a database rehearsal imports the dump into temporary tables and
    checks it, and a separately confirmed exchange then makes it live on an eligible MySQL
    server; on MariaDB and with incompatible schemas, import the SQL files by hand
-   (Scenario B). Where PHP's POSIX extension is available, the preview refuses to replace
-   a file that belongs to another user than PHP, or whose group a file written by PHP
-   cannot have: have the owner changed to the PHP user, or the group to one PHP belongs
-   to, or restore that file offline. Without the POSIX extension the preview cannot check
+   (Scenario B). Where PHP can tell which user and groups it runs as, the preview refuses
+   to replace a file that belongs to another user than PHP, or whose group a file written
+   by PHP cannot have: have the owner changed to the PHP user, or the group to one PHP
+   belongs to, or restore that file offline. PHP cannot tell when its POSIX extension is
+   missing or the host has disabled one of its functions; the preview then does not check
    owner and group, and the apply stops before it replaces such a file. Without the PHP
    intl extension the preview also refuses a name that might match a protected path once
    Unicode is normalized.

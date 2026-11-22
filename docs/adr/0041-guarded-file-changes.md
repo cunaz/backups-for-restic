@@ -50,7 +50,9 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   manifest's format, or a `database/` directory with a dump manifest or a file that starts
   with the dump's format line. Every file of a dump starts with that line, so a selection
   of a single table file is recognized too. Another directory named `spool`, also one with
-  a `database/` directory of its own, is applied as usual. The check reads the staged
+  a `database/` directory of its own, is applied as usual. What cannot be decided counts
+  as the backup's: a file that cannot be read, and a database directory with more than
+  1,024 files named like a dump's of which none is one. The check reads the staged
   files because an ordinary restore does not record the manifest locator; it also covers
   older snapshots without one and copies of a spool at other paths. The database rehearsal
   reads the dump from staging.
