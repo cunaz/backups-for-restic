@@ -96,18 +96,19 @@ The site records each delivery. Store the file with the other offline recovery m
    An entry that is still as the apply left it is reverted: a replaced file gets its
    original back, and a file or directory that the apply created is removed. An entry that
    changed after the apply is kept, and the preview gives the reason: for example a file
-   that was edited or updated since, a replaced file that was deleted, or a directory the
-   apply created into which something was uploaded since (the other files the apply put
-   there are still removed). Files and directories that the apply created and that were
-   deleted since, such as a removed plugin, need nothing. The preview counts what it
-   restores, removes and keeps; confirm to revert the listed entries. The undo checks
-   every entry again just before it changes it and keeps one that changed after your
-   review. Its result counts what it did and lists every kept entry with its reason. Kept
-   entries stay undoable until the expiry time, and the apply stays listed as partly
-   undone: if a kept entry is put back as the apply left it, for example by undoing a
-   later apply over the same files, preview the undo again. An undo with nothing left to
-   revert is refused. Restore files that should not stay as they are offline as in step 4.
-   Use **Delete staged files** to remove the private downloads when you are finished.
+   that was edited or updated since, or deleted and uploaded again, also with the same
+   content, a replaced file that was deleted, or a directory the apply created into which
+   something was uploaded since (the other files the apply put there are still removed).
+   Files and directories that the apply created and that were deleted since, such as a
+   removed plugin, need nothing. The preview counts what it restores, removes and keeps;
+   confirm to revert the listed entries. The undo checks every entry again just before it
+   changes it and keeps one that changed after your review. Its result counts what it did
+   and lists every kept entry with its reason. Kept entries stay undoable until the expiry
+   time, and the apply stays listed as partly undone: if a kept entry is put back as the
+   apply left it, for example by undoing a later apply over the same files, preview the
+   undo again. An undo with nothing left to revert is refused. Restore files that should
+   not stay as they are offline as in step 4. Use **Delete staged files** to remove the
+   private downloads when you are finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.

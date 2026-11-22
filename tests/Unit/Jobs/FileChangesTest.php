@@ -241,11 +241,16 @@ final class FileChangesTest extends TestCase {
 		return null;
 	}
 
-	/** Puts a copy of a live file in its place: the same bytes and permissions, a new inode. */
+	/**
+	 * Puts a copy of a live file in its place, as the undo of a later apply over it leaves
+	 * it: the same bytes, permissions and modification time under a new inode.
+	 */
 	private static function rewrite_as_copy( string $path ): void {
+		clearstatcache();
+		$mtime = filemtime( $path );
 		copy( $path, $path . '.copy' );
 		chmod( $path . '.copy', fileperms( $path ) & 07777 );
-		touch( $path . '.copy', 1700000000 );
+		touch( $path . '.copy', (int) $mtime );
 		rename( $path . '.copy', $path );
 		clearstatcache();
 	}

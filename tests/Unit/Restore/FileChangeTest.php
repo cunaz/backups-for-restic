@@ -546,12 +546,18 @@ final class FileChangeTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $plugin );
 	}
 
-	/** Replaces the live file by a copy of itself: same bytes and permissions, another inode. */
+	/**
+	 * Replaces the live file by a copy of itself under another inode, with the same bytes,
+	 * permissions (or the ones given) and modification time: the state in which the undo of a
+	 * later apply over the same file leaves it.
+	 */
 	private function rewrite_as_copy( string $path, ?int $mode = null ): void {
-		$copy = $path . '.copy';
+		clearstatcache();
+		$mtime = filemtime( $path );
+		$copy  = $path . '.copy';
 		copy( $path, $copy );
 		chmod( $copy, $mode ?? fileperms( $path ) & 07777 );
-		touch( $copy, 1700000000 );
+		touch( $copy, (int) $mtime );
 		rename( $copy, $path );
 		clearstatcache();
 	}
@@ -563,7 +569,7 @@ final class FileChangeTest extends TestCase {
 		self::assertTrue( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
 		$installed = fileinode( $this->path );
 		// As the undo of a later apply leaves it: the bytes and attributes the apply installed,
-		// under a new inode and with another modification time.
+		// its modification time among them, under a new inode.
 		$this->rewrite_as_copy( $this->path );
 		self::assertNotSame( $installed, fileinode( $this->path ) );
 		self::assertSame(
@@ -581,24 +587,120 @@ final class FileChangeTest extends TestCase {
 	public function test_another_inode_with_other_bytes_size_or_permissions_is_kept(): void {
 		file_put_contents( $this->staging . $this->path, 'new' );
 		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF, 0644 ) );
+		$mtime  = (int) filemtime( $this->path );
 		$reason = fn (): string => $this->change->undo_review( $this->path, 'create' )['reason'];
 		$this->rewrite_as_copy( $this->path, 0600 );
 		self::assertSame( 'changed_since_apply', $reason() );
+		// A file system that reuses inode numbers can give this copy the recorded one, which
+		// was freed by the copy before: only the reason depends on that.
 		$this->rewrite_as_copy( $this->path, 0644 );
-		self::assertSame( 'installed_content', $reason() );
-		file_put_contents( $this->path . '.copy', 'NEW' );
-		chmod( $this->path . '.copy', 0644 );
-		rename( $this->path . '.copy', $this->path );
-		self::assertSame( 'changed_since_apply', $reason() );
-		file_put_contents( $this->path . '.copy', 'newer' );
-		chmod( $this->path . '.copy', 0644 );
-		rename( $this->path . '.copy', $this->path );
-		self::assertSame( 'changed_since_apply', $reason() );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+		// Each with the installed permissions and modification time: only the bytes differ.
+		foreach ( [ 'NEW', 'newer' ] as $bytes ) {
+			file_put_contents( $this->path . '.copy', $bytes );
+			chmod( $this->path . '.copy', 0644 );
+			touch( $this->path . '.copy', $mtime );
+			rename( $this->path . '.copy', $this->path );
+			self::assertSame( 'changed_since_apply', $reason(), $bytes );
+		}
 		// A directory in its place is a change as well.
 		unlink( $this->path );
 		mkdir( $this->path );
 		self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $this->change->undo( $this->path, 'create', INF, 'remove' ) );
 		self::assertDirectoryExists( $this->path );
+	}
+
+	public function test_a_file_with_the_installed_bytes_and_a_later_modification_time_is_kept(): void {
+		$kept = [
+			'action' => 'keep',
+			'reason' => 'changed_since_apply',
+		];
+		// The staged copy has the time of the snapshot, as a restore leaves it; the apply
+		// installs a copy of its own, written at the time of the apply.
+		file_put_contents( $this->staging . $this->path, 'photo' );
+		touch( $this->staging . $this->path, 1600000000 );
+		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'photo' ), null, INF, 0644 ) );
+		clearstatcache();
+		$mtime = (int) filemtime( $this->path );
+		self::assertNotSame( 1600000000, $mtime );
+		// Deleted and uploaded again with the same bytes and permissions: a new file, which a
+		// file system that reuses inode numbers can give the recorded one, with the time of
+		// the upload, or with the time of the snapshot as a copy that keeps times has it.
+		foreach ( [ $mtime + 1, 1600000000 ] as $time ) {
+			unlink( $this->path );
+			file_put_contents( $this->path, 'photo' );
+			chmod( $this->path, 0644 );
+			touch( $this->path, $time );
+			self::assertSame( $kept, $this->change->undo_review( $this->path, 'create' ), (string) $time );
+			self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $this->change->undo( $this->path, 'create', INF, 'remove' ) );
+			self::assertSame( 'photo', file_get_contents( $this->path ) );
+		}
+		// The same file with the installed time is what the apply left there.
+		touch( $this->path, $mtime );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+
+		// A replaced file whose copy, or whose own inode, gets a later time.
+		$replaced = $this->site . '/settings.php';
+		$journal  = $this->root . '/journal-replaced';
+		$change   = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal, $journal ] ), $this->staging, $journal );
+		file_put_contents( $replaced, 'old' );
+		file_put_contents( $this->staging . $replaced, 'new' );
+		self::assertTrue( $change->apply( $replaced, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		clearstatcache();
+		$mtime = (int) filemtime( $replaced );
+		foreach ( [ 'another inode', 'the installed inode' ] as $case ) {
+			if ( 'another inode' === $case ) {
+				$this->rewrite_as_copy( $replaced );
+			}
+			touch( $replaced, $mtime + 1 );
+			self::assertSame( $kept, $change->undo_review( $replaced, 'replace' ), $case );
+			self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $change->undo( $replaced, 'replace', INF, 'restore' ), $case );
+			self::assertSame( 'new', file_get_contents( $replaced ) );
+			self::assertSame( 'old', file_get_contents( $journal . '/original' ) );
+		}
+	}
+
+	public function test_an_interrupted_undo_of_a_later_apply_leaves_the_first_undoable(): void {
+		file_put_contents( $this->path, 'original' );
+		file_put_contents( $this->staging . $this->path, 'first' );
+		$staged = $this->root . '/files-second';
+		mkdir( $staged . $this->site, 0700, true );
+		file_put_contents( $staged . $this->path, 'second' );
+		// The worker of the later apply's undo stops before its rename, or after it and before
+		// the record that completes the entry.
+		foreach ( [ [ 'journal', 'restore' ], [ 'rename', $this->path ] ] as $number => [ $operation, $subject ] ) {
+			$journals = [ $this->root . '/first-' . $number, $this->root . '/second-' . $number ];
+			$plan     = new ApplyPlan( [ $this->site ], $journals );
+			$first    = new FileChange( $plan, $this->staging, $journals[0] );
+			self::assertTrue( $first->apply( $this->path, 'replace', hash( 'sha256', 'first' ), hash( 'sha256', 'original' ), INF ) );
+			clearstatcache();
+			$installed = [ fileinode( $this->path ), (int) filemtime( $this->path ) ];
+			self::assertTrue( ( new FileChange( $plan, $staged, $journals[1] ) )->apply( $this->path, 'replace', hash( 'sha256', 'second' ), hash( 'sha256', 'first' ), INF ) );
+			// The later apply ran an hour after the first: its copy of the first one's file is from then.
+			touch( $journals[1] . '/original', $installed[1] + 3600 );
+			$kill = static function ( string $done, string $on ) use ( $operation, $subject ): void {
+				if ( $done === $operation && $on === $subject ) {
+					throw new \DomainException( 'The worker was killed.' );
+				}
+			};
+			try {
+				( new FileChange( $plan, $staged, $journals[1], null, 'later-undo', $kill ) )->undo( $this->path, 'replace', INF, 'restore' );
+				self::fail( 'The undo of the later apply must stop at ' . $operation . '.' );
+			} catch ( \DomainException ) {
+				$this->addToAssertionCount( 1 );
+			}
+			// Before the rename the later apply's file is live, after it the later apply's copy of
+			// the first apply's file, with the time that the first apply installed.
+			self::assertSame( 0 === $number ? 'changed_since_apply' : 'installed_content', $first->undo_review( $this->path, 'replace' )['reason'], $operation );
+			$second = new FileChange( $plan, $staged, $journals[1], null, 'later-undo' );
+			self::assertSame( 'restored', $second->undo( $this->path, 'replace', INF, 'restore' )['outcome'], $operation );
+			clearstatcache();
+			self::assertSame( 'first', file_get_contents( $this->path ) );
+			self::assertNotSame( $installed[0], fileinode( $this->path ) );
+			self::assertSame( $installed[1], filemtime( $this->path ) );
+			self::assertSame( self::outcome( 'restored', 'installed_content' ), $first->undo( $this->path, 'replace', INF, 'restore' ), $operation );
+			self::assertSame( 'original', file_get_contents( $this->path ) );
+		}
 	}
 
 	public function test_a_second_link_is_a_change_of_the_installed_file_and_of_any_other(): void {
@@ -622,6 +724,8 @@ final class FileChangeTest extends TestCase {
 		// still exists so that it cannot get the recorded number, and linked twice.
 		file_put_contents( $this->path . '.next', 'new' );
 		chmod( $this->path . '.next', 0644 );
+		clearstatcache();
+		touch( $this->path . '.next', (int) filemtime( $this->path ) );
 		link( $this->path . '.next', $second );
 		rename( $this->path . '.next', $this->path );
 		self::assertSame( $kept, $review() );
@@ -644,21 +748,21 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'new', file_get_contents( $this->site . '/second-link' ) );
 	}
 
-	public function test_an_entry_recorded_without_its_installed_attributes_counts_only_its_own_inode(): void {
+	public function test_an_entry_recorded_without_its_installed_size_counts_only_its_own_inode(): void {
 		file_put_contents( $this->path, 'old' );
 		file_put_contents( $this->staging . $this->path, 'new' );
 		self::assertTrue( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
 		$file   = $this->journal . '/entry.json';
 		$record = json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR );
-		self::assertSame( filesize( $this->path ), $record['stat']['size'] );
+		self::assertSame( filesize( $this->path ), $record['size'] );
 		// The record an earlier version wrote.
-		unset( $record['stat'] );
+		unset( $record['size'] );
 		file_put_contents( $file, json_encode( $record, JSON_THROW_ON_ERROR ) );
 		self::assertSame( 'undo_journal', $this->change->undo_review( $this->path, 'replace' )['reason'] );
 		$this->rewrite_as_copy( $this->path );
 		self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $this->change->undo( $this->path, 'replace', INF, 'restore' ) );
 		self::assertSame( 'new', file_get_contents( $this->path ) );
-		$record['stat'] = [ 'size' => 'three' ];
+		$record['size'] = 'three';
 		file_put_contents( $file, json_encode( $record, JSON_THROW_ON_ERROR ) );
 		$this->expectException( StorageFailed::class );
 		$this->change->undo_review( $this->path, 'replace' );
@@ -690,6 +794,7 @@ final class FileChangeTest extends TestCase {
 		file_put_contents( $this->path, 'old' );
 		file_put_contents( $this->staging . $this->path, 'new' );
 		self::assertTrue( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		$mtime = (int) filemtime( $this->path );
 		$edits = [
 			// Another process writes into the file while the undo prepares its rename.
 			fn () => file_put_contents( $this->path, 'edit' ),
@@ -707,6 +812,7 @@ final class FileChangeTest extends TestCase {
 			self::assertSame( 0 === $number ? 'edit' : 'new', file_get_contents( $this->path ) );
 			self::assertSame( 'old', file_get_contents( $this->journal . '/original' ) );
 			file_put_contents( $this->path, 'new' );
+			touch( $this->path, $mtime );
 			// Restore the installed content for the next case; only the inode is new.
 			$this->rewrite_as_copy( $this->path, 0600 );
 			chmod( $this->path, fileperms( $this->journal . '/original' ) & 0777 );
@@ -816,24 +922,23 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'done', json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR )['phase'] );
 	}
 
-	public function test_a_damaged_record_of_the_installed_attributes_is_refused(): void {
+	public function test_a_damaged_record_of_the_installed_size_is_refused(): void {
 		// An empty file: a size of zero is a valid one.
 		file_put_contents( $this->staging . $this->path, '' );
 		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', '' ), null, INF ) );
 		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
-		$file      = $this->journal . '/entry.json';
-		$record    = json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR );
-		$installed = $record['stat'];
-		self::assertSame( 0, $installed['size'] );
-		$damaged = [ 'text', [ 'size' => -1 ] + $installed, [ 'size' => '0' ] + $installed, [ 'mode' => '0644' ] + $installed, [ 'uid' => null ] + $installed, [ 'gid' => 1.5 ] + $installed ];
-		foreach ( $damaged as $number => $stat ) {
-			$record['stat'] = $stat;
+		$file   = $this->journal . '/entry.json';
+		$record = json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertSame( 0, $record['size'] );
+		$damaged = [ 'text', -1, '0', 1.5, [ 'size' => 0 ], true ];
+		foreach ( $damaged as $number => $size ) {
+			$record['size'] = $size;
 			file_put_contents( $file, json_encode( $record, JSON_THROW_ON_ERROR ) );
 			try {
 				$this->change->undo_review( $this->path, 'create' );
-				self::fail( 'Damaged attributes ' . $number . ' must not be read.' );
+				self::fail( 'Damaged size ' . $number . ' must not be read.' );
 			} catch ( StorageFailed $refused ) {
-				self::assertStringContainsString( 'invalid installed attributes', $refused->getMessage() );
+				self::assertStringContainsString( 'invalid installed size', $refused->getMessage() );
 			}
 		}
 		self::assertFileExists( $this->path );

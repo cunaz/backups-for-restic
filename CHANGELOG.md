@@ -460,8 +460,9 @@ All notable changes are documented here. The format follows
   partial apply had created, or an update of one replaced file, made the apply impossible
   to undo, and after 24 hours the only copies of the original files expired with it. A
   file with another inode counts as unchanged when its content, size, type, permissions,
-  owner and group are those the apply installed, so an apply can be undone after a later
-  apply over the same files was undone. Kept entries stay undoable until the recovery
+  owner, group and modification time are those the apply installed, so an apply can be
+  undone after a later apply over the same files was undone, while a file written after
+  the apply with the same bytes is kept. Kept entries stay undoable until the recovery
   window ends, and the apply is listed as partly undone. The undo checks every entry again
   just before it changes it and keeps, rather than fails on, one that changed after the
   review. Its result counts the entries by outcome and lists the kept ones with their

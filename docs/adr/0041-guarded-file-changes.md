@@ -164,18 +164,25 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
 - Whether an entry is still what the apply left there is decided by content and attributes,
   not by the inode alone. The inode that the apply published, with the attributes it
   recorded, counts as before while its content has the reviewed digest. A regular file with
-  one link and another inode counts when its size, type, permission bits, owner and group
-  are those of the apply's candidate, which the `ready` record keeps since this version,
-  and its content has the digest of the staged source. Stacked applies compose this way:
-  the undo of a later apply over the same file publishes its retained copy as a new inode,
-  and the undo of the earlier apply then restores its own original. The modification time
-  is not compared for another inode; it is no data that an undo could lose, and the undo
-  of a later apply restores it as well. An entry recorded by an earlier version has no
-  recorded attributes, so only its own inode counts. A different size keeps the entry
-  without reading it, so a file with another inode costs at most the installed size to
-  verify: in the digest format of its review, a plain SHA-256 for an inline review, whose
-  sources are at most 8 MiB, and the ordered 1 MiB block digest for a background review,
-  which resumes across ticks.
+  one link and another inode counts when its size, which the `ready` record keeps since
+  this version, and the attributes that the record already kept for the candidate (type,
+  permission bits, owner, group and modification time, the `installed` digest) are those of
+  the apply's candidate, and its content has the digest of the staged source. Stacked
+  applies compose this way: the undo of a later apply over the same file publishes its
+  retained copy as a new inode with the time that the earlier apply installed, and the
+  undo of the earlier apply then restores its own original; an undo of the later apply
+  that stopped before or after its rename and was resumed leaves the same state. The
+  modification time is compared because a file written after the apply has a later one,
+  also with the same bytes: a re-upload of the same image or a deploy of the same version
+  is kept, where it would otherwise be removed or overwritten with the saved original. The
+  apply installs a copy that it wrote itself, so the installed time is the time of the
+  apply, not the snapshot's time that the staged copy has. A file that a tool puts back
+  with exactly the installed time, permissions, owner, group and bytes is not told apart.
+  An entry recorded by an earlier version has no recorded size, so only its own inode
+  counts. A different size keeps the entry without reading it, so a file with another
+  inode costs at most the installed size to verify: in the digest format of its review, a
+  plain SHA-256 for an inline review, whose sources are at most 8 MiB, and the ordered
+  1 MiB block digest for a background review, which resumes across ticks.
 - The link count belongs to that state: the apply leaves one link, or two while the private
   name of an interrupted create remains. A file with another count, the installed inode as
   well as another one, is `changed_since_apply`, decided like the size before the site policy
@@ -183,7 +190,8 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   inode numbers. ext4 gives a file created after the installed one was freed the recorded
   number, and a file written in the same second with the installed permissions, owner and
   group then passes for the installed inode; it is reverted only with the installed link
-  count, size and content, as any other copy is, but its reason can be `undo_journal`.
+  count, size, attributes and content, as any other copy is, but its reason can be
+  `undo_journal`.
 - The worker reads the identity of the live file, which covers its device, inode, owner,
   group, mode, size and both change times, before it verifies the content. It compares it
   after the verification and once more immediately before the rename or unlink, after the

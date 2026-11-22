@@ -27,8 +27,7 @@ defined( 'ABSPATH' ) || exit;
  * leaves a state that the retry or the undo recognises, as a killed process does.
  *
  * @phpstan-type Identity array{dev: int, ino: int}
- * @phpstan-type Installed array{size: int, mode: int, uid: int, gid: int}
- * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, stat: Installed|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string}
+ * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, size: int|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string}
  * @phpstan-type Decision array{action: string, reason: string, live: string|null}
  * @phpstan-type Outcome array{outcome: string, reason: string}
  */
@@ -166,7 +165,7 @@ final readonly class FileChange {
 				'previous'  => null === $previous ? null : self::identity( $previous ),
 				'candidate' => null,
 				'installed' => null,
-				'stat'      => null,
+				'size'      => null,
 				'backup'    => null,
 				'mode'      => null === $previous ? ( ( ( $mode ?? 0600 ) & 0755 ) | ( 'mkdir' === $action ? 0700 : 0400 ) ) : ( $previous['mode'] & 0777 ),
 				'uid'       => $previous['uid'] ?? null,
@@ -213,13 +212,8 @@ final readonly class FileChange {
 			$prepared            = self::regular( $next );
 			$record['candidate'] = self::identity( $prepared );
 			$record['installed'] = self::metadata( $next );
-			// What an undo compares a live file with another inode against.
-			$record['stat']  = [
-				'size' => $prepared['size'],
-				'mode' => $prepared['mode'],
-				'uid'  => $prepared['uid'],
-				'gid'  => $prepared['gid'],
-			];
+			// With the installed attributes, what an undo compares a live file with another inode against.
+			$record['size']  = $prepared['size'];
 			$record['phase'] = 'ready';
 			$this->save( $record );
 		}
@@ -281,9 +275,9 @@ final readonly class FileChange {
 	 * Decides what an undo can do with this entry now, and why. An entry is reverted only while
 	 * it still is what the apply left there: the inode that the apply published with the
 	 * attributes it recorded, or a regular file with another inode whose content, size, mode,
-	 * owner and group are those that the apply installed, as after the undo of a later apply
-	 * put its copy back. Every other entry is kept, with the reason, and its journal stays for
-	 * a later undo. A missing intent means that no live write was attempted.
+	 * owner, group and modification time are those that the apply installed, as after the undo
+	 * of a later apply put its copy back. Every other entry is kept, with the reason, and its
+	 * journal stays for a later undo. A missing intent means that no live write was attempted.
 	 *
 	 * Absence is decided before the parent: a created file or directory that is gone, also
 	 * below a directory that was removed since, leaves nothing to revert, and a replaced file
@@ -545,8 +539,12 @@ final readonly class FileChange {
 	/**
 	 * Whether a live regular file has the state that the apply left there: one link, or two
 	 * while the private name of an interrupted create remains, and the installed size, which
-	 * needs no hashing to tell. Another inode than the recorded one also needs the installed
-	 * type, permissions, owner and group.
+	 * needs no hashing to tell. Another inode than the recorded one also needs the attributes
+	 * that the apply recorded for its candidate: type, permissions, owner, group and
+	 * modification time. The undo of a later apply puts its copy back with all of them, and
+	 * a file that someone wrote after the apply has a later modification time, also with the
+	 * same bytes. An entry recorded before the installed size was kept counts only its own
+	 * inode.
 	 *
 	 * @param array<int|string,int>|null $stat Live regular file.
 	 * @param Record                     $record Intent.
@@ -555,20 +553,8 @@ final readonly class FileChange {
 	 * @return bool Whether the file is as the apply left it, its content aside.
 	 */
 	private static function as_left( ?array $stat, array $record, bool $same, bool $linked ): bool {
-		return null !== $stat && ( $linked ? 2 : 1 ) === $stat['nlink'] && ( null === $record['stat'] || $record['stat']['size'] === $stat['size'] ) && ( $same || self::copy_of( $stat, $record ) );
-	}
-
-	/**
-	 * Whether a regular file has the size, type, permissions, owner and group that the apply's
-	 * candidate had. An entry recorded before these were kept has none.
-	 *
-	 * @param array<int|string,int> $stat Live regular file.
-	 * @param Record                $record Intent.
-	 * @return bool Whether the attributes match those installed.
-	 */
-	private static function copy_of( array $stat, array $record ): bool {
-		$installed = $record['stat'];
-		return null !== $installed && $installed['size'] === $stat['size'] && $installed['mode'] === $stat['mode'] && $installed['uid'] === $stat['uid'] && $installed['gid'] === $stat['gid'];
+		return null !== $stat && ( $linked ? 2 : 1 ) === $stat['nlink'] && ( null === $record['size'] || $record['size'] === $stat['size'] )
+			&& ( $same || ( null !== $record['size'] && self::attributes( $stat, false ) === $record['installed'] ) );
 	}
 
 	/**
@@ -1022,7 +1008,19 @@ final readonly class FileChange {
 		if ( false === $stat ) {
 			throw new StorageFailed( 'File metadata could not be read.' );
 		}
-		return hash( 'sha256', implode( '|', [ $stat['mode'], $stat['uid'], $stat['gid'], is_dir( $path ) ? 0 : $stat['mtime'] ] ) );
+		return self::attributes( $stat, is_dir( $path ) );
+	}
+
+	/**
+	 * The digest of metadata(): type and permissions, owner, group and, for a file, the
+	 * modification time.
+	 *
+	 * @param array<int|string,int> $stat lstat result.
+	 * @param bool                  $directory Whether the entry is a directory.
+	 * @return string Digest.
+	 */
+	private static function attributes( array $stat, bool $directory ): string {
+		return hash( 'sha256', implode( '|', [ $stat['mode'], $stat['uid'], $stat['gid'], $directory ? 0 : $stat['mtime'] ] ) );
 	}
 
 	/**
@@ -1223,17 +1221,11 @@ final readonly class FileChange {
 		if ( null === $data['parent'] ) {
 			throw new StorageFailed( 'The file change journal has no parent identity.' );
 		}
-		// Entries recorded before the installed attributes were kept have none.
-		$stat = $data['stat'] ?? null;
-		if ( null !== $stat && ( ! is_array( $stat ) || ! is_int( $stat['size'] ?? null ) || $stat['size'] < 0 || ! is_int( $stat['mode'] ?? null ) || ! is_int( $stat['uid'] ?? null ) || ! is_int( $stat['gid'] ?? null ) ) ) {
-			throw new StorageFailed( 'The file change journal has invalid installed attributes.' );
+		// Entries recorded before the installed size was kept have none.
+		$data['size'] ??= null;
+		if ( null !== $data['size'] && ( ! is_int( $data['size'] ) || $data['size'] < 0 ) ) {
+			throw new StorageFailed( 'The file change journal has an invalid installed size.' );
 		}
-		$data['stat'] = null === $stat ? null : [
-			'size' => $stat['size'],
-			'mode' => $stat['mode'],
-			'uid'  => $stat['uid'],
-			'gid'  => $stat['gid'],
-		];
 		/**
 		 * The record shape and all scalar fields have been checked above.
 		 *
