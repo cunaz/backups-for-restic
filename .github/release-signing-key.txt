@@ -1,0 +1,10 @@
+# Fingerprint of the OpenPGP primary key that signs release tags (docs/04 §7).
+#
+# bin/verify-release-tag.sh reads this file from main and accepts a release tag only if the
+# public key in the repository variable RELEASE_SIGNING_PUBLIC_KEY has a primary fingerprint
+# listed here. Replacing the variable alone therefore authorises no other key: a new key
+# needs a reviewed pull request that changes this file.
+#
+# One fingerprint per line, 40 hexadecimal digits (or 64 for a version 5 key), spaces allowed,
+# as printed by: gpg --fingerprint --with-colons KEY | awk -F: '$1=="fpr" {print $10; exit}'
+# Text after # is a comment. No release key is pinned yet, so every release tag is refused.
