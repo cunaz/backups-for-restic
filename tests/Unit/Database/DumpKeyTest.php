@@ -23,6 +23,8 @@ final class DumpKeyTest extends TestCase {
 		yield 'zero-filled integer' => [ 'int(10) unsigned zerofill', '0000000042', null, '`k`', '0000000042', '`k`' ];
 		yield 'year' => [ 'year', '0000', null, '`k`', '0000', '`k`' ];
 		yield 'decimal' => [ 'decimal(20,6)', '-12.000100', null, '`k`', '-12.000100', '`k`' ];
+		yield 'decimal with the most digits MySQL allows after the point' => [ 'decimal(65,30)', '-' . str_repeat( '9', 35 ) . '.' . str_repeat( '1', 30 ), null, '`k`', '-' . str_repeat( '9', 35 ) . '.' . str_repeat( '1', 30 ), '`k`' ];
+		yield 'decimal with the most digits MariaDB allows after the point' => [ 'decimal(65,38)', '-' . str_repeat( '9', 27 ) . '.' . str_repeat( '1', 38 ), null, '`k`', '-' . str_repeat( '9', 27 ) . '.' . str_repeat( '1', 38 ), '`k`' ];
 		yield 'float as its exact double' => [ 'float', '0.10000000149011612', null, '`k` + 0e0', '0.10000000149011612', '`k`' ];
 		yield 'double in exponent notation' => [ 'double', '1.0000000031710769e-30', null, '`k` + 0e0', '1.0000000031710769e-30', '`k`' ];
 		yield 'enum by its index' => [ "enum('zeta','alpha')", '2', null, '`k` + 0', '2', '`k`' ];
@@ -71,6 +73,7 @@ final class DumpKeyTest extends TestCase {
 		yield 'a number that is no string' => [ 'int', 17 ];
 		yield 'null' => [ 'int', null ];
 		yield 'an exponent in a decimal' => [ 'decimal(10,2)', '1e5' ];
+		yield 'a decimal with more digits after the point than any server allows' => [ 'decimal(65,38)', '0.' . str_repeat( '1', 39 ) ];
 	}
 
 	#[DataProvider( 'values_of_another_form' )]

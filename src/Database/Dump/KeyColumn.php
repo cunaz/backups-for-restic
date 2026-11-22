@@ -19,7 +19,8 @@ defined( 'ABSPATH' ) || exit;
  * does (ADR 0021):
  *
  * - integers, YEAR and DECIMAL compare as the exact numbers the server sends, unsigned
- *   64-bit values above PHP_INT_MAX included, because they stay strings;
+ *   64-bit values above PHP_INT_MAX included, because they stay strings; a DECIMAL has up to
+ *   65 digits, of which MySQL allows 30 and MariaDB 38 after the point;
  * - FLOAT and DOUBLE are read as `col + 0e0`, the exact double, because the server prints a
  *   FLOAT with fewer digits than it has;
  * - BIT, ENUM and SET are read as `col + 0` and compared with that number: ENUM and SET sort
@@ -132,7 +133,7 @@ final readonly class KeyColumn {
 	public function literal( mixed $value ): string {
 		$patterns = [
 			self::INTEGER => '/\A-?[0-9]{1,20}\z/',
-			self::DECIMAL => '/\A-?[0-9]{1,65}(?:\.[0-9]{1,30})?\z/',
+			self::DECIMAL => '/\A-?[0-9]{1,65}(?:\.[0-9]{1,38})?\z/',
 			self::FLOAT   => '/\A-?(?:[0-9]{1,40}(?:\.[0-9]{0,40})?|\.[0-9]{1,40})(?:[eE][-+]?[0-9]{1,3})?\z/',
 			self::ORDINAL => '/\A[0-9]{1,20}\z/',
 			self::QUOTED  => '/\A(?=.)-?[0-9A-Za-z]{0,12}(?:[-:. ][0-9A-Za-z]{0,12}){0,16}\z/',
