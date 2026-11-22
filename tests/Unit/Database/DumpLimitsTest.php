@@ -247,6 +247,68 @@ final class DumpLimitsTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_a_row_that_grows_after_its_size_was_read_is_never_fetched_beyond_the_memory_left(): void {
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 160 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This separate process checks what a page fetches.
+		// On the site's connection the sizes and the page are two reads: the second row has
+		// grown to 200 MiB in between, more than PHP could hold.
+		$db     = new class() implements Connection {
+			public bool $grown = false;
+
+			public bool $fetched_whole = false;
+
+			public function rows( string $sql ): array {
+				$after = 1 === preg_match( '/WHERE \(`id` > (\d+)\)/', $sql, $match ) ? (int) $match[1] : 0;
+				$limit = 1 === preg_match( '/LIMIT (\d+)\z/', $sql, $match ) ? (int) $match[1] : 0;
+				$ids   = $after >= 3 || 0 === $limit ? [] : range( $after + 1, min( 3, $after + $limit ) );
+				$size  = fn ( int $id ): int => 2 === $id && $this->grown ? 200 * 1048576 : 1024;
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					$sizes       = array_map( static fn ( int $id ): array => [ 'size' => (string) ( 1 + $size( $id ) ) ], $ids );
+					$this->grown = true;
+					return $sizes;
+				}
+				// As the server answers: a value larger than the cap of the query does not come.
+				$cap = 1 === preg_match( '/ <= (\d+), `body`, NULL\)/', $sql, $match ) ? (int) $match[1] : PHP_INT_MAX;
+				return array_map(
+					function ( int $id ) use ( $size, $cap ): array {
+						$bytes               = 1 + $size( $id );
+						$this->fetched_whole = $this->fetched_whole || ( $bytes > 1048576 && $bytes <= $cap );
+						return [
+							'id'         => (string) $id,
+							'body'       => $bytes > $cap ? null : str_repeat( 'g', $bytes - 1 ),
+							'__bfr_size' => (string) $bytes,
+						];
+					},
+					$ids
+				);
+			}
+		};
+		$table  = new Table(
+			'wp_rows',
+			'CREATE TABLE `wp_rows` (`id` int NOT NULL, `body` longblob, PRIMARY KEY (`id`)) ENGINE=InnoDB',
+			[
+				'id'   => SqlFormatter::NUMERIC,
+				'body' => SqlFormatter::BINARY,
+			],
+			'PRIMARY',
+			[ new KeyColumn( 'id', KeyColumn::INTEGER ) ],
+			'InnoDB',
+			'',
+			true,
+			[ 'body' ]
+		);
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		try {
+			while ( '' !== $source->read( 65536 ) ) {
+				continue;
+			}
+			self::fail( 'A row of 200 MiB does not fit into 160 MiB.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_row_memory', JobError::from_throwable( $error )->code );
+		}
+		self::assertFalse( $db->fetched_whole, 'The grown row never reached PHP.' );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_a_row_that_cannot_fit_into_memory_on_its_own_is_refused_before_it_is_fetched(): void {
 		ini_set( 'memory_limit', '256M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This separate process checks the refusal under a known limit.
 		$db    = new class() implements Connection {

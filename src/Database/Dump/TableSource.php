@@ -249,6 +249,20 @@ final class TableSource implements ResumableByteSource {
 	private ?array $carry = null;
 
 	/**
+	 * Alias of the size of each row in a query that reads values of any size.
+	 *
+	 * @var string
+	 */
+	private string $size_alias = '__bfr_size';
+
+	/**
+	 * Pages in a row that ended before their first row because it had grown.
+	 *
+	 * @var int
+	 */
+	private int $cut = 0;
+
+	/**
 	 * Start of every INSERT statement of the table.
 	 *
 	 * @var string
@@ -280,6 +294,9 @@ final class TableSource implements ResumableByteSource {
 				$alias .= '_';
 			}
 			$this->aliases[ $position ] = $alias;
+		}
+		while ( isset( $table->columns[ $this->size_alias ] ) || in_array( $this->size_alias, $this->aliases, true ) ) {
+			$this->size_alias .= '_';
 		}
 		$state    = self::saved( $cursor, $table );
 		$restarts = self::restarts( $cursor );
@@ -615,21 +632,38 @@ final class TableSource implements ResumableByteSource {
 
 	/**
 	 * The selected columns: every insertable column, a FLOAT as the DOUBLE it converts to
-	 * exactly, and the cursor values that need an expression.
+	 * exactly, and the cursor values that need an expression. With a cap, a row larger than
+	 * the cap comes with NULL in place of its values of any size, and every row with its size:
+	 * the server checks each row before it is sent, so PHP never fetches one it cannot hold.
 	 *
+	 * @param int|null $cap Bytes of the largest row to fetch whole, or null for every row.
 	 * @return string Selection list.
 	 */
-	private function selection(): string {
+	private function selection( ?int $cap = null ): string {
+		$size    = null === $cap ? '' : $this->size();
+		$guarded = [];
+		if ( null !== $cap ) {
+			foreach ( [] !== $this->table->unbounded ? $this->table->unbounded : array_keys( array_filter( $this->table->columns, static fn ( string $kind ): bool => in_array( $kind, [ SqlFormatter::TEXT, SqlFormatter::BINARY ], true ) ) ) as $name ) {
+				$guarded[ (string) $name ] = true;
+			}
+		}
 		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
 		$selection = [];
 		foreach ( $this->table->columns as $name => $kind ) {
-			$column      = SqlFormatter::identifier( (string) $name );
-			$selection[] = SqlFormatter::FLOAT === $kind ? $column . ' + 0e0 AS ' . $column : $column;
+			$column = SqlFormatter::identifier( (string) $name );
+			$value  = SqlFormatter::FLOAT === $kind ? $column . ' + 0e0' : $column;
+			if ( isset( $guarded[ (string) $name ] ) ) {
+				$value = 'IF(' . $size . ' <= ' . $cap . ', ' . $value . ', NULL)';
+			}
+			$selection[] = $column === $value ? $column : $value . ' AS ' . $column;
 		}
 		foreach ( $this->table->order as $position => $column ) {
 			if ( $column->computed() ) {
 				$selection[] = $column->value() . ' AS ' . SqlFormatter::identifier( $this->aliases[ $position ] );
 			}
+		}
+		if ( null !== $cap ) {
+			$selection[] = $size . ' AS ' . SqlFormatter::identifier( $this->size_alias );
 		}
 		// A generated-only table still has rows: one empty INSERT tuple recreates each one.
 		return [] === $selection ? '1' : implode( ', ', $selection );
@@ -814,14 +848,33 @@ final class TableSource implements ResumableByteSource {
 		}
 		// Values of any size: the server first says how large the next rows are, so that the
 		// page fetches no more of them than PHP can hold.
-		[ $limit, $more ] = $this->table->wide ? $this->fitting( $range, $offset ) : [ $this->page, true ];
-		$rows             = 0 === $limit ? [] : $this->connection->rows( 'SELECT ' . $this->selection() . $range . $limit . $offset );
+		[ $limit, $more, $cap ] = $this->table->wide ? $this->fitting( $range, $offset ) : [ $this->page, true, null ];
+		$rows                   = 0 === $limit ? [] : $this->connection->rows( 'SELECT ' . $this->selection( $cap ) . $range . $limit . $offset );
 		// Also a read that finds nothing more is a moment of its own outside a snapshot.
 		$this->viewed();
 		if ( [] === $rows ) {
 			$this->exhausted = true;
 			return;
 		}
+		// Outside a snapshot the sizes and the page are two reads: a row that has grown beyond
+		// the cap since came without its values, and the page ends before it.
+		$grown = null;
+		foreach ( null === $cap ? [] : $rows as $index => $row ) {
+			if ( (int) ( $row[ $this->size_alias ] ?? 0 ) > $cap ) {
+				$grown = (int) $row[ $this->size_alias ];
+				$rows  = array_slice( $rows, 0, $index );
+				break;
+			}
+		}
+		if ( [] === $rows ) {
+			// The first row grew: its size is read again with the next page, unless it no
+			// longer fits on its own.
+			if ( null !== $grown && ( 1 === $limit || ++$this->cut >= 3 ) ) {
+				$this->refuse( $this->estimate( $grown ) );
+			}
+			return;
+		}
+		$this->cut = 0;
 		// Outside a snapshot nothing holds the definition from one statement to the next: a
 		// page read under another one is not written, even if the change is undone later.
 		if ( $this->definition_changed() ) {
@@ -847,7 +900,7 @@ final class TableSource implements ResumableByteSource {
 		$count         = count( $rows );
 		$this->rows   += $count;
 		$this->offset += $count;
-		if ( $count < $limit || ! $more ) {
+		if ( null === $grown && ( $count < $limit || ! $more ) ) {
 			$this->exhausted = true;
 		}
 		if ( $size > 2 * self::TARGET_PAGE_BYTES ) {
@@ -861,34 +914,38 @@ final class TableSource implements ResumableByteSource {
 
 	/**
 	 * How many of the next rows of a table with values of any size one page fetches: as many
-	 * as fit, with their SQL, into the memory left, and about TARGET_PAGE_BYTES of SQL, at
-	 * least one. The server reports their sizes first.
+	 * as fit, with their SQL, into the memory left even if each were as large as the largest
+	 * of them, and about TARGET_PAGE_BYTES of SQL, at least one. The server reports their sizes
+	 * first. The cap is the share of the memory left that each row of the page may take.
 	 *
 	 * @param string $range  FROM, WHERE, ORDER BY and LIMIT keyword of the page.
 	 * @param string $offset OFFSET clause, or empty.
-	 * @return array{int, bool} Rows to fetch, 0 if none are left, and whether more may follow them.
+	 * @return array{int, bool, int|null} Rows to fetch, 0 if none are left; whether more may follow them; the cap of each row, null without a memory limit.
 	 * @throws DatabaseFailed If the next row does not fit into the memory limit on its own.
 	 */
 	private function fitting( string $range, string $offset ): array {
-		$sizes = $this->connection->rows( 'SELECT ' . $this->size() . ' AS size' . $range . $this->page . $offset );
-		$room  = self::room();
-		$count = 0;
-		$need  = 0;
-		$sql   = 0;
+		$sizes  = $this->connection->rows( 'SELECT ' . $this->size() . ' AS size' . $range . $this->page . $offset );
+		$room   = self::room();
+		$count  = 0;
+		$sql    = 0;
+		$widest = 0;
 		foreach ( $sizes as $row ) {
 			$bytes = (int) ( $row['size'] ?? 0 );
 			$bound = $this->estimate( $bytes );
 			if ( 0 === $count && $bytes + $bound > $room ) {
 				$this->refuse( $bound );
 			}
-			if ( $count > 0 && ( $sql + $bound > self::TARGET_PAGE_BYTES || $need + $bytes + $bound > $room ) ) {
+			$larger = max( $widest, $bytes );
+			if ( $count > 0 && ( $sql + $bound > self::TARGET_PAGE_BYTES || ( $count + 1 ) * ( $larger + $this->estimate( $larger ) ) > $room ) ) {
 				break;
 			}
-			$need += $bytes + $bound;
-			$sql  += $bound;
+			$widest = $larger;
+			$sql   += $bound;
 			++$count;
 		}
-		return [ $count, $count < count( $sizes ) || count( $sizes ) === $this->page ];
+		// Without a memory limit nothing needs a cap.
+		$cap = 0 === $count || PHP_INT_MAX === $room ? null : max( $widest, $this->alone( intdiv( $room, $count ) ) );
+		return [ $count, $count < count( $sizes ) || count( $sizes ) === $this->page, $cap ];
 	}
 
 	/**
@@ -916,6 +973,16 @@ final class TableSource implements ResumableByteSource {
 			}
 		}
 		return [] === $sizes ? '0' : implode( ' + ', $sizes );
+	}
+
+	/**
+	 * The size of the largest row that fits, with its SQL, into the given memory.
+	 *
+	 * @param int $room Bytes.
+	 * @return int Bytes of its values; 0 if none fits.
+	 */
+	private function alone( int $room ): int {
+		return max( 0, intdiv( $room - $this->estimate( 0 ), 3 ) );
 	}
 
 	/**

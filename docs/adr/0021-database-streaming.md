@@ -123,9 +123,14 @@ and makes an interrupted dump start from zero.
   latin1 "é" takes two bytes and "€" three, and fetch only as many as fit, with their SQL,
   into what the memory limit leaves, at least one. A row that cannot fit on its own stops the dump before it is
   fetched; on the dump's own connection, a table without a key is checked for its largest
-  row before its one statement starts. Through `$wpdb`, a row can still grow between the
-  read of its size and its own read: the check before it is written then stops the dump,
-  unless the row has grown beyond what PHP can hold at all.
+  row before its one statement starts. Through `$wpdb` the sizes and the page are two reads,
+  and a row can grow in between: each row of the page may take an equal share of the memory
+  left, and the page asks the server to send a row's values only if the row stays within
+  that share. A row that has grown beyond it comes with its size but without its values;
+  the page ends before it, and the next page reads its size again and fetches it on its own
+  if it fits. The page can therefore fetch no more than the memory it was admitted for.
+  What remains is memory that other code takes between the two reads, which the reserve of
+  16 MiB for the backup's own reading has to cover.
 - Restore: database files are restored to staging and executed through `$wpdb` in budgeted
   batches with maintenance mode and plugin state preserved (Milestone 3). The manual path is
   `cat *.sql | mariadb`, verified in the database test suite.

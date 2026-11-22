@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Database;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Database\Dump\Connection;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Database\Dump\TableSource;
@@ -632,6 +633,46 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertLessThan( 1048576, (int) ( mysqli_get_client_stats()['bytes_received'] ?? 0 ) - $seen, 'The row was refused before it was fetched.' );
 	}
 
+	public function test_on_the_site_connection_a_row_that_grows_after_its_size_was_read_is_read_again(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS grow_rows' );
+		$db->execute( 'CREATE TABLE grow_rows (id INT NOT NULL PRIMARY KEY, body LONGBLOB) ENGINE=InnoDB' );
+		$db->execute( "INSERT INTO grow_rows VALUES (1, 'one'), (2, 'two'), (3, 'three')" );
+		$writer = self::database( self::$source );
+		// The site's connection, which grows the second row to 12 MiB right after the first
+		// read of sizes, and counts those reads.
+		$site  = new class( $db, $writer ) implements Connection {
+			public int $sizes = 0;
+
+			public function __construct( private readonly MysqliConnection $db, private readonly MysqliConnection $writer ) {
+			}
+
+			public function rows( string $sql ): array {
+				$rows = $this->db->rows( $sql );
+				if ( str_contains( $sql, ' AS size FROM `grow_rows`' ) && 1 === ++$this->sizes ) {
+					$this->writer->execute( 'UPDATE grow_rows SET body = REPEAT(0xA5, 12582912) WHERE id = 2' );
+				}
+				return $rows;
+			}
+		};
+		$files = ( new DatabaseDump( $site, $this->directory . '/grow.json', 'grow_', [], 1767323100 ) )->files();
+		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-grow_rows.sql' === $file->name ) )[0];
+		$limit = (string) ini_get( 'memory_limit' );
+		// 48 MiB besides the reserve: a third of it for each of three rows is less than the grown
+		// row, all of it is enough for that row on its own.
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 64 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit for one read and restores it.
+		try {
+			$this->read_to_file( $table->source, $this->directory . '/010-grow_rows.sql' );
+		} finally {
+			ini_set( 'memory_limit', $limit ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+		}
+		MysqliConnection::import( self::$target, [ $this->directory . '/010-grow_rows.sql' ] );
+
+		$query = 'SELECT id, SHA2(body, 256) AS body FROM grow_rows ORDER BY id';
+		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), 'The grown row is backed up as it is now.' );
+		self::assertGreaterThan( 1, $site->sizes, 'The page ended before the grown row, whose size was read again.' );
+	}
+
 	#[DataProvider( 'connections' )]
 	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone( bool $dedicated ): void {
 		$db   = self::database( self::$source );
@@ -891,7 +932,7 @@ final class DatabaseDumpTest extends TestCase {
 	 * @param \Closure|null                      $dedicated Opens the dump's own connection, or null for the site connection only.
 	 * @return array<string, mixed> The decoded manifest.
 	 */
-	private function dump_and_import( MysqliConnection $db, string $prefix, ?\Closure $between = null, ?\Closure $dedicated = null ): array {
+	private function dump_and_import( Connection $db, string $prefix, ?\Closure $between = null, ?\Closure $dedicated = null ): array {
 		$files = [];
 		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'state.json', $prefix, [], 1767323100, $dedicated ) )->files() as $file ) {
 			$files[ $file->name ] = $this->read( $file->source, 1, null === $between ? null : static fn ( int $part ) => $between( $file->name, $part ) );
