@@ -19,7 +19,9 @@ env:
 
 jobs:
   fuzz:
-    name: Fuzz parsers
+    # The release gate reads the duration from this name: a release needs a run of at least
+    # 120 seconds per target on its commit (docs/04 §7).
+    name: Fuzz parsers (${{ inputs.seconds || '120' }} s per target)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

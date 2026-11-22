@@ -85,6 +85,8 @@ jobs:
         run: |
           if ! command -v svnadmin >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y subversion; fi
           tests/Release/test-wordpress-org.sh
+      - name: Release gates against recorded GitHub responses
+        run: python3 tests/Release/test_release_gates.py
       - uses: ./.github/actions/check-package
 
   pot:

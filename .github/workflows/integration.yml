@@ -50,7 +50,9 @@ env:
 
 jobs:
   wordpress:
-    name: WordPress ${{ matrix.wordpress }} on PHP ${{ matrix.php }}
+    # The release gate recognises a run of the acceptance size by this suffix; it is derived
+    # from the same condition as the fixture sizes below.
+    name: WordPress ${{ matrix.wordpress }} on PHP ${{ matrix.php }}${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && ' (acceptance size)' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     strategy:
