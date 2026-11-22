@@ -674,7 +674,8 @@ read view, how often it started over and its largest statement. A table whose de
 changes during its dump starts over, at most three times, then the backup stops with
 `database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)). Every read waits at
 most five seconds for a lock that another connection holds on a table; then the tick stops
-with the retryable `database_dump_locked`, and the job continues the table later.
+with the retryable `database_dump_locked`, and the job continues the table later. Every read
+also runs without a row limit, whatever `sql_select_limit` the session inherited.
 
 Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
 rows, cursor and content transcript commit in one transaction. The report compares

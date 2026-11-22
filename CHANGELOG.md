@@ -424,3 +424,6 @@ All notable changes are documented here. The format follows
   query wait for a lock, a year on MySQL and a day on MariaDB by default. The backup waits
   five seconds and then tries again later, with growing pauses; a table that stays locked
   stops the backup at the sixth try with its own message, which names the table.
+- A row limit (`sql_select_limit`) that the server's settings or a plugin left on the
+  database session no longer cuts the database backup short. It could leave out tables,
+  columns, parts of a key or rows without an error.
