@@ -41,6 +41,12 @@ final class DatabaseDump {
 
 	public const string DIRECTORY = 'database';
 
+	/**
+	 * The largest manifest that the plugin's restore reads (Restore\Manifest::MAX_BYTES); it
+	 * refuses a larger one before it reads any of it.
+	 */
+	public const int MANIFEST_BYTES = 2097152;
+
 	/** State files of earlier versions have no version and recorded the session's offset. */
 	private const int STATE_VERSION = 2;
 
@@ -105,7 +111,7 @@ final class DatabaseDump {
 				return new StringByteSource( $sql );
 			}
 		);
-		$files[] = $this->file( 'manifest.json', fn (): ByteSource => new StringByteSource( $this->manifest() ) );
+		$files[] = $this->file( 'manifest.json', fn (): ByteSource => $this->manifest() );
 		return $files;
 	}
 
@@ -167,11 +173,13 @@ final class DatabaseDump {
 	}
 
 	/**
-	 * The database manifest: format, server, and per file the table, rows and bytes.
+	 * The database manifest: format, server, and per file the table, rows and bytes, with how
+	 * the rows were read where the whole manifest stays within MANIFEST_BYTES.
 	 *
-	 * @return string JSON.
+	 * @return ByteSource JSON; with a warning for the job if even the table list is larger.
+	 * @throws DatabaseFailed If the state cannot be read.
 	 */
-	private function manifest(): string {
+	private function manifest(): ByteSource {
 		$state  = $this->state();
 		$tables = [];
 		foreach ( $state['tables'] as $name ) {
@@ -196,20 +204,34 @@ final class DatabaseDump {
 			}
 			$tables[] = $entry;
 		}
-		return (string) json_encode(
-			[
-				'format'         => TableSource::FORMAT,
-				'created'        => Rfc3339::format( $this->time ),
-				'server'         => $state['server'],
-				'charset'        => 'utf8mb4',
-				'time_zone'      => $state['time_zone'],
-				'prefix'         => $this->prefix,
-				'tables'         => $tables,
-				'views'          => $state['views'],
-				'trigger_tables' => ( new Catalog( $this->reader( $state['time_zone'] ) ) )->trigger_tables( $state['tables'] ),
-			],
-			JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-		) . "\n";
+		$manifest = [
+			'format'         => TableSource::FORMAT,
+			'created'        => Rfc3339::format( $this->time ),
+			'server'         => $state['server'],
+			'charset'        => 'utf8mb4',
+			'time_zone'      => $state['time_zone'],
+			'prefix'         => $this->prefix,
+			'tables'         => $tables,
+			'views'          => $state['views'],
+			'trigger_tables' => ( new Catalog( $this->reader( $state['time_zone'] ) ) )->trigger_tables( $state['tables'] ),
+		];
+		// Within what the plugin's restore reads: without line breaks, then without how the
+		// rows were read. Sixteen key columns with names of 64 characters, which JSON can
+		// escape to six bytes each, take up to 6 KiB per table.
+		$flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+		$json  = (string) json_encode( $manifest, $flags | JSON_PRETTY_PRINT ) . "\n";
+		if ( strlen( $json ) > self::MANIFEST_BYTES ) {
+			$json = (string) json_encode( $manifest, $flags ) . "\n";
+		}
+		if ( strlen( $json ) > self::MANIFEST_BYTES ) {
+			$manifest['tables'] = array_map( static fn ( array $entry ): array => array_intersect_key( $entry, array_flip( [ 'name', 'file', 'rows', 'bytes' ] ) ), $tables );
+			$json               = (string) json_encode( $manifest, $flags ) . "\n";
+		}
+		if ( strlen( $json ) <= self::MANIFEST_BYTES ) {
+			return new StringByteSource( $json );
+		}
+		// Thousands of tables with long names: the files still import with the command-line client.
+		return new WarnedSource( $json, [ sprintf( 'The database manifest of this backup has %d bytes, more than the %d that the plugin\'s restore reads: its database can be restored with the command-line client only.', strlen( $json ), self::MANIFEST_BYTES ) ] );
 	}
 
 	/**

@@ -673,7 +673,8 @@ manifest and a job warning say so. Across ticks, the pages of one table and the 
 themselves are read at different moments: a row deleted and inserted again with a new key
 between two ticks can appear twice, and an import then stops with a duplicate key. The
 manifest records for each table which key ordered its pages, whether all rows come from one
-read view, how often it started over and its largest statement. A table whose definition
+read view, how often it started over and its largest statement, unless the manifest would
+then be larger than the 2 MiB that the plugin's restore reads. A table whose definition
 changes during its dump starts over, at most three times, then the backup stops with
 `database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)). Every read waits at
 most five seconds for a lock that another connection holds on a table; then the tick stops

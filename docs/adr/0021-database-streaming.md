@@ -79,7 +79,13 @@ and makes an interrupted dump start from zero.
   old key and once from the later one with its new key. For a unique key other than the
   paging key the import then stops with a duplicate key. The manifest records for each
   table whether all its rows come from one read view (`"snapshot"`), so that an importer
-  can explain such a failure precisely.
+  can explain such a failure precisely. The plugin's restore refuses a manifest larger than
+  2 MiB before it reads any of it, and sixteen key columns with names of 64 characters take
+  up to 6 KiB per table: a manifest that would be larger is written without line breaks,
+  then without how the rows were read (`"key"`, `"snapshot"`, `"restarts"`,
+  `"largest_statement"`). If even the list of tables is larger, which takes thousands of
+  tables with long names, the backup keeps it and warns that its database can be restored
+  with the command-line client only.
 - **The definition is pinned.** The cursor carries a digest of the table's definition (SHOW
   CREATE TABLE without the `AUTO_INCREMENT` counter, the columns and the key). A tick that
   finds another definition starts the table over (the engine drops the chunks of the

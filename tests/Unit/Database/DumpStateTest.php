@@ -6,9 +6,14 @@ namespace BackupsForRestic\Tests\Unit\Database;
 use BackupsForRestic\Database\Dump\Connection;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
+use BackupsForRestic\Database\Dump\Table;
+use BackupsForRestic\Database\Dump\WarnedSource;
+use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Support\ByteSource;
+use BackupsForRestic\Support\ResumableByteSource;
 use BackupsForRestic\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -57,6 +62,90 @@ final class DumpStateTest extends TestCase {
 		$this->expectException( DatabaseFailed::class );
 		$this->expectExceptionMessage( 'not a numeric offset' );
 		( new DatabaseDump( $this->site(), $this->directory . '/state.json', 'wp_', [], 1767323100 ) )->files();
+	}
+
+	public function test_the_manifest_limit_is_the_one_the_restore_reads(): void {
+		self::assertSame( Manifest::MAX_BYTES, DatabaseDump::MANIFEST_BYTES );
+	}
+
+	/** @return iterable<string, array{int, int, string, bool, bool}> */
+	public static function manifests(): iterable {
+		// Tables, key columns per table, a key column name, line breaks kept, details kept.
+		yield 'a site of a few tables' => [ 12, 2, 'id', true, true ];
+		yield 'thousands of tables with long key names' => [ 4000, 4, str_repeat( 'k', 64 ), false, true ];
+		yield 'thousands of tables with the longest keys' => [ 3000, 16, str_repeat( 'k"', 32 ), false, false ];
+	}
+
+	#[DataProvider( 'manifests' )]
+	public function test_the_manifest_stays_within_what_the_restore_reads( int $count, int $columns, string $column, bool $pretty, bool $details ): void {
+		$this->state( $count, array_fill( 0, $columns, $column ), static fn ( int $table ): string => sprintf( 'wp_t%05d', $table ) );
+		$dump   = new DatabaseDump( $this->site(), $this->directory . '/state.json', 'wp_', [], 1767323100 );
+		$files  = $dump->files();
+		$source = ( end( $files )->source )( null );
+		$json   = self::read( static fn (): ByteSource => $source );
+
+		self::assertLessThanOrEqual( DatabaseDump::MANIFEST_BYTES, strlen( $json ) );
+		self::assertNotInstanceOf( WarnedSource::class, $source );
+		self::assertCount( $count, Manifest::parse( $json, 'wp_' )->tables, 'The restore reads it.' );
+		self::assertSame( $pretty, substr_count( $json, "\n" ) > 1, 'Line breaks are the first to go.' );
+		$manifest = json_decode( $json, true );
+		self::assertIsArray( $manifest );
+		self::assertSame( $details ? array_fill( 0, $columns, $column ) : null, $manifest['tables'][0]['key'] ?? null, 'Then how the rows were read.' );
+	}
+
+	public function test_a_table_list_larger_than_the_restore_reads_is_kept_with_a_warning(): void {
+		// Ten thousand tables, as many as the restore accepts, with names of 64 characters
+		// that JSON and the file names escape.
+		$this->state( 10000, [ 'id' ], static fn ( int $table ): string => sprintf( 'wp_%05d', $table ) . str_repeat( '"', 30 ) . str_repeat( 'n', 26 ) );
+		$dump   = new DatabaseDump( $this->site(), $this->directory . '/state.json', 'wp_', [], 1767323100 );
+		$files  = $dump->files();
+		$source = ( end( $files )->source )( null );
+		$json   = self::read( static fn (): ByteSource => $source );
+
+		self::assertGreaterThan( DatabaseDump::MANIFEST_BYTES, strlen( $json ) );
+		self::assertInstanceOf( ResumableByteSource::class, $source );
+		self::assertNull( $source->cursor() );
+		self::assertCount( 1, $source->warnings() );
+		self::assertStringContainsString( 'command-line client', $source->warnings()[0] );
+		$manifest = json_decode( $json, true );
+		self::assertIsArray( $manifest );
+		self::assertCount( 10000, $manifest['tables'], 'Every table is still listed.' );
+	}
+
+	/**
+	 * Writes the state of a dump whose tables are all done.
+	 *
+	 * @param list<string>          $key  Key columns of every table.
+	 * @param \Closure(int): string $name Table name by number.
+	 */
+	private function state( int $count, array $key, \Closure $name ): void {
+		$tables  = [];
+		$results = [];
+		for ( $table = 1; $table <= $count; ++$table ) {
+			$tables[] = $name( $table );
+			$results[ ( new Table( $name( $table ), '', [], null, [] ) )->file() ] = [
+				'table'    => $name( $table ),
+				'rows'     => 1000 + $table,
+				'bytes'    => 90000 + $table,
+				'snapshot' => true,
+				'key'      => $key,
+				'restarts' => 0,
+				'largest'  => 1048576,
+			];
+		}
+		file_put_contents(
+			$this->directory . '/state.json',
+			(string) json_encode(
+				[
+					'version'   => 2,
+					'tables'    => $tables,
+					'views'     => [],
+					'time_zone' => '+00:00',
+					'server'    => '8.4.0',
+					'results'   => $results,
+				]
+			)
+		);
 	}
 
 	/**

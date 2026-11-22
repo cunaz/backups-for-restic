@@ -170,7 +170,10 @@ completed changes and checks their identities during recovery.
    make a statement larger than the client's default `max_allowed_packet` of 16 MiB:
    `manifest.json` lists each table's `largest_statement` in bytes. Then pass a larger value
    to the client, for example `--max-allowed-packet=1G`, and set the server's
-   `max_allowed_packet` at least as high.
+   `max_allowed_packet` at least as high. The manifest of a database with thousands of
+   tables can leave out `largest_statement`, `snapshot`, `key` and `restarts` to stay within
+   what the plugin's restore reads; pass the larger value then if the client stops with
+   `ERROR 2020` or `Got a packet bigger than 'max_allowed_packet'`.
 
    If the import stops with `ERROR 1062 … Duplicate entry` in a table that `manifest.json`
    marks with `"snapshot": false`, the backup read that table in several requests, and a
