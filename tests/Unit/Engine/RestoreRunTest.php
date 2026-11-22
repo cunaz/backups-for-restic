@@ -9,6 +9,7 @@ use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\BlobStore;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Restore\Files;
@@ -583,6 +584,75 @@ final class RestoreRunTest extends TestCase {
 			$this->backend->objects['locks'] = [];
 		}
 		self::assertTrue( $run->advance( INF ) );
+		self::assertSame( 'content', file_get_contents( $this->target . '/file.txt' ) );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	/**
+	 * A repository whose loads of index files are counted, over the test's backend.
+	 *
+	 * @param int $loads Index files downloaded so far.
+	 */
+	private function counting( int &$loads ): Repository {
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$loads ): void {
+				if ( 'load' === $method && ObjectType::Index === $type ) {
+					++$loads;
+				}
+			}
+		);
+		return Repository::open( $backend, $this->repository->master_key(), new SystemRandom() );
+	}
+
+	public function test_with_an_index_cache_a_resumed_run_downloads_no_index_file_twice(): void {
+		$snapshot   = $this->snapshot( [ $this->file( 'one.txt', 'one' ), $this->file( 'two.txt', 'two' ), $this->directory( 'deep', [ $this->file( 'three.txt', 'three' ) ] ) ] );
+		$files      = count( $this->backend->list( ObjectType::Index ) );
+		$loads      = 0;
+		$repository = $this->counting( $loads );
+		$cache      = new IndexCache( $this->scratch . '/cache' );
+		$run        = RestoreRun::start( $repository, $snapshot, $this->target, $this->work, [ '/' ], new Identity( 'example.test' ), $this->clock, null, null, $cache );
+		$ticks      = 0;
+		// Every tick is a request of its own: a new object, as after a resume.
+		while ( ! $run->advance( 0.0 ) ) {
+			$run = RestoreRun::resume( $repository, $this->work, $this->clock, null, null, $cache );
+			++$ticks;
+		}
+
+		self::assertGreaterThan( 3, $ticks );
+		self::assertSame( $files, $loads, 'Each index file is downloaded once, not once a tick.' );
+		self::assertSame( 'three', file_get_contents( $this->target . '/deep/three.txt' ) );
+		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
+	}
+
+	#[DataProvider( 'lease_gaps' )]
+	public function test_a_cached_index_is_reloaded_after_repacking_during_a_lease_gap( bool $elapsed ): void {
+		$node     = $this->file( 'file.txt', 'content' );
+		$snapshot = $this->snapshot( [ $node ] );
+		$cache    = new IndexCache( $this->scratch . '/cache' );
+		$run      = RestoreRun::start( $this->repository, $snapshot, $this->target, $this->work, [ '/' ], new Identity( 'example.test' ), $this->clock, null, null, $cache );
+		$run->advance( 0.0 );
+		self::assertFileExists( $this->scratch . '/cache/index.bin', 'The index the run read is cached.' );
+		$packs       = array_keys( $this->backend->list( ObjectType::Data ) );
+		$indexes     = array_keys( $this->backend->list( ObjectType::Index ) );
+		$this->store = new BlobStore( $this->repository, new IndexSet() );
+		$this->file( 'file.txt', 'content' );
+		$this->directory( 'root', [ $node ] );
+		$this->store->flush();
+		$this->store->write_index();
+		foreach ( $packs as $pack ) {
+			$this->backend->delete( ObjectType::Data, $pack );
+		}
+		foreach ( $indexes as $index ) {
+			$this->backend->delete( ObjectType::Index, $index );
+		}
+		if ( $elapsed ) {
+			$this->clock->advance( Locking::TRUSTED_SECONDS + 1 );
+		} else {
+			$this->backend->objects['locks'] = [];
+		}
+
+		self::assertTrue( $run->advance( INF ), 'The cache does not name the packs that a prune removed in the gap.' );
 		self::assertSame( 'content', file_get_contents( $this->target . '/file.txt' ) );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}

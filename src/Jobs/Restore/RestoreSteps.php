@@ -505,7 +505,7 @@ final class RestoreSteps implements StepProvider {
 			$job->data['site_layout'] = $binding;
 		}
 		if ( $resume ) {
-			return RestoreRun::resume( $repository, $work, $services->clock, $services->throttle(), $this->services->space );
+			return RestoreRun::resume( $repository, $work, $services->clock, $services->throttle(), $this->services->space, $services->index_cache( $repository ) );
 		}
 		// No checkpoint means no run: what a start that the host ended left behind holds no
 		// lock and no file, and would only keep the new start from finding its directory empty.
@@ -522,7 +522,7 @@ final class RestoreSteps implements StepProvider {
 		}
 		chmod( $this->services->staging_dir( $job ), 0700 );
 		chmod( $target, 0700 );
-		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $paths, $services->identity, $services->clock, $services->throttle(), $this->services->space );
+		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $paths, $services->identity, $services->clock, $services->throttle(), $this->services->space, $services->index_cache( $repository ) );
 		$log->write(
 			'info',
 			'Restore started.',

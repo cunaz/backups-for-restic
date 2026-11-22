@@ -12,6 +12,7 @@ namespace BackupsForRestic\Engine\Restore;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
@@ -101,13 +102,15 @@ final class RestoreRun {
 	 * @param Clock                                  $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
 	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe; disk_free_space() by default, unknown where a host disables it.
+	 * @param IndexCache|null                        $cache Local index cache; the index files are read from the server without one.
 	 */
 	private function __construct(
 		private readonly Repository $repository,
 		private State $state,
 		private readonly Clock $clock,
 		private readonly ?Throttle $throttle,
-		?\Closure $free_space
+		?\Closure $free_space,
+		private readonly ?IndexCache $cache
 	) {
 		$this->locking = new Locking( $repository, new Identity( $state->hostname ), $clock, $state->pid );
 		// PHP treats a function in disable_functions as undefined: it is looked for when the
@@ -128,11 +131,12 @@ final class RestoreRun {
 	 * @param Clock|null                             $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
 	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
+	 * @param IndexCache|null                        $cache Local index cache; the index files are read from the server without one.
 	 * @return self New run; no file has been restored yet.
 	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
 	 * @throws StorageFailed With the code staging_write if the working directory cannot be created.
 	 */
-	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string|array $selection = '/', ?Identity $identity = null, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
+	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string|array $selection = '/', ?Identity $identity = null, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null, ?IndexCache $cache = null ): self {
 		$selected    = new Selection( is_string( $selection ) ? [ $selection ] : $selection );
 		$destination = Files::bind( $target );
 		if ( ! Files::exists( $work_dir ) && ! mkdir( $work_dir, 0700, true ) ) {
@@ -151,7 +155,7 @@ final class RestoreRun {
 			Files::discard_unpublished( $work['path'] );
 			Files::empty_directory( $work['path'], true );
 			$state = new State( $repository->config()->id, $snapshot, $selected, $destination, $work, ( $identity ?? new Identity( 'backups-for-restic-restore' ) )->hostname, random_int( 1, 2147483647 ) );
-			$run   = new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
+			$run   = new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space, $cache );
 			Files::persist( $state );
 			return $run;
 		} finally {
@@ -167,16 +171,17 @@ final class RestoreRun {
 	 * @param Clock|null                             $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
 	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
+	 * @param IndexCache|null                        $cache Local index cache; the index files are read from the server without one.
 	 * @return self Resumed run.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	public static function resume( Repository $repository, string $work_dir, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
+	public static function resume( Repository $repository, string $work_dir, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null, ?IndexCache $cache = null ): self {
 		$work  = Files::bind( $work_dir );
 		$state = Files::read( $work['path'] );
 		if ( $work !== $state->work ) {
 			throw new FormatException( 'The restore checkpoint belongs to another working directory.' );
 		}
-		return new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
+		return new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space, $cache );
 	}
 
 	/**
@@ -388,9 +393,14 @@ final class RestoreRun {
 		return $found;
 	}
 
-	/** Loads the index and root tree only after taking a lock. */
+	/**
+	 * Loads the index and root tree only after taking a lock. With a cache, only the index
+	 * files that the cache does not cover are downloaded. After a lock gap keep_lock() has
+	 * dropped the index, and the cache answers with what the server lists now: a cache that
+	 * covers an index file that is gone, as after a prune elsewhere, is not used.
+	 */
 	private function prepare(): void {
-		$this->index ??= $this->repository->load_index( keep_lock: $this->keep_lock( ... ) );
+		$this->index ??= null === $this->cache ? $this->repository->load_index( keep_lock: $this->keep_lock( ... ) ) : $this->cache->load( $this->repository, keep_lock: $this->keep_lock( ... ) );
 		$this->keep_lock();
 		if ( null === $this->state->tree ) {
 			$snapshot = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, $this->state->snapshot ) );

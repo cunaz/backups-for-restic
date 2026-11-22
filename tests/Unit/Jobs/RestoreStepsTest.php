@@ -292,6 +292,19 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( [ $job->id, $snapshot, 4, 'restores/' . $job->id ], [ $last['job'] ?? null, $last['snapshot'] ?? null, $last['files'] ?? null, $last['staging'] ?? null ] );
 	}
 
+	public function test_the_ticks_of_a_restore_share_the_index_cache_of_the_jobs(): void {
+		$snapshot = $this->backup();
+		$before   = count( $this->server->requests );
+
+		$job = $this->drive( $this->restore_job( $snapshot ) );
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertGreaterThan( 8, $job->ticks );
+		$downloads = array_filter( array_slice( $this->server->requests, $before ), static fn ( string $request ): bool => 1 === preg_match( '~^GET /site/index/[0-9a-f]{64}~', $request ) );
+		self::assertNotSame( [], $downloads, 'The index file that the backup wrote last is not in its cache yet.' );
+		self::assertSame( array_values( array_unique( $downloads ) ), array_values( $downloads ), 'No tick of the restore downloads an index file again.' );
+	}
+
 	public function test_a_restore_of_selected_paths_stages_only_those(): void {
 		$snapshot = $this->backup();
 
