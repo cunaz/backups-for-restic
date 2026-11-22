@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Composer verified against the SHA-256 of its release PHAR, as in ci.yml.
+  PHP_TOOLS: composer:2.11.2@sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
+
 jobs:
   fuzz:
     name: Fuzz parsers
@@ -26,7 +30,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - name: Fuzz
         env:

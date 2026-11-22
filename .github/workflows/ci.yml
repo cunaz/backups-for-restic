@@ -15,6 +15,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Composer for every PHP job, verified by setup-php against the SHA-256 of its release PHAR
+  # (getcomposer.org publishes it, and the PHAR carries an OpenPGP signature by Composer's
+  # release key 161DFBE342889F01DDAC4E61CBB3D576F2A0946F). A new version is a reviewed change.
+  PHP_TOOLS: composer:2.11.2@sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
+
 jobs:
   lint:
     name: Coding standards
@@ -28,7 +34,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpcs
       - name: JavaScript syntax
@@ -61,7 +67,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpstan.phar analyse --no-progress --memory-limit=1G
 
@@ -93,7 +99,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: bin/install-test-tools.sh wp-cli
       # Builds the package and extracts the strings of its PHP and JavaScript files. WP-CLI
       # only warns about a string it finds fault with, for example one with two different
@@ -182,7 +188,7 @@ jobs:
           # Shared hosting rarely runs OPcache or JIT for CLI; test the slow path.
           ini-values: opcache.enable_cli=0
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - name: The zstd extension is ${{ matrix.zstd && 'loaded' || 'not loaded' }}
         env:
           ZSTD: ${{ matrix.zstd }}
@@ -204,13 +210,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Exact releases by digest; a new image is a reviewed change, like a new restic.
           - database: MySQL 8.4
-            image: mysql:8.4
+            image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
             health: mysqladmin ping -h 127.0.0.1 -proot --silent
             skips: tests/Skips/database-mysql.txt
           # MariaDB skips the cases of the atomic exchange, which is MySQL-only by design.
           - database: MariaDB 11.4
-            image: mariadb:11.4
+            image: mariadb:11.4.13@sha256:a8992b5e5404d11e03c54a31d0c1bdea3fd116d283aa6d1a627551f29045309b
             health: healthcheck.sh --connect --innodb_initialized
             skips: tests/Skips/database-mariadb.txt
     services:
@@ -239,7 +246,7 @@ jobs:
           php-version: '8.3'
           extensions: mbstring, openssl, mysqli
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: vendor/bin/phpunit --testsuite database --log-junit "$RUNNER_TEMP/database.xml"
       # Every test of the suite skips when the server does not answer.
@@ -287,7 +294,7 @@ jobs:
           # With ext-zstd the native decompression of format 2 is mutated and tested too.
           extensions: zstd
           coverage: pcov
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
         if: steps.changes.outputs.run == 'true'
       - run: bin/install-test-tools.sh infection
@@ -321,7 +328,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: pcov
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh infection
       - run: composer mutation:planner -- --threads=max --no-progress

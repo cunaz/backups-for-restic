@@ -33,7 +33,8 @@
                 "description": "PHPStan from its release PHAR: GitHub source archives are not reachable from every CI and sandbox network.",
                 "dist": {
                     "type": "file",
-                    "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar"
+                    "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar",
+                    "shasum": "05eda8c51645fbb1cca6277a0bc2d2f9549d3f53"
                 },
                 "bin": [
                     "phpstan.phar"
