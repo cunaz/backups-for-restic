@@ -107,7 +107,7 @@ final class ApplyPlanTest extends TestCase {
 		}
 	}
 
-	public function test_a_dump_file_is_found_among_any_number_of_other_entries(): void {
+	public function test_a_dump_file_is_found_among_many_other_entries(): void {
 		$old      = $this->live . '/backups-for-restic';
 		$database = $this->files . $old . '/spool/database';
 		mkdir( $database, 0700, true );
@@ -121,6 +121,19 @@ final class ApplyPlanTest extends TestCase {
 		foreach ( [ '/spool/database/010-wp_users.sql', '/spool/database/note-7.txt', '/spool' ] as $suffix ) {
 			self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, $old . $suffix )['reason'], $suffix );
 		}
+	}
+
+	public function test_a_database_directory_too_large_to_list_counts_as_the_backups(): void {
+		$database = $this->files . $this->live . '/exports/spool/database';
+		mkdir( $database, 0700, true );
+		for ( $i = 0; $i < 65536; $i++ ) {
+			touch( $database . '/' . $i );
+		}
+		// Up to the limit every name was listed and none is named like a dump's file.
+		self::assertSame( 'create', $this->plan->inspect( $this->files, $this->live . '/exports/spool/database/0' )['action'] );
+		touch( $database . '/65536' );
+		$plan = new ApplyPlan( [ $this->live ], [ $this->live . '/private' ], [ $this->live . '/wp-config.php' ] );
+		self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, $this->live . '/exports/spool/database/0' )['reason'] );
 	}
 
 	public function test_more_files_named_like_a_dumps_than_can_be_read_count_as_the_backups(): void {

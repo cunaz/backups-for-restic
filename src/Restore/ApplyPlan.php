@@ -39,6 +39,9 @@ final class ApplyPlan {
 	/** Number of files named like a dump's that are read in one database directory of a spool. */
 	private const int SPOOL_FILES = 1024;
 
+	/** Number of names that are listed in one database directory of a spool. */
+	private const int SPOOL_NAMES = 65536;
+
 	/** Wider folders share a disk index across read-only worker requests. */
 	private const int DISK_THRESHOLD = 2048;
 
@@ -540,10 +543,11 @@ final class ApplyPlan {
 	 * writes: a site manifest that declares its format, or a database directory with a dump
 	 * manifest or an SQL file that starts with the dump's format line. Every file of a
 	 * dump starts with that line, so a selection of one table file is recognized as well.
-	 * The whole database directory is listed, and the files named as a dump names its
-	 * own (manifest.json, and three digits, a hyphen and a name ending in .sql) are read.
-	 * What cannot be decided counts as the backup's: a file that cannot be read, and a
-	 * directory with more such files than SPOOL_FILES of which none is a dump's.
+	 * The database directory is listed, and the files named as a dump names its own
+	 * (manifest.json, and three digits, a hyphen and a name ending in .sql) are read. Both
+	 * are bounded, so that one directory cannot use up a request. What cannot be decided
+	 * counts as the backup's: a file that cannot be read, and a directory in which neither
+	 * SPOOL_NAMES listed names nor SPOOL_FILES read files showed a dump.
 	 *
 	 * @param string $directory Staged directory named spool.
 	 * @return bool Whether a backup of this plugin wrote it.
@@ -563,13 +567,19 @@ final class ApplyPlan {
 		if ( false === $handle ) {
 			return true;
 		}
-		$line = '-- ' . explode( '/', TableSource::FORMAT )[0] . '/';
-		$read = 0;
+		$line   = '-- ' . explode( '/', TableSource::FORMAT )[0] . '/';
+		$read   = 0;
+		$listed = 0;
 		try {
 			while ( true ) {
 				$name = readdir( $handle );
 				if ( false === $name ) {
 					return false;
+				}
+				++$listed;
+				if ( $listed > self::SPOOL_NAMES + 2 ) {
+					// Too many to list them all, and a later one could be a dump's.
+					return true;
 				}
 				// The names the dump gives its files: 000-header.sql, 010-<table>.sql, 900-views.sql.
 				$manifest = 'manifest.json' === $name;
