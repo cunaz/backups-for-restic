@@ -24,6 +24,9 @@ final class DatabaseDumpTest extends TestCase {
 
 	private string $directory = '';
 
+	/** @var list<string> Warnings of the complete table sources read by read(). */
+	private array $warnings = [];
+
 	public static function setUpBeforeClass(): void {
 		self::$admin = MysqliConnection::connect();
 		if ( null === self::$admin ) {
@@ -181,6 +184,137 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertGreaterThan( 1000000, strlen( $whole ) );
 	}
 
+	/**
+	 * Tables whose pages followed an offset in key order: a composite primary key as in
+	 * wp_term_relationships, a string key under a case- and accent-insensitive collation, and
+	 * a unique key without a primary key. After the first part, the two first rows are deleted;
+	 * after the second, two rows are inserted before all others. Every row that the dump read
+	 * stays in it once, none is skipped and none repeated.
+	 */
+	public function test_rows_present_for_the_whole_dump_appear_exactly_once_when_rows_before_the_cursor_change(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'CREATE TABLE key_relationships (object_id BIGINT UNSIGNED NOT NULL, term_taxonomy_id BIGINT UNSIGNED NOT NULL, term_order INT NOT NULL DEFAULT 0, note VARCHAR(500) NOT NULL, PRIMARY KEY (object_id, term_taxonomy_id), KEY term_taxonomy_id (term_taxonomy_id)) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE key_names (name VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci NOT NULL PRIMARY KEY, body VARCHAR(500) NOT NULL) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE key_codes (code CHAR(10) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL, label VARCHAR(500) NOT NULL, UNIQUE KEY code (code)) ENGINE=InnoDB' );
+		$relationships = [];
+		$names         = [];
+		$codes         = [];
+		for ( $i = 1; $i <= 2000; ++$i ) {
+			$relationships[] = sprintf( "(%d, %d, %d, '%s')", intdiv( $i + 2, 3 ), ( $i % 3 ) + 1, $i % 5, str_repeat( 'r', 400 ) );
+			$names[]         = sprintf( "('%s%05d%s', '%s')", [ 'alpha', 'Ålpha', 'ÉCHO', 'echo', 'Zeta', 'zeta ß' ][ $i % 6 ], $i, 0 === $i % 7 ? ' ' : '', str_repeat( 'n', 400 ) );
+			$codes[]         = sprintf( "('%s%05d', '%s')", [ 'a', 'z', 'å', 'ä', 'ö', 'A' ][ $i % 6 ], $i, str_repeat( 'c', 400 ) );
+		}
+		foreach ( [
+			'key_relationships' => $relationships,
+			'key_names'         => $names,
+			'key_codes'         => $codes,
+		] as $table => $values ) {
+			foreach ( array_chunk( $values, 500 ) as $chunk ) {
+				$db->execute( 'INSERT INTO ' . $table . ' VALUES ' . implode( ',', $chunk ) );
+			}
+		}
+		$orders   = [
+			'key_relationships' => 'object_id, term_taxonomy_id',
+			'key_names'         => 'name',
+			'key_codes'         => 'code',
+		];
+		$inserted = [
+			'key_relationships' => "(0, 1, 0, 'new'), (0, 2, 0, 'new')",
+			'key_names'         => "('!00000', 'new'), ('!00001', 'new')",
+			'key_codes'         => "('!0000', 'new'), ('!0001', 'new')",
+		];
+		$expected = [];
+		foreach ( $orders as $table => $order ) {
+			$expected[ $table ] = $db->rows( 'SELECT * FROM ' . $table . ' ORDER BY ' . $order . ', HEX(' . explode( ',', $order )[0] . ')' );
+		}
+		$parts = [];
+
+		$this->dump_and_import(
+			$db,
+			'key_',
+			static function ( string $file, int $part ) use ( $db, $orders, $inserted, &$parts ): void {
+				$table           = substr( $file, 4, -4 );
+				$parts[ $table ] = $part;
+				if ( 1 === $part ) {
+					$db->execute( 'DELETE FROM ' . $table . ' ORDER BY ' . $orders[ $table ] . ' LIMIT 2' );
+				} elseif ( 2 === $part ) {
+					$db->execute( 'INSERT INTO ' . $table . ' VALUES ' . $inserted[ $table ] );
+				}
+			}
+		);
+
+		$target = self::database( self::$target );
+		foreach ( $orders as $table => $order ) {
+			self::assertGreaterThanOrEqual( 2, $parts[ $table ] ?? 0, $table . ' was read in at least three parts, so both changes happened.' );
+			self::assertSame( $expected[ $table ], $target->rows( 'SELECT * FROM ' . $table . ' ORDER BY ' . $order . ', HEX(' . explode( ',', $order )[0] . ')' ), $table . ': every row read once, nothing skipped, nothing repeated.' );
+		}
+	}
+
+	/**
+	 * Keys of every type that can order pages, each with the same changes before the cursor:
+	 * unsigned 64-bit values above PHP_INT_MAX, negative numbers, DECIMAL, DOUBLE, dates and
+	 * times, TIMESTAMP across changes of daylight saving time, YEAR, ENUM and SET (which sort
+	 * by index and bits), BIT, BINARY and VARBINARY with zero bytes, and a key over a DATE and
+	 * an INT.
+	 */
+	public function test_keys_of_every_type_page_exactly_while_rows_before_the_cursor_change(): void {
+		$db = self::database( self::$source );
+		if ( null !== self::daylight_saving_zone( $db ) ) {
+			// TIMESTAMP keys are compared in UTC; the site's session may use any zone.
+			$db->execute( "SET SESSION time_zone = 'SYSTEM'" );
+		}
+		$filler   = str_repeat( 'f', 400 );
+		$types    = [
+			'u64'  => [ 'BIGINT UNSIGNED', static fn ( int $i ): string => 1999 === $i ? '18446744073709551615' : '9223372036' . sprintf( '%09d', 854775808 + $i ), [ '1', '2' ] ],
+			'i32'  => [ 'INT', static fn ( int $i ): string => (string) ( $i - 1000 ), [ '-2147483648', '-2147483647' ] ],
+			'dec'  => [ 'DECIMAL(20,6)', static fn ( int $i ): string => sprintf( "'%s%d.%06d'", $i < 1000 ? '-' : '', abs( $i - 1000 ), ( $i * 7919 ) % 1000000 ), [ "'-99999999999999.999999'", "'-99999999999999.999998'" ] ],
+			'dbl'  => [ 'DOUBLE', static fn ( int $i ): string => sprintf( '%.17g', ( $i - 1000 ) / 7 ), [ '-1e300', '-1e299' ] ],
+			'dt6'  => [ 'DATETIME(6)', static fn ( int $i ): string => "'" . gmdate( 'Y-m-d H:i:s', 1700000000 + $i * 3700 ) . sprintf( '.%06d', $i ) . "'", [ "'1000-01-01 00:00:00.000000'", "'1000-01-01 00:00:00.000001'" ] ],
+			'ts'   => [ 'TIMESTAMP', static fn ( int $i ): string => 'FROM_UNIXTIME(' . ( 1700000000 + $i * 3601 ) . ')', [ 'FROM_UNIXTIME(1)', 'FROM_UNIXTIME(2)' ] ],
+			'tm'   => [ 'TIME(3)', static fn ( int $i ): string => sprintf( 'SEC_TO_TIME(%d.%03d)', ( $i - 1000 ) * 2801, $i % 1000 ), [ "'-838:59:59.000'", "'-838:59:58.999'" ] ],
+			'yr'   => [ 'YEAR', static fn ( int $i ): string => (string) ( 1901 + $i % 250 ), [ "'0000'", "'0000'" ], true ],
+			'en'   => [ "ENUM('zeta','alpha','mid','beta')", static fn ( int $i ): string => "'" . [ 'zeta', 'alpha', 'mid', 'beta' ][ $i % 4 ] . "'", [ "'zeta'", "'zeta'" ], true ],
+			'st'   => [ "SET('b','a','c')", static fn ( int $i ): string => "'" . [ '', 'b', 'a', 'b,a', 'c', 'b,c', 'a,c', 'b,a,c' ][ $i % 8 ] . "'", [ "''", "''" ], true ],
+			'bt'   => [ 'BIT(12)', static fn ( int $i ): string => (string) ( $i + 2 ), [ '0', '1' ] ],
+			'bin'  => [ 'BINARY(16)', static fn ( int $i ): string => '0x' . md5( (string) $i ), [ '0x00000000000000000000000000000000', '0x00000000000000000000000000000001' ] ],
+			'vbin' => [ 'VARBINARY(20)', static fn ( int $i ): string => '0x' . bin2hex( chr( $i >> 8 ) . chr( $i & 255 ) . substr( md5( (string) $i, true ), 0, $i % 9 ) ), [ "''", '0x00' ] ],
+			'cmp'  => [ 'DATE', static fn ( int $i ): string => "'" . gmdate( 'Y-m-d', 1700000000 + ( $i % 150 ) * 86400 ) . "'", [ "'1000-01-01'", "'1000-01-01'" ], true ],
+		];
+		$expected = [];
+		foreach ( $types as $name => $definition ) {
+			[ $type, $value ] = $definition;
+			$composite        = $definition[3] ?? false;
+			$db->execute( sprintf( 'CREATE TABLE kt_%s (k %s NOT NULL, n INT NOT NULL, filler VARCHAR(500) NOT NULL, PRIMARY KEY (k%s)) ENGINE=InnoDB', $name, $type, $composite ? ', n' : '' ) );
+			$rows = [];
+			for ( $i = 0; $i < 2000; ++$i ) {
+				$rows[] = '(' . $value( $i ) . ', ' . $i . ", '" . $filler . "')";
+			}
+			foreach ( array_chunk( $rows, 500 ) as $chunk ) {
+				$db->execute( 'INSERT INTO kt_' . $name . ' VALUES ' . implode( ',', $chunk ) );
+			}
+			$expected[ $name ] = $db->rows( 'SELECT HEX(k) AS k, k + 0 AS v, n, filler FROM kt_' . $name . ' ORDER BY k, n' );
+		}
+
+		$this->dump_and_import(
+			$db,
+			'kt_',
+			static function ( string $file, int $part ) use ( $db, $types ): void {
+				$name = substr( $file, 7, -4 );
+				if ( 1 === $part ) {
+					$db->execute( 'DELETE FROM kt_' . $name . ' ORDER BY k, n LIMIT 2' );
+				} elseif ( 2 === $part ) {
+					[ $first, $second ] = $types[ $name ][2];
+					$db->execute( sprintf( "INSERT INTO kt_%s VALUES (%s, -2, 'new'), (%s, -1, 'new')", $name, $first, $second ) );
+				}
+			}
+		);
+
+		$target = self::database( self::$target );
+		foreach ( array_keys( $types ) as $name ) {
+			self::assertSame( $expected[ $name ], $target->rows( 'SELECT HEX(k) AS k, k + 0 AS v, n, filler FROM kt_' . $name . ' ORDER BY k, n' ), 'kt_' . $name );
+		}
+	}
+
 	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone(): void {
 		$db   = self::database( self::$source );
 		$zone = self::daylight_saving_zone( $db );
@@ -250,12 +384,13 @@ final class DatabaseDumpTest extends TestCase {
 	 * Dumps the tables with a prefix in pages with a stop after every read, writes the files
 	 * and imports them into the target database with the command-line client.
 	 *
+	 * @param (\Closure(string, int): void)|null $between Runs between two parts of a table file, with its name and the part number.
 	 * @return array<string, mixed> The decoded manifest.
 	 */
-	private function dump_and_import( MysqliConnection $db, string $prefix ): array {
+	private function dump_and_import( MysqliConnection $db, string $prefix, ?\Closure $between = null ): array {
 		$files = [];
 		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'state.json', $prefix, [], 1767323100 ) )->files() as $file ) {
-			$files[ $file->name ] = $this->read( $file->source, 1 );
+			$files[ $file->name ] = $this->read( $file->source, 1, null === $between ? null : static fn ( int $part ) => $between( $file->name, $part ) );
 			if ( str_ends_with( $file->name, '.sql' ) ) {
 				file_put_contents( $this->directory . '/' . $file->name, $files[ $file->name ] );
 			}
@@ -288,16 +423,22 @@ final class DatabaseDumpTest extends TestCase {
 
 	/**
 	 * Reads a virtual file like the backup does, asking a resumable source to stop after the
-	 * given number of reads and continuing with its cursor.
+	 * given number of reads and continuing with its cursor. As the engine does, it drops what
+	 * it has when a source starts over, and keeps the warnings of the complete source.
 	 *
-	 * @param \Closure(?string): \BackupsForRestic\Support\ByteSource $open Source factory.
+	 * @param \Closure(?string): \BackupsForRestic\Support\ByteSource $open    Source factory.
+	 * @param (\Closure(int): void)|null                               $between Runs after each part that stopped, with its number.
 	 */
-	private function read( \Closure $open, int $reads_per_tick ): string {
+	private function read( \Closure $open, int $reads_per_tick, ?\Closure $between = null ): string {
 		$content = '';
 		$cursor  = null;
+		$part    = 0;
 		do {
 			$source = $open( $cursor );
-			$reads  = 0;
+			if ( null !== $cursor && $source instanceof ResumableByteSource && method_exists( $source, 'restarted' ) && $source->restarted() ) {
+				$content = '';
+			}
+			$reads = 0;
 			for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
 				$content .= $block;
 				if ( ++$reads === $reads_per_tick && $source instanceof ResumableByteSource ) {
@@ -305,7 +446,13 @@ final class DatabaseDumpTest extends TestCase {
 				}
 			}
 			$cursor = $source instanceof ResumableByteSource ? $source->cursor() : null;
+			if ( null !== $cursor && null !== $between ) {
+				$between( ++$part );
+			}
 		} while ( null !== $cursor );
+		if ( $source instanceof ResumableByteSource && method_exists( $source, 'warnings' ) ) {
+			array_push( $this->warnings, ...$source->warnings() );
+		}
 		return $content;
 	}
 

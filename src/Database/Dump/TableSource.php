@@ -19,10 +19,13 @@ defined( 'ABSPATH' ) || exit;
  * the session settings, DROP and CREATE, INSERT statements of about 1 MiB, and a trailer
  * with the row and byte counts.
  *
- * Pages follow the integer primary key where the table has one, otherwise an offset in the
- * order of the primary key columns. The page size adapts so that one page stays near 2 MiB of
+ * Pages follow the table's primary key, or a unique key over NOT NULL columns, in full: each
+ * page asks for the rows after the last key it wrote (KeyColumn), so an insert or a delete
+ * elsewhere in the table cannot shift a row into or out of a page, and a row that exists
+ * for the whole dump of its table appears exactly once. A table without such a key is read
+ * by its position in the table. The page size adapts so that one page stays near 2 MiB of
  * SQL. A page is the unit of resumption: the backup stops between pages and continues with
- * the next one in a later request, so every row appears exactly once.
+ * the next one in a later request.
  */
 final class TableSource implements ResumableByteSource {
 
@@ -34,6 +37,9 @@ final class TableSource implements ResumableByteSource {
 	private const int STATEMENT_BYTES = 1048576;
 
 	private const int TARGET_PAGE_BYTES = 2097152;
+
+	/** Cursors of earlier versions have no version; they cannot continue and the table starts over. */
+	private const int CURSOR_VERSION = 2;
 
 	/**
 	 * Produced but not yet read output.
@@ -78,11 +84,25 @@ final class TableSource implements ResumableByteSource {
 	private bool $stopped = false;
 
 	/**
-	 * Primary key value of the last row, for keyset paging.
+	 * Key values of the last row written, in key order, or null before the first page.
 	 *
-	 * @var string|null
+	 * @var list<string>|null
 	 */
-	private ?string $after;
+	private ?array $after = null;
+
+	/**
+	 * Whether the cursor this source was opened with could not be continued.
+	 *
+	 * @var bool
+	 */
+	private bool $restarted = false;
+
+	/**
+	 * Aliases of the cursor expressions in the page query, by key position.
+	 *
+	 * @var array<int, string>
+	 */
+	private array $aliases = [];
 
 	/**
 	 * Rows read so far, for offset paging.
@@ -120,7 +140,6 @@ final class TableSource implements ResumableByteSource {
 	 * @param string                   $preamble    Session settings, one statement per line.
 	 * @param string|null              $cursor      Cursor from an earlier source, or null to start.
 	 * @param \Closure(int, int): void $on_complete Receives rows and bytes once the trailer is written.
-	 * @throws DatabaseFailed If the saved integer primary key is invalid.
 	 */
 	public function __construct(
 		private readonly Connection $connection,
@@ -129,15 +148,67 @@ final class TableSource implements ResumableByteSource {
 		?string $cursor,
 		private readonly \Closure $on_complete
 	) {
-		$state         = null === $cursor ? null : json_decode( $cursor, true );
-		$state         = is_array( $state ) ? $state : null;
-		$this->started = null !== $state;
-		$after         = $state['after'] ?? null;
-		$this->after   = null === $table->key || null === $after ? null : self::integer_key( $after );
-		$this->offset  = is_int( $state['offset'] ?? null ) ? $state['offset'] : 0;
-		$this->rows    = is_int( $state['rows'] ?? null ) ? $state['rows'] : 0;
-		$this->bytes   = is_int( $state['bytes'] ?? null ) ? $state['bytes'] : 0;
-		$this->page    = is_int( $state['page'] ?? null ) ? max( 1, $state['page'] ) : 500;
+		foreach ( array_keys( $table->order ) as $position ) {
+			$alias = '__bfr_key_' . $position;
+			while ( isset( $table->columns[ $alias ] ) ) {
+				$alias .= '_';
+			}
+			$this->aliases[ $position ] = $alias;
+		}
+		$state           = self::saved( $cursor, $table );
+		$this->restarted = null !== $cursor && null === $state;
+		$this->started   = null !== $state;
+		$this->after     = $state['after'] ?? null;
+		$this->offset    = $state['offset'] ?? 0;
+		$this->rows      = $state['rows'] ?? 0;
+		$this->bytes     = $state['bytes'] ?? 0;
+		$this->page      = $state['page'] ?? 500;
+	}
+
+	/**
+	 * The state of a cursor that this table can continue. A cursor of an earlier version, a
+	 * damaged one and one whose key values do not fit the table's key cannot be continued.
+	 *
+	 * @param string|null $cursor Cursor.
+	 * @param Table       $table  Table.
+	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int}|null State, or null to start the table from its beginning.
+	 */
+	private static function saved( ?string $cursor, Table $table ): ?array {
+		$state = null === $cursor ? null : json_decode( $cursor, true );
+		if ( ! is_array( $state ) || self::CURSOR_VERSION !== ( $state['v'] ?? null ) ) {
+			return null;
+		}
+		foreach ( [ 'offset', 'rows', 'bytes', 'page' ] as $field ) {
+			if ( ! is_int( $state[ $field ] ?? null ) || $state[ $field ] < 0 ) {
+				return null;
+			}
+		}
+		$after = $state['after'] ?? null;
+		if ( null !== $after ) {
+			if ( ! is_array( $after ) || ! array_is_list( $after ) ) {
+				return null;
+			}
+			$values = [];
+			foreach ( $after as $value ) {
+				if ( ! is_string( $value ) ) {
+					return null;
+				}
+				$values[] = $value;
+			}
+			try {
+				KeyColumn::after( $table->order, $values );
+			} catch ( DatabaseFailed ) {
+				return null;
+			}
+			$after = $values;
+		}
+		return [
+			'after'  => $after,
+			'offset' => $state['offset'],
+			'rows'   => $state['rows'],
+			'bytes'  => $state['bytes'],
+			'page'   => max( 1, min( 20000, $state['page'] ) ),
+		];
 	}
 
 	/**
@@ -176,6 +247,7 @@ final class TableSource implements ResumableByteSource {
 		}
 		return (string) json_encode(
 			[
+				'v'      => self::CURSOR_VERSION,
 				'after'  => $this->after,
 				'offset' => $this->offset,
 				'rows'   => $this->rows,
@@ -186,12 +258,12 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
-	 * A table continues after its cursor.
+	 * Whether the table starts over: the cursor is from an earlier version or damaged.
 	 *
-	 * @return bool False.
+	 * @return bool True if the content kept from earlier sources must be discarded.
 	 */
 	public function restarted(): bool {
-		return false;
+		return $this->restarted;
 	}
 
 	/**
@@ -231,21 +303,25 @@ final class TableSource implements ResumableByteSource {
 	/**
 	 * Fetches one page and turns it into INSERT statements.
 	 *
-	 * @throws DatabaseFailed If the query fails.
+	 * @throws DatabaseFailed If the query fails or a key value is not what its column holds.
 	 */
 	private function page(): void {
 		$table = SqlFormatter::identifier( $this->table->name );
 		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
-		$selection = implode( ', ', array_map( SqlFormatter::identifier( ... ), array_keys( $this->table->columns ) ) );
+		$selection = array_map( SqlFormatter::identifier( ... ), array_keys( $this->table->columns ) );
+		foreach ( $this->table->order as $position => $column ) {
+			if ( $column->computed() ) {
+				$selection[] = $column->value() . ' AS ' . SqlFormatter::identifier( $this->aliases[ $position ] );
+			}
+		}
 		// A generated-only table still has rows: one empty INSERT tuple recreates each one.
-		$selection = '' === $selection ? '1' : $selection;
-		if ( null !== $this->table->key ) {
-			$key   = SqlFormatter::identifier( $this->table->key );
-			$where = null === $this->after ? '' : ' WHERE ' . $key . ' > ' . $this->after;
-			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $where . ' ORDER BY ' . $key . ' LIMIT ' . $this->page;
+		$selection = [] === $selection ? '1' : implode( ', ', $selection );
+		if ( [] !== $this->table->order ) {
+			$where = null === $this->after ? '' : ' WHERE ' . KeyColumn::after( $this->table->order, $this->after );
+			$order = implode( ', ', array_map( static fn ( KeyColumn $column ): string => SqlFormatter::identifier( $column->name ), $this->table->order ) );
+			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $where . ' ORDER BY ' . $order . ' LIMIT ' . $this->page;
 		} else {
-			$order = [] === $this->table->order ? '' : ' ORDER BY ' . implode( ', ', array_map( SqlFormatter::identifier( ... ), $this->table->order ) );
-			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $order . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;
+			$sql = 'SELECT ' . $selection . ' FROM ' . $table . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;
 		}
 		$rows = $this->connection->rows( $sql );
 		if ( [] === $rows ) {
@@ -253,8 +329,17 @@ final class TableSource implements ResumableByteSource {
 			return;
 		}
 
-		if ( null !== $this->table->key ) {
-			$this->after = self::integer_key( $rows[ array_key_last( $rows ) ][ $this->table->key ] ?? null );
+		if ( [] !== $this->table->order ) {
+			$last  = $rows[ array_key_last( $rows ) ];
+			$after = [];
+			foreach ( $this->table->order as $position => $column ) {
+				$value = $last[ $column->computed() ? $this->aliases[ $position ] : $column->name ] ?? null;
+				// Checked before anything is written: a column whose type changed since the
+				// catalog read it must not produce a cursor that misses or repeats rows.
+				$column->literal( $value );
+				$after[] = (string) $value;
+			}
+			$this->after = $after;
 		}
 		$columns = $this->table->columns;
 		$prefix  = 'INSERT INTO ' . $table . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $columns ) ) ) . ') VALUES ';
@@ -291,21 +376,6 @@ final class TableSource implements ResumableByteSource {
 		} elseif ( $size < intdiv( self::TARGET_PAGE_BYTES, 2 ) && $count === $this->page ) {
 			$this->page = min( 20000, $this->page * 2 );
 		}
-	}
-
-	/**
-	 * Checks the SQL seek literal at both its sources. Concurrent DDL can change
-	 * the live column type after the catalog selected integer pagination.
-	 *
-	 * @param mixed $value A server row or a saved checkpoint field.
-	 * @return string Signed or unsigned MySQL integer, preserving full precision.
-	 * @throws DatabaseFailed If the primary key no longer matches the catalog.
-	 */
-	private static function integer_key( mixed $value ): string {
-		if ( ! is_string( $value ) || 1 !== preg_match( '/\A-?[0-9]{1,20}\z/', $value ) ) {
-			throw new DatabaseFailed( 'The database dump primary key is no longer an integer.' );
-		}
-		return $value;
 	}
 
 	/**

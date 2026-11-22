@@ -85,28 +85,75 @@ final class Catalog {
 		if ( ! isset( $create[0]['Create Table'] ) ) {
 			DatabaseFailed::raise( 'The table structure cannot be read.', [ 'table' => $name ] );
 		}
-		$columns      = [];
-		$integer_keys = [];
-		foreach ( $this->connection->rows( 'SHOW COLUMNS FROM ' . $quoted ) as $column ) {
+		$columns = [];
+		$usable  = [];
+		foreach ( $this->connection->rows( 'SHOW FULL COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
+			// Their values are not read, so they cannot order pages either.
 			$extra = strtoupper( $column['Extra'] ?? '' );
-			if ( ! str_contains( $extra, 'VIRTUAL GENERATED' ) && ! str_contains( $extra, 'STORED GENERATED' ) ) {
-				$field             = (string) $column['Field'];
-				$type              = (string) $column['Type'];
-				$columns[ $field ] = SqlFormatter::kind( $type );
-				if ( 1 === preg_match( '/\A(tinyint|smallint|mediumint|int|integer|bigint)\b/i', $type ) ) {
-					$integer_keys[] = $field;
-				}
+			if ( str_contains( $extra, 'VIRTUAL GENERATED' ) || str_contains( $extra, 'STORED GENERATED' ) ) {
+				continue;
+			}
+			$field             = (string) $column['Field'];
+			$type              = (string) $column['Type'];
+			$columns[ $field ] = SqlFormatter::kind( $type );
+			if ( 'NO' === ( $column['Null'] ?? null ) ) {
+				$usable[ $field ] = KeyColumn::of( $field, $type, $column['Collation'] ?? null );
 			}
 		}
-		$primary = [];
-		foreach ( $this->connection->rows( 'SHOW KEYS FROM ' . $quoted . " WHERE Key_name = 'PRIMARY'" ) as $key ) {
-			$primary[ (int) $key['Seq_in_index'] ] = (string) $key['Column_name'];
+		[ $key, $order ] = $this->key( $quoted, $usable );
+		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $order );
+	}
+
+	/**
+	 * The key whose columns order the pages: the primary key, otherwise a unique key whose
+	 * columns are all NOT NULL, stored and of a type that compares exactly (KeyColumn). Among
+	 * unique keys, one that the server uses and that indexes whole values comes first, so that
+	 * every page is a range of the index.
+	 *
+	 * @param string                        $quoted Quoted table name.
+	 * @param array<string, KeyColumn|null> $usable NOT NULL stored columns by name; null for a type that cannot order pages.
+	 * @return array{0: string|null, 1: list<KeyColumn>} Key name and its columns, or null and none.
+	 * @throws DatabaseFailed If the keys cannot be read.
+	 */
+	private function key( string $quoted, array $usable ): array {
+		$keys = [];
+		foreach ( $this->connection->rows( 'SHOW KEYS FROM ' . $quoted ) as $part ) {
+			if ( '0' !== ( $part['Non_unique'] ?? null ) ) {
+				continue;
+			}
+			$name = $part['Key_name'] ?? '';
+			$key  = $keys[ $name ] ?? [
+				'name'   => $name,
+				'rank'   => 'PRIMARY' === $name ? 0 : 1,
+				'parts'  => [],
+				'usable' => true,
+			];
+			// A functional key part has no column; its key cannot be compared column by column.
+			$column = $part['Column_name'] ?? null;
+			$found  = null === $column ? null : ( $usable[ $column ] ?? null );
+			if ( null === $found ) {
+				$key['usable'] = false;
+			} else {
+				$key['parts'][ (int) ( $part['Seq_in_index'] ?? 0 ) ] = $found;
+			}
+			// A prefix part or a key the server does not use makes every page a sort.
+			if ( null !== ( $part['Sub_part'] ?? null ) || 'NO' === ( $part['Visible'] ?? 'YES' ) || 'YES' === ( $part['Ignored'] ?? 'NO' ) ) {
+				$key['rank'] = 'PRIMARY' === $name ? 2 : 3;
+			}
+			$keys[ $name ] = $key;
 		}
-		ksort( $primary );
-		$primary = array_values( $primary );
-		$key     = 1 === count( $primary ) && in_array( $primary[0], $integer_keys, true ) ? $primary[0] : null;
-		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $primary );
+		$best = null;
+		foreach ( $keys as $key ) {
+			if ( $key['usable'] && ( null === $best || $key['rank'] < $best['rank'] ) ) {
+				$best = $key;
+			}
+		}
+		if ( null === $best ) {
+			return [ null, [] ];
+		}
+		ksort( $best['parts'] );
+		return [ $best['name'], array_values( $best['parts'] ) ];
 	}
 
 	/**

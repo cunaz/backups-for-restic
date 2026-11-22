@@ -12,18 +12,18 @@ namespace BackupsForRestic\Database\Dump;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Name, CREATE statement, columns with their kinds, and how to page through the rows.
+ * Name, CREATE statement, columns with their kinds, and the key whose columns order the pages.
  */
 final readonly class Table {
 
 	/**
 	 * Describes a table.
 	 *
-	 * @param string                $name        Table name.
-	 * @param string                $create      CREATE TABLE statement on one line.
-	 * @param array<string, string> $columns     Column kinds by column name, in table order.
-	 * @param string|null           $key         Single integer primary key column for keyset paging, if any.
-	 * @param list<string>          $order       Columns to order by when paging by offset.
+	 * @param string                $name    Table name.
+	 * @param string                $create  CREATE TABLE statement on one line.
+	 * @param array<string, string> $columns Column kinds by column name, in table order.
+	 * @param string|null           $key     Name of the primary or unique key whose columns order the pages, or null if the table has none that can.
+	 * @param list<KeyColumn>       $order   Columns of that key, in key order; empty without a key.
 	 */
 	public function __construct(
 		public string $name,
