@@ -1228,6 +1228,8 @@
 		const reasons = {
 			protected: __( 'Protected plugin, configuration or private path', 'backups-for-restic' ),
 			offline_restore_required: __( 'Restore this WordPress startup file offline using the recovery kit.', 'backups-for-restic' ),
+			unverified_name: __( 'This name may match a protected path. Comparing it needs the PHP intl extension.', 'backups-for-restic' ),
+			snapshot_spool: __( 'Private database dump and site manifest of a backup', 'backups-for-restic' ),
 			outside_roots: __( 'Outside the live site directories', 'backups-for-restic' ),
 			unavailable_destination_root: __( 'The live destination directory is unavailable.', 'backups-for-restic' ),
 			invalid_path: __( 'Invalid file name or path', 'backups-for-restic' ),
@@ -1243,6 +1245,9 @@
 			ambiguous_destination: __( 'Conflicting names at the destination', 'backups-for-restic' ),
 			linked_destination: __( 'Destination contains a symbolic link', 'backups-for-restic' ),
 			unwritable_destination: __( 'Destination is read-only', 'backups-for-restic' ),
+			foreign_owner: __( 'The live file belongs to another user than PHP, so its owner could not be kept', 'backups-for-restic' ),
+			foreign_group: __( 'PHP cannot give the replacement the group of the live file', 'backups-for-restic' ),
+			special_permissions: __( 'The live file has setuid, setgid or sticky permissions', 'backups-for-restic' ),
 			unsafe_destination_parent: __( 'Unsafe parent directory', 'backups-for-restic' ),
 			missing_destination: __( 'New path on the live site', 'backups-for-restic' ),
 			existing_directory: __( 'Directory already exists', 'backups-for-restic' ),
