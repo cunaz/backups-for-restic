@@ -371,3 +371,17 @@ All notable changes are documented here. The format follows
 - Cancelling a forget releases its lock even when the retention settings became unusable.
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
+- Undo of a file apply works after a directory that the apply created was deleted, for
+  example a removed plugin: its entries are kept and the replaced files are restored.
+  Before, the review stopped at the first entry below the deleted directory, and nothing
+  could be undone.
+- File apply and undo put each journal record and private copy on disk before the live
+  change that depends on it, and each live change on disk before recording it, so that a
+  power loss or a crash of the server during an apply leaves a state that the next attempt
+  and the undo recognise, as a stopped request already did.
+- A file apply stopped right after it created a directory can be resumed and undone:
+  directories are prepared privately and renamed into place. Before, the retry could not
+  prove that it had created the directory, so every entry below it failed and undo left it.
+- Applying many files into one large folder no longer lists the folder several times for
+  every file while the site is in maintenance: 500 new files beside 20,000 others needed
+  27 seconds of checks before and less than half a second now.

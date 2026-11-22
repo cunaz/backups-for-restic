@@ -79,8 +79,10 @@ The site records each delivery. Store the file with the other offline recovery m
    these startup paths.
 5. The **Restores** tab lists available undo jobs and their expiry times. Choose
    **Preview undo**, review the actions, then confirm to return the affected files to
-   their previous state. Use **Delete staged files** to remove the private downloads
-   when you are finished.
+   their previous state. Files and directories that the apply created and that were
+   deleted since, such as a removed plugin, are kept as they are; a replaced file that was
+   deleted since blocks the undo. Use **Delete staged files** to remove the private
+   downloads when you are finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.
