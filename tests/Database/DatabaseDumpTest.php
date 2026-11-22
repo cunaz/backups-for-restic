@@ -286,10 +286,11 @@ final class DatabaseDumpTest extends TestCase {
 	 */
 	public function test_keys_of_every_type_page_exactly_while_rows_before_the_cursor_change(): void {
 		$db = self::database( self::$source );
-		if ( null !== self::daylight_saving_zone( $db ) ) {
-			// TIMESTAMP keys are compared in UTC; the site's session may use any zone.
-			$db->execute( "SET SESSION time_zone = 'SYSTEM'" );
-		}
+		// Seeded and compared in UTC: in a zone with daylight saving time, two instants of the
+		// hour that the zone repeats have one local time.
+		$db->execute( "SET SESSION time_zone = '+00:00'" );
+		// A day before the clocks go back in Europe: rows 24 and 25 fall into the repeated hour.
+		$start    = gmmktime( 0, 0, 0, 10, 24, 2026 );
 		$filler   = str_repeat( 'f', 400 );
 		$types    = [
 			'u64'  => [ 'BIGINT UNSIGNED', static fn ( int $i ): string => 1999 === $i ? '18446744073709551615' : '9223372036' . sprintf( '%09d', 854775808 + $i ), [ '1', '2' ] ],
@@ -298,7 +299,7 @@ final class DatabaseDumpTest extends TestCase {
 			'dbl'  => [ 'DOUBLE', static fn ( int $i ): string => sprintf( '%.17g', ( $i - 1000 ) / 7 ), [ '-1e300', '-1e299' ] ],
 			'flt'  => [ 'FLOAT', static fn ( int $i ): string => sprintf( '%.9g', ( $i - 1000 ) / 7 ), [ '-3e38', '-2e38' ] ],
 			'dt6'  => [ 'DATETIME(6)', static fn ( int $i ): string => "'" . gmdate( 'Y-m-d H:i:s', 1700000000 + $i * 3700 ) . sprintf( '.%06d', $i ) . "'", [ "'1000-01-01 00:00:00.000000'", "'1000-01-01 00:00:00.000001'" ] ],
-			'ts'   => [ 'TIMESTAMP', static fn ( int $i ): string => 'FROM_UNIXTIME(' . ( 1700000000 + $i * 3601 ) . ')', [ 'FROM_UNIXTIME(1)', 'FROM_UNIXTIME(2)' ] ],
+			'ts'   => [ 'TIMESTAMP', static fn ( int $i ): string => 'FROM_UNIXTIME(' . ( $start + $i * 3601 ) . ')', [ 'FROM_UNIXTIME(1)', 'FROM_UNIXTIME(2)' ] ],
 			'tm'   => [ 'TIME(3)', static fn ( int $i ): string => sprintf( 'SEC_TO_TIME(%d.%03d)', ( $i - 1000 ) * 2801, $i % 1000 ), [ "'-838:59:59.000'", "'-838:59:58.999'" ] ],
 			'yr'   => [ 'YEAR', static fn ( int $i ): string => (string) ( 1901 + $i % 250 ), [ "'0000'", "'0000'" ], true ],
 			'en'   => [ "ENUM('zeta','alpha','mid','beta')", static fn ( int $i ): string => "'" . [ 'zeta', 'alpha', 'mid', 'beta' ][ $i % 4 ] . "'", [ "'zeta'", "'zeta'" ], true ],
@@ -322,6 +323,9 @@ final class DatabaseDumpTest extends TestCase {
 			}
 			$expected[ $name ] = $db->rows( 'SELECT HEX(k) AS k, k + 0 AS v, n, filler FROM kt_' . $name . ' ORDER BY k, n' );
 		}
+		// The site's session reads in a zone with daylight saving time where the server has one;
+		// the dump pages TIMESTAMP keys in UTC whatever it is.
+		self::daylight_saving_zone( $db );
 
 		$this->dump_and_import(
 			$db,
@@ -338,9 +342,18 @@ final class DatabaseDumpTest extends TestCase {
 		);
 
 		$target = self::database( self::$target );
+		$target->execute( "SET SESSION time_zone = '+00:00'" );
 		foreach ( array_keys( $types ) as $name ) {
 			self::assertSame( $expected[ $name ], $target->rows( 'SELECT HEX(k) AS k, k + 0 AS v, n, filler FROM kt_' . $name . ' ORDER BY k, n' ), 'kt_' . $name );
 		}
+		self::assertSame(
+			[
+				[ 'at' => (string) ( $start + 24 * 3601 ) ],
+				[ 'at' => (string) ( $start + 25 * 3601 ) ],
+			],
+			$target->rows( 'SELECT UNIX_TIMESTAMP(k) AS at FROM kt_ts WHERE n IN (24, 25) ORDER BY n' ),
+			'Both instants of the repeated hour, as seeded.'
+		);
 	}
 
 	/**
@@ -612,18 +625,35 @@ final class DatabaseDumpTest extends TestCase {
 			3 => gmmktime( 0, 30, 0, 10, 25, 2026 ),
 			4 => gmmktime( 1, 30, 0, 10, 25, 2026 ),
 		];
+		// Seeded in UTC: FROM_UNIXTIME() in the zone would give both instants of the repeated
+		// hour one local time, and the insert would store one of them twice.
+		$db->execute( "SET SESSION time_zone = '+00:00'" );
 		foreach ( $instants as $id => $instant ) {
 			$db->execute( sprintf( 'INSERT INTO tz_events VALUES (%d, FROM_UNIXTIME(%d.250000), FROM_UNIXTIME(%d))', $id, $instant, $instant ) );
 		}
 		$db->execute( 'INSERT INTO tz_events VALUES (5, NULL, NULL)' );
-		$session = 'SELECT @@SESSION.time_zone AS zone';
-		$before  = $db->rows( $session );
+		$db->execute( "SET SESSION time_zone = '" . $zone . "'" );
+		$session  = 'SELECT @@SESSION.time_zone AS zone';
+		$before   = $db->rows( $session );
+		$query    = 'SELECT id, UNIX_TIMESTAMP(at) AS at, UNIX_TIMESTAMP(plain) AS plain FROM tz_events ORDER BY id';
+		$expected = [];
+		foreach ( $instants as $id => $instant ) {
+			$expected[] = [
+				'id'    => (string) $id,
+				'at'    => $instant . '.250000',
+				'plain' => (string) $instant,
+			];
+		}
+		$expected[] = [
+			'id'    => '5',
+			'at'    => null,
+			'plain' => null,
+		];
+		self::assertSame( $expected, $db->rows( $query ), 'The table holds the instants it was given.' );
 
 		$manifest = $this->dump_and_import( $db, 'tz_', null, $dedicated ? self::dedicated() : null );
 
-		$query = 'SELECT id, UNIX_TIMESTAMP(at) AS at, UNIX_TIMESTAMP(plain) AS plain FROM tz_events ORDER BY id';
-		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), 'Every instant survives, including both of the repeated autumn hour.' );
-		self::assertSame( (string) $instants[2], self::database( self::$target )->rows( $query )[1]['plain'] );
+		self::assertSame( $expected, self::database( self::$target )->rows( $query ), 'Every instant survives, including both of the repeated autumn hour.' );
 		self::assertSame( '+00:00', $manifest['time_zone'] );
 		self::assertStringContainsString( "SET SESSION time_zone = '+00:00';\n", (string) file_get_contents( $this->directory . '/010-tz_events.sql' ) );
 		self::assertSame( $before, $db->rows( $session ), 'The site connection keeps its time zone.' );
