@@ -29,9 +29,13 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
   function list. Qualified names, unknown functions, external engines, paths and additional
   statements are refused. MySQL's exact `/*!80023 INVISIBLE */` marker becomes the ordinary
   `INVISIBLE` keyword; executable comments are never passed through to the server.
-  The dump writer uses the same 16 MiB statement limit (semicolon included, LF excluded).
-  It refuses an oversized encoded row with a database error before recording a completed
-  dump; it never silently omits that row. Older oversized dumps require an external client.
+  The dump writer aims at the same 16 MiB statement limit (semicolon included, LF
+  excluded) for the statements it fills with several rows. It never omits a row and no
+  longer refuses one for its size: a row that alone encodes to more is written as a
+  statement of its own, and the dump's manifest records each table's largest statement
+  ([ADR 0021](0021-database-streaming.md)). The importer keeps its 16 MiB bound, so a
+  table with a larger statement is restored with an external client, as dumps written
+  before the limit existed are.
   A table with only generated columns uses a constant SELECT projection and one empty
   INSERT tuple per row. The importer accepts these tuples only with the CREATE's matching
   empty insertable-column list.
