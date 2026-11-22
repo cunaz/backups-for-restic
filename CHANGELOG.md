@@ -230,8 +230,50 @@ All notable changes are documented here. The format follows
   normalization. A name such as `wp-conﬁg.php` with a ligature no longer passes for an
   ordinary file. Without intl, a name that only normalization could tell apart from a
   protected one is refused (`unverified_name`).
+- While a live file change holds the site in maintenance, a request that the job's control
+  token admits can no longer reach another REST route through a `rest_route` field in its
+  form body, and no admitted request can store the shortened list of active plugins that
+  it starts with. Every tick of a file apply or undo checks again that the administrator
+  who confirmed it still has the backup capability and `update_core`
+  (`file_writes_refused`). The check reads the account from the database, so a role taken
+  away also stops a running `wp backups-for-restic tick --until-idle`.
+- Downloading a restored file or a restore's ZIP asks for the WordPress password, as the
+  recovery kit does, and every grant is recorded with time, account, restore job, kind and
+  path; the Settings tab lists the latest beside the deliveries of the recovery kit, and
+  the action `backups_for_restic_download_granted` fires. A restored `wp-config.php` and
+  database dump together decrypt the stored passwords; before, any session or application
+  password with the plugin's capability could download them without a trace. Staging and
+  the two reports still need the capability alone. Restore jobs record who started them,
+  and the job view shows it.
+- Wrong WordPress passwords at the recovery kit, at creating and connecting a repository,
+  at live file and database changes and at downloads are counted per account. The first
+  three cost nothing; then each makes the next attempt wait longer, from one minute
+  doubling up to 32, and from the tenth on each locks the confirmation of that account for
+  an hour (HTTP 429 `user_password_throttled` with `Retry-After`). Each fires core's
+  `wp_login_failed` action, so that login limiters and fail2ban rules count it. The
+  password is read from the JSON body of a request only.
+- A refusal of the probe of the private directory counts as protection only when the same
+  check also gets the plugin's own stylesheet back from the site. A 403 or 404 from a
+  firewall, a CDN challenge or another virtual host no longer allows plaintext restore
+  staging; the probe says it could not be verified instead. `restores/` and every staging
+  directory get the deny files and `index.php` of the private directory, so that a server
+  that lists directories does not list the restores.
+- Deleting the plugin on a PHP older than 8.3 stops with a message that asks to switch
+  back first. Before, the uninstall did nothing there and WordPress deleted the plugin,
+  leaving staged files, retained database tables and the encrypted secrets behind with
+  nothing left to expire them.
+- `wp backups-for-restic snapshots` prints host names with control characters quoted, as
+  `ls` prints names; a client of a shared repository could send escape sequences to the
+  terminal through the host name of a snapshot.
 
 ### Fixed
+- A live database exchange waits, for at most a minute, until requests that started before maintenance have ended: the site's database account must have had no other connection to the site database for a second, so a request that reconnected in between is waited for as well. Such a request could otherwise write a post or an order into one database generation and its metadata into the other. Connections that stay open, such as persistent database connections or long-running WP-CLI processes, make the exchange try again later. The exchange now needs MySQL 8.0.22 or later with the Performance Schema enabled and listing every connection; the review reports a server that leaves connections out.
+- After a database migration or a failover to another server, a database restore that kept private tables no longer stops backups and all other jobs. Only another database restore waits. The new `wp backups-for-restic database-discard` command and REST action list those tables for removal on the old server and forget them without dropping anything. Uninstall no longer fails on such a restore, and all-tables backups no longer fail because of it.
+- A database undo whose reply was lost is recorded by a later tick or by the heartbeat, which then expires the replaced tables. Before, the heartbeat stopped at that undo for good.
+- `OPTIMIZE TABLE` and other table rebuilds after a database exchange no longer cost the undo of a rebuilt live table, and a rebuilt witness no longer stops expiry and uninstall. A rebuilt retained table is kept and listed on the job instead of being left behind unnoticed.
+- One database restore whose cleanup keeps failing no longer stops older ones from expiring.
+- The database review reports disabled InnoDB table locks, statement-based binary logging and a Galera node before the import starts, instead of failing after it.
+- A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent, and the job log names its size, the limit it needs and the server's limit. It was reported as a busy database and retried.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a
@@ -394,6 +436,44 @@ All notable changes are documented here. The format follows
   the review called such a plan applicable, and the apply stopped at the first such file
   after earlier changes were made. Without the POSIX extension the review cannot check the
   owner, and the apply still stops before it replaces such a file.
+- Undo of a file apply works after a directory that the apply created was deleted, for
+  example a removed plugin: its entries are kept and the replaced files are restored.
+  Before, the review stopped at the first entry below the deleted directory, and nothing
+  could be undone.
+- File apply and undo put each journal record and private copy on disk before the live
+  change that depends on it, and each live change on disk before recording it, so that a
+  power loss or a crash of the server during an apply leaves a state that the next attempt
+  and the undo recognise, as a stopped request already did. Every job document and each
+  new job directory are now put on disk as well, so that a power loss cannot bring back a
+  document that lost what a running apply, undo or database exchange had recorded. Each
+  saved job document waits for the disk, which on slow storage adds a few hundredths of a
+  second to a backup step and to each file of an apply.
+- A file apply stopped right after it created a directory can be resumed and undone:
+  directories are prepared privately and renamed into place. Before, the retry could not
+  prove that it had created the directory, so every entry below it failed and undo left it.
+- Applying many files into one large folder no longer lists the folder several times for
+  every file while the site is in maintenance: 500 new files beside 20,000 others needed
+  27 seconds of checks before and less than half a second now.
+- While a live file change holds the site in maintenance, WP-CLI commands other than the
+  plugin's own run with the site's plugins, as during a WordPress update. Before, every
+  command started with this plugin alone: `wp plugin activate`, or deactivating this
+  plugin, could leave every other plugin inactive, and `wp cron event run --due-now`
+  dropped other plugins' due events. Requests that run cron themselves, as with
+  `ALTERNATE_WP_CRON`, release only this plugin's events during the job.
+- A file apply or undo keeps the maintenance marker that its first tick wrote and the
+  uploads directory it was confirmed with. URL and upload-directory filters in the theme or
+  a regular plugin, which do not load during maintenance, made its first change fail or
+  refused uploads after other files had changed.
+- The maintenance marker is readable like WordPress's own, so PHP processes of other
+  system users show the maintenance page instead of a fatal error. It is also cleared from
+  OPcache, so hosts without timestamp checks run the current job's marker. Where
+  `opcache.restrict_api` keeps the plugin from clearing it, a host without timestamp checks
+  stops the change before it touches a file (`maintenance_opcache`), and a host with them
+  waits until OPcache has seen the new marker.
+- A file job that the site's file modification policy stops reports `file_writes_refused`
+  instead of "Another backup job is still running". A confirmation that finds the
+  permission gone just before the job would start reports it too, instead of asking the
+  administrator to wait for active work to finish.
 - A private directory that `BACKUPS_FOR_RESTIC_PRIVATE_DIR` names through a symbolic link,
   as some hosts mount their data volume, is used by its real path. Large file previews failed there,
   and after one had failed, no restore staging expired any more. Expiry also goes on when

@@ -131,6 +131,9 @@ final readonly class PrivateDirectory {
 
 	/**
 	 * Creates the directory, its deny files and subdirectories. Safe to call on every request.
+	 * restores/ and every staging directory in it get the deny files and the index.php of the
+	 * root as well: where a web server ignores the deny files and lists directories, the
+	 * index.php keeps it from listing the job IDs and the staged names.
 	 *
 	 * @throws StorageFailed If the directory cannot be created.
 	 */
@@ -139,17 +142,58 @@ final readonly class PrivateDirectory {
 		try {
 			$this->claim();
 			$this->make_directory( $this->path );
-			$this->write_if_missing( '.htaccess', self::HTACCESS );
-			$this->write_if_missing( 'web.config', self::WEB_CONFIG );
-			$this->write_if_missing( 'index.php', self::INDEX );
+			$this->protect( $this->path );
 			foreach ( self::SUBDIRECTORIES as $name ) {
 				if ( is_link( $this->subdirectory( $name ) ) ) {
 					StorageFailed::raise( 'A private subdirectory is a symbolic link.', [ 'file' => $name ] );
 				}
 				$this->make_directory( $this->path . '/' . $name );
 			}
+			$this->protect( $this->subdirectory( 'restores' ) );
+			$this->protect_staging();
 		} finally {
 			umask( $umask );
+		}
+	}
+
+	/**
+	 * Gives a directory the deny files and the index.php of the root, where they are missing.
+	 * A restore job calls it for the staging directory it has just created.
+	 *
+	 * @param string $directory A directory inside the private directory.
+	 * @throws StorageFailed If a file cannot be written.
+	 */
+	public function protect( string $directory ): void {
+		foreach ( [
+			'.htaccess'  => self::HTACCESS,
+			'web.config' => self::WEB_CONFIG,
+			'index.php'  => self::INDEX,
+		] as $name => $content ) {
+			if ( ! is_file( $directory . '/' . $name ) ) {
+				Files::write_atomic( $directory . '/' . $name, $content );
+			}
+		}
+	}
+
+	/**
+	 * Protects every staging directory in restores/ that lacks the deny files, such as one
+	 * staged before this was done. Nothing here may stop the request: a directory that a
+	 * removal renames or deletes at the same moment is passed over, and so are links and the
+	 * names that start with a dot, among them those set aside for removal.
+	 */
+	private function protect_staging(): void {
+		$restores = $this->subdirectory( 'restores' );
+		$entries  = scandir( $restores );
+		foreach ( false === $entries ? [] : $entries as $name ) {
+			$directory = $restores . '/' . $name;
+			if ( str_starts_with( $name, '.' ) || is_link( $directory ) || ! is_dir( $directory ) ) {
+				continue;
+			}
+			try {
+				$this->protect( $directory );
+			} catch ( StorageFailed ) {
+				continue;
+			}
 		}
 	}
 
@@ -361,20 +405,6 @@ final readonly class PrivateDirectory {
 		}
 		if ( ! @chmod( $directory, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The exception reports a read-only directory without printing its private path.
 			StorageFailed::raise( 'The private directory could not be made owner-only.', [ 'path' => $directory ] );
-		}
-	}
-
-	/**
-	 * Writes a file unless it exists.
-	 *
-	 * @param string $name    File name.
-	 * @param string $content Content.
-	 * @throws StorageFailed If it cannot be written.
-	 */
-	private function write_if_missing( string $name, string $content ): void {
-		$file = $this->path . '/' . $name;
-		if ( ! is_file( $file ) ) {
-			Files::write_atomic( $file, $content );
 		}
 	}
 }

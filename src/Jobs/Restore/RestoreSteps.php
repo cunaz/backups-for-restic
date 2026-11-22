@@ -583,6 +583,7 @@ final class RestoreSteps implements StepProvider {
 		}
 		chmod( $this->services->staging_dir( $job ), 0700 );
 		chmod( $target, 0700 );
+		$services->private_dir->protect( $this->services->staging_dir( $job ) );
 		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $paths, $services->identity, $services->clock, $services->throttle(), $this->services->space, $services->index_cache( $repository ) );
 		$log->write(
 			'info',

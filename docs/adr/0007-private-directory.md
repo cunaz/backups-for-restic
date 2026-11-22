@@ -69,7 +69,8 @@ web-reachable; nginx ignores `.htaccess`. Shared hosting adds disk quotas.
 ## Private staging and directory ownership
 
 A restore writes plaintext. Before a restore starts, a probe of the working directory
-under a public WordPress path must receive a denial (403, 404 or 410). The probe also
+under a public WordPress path must receive a denial (403, 404 or 410), confirmed as coming
+from this site (next section). The probe also
 checks custom content and upload directories. If a host blocks loopback requests, a
 browser report for the same physical directory and URL is accepted for 24 hours.
 Redirects and service errors provide no confirmation. Move the private directory outside
@@ -83,6 +84,40 @@ Uninstall checks both the current filtered location and the previous default or 
 location for outstanding database cleanup before deleting options or local files. If an
 owned job document cannot be read, or a live restore still owns the maintenance marker,
 the job history and recovery material stay in place for a retry.
+
+## A refusal is confirmed by a known file (2026-11-20)
+
+A WAF, a CDN challenge or another virtual host can answer the site's own request with 403
+or 404 while the site's web server would serve the directory, even with a listing of its
+subdirectories. A refusal therefore counts only when the same check, with the same kind of
+request to the same scheme, host and port, gets a known file of this site back byte for
+byte. The known file is the plugin's own stylesheet, `assets/css/admin.css`, which is public
+anyway because the admin page loads it; no new public file is needed. Its URL comes from
+`plugin_dir_url()` and carries a random query, so that a cache keyed on the query cannot
+answer for the site; its expected bytes come from the file on disk. The site's own probe
+requests it after a refusal of the probe file. The browser probe requests it beside the
+probe file and reports both answers; the expected SHA-256 is recorded with the pending
+probe. Every other outcome, also a stylesheet with other bytes or at another origin, is
+`unverified`, and plaintext staging is refused with `staging_unverified`. The Doctor's hint
+and the error's hint say why.
+
+The control proves that the requests reach this site's file serving at that origin; it
+does not prove that the refusal came from the site's own rules. Two cases still pass: a
+challenge that lets a cached stylesheet through but stops the probe, where the cache
+ignores the query, and an origin that refuses the site's own address but serves others.
+A core file was not taken as the control, because every WordPress serves the same bytes
+at the same path, another WordPress on the default virtual host among them.
+
+`restores/` and every staging directory below it get the deny files and the empty
+`index.php` of the root, as defence in depth against servers that ignore the deny files and
+list directories: the listing of `restores/` would name the job IDs, and a staging
+directory's would name what it holds. The restore job writes them when it creates the
+staging directory; `PrivateDirectory::ensure()`, which every request that takes one of the
+plugin's locks runs, adds missing ones to `restores/` and to staging from before. It passes
+over links, the names set aside for removal (`.removing-<job-id>`) and directories that a
+removal renames at the same moment, and nothing there stops a request. The staged tree
+under `files/` gets no such file: it is the snapshot's content and is applied to the live
+site as it is.
 
 ## Canonical path (2026-11)
 

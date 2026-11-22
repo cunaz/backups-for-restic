@@ -16,6 +16,7 @@ use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\FileSpace;
+use BackupsForRestic\Restore\LiveSpellings;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Support\Redactor;
@@ -38,6 +39,22 @@ final class FileChangesTest extends TestCase {
 	private Runner $runner;
 	private bool $allowed = true;
 	private ?int $free    = PHP_INT_MAX;
+	/** @var list<int> Users who may still write live files. */
+	private array $administrators = [ 7 ];
+
+	/**
+	 * Every plan that the job service asked for, in order.
+	 *
+	 * @var list<ApplyPlan>
+	 */
+	private array $plans = [];
+
+	/**
+	 * Told of each new job directory, synchronisation and document rename of the store.
+	 *
+	 * @var (\Closure(string, string): void)|null
+	 */
+	private ?\Closure $job_writes = null;
 
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'apply-job' );
@@ -45,7 +62,16 @@ final class FileChangesTest extends TestCase {
 		mkdir( $this->live );
 		$this->clock         = new FrozenClock();
 		$random              = new SystemRandom();
-		$this->jobs          = new JobStore( $this->directory . '/jobs', new Redactor(), $random );
+		$this->jobs          = new JobStore(
+			$this->directory . '/jobs',
+			new Redactor(),
+			$random,
+			function ( string $operation, string $path ): void {
+				if ( null !== $this->job_writes ) {
+					( $this->job_writes )( $operation, $path );
+				}
+			}
+		);
 		$this->staging       = new Staging( $this->directory . '/restores', $this->jobs, $this->clock );
 		$source              = $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds - 60 );
 		$source->state       = JobState::Succeeded;
@@ -65,15 +91,18 @@ final class FileChangesTest extends TestCase {
 			$this->staging,
 			$this->clock,
 			1,
-			function ( bool $config, string $id ): ApplyPlan {
+			function ( bool $config, string $id, ?string $uploads = null ): ApplyPlan {
 				$restore = $this->jobs->get( $id );
 				self::assertNotNull( $restore );
-				$layout = SiteLayout::from_job( $restore, $this->live, $this->uploads );
-				return new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
+				$layout        = SiteLayout::from_job( $restore, $this->live, $uploads ?? $this->uploads );
+				$plan          = new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
+				$this->plans[] = $plan;
+				return $plan;
 			},
 			new FileMaintenance( $this->live ),
-			fn (): bool => $this->allowed,
-			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free )
+			fn ( ?int $user = null ): bool => $this->allowed && ( null === $user || in_array( $user, $this->administrators, true ) ),
+			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free ),
+			fn (): string => $this->uploads
 		);
 		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
 	}
@@ -288,6 +317,52 @@ final class FileChangesTest extends TestCase {
 		self::assertFalse( $this->changes->preview_undo( $job->id )['applicable'] );
 	}
 
+	public function test_the_apply_document_that_names_the_manifest_is_on_disk_before_the_first_live_change(): void {
+		$job       = $this->start();
+		$directory = $this->directory . '/jobs/' . $job->id;
+		$live      = null;
+		// Without it a power loss can bring back a document without the manifest hash, and undo
+		// cannot read the journal of a partial apply.
+		$this->job_writes = function ( string $operation, string $path ) use ( $directory, &$live ): void {
+			if ( null !== $live || 'sync' !== $operation || $directory !== $path ) {
+				return;
+			}
+			$document = json_decode( (string) file_get_contents( $directory . '/job.json' ), true );
+			if ( is_array( $document ) && 'applying' === ( $document['step'] ?? null ) && is_string( $document['data']['manifest_hash'] ?? null ) ) {
+				$live = file_get_contents( $this->live . '/a-existing' );
+			}
+		};
+		$this->run_job( $job );
+		self::assertSame( 'original', $live );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_a_worker_killed_after_publishing_a_directory_lets_the_apply_and_its_undo_finish(): void {
+		$job = $this->start();
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		self::assertDirectoryExists( $this->live . '/b-new' );
+		// The state of a worker killed after the rename and before it recorded the result.
+		$entry  = $this->jobs->directory( $job ) . '/undo/item-1/entry.json';
+		$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertSame( 'done', $record['phase'] );
+		self::assertNotNull( $record['candidate'] );
+		$record['phase'] = 'ready';
+		file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
+		$saved = $this->jobs->get( $job->id );
+		self::assertNotNull( $saved );
+		self::assertSame( 2, $saved->progress['done'] );
+		$saved->progress['done'] = 1;
+		$this->jobs->save( $saved );
+		$this->run_job( $job );
+		self::assertSame( 'created', file_get_contents( $this->live . '/b-new/new.txt' ) );
+		$this->undo( $job );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+		self::assertSame( [ '.', '..', 'a-existing' ], scandir( $this->live ) );
+	}
+
 	public function test_edited_files_and_additional_directory_children_block_undo(): void {
 		$job      = $this->run_job( $this->start() );
 		$approved = $this->changes->preview_undo( $job->id );
@@ -297,6 +372,32 @@ final class FileChangesTest extends TestCase {
 		file_put_contents( $this->live . '/a-existing', 'keep edit' );
 		$this->expectException( JobConflict::class );
 		$this->changes->start_undo( $job->id, $approved['digest'] );
+	}
+
+	public function test_undo_after_a_created_directory_was_removed_restores_the_replaced_file(): void {
+		$job = $this->run_job( $this->start() );
+		TempDir::remove( $this->live . '/b-new' );
+		$review  = $this->changes->preview_undo( $job->id );
+		$actions = array_column( $review['entries'], 'action', 'path' );
+		self::assertSame( 'keep', $actions[ $this->live . '/b-new/new.txt' ] );
+		self::assertSame( 'keep', $actions[ $this->live . '/b-new' ] );
+		self::assertSame( 'restore', $actions[ $this->live . '/a-existing' ] );
+		$this->undo( $job );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+	}
+
+	public function test_background_undo_review_keeps_entries_below_a_removed_directory(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		TempDir::remove( $this->live . '/b-new' );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		self::assertSame( 0, $review->result['refused'] );
+		$this->run_job( $this->changes->start_undo( $apply->id, $review->result['digest'], '', $review->id ) );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 	}
 
 	public function test_expired_undo_is_removed_and_staging_released(): void {
@@ -312,8 +413,32 @@ final class FileChangesTest extends TestCase {
 		$job = $this->start();
 		$this->runner->tick( 0.0 );
 		$this->allowed = false;
-		$this->run_job( $job, JobState::Failed );
+		$failed        = $this->run_job( $job, JobState::Failed );
+		self::assertSame( 'file_writes_refused', $failed->error?->code );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_every_tick_rechecks_the_administrator_who_confirmed_in_the_browser(): void {
+		$plan  = $this->changes->preview( $this->restore );
+		$grant = hash( 'sha256', 'control token' );
+		try {
+			$this->changes->start_apply( $this->restore, false, $plan['digest'], $grant );
+			self::fail( 'A browser confirmation needs the user who confirmed it.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'file_writes_refused', $refused->context()['code'] );
+		}
+		$job = $this->changes->start_apply( $this->restore, false, $plan['digest'], $grant, null, 7 );
+		self::assertSame( 7, $job->data['user'] );
+		$this->runner->tick( 0.0 );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		// The account loses its role while the site is in maintenance.
+		$this->administrators = [];
+		$failed               = $this->run_job( $job, JobState::Failed );
+		self::assertSame( 'file_writes_refused', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		// The command line has no WordPress account; the host policy alone applies to it.
+		$this->run_job( $this->start() );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
 	public function test_foreign_maintenance_marker_survives_and_blocks_publication(): void {
@@ -385,6 +510,22 @@ final class FileChangesTest extends TestCase {
 		$this->undo( $job );
 		self::assertDirectoryDoesNotExist( $this->uploads . '/album' );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_a_confirmed_apply_keeps_its_uploads_root_while_its_ticks_boot_without_the_filter(): void {
+		$this->stage_fresh();
+		$confirmed = $this->uploads;
+		$preview   = $this->changes->preview( $this->restore );
+		$job       = $this->changes->start_apply( $this->restore, false, $preview['digest'] );
+		$this->runner->tick( 0.0 );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		// Ticks under the marker boot without the ordinary plugin whose upload_dir filter
+		// chose the uploads root of the review, and WordPress reports its default instead.
+		$this->uploads = $this->live . '/default-uploads';
+		mkdir( $this->uploads );
+		$this->run_job( $job );
+		self::assertSame( 'imported upload', file_get_contents( $confirmed . '/album/photo.txt' ) );
+		self::assertDirectoryDoesNotExist( $this->uploads . '/album' );
 	}
 
 	public function test_overlapping_fresh_destinations_refuse_the_entire_apply(): void {
@@ -461,6 +602,40 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
 		self::assertDirectoryDoesNotExist( dirname( $this->files ) );
+	}
+
+	public function test_a_large_apply_into_one_wide_folder_lists_it_about_once_per_tick_and_second(): void {
+		$media = $this->live . '/media';
+		mkdir( $media );
+		mkdir( $this->files . $media, 0700 );
+		for ( $i = 0; $i < 2500; ++$i ) {
+			touch( $media . '/existing-' . $i );
+		}
+		for ( $i = 0; $i < 150; ++$i ) {
+			file_put_contents( $this->files . $media . '/new-' . $i, 'new ' . $i );
+		}
+		$this->write_report( $this->live . '/skipped-link' );
+		$review = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		// A review takes the administrator longer than this; the staged tree has settled.
+		$ready = time() + 1 + LiveSpellings::CLOCK_MARGIN;
+		while ( microtime( true ) < $ready ) {
+			usleep( 10000 );
+		}
+		$this->plans = [];
+		$started     = time();
+		$apply       = $this->run_job( $this->changes->start_apply( $this->restore, false, $review->result['digest'], '', $review->id ) );
+		$seconds     = time() - $started + 1;
+		self::assertSame( 153, $apply->result['files_changed'] );
+		self::assertSame( 'new 149', file_get_contents( $media . '/new-149' ) );
+		$wide   = array_sum( array_map( static fn ( ApplyPlan $plan ): int => $plan->listings( $media ), $this->plans ) );
+		$staged = array_sum( array_map( fn ( ApplyPlan $plan ): int => $plan->listings( $this->files . $media ), $this->plans ) );
+		// Every recheck of the 150 new files used to list both folders, about 750 times each.
+		self::assertGreaterThan( 0, $wide );
+		self::assertLessThanOrEqual( count( $this->plans ) + 2 * $seconds, $wide );
+		self::assertGreaterThan( 0, $staged );
+		self::assertLessThanOrEqual( count( $this->plans ), $staged );
 	}
 
 	public function test_legacy_sealed_plan_without_an_estimate_restarts_interrupted_preflight_before_mutating(): void {

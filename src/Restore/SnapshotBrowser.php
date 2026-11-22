@@ -516,13 +516,13 @@ final class SnapshotBrowser {
 	}
 
 	/**
-	 * A name or link target for a terminal: as it is when it consists of printable
-	 * characters only, otherwise in double quotes with Go's escapes.
+	 * A name, link target or host name for a terminal: as it is when it consists of
+	 * printable characters only, otherwise in double quotes with Go's escapes.
 	 *
 	 * @param string $bytes Bytes from the repository.
 	 * @return string Text without control characters.
 	 */
-	private static function printable( string $bytes ): string {
+	public static function printable( string $bytes ): string {
 		$quoted = GoQuote::quote( $bytes );
 		return $quoted === $bytes ? $bytes : '"' . $quoted . '"';
 	}

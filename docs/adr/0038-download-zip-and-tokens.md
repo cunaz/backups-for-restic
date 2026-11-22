@@ -126,6 +126,7 @@ the staged files ([ADR 0037](0037-restore-job.md)).
 
 An administrator requests a download with `POST /restores/<job>/download`. The response
 contains a form that submits the one-time token and encoded subject to `admin-post.php`.
+A grant of restored content needs the WordPress password and is recorded (last section).
 The token store requires an exclusive lock. The handler checks the staging lifetime and
 the file again on redemption, then streams the inspected handle as an attachment. The
 download kinds are `file` with an absolute snapshot path, `archive`, `report`, and
@@ -152,3 +153,45 @@ download kinds are `file` with an absolute snapshot path, `archive`, `report`, a
   without a store of used tokens, which is the same file.
 - **The REST nonce in the address.** It is valid for up to a day, for every route, and
   would end up in the access log of the server.
+
+## As built: restored content needs the WordPress password (2026-11-20)
+
+Staged files are site content, and among them can be `wp-config.php` and the database dump
+of `spool/database/`. The eight salt constants of the one are the key material of the
+secret store, and the options table of the other holds its ciphertexts: together they
+give the repository password, the REST password and the cached master key, which the
+recovery kit hands out only after the WordPress password was entered again. A grant for
+them now asks the same.
+
+- **What needs the password.** The kinds `file` and `archive`: a grant needs the WordPress
+  password of the current user as `user_password` in the JSON body of the grant request,
+  checked by the one confirmation that the kit and the live changes use, with its count of
+  wrong passwords ([security](../03-security-and-threat-model.md) §5.5). An application
+  password authenticates the request and is not enough. A kind that the route does not
+  know counts as content, so that a new kind needs the password until it is classified.
+- **What does not.** The kinds `report` and `database_report`. The restore report holds
+  one line per staged entry with its quoted path, type, mode, time, size and link target:
+  what the snapshot routes show to the same capability. The rehearsal's report holds the
+  snapshot ID, the site address and prefix, table names, row counts and sizes, engines,
+  character sets and collations, missing privileges, server versions and a digest of the
+  imported content, but no row value. The page fetches it by itself for its preview.
+- **Staging stays behind the capability alone.** Staging writes the copy into the private
+  directory, owner-only, and gives nothing out; what leaves that directory is guarded. A
+  restore job records the user who started it (`user` in its data), and the job view
+  shows it.
+- **The audit.** Before the token of a content grant exists, an entry with the time, the
+  user ID and login, the restore job, the kind and the path is written to the state option,
+  under its lock; if it cannot be written, no token is issued. The path is kept in Go's
+  quoting (`Support\GoQuote`), the form of names in restic's tree JSON, so that line
+  breaks, control characters, quotes and bytes that are not UTF-8 appear as escapes and
+  cannot break the list, a JSON answer or a log line of an audit plugin; it is cut after
+  1 KiB and marked with three dots. The last twenty are kept. `GET /settings` answers the
+  latest five as `downloads`, and the Settings tab shows them beside the deliveries of the
+  kit. The action `backups_for_restic_download_granted( $user_id, $job_id, $kind, $path )`
+  fires after the entry is stored, with the quoted path. A refused request and a file that
+  the restore does not hold are not recorded. The entry records the grant, not the
+  download: whoever holds the token can redeem it once within the hour, and the handler
+  that redeems it knows no user.
+- **The form.** The staged restore's card has a password field for the two content
+  downloads. The page sends the password in the JSON body of the grant request only and
+  clears the field at once, whatever the answer; the reports send none.
