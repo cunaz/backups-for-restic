@@ -105,6 +105,22 @@ final class DedicatedConnectionTest extends TestCase {
 		self::assertSame( $attempts, self::attempts(), 'It did not even connect: the account would have authenticated in the clear.' );
 	}
 
+	public function test_no_connection_when_the_site_session_shows_no_cipher(): void {
+		// Encrypted where the server allows it: the case in which reading "no row" as "not
+		// encrypted" would send the account in the clear.
+		$encrypted = mysqli_init();
+		self::assertInstanceOf( \mysqli::class, $encrypted );
+		[ $host, $port ] = $this->address();
+		$site            = @$encrypted->real_connect( $host, MysqliConnection::environment( 'BFR_TEST_MYSQL_USER', 'root' ), MysqliConnection::environment( 'BFR_TEST_MYSQL_PASSWORD', '' ), self::$database, $port, null, MYSQLI_CLIENT_SSL | MYSQLI_CLIENT_SSL_DONT_VERIFY_SERVER_CERT ) ? new MysqliConnection( $encrypted ) : $this->site( self::$database );
+		// A limit of 0 that the session inherited hides the row of SHOW SESSION STATUS.
+		$site->execute( 'SET SESSION sql_select_limit = 0' );
+		self::assertSame( [], $site->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" ) );
+
+		$attempts = self::attempts();
+		self::assertNull( WpdbConnection::dedicated( $this->wpdb( $site, self::$database ), new SystemRandom(), '+00:00' ) );
+		self::assertSame( $attempts, self::attempts(), 'An unknown cipher opens no connection.' );
+	}
+
 	/**
 	 * Connections that this process tried to open, successful or not: the server's own count
 	 * also moves when another process connects.

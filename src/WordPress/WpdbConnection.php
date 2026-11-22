@@ -106,8 +106,10 @@ final class WpdbConnection implements Connection {
 		} catch ( DatabaseFailed ) {
 			return null;
 		}
-		if ( '' !== $cipher && 0 === ( $flags & MYSQLI_CLIENT_SSL ) ) {
-			// A database drop-in can encrypt the site's connection with settings of its own.
+		// Unknown when the session shows no row: an inherited sql_select_limit of 0 hides it,
+		// also on an encrypted connection. A database drop-in can encrypt the site's
+		// connection with settings of its own.
+		if ( null === $cipher || ( '' !== $cipher && 0 === ( $flags & MYSQLI_CLIENT_SSL ) ) ) {
 			return null;
 		}
 		try {
@@ -200,17 +202,19 @@ final class WpdbConnection implements Connection {
 			$site->rows( 'DO RELEASE_LOCK(' . $lock . ')' );
 		}
 		$database = $site->rows( 'SELECT DATABASE() AS name' )[0]['name'] ?? null;
-		return null !== $holder && null !== $database && $database === ( $dedicated->rows( 'SELECT DATABASE() AS name' )[0]['name'] ?? null ) && ( '' === $cipher || '' !== self::cipher( $dedicated ) );
+		$own      = '' === $cipher ? '' : self::cipher( $dedicated );
+		return null !== $holder && null !== $database && $database === ( $dedicated->rows( 'SELECT DATABASE() AS name' )[0]['name'] ?? null ) && ( '' === $cipher || ( null !== $own && '' !== $own ) );
 	}
 
 	/**
-	 * The TLS cipher of a connection.
+	 * The TLS cipher of a connection, as its session reports it.
 	 *
 	 * @param Connection $connection Connection.
-	 * @return string Cipher, or empty if the connection is not encrypted.
+	 * @return string|null Cipher; empty if the connection is not encrypted, null if the session showed no value.
 	 * @throws DatabaseFailed If it cannot be read.
 	 */
-	private static function cipher( Connection $connection ): string {
-		return $connection->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" )[0]['Value'] ?? '';
+	private static function cipher( Connection $connection ): ?string {
+		$value = $connection->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" )[0]['Value'] ?? null;
+		return is_string( $value ) ? $value : null;
 	}
 }
