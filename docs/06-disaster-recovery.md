@@ -196,21 +196,44 @@ plugin that stops WordPress from starting stops them as well; skip it with
    deletes every row it conflicts with in any unique key, which can take two rows away for
    one. Reconcile the table in a scratch copy:
 
-   1. Copy `010-<table>.sql`. In the copy's `CREATE TABLE` line, turn every `UNIQUE KEY`
-      into a plain `KEY`, not only the one the error names: a row can conflict in several
-      unique keys, and the import would stop at the next one. If the error names `PRIMARY`,
-      turn `PRIMARY KEY` into `KEY` as well. Import the copy into an empty scratch database.
-   2. For each key you changed, find the rows that share a value, for example
-      `SELECT <key columns>, COUNT(*) FROM <table> GROUP BY <key columns> HAVING COUNT(*) > 1`.
+   1. Copy `010-<table>.sql`. In the copy's `CREATE TABLE` line, turn `PRIMARY KEY (…)` into
+      `KEY relaxed_primary (…)` and every `UNIQUE KEY` into a plain `KEY`, with the same
+      column lists, whichever key the error names: a row can conflict in several keys, and
+      a table that the backup read by position because it could not page by its primary key,
+      for example one over a prefix of a BLOB, can also hold one row twice with the same
+      primary key. A plain key keeps the index that an `AUTO_INCREMENT` column needs; the
+      name `PRIMARY` is reserved for the primary key. Import the copy into an empty scratch
+      database.
+   2. For each key you changed, find the groups of rows that the original key does not
+      allow. Group by exactly what the key indexes: a whole column, `LEFT(<column>, <n>)`
+      for a part with a length such as `<column>(<n>)`, or the expression of a functional
+      key part. Leave out rows in which one of these values is NULL: a unique key allows
+      any number of those, and a primary key has none.
+
+      ```sql
+      SELECT <indexed parts>, COUNT(*) FROM <table>
+      WHERE <first part> IS NOT NULL AND <second part> IS NOT NULL
+      GROUP BY <indexed parts> HAVING COUNT(*) > 1;
+      ```
+
       Look at the rows of each group and decide which one the site had last; with a row
-      that was inserted again that is usually the one with the newer primary key. Delete
-      the others. Then make the keys unique again as the original `CREATE TABLE` has them;
-      a key that the server refuses to add names a group that is still to be decided.
-   3. Export the reconciled table, for example with `mariadb-dump <scratch> <table>`, and
-      use that file in place of `010-<table>.sql`; it has no trailer line.
-   4. Import all files again, in name order, into an empty database, and check that the
-      client ends without an `ERROR` line and with exit status 0 before you use that
-      database. If it stops with `ERROR 1062` in another table, repeat these steps for it.
+      that was inserted again that is usually the one with the newer primary key, and rows
+      that are equal in every column are one row read twice. Delete the others, one at a
+      time, for example `DELETE FROM <table> WHERE <the row's values> LIMIT 1`.
+   3. Make the keys what the original `CREATE TABLE` has, in one statement, for example
+      `ALTER TABLE <table> DROP KEY relaxed_primary, ADD PRIMARY KEY (…), DROP KEY <name>,
+      ADD UNIQUE KEY <name> (…)`. A key that the server refuses to add names a group that
+      is still to be decided.
+   4. Export the reconciled table with the dump tool of the client you import with:
+      `mysqldump <scratch> <table>` for `mysql`, `mariadb-dump <scratch> <table>` for
+      `mariadb`. A recent `mariadb-dump` begins its file with a line that `mysql` refuses.
+      Save the export as `reconciled/010-<table>.sql` beside the original files, which you
+      keep unchanged; it ends with `-- Dump completed` instead of the trailer line.
+   5. Import all files again, in name order, into an empty database, with the export in
+      place of the original file, as the script of Scenario D does: it checks the trailer
+      of every original table file and the last line of every export. Check that the client
+      ends without an `ERROR` line and with exit status 0 before you use that database. If
+      it stops with `ERROR 1062` in another table, repeat these steps for it.
 
    A table marked `"key": []` was read without a key to order its pages: none of its
    primary and unique keys consists only of stored NOT NULL columns of types that compare
@@ -300,17 +323,29 @@ give its account access only to that database. Each table dump starts with a
 In Bash, change into the directory containing `000-header.sql` and `manifest.json`.
 Check the table file names against the manifest, then import in name order using one
 database connection. Replace `recovery_user` and `recovery_database` with the account
-and new database you created.
+and new database you created. A table that you reconciled after a duplicate key (step 5 of
+Scenario B) is imported from its export in `reconciled/` instead of its original file; every
+original file must still end with its trailer.
 
 ```bash
 set -euo pipefail
+files=()
 for table in 010-*.sql; do
     tail -n 1 -- "$table" | grep -Eq '^-- end table rows=[0-9]+ bytes=[0-9]+$' || {
         echo "Incomplete table dump: $table" >&2
         exit 1
     }
+    if [ -e "reconciled/$table" ]; then
+        tail -n 1 -- "reconciled/$table" | grep -q '^-- Dump completed' || {
+            echo "Incomplete reconciled export: reconciled/$table" >&2
+            exit 1
+        }
+        files+=("reconciled/$table")
+    else
+        files+=("$table")
+    fi
 done
-cat -- 000-header.sql 010-*.sql 900-views.sql |
+cat -- 000-header.sql "${files[@]}" 900-views.sql |
     mariadb --user=recovery_user --password recovery_database
 ```
 
