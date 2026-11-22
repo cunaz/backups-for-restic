@@ -629,7 +629,9 @@ with the copies of the scripts on `main`:
    variable `RELEASE_SIGNING_PUBLIC_KEY`, whose primary fingerprint must be pinned in
    `.github/release-signing-key.txt` as committed on `main`. Replacing the variable alone
    therefore authorises no other key; a new key needs a reviewed pull request. A signature by a
-   signing subkey of the pinned key counts; an expired or revoked key does not.
+   signing subkey of the pinned key counts; an expired or revoked key does not. The script
+   reads GnuPG's status itself and requires `GOODSIG`: Git 2.56 on the runner accepts a
+   signature whose key has expired since, which Git 2.53 refused.
 2. **The protections** (`bin/check-release-gates.py protections`): an active ruleset on
    `main` that requires pull requests and status checks and blocks force pushes and deletion;
    an active tag ruleset that keeps the release tag from being moved or deleted; and the

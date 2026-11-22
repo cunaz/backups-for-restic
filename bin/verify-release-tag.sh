@@ -82,8 +82,15 @@ done
 if [[ "$pinned" != true ]]; then
 	fail "The key in RELEASE_SIGNING_PUBLIC_KEY ($signing_key) is not a release key pinned in $pinned_file on main."
 fi
-# Git accepts only a good signature: unsigned tags and bad, expired or revoked signatures fail.
-if ! git -c gpg.program=gpg verify-tag --raw "$ref" 2> "$keyring/verification"; then
+# A release needs GnuPG's GOODSIG: a valid signature by a key that is neither expired nor
+# revoked. Git's own verdict is not enough, because it differs between versions: Git 2.56
+# accepts a signature whose key has expired since (EXPKEYSIG), Git 2.53 refuses it. So the
+# status lines decide, and Git's refusal of an unsigned tag or a bad signature counts as well.
+verified=true
+git -c gpg.program=gpg verify-tag --raw "$ref" 2> "$keyring/verification" || verified=false
+if [[ "$verified" != true ]] ||
+	! grep -q '^\[GNUPG:\] GOODSIG ' "$keyring/verification" ||
+	grep -Eq '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG) ' "$keyring/verification"; then
 	status="$(awk '$1=="[GNUPG:]" {print $2}' "$keyring/verification" | sort -u | paste -sd ' ' -)"
 	fail "The signature of $tag does not verify with the pinned release key (GnuPG status: ${status:-none})."
 fi
