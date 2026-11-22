@@ -17,6 +17,7 @@ use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Restore\DiskFilePlan;
 use BackupsForRestic\Restore\Staging;
+use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Clock;
 
 defined( 'ABSPATH' ) || exit;
@@ -139,14 +140,21 @@ final readonly class ApplyJournal {
 	}
 
 	/**
-	 * Creates a private component below the job directory.
+	 * Creates a private component below the job directory. A new directory is synchronised in
+	 * its parent, so that the durable records written into it survive a power loss with it.
 	 *
 	 * @param string $dir Directory.
 	 * @throws StorageFailed If the private journal directory is unavailable.
 	 */
 	public static function directory( string $dir ): void {
-		if ( is_link( $dir ) || ( ! is_dir( $dir ) && ! mkdir( $dir, 0700 ) ) ) {
+		if ( is_link( $dir ) ) {
 			throw new StorageFailed( 'The apply journal directory is unavailable.' );
+		}
+		if ( ! is_dir( $dir ) ) {
+			if ( ! mkdir( $dir, 0700 ) ) {
+				throw new StorageFailed( 'The apply journal directory is unavailable.' );
+			}
+			Files::sync_directory( dirname( $dir ) );
 		}
 	}
 }
