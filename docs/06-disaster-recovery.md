@@ -177,16 +177,27 @@ completed changes and checks their identities during recovery.
 
    If the import stops with `ERROR 1062 … Duplicate entry` in a table that `manifest.json`
    marks with `"snapshot": false`, the backup read that table in several requests, and a
-   row that was deleted and inserted again with a new key in between is in the dump twice.
-   Import that file with `REPLACE` instead of `INSERT`, which keeps the later copy:
+   row that was deleted and inserted again with a new key in between is in the dump twice,
+   with its old key and with its new one. The client stopped at that statement: the tables
+   after it in name order are missing as well. Do not turn the file's `INSERT` statements
+   into `REPLACE`: a row that `REPLACE` writes deletes every row it conflicts with in any
+   unique key, which can take two rows away for one. Reconcile the table in a scratch copy:
 
-   ```bash
-   sed 's/^INSERT INTO /REPLACE INTO /' 010-<table>.sql | mariadb -u <user> -p <database>
-   ```
+   1. Copy `010-<table>.sql`, remove the unique key that the error names from the copy's
+      `CREATE TABLE` line, and import the copy into an empty scratch database.
+   2. Find the rows that share the value, for example
+      `SELECT <key columns>, COUNT(*) FROM <table> GROUP BY <key columns> HAVING COUNT(*) > 1`.
+      Keep the copy that the site had last, usually the one with the newer primary key,
+      delete the other, and add the unique key again as the original `CREATE TABLE` has it.
+   3. Export the reconciled table, for example with `mariadb-dump <scratch> <table>`, and
+      use that file in place of `010-<table>.sql`; it has no trailer line.
+   4. Import all files again, in name order, into an empty database.
 
-   A table marked `"key": []` has neither a primary key nor a unique key over NOT NULL
-   columns. If it is also marked `"snapshot": false`, rows that changed while it was read
-   can be missing or repeated; the backup's job named it in a warning.
+   A table marked `"key": []` was read without a key to order its pages: none of its
+   primary and unique keys consists only of stored NOT NULL columns of types that compare
+   exactly; TEXT, BLOB, JSON and spatial columns and functional key parts do not. It can
+   still have other unique keys. If it is also marked `"snapshot": false`, rows that changed
+   while it was read can be missing or repeated; the backup's job named it in a warning.
 
 6. **Adjust `wp-config.php`** for the new database credentials. If the domain changed, run
    `wp search-replace` afterwards.
