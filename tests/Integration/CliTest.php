@@ -181,6 +181,42 @@ final class CliTest extends TestCase {
 		}
 	}
 
+	public function test_a_permission_lost_before_a_file_job_starts_is_reported_as_such(): void {
+		$login = 'bfr-starting-' . bin2hex( random_bytes( 4 ) );
+		TestSite::user( $login, 'administrator' );
+		try {
+			// The confirmation is authorized for the administrator that this process loaded.
+			// Before start_apply() checks the account again, another request takes the role
+			// away in the database, as in a race between the two.
+			[ $status, $output ] = TestSite::wp(
+				[
+					'eval',
+					sprintf(
+						'( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) )->private_dir()->ensure();
+						$user = get_user_by( "login", %s );
+						wp_set_password( "bfr-test-password", $user->ID );
+						wp_set_current_user( $user->ID );
+						$id     = "20261120T000000Z-0d0e0f";
+						$digest = str_repeat( "a", 64 );
+						$token  = wp_create_nonce( implode( "|", [ "backups_for_restic_live", home_url(), "files", "apply", $id, "default", $digest, "" ] ) );
+						global $wpdb;
+						$wpdb->update( $wpdb->usermeta, [ "meta_value" => serialize( [ "editor" => true ] ) ], [ "user_id" => $user->ID, "meta_key" => $wpdb->get_blog_prefix() . "capabilities" ] );
+						$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/restores/" . $id . "/apply" );
+						$request->set_header( "content-type", "application/json" );
+						$request->set_body( wp_json_encode( [ "reviewed" => true, "site_url" => home_url(), "digest" => $digest, "review_token" => $token, "user_password" => "bfr-test-password" ] ) );
+						$response = rest_do_request( $request );
+						echo wp_json_encode( [ $response->get_status(), $response->get_data()["code"] ?? null ] );',
+						var_export( $login, true )
+					),
+				]
+			);
+			self::assertSame( 0, $status, $output );
+			self::assertSame( '[409,"backups_for_restic_file_writes_refused"]', TestSite::last_line( $output ), 'The administrator learns that the permission is gone, not that other work is in the way.' );
+		} finally {
+			TestSite::wp( [ 'user', 'delete', $login, '--yes' ] );
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
 		$before            = TestSite::state( 'recovery_kit' );

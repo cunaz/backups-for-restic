@@ -395,4 +395,6 @@ All notable changes are documented here. The format follows
   stops the change before it touches a file (`maintenance_opcache`), and a host with them
   waits until OPcache has seen the new marker.
 - A file job that the site's file modification policy stops reports `file_writes_refused`
-  instead of "Another backup job is still running".
+  instead of "Another backup job is still running". A confirmation that finds the
+  permission gone just before the job would start reports it too, instead of asking the
+  administrator to wait for active work to finish.

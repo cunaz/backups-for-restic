@@ -915,7 +915,7 @@ final class RestRoutes {
 	private function plan_error( InvalidArgument|JobConflict $refused, bool $database = false ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
 			$code = JobError::from_throwable( $refused )->code;
-			return $this->error( $database || 'file_space' === $code ? $code : 'live_plan_conflict', 409 );
+			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused' ], true ) ? $code : 'live_plan_conflict', 409 );
 		}
 		return $this->error( $database ? 'database_review_required' : 'live_plan_unavailable', 400 );
 	}
