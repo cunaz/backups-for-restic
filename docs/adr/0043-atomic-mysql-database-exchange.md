@@ -111,10 +111,18 @@ row there could reuse its ID.
 After entering maintenance, `Database\Restore\SessionDrain` waits two seconds, which covers
 the step from WordPress's check to its connection. It then lists the other sessions of the
 site's account whose current database is the site's (`performance_schema.processlist`,
-columns `USER` and `DB`), and the exchange starts only after every listed session has
-ended. A session that appears later belongs to a request that the marker stopped or that
-the maintenance gate admits on purpose: this job's own ticks and control requests, and
-WP-CLI.
+columns `USER` and `DB`) five times a second, and the exchange starts only after that list
+has stayed empty for one second, the quiet interval. Waiting only for the sessions of a
+first listing would miss a request from before maintenance that loses its session, for
+example to a proxy or a server timeout, and reconnects under a new connection ID: within
+the quiet interval its new session is listed, and the interval starts again. The requests
+that the maintenance gate admits on purpose are waited for the same way, because the server
+cannot tell them apart: the plugin's cron events, the administration page and its status
+poll, which follows three seconds after each answer, the job's control requests, and
+WP-CLI. The tick's own WordPress session is the one that takes the locks and is not listed.
+The job saves its swap marker, and for an undo the owner's record, before the wait, so
+that only a few statements on that session separate the last empty listing from the table
+locks.
 
 The list comes from the Performance Schema because MySQL 8.4 raises deprecation warning
 1287 for [`INFORMATION_SCHEMA.PROCESSLIST`](https://dev.mysql.com/doc/refman/8.4/en/information-schema-processlist-table.html),
@@ -123,24 +131,31 @@ also behind `SHOW PROCESSLIST`, and the restore port refuses warnings.
 gives a non-anonymous account its own sessions without PROCESS. On MySQL 8.4.11 with the
 Performance Schema disabled it listed nothing, not even the asking session, so the preflight
 requires that session to be listed with the site's database (blocker `performance_schema`).
-Connection IDs are only compared for equality: "Every connection has an ID that is unique
-among the set of currently connected clients"
+The listing leaves out this session by its connection ID: "Every connection has an ID that
+is unique among the set of currently connected clients"
 ([CONNECTION_ID()](https://dev.mysql.com/doc/refman/8.4/en/information-functions.html)).
-The wait does not depend on their order.
+The wait compares no other IDs; it only asks whether any other session is listed.
 
 The bound: the wait ends with the tick, after at most 60 seconds and at least 5 seconds even
 late in a tick. A tick with less than seven seconds left first defers the swap once to a
-fresh tick, before it enters maintenance. If a listed session is still open, the job leaves
-maintenance and fails the step with the retryable code `database_exchange_sessions`; the
+fresh tick, before it enters maintenance. If the account has not been quiet for the
+interval by then, the job leaves maintenance and fails the step with the retryable code
+`database_exchange_sessions`; the
 import is kept, and the runner tries again after 30 seconds, doubling, at most five times.
 One maintenance window therefore lasts at most about 62 seconds plus the exchange, whose
 statements each wait at most three seconds for a lock.
 
 What remains: a request that needs more than two seconds from WordPress's maintenance check
-to its first query is not waited for. Clients that do not stop at the marker are not covered:
-WP-CLI processes started during the window, other database accounts and other applications.
-Persistent connections, long-running WP-CLI processes and another application that uses the
-same account keep sessions open; the exchange then refuses until they end.
+to its first query is not waited for, nor one that stays without a session for longer than
+the quiet interval before it reconnects, for example after the server closed its idle
+connection, nor a session of the account without a default database. Between the last
+empty listing and LOCK TABLES lie a few statements on the exchange's session, a few
+milliseconds in which a new session is not seen. Clients that do not stop at the marker,
+WP-CLI among them, are waited for only while their sessions are listed; other database
+accounts and applications with accounts of their own are not covered. Persistent
+connections, long-running WP-CLI processes, another application that uses the same account
+and open pages of the plugin whose polls leave no quiet second keep the account busy; the
+exchange then refuses until they end.
 
 ### A binding of another server or database
 
@@ -241,13 +256,14 @@ exercise the normal filesystem store, timeout, confirmation digest, staging pin,
 pruning and recovery windows. A local real WordPress 7.1.4, PHP 8.4 and MySQL 8.4.11
 restore also verified authentication state, addresses, active plugins and the heartbeat.
 After the review of 0.3.0-rc.1 the MySQL tests also cover: a second session that keeps a
-unit of work open across the swap, and one that outlasts the wait; a binding with another
+unit of work open across the swap, the same with a reconnect during maintenance, and one
+that outlasts the wait; a binding with another
 server UUID during an apply, with a backup, a review, the discard and uninstall; a lost reply
 to the undo's RENAME followed by cleanup in the same request, a later tick and the heartbeat;
 `OPTIMIZE TABLE` on a live table, on the witness and on a retained table inside the window;
 a stuck newer generation in front of an expired older one; statement-based logging and
 disabled InnoDB table locks; and a batch beyond `max_allowed_packet`. Unit tests cover the
-drain's grace period and bounds, the session listing, the setting blockers, the plan's
+drain's grace period, quiet interval and bounds on an injected clock, the session listing, the setting blockers, the plan's
 validation and rebinding, and the job-level handling of foreign bindings and lost sessions.
 A separate MySQL 8.4.11 account restricted to the privileges listed above rehearsed,
 applied, undid and expired its own private tables. Removing PROCESS or withholding

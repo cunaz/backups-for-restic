@@ -276,9 +276,11 @@ destination. On a compatible host the initiating WordPress administrator confirm
 current site address and password. The job imports verified data into private tables
 first. WordPress enters maintenance during the final write-locked exchange. Before it
 takes the locks, the job waits for up to a minute until requests that started before
-maintenance have ended. Persistent database connections, long-running WP-CLI processes or
-another application using the same database account keep it waiting; it then leaves
-maintenance and tries again later, at most five times. The current home and site URLs,
+maintenance have ended: the site's database account must have had no other connection to
+the site database for a second, so a request that reconnected in between is waited for as
+well. Persistent database connections, long-running WP-CLI processes or another
+application using the same database account keep it waiting; it then leaves maintenance
+and tries again later, at most five times. The current home and site URLs,
 active plugins, roles, confirming administrator and sessions, backup configuration and
 cron schedule carry across.
 

@@ -311,7 +311,8 @@ final class DatabaseExchangeTest extends TestCase {
 
 	/**
 	 * Stages this suite's dump as a successful rehearsal and builds the database job services
-	 * of one site around it. The default drain keeps its grace period short for the tests.
+	 * of one site around it. The default drain keeps its grace period and its quiet interval
+	 * short for the tests.
 	 *
 	 * @return array{changes:DatabaseChanges,runner:Runner,jobs:JobStore,staging:Staging,clock:FrozenClock,source:Job,files:string,site:string}
 	 */
@@ -356,7 +357,7 @@ final class DatabaseExchangeTest extends TestCase {
 			static fn ( int $id ): array => 1 === $id ? [] : [ 'database_account' ],
 			new FileMaintenance( $site ),
 			$refresh ?? static function (): void {},
-			$drain ?? new SessionDrain( 0.05, 10.0, 5.0, 0.02 )
+			$drain ?? new SessionDrain( 0.05, 10.0, 5.0, 0.02, 0.1 )
 		);
 		return [
 			'changes' => $changes,
@@ -412,33 +413,18 @@ final class DatabaseExchangeTest extends TestCase {
 	}
 
 	/**
-	 * Ends a child process that a failed step left behind: it is killed while it still runs,
-	 * its pipes are closed and it is reaped, so a failing test blocks neither on it nor on
-	 * the database session it holds.
+	 * Runs the apply while a request from before maintenance writes a post and then its
+	 * metadata, and checks that both stay in the generation that was live when it began.
 	 *
-	 * @param resource|null       $process Child process, or null once it has been closed.
-	 * @param array<int,resource> $pipes Its pipes.
+	 * @param SessionDrain $drain Wait for that request.
+	 * @param string|null  $reconnect Seconds the request spends without a session, or null to keep it.
 	 */
-	private static function reap( mixed $process, array $pipes ): void {
-		if ( is_resource( $process ) && proc_get_status( $process )['running'] ) {
-			proc_terminate( $process, 9 );
-		}
-		foreach ( $pipes as $pipe ) {
-			if ( is_resource( $pipe ) ) {
-				fclose( $pipe );
-			}
-		}
-		if ( is_resource( $process ) ) {
-			proc_close( $process );
-		}
-	}
-
-	public function test_the_exchange_waits_for_a_request_that_started_before_maintenance(): void {
-		$this->mysql_only();
-		$services = $this->services();
+	private function in_flight( SessionDrain $drain, ?string $reconnect ): void {
+		$services = $this->services( $drain );
 		$job      = self::before_swap( $services );
 		$started  = $this->directory . '/writer-started';
-		$process  = proc_open( [ PHP_BINARY, dirname( __DIR__ ) . '/Fixtures/Database/exchange-writer.php', $this->database, $services['site'] . '/.maintenance', $started, '1.0' ], [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
+		$command  = [ PHP_BINARY, dirname( __DIR__ ) . '/Fixtures/Database/exchange-writer.php', $this->database, $services['site'] . '/.maintenance', $started, '1.0' ];
+		$process  = proc_open( null === $reconnect ? $command : [ ...$command, $reconnect ], [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
 		self::assertIsResource( $process );
 		try {
 			fclose( $pipes[0] );
@@ -466,9 +452,42 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( '9001', $this->db->rows( 'SELECT meta_value FROM ' . $this->holder( $applied, 'wp_usermeta', 'retained' ) . " WHERE meta_key='in_flight_post'" )[0]['meta_value'] );
 	}
 
+	/**
+	 * Ends a child process that a failed step left behind: it is killed while it still runs,
+	 * its pipes are closed and it is reaped, so a failing test blocks neither on it nor on
+	 * the database session it holds.
+	 *
+	 * @param resource|null       $process Child process, or null once it has been closed.
+	 * @param array<int,resource> $pipes Its pipes.
+	 */
+	private static function reap( mixed $process, array $pipes ): void {
+		if ( is_resource( $process ) && proc_get_status( $process )['running'] ) {
+			proc_terminate( $process, 9 );
+		}
+		foreach ( $pipes as $pipe ) {
+			if ( is_resource( $pipe ) ) {
+				fclose( $pipe );
+			}
+		}
+		if ( is_resource( $process ) ) {
+			proc_close( $process );
+		}
+	}
+
+	public function test_the_exchange_waits_for_a_request_that_started_before_maintenance(): void {
+		$this->mysql_only();
+		$this->in_flight( new SessionDrain( 0.05, 10.0, 5.0, 0.02, 0.1 ), null );
+	}
+
+	public function test_the_exchange_waits_for_a_request_that_reconnects_during_maintenance(): void {
+		$this->mysql_only();
+		// The request is without a session for 0.1 s, well inside the quiet interval.
+		$this->in_flight( new SessionDrain( 0.05, 10.0, 5.0, 0.02, 0.5 ), '0.1' );
+	}
+
 	public function test_a_session_that_outlasts_the_wait_stops_the_exchange_with_its_own_code(): void {
 		$this->mysql_only();
-		$services = $this->services( new SessionDrain( 0.05, 0.3, 0.3, 0.02 ) );
+		$services = $this->services( new SessionDrain( 0.05, 0.3, 0.3, 0.02, 0.1 ) );
 		$job      = self::before_swap( $services );
 		$open     = MysqliConnection::connect( $this->database ); // For example a long WP-CLI process.
 		self::assertNotNull( $open );

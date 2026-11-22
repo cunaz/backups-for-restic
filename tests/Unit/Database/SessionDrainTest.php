@@ -11,8 +11,19 @@ use BackupsForRestic\Exception\DatabaseFailed;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
-/** The wait for requests that started before maintenance, against a scripted session list. */
+/**
+ * The wait for requests that started before maintenance, against a scripted session list and
+ * a clock that only the sleeper moves. No assertion depends on how fast the host runs.
+ */
 final class SessionDrainTest extends TestCase {
+
+	private const string OWN = 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()';
+
+	/** Simulated time, in seconds. */
+	private float $now = 1000.0;
+
+	/** @var list<float> Requested sleeps. */
+	private array $slept = [];
 
 	/**
 	 * A server whose other sessions of the account `wp` in the database `site` change with
@@ -23,7 +34,8 @@ final class SessionDrainTest extends TestCase {
 	 */
 	private function server( array $listings, ?array $own = null ): object {
 		$own ??= [ self::row( 'wp', 'site' ) ];
-		return new class( $listings, $own ) implements Connection {
+		$clock = fn (): float => $this->now;
+		return new class( $listings, $own, $clock ) implements Connection {
 			/** @var list<string> */
 			public array $queries = [];
 			/** @var list<float> */
@@ -33,19 +45,20 @@ final class SessionDrainTest extends TestCase {
 			/**
 			 * @param list<list<string>>              $listings
 			 * @param list<array<string,string|null>> $own
+			 * @param \Closure():float                $clock
 			 */
-			public function __construct( private array $listings, private array $own ) {}
+			public function __construct( private array $listings, private array $own, private \Closure $clock ) {}
 
 			public function rows( string $sql ): array {
 				$this->queries[] = $sql;
-				if ( 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()' === $sql ) {
+				if ( SessionDrainTest::own() === $sql ) {
 					if ( null !== $this->own_error ) {
 						throw $this->own_error;
 					}
 					return $this->own;
 				}
 				if ( str_starts_with( $sql, 'SELECT ID FROM performance_schema.processlist WHERE ' ) ) {
-					$this->listed[] = microtime( true );
+					$this->listed[] = ( $this->clock )();
 					$ids            = count( $this->listings ) > 1 ? array_shift( $this->listings ) : $this->listings[0];
 					return array_map( static fn ( string $id ): array => [ 'ID' => $id ], $ids );
 				}
@@ -58,6 +71,10 @@ final class SessionDrainTest extends TestCase {
 		};
 	}
 
+	public static function own(): string {
+		return self::OWN;
+	}
+
 	/** @return array<string,string|null> */
 	private static function row( string $account, ?string $database ): array {
 		return [
@@ -66,70 +83,110 @@ final class SessionDrainTest extends TestCase {
 		];
 	}
 
-	public function test_waits_until_every_session_listed_after_the_grace_period_has_ended(): void {
-		$server = $this->server( [ [ '10', '11' ], [ '10', '11', '12' ], [ '11', '12' ], [ '12', '13' ] ] );
-		$start  = microtime( true );
-		( new SessionDrain( 0.0, 5.0, 0.0, 0.001 ) )->wait( $server, 'site', $start, $start + 5.0 );
-		self::assertCount( 4, $server->listed, 'Sessions that appeared after the first listing must not prolong the wait.' );
-		self::assertLessThan( 0.5, microtime( true ) - $start, 'The drain polls instead of sleeping until the bound.' );
-		self::assertSame( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( 'wp' ) . ' AND DB=' . Session::literal( 'site' ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT 4097', end( $server->queries ) );
+	/** A drain on the simulated clock; the sleeper records each sleep and moves the clock. */
+	private function drain( float $grace, float $bound, float $minimum, float $poll, float $quiet ): SessionDrain {
+		return new SessionDrain(
+			$grace,
+			$bound,
+			$minimum,
+			$poll,
+			$quiet,
+			fn (): float => $this->now,
+			function ( float $seconds ): void {
+				$this->slept[] = $seconds;
+				$this->now    += $seconds;
+			}
+		);
 	}
 
-	public function test_the_sessions_are_listed_only_after_the_grace_period(): void {
-		$server  = $this->server( [ [] ] );
-		$entered = microtime( true );
-		( new SessionDrain( 0.08, 5.0, 0.0, 0.001 ) )->wait( $server, 'site', $entered, $entered + 5.0 );
-		self::assertCount( 1, $server->listed );
-		self::assertGreaterThanOrEqual( $entered + 0.08, $server->listed[0] );
-		self::assertLessThan( $entered + 0.3, $server->listed[0] );
-	}
-
-	public function test_a_grace_period_that_has_already_passed_does_not_wait_again(): void {
-		$server = $this->server( [ [] ] );
-		$start  = microtime( true );
-		( new SessionDrain( 0.05, 5.0, 0.0, 0.001 ) )->wait( $server, 'site', $start - 10.0, $start + 5.0 );
-		self::assertLessThan( 0.04, microtime( true ) - $start );
-	}
-
-	public function test_sessions_that_stay_open_are_refused_with_their_own_code_at_the_bound(): void {
-		$server = $this->server( [ [ '10' ] ] );
-		$start  = microtime( true );
+	/**
+	 * Runs a wait and returns its refusal code, or null if the exchange may start.
+	 *
+	 * @param float $entered Time maintenance was entered.
+	 * @param float $deadline End of the tick.
+	 */
+	private function wait( SessionDrain $drain, object $server, float $entered, float $deadline ): ?string {
+		self::assertInstanceOf( Connection::class, $server );
 		try {
-			( new SessionDrain( 0.0, 0.1, 0.0, 0.01 ) )->wait( $server, 'site', $start, $start + 100.0 );
-			self::fail( 'A session from before maintenance was ignored.' );
+			$drain->wait( $server, 'site', $entered, $deadline );
+			return null;
 		} catch ( DatabaseFailed $refused ) {
-			self::assertSame( 'database_exchange_sessions', $refused->context()['code'] ?? null );
+			return (string) ( $refused->context()['code'] ?? '' );
 		}
-		$elapsed = microtime( true ) - $start;
-		self::assertGreaterThanOrEqual( 0.1, $elapsed, 'The bound is the full waiting time.' );
-		self::assertLessThan( 0.6, $elapsed, 'A long tick does not extend the bound.' );
-		self::assertGreaterThan( 2, count( $server->listed ), 'The wait checks the sessions repeatedly.' );
-		self::assertLessThan( 30, count( $server->listed ), 'The wait pauses between two checks.' );
+	}
+
+	public function test_the_first_look_comes_after_the_grace_period(): void {
+		$server = $this->server( [ [] ] );
+		self::assertNull( $this->wait( $this->drain( 2.0, 60.0, 5.0, 0.25, 0.0 ), $server, 1000.0, 1100.0 ) );
+		self::assertSame( [ 2.0 ], $this->slept );
+		self::assertSame( [ 1002.0 ], $server->listed );
+	}
+
+	public function test_a_grace_period_that_has_already_passed_is_not_waited_for_again(): void {
+		$server = $this->server( [ [] ] );
+		self::assertNull( $this->wait( $this->drain( 2.0, 60.0, 5.0, 0.25, 0.0 ), $server, 990.0, 1100.0 ) );
+		self::assertSame( [], $this->slept, 'No sleep is requested for a grace period that is over.' );
+		self::assertSame( [ 1000.0 ], $server->listed );
+	}
+
+	public function test_the_account_must_stay_without_other_sessions_for_the_quiet_interval(): void {
+		$server = $this->server( [ [] ] );
+		self::assertNull( $this->wait( $this->drain( 0.0, 60.0, 5.0, 0.25, 1.0 ), $server, 1000.0, 1100.0 ) );
+		self::assertSame( [ 1000.0, 1000.25, 1000.5, 1000.75, 1001.0 ], $server->listed );
+		self::assertSame( [ 0.25, 0.25, 0.25, 0.25 ], $this->slept );
+	}
+
+	public function test_a_request_that_reconnects_under_a_new_id_is_waited_for(): void {
+		// Session 10 ends, the same request comes back as 11 before the account was quiet long enough.
+		$server = $this->server( [ [ '10' ], [], [ '11' ], [], [], [] ] );
+		self::assertNull( $this->wait( $this->drain( 0.0, 60.0, 5.0, 0.25, 0.5 ), $server, 1000.0, 1100.0 ) );
+		self::assertSame( [ 1000.0, 1000.25, 1000.5, 1000.75, 1001.0, 1001.25 ], $server->listed, 'The quiet interval starts again after every session.' );
+	}
+
+	public function test_sessions_that_stay_are_refused_with_their_own_code_at_the_bound(): void {
+		$server = $this->server( [ [ '10' ] ] );
+		self::assertSame( 'database_exchange_sessions', $this->wait( $this->drain( 0.0, 1.0, 0.0, 0.25, 0.0 ), $server, 1000.0, 2000.0 ) );
+		self::assertSame( [ 1000.0, 1000.25, 1000.5, 1000.75, 1001.0 ], $server->listed, 'A long tick does not extend the bound, and the last look is at the bound.' );
+		self::assertSame( 1001.0, $this->now );
+	}
+
+	public function test_the_last_pause_ends_at_the_bound(): void {
+		$server = $this->server( [ [ '10' ] ] );
+		self::assertSame( 'database_exchange_sessions', $this->wait( $this->drain( 0.0, 0.75, 0.0, 0.5, 0.0 ), $server, 1000.0, 2000.0 ) );
+		self::assertSame( [ 0.5, 0.25 ], $this->slept );
+		self::assertSame( [ 1000.0, 1000.5, 1000.75 ], $server->listed );
+	}
+
+	public function test_a_quiet_interval_cut_off_by_the_bound_does_not_count(): void {
+		$server = $this->server( [ [ '10' ], [ '10' ], [], [] ] );
+		self::assertSame( 'database_exchange_sessions', $this->wait( $this->drain( 0.0, 0.75, 0.0, 0.25, 1.0 ), $server, 1000.0, 2000.0 ) );
 	}
 
 	public function test_the_wait_ends_with_the_tick_but_not_before_the_minimum(): void {
 		$server = $this->server( [ [ '10' ] ] );
-		$start  = microtime( true );
-		try {
-			( new SessionDrain( 0.0, 5.0, 0.0, 0.01 ) )->wait( $server, 'site', $start, $start + 0.1 );
-			self::fail( 'A session from before maintenance was ignored.' );
-		} catch ( DatabaseFailed $refused ) {
-			self::assertSame( 'database_exchange_sessions', $refused->context()['code'] ?? null );
-		}
-		$elapsed = microtime( true ) - $start;
-		self::assertGreaterThanOrEqual( 0.1, $elapsed );
-		self::assertLessThan( 0.6, $elapsed, 'The tick deadline ends the wait before the bound.' );
+		self::assertSame( 'database_exchange_sessions', $this->wait( $this->drain( 0.0, 5.0, 0.0, 0.25, 0.0 ), $server, 1000.0, 1000.5 ) );
+		self::assertSame( 1000.5, $this->now, 'The tick deadline ends the wait before the bound.' );
+		$this->now   = 2000.0;
+		$this->slept = [];
+		self::assertSame( 'database_exchange_sessions', $this->wait( $this->drain( 0.0, 5.0, 1.0, 0.25, 0.0 ), $server, 2000.0, 1970.0 ) );
+		self::assertSame( 2001.0, $this->now, 'A spent tick still grants the minimum wait.' );
+	}
 
-		$start = microtime( true );
-		try {
-			( new SessionDrain( 0.0, 5.0, 0.1, 0.01 ) )->wait( $server, 'site', $start, $start - 30.0 );
-			self::fail( 'A session from before maintenance was ignored.' );
-		} catch ( DatabaseFailed $refused ) {
-			self::assertSame( 'database_exchange_sessions', $refused->context()['code'] ?? null );
-		}
-		$elapsed = microtime( true ) - $start;
-		self::assertGreaterThanOrEqual( 0.1, $elapsed, 'A spent tick still grants the minimum wait.' );
-		self::assertLessThan( 0.6, $elapsed );
+	public function test_by_default_the_account_must_stay_quiet_for_a_second_after_a_two_second_grace(): void {
+		$server = $this->server( [ [] ] );
+		$drain  = new SessionDrain(
+			clock: fn (): float => $this->now,
+			sleep: function ( float $seconds ): void {
+				$this->slept[] = $seconds;
+				$this->now    += $seconds;
+			}
+		);
+		self::assertNull( $this->wait( $drain, $server, 1000.0, 1100.0 ) );
+		self::assertSame( 1002.0, $server->listed[0] );
+		self::assertGreaterThanOrEqual( 1003.0, $this->now );
+		self::assertLessThan( 1003.3, $this->now );
+		self::assertSame( [ 2.0 ], array_values( array_unique( array_slice( $this->slept, 0, 1 ) ) ) );
+		self::assertSame( [ 0.2 ], array_values( array_unique( array_slice( $this->slept, 1 ) ) ), 'The drain polls five times a second.' );
 	}
 
 	public function test_the_budget_covers_the_grace_period_and_the_minimum_wait(): void {
@@ -150,13 +207,9 @@ final class SessionDrainTest extends TestCase {
 	#[DataProvider( 'invisible' )]
 	public function test_sessions_that_cannot_be_listed_name_the_performance_schema( array $own ): void {
 		$server = $this->server( [ [] ], $own );
-		try {
-			( new SessionDrain( 0.0, 5.0, 0.0, 0.001 ) )->wait( $server, 'site', microtime( true ), microtime( true ) + 5.0 );
-			self::fail( 'An invisible session list was trusted.' );
-		} catch ( DatabaseFailed $refused ) {
-			self::assertSame( 'performance_schema', $refused->context()['code'] ?? null );
-		}
+		self::assertSame( 'performance_schema', $this->wait( $this->drain( 0.0, 5.0, 0.0, 0.25, 0.0 ), $server, 1000.0, 1005.0 ) );
 		self::assertSame( [], $server->listed );
+		self::assertSame( [], $this->slept, 'An invisible list is refused at once, without waiting.' );
 	}
 
 	/** @return iterable<string, array{int}> */
@@ -190,8 +243,10 @@ final class SessionDrainTest extends TestCase {
 	}
 
 	public function test_the_session_list_is_bounded_and_validated(): void {
-		$catalog = new SwapCatalog( $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS ) ) ] ) );
+		$server  = $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS ) ) ] );
+		$catalog = new SwapCatalog( $server );
 		self::assertCount( SwapCatalog::MAX_SESSIONS, $catalog->sessions( 'site' ) );
+		self::assertSame( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( 'wp' ) . ' AND DB=' . Session::literal( 'site' ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT 4097', end( $server->queries ) );
 		$catalog = new SwapCatalog( $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS + 1 ) ) ] ) );
 		try {
 			$catalog->sessions( 'site' );

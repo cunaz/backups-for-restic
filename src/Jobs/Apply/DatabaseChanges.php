@@ -603,7 +603,6 @@ final readonly class DatabaseChanges implements StepProvider {
 				if ( $plan->document['prefix'] !== $this->prefix || [] !== ( $this->policy )( $user ) ) {
 					JobConflict::raise( 'The destination or confirming administrator no longer permits this exchange.', [ 'code' => 'database_exchange_changed' ] );
 				}
-				$this->drain->wait( $connection, $plan->document['database'], $entered, $deadline );
 				$job->data['database_swapping_at'] = $this->clock->now()[0];
 				$this->jobs->save( $job );
 				if ( $undo ) {
@@ -616,6 +615,8 @@ final readonly class DatabaseChanges implements StepProvider {
 					];
 					$this->jobs->save( $owner );
 				}
+				// Only a few statements separate the quiet interval from the table locks.
+				$this->drain->wait( $connection, $plan->document['database'], $entered, $deadline );
 				$exchange->run( $plan, $user, $undo, self::field( $job, 'authority' ) );
 			}
 			DatabaseGeneration::record( $owner, $job, $state );
