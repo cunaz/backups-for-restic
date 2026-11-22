@@ -31,10 +31,10 @@ final class DumpKeyTest extends TestCase {
 		yield 'datetime with fractions' => [ 'datetime(6)', '2026-11-20 12:34:56.000001', null, '`k`', "'2026-11-20 12:34:56.000001'", '`k`' ];
 		yield 'negative time' => [ 'time(3)', '-838:59:59.000', null, '`k`', "'-838:59:59.000'", '`k`' ];
 		yield 'MariaDB inet6 with an IPv4 tail' => [ 'inet6', '::ffff:192.0.2.1', null, '`k`', "'::ffff:192.0.2.1'", '`k`' ];
-		yield 'string in its own collation' => [ 'varchar(191)', 'C3A920', 'utf8mb4_unicode_520_ci', 'HEX(`k`)', "_utf8mb4 X'C3A920' COLLATE utf8mb4_unicode_520_ci", '`k`' ];
-		yield 'latin1 string' => [ 'char(10)', 'E5', 'latin1_swedish_ci', 'HEX(`k`)', "_latin1 X'E5' COLLATE latin1_swedish_ci", '`k`' ];
-		yield 'empty string' => [ 'varchar(10)', '', 'utf8mb4_bin', 'HEX(`k`)', "_utf8mb4 X'' COLLATE utf8mb4_bin", '`k`' ];
-		yield 'binary with zero bytes' => [ 'binary(4)', '00FF0000', null, 'HEX(`k`)', "X'00FF0000'", '`k`' ];
+		yield 'string in its own collation' => [ 'varchar(191)', 'c3a920', 'utf8mb4_unicode_520_ci', 'CAST(`k` AS BINARY)', "_utf8mb4 X'c3a920' COLLATE utf8mb4_unicode_520_ci", '`k`' ];
+		yield 'latin1 string' => [ 'char(10)', 'e5', 'latin1_swedish_ci', 'CAST(`k` AS BINARY)', "_latin1 X'e5' COLLATE latin1_swedish_ci", '`k`' ];
+		yield 'empty string' => [ 'varchar(10)', '', 'utf8mb4_bin', 'CAST(`k` AS BINARY)', "_utf8mb4 X'' COLLATE utf8mb4_bin", '`k`' ];
+		yield 'binary with zero bytes' => [ 'binary(4)', '00ff0000', null, 'CAST(`k` AS BINARY)', "X'00ff0000'", '`k`' ];
 	}
 
 	#[DataProvider( 'literals' )]
@@ -45,6 +45,17 @@ final class DumpKeyTest extends TestCase {
 		self::assertSame( '`k`' !== $read, $key->computed() );
 		self::assertSame( $literal, $key->literal( $value ) );
 		self::assertSame( '(' . $column . ' > ' . $literal . ')', KeyColumn::after( [ $key ], [ $value ] ) );
+	}
+
+	public function test_string_and_binary_keys_keep_their_stored_bytes_as_hex_and_other_values_as_sent(): void {
+		// MariaDB returns NULL for HEX() of a value longer than half of max_allowed_packet:
+		// the stored bytes come back whole from CAST(... AS BINARY) and PHP writes the hex.
+		self::assertSame( 'c3a9200078', KeyColumn::of( 'k', 'varchar(191)', 'utf8mb4_unicode_520_ci' )?->cursor( "\xc3\xa9 \x00x" ) );
+		self::assertSame( '00ff', KeyColumn::of( 'k', 'varbinary(8)', null )?->cursor( "\x00\xff" ) );
+		self::assertSame( '', KeyColumn::of( 'k', 'binary(0)', null )?->cursor( '' ) );
+		self::assertSame( '-12.5', KeyColumn::of( 'k', 'decimal(10,1)', null )?->cursor( '-12.5' ) );
+		self::assertSame( '2026-11-20 12:34:56', KeyColumn::of( 'k', 'datetime', null )?->cursor( '2026-11-20 12:34:56' ) );
+		self::assertNull( KeyColumn::of( 'k', 'varchar(10)', 'utf8mb4_bin' )?->cursor( null ), 'A missing value stays missing, so that literal() refuses it.' );
 	}
 
 	/** @return iterable<string, array{string, mixed}> */

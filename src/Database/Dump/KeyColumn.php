@@ -27,10 +27,12 @@ defined( 'ABSPATH' ) || exit;
  * - dates, times and MariaDB's UUID and INET types compare as a quoted literal of their text
  *   form, which the server converts to the column's type; TIMESTAMP values are UTC because
  *   the dump's session uses +00:00;
- * - CHAR and VARCHAR are read as HEX(col), the stored bytes, and compared as a literal of the
- *   column's own character set and collation, so that case, accents and trailing spaces
- *   compare as in the index and no conversion can change a byte;
- * - BINARY and VARBINARY are read as HEX(col) and compared byte by byte.
+ * - CHAR and VARCHAR are read as CAST(col AS BINARY), the stored bytes, kept as hex in the
+ *   cursor and compared as a literal of the column's own character set and collation, so that
+ *   case, accents and trailing spaces compare as in the index and no conversion can change a
+ *   byte. HEX(col) would do the same on MySQL, but MariaDB returns NULL for HEX() of a value
+ *   longer than half of max_allowed_packet;
+ * - BINARY and VARBINARY are read and kept the same way and compared byte by byte.
  *
  * TEXT, BLOB, JSON and spatial columns cannot order pages: an index holds only a prefix of
  * them, and a sort compares only a prefix as well. A key with such a column is not used.
@@ -94,9 +96,20 @@ final readonly class KeyColumn {
 		return match ( $this->kind ) {
 			self::FLOAT                => $column . ' + 0e0',
 			self::ORDINAL              => $column . ' + 0',
-			self::STRING, self::BINARY => 'HEX(' . $column . ')',
+			self::STRING, self::BINARY => 'CAST(' . $column . ' AS BINARY)',
 			default                    => $column,
 		};
+	}
+
+	/**
+	 * The cursor value of what value() read: the stored bytes of a string or binary column as
+	 * hex, which is what literal() takes and what a JSON cursor can hold; anything else as sent.
+	 *
+	 * @param string|null $value Value as the server sent it.
+	 * @return string|null Cursor value, or null if the server sent none.
+	 */
+	public function cursor( ?string $value ): ?string {
+		return null !== $value && in_array( $this->kind, [ self::STRING, self::BINARY ], true ) ? bin2hex( $value ) : $value;
 	}
 
 	/**

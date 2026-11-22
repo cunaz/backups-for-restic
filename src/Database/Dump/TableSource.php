@@ -752,7 +752,7 @@ final class TableSource implements ResumableByteSource {
 			$last  = $rows[ array_key_last( $rows ) ];
 			$after = [];
 			foreach ( $this->table->order as $position => $column ) {
-				$value = $last[ $column->computed() ? $this->aliases[ $position ] : $column->name ] ?? null;
+				$value = $column->cursor( $last[ $column->computed() ? $this->aliases[ $position ] : $column->name ] ?? null );
 				// Checked before anything is written: a column whose type changed since the
 				// catalog read it must not produce a cursor that misses or repeats rows.
 				$column->literal( $value );

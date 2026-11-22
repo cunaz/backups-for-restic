@@ -232,6 +232,34 @@ final class DumpColumnsTest extends TestCase {
 		self::assertSame( $snapshot, $results[0]['snapshot'] ?? null, 'Rows read at two moments are no snapshot, even if the second read finds nothing.' );
 	}
 
+	public function test_a_string_key_continues_from_its_stored_bytes_without_hex_in_any_query(): void {
+		$db     = new class() implements Connection {
+			/** @var list<string> */
+			public array $queries = [];
+
+			public function rows( string $sql ): array {
+				$this->queries[] = $sql;
+				// The page that ends with a name whose stored bytes are C3 A9 20 78.
+				return 1 === count( $this->queries ) ? array_map(
+					static fn ( int $row ): array => [
+						'name'        => 500 === $row ? "\u{e9} x" : 'n' . $row,
+						'__bfr_key_0' => 500 === $row ? "\xc3\xa9 x" : 'n' . $row,
+					],
+					range( 1, 500 )
+				) : [];
+			}
+		};
+		$table  = new Table( 'wp_names', 'CREATE TABLE `wp_names` (`name` varchar(191))', [ 'name' => SqlFormatter::TEXT ], 'PRIMARY', [ new KeyColumn( 'name', KeyColumn::STRING, 'utf8mb4_unicode_520_ci' ) ], 'InnoDB' );
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		while ( '' !== $source->read( 65536 ) ) {
+			continue;
+		}
+		self::assertSame( 'SELECT `name`, CAST(`name` AS BINARY) AS `__bfr_key_0` FROM `wp_names` ORDER BY `wp_names`.`name` LIMIT 500', $db->queries[0] );
+		self::assertStringContainsString( "WHERE (`name` > _utf8mb4 X'c3a92078' COLLATE utf8mb4_unicode_520_ci)", $db->queries[1] );
+		// MariaDB returns NULL for HEX() of a value longer than half of max_allowed_packet.
+		self::assertSame( [], array_filter( $db->queries, static fn ( string $query ): bool => str_contains( $query, 'HEX(' ) ) );
+	}
+
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {
 		$db     = new class() implements Connection {
 			public function rows( string $sql ): array {

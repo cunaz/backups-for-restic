@@ -527,7 +527,14 @@ final class DatabaseDumpTest extends TestCase {
 		$large = array_values( array_filter( $lines, static fn ( string $line ): bool => strlen( $line ) > TableSource::MAX_STATEMENT_BYTES ) );
 		self::assertCount( 1, $large, 'One statement holds the large row alone.' );
 		self::assertStringStartsWith( 'INSERT INTO `huge_rows` (`id`,`body`) VALUES (2,0x', $large[0] );
-		self::assertSame( $db->rows( 'SELECT SHA2(LOWER(HEX(body)), 256) AS digest FROM huge_rows WHERE id = 2' )[0]['digest'], hash( 'sha256', substr( $large[0], strlen( 'INSERT INTO `huge_rows` (`id`,`body`) VALUES (2,0x' ), -2 ) ) );
+		// The digest of the stored bytes, not of HEX(body): MariaDB returns NULL for HEX() of a
+		// value longer than half of max_allowed_packet, which is 16 MiB there by default.
+		$digest = hash_init( 'sha256' );
+		$end    = strlen( $large[0] ) - 2;
+		for ( $at = strlen( 'INSERT INTO `huge_rows` (`id`,`body`) VALUES (2,0x' ); $at < $end; $at += 1048576 ) {
+			hash_update( $digest, (string) hex2bin( substr( $large[0], $at, min( 1048576, $end - $at ) ) ) );
+		}
+		self::assertSame( $db->rows( 'SELECT SHA2(body, 256) AS digest FROM huge_rows WHERE id = 2' )[0]['digest'], hash_final( $digest ) );
 		$trailer = (string) end( $lines );
 		self::assertSame( '-- end table rows=3 bytes=' . ( strlen( $files['010-huge_rows.sql'] ) - strlen( $trailer ) - 1 ), $trailer );
 		self::assertSame( strlen( $large[0] ), self::manifest_table( $files, 'huge_rows' )['largest_statement'] );
