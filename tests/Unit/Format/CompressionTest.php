@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Format;
 
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\Compression;
+use BackupsForRestic\Format\Unpacked;
 use BackupsForRestic\Format\ZstdFrame;
 use BackupsForRestic\Tests\Support\ResticIndexFile;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -429,5 +430,30 @@ final class CompressionTest extends TestCase {
 		// A request limited to 128 MiB, with WordPress loaded and the compressed file in memory.
 		self::limit_memory( memory_get_usage( true ) + 128 * self::MIB - self::WORDPRESS - strlen( $frame ) );
 		self::assertSame( $digest, hash( 'sha256', Compression::decompress( $frame ) ) );
+	}
+
+	public function test_an_unknown_encoding_byte_is_refused_before_anything_is_decompressed(): void {
+		$this->expectException( FormatException::class );
+		$this->expectExceptionMessage( 'Repository file uses an unknown encoding.' );
+		Unpacked::decode( "\x05" . self::SIZED, 2 );
+	}
+
+	public function test_the_plaintext_is_let_go_before_its_compressed_bytes_are_decoded(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		// Eight MiB of random hex digits, about four MiB as zstd.
+		$json   = '["' . bin2hex( random_bytes( 4 * self::MIB - 2 ) ) . '"]';
+		$frame  = (string) zstd_compress( $json, 3 );
+		$digest = hash( 'sha256', $json );
+		unset( $json );
+		memory_reset_peak_usage();
+		$before = memory_get_usage();
+		// Passed as a temporary value, as the repository passes the decrypted file.
+		$decoded = Unpacked::decode( "\x02" . $frame, 2 );
+		$peak    = memory_get_peak_usage() - $before;
+		self::assertSame( $digest, hash( 'sha256', $decoded ) );
+		// Twice the JSON beside one copy of the compressed bytes; the plaintext would be another.
+		self::assertLessThan( 2 * strlen( $decoded ) + 1.5 * strlen( $frame ), $peak );
 	}
 }

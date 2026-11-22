@@ -25,6 +25,11 @@ final class Unpacked {
 	/**
 	 * Decodes the plaintext of an unpacked file into JSON.
 	 *
+	 * The compressed bytes after the encoding byte are a copy. The plaintext is let go before
+	 * they are decoded: when the caller passes it as a temporary value, such as the result of
+	 * decrypting the file, the decoder then works beside one copy of the compressed bytes
+	 * instead of two.
+	 *
 	 * @param string $plaintext Decrypted file content.
 	 * @param int    $version   Repository version.
 	 * @return string JSON.
@@ -38,6 +43,8 @@ final class Unpacked {
 		if ( "\x02" !== $plaintext[0] ) {
 			throw new FormatException( 'Repository file uses an unknown encoding.' );
 		}
-		return Compression::decompress( substr( $plaintext, 1 ) );
+		$compressed = substr( $plaintext, 1 );
+		unset( $plaintext );
+		return Compression::decompress( $compressed );
 	}
 }

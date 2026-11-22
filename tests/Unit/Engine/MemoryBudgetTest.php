@@ -20,6 +20,8 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Compression;
+use BackupsForRestic\Format\Config;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Index\IndexSet;
@@ -28,6 +30,8 @@ use BackupsForRestic\Format\Pack\PackReader;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\CountingBackend;
+use BackupsForRestic\Tests\Support\FileBackend;
+use BackupsForRestic\Tests\Support\ResticIndexFile;
 use BackupsForRestic\Tests\Support\TempDir;
 
 /**
@@ -43,12 +47,42 @@ final class MemoryBudgetTest extends TestCase {
 	/** PHP reserves memory in blocks of this size, so the reserved figure moves in such steps. */
 	private const int BLOCK = 2 * self::MIB;
 
+	/**
+	 * What WordPress 7.1.5 on PHP 8.3 had reserved once it was loaded, in every tick of the CI
+	 * memory runs (ADR 0019).
+	 */
+	private const int WORDPRESS = 34 * self::MIB;
+
 	/** @var list<string> */
 	private array $cleanup = [];
 
+	/**
+	 * PHP's memory limit when the test started.
+	 *
+	 * @var string
+	 */
+	private string $memory_limit = '';
+
+	protected function setUp(): void {
+		$this->memory_limit = (string) ini_get( 'memory_limit' );
+	}
+
 	protected function tearDown(): void {
+		self::limit_memory( $this->memory_limit );
 		foreach ( $this->cleanup as $path ) {
 			TempDir::remove( $path );
+		}
+	}
+
+	/**
+	 * Sets PHP's memory limit; tearDown() restores it.
+	 *
+	 * @param int|string $value Bytes.
+	 */
+	private static function limit_memory( int|string $value ): void {
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The decoder reads PHP's own limit; this test without WordPress sets it as a host would.
+		if ( false === ini_set( 'memory_limit', (string) $value ) ) {
+			throw new \LogicException( 'PHP did not accept the memory limit.' );
 		}
 	}
 
@@ -229,6 +263,48 @@ final class MemoryBudgetTest extends TestCase {
 			}
 		}
 		return $repository;
+	}
+
+	/**
+	 * A format 2 repository on files with one index file that restic 0.14 to 0.16 could have
+	 * written: 150,000 blobs compressed with zstd. Every load from files makes a copy of its
+	 * own, as a response from a server does.
+	 *
+	 * @return array{Repository, int, int} The repository, the length of the JSON and of the stored file.
+	 */
+	private function compressed_index_repository(): array {
+		$directory       = TempDir::create( 'compressed-index' );
+		$this->cleanup[] = $directory;
+		$backend         = new FileBackend( $directory );
+		$repository      = Repository::initialize( $backend, 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$config          = $repository->config();
+		unlink( $directory . '/config' );
+		$backend->save( ObjectType::Config, 'config', $repository->cipher()->seal( ( new Config( Config::VERSION_2, $config->id, $config->chunker_polynomial ) )->to_json() ) );
+		$repository = Repository::open( $backend, $repository->master_key(), new SystemRandom() );
+		$json       = ResticIndexFile::json( ResticIndexFile::COMPRESSED_BLOBS );
+		$id         = $repository->save_unpacked( ObjectType::Index, "\x02" . zstd_compress( $json, 3 ) );
+		return [ $repository, strlen( $json ), (int) $backend->size( ObjectType::Index, $id->hex() ) ];
+	}
+
+	public function test_a_compressed_index_file_of_150000_blobs_loads_in_what_wordpress_leaves_of_128_mib(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		// Building the file needs more than the suite's limit leaves; loading it does not.
+		self::limit_memory( self::reserved() + 128 * self::MIB );
+		[ $repository, $json, $stored ] = $this->compressed_index_repository();
+		$limit                          = self::reserved() + 128 * self::MIB - self::WORDPRESS;
+		self::limit_memory( $limit );
+		$repository->limit_memory( new MemoryBudget( $limit ) );
+
+		memory_reset_peak_usage();
+		$before = memory_get_usage();
+		$index  = $repository->load_index();
+		$peak   = memory_get_peak_usage() - $before;
+		self::assertSame( ResticIndexFile::COMPRESSED_BLOBS, $index->count() );
+		// The decoder's two buffers beside one copy of the stored file: the sealed bytes and the
+		// plaintext are let go before decoding starts.
+		self::assertLessThan( 2 * $json + 1.5 * $stored, $peak );
 	}
 
 	public function test_an_index_that_does_not_fit_stops_loading_from_the_index_files(): void {

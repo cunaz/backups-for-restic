@@ -251,11 +251,27 @@ final class Repository {
 			}
 			$this->memory->check_index_input( $length );
 		}
+		// Each copy is let go once the next one exists: the sealed bytes when they are
+		// decrypted, the plaintext when the compressed bytes are taken out of it. A compressed
+		// file is then decoded beside one copy of itself (ADR 0019).
+		return Unpacked::decode( $this->cipher->open( $this->load_named( $type, $id, $length ) ), $this->config->version );
+	}
+
+	/**
+	 * Loads a file and checks that its content matches its name.
+	 *
+	 * @param ObjectType $type   Index, snapshot or lock.
+	 * @param Id         $id     Name.
+	 * @param int|null   $length Size to load, or null for the whole file.
+	 * @return string Sealed content.
+	 * @throws FormatException If the content does not match its name.
+	 */
+	private function load_named( ObjectType $type, Id $id, ?int $length ): string {
 		$sealed = $this->backend->load( $type, $id->hex(), 0, $length );
 		if ( ! Id::of( $sealed )->equals( $id ) ) {
 			FormatException::raise( 'Repository file content does not match its name.', [ 'type' => $type->value ] );
 		}
-		return Unpacked::decode( $this->cipher->open( $sealed ), $this->config->version );
+		return $sealed;
 	}
 
 	/**
