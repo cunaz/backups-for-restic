@@ -187,22 +187,30 @@ plugin that stops WordPress from starting stops them as well; skip it with
    `ERROR 2020` or `Got a packet bigger than 'max_allowed_packet'`.
 
    If the import stops with `ERROR 1062 … Duplicate entry` in a table that `manifest.json`
-   marks with `"snapshot": false`, the backup read that table in several requests, and a
-   row that was deleted and inserted again with a new key in between is in the dump twice,
-   with its old key and with its new one. The client stopped at that statement: the tables
-   after it in name order are missing as well. Do not turn the file's `INSERT` statements
-   into `REPLACE`: a row that `REPLACE` writes deletes every row it conflicts with in any
-   unique key, which can take two rows away for one. Reconcile the table in a scratch copy:
+   marks with `"snapshot": false`, the backup read that table at more than one moment. One
+   way to such a duplicate is a row that was deleted and inserted again with a new key in
+   between: it is in the dump twice, with its old key and with its new one. The mark alone
+   does not prove that this is what happened; the conflicting rows show it. The client
+   stopped at that statement: the tables after it in name order are missing as well. Do
+   not turn the file's `INSERT` statements into `REPLACE`: a row that `REPLACE` writes
+   deletes every row it conflicts with in any unique key, which can take two rows away for
+   one. Reconcile the table in a scratch copy:
 
-   1. Copy `010-<table>.sql`, remove the unique key that the error names from the copy's
-      `CREATE TABLE` line, and import the copy into an empty scratch database.
-   2. Find the rows that share the value, for example
+   1. Copy `010-<table>.sql`. In the copy's `CREATE TABLE` line, turn every `UNIQUE KEY`
+      into a plain `KEY`, not only the one the error names: a row can conflict in several
+      unique keys, and the import would stop at the next one. If the error names `PRIMARY`,
+      turn `PRIMARY KEY` into `KEY` as well. Import the copy into an empty scratch database.
+   2. For each key you changed, find the rows that share a value, for example
       `SELECT <key columns>, COUNT(*) FROM <table> GROUP BY <key columns> HAVING COUNT(*) > 1`.
-      Keep the copy that the site had last, usually the one with the newer primary key,
-      delete the other, and add the unique key again as the original `CREATE TABLE` has it.
+      Look at the rows of each group and decide which one the site had last; with a row
+      that was inserted again that is usually the one with the newer primary key. Delete
+      the others. Then make the keys unique again as the original `CREATE TABLE` has them;
+      a key that the server refuses to add names a group that is still to be decided.
    3. Export the reconciled table, for example with `mariadb-dump <scratch> <table>`, and
       use that file in place of `010-<table>.sql`; it has no trailer line.
-   4. Import all files again, in name order, into an empty database.
+   4. Import all files again, in name order, into an empty database, and check that the
+      client ends without an `ERROR` line and with exit status 0 before you use that
+      database. If it stops with `ERROR 1062` in another table, repeat these steps for it.
 
    A table marked `"key": []` was read without a key to order its pages: none of its
    primary and unique keys consists only of stored NOT NULL columns of types that compare

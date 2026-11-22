@@ -79,7 +79,10 @@ and makes an interrupted dump start from zero.
   old key and once from the later one with its new key. For a unique key other than the
   paging key the import then stops with a duplicate key. The manifest records for each
   table whether all its rows come from one read view (`"snapshot"`), so that an importer
-  can explain such a failure precisely. The plugin's restore refuses a manifest larger than
+  can explain such a failure precisely. The field speaks of the rows only: a table read
+  with one statement through `$wpdb` has `"snapshot": true` although no transaction held
+  its definition, which the check after each page guards there (see below). The plugin's
+  restore refuses a manifest larger than
   2 MiB before it reads any of it, and sixteen key columns with names of 64 characters take
   up to 6 KiB per table: a manifest that would be larger is written without line breaks,
   then without how the rows were read (`"key"`, `"snapshot"`, `"restarts"`,
