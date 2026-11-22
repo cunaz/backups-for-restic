@@ -284,6 +284,25 @@ final class FileChangeTest extends TestCase {
 		}
 	}
 
+	public function test_a_created_folder_that_gained_many_names_is_kept_without_listing_them(): void {
+		$folder = $this->site . '/uploads';
+		mkdir( $this->staging . $folder, 0700 );
+		self::assertTrue( $this->change->apply( $folder, 'mkdir', null, null, INF ) );
+		self::assertSame( 'remove', $this->change->undo_action( $folder, 'mkdir' ) );
+		// After the review, the folder gains many long names; one of them tells that it is not empty.
+		for ( $index = 0; $index < 8000; ++$index ) {
+			touch( $folder . '/' . str_pad( (string) $index, 240, '-' ) );
+		}
+		memory_reset_peak_usage();
+		$before  = memory_get_usage();
+		$outcome = $this->change->undo( $folder, 'mkdir', INF, 'remove' );
+		$peak    = memory_get_peak_usage() - $before;
+		self::assertSame( self::outcome( 'kept', 'new_children' ), $outcome );
+		// Their listing alone would take more than two megabytes.
+		self::assertLessThan( 1048576, $peak );
+		self::assertCount( 8002, scandir( $folder ) );
+	}
+
 	public function test_a_directory_is_created_and_undone_only_if_owned(): void {
 		mkdir( $this->staging . $this->path );
 		self::assertTrue( $this->change->apply( $this->path, 'mkdir', null, null, INF ) );

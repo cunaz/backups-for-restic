@@ -459,7 +459,7 @@ final readonly class FileChange {
 			return $policy['reason'];
 		}
 		if ( 'mkdir' === $action ) {
-			return [ '.', '..' ] === scandir( $path ) ? null : 'new_children';
+			return self::empty_directory( $path ) ? null : 'new_children';
 		}
 		return self::live_identity( $path ) === $decision['live'] ? null : 'changed_since_apply';
 	}
@@ -659,7 +659,7 @@ final readonly class FileChange {
 			$this->save( $record );
 		}
 		if ( ! self::at( $path, $record['candidate'] ) ) {
-			if ( ! self::at( $prepared, $record['candidate'] ) || self::metadata( $prepared ) !== $record['installed'] || [ '.', '..' ] !== scandir( $prepared ) ) {
+			if ( ! self::at( $prepared, $record['candidate'] ) || self::metadata( $prepared ) !== $record['installed'] || ! self::empty_directory( $prepared ) ) {
 				throw new StorageFailed( 'The prepared directory changed before publication.' );
 			}
 			$this->require_parent( $path, $record );
@@ -694,7 +694,7 @@ final readonly class FileChange {
 	 */
 	private function prepare_candidate_directory( string $prepared, int $mode, string $live_parent ): void {
 		clearstatcache( true );
-		if ( is_link( $prepared ) || ( file_exists( $prepared ) && ( realpath( $prepared ) !== $prepared || ! is_dir( $prepared ) || [ '.', '..' ] !== scandir( $prepared ) ) ) ) {
+		if ( is_link( $prepared ) || ( file_exists( $prepared ) && ( realpath( $prepared ) !== $prepared || ! is_dir( $prepared ) || ! self::empty_directory( $prepared ) ) ) ) {
 			throw new StorageFailed( 'The private copy of a reviewed directory is not an empty directory.' );
 		}
 		if ( ! is_dir( $prepared ) ) {
@@ -1123,11 +1123,36 @@ final readonly class FileChange {
 	 * @throws StorageFailed If the directory has an entry or cannot be removed.
 	 */
 	private function remove_directory( string $path ): void {
-		if ( [ '.', '..' ] !== scandir( $path ) || ! rmdir( $path ) ) {
+		if ( ! self::empty_directory( $path ) || ! rmdir( $path ) ) {
 			throw new StorageFailed( 'A directory created by file apply is no longer empty or cannot be removed.' );
 		}
 		$this->plan->changed( $path, false );
 		$this->observe( 'rmdir', $path );
+	}
+
+	/**
+	 * Whether a directory holds no entry, read only up to its first name: a folder that gained
+	 * very many names is not listed in full to tell that it is not empty. The removal itself
+	 * remains the final check.
+	 *
+	 * @param string $path Directory.
+	 * @return bool Whether it could be read and holds no entry.
+	 */
+	private static function empty_directory( string $path ): bool {
+		$handle = opendir( $path );
+		if ( false === $handle ) {
+			return false;
+		}
+		try {
+			for ( $name = readdir( $handle ); false !== $name; $name = readdir( $handle ) ) {
+				if ( '.' !== $name && '..' !== $name ) {
+					return false;
+				}
+			}
+			return true;
+		} finally {
+			closedir( $handle );
+		}
 	}
 
 	/**
