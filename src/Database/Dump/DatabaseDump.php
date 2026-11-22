@@ -33,9 +33,9 @@ defined( 'ABSPATH' ) || exit;
  * (SharedConnection), without snapshots. Either way every read runs with utf8mb4 results and
  * the time zone +00:00, and the files say so: TIMESTAMP values are UTC, as with mysqldump
  * --tz-utc, and text arrives in the one character set the manifest names. A dump that an
- * earlier version started recorded the session's offset instead; it keeps reading in the
- * session's time zone until it is done, so that all of its files agree with the one offset in
- * its manifest.
+ * earlier version started recorded the session's offset at its start instead; it reads in that
+ * offset until it is done, on either connection, so that all of its files agree with the one
+ * offset in its manifest.
  */
 final class DatabaseDump {
 
@@ -78,10 +78,10 @@ final class DatabaseDump {
 	 * @throws DatabaseFailed If the tables cannot be listed.
 	 */
 	public function files(): array {
-		$state    = $this->state();
-		$version  = $state['version'];
-		$preamble = $this->preamble( $state['time_zone'] );
-		$files    = [];
+		$state     = $this->state();
+		$time_zone = $state['time_zone'];
+		$preamble  = $this->preamble( $time_zone );
+		$files     = [];
 
 		$header  = '-- ' . TableSource::FORMAT . "\n";
 		$header .= "-- Database dump written by the backup plugin. Import every .sql file of this directory in name order,\n";
@@ -90,14 +90,14 @@ final class DatabaseDump {
 
 		foreach ( $state['tables'] as $name ) {
 			$file    = ( new Table( $name, '', [], null, [] ) )->file();
-			$files[] = $this->file( $file, fn ( ?string $cursor ): ByteSource => $this->table( $version, $name, $file, $preamble, $cursor ) );
+			$files[] = $this->file( $file, fn ( ?string $cursor ): ByteSource => $this->table( $time_zone, $name, $file, $preamble, $cursor ) );
 		}
 
 		$views   = $state['views'];
 		$files[] = $this->file(
 			'900-views.sql',
-			function () use ( $version, $views, $preamble ): ByteSource {
-				$catalog = new Catalog( $this->reader( $version ) );
+			function () use ( $time_zone, $views, $preamble ): ByteSource {
+				$catalog = new Catalog( $this->reader( $time_zone ) );
 				$sql     = '-- ' . TableSource::FORMAT . " views\n" . $preamble;
 				foreach ( $views as $view ) {
 					$sql .= 'DROP VIEW IF EXISTS ' . SqlFormatter::identifier( $view ) . ";\n" . $catalog->view( $view ) . ";\n";
@@ -113,7 +113,7 @@ final class DatabaseDump {
 	 * Opens one table's file at a cursor. On a connection of the dump's own, its transaction
 	 * starts before the definition is read, so that definition and rows belong together.
 	 *
-	 * @param int         $version  Version of the dump's state.
+	 * @param string      $time_zone Time zone of the dump's reads.
 	 * @param string      $name     Table name.
 	 * @param string      $file     File name.
 	 * @param string      $preamble Session settings.
@@ -121,8 +121,8 @@ final class DatabaseDump {
 	 * @return TableSource Source.
 	 * @throws DatabaseFailed If the table cannot be described.
 	 */
-	private function table( int $version, string $name, string $file, string $preamble, ?string $cursor ): TableSource {
-		$reader = $this->reader( $version );
+	private function table( string $time_zone, string $name, string $file, string $preamble, ?string $cursor ): TableSource {
+		$reader = $this->reader( $time_zone );
 		if ( $reader instanceof DedicatedConnection ) {
 			$reader->begin( $name );
 		}
@@ -135,12 +135,11 @@ final class DatabaseDump {
 	 * verified, otherwise the site's. A connection of its own that a table closed after an
 	 * unfinished read is replaced.
 	 *
-	 * @param int $version Version of the dump's state.
+	 * @param string $time_zone Time zone of the dump's reads: +00:00, or the offset that a dump of an earlier version recorded.
 	 * @return Connection Reader.
 	 */
-	private function reader( int $version ): Connection {
+	private function reader( string $time_zone ): Connection {
 		if ( null === $this->reader || ( $this->reader instanceof DedicatedConnection && $this->reader->closed() ) ) {
-			$time_zone    = self::STATE_VERSION === $version ? '+00:00' : null;
 			$dedicated    = null === $this->dedicated ? null : ( $this->dedicated )( $time_zone );
 			$this->reader = $dedicated instanceof DedicatedConnection ? $dedicated : new SharedConnection( $this->connection, $time_zone );
 		}
@@ -201,7 +200,7 @@ final class DatabaseDump {
 				'prefix'         => $this->prefix,
 				'tables'         => $tables,
 				'views'          => $state['views'],
-				'trigger_tables' => ( new Catalog( $this->reader( $state['version'] ) ) )->trigger_tables( $state['tables'] ),
+				'trigger_tables' => ( new Catalog( $this->reader( $state['time_zone'] ) ) )->trigger_tables( $state['tables'] ),
 			],
 			JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 		) . "\n";
@@ -251,12 +250,12 @@ final class DatabaseDump {
 				'version'   => is_int( $stored['version'] ?? null ) ? $stored['version'] : 1,
 				'tables'    => array_values( array_filter( $stored['tables'], 'is_string' ) ),
 				'views'     => array_values( array_filter( is_array( $stored['views'] ?? null ) ? $stored['views'] : [], 'is_string' ) ),
-				'time_zone' => is_string( $stored['time_zone'] ?? null ) ? $stored['time_zone'] : '+00:00',
+				'time_zone' => self::offset( $stored['time_zone'] ?? '+00:00' ),
 				'server'    => is_string( $stored['server'] ?? null ) ? $stored['server'] : '',
 				'results'   => $results,
 			];
 		}
-		$catalog = new Catalog( $this->reader( self::STATE_VERSION ) );
+		$catalog = new Catalog( $this->reader( '+00:00' ) );
 		$state   = [
 			'version'   => self::STATE_VERSION,
 			'tables'    => $catalog->table_names( $this->prefix, $this->exclude ),
@@ -268,6 +267,20 @@ final class DatabaseDump {
 		];
 		Files::write_atomic( $this->state_file, (string) json_encode( $state ) );
 		return $state;
+	}
+
+	/**
+	 * Checks a recorded time zone: the reads use it, and the importer accepts only a numeric offset.
+	 *
+	 * @param mixed $offset Recorded value.
+	 * @return string Offset such as +02:00.
+	 * @throws DatabaseFailed If the state file holds something else.
+	 */
+	private static function offset( mixed $offset ): string {
+		if ( ! is_string( $offset ) || 1 !== preg_match( '/\A[+-](?:0[0-9]|1[0-4]):[0-5][0-9]\z/', $offset ) ) {
+			throw new DatabaseFailed( 'The time zone recorded for the database dump is not a numeric offset.' );
+		}
+		return $offset;
 	}
 
 	/**
