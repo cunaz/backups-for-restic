@@ -34,8 +34,13 @@ defined( 'ABSPATH' ) || exit;
  * its definition is read, and this source ends it when it stops or finishes: an InnoDB table
  * is then read from one snapshot per tick. A table without a usable key is read there with
  * one unbuffered statement, which is consistent by itself; only when a tick ends before that
- * statement does, the next tick continues at the row's position with a new one. Elsewhere such
- * a table is read in pages by position.
+ * statement does, the next tick continues at the row's position with a new one. Its rows are
+ * written one by one, each before the next is fetched. Elsewhere such a table is read in pages
+ * by position.
+ *
+ * The pages of a table with values of any size first read the sizes in which their next rows
+ * arrive and fetch only as many as fit into the memory left; the page query and the unbuffered
+ * statement send the values of a row only if the row stays within its share of that memory.
  *
  * The source counts the read views its rows came from: one per tick inside a snapshot, one
  * per statement outside. The manifest records whether that was one, and a table without a key
@@ -242,18 +247,32 @@ final class TableSource implements ResumableByteSource {
 	private bool $streaming = false;
 
 	/**
-	 * A row read from the stream that did not fit into the statement before.
-	 *
-	 * @var array<string, string|null>|null
-	 */
-	private ?array $carry = null;
-
-	/**
 	 * Alias of the size of each row in a query that reads values of any size.
 	 *
 	 * @var string
 	 */
 	private string $size_alias = '__bfr_size';
+
+	/**
+	 * The most bytes that the unbuffered read of this tick fetches of one row; null without values of any size.
+	 *
+	 * @var int|null
+	 */
+	private ?int $cap = null;
+
+	/**
+	 * Length of the INSERT statement that the stream is still filling, 0 if none is open.
+	 *
+	 * @var int
+	 */
+	private int $open = 0;
+
+	/**
+	 * Rows of the INSERT statement that the stream is still filling.
+	 *
+	 * @var int
+	 */
+	private int $open_rows = 0;
 
 	/**
 	 * Pages in a row that ended before their first row because it had grown.
@@ -511,7 +530,8 @@ final class TableSource implements ResumableByteSource {
 				}
 			} catch ( DatabaseFailed $error ) {
 				// A column that was dropped or changed makes a page fail: the table starts over.
-				if ( self::waited( $error ) || ! $this->definition_changed() ) {
+				// A refusal of the dump's own, such as a row too large, is no failed query.
+				if ( isset( $error->context()['code'] ) || self::waited( $error ) || ! $this->definition_changed() ) {
 					self::rethrow( $error, $this->table->name );
 				}
 				$this->changed = true;
@@ -525,6 +545,7 @@ final class TableSource implements ResumableByteSource {
 			$this->stop();
 			return;
 		}
+		$this->close_statement();
 		$this->emit( '-- end table rows=' . $this->rows . ' bytes=' . $this->bytes . "\n" );
 		$this->finished = true;
 		$this->release();
@@ -580,8 +601,7 @@ final class TableSource implements ResumableByteSource {
 	 */
 	private function stop(): void {
 		$this->stopped = true;
-		// A row carried over from the stream was not written; the next tick reads it again.
-		$this->carry = null;
+		$this->close_statement();
 		$this->release();
 	}
 
@@ -670,49 +690,71 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
-	 * Reads one statement's worth of rows of a table without a key from the unbuffered read of
-	 * this tick, which starts at the first row not yet written.
+	 * Reads the next row of a table without a key from the unbuffered read of this tick, which
+	 * starts at the first row not yet written, and writes it before the next one is fetched:
+	 * no other row of the table is held then, so a row that fits into the memory left on its
+	 * own is backed up. Values of any size come only for rows that fit (selection()), so the
+	 * read needs no scan of the table to find its largest row.
 	 *
-	 * @throws DatabaseFailed If the read fails.
+	 * @throws DatabaseFailed If the read fails or a row does not fit into the memory limit.
 	 */
 	private function stream(): void {
 		if ( ! $this->streaming && $this->connection instanceof DedicatedConnection ) {
-			$table = SqlFormatter::identifier( $this->table->name );
-			if ( $this->table->wide ) {
-				// The stream fetches each row whole; the widest must fit before it starts.
-				$widest = (int) ( $this->connection->rows( 'SELECT MAX(' . $this->size() . ') AS widest FROM ' . $table )[0]['widest'] ?? 0 );
-				if ( $widest + $this->estimate( $widest ) > self::room() ) {
-					$this->refuse( $this->estimate( $widest ) );
-				}
-			}
+			$room      = self::room();
+			$this->cap = $this->table->wide && PHP_INT_MAX !== $room ? $this->alone( $room ) : null;
 			// An explicit limit, so that no sql_select_limit of the session applies.
-			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ' LIMIT 18446744073709551615' . ( $this->offset > 0 ? ' OFFSET ' . $this->offset : '' ) );
+			$this->connection->stream( 'SELECT ' . $this->selection( $this->cap ) . ' FROM ' . SqlFormatter::identifier( $this->table->name ) . ' LIMIT 18446744073709551615' . ( $this->offset > 0 ? ' OFFSET ' . $this->offset : '' ) );
 			$this->streaming = true;
 			$this->viewed();
 		}
-		$rows        = null === $this->carry ? [] : [ $this->carry ];
-		$length      = null === $this->carry ? 0 : $this->bound( $this->carry );
-		$this->carry = null;
-		while ( true ) {
-			$row = $this->connection instanceof DedicatedConnection ? $this->connection->next() : null;
-			if ( null === $row ) {
-				$this->streaming = false;
-				$this->exhausted = true;
-				break;
-			}
-			$bound = $this->bound( $row );
-			// About a page's worth, which write() puts into statements of about 1 MiB.
-			if ( [] !== $rows && ( $length + $bound > self::TARGET_PAGE_BYTES || count( $rows ) >= self::STATEMENT_ROWS ) ) {
-				$this->carry = $row;
-				break;
-			}
-			$rows[]  = $row;
-			$length += $bound;
+		$row = $this->connection instanceof DedicatedConnection ? $this->connection->next() : null;
+		if ( null === $row ) {
+			$this->close_statement();
+			$this->streaming = false;
+			$this->exhausted = true;
+			return;
 		}
-		if ( [] !== $rows ) {
-			$this->write( $rows );
-			$this->rows   += count( $rows );
-			$this->offset += count( $rows );
+		$size = (int) ( $row[ $this->size_alias ] ?? 0 );
+		if ( null !== $this->cap && $size > $this->cap ) {
+			$this->close_statement();
+			$this->refuse( $this->estimate( $size ) );
+		}
+		$this->append( $row );
+		++$this->rows;
+		++$this->offset;
+	}
+
+	/**
+	 * Writes a row of the stream into the INSERT statement it is filling, of about
+	 * STATEMENT_BYTES and at most STATEMENT_ROWS rows; a large row gets a statement of its own.
+	 *
+	 * @param array<string, string|null> $row Row.
+	 * @throws DatabaseFailed If the row cannot be encoded within the memory limit.
+	 */
+	private function append( array $row ): void {
+		$bound = $this->bound( $row );
+		if ( $bound > 2 * self::STATEMENT_BYTES ) {
+			$this->close_statement();
+			$this->large( $row, $bound );
+			return;
+		}
+		$tuple = $this->tuple( $row );
+		if ( $this->open > 0 && ( $this->open + 1 + strlen( $tuple ) > self::STATEMENT_BYTES || $this->open_rows >= self::STATEMENT_ROWS ) ) {
+			$this->close_statement();
+		}
+		$this->open += 0 === $this->open ? $this->emit( $this->prefix . $tuple ) : $this->emit( ',' . $tuple );
+		++$this->open_rows;
+	}
+
+	/**
+	 * Ends the INSERT statement that the stream is filling, if any.
+	 */
+	private function close_statement(): void {
+		if ( $this->open > 0 ) {
+			$this->emit( ";\n" );
+			$this->largest   = max( $this->largest, $this->open + 1 );
+			$this->open      = 0;
+			$this->open_rows = 0;
 		}
 	}
 
@@ -1014,6 +1056,11 @@ final class TableSource implements ResumableByteSource {
 	 * @throws DatabaseFailed Always.
 	 */
 	private function refuse( int $bound ): never {
+		if ( $this->streaming && $this->connection instanceof DedicatedConnection ) {
+			// Freed at the end of the request, the read would make the client fetch every row left.
+			$this->streaming = false;
+			$this->connection->abandon();
+		}
 		DatabaseFailed::raise(
 			'A database row is too large to be backed up within the PHP memory limit.',
 			[

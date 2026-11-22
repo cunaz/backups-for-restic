@@ -673,6 +673,52 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertGreaterThan( 1, $site->sizes, 'The page ended before the grown row, whose size was read again.' );
 	}
 
+	public function test_a_table_without_a_key_is_read_without_a_scan_for_its_largest_row(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS scan_rows' );
+		$db->execute( 'CREATE TABLE scan_rows (n INT, body LONGTEXT) ENGINE=InnoDB' );
+		$values = [];
+		for ( $i = 1; $i <= 600; ++$i ) {
+			$values[] = sprintf( "(%d, REPEAT('s', %d))", $i, $i * 10 );
+		}
+		$db->execute( 'INSERT INTO scan_rows VALUES ' . implode( ',', $values ) );
+		$session = null;
+		$open    = static function ( ?string $time_zone ) use ( &$session ): DedicatedConnection {
+			$session = self::database( self::$source );
+			return new DedicatedConnection( $session->mysqli, $time_zone );
+		};
+		$files   = ( new DatabaseDump( $db, $this->directory . '/scan.json', 'scan_', [], 1767323100, $open ) )->files();
+		$table   = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-scan_rows.sql' === $file->name ) )[0];
+
+		// In one part, so that the session the rows came from is still open.
+		$this->read( $table->source, PHP_INT_MAX );
+
+		self::assertInstanceOf( MysqliConnection::class, $session );
+		$scanned = (int) ( $session->rows( "SHOW SESSION STATUS LIKE 'Handler_read_rnd_next'" )[0]['Value'] ?? 0 );
+		self::assertLessThan( 2 * 600, $scanned, 'The rows were read once, not once more to find the largest.' );
+		self::assertGreaterThanOrEqual( 600, $scanned );
+	}
+
+	public function test_on_its_own_connection_two_large_rows_in_a_row_are_backed_up_one_after_the_other(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS pair_rows' );
+		$db->execute( 'CREATE TABLE pair_rows (body LONGBLOB) ENGINE=InnoDB' );
+		$db->execute( "INSERT INTO pair_rows VALUES ('first'), (REPEAT(0x5A, 6291456)), (REPEAT(0x5B, 6291456)), ('last')" );
+		$files = ( new DatabaseDump( $db, $this->directory . '/pair.json', 'pair_', [], 1767323100, self::dedicated() ) )->files();
+		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-pair_rows.sql' === $file->name ) )[0];
+		$limit = (string) ini_get( 'memory_limit' );
+		// Room for one row of 6 MiB with its 12 MiB of SQL and the reserve, not for two such rows.
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 37 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test lowers the limit for one read and restores it.
+		try {
+			$this->read_to_file( $table->source, $this->directory . '/010-pair_rows.sql' );
+		} finally {
+			ini_set( 'memory_limit', $limit ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+		}
+		MysqliConnection::import( self::$target, [ $this->directory . '/010-pair_rows.sql' ] );
+		$query = 'SELECT SHA2(body, 256) AS body FROM pair_rows ORDER BY body';
+		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ) );
+	}
+
 	#[DataProvider( 'connections' )]
 	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone( bool $dedicated ): void {
 		$db   = self::database( self::$source );

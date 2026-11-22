@@ -122,8 +122,11 @@ and makes an interrupted dump start from zero.
   which their next rows arrive, text in another character set converted to utf8mb4, where
   latin1 "é" takes two bytes and "€" three, and fetch only as many as fit, with their SQL,
   into what the memory limit leaves, at least one. A row that cannot fit on its own stops the dump before it is
-  fetched; on the dump's own connection, a table without a key is checked for its largest
-  row before its one statement starts. Through `$wpdb` the sizes and the page are two reads,
+  fetched. On the dump's own connection, a table without a key is read with its one
+  statement row by row: each row is written before the next one is fetched, so that no two
+  large rows are held at once, and the statement asks the server to send a row's values only
+  if the row fits on its own into the memory left when the statement starts, so that no scan
+  of the table looks for its largest row first. Through `$wpdb` the sizes and the page are two reads,
   and a row can grow in between: each row of the page may take an equal share of the memory
   left, and the page asks the server to send a row's values only if the row stays within
   that share. A row that has grown beyond it comes with its size but without its values;
