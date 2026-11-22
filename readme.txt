@@ -29,7 +29,7 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * **Review before live changes.** Compare staged files with the receiving site, confirm the exact changes and undo eligible changes for 24 hours. WordPress startup files and configuration have a separate offline recovery procedure.
 * **Rehearse the database.** Verify snapshot tables in private shadow tables. On an eligible MySQL installation, confirm the table exchange and keep the destination administrator, site address and backup settings. MariaDB and incompatible schemas use the manual SQL import guide.
 * **Recovery kit.** One page with everything needed to restore without the website: repository address, passwords, the CA certificate of a server with its own certificate authority, and the exact restic commands.
-* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`, `ls`, `restore`, `apply-plan`). Use `undo` for a reviewed file reversal and `recovery-kit` for offline credentials. Setup and settings are done in the admin area.
+* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`, `ls`, `restore`, `apply-plan`). Use `undo` for a reviewed file reversal, `database-discard` to forget the private tables of a database restore that stayed on another database server, and `recovery-kit` for offline credentials. Setup and settings are done in the admin area.
 * **Site Health** checks and debug information.
 
 = Requirements =

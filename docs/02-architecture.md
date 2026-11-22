@@ -657,8 +657,10 @@ engine, charset, collation and rows with the current site and lists compatibilit
 Its digest and the original snapshot bind a subsequent live review to the same source.
 
 A separately confirmed database apply reimports the source on supported MySQL sites,
-compares its transcript and checks native table identities. One multi-table RENAME
-under WRITE locks swaps every selected table and its operation witness. The destination
+compares its transcript and checks native table identities. After WordPress enters
+maintenance, the job waits until the requests that started earlier have ended, for at most
+a minute. One multi-table RENAME under WRITE locks then swaps every selected table and its
+operation witness. The destination
 keeps its site address, active plugins, plugin options, cron and confirming administrator.
 The previous generation remains available for undo for 24 hours. Undo retains the entire
 post-apply generation for another 24 hours and supports manual recovery of later edits.
@@ -1098,6 +1100,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | `POST /restores/{id}/download` | Issues a single-use browser POST form for a file, ZIP, restore report or database rehearsal report. The browser submits the grant to WordPress for streaming. |
 | `POST /restores/{id}/database/plan`, `POST /restores/{id}/database/apply` | Review a rehearsed database exchange and confirm the exact table generations. |
 | `GET /database-changes`, `POST /database-changes/{id}/undo-plan`, `POST /database-changes/{id}/undo` | Discover retained database generations, review an undo and queue it. |
+| `POST /database-changes/{id}/discard` | Forgets the binding of a database apply whose private tables are on another database server or in another database, with the WordPress password as `user_password` in the JSON body (403 `wrong_user_password`). Nothing is dropped; the answer names the database, the server UUID and the private table names to remove there. 409 `database_binding_verified` if the connected database holds the tables, `database_binding_missing` if the job holds no binding, `job_conflict` while it or an undo of it runs ([ADR 0043](adr/0043-atomic-mysql-database-exchange.md)). |
 | `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. The optional JSON boolean `include_config` includes configuration in the detailed review. Startup files, including wp-config.php, require offline recovery. |
 | `GET /undo`, `POST /undo/{id}/plan`, `POST /undo/{id}` | List reversible apply jobs, review the original files to recover, then queue the reviewed undo. |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size |
@@ -1266,7 +1269,9 @@ completed, without a repository address, and `forget` and `prune` in retention m
 `restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
 private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
 records. Configuration and startup files require offline recovery. `undo <apply-job>`
-reviews and confirms reversal of live file changes. The recovery guide includes the
+reviews and confirms reversal of live file changes. `database-discard <apply-job> [--yes]`
+lists the private tables of a database apply whose binding belongs to another database
+server or database, and forgets that binding after confirmation without dropping anything. The recovery guide includes the
 `--skip-plugins` procedure for a site whose active plugin prevents normal startup.
 Use the admin page to initiate live changes, configure a repository or review retention.
 `recovery-kit` exports credentials on an interactive terminal after setup. The explicit
