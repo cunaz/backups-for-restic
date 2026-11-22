@@ -82,11 +82,11 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 
 | ID | Threat | Control(s) | Residual |
 | --- | --- | --- | --- |
-| T-01 | Unauthorised user starts a backup/restore, changes settings or downloads staged files [E, T] | The menu and every REST route enforce the configured backup capability. Live file writes also require `update_core` and permission under the host file modification policy. Live database writes require `manage_options`, `edit_users`, `promote_users` and `update_core` alongside the backup capability. A download grant authorizes one exact staged subject. | Compromised administrator account or unredeemed download grant |
-| T-02 | CSRF on destructive actions [T] | WordPress authenticates REST requests with its cookie nonce or an Application Password. File and database apply/undo each require an operation-specific signed review, explicit acknowledgment, the exact home URL and the confirming user’s WordPress password in the JSON body. The download form uses a one-time POST token. | An authenticated administrator can intentionally authorize a destructive change. |
+| T-01 | Unauthorised user starts a backup/restore, changes settings or downloads staged files [E, T] | The menu and every REST route enforce the configured backup capability. Live file writes also require `update_core` and permission under the host file modification policy. Live database writes require `manage_options`, `edit_users`, `promote_users` and `update_core` alongside the backup capability. A download grant authorizes one exact staged subject; a grant of a restored file or archive also needs the user's WordPress password and is recorded (§5.5). Staging itself needs the capability alone, because the staged copy stays in the private directory (§8). | Compromised administrator account or unredeemed download grant; a holder of the capability can stage any path of a snapshot and read the reports |
+| T-02 | CSRF on destructive actions [T] | WordPress authenticates REST requests with its cookie nonce or an Application Password. File and database apply/undo each require an operation-specific signed review, explicit acknowledgment, the exact home URL and the confirming user’s WordPress password in the JSON body. The download form uses a one-time POST token. Wrong WordPress passwords are counted per user and slowed down, and reported to login limiters (§5.5). | An authenticated administrator can intentionally authorize a destructive change. |
 | T-03 | Secrets leak through the database (SQL injection elsewhere, leaked DB dump) [I] | repository password, REST password and cached master key encrypted with a key derived from `wp-config.php` salts (§5); `autoload = no`; constants in `wp-config.php` as an alternative | attacker with DB **and** `wp-config.php` |
 | T-04 | Secrets leak via logs, notices, e-mails, REST responses, HTML forms [I] | `Secret` type redacts itself; `Redactor` masks the registered secret values in job files and event lines (§12); REST errors and e-mails are built from codes, not from log lines; secret fields are write-only; after the setup the recovery kit is sent only with the administrator's WordPress password (§5.5); the stored REST password goes only to the server it was saved for (T-28); tests search the files under `jobs/` and four REST responses for both passwords | browser extensions on the admin's machine |
-| T-05 | Web access to the private directory (caches, checkpoints, staging, KDF checkpoint) [I, T] | directory outside the web root recommended and supported; otherwise `.htaccess`, `web.config`, `index.php`, `0700`; **active HTTP probe**: if it reads its file back, the Doctor is critical and backups stop; the cache is encrypted with the master key; from Milestone 3 staging and import files `0600` and short-lived | servers that serve dotfiles and ignore modes, caught by the probe when it can run. Where the site cannot request itself, the administrator's browser makes the request and reports the answer; until one has, the finding is `unverified`; a restore requires a verified denial before it stages plaintext under a public path |
+| T-05 | Web access to the private directory (caches, checkpoints, staging, KDF checkpoint) [I, T] | directory outside the web root recommended and supported; otherwise `.htaccess`, `web.config`, `index.php`, `0700`; **active HTTP probe**: if it reads its file back, the Doctor is critical and backups stop; the cache is encrypted with the master key; from Milestone 3 staging and import files `0600` and short-lived | servers that serve dotfiles and ignore modes, caught by the probe when it can run. A refusal (403, 404 or 410) counts as a denial only when the same check also gets the plugin's stylesheet back byte for byte from the same scheme, host and port, with a random query past any cache: a firewall, a CDN challenge or another virtual host that refuses the probe fails that control, and the finding stays `unverified`. Where the site cannot request itself, the administrator's browser makes both requests and reports the answers; until one has, the finding is `unverified`; a restore requires a verified denial before it stages plaintext under a public path. `restores/` and every staging directory carry the deny files and the `index.php` of the root, against servers that list directories. A challenge that lets a cached stylesheet through but stops the probe, or a server that serves the directory only to others, still passes |
 | T-06 | Nonce reuse or weak randomness breaks confidentiality of AES-CTR [I] | nonces, salts, ids and passwords from `random_bytes()` (CSPRNG) only; one nonce per sealed object; unit test asserts distinct nonces across a batch; no deterministic nonce derivation anywhere | OS CSPRNG failure |
 | T-07 | Tampered or corrupted repository objects accepted (malicious server, MITM, disk error) [T] | Poly1305 tag verified before any decryption (constant time); blob id (SHA-256 of plaintext) verified after decryption; the names of index, snapshot and lock files verified against their content on download, the name of a pack when the check reads the whole pack; index and tree JSON validated against expected shapes; a failed tag aborts the job with `authentication_failed`, a wrong id or shape with `repository_damaged` | — |
 | T-08 | Weak password brute-forced from a leaked key file [I] | generated passwords are 192-bit random; a password that somebody chose for a new repository, in the request or in `wp-config.php`, must have at least 12 characters, which the core enforces (`Connection\Setup::create()` refuses a shorter one with `password_too_short`); scrypt with `N ≥ 16384, r = 8` (restic's default); key files live only on the repository server | weak user passwords remain weak; the password of an existing repository is taken as it is |
@@ -121,7 +121,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 | Repository master key | derived once from the password via the key file | changes only with `restic copy` to a new repository | every seal/open; cached in the secret store |
 | REST password | the `.htpasswd` of the rest-server, or the BorgBase control panel | change it on the server. After setup the plugin takes the new one under Settings → Repository, where it is tested against the server before it is saved, or through the constant `BACKUPS_FOR_RESTIC_REST_PASSWORD` | `Authorization` header |
 | REST username | the `.htpasswd` of the rest-server, or the BorgBase control panel; stored as a plain setting, not as a secret, and not masked in logs | with the password; after setup through the constant `BACKUPS_FOR_RESTIC_REST_USERNAME` | `Authorization` header |
-| Download tokens | 256 random bits per download from `Storage\DownloadTokens` | Single use, one hour, at most 256 outstanding | An authenticated REST request issues a grant for the exact job, download kind and file path. Only token and subject hashes plus expiry are stored in an owner-only file. The POST download redeems the grant atomically and reopens the checked staged file. Token and file name stay out of the URL. |
+| Download tokens | 256 random bits per download from `Storage\DownloadTokens` | Single use, one hour, at most 256 outstanding | An authenticated REST request issues a grant for the exact job, download kind and file path; for a restored file or archive only with the WordPress password and after an audit entry (§5.5). Only token and subject hashes plus expiry are stored in an owner-only file. The POST download redeems the grant atomically and reopens the checked staged file. Token and file name stay out of the URL. |
 
 ### 5.2 Storage: encrypted option, or constants
 
@@ -214,6 +214,57 @@ carries `Cache-Control: no-store`.
   entered. The kit's view has copy and download, so no second request is needed, and a
   window in which a session gets the kit without the password would only help whoever
   took the session over.
+
+The same secrets can be taken from restored content: the eight salt constants in
+`wp-config.php` are the key material of the secret store (§5.2), and the dump of the options
+table holds its ciphertexts. The download of a restored file or of a restore's ZIP is
+therefore guarded like the kit:
+
+- Its grant (`POST /restores/{id}/download` with `kind` `file` or `archive`) needs the
+  WordPress password of the current user in the JSON body of the same request. An
+  application password, which authenticates the request, is not enough.
+- Every grant requires a durable audit entry with time, user, the restore job, the kind
+  and the path before the token is issued. The path is kept in Go's quoting, so that a line
+  break, a control character or bytes that are not UTF-8 in a snapshot name cannot break
+  the list or a log line; a path longer than 1 KiB is cut and marked. The last twenty stay
+  in the state option, the Settings tab shows the latest five beside the deliveries of the
+  kit, and the action `backups_for_restic_download_granted` fires for audit plugins. A
+  refused request and a file that the restore does not hold are not recorded.
+- What stays behind the capability alone: staging itself (`POST /jobs` with `type: restore`),
+  which only writes the copy into the private directory (§8), and the two reports, the
+  restore report (`entries.jsonl`: names, types, modes, times, sizes and link targets, which
+  the snapshot routes show anyway) and the database rehearsal's report (table names, row
+  counts, engines, collations, privileges, server versions and a digest of the content, no
+  row values). The admin page fetches the rehearsal's report by itself for its preview. A
+  download kind that is neither report counts as content.
+- A restore job records the user who started it, and the job view shows it.
+
+Every route that asks for the WordPress password asks through one check
+(`WordPress\PasswordConfirmation`), and wrong passwords are counted per user
+(`Storage\ConfirmationThrottle`):
+
+- The first three wrong passwords in a row cost nothing but the refusal. After the fourth
+  the next attempt waits one minute, and every further wrong password doubles the wait: 1,
+  2, 4, 8, 16 and 32 minutes. From the tenth on, every wrong password locks the
+  confirmation of that user for an hour. The right password forgets the count, and so does
+  a day without an attempt.
+- While a user waits, no password of theirs is checked at all, so the answer during a wait
+  says nothing about the password. It is 429 `user_password_throttled` with a `Retry-After`
+  header.
+- An attempt is counted before its password is checked, in the state option under its
+  file lock, so that requests sent at the same moment cannot share one try; the right
+  password takes its count back. Where the count cannot be stored, no password is checked.
+- The count is the user's own: what one account sends changes the count of no other, and
+  only the right password, or a day of quiet, ends it early. A stolen session can lock its
+  own account's confirmation for an hour at a time, not its login, and not anybody else's.
+- Each wrong password fires core's `wp_login_failed` action with the login and a `WP_Error`
+  of the code `incorrect_password`, as core's login does, so that login limiters and
+  fail2ban rules count these attempts. An attempt without a password is refused and not
+  counted, as by core.
+- Residual: a limiter that blocks on the `authenticate` filter does not stop these checks
+  (the plugin's own count does), and a two-factor plugin does not take part, because only
+  the password is asked for. At the rates above a stolen session gets 32 guesses in the
+  first day and 24 in each day after.
 
 ## 6. Cryptography and format implementation
 
@@ -323,6 +374,19 @@ carries `Cache-Control: no-store`.
   read the document, or with the uninstall.
   Active review, apply and undo jobs can pin their source while they run. Database
   rehearsal reports and ZIP downloads share staging's ownership and expiry rules.
+- Who may do what with staging: staging needs the backup capability alone, because the
+  staged copy stays in the private directory, readable by the PHP user only. Taking it out
+  of there is guarded: the download of a restored file or ZIP needs the WordPress password
+  and is recorded (§5.5); the restore report and the rehearsal's report hold metadata and
+  need the capability alone. Applying files or tables to the live site needs the checks of
+  T-01 and T-02.
+- `restores/` and every staging directory in it (`restores/<job-id>/`) carry the deny files
+  and the empty `index.php` of the private root. The restore job writes them when it creates
+  the directory, and every request that prepares the private directory adds those that are
+  missing, for staging from before; a directory set aside for removal and a link are left
+  alone. They are defence in depth: where a web server ignores the deny files but lists
+  directories, `index.php` keeps it from listing the job IDs and what a restore staged.
+  The staged tree itself gets no such file, because it is the snapshot's content.
 - Restore staging is owner-only whatever the snapshot recorded: every staged file is `0600`
   and every staged directory `0700`. A snapshot's `0644` or `0666` file and its `0755` or
   `0777` directory are never staged with those modes; the original mode is kept in the
@@ -355,8 +419,11 @@ carries `Cache-Control: no-store`.
 The admin menu, REST routes and worker authorization share the configured backup
 capability (default `manage_options`). Live file and database operations apply the
 additional checks in T-01 and T-02. Staging and rehearsal use the backup capability.
+Every route that asks for the WordPress password asks through one check, which counts
+wrong passwords per user, slows them down and reports them to `wp_login_failed` (§5.5).
 Multisite is refused. The download handler accepts a one-time bearer grant issued through
-the authenticated REST API. It uses POST, streams the verified descriptor and disables
+the authenticated REST API; the grant of a restored file or ZIP also needs the WordPress
+password and is recorded (§5.5). It uses POST, streams the verified descriptor and disables
 caching. File-change maintenance admits the initiating control cookie or header to the
 ordinary WordPress authorization checks for that job. The plugin enqueues admin assets
 only on its own screen and uses local WordPress scripts.
@@ -368,8 +435,8 @@ whoever holds its password, chose them. A snapshot ID is 64 hex digits and a pat
 before it is decoded, and a path only ever selects entries inside the snapshot, never a
 file of the site. A directory is answered in pages of at most 1000 entries. Text that is
 not valid UTF-8 reaches a response only with replacement characters, and the command line
-prints names with control characters quoted, so that a stored name cannot send escape
-sequences to a terminal ([ADR 0039](adr/0039-snapshot-routes.md)). The answers hold file
+prints names, link targets and the host names of `snapshots` with control characters
+quoted, so that a stored name cannot send escape sequences to a terminal ([ADR 0039](adr/0039-snapshot-routes.md)). The answers hold file
 names and the site's manifest, no secret; like every route they need the capability. A
 read creates a shared lock in the repository and removes it, which is its only write there;
 on the site it writes encrypted trees and the index into the cache of the private directory.
