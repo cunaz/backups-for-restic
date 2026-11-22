@@ -452,6 +452,25 @@ final class Messages {
 	}
 
 	/**
+	 * Message and hint for a WordPress password that is not checked yet, because too many
+	 * wrong ones came before it (Storage\ConfirmationThrottle).
+	 *
+	 * @param int $seconds Seconds until the password is checked again.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function password_throttled( int $seconds ): array {
+		$minutes = max( 1, (int) ceil( $seconds / 60 ) );
+		return [
+			'message' => __( 'Too many wrong WordPress passwords were entered for this account.', 'backups-for-restic' ),
+			'hint'    => sprintf(
+				/* translators: %d: number of minutes. */
+				_n( 'The password is checked again in %d minute. If you did not enter them, change your WordPress password, log out everywhere else and revoke application passwords you do not know in your profile.', 'The password is checked again in %d minutes. If you did not enter them, change your WordPress password, log out everywhere else and revoke application passwords you do not know in your profile.', $minutes, 'backups-for-restic' ),
+				$minutes
+			),
+		];
+	}
+
+	/**
 	 * Builds a label and description pair.
 	 *
 	 * @param string $label       Label.

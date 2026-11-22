@@ -28,6 +28,7 @@ use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
 use BackupsForRestic\Settings\Schema;
+use BackupsForRestic\Storage\ConfirmationThrottle;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Decoded;
 
@@ -119,7 +120,8 @@ final class RestRoutes {
 
 	/**
 	 * Runs the method of a route. What a method does not answer itself, such as settings that
-	 * the database refused to store, becomes an error response instead of a fatal error.
+	 * the database refused to store, becomes an error response instead of a fatal error. A
+	 * refusal that says how long to wait also says it in a Retry-After header.
 	 *
 	 * @param \Closure                               $route   The method.
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
@@ -127,10 +129,17 @@ final class RestRoutes {
 	 */
 	private function answer( \Closure $route, \WP_REST_Request $request ): mixed {
 		try {
-			return $route( $request );
+			$answer = $route( $request );
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
+		$data = $answer instanceof \WP_Error ? $answer->get_error_data() : null;
+		if ( $answer instanceof \WP_Error && is_array( $data ) && is_int( $data['retry_after'] ?? null ) ) {
+			$response = rest_convert_error_to_response( $answer );
+			$response->header( 'Retry-After', (string) $data['retry_after'] );
+			return $response;
+		}
+		return $answer;
 	}
 
 	/**
@@ -863,9 +872,9 @@ final class RestRoutes {
 		if ( ! is_bool( $include_config ) || ( ( $undo || $database ) && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $undo, $id, $include_config, $digest, $plan_job, $database ) ) ) {
 			return $this->error( $database ? 'database_exchange_changed' : 'live_plan_changed', 409 );
 		}
-		$user = wp_get_current_user();
-		if ( ! is_string( $body['user_password'] ?? null ) || ! wp_check_password( $body['user_password'], $user->user_pass, $user->ID ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->password_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		return [ $id, $digest, $include_config, $plan_job ];
 	}
@@ -1136,8 +1145,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function create_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		if ( ! $this->may_see_kit( $request ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->kit_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		try {
 			// The answer is the recovery kit: what the kit needs has to be there before a repository exists.
@@ -1164,8 +1174,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function connect_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		if ( ! $this->may_see_kit( $request ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->kit_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		try {
 			// The answer contains the recovery kit: what the kit needs has to be there first.
@@ -1270,8 +1281,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function recovery_kit( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		if ( ! $this->password_confirmed( $request ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->password_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		try {
 			$kit = RecoveryKit::deliver( $this->container, 'settings' );
@@ -1314,15 +1326,34 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Whether the request carries the WordPress password of the current user, as proof that the
-	 * administrator is present and not only a session of theirs.
+	 * Checks the WordPress password of the current user, as proof that the administrator is
+	 * present and not only a session of theirs. Every route that asks for the password asks
+	 * here (docs/03-security-and-threat-model.md §5.5). The password is taken from the JSON
+	 * body only, never from the address, which access logs keep. Wrong passwords are counted
+	 * per user; after too many the password is not checked for a while (PasswordConfirmation).
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return bool True if the password is right.
+	 * @return \WP_Error|null Null if the password is right, otherwise the refusal.
 	 */
-	private function password_confirmed( \WP_REST_Request $request ): bool {
-		$user = wp_get_current_user();
-		return wp_check_password( self::text( $request, 'user_password' ), $user->user_pass, $user->ID );
+	private function password_refusal( \WP_REST_Request $request ): ?\WP_Error {
+		$checker = new PasswordConfirmation( new ConfirmationThrottle( $this->container->state(), $this->container->clock() ) );
+		$refusal = $checker->check( $request->get_json_params()['user_password'] ?? null );
+		if ( null === $refusal ) {
+			return null;
+		}
+		if ( 'user_password_throttled' !== $refusal['code'] ) {
+			return $this->error( 'wrong_user_password', 403 );
+		}
+		$texts = Messages::password_throttled( $refusal['wait'] );
+		return new \WP_Error(
+			'backups_for_restic_user_password_throttled',
+			$texts['message'],
+			[
+				'status'      => 429,
+				'hint'        => $texts['hint'],
+				'retry_after' => $refusal['wait'],
+			]
+		);
 	}
 
 	/**
@@ -1331,10 +1362,10 @@ final class RestRoutes {
 	 * for the recovery kit route (docs/03-security-and-threat-model.md §5.5).
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return bool True if allowed.
+	 * @return \WP_Error|null Null if allowed, otherwise the refusal.
 	 */
-	private function may_see_kit( \WP_REST_Request $request ): bool {
-		return ! $this->container->settings()->bool( 'setup.completed' ) || $this->password_confirmed( $request );
+	private function kit_refusal( \WP_REST_Request $request ): ?\WP_Error {
+		return $this->container->settings()->bool( 'setup.completed' ) ? $this->password_refusal( $request ) : null;
 	}
 
 	/**
