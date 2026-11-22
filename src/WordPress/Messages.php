@@ -150,7 +150,7 @@ final class Messages {
 			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
-				'hint'    => __( 'The job retries automatically using its saved database progress and operation witness.', 'backups-for-restic' ),
+				'hint'    => __( 'The job tried again several times from its saved database progress and operation witness, then stopped. When the database server answers and no other client holds long locks on the site tables, start the rehearsal or the database change again.', 'backups-for-restic' ),
 			],
 			'database_admin_collision' => [
 				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
@@ -177,8 +177,8 @@ final class Messages {
 				'hint'    => __( 'Keep the private job directory, reconnect the original database with its restore permissions, and allow the next heartbeat to retry.', 'backups-for-restic' ),
 			],
 			'database_exchange_sessions' => [
-				'message' => __( 'Other connections to the site database did not end during maintenance, so the table exchange did not start.', 'backups-for-restic' ),
-				'hint'    => __( 'The job tries again automatically. Persistent database connections, long-running WP-CLI processes or another application using the same database account keep connections open; stop them before the next attempt.', 'backups-for-restic' ),
+				'message' => __( 'Other connections to the site database did not end during maintenance in several attempts, so the table exchange did not start and the job stopped.', 'backups-for-restic' ),
+				'hint'    => __( 'Persistent database connections, long-running WP-CLI processes or another application using the same database account keep connections open. Stop them, then review and confirm the database change again.', 'backups-for-restic' ),
 			],
 			'performance_schema' => [
 				'message' => __( 'The database server does not list every connection, so the table exchange cannot tell whether earlier requests have ended.', 'backups-for-restic' ),

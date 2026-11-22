@@ -25,6 +25,16 @@ final class DatabaseMessagesTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_errors_that_are_retried_are_shown_only_after_the_last_attempt_and_say_so(): void {
+		foreach ( [ 'database_exchange_sessions', 'database_restore_busy' ] as $code ) {
+			$text = self::text( $code );
+			self::assertStringContainsString( 'stopped', $text, $code );
+			self::assertDoesNotMatchRegularExpression( '/tries again|retries|next attempt/', $text, $code );
+		}
+		self::assertStringContainsString( 'review and confirm the database change again', self::text( 'database_exchange_sessions' ) );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_the_packet_hint_says_how_to_get_the_sql_and_which_limits_count(): void {
 		$text = self::text( 'database_restore_packet' );
 		self::assertStringContainsString( 'stage the snapshot’s database directory again with the rehearsal switched off', $text );
