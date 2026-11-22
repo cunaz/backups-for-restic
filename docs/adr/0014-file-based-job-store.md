@@ -80,3 +80,10 @@ count as an existing job. The first options layout number is inserted atomically
 overwrites a competing writer's value. A malformed options marker is preserved and keeps
 the plugin inactive, including leaving jobs and locks alone during deactivation; only a
 missing marker denotes legacy settings.
+
+Since 2026-11 `job.json` is written durably: the temporary document is synchronised before its
+rename and the job's directory after it, and a new job directory is synchronised in `jobs/`
+before its first document is written. A power loss can then neither empty a document nor bring
+back an older one than a step's next change relies on, such as a live file apply or a table
+exchange ([ADR 0041](0041-guarded-file-changes.md), As built). A save costs two
+synchronisations; a backup tick saves twice, a file apply once per changed entry.

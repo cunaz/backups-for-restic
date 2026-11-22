@@ -343,6 +343,16 @@ carries `Cache-Control: no-store`.
   local process that controls those directories. The live planner binds each operation
   to the verified source and destination. The worker rechecks the reviewed state before
   writing. Browser downloads require a single-use grant and a still-eligible staged file.
+- A live file apply synchronises each journal record to disk before the live change it
+  authorises, and each private copy before the record that names it (ADR 0041). Every job
+  document is synchronised too, and a new job directory in `jobs/` before its first
+  document, so that a power loss cannot leave a partial apply without the record of its
+  undo journal. What a process of the same user changes in a live entry between the
+  worker's last check and the rename or unlink is lost, and such a rename can replace an
+  empty directory created at the same name in that moment. In a folder of more than 2,048
+  names, a second spelling of a name that another process creates in the same second as
+  one of the worker's own changes can stay hidden from the worker's rechecks for up to
+  about one and a quarter seconds.
 - The zip writer for downloads (`Storage\Zip\ZipWriter`, ADR 0038) reads staging the same
   way: it inspects every entry with `lstat()` and ends on a symbolic link, a second hard
   link or a special file. It refuses names that are not valid UTF-8 or that could leave the
