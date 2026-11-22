@@ -138,20 +138,27 @@ final class RestoreSteps implements StepProvider {
 	 */
 	public function restore( Job $job, EventLog $log, float $deadline ): bool {
 		if ( 'database_import' === ( $job->progress['phase'] ?? null ) ) {
-			if ( $this->preview()->advance( $this->services, $job, $deadline ) ) {
-				$job->progress['phase'] = 'database_cleanup';
+			if ( ! $job->cancel_requested ) {
+				if ( $this->preview()->advance( $this->services, $job, $deadline ) ) {
+					$job->progress['phase'] = 'database_cleanup';
+				}
+				return false;
 			}
-			return false;
+			// Every file is staged, so a request to cancel ends only the rehearsal (ADR 0037).
+			// Its tables go as after a rehearsal that finished.
+			$job->warn( 'Cancelled after the files were staged: the database rehearsal stopped and has no report. The staged files are kept.' );
+			$log->write( 'info', 'Cancelled after the files were staged; the database rehearsal stops and its tables are removed.' );
+			$job->progress['phase'] = 'database_cleanup';
 		}
 		if ( 'database_cleanup' === ( $job->progress['phase'] ?? null ) ) {
 			if ( ! $this->preview()->clean( $job, $deadline ) ) {
 				return false;
 			}
 			$job->progress['phase'] = 'complete';
-			return $this->after_staging( $job );
+			return $this->after_staging( $job, $log );
 		}
 		if ( 'archiving' === ( $job->progress['phase'] ?? null ) ) {
-			return $this->archive( $job, $deadline );
+			return $this->archive( $job, $log, $deadline );
 		}
 		if ( 'complete' !== $this->advance( $job, $log, $deadline ) ) {
 			return false;
@@ -177,7 +184,7 @@ final class RestoreSteps implements StepProvider {
 			// Returning before DDL ensures the runner persists the cleanup identity first.
 			return false;
 		}
-		return $this->after_staging( $job );
+		return $this->after_staging( $job, $log );
 	}
 
 	/**
@@ -196,27 +203,39 @@ final class RestoreSteps implements StepProvider {
 	/**
 	 * Continues with archive creation or recording after staging and any database rehearsal.
 	 *
-	 * @param Job $job Restore job.
+	 * @param Job      $job Restore job.
+	 * @param EventLog $log Log.
 	 * @return bool Whether recording can begin.
 	 */
-	private function after_staging( Job $job ): bool {
+	private function after_staging( Job $job, EventLog $log ): bool {
 		if ( RestoreRequest::from_job( $job )->archive ) {
 			$job->progress['phase'] = 'archiving';
-			return false;
+			// A request to cancel that came during the rehearsal ends the archive before it begins.
+			return $job->cancel_requested && $this->archive( $job, $log, 0.0 );
 		}
 		return true;
 	}
 
 	/**
 	 * Builds the optional archive in the remaining restore ticks. Staged files stay usable
-	 * when a name cannot be archived or the second copy does not fit on disk.
+	 * when a name cannot be archived or the second copy does not fit on disk, and when a
+	 * request to cancel comes while it is built: every file is staged by then, so the
+	 * request ends only the archive (ADR 0037).
 	 *
-	 * @param Job   $job      Job with completed staging.
-	 * @param float $deadline End of this tick.
+	 * @param Job      $job      Job with completed staging.
+	 * @param EventLog $log      Log.
+	 * @param float    $deadline End of this tick.
 	 * @return bool Whether recording may begin.
 	 */
-	private function archive( Job $job, float $deadline ): bool {
+	private function archive( Job $job, EventLog $log, float $deadline ): bool {
 		$writer = new ZipWriter( $this->services->files_dir( $job ), $this->services->staging_dir( $job ) . '/' . RestoreServices::ARCHIVE );
+		if ( $job->cancel_requested ) {
+			$job->warn( 'Cancelled after the files were staged: the ZIP was not built. The staged files are kept and can be downloaded one by one.' );
+			$log->write( 'info', 'Cancelled after the files were staged; the ZIP is not built.' );
+			self::discard( $job, $writer );
+			$job->progress['phase'] = 'complete';
+			return true;
+		}
 		try {
 			if ( ! $writer->advance( $deadline ) ) {
 				$job->progress['archive_bytes'] = $writer->progress()['bytes'];
@@ -225,14 +244,24 @@ final class RestoreSteps implements StepProvider {
 		} catch ( InvalidArgument | StorageFailed $error ) {
 			$name = $error->context()['name'] ?? '';
 			$job->warn( 'ZIP unavailable. ' . $error->getMessage() . ( is_string( $name ) && '' !== $name ? ' ' . $name : '' ) );
-			try {
-				$writer->discard();
-			} catch ( StorageFailed ) {
-				$job->warn( 'Archive working files will be removed when staging expires.' );
-			}
+			self::discard( $job, $writer );
 		}
 		$job->progress['phase'] = 'complete';
 		return true;
+	}
+
+	/**
+	 * Removes an unfinished archive and its working files.
+	 *
+	 * @param Job       $job    Job, which is told if they stay.
+	 * @param ZipWriter $writer Writer of the archive.
+	 */
+	private static function discard( Job $job, ZipWriter $writer ): void {
+		try {
+			$writer->discard();
+		} catch ( StorageFailed ) {
+			$job->warn( 'Archive working files will be removed when staging expires.' );
+		}
 	}
 
 	/**

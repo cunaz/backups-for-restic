@@ -194,6 +194,52 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( [], $done->warnings );
 	}
 
+	/**
+	 * A restore of the docs with an archive, driven until the archive is being written.
+	 */
+	private function archiving(): Job {
+		$job      = $this->restore_job( $this->backup(), [ $this->site . '/docs' ], true );
+		$building = $this->drive( $job, static fn ( Job $pending ): bool => ( $pending->progress['archive_bytes'] ?? 0 ) > 0 );
+		self::assertSame( 'archiving', $building->progress['phase'] ?? null );
+		self::assertFileExists( $this->staging( $job ) . '/selection.zip.part', 'The archive is being written.' );
+		return $building;
+	}
+
+	/**
+	 * What a cancel that came while the archive was built leaves: the staged files, recorded
+	 * as the result of a restore that succeeded, and nothing of the archive.
+	 */
+	private function assert_staged_without_archive( Job $job ): void {
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+		self::assertFileExists( $this->staging( $job ) . '/entries.jsonl' );
+		foreach ( [ '', '.part', '.entries', '.state' ] as $suffix ) {
+			self::assertFileDoesNotExist( $this->staging( $job ) . '/selection.zip' . $suffix );
+		}
+		self::assertCount( 1, $job->warnings );
+		self::assertStringContainsString( 'the ZIP was not built', $job->warnings[0] );
+		self::assertSame( $job->id, ( new SiteState( $this->options ) )->get( 'last_restore' )['job'] ?? null );
+		self::assertSame( [], $this->locks() );
+	}
+
+	public function test_a_cancel_while_the_zip_is_built_ends_only_the_zip(): void {
+		$job = $this->archiving();
+
+		$this->runner()->cancel( $job->id );
+
+		$this->assert_staged_without_archive( $this->drive( $job ) );
+	}
+
+	public function test_deactivating_the_plugin_while_the_zip_is_built_keeps_the_staged_files(): void {
+		$job = $this->archiving();
+
+		// What the deactivation does: no tick comes after this call.
+		$stopped = $this->runner()->stop( 10.0, [ 'reason' => 'deactivation' ] );
+
+		self::assertNotNull( $stopped );
+		$this->assert_staged_without_archive( $stopped );
+	}
+
 	public function test_a_backup_and_a_restore_in_many_short_ticks_stage_identical_bytes(): void {
 		$snapshot = $this->backup();
 
@@ -506,6 +552,11 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( [ 'preflight', 'unlocking', 'planning', 'restoring', 'recording' ], JobType::Restore->steps() );
 		self::assertSame( [ 'releasing', 'cleaning_up' ], JobType::Restore->cleanup_steps() );
 		self::assertTrue( JobType::Restore->cancels_before( 'restoring' ) );
+		self::assertTrue( JobType::Restore->cancels_before( 'restoring', 'restore' ) );
+		foreach ( [ 'complete', 'database_import', 'database_cleanup', 'archiving' ] as $phase ) {
+			self::assertFalse( JobType::Restore->cancels_before( 'restoring', $phase ), 'Every file is staged in ' . $phase . '; the step answers the cancel itself.' );
+		}
+		self::assertTrue( JobType::Backup->cancels_before( 'backing_up', 'archiving' ), 'Only a restore knows these phases.' );
 		self::assertFalse( JobType::Restore->cancels_before( 'recording' ), 'Staged files are recorded, not thrown away by a late cancel.' );
 		self::assertFalse( JobType::Restore->is_maintenance() );
 	}

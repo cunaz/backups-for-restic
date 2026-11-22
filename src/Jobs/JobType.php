@@ -130,15 +130,29 @@ enum JobType: string {
 	}
 
 	/**
+	 * The phases of a restore's step restoring that come after its last file is staged:
+	 * the optional database rehearsal and archive (ADR 0037, ADR 0038).
+	 */
+	public const array STAGED_PHASES = [ 'complete', 'database_import', 'database_cleanup', 'archiving' ];
+
+	/**
 	 * Whether a request to cancel still stops the job before a step. It does before the
 	 * steps that do the work. Once the work is done, the snapshot written, the packs
 	 * deleted or the files staged, only its result is left to record: a job that stopped
 	 * there would call itself cancelled over work that it did all the same.
 	 *
-	 * @param string $step Step name.
+	 * A restore rehearses its database and builds its archive in its step restoring, after
+	 * the last file is staged. From then on that step answers a request to cancel itself:
+	 * it ends what is optional and unfinished and keeps the staged files.
+	 *
+	 * @param string $step  Step name.
+	 * @param mixed  $phase The phase in the job's progress, which says how far a step is.
 	 * @return bool True if the job can still be cancelled before the step.
 	 */
-	public function cancels_before( string $step ): bool {
+	public function cancels_before( string $step, mixed $phase = null ): bool {
+		if ( self::Restore === $this && 'restoring' === $step && in_array( $phase, self::STAGED_PHASES, true ) ) {
+			return false;
+		}
 		return 'recording' !== $step && ! $this->is_cleanup( $step );
 	}
 
