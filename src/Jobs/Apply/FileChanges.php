@@ -68,14 +68,15 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * Creates the service.
 	 *
-	 * @param JobStore                        $jobs Jobs.
-	 * @param Staging                         $staging Restore retention.
-	 * @param Clock                           $clock Time.
-	 * @param int                             $hours Staging lifetime.
-	 * @param \Closure(bool,string):ApplyPlan $planner Current live site policy.
-	 * @param FileMaintenance                 $maintenance WordPress maintenance marker.
-	 * @param \Closure():bool                 $allowed Host-wide permission to write live files.
-	 * @param FileSpace|null                  $space Host filesystem capacity.
+	 * @param JobStore                                     $jobs Jobs.
+	 * @param Staging                                      $staging Restore retention.
+	 * @param Clock                                        $clock Time.
+	 * @param int                                          $hours Staging lifetime.
+	 * @param \Closure(bool,string,string|null=):ApplyPlan $planner Live site policy, with the uploads root a job was confirmed with or the current one.
+	 * @param FileMaintenance                              $maintenance WordPress maintenance marker.
+	 * @param \Closure():bool                              $allowed Host-wide permission to write live files.
+	 * @param FileSpace|null                               $space Host filesystem capacity.
+	 * @param (\Closure():string)|null                     $uploads Current uploads root, recorded with a confirmed job: its later ticks boot without the filters of the theme and ordinary plugins.
 	 */
 	public function __construct(
 		private JobStore $jobs,
@@ -85,7 +86,8 @@ final readonly class FileChanges implements StepProvider {
 		private \Closure $planner,
 		private FileMaintenance $maintenance,
 		private \Closure $allowed,
-		?FileSpace $space = null
+		?FileSpace $space = null,
+		private ?\Closure $uploads = null
 	) {
 		$this->space   = $space ?? new FileSpace( $jobs->storage_directory() );
 		$this->journal = new ApplyJournal( $jobs, $staging, $clock, $hours );
@@ -184,6 +186,7 @@ final readonly class FileChanges implements StepProvider {
 						'digest'            => $digest,
 						'maintenance_grant' => $control_hash,
 						'plan_job'          => $plan_job,
+						'uploads_dir'       => null === $this->uploads ? null : ( $this->uploads )(),
 					]
 				);
 			}
@@ -246,6 +249,7 @@ final readonly class FileChanges implements StepProvider {
 						'digest'            => $digest,
 						'maintenance_grant' => $control_hash,
 						'plan_job'          => $plan_job,
+						'uploads_dir'       => null === $this->uploads ? null : ( $this->uploads )(),
 					]
 				);
 			}
@@ -290,7 +294,7 @@ final readonly class FileChanges implements StepProvider {
 		$this->require_writes();
 		if ( JobType::Undo === $job->type ) {
 			$original = $this->journal->original( ApplyJournal::field( $job, 'apply' ), true );
-			self::confirmed( $this->undo_summary( $original ), $digest );
+			self::confirmed( $this->undo_summary( $original, self::uploads( $job ) ), $digest );
 			$job->progress['total'] = $this->journal->attempted( $original );
 			$this->enter_maintenance( $job );
 			$job->step = 'undoing';
@@ -299,7 +303,7 @@ final readonly class FileChanges implements StepProvider {
 		}
 		$restore = ApplyJournal::field( $job, 'restore' );
 		$config  = true === ( $job->data['include_config'] ?? null );
-		$rows    = $this->rows( $restore, $config, true );
+		$rows    = $this->rows( $restore, $config, true, ApplyManifest::MAX_BYTES, self::uploads( $job ) );
 		$preview = $this->summary( $restore, $config, $rows );
 		self::confirmed( $preview, $digest );
 		$job->data['remaining_bytes'] = $preview['required_bytes'];
@@ -341,7 +345,7 @@ final readonly class FileChanges implements StepProvider {
 		if ( $head['restore'] !== $restore || $head['subject'] !== ( $undo ? $original->id : $restore ) || $head['undo'] !== $undo || $head['config'] !== ( ! $undo && $config ) || $head['changes'] < 1 || $head['refused'] > 0 ) {
 			throw new JobConflict( 'The sealed file preview does not match the approved operation.' );
 		}
-		$plan      = ( $this->planner )( $config, $restore );
+		$plan      = ( $this->planner )( $config, $restore, self::uploads( $job ) );
 		$files     = $this->journal->files( $restore, true );
 		$forward   = $undo ? $this->plans->approved( $original ) : null;
 		$attempted = $undo ? $this->journal->attempted( $original ) : 0;
@@ -460,7 +464,7 @@ final readonly class FileChanges implements StepProvider {
 			return true;
 		}
 		$files = $this->journal->files( ApplyJournal::field( $original, 'restore' ), true );
-		$plan  = ( $this->planner )( true === ( $original->data['include_config'] ?? null ), ApplyJournal::field( $original, 'restore' ) );
+		$plan  = ( $this->planner )( true === ( $original->data['include_config'] ?? null ), ApplyJournal::field( $original, 'restore' ), self::uploads( $job ) );
 		$made  = [];
 		foreach ( $rows as $ordinal => $entry ) {
 			if ( 'mkdir' === $entry['action'] ) {
@@ -618,23 +622,40 @@ final readonly class FileChanges implements StepProvider {
 	}
 
 	/**
+	 * The uploads root the job was confirmed with. Its later ticks boot without the theme
+	 * and ordinary plugins, so an upload_dir filter there no longer applies.
+	 *
+	 * @param Job $job Apply or undo.
+	 * @return string|null Root, or null where the job recorded none.
+	 * @throws StorageFailed If the recorded root is unreadable.
+	 */
+	private static function uploads( Job $job ): ?string {
+		$uploads = $job->data['uploads_dir'] ?? null;
+		if ( null !== $uploads && ( ! is_string( $uploads ) || '' === $uploads ) ) {
+			throw new StorageFailed( 'The confirmed uploads directory of the job is unreadable.' );
+		}
+		return $uploads;
+	}
+
+	/**
 	 * Reads the staged report under the current eligibility decision.
 	 *
-	 * @param string $restore Restore job.
-	 * @param bool   $config Include configuration.
-	 * @param bool   $retained Allow pinned staging for an active job.
-	 * @param int    $limit Synchronous byte budget.
+	 * @param string      $restore Restore job.
+	 * @param bool        $config Include configuration.
+	 * @param bool        $retained Allow pinned staging for an active job.
+	 * @param int         $limit Synchronous byte budget.
+	 * @param string|null $uploads Uploads root of a confirmed job, null for the current one.
 	 * @return list<Row> Confirmable entries.
 	 * @throws InvalidArgument If the completed report is unavailable.
 	 */
-	private function rows( string $restore, bool $config, bool $retained, int $limit = ApplyManifest::MAX_BYTES ): array {
+	private function rows( string $restore, bool $config, bool $retained, int $limit = ApplyManifest::MAX_BYTES, ?string $uploads = null ): array {
 		$files  = $this->journal->files( $restore, $retained );
 		$report = $this->staging->open_download( $restore, $this->hours, 'report', '', $retained );
 		if ( null === $report ) {
 			throw new InvalidArgument( 'The complete staging report is unavailable.' );
 		}
 		try {
-			return ApplyManifest::build( ( $this->planner )( $config, $restore ), $files, $report, $this->jobs->device(), $limit, FilePlans::INLINE_BYTES === $limit );
+			return ApplyManifest::build( ( $this->planner )( $config, $restore, $uploads ), $files, $report, $this->jobs->device(), $limit, FilePlans::INLINE_BYTES === $limit );
 		} finally {
 			fclose( $report );
 		}
@@ -671,18 +692,19 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * Rechecks the original journal and any changes to live files before offering undo.
 	 *
-	 * @param Job $apply Original apply job.
+	 * @param Job         $apply Original apply job.
+	 * @param string|null $uploads Uploads root of a confirmed undo, null for the current one.
 	 * @return Preview Undo preview.
 	 * @throws StorageFailed If the undo cursor exceeds the confirmed manifest.
 	 */
-	private function undo_summary( Job $apply ): array {
+	private function undo_summary( Job $apply, ?string $uploads = null ): array {
 		if ( is_string( $apply->data['plan_job'] ?? null ) ) {
 			throw new JobConflict( 'This apply requires a completed background undo preview.' );
 		}
 		$restore  = ApplyJournal::field( $apply, 'restore' );
 		$files    = $this->journal->files( $restore, true );
 		$config   = true === ( $apply->data['include_config'] ?? null );
-		$plan     = ( $this->planner )( $config, $restore );
+		$plan     = ( $this->planner )( $config, $restore, $uploads );
 		$rows     = $this->load( $apply );
 		$undo     = [];
 		$removals = [];

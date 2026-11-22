@@ -65,15 +65,16 @@ final class FileChangesTest extends TestCase {
 			$this->staging,
 			$this->clock,
 			1,
-			function ( bool $config, string $id ): ApplyPlan {
+			function ( bool $config, string $id, ?string $uploads = null ): ApplyPlan {
 				$restore = $this->jobs->get( $id );
 				self::assertNotNull( $restore );
-				$layout = SiteLayout::from_job( $restore, $this->live, $this->uploads );
+				$layout = SiteLayout::from_job( $restore, $this->live, $uploads ?? $this->uploads );
 				return new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
 			},
 			new FileMaintenance( $this->live ),
 			fn (): bool => $this->allowed,
-			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free )
+			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free ),
+			fn (): string => $this->uploads
 		);
 		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
 	}
@@ -385,6 +386,22 @@ final class FileChangesTest extends TestCase {
 		$this->undo( $job );
 		self::assertDirectoryDoesNotExist( $this->uploads . '/album' );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_a_confirmed_apply_keeps_its_uploads_root_while_its_ticks_boot_without_the_filter(): void {
+		$this->stage_fresh();
+		$confirmed = $this->uploads;
+		$preview   = $this->changes->preview( $this->restore );
+		$job       = $this->changes->start_apply( $this->restore, false, $preview['digest'] );
+		$this->runner->tick( 0.0 );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		// Ticks under the marker boot without the ordinary plugin whose upload_dir filter
+		// chose the uploads root of the review, and WordPress reports its default instead.
+		$this->uploads = $this->live . '/default-uploads';
+		mkdir( $this->uploads );
+		$this->run_job( $job );
+		self::assertSame( 'imported upload', file_get_contents( $confirmed . '/album/photo.txt' ) );
+		self::assertDirectoryDoesNotExist( $this->uploads . '/album' );
 	}
 
 	public function test_overlapping_fresh_destinations_refuse_the_entire_apply(): void {
