@@ -20,7 +20,8 @@ defined( 'ABSPATH' ) || exit;
  *
  * - integers, YEAR and DECIMAL compare as the exact numbers the server sends, unsigned
  *   64-bit values above PHP_INT_MAX included, because they stay strings; a DECIMAL has up to
- *   65 digits, of which MySQL allows 30 and MariaDB 38 after the point;
+ *   65 digits, of which MySQL allows 30 and MariaDB 38 after the point; the leading zeros of
+ *   ZEROFILL are dropped from the cursor, so that the number fits its kind's form;
  * - FLOAT and DOUBLE are read as `col + 0e0`, the exact double, because the server prints a
  *   FLOAT with fewer digits than it has;
  * - BIT, ENUM and SET are read as `col + 0` and compared with that number: ENUM and SET sort
@@ -104,13 +105,22 @@ final readonly class KeyColumn {
 
 	/**
 	 * The cursor value of what value() read: the stored bytes of a string or binary column as
-	 * hex, which is what literal() takes and what a JSON cursor can hold; anything else as sent.
+	 * hex, which is what literal() takes and what a JSON cursor can hold; an integer or DECIMAL
+	 * without the leading zeros of ZEROFILL, which pads to a display width of up to 255
+	 * characters, as a string, so that it compares as the same number; anything else as sent.
 	 *
 	 * @param string|null $value Value as the server sent it.
 	 * @return string|null Cursor value, or null if the server sent none.
 	 */
 	public function cursor( ?string $value ): ?string {
-		return null !== $value && in_array( $this->kind, [ self::STRING, self::BINARY ], true ) ? bin2hex( $value ) : $value;
+		if ( null === $value ) {
+			return null;
+		}
+		return match ( $this->kind ) {
+			self::STRING, self::BINARY  => bin2hex( $value ),
+			self::INTEGER, self::DECIMAL => (string) preg_replace( '/\A(-?)0+(?=[0-9])/', '$1', $value ),
+			default                      => $value,
+		};
 	}
 
 	/**

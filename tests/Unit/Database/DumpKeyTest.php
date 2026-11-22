@@ -60,6 +60,23 @@ final class DumpKeyTest extends TestCase {
 		self::assertNull( KeyColumn::of( 'k', 'varchar(10)', 'utf8mb4_bin' )?->cursor( null ), 'A missing value stays missing, so that literal() refuses it.' );
 	}
 
+	public function test_zero_filled_numbers_continue_as_their_value_whatever_their_width(): void {
+		// ZEROFILL pads to the display width, which can exceed the 20 digits of any integer.
+		$int = KeyColumn::of( 'k', 'int(21) unsigned zerofill', null );
+		self::assertInstanceOf( KeyColumn::class, $int );
+		self::assertSame( '42', $int->cursor( '000000000000000000042' ) );
+		self::assertSame( '(`k` > 42)', KeyColumn::after( [ $int ], [ $int->cursor( '000000000000000000042' ) ] ) );
+		self::assertSame( '0', $int->cursor( '000000000000000000000' ) );
+		self::assertSame( '18446744073709551615', KeyColumn::of( 'k', 'bigint(25) unsigned zerofill', null )?->cursor( '0000018446744073709551615' ) );
+		self::assertSame( '18446744073709551615', KeyColumn::of( 'k', 'bigint unsigned', null )?->cursor( '18446744073709551615' ) );
+		self::assertSame( '-2147483648', KeyColumn::of( 'k', 'int', null )?->cursor( '-2147483648' ) );
+		$decimal = KeyColumn::of( 'k', 'decimal(30,10) unsigned zerofill', null );
+		self::assertInstanceOf( KeyColumn::class, $decimal );
+		self::assertSame( '12.5000000000', $decimal->cursor( '00000000000000000012.5000000000' ) );
+		self::assertSame( '0.5000000000', $decimal->cursor( '00000000000000000000.5000000000' ) );
+		self::assertSame( '12.5000000000', $decimal->literal( $decimal->cursor( '00000000000000000012.5000000000' ) ) );
+	}
+
 	/** @return iterable<string, array{string, mixed}> */
 	public static function values_of_another_form(): iterable {
 		yield 'text in an integer key' => [ 'int', '12abc' ];

@@ -771,6 +771,26 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertStringContainsString( "INSERT INTO `lock_rows` (`id`,`body`) VALUES (1,'a'),(2,'b');", $this->read( $table->source, PHP_INT_MAX ), 'The next try reads the table.' );
 	}
 
+	public function test_a_zero_filled_key_wider_than_any_integer_pages_by_its_value(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS zf_rows' );
+		// ZEROFILL pads to the display width: 21 and 65 characters here.
+		$db->execute( 'CREATE TABLE zf_rows (k INT(21) UNSIGNED ZEROFILL NOT NULL, d DECIMAL(65,0) UNSIGNED ZEROFILL NOT NULL, body VARCHAR(100) NOT NULL, PRIMARY KEY (k, d)) ENGINE=InnoDB' );
+		$values = [];
+		for ( $i = 1; $i <= 1200; ++$i ) {
+			$values[] = sprintf( "(%d, %d, 'row %d')", intdiv( $i, 2 ) * 7, $i, $i );
+		}
+		$db->execute( 'INSERT INTO zf_rows VALUES ' . implode( ',', $values ) );
+		self::assertSame( [ [ 'k' => '000000000000000000007' ] ], $db->rows( 'SELECT k FROM zf_rows WHERE k > 0 ORDER BY k LIMIT 1' ) );
+
+		$manifest = $this->dump_and_import( $db, 'zf_' );
+
+		$query = 'SELECT * FROM zf_rows ORDER BY k, d';
+		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ) );
+		$tables = array_column( $manifest['tables'], null, 'name' );
+		self::assertSame( 1200, $tables['zf_rows']['rows'] ?? null );
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().
