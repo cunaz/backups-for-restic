@@ -7,6 +7,8 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
+use BackupsForRestic\Exception\DatabaseFailed;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Support\ResumableByteSource;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -410,6 +412,101 @@ final class DatabaseDumpTest extends TestCase {
 		}
 	}
 
+	/**
+	 * A plugin update adds a column between two ticks. The CREATE already written has no such
+	 * column, so the table starts over with the new definition instead of continuing with
+	 * INSERT statements that the CREATE does not fit.
+	 */
+	#[DataProvider( 'connections' )]
+	public function test_a_column_added_between_two_ticks_starts_the_table_over( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS pin_items' );
+		$this->fill_items( $db, 'pin_items' );
+
+		$manifest = $this->dump_and_import(
+			$db,
+			'pin_',
+			static function ( string $file, int $part ) use ( $db ): void {
+				if ( 1 === $part ) {
+					$db->execute( 'ALTER TABLE pin_items ADD COLUMN added INT NOT NULL DEFAULT 7' );
+				}
+			},
+			$dedicated ? self::dedicated() : null
+		);
+
+		$target = self::database( self::$target );
+		// The columns as the server uses them; SHOW CREATE TABLE prints an inherited collation differently.
+		self::assertSame( $db->rows( 'SHOW FULL COLUMNS FROM pin_items' ), $target->rows( 'SHOW FULL COLUMNS FROM pin_items' ) );
+		self::assertSame( $db->rows( 'SELECT * FROM pin_items ORDER BY id' ), $target->rows( 'SELECT * FROM pin_items ORDER BY id' ) );
+		self::assertSame( 1, $manifest['tables'][0]['restarts'] );
+	}
+
+	public function test_a_table_that_changes_its_definition_at_every_tick_stops_the_dump_with_its_own_code(): void {
+		$db = self::database( self::$source );
+		$this->fill_items( $db, 'unstable_items' );
+		try {
+			$this->dump_and_import(
+				$db,
+				'unstable_',
+				static fn ( string $file, int $part ) => $db->execute( 'ALTER TABLE unstable_items ADD COLUMN c' . $part . ' INT NOT NULL DEFAULT 0' ),
+				self::dedicated()
+			);
+			self::fail( 'A table whose definition never holds cannot be backed up.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_unstable', JobError::from_throwable( $error )->code );
+			self::assertSame( 'unstable_items', $error->context()['table'] );
+		}
+	}
+
+	/**
+	 * On the site's connection nothing holds the definition during a tick: a column added
+	 * between two pages of one tick is found before the trailer, and the next tick starts
+	 * the table over.
+	 */
+	public function test_on_the_site_connection_a_change_within_a_tick_starts_the_table_over(): void {
+		$db = self::database( self::$source );
+		$this->fill_items( $db, 'within_items' );
+
+		$files = $this->dump_with_change( $db, 'within_', '010-within_items.sql', static fn () => $db->execute( 'ALTER TABLE within_items ADD COLUMN added INT NOT NULL DEFAULT 7' ), false );
+
+		$target = self::database( self::$target );
+		// The columns as the server uses them; SHOW CREATE TABLE prints an inherited collation differently.
+		self::assertSame( $db->rows( 'SHOW FULL COLUMNS FROM within_items' ), $target->rows( 'SHOW FULL COLUMNS FROM within_items' ) );
+		self::assertSame( $db->rows( 'SELECT * FROM within_items ORDER BY id' ), $target->rows( 'SELECT * FROM within_items ORDER BY id' ) );
+		self::assertSame( 1, self::manifest_table( $files, 'within_items' )['restarts'] );
+	}
+
+	/**
+	 * On a connection of its own, the tick holds the table's metadata lock from before the
+	 * definition is read until the tick ends: an ALTER waits, here until its time runs out.
+	 */
+	public function test_on_its_own_connection_a_tick_keeps_the_definition_of_its_table(): void {
+		$db = self::database( self::$source );
+		$this->fill_items( $db, 'locked_items' );
+		$other = self::database( self::$source );
+		$other->execute( 'SET SESSION lock_wait_timeout = 1' );
+		$waited = null;
+
+		$files = $this->dump_with_change(
+			$db,
+			'locked_',
+			'010-locked_items.sql',
+			static function () use ( $other, &$waited ): void {
+				try {
+					$other->execute( 'ALTER TABLE locked_items ADD COLUMN added INT NOT NULL DEFAULT 7' );
+					$waited = false;
+				} catch ( \RuntimeException $error ) {
+					$waited = str_contains( $error->getMessage(), 'Lock wait timeout' );
+				}
+			}
+		);
+
+		self::assertTrue( $waited, 'The ALTER had to wait for the end of the tick.' );
+		self::assertSame( $db->rows( 'SELECT * FROM locked_items ORDER BY id' ), self::database( self::$target )->rows( 'SELECT * FROM locked_items ORDER BY id' ) );
+		self::assertSame( 0, self::manifest_table( $files, 'locked_items' )['restarts'] );
+		self::assertTrue( self::manifest_table( $files, 'locked_items' )['snapshot'] );
+	}
+
 	#[DataProvider( 'connections' )]
 	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone( bool $dedicated ): void {
 		$db   = self::database( self::$source );
@@ -480,30 +577,31 @@ final class DatabaseDumpTest extends TestCase {
 	}
 
 	/**
-	 * Dumps the tables with a prefix in one tick on a connection of the dump's own. One table is
-	 * changed after its first block was read, while its source is still open, and the files are
-	 * imported into the target database.
+	 * A table of 3,000 rows of about 500 bytes, read in several parts with a stop after every read.
+	 */
+	private function fill_items( MysqliConnection $db, string $table ): void {
+		$db->execute( 'CREATE TABLE ' . $table . ' (id INT NOT NULL PRIMARY KEY, body VARCHAR(500) NOT NULL) ENGINE=InnoDB' );
+		$values = [];
+		for ( $i = 1; $i <= 3000; ++$i ) {
+			$values[] = sprintf( "(%d, '%s')", $i, str_repeat( 'i', 480 ) );
+		}
+		foreach ( array_chunk( $values, 500 ) as $chunk ) {
+			$db->execute( 'INSERT INTO ' . $table . ' VALUES ' . implode( ',', $chunk ) );
+		}
+	}
+
+	/**
+	 * Dumps the tables with a prefix in one tick, on a connection of the dump's own unless
+	 * $dedicated is false. One table is changed after its first block was read, while its
+	 * source is still open, and the files are imported into the target database.
 	 *
 	 * @param \Closure(): mixed $change Changes the table.
 	 * @return array<string, string> File contents by name.
 	 */
-	private function dump_with_change( MysqliConnection $db, string $prefix, string $changed, \Closure $change ): array {
+	private function dump_with_change( MysqliConnection $db, string $prefix, string $changed, \Closure $change, bool $dedicated = true ): array {
 		$files = [];
-		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'change.json', $prefix, [], 1767323100, self::dedicated() ) )->files() as $file ) {
-			if ( $changed !== $file->name ) {
-				$files[ $file->name ] = $this->read( $file->source, PHP_INT_MAX );
-				continue;
-			}
-			$source  = ( $file->source )( null );
-			$content = $source->read( 65536 );
-			$change();
-			for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
-				$content .= $block;
-			}
-			self::assertInstanceOf( ResumableByteSource::class, $source );
-			self::assertNull( $source->cursor(), 'The table was read in one tick.' );
-			array_push( $this->warnings, ...$source->warnings() );
-			$files[ $file->name ] = $content;
+		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'change.json', $prefix, [], 1767323100, $dedicated ? self::dedicated() : null ) )->files() as $file ) {
+			$files[ $file->name ] = $this->read( $file->source, PHP_INT_MAX, null, $changed === $file->name ? static fn () => $change() : null );
 		}
 		foreach ( $files as $name => $content ) {
 			if ( str_ends_with( $name, '.sql' ) ) {
@@ -580,8 +678,9 @@ final class DatabaseDumpTest extends TestCase {
 	 *
 	 * @param \Closure(?string): \BackupsForRestic\Support\ByteSource $open    Source factory.
 	 * @param (\Closure(int): void)|null                               $between Runs after each part that stopped, with its number.
+	 * @param (\Closure(): void)|null                                  $during  Runs once, after the first block, while the first source is open.
 	 */
-	private function read( \Closure $open, int $reads_per_tick, ?\Closure $between = null ): string {
+	private function read( \Closure $open, int $reads_per_tick, ?\Closure $between = null, ?\Closure $during = null ): string {
 		$content = '';
 		$cursor  = null;
 		$part    = 0;
@@ -593,6 +692,10 @@ final class DatabaseDumpTest extends TestCase {
 			$reads = 0;
 			for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
 				$content .= $block;
+				if ( null !== $during ) {
+					$during();
+					$during = null;
+				}
 				if ( ++$reads === $reads_per_tick && $source instanceof ResumableByteSource ) {
 					$source->stop_at_boundary();
 				}

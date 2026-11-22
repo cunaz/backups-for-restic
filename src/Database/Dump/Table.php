@@ -25,6 +25,7 @@ final readonly class Table {
 	 * @param string|null           $key     Name of the primary or unique key whose columns order the pages, or null if the table has none that can.
 	 * @param list<KeyColumn>       $order   Columns of that key, in key order; empty without a key.
 	 * @param string                $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
+	 * @param string                $digest  Hash of the definition without its AUTO_INCREMENT counter, of the columns and of the key; see Catalog.
 	 */
 	public function __construct(
 		public string $name,
@@ -32,7 +33,8 @@ final readonly class Table {
 		public array $columns,
 		public ?string $key,
 		public array $order,
-		public string $engine = ''
+		public string $engine = '',
+		public string $digest = ''
 	) {
 	}
 

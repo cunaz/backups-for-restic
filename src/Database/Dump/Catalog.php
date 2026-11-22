@@ -102,9 +102,19 @@ final class Catalog {
 			}
 		}
 		[ $key, $order ] = $this->key( $quoted, $usable );
-		// The table options follow the line that closes the column list; no literal can start a line.
-		$engine = 1 === preg_match( '/^\) ENGINE=([A-Za-z0-9_]+)/m', $create[0]['Create Table'], $match ) ? $match[1] : '';
-		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $order, $engine );
+		$raw             = $create[0]['Create Table'];
+		// The table options follow the line that closes the column list; no literal can start a
+		// line, and the table comment comes after AUTO_INCREMENT, which changes with every insert.
+		$engine     = 1 === preg_match( '/^\) ENGINE=([A-Za-z0-9_]+)/m', $raw, $match ) ? $match[1] : '';
+		$definition = (string) preg_replace( '/^(\)[^\'\n]*?) AUTO_INCREMENT=[0-9]+/m', '$1', $raw );
+		$parts      = [ $definition, (string) $key ];
+		foreach ( $columns as $field => $kind ) {
+			$parts[] = $field . "\t" . $kind;
+		}
+		foreach ( $order as $column ) {
+			$parts[] = $column->name . "\t" . $column->kind . "\t" . $column->collation;
+		}
+		return new Table( $name, SqlFormatter::one_line( $raw ), $columns, $key, $order, $engine, hash( 'sha256', implode( "\n", $parts ) ) );
 	}
 
 	/**

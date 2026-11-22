@@ -37,6 +37,13 @@ defined( 'ABSPATH' ) || exit;
  * per statement outside. The manifest records whether that was one, and a table without a key
  * that needed more than one gets a warning, because rows added or removed between the reads
  * can then be missing or repeated.
+ *
+ * The definition is pinned for the whole dump of the table: the cursor carries the digest of
+ * the definition the file started with. If the table's definition differs when a later tick
+ * opens it, the CREATE already written no longer fits the rows to come, and the table starts
+ * over (restarted()), at most MAX_RESTARTS times. Inside a snapshot the metadata lock keeps the
+ * definition for the tick; outside one, the definition is read again before a stop and before
+ * the trailer, and a change, or a page that fails because of one, stops the tick instead.
  */
 final class TableSource implements ResumableByteSource {
 
@@ -54,6 +61,9 @@ final class TableSource implements ResumableByteSource {
 
 	/** Cursors of earlier versions have no version; they cannot continue and the table starts over. */
 	private const int CURSOR_VERSION = 2;
+
+	/** How often a table may start over because its definition changed. */
+	public const int MAX_RESTARTS = 3;
 
 	/**
 	 * Produced but not yet read output.
@@ -110,6 +120,20 @@ final class TableSource implements ResumableByteSource {
 	 * @var bool
 	 */
 	private bool $restarted = false;
+
+	/**
+	 * How often the table started over.
+	 *
+	 * @var int
+	 */
+	private int $restarts;
+
+	/**
+	 * Whether the definition changed during this tick, so that the next one starts over.
+	 *
+	 * @var bool
+	 */
+	private bool $changed = false;
 
 	/**
 	 * Aliases of the cursor expressions in the page query, by key position.
@@ -191,18 +215,21 @@ final class TableSource implements ResumableByteSource {
 	/**
 	 * Opens the table at a cursor.
 	 *
-	 * @param Connection                                                                      $connection  Database; a DedicatedConnection inside begin() for one snapshot.
-	 * @param Table                                                                           $table       Table.
-	 * @param string                                                                          $preamble    Session settings, one statement per line.
-	 * @param string|null                                                                     $cursor      Cursor from an earlier source, or null to start.
-	 * @param \Closure(array{rows: int, bytes: int, snapshot: bool, key: list<string>}): void $on_complete Receives the counts and how the rows were read, once the trailer is written.
+	 * @param Connection                                                                                     $connection  Database; a DedicatedConnection inside begin() for one snapshot.
+	 * @param Table                                                                                          $table       Table.
+	 * @param string                                                                                         $preamble    Session settings, one statement per line.
+	 * @param string|null                                                                                    $cursor Cursor from an earlier source, or null to start.
+	 * @param \Closure(array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int}): void $on_complete Receives the counts and how the rows were read, once the trailer is written.
+	 * @param (\Closure(): Table)|null                                                                       $describe Reads the definition again, to see whether it changed during a tick outside a snapshot.
+	 * @throws DatabaseFailed If the table has started over too often.
 	 */
 	public function __construct(
 		private readonly Connection $connection,
 		private readonly Table $table,
 		private readonly string $preamble,
 		?string $cursor,
-		private readonly \Closure $on_complete
+		private readonly \Closure $on_complete,
+		private readonly ?\Closure $describe = null
 	) {
 		foreach ( array_keys( $table->order ) as $position ) {
 			$alias = '__bfr_key_' . $position;
@@ -211,17 +238,34 @@ final class TableSource implements ResumableByteSource {
 			}
 			$this->aliases[ $position ] = $alias;
 		}
-		$state           = self::saved( $cursor, $table );
-		$this->restarted = null !== $cursor && null === $state;
-		$this->started   = null !== $state;
-		$this->after     = $state['after'] ?? null;
-		$this->offset    = $state['offset'] ?? 0;
-		$this->rows      = $state['rows'] ?? 0;
-		$this->bytes     = $state['bytes'] ?? 0;
-		$this->page      = $state['page'] ?? 500;
-		$this->views     = $state['views'] ?? 0;
-		$this->snapshot  = $connection instanceof DedicatedConnection && $connection->in_snapshot() && $table->versioned();
-		$this->prefix    = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $table->columns ) ) ) . ') VALUES ';
+		$state    = self::saved( $cursor, $table );
+		$restarts = $state['restarts'] ?? 0;
+		if ( null !== $cursor && ( null === $state || $state['changed'] || $state['digest'] !== $table->digest ) ) {
+			// The file was started with another definition, by an earlier version, or the
+			// cursor is damaged: what was written cannot be continued.
+			$state           = null;
+			$this->restarted = true;
+			++$restarts;
+		}
+		if ( $restarts > self::MAX_RESTARTS ) {
+			DatabaseFailed::raise(
+				'The definition of a database table kept changing while it was backed up.',
+				[
+					'table' => $table->name,
+					'code'  => 'database_dump_unstable',
+				]
+			);
+		}
+		$this->restarts = $restarts;
+		$this->started  = null !== $state;
+		$this->after    = $state['after'] ?? null;
+		$this->offset   = $state['offset'] ?? 0;
+		$this->rows     = $state['rows'] ?? 0;
+		$this->bytes    = $state['bytes'] ?? 0;
+		$this->page     = $state['page'] ?? 500;
+		$this->views    = $state['views'] ?? 0;
+		$this->snapshot = $connection instanceof DedicatedConnection && $connection->in_snapshot() && $table->versioned();
+		$this->prefix   = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $table->columns ) ) ) . ') VALUES ';
 	}
 
 	/**
@@ -230,14 +274,14 @@ final class TableSource implements ResumableByteSource {
 	 *
 	 * @param string|null $cursor Cursor.
 	 * @param Table       $table  Table.
-	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int, views: int}|null State, or null to start the table from its beginning.
+	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int, views: int, restarts: int, digest: string, changed: bool}|null State, or null to start the table from its beginning.
 	 */
 	private static function saved( ?string $cursor, Table $table ): ?array {
 		$state = null === $cursor ? null : json_decode( $cursor, true );
-		if ( ! is_array( $state ) || self::CURSOR_VERSION !== ( $state['v'] ?? null ) ) {
+		if ( ! is_array( $state ) || self::CURSOR_VERSION !== ( $state['v'] ?? null ) || ! is_string( $state['digest'] ?? null ) || ! is_bool( $state['changed'] ?? null ) ) {
 			return null;
 		}
-		foreach ( [ 'offset', 'rows', 'bytes', 'page', 'views' ] as $field ) {
+		foreach ( [ 'offset', 'rows', 'bytes', 'page', 'views', 'restarts' ] as $field ) {
 			if ( ! is_int( $state[ $field ] ?? null ) || $state[ $field ] < 0 ) {
 				return null;
 			}
@@ -262,12 +306,15 @@ final class TableSource implements ResumableByteSource {
 			$after = $values;
 		}
 		return [
-			'after'  => $after,
-			'offset' => $state['offset'],
-			'rows'   => $state['rows'],
-			'bytes'  => $state['bytes'],
-			'page'   => max( 1, min( 20000, $state['page'] ) ),
-			'views'  => $state['views'],
+			'after'    => $after,
+			'offset'   => $state['offset'],
+			'rows'     => $state['rows'],
+			'bytes'    => $state['bytes'],
+			'page'     => max( 1, min( 20000, $state['page'] ) ),
+			'views'    => $state['views'],
+			'restarts' => $state['restarts'],
+			'digest'   => $state['digest'],
+			'changed'  => $state['changed'],
 		];
 	}
 
@@ -307,19 +354,23 @@ final class TableSource implements ResumableByteSource {
 		}
 		return (string) json_encode(
 			[
-				'v'      => self::CURSOR_VERSION,
-				'after'  => $this->after,
-				'offset' => $this->offset,
-				'rows'   => $this->rows,
-				'bytes'  => $this->bytes,
-				'page'   => $this->page,
-				'views'  => $this->views,
+				'v'        => self::CURSOR_VERSION,
+				'after'    => $this->after,
+				'offset'   => $this->offset,
+				'rows'     => $this->rows,
+				'bytes'    => $this->bytes,
+				'page'     => $this->page,
+				'views'    => $this->views,
+				'restarts' => $this->restarts,
+				'digest'   => $this->table->digest,
+				'changed'  => $this->changed,
 			]
 		);
 	}
 
 	/**
-	 * Whether the table starts over: the cursor is from an earlier version or damaged.
+	 * Whether the table starts over: its definition changed since the cursor was handed out,
+	 * or the cursor is from an earlier version or damaged.
 	 *
 	 * @return bool True if the content kept from earlier sources must be discarded.
 	 */
@@ -354,17 +405,30 @@ final class TableSource implements ResumableByteSource {
 		}
 		if ( ! $this->exhausted ) {
 			if ( $this->stopping ) {
-				$this->stopped = true;
-				// A row carried over from the stream was not written; the next tick reads it again.
-				$this->carry = null;
-				$this->release();
+				$this->changed = $this->definition_changed();
+				$this->stop();
 				return;
 			}
-			if ( [] === $this->table->order && $this->snapshot ) {
-				$this->stream();
-			} else {
-				$this->page();
+			try {
+				if ( [] === $this->table->order && $this->snapshot ) {
+					$this->stream();
+				} else {
+					$this->page();
+				}
+			} catch ( DatabaseFailed $error ) {
+				// A column that was dropped or changed makes a page fail: the table starts over.
+				if ( ! $this->definition_changed() ) {
+					throw $error;
+				}
+				$this->changed = true;
+				$this->stop();
 			}
+			return;
+		}
+		if ( $this->definition_changed() ) {
+			// The rows were read with a definition the table no longer has.
+			$this->changed = true;
+			$this->stop();
 			return;
 		}
 		$this->emit( '-- end table rows=' . $this->rows . ' bytes=' . $this->bytes . "\n" );
@@ -376,8 +440,35 @@ final class TableSource implements ResumableByteSource {
 				'bytes'    => $this->bytes,
 				'snapshot' => $this->views <= 1,
 				'key'      => array_map( static fn ( KeyColumn $column ): string => $column->name, $this->table->order ),
+				'restarts' => $this->restarts,
 			]
 		);
+	}
+
+	/**
+	 * Ends the stream at a boundary, with a cursor.
+	 *
+	 * @throws DatabaseFailed If the transaction cannot be ended.
+	 */
+	private function stop(): void {
+		$this->stopped = true;
+		// A row carried over from the stream was not written; the next tick reads it again.
+		$this->carry = null;
+		$this->release();
+	}
+
+	/**
+	 * Whether the table's definition differs from the one this file started with. Inside a
+	 * snapshot the metadata lock keeps it, so only reads outside one look again.
+	 *
+	 * @return bool True if it changed.
+	 * @throws DatabaseFailed If the definition cannot be read.
+	 */
+	private function definition_changed(): bool {
+		if ( null === $this->describe || ( $this->connection instanceof DedicatedConnection && $this->connection->in_snapshot() ) ) {
+			return false;
+		}
+		return ( $this->describe )()->digest !== $this->table->digest;
 	}
 
 	/**
