@@ -1,0 +1,27 @@
+// Mutation testing of the streamed ZIP writer of downloads (docs/04 §5.6). composer
+// mutation:zip counts code that no test reaches (--with-uncovered).
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": ["src/Storage/Zip"]
+    },
+    "bootstrap": "tests/bootstrap.php",
+    "phpUnit": {
+        "configDir": "tests/Mutation"
+    },
+    "testFrameworkOptions": "--testsuite=zip",
+    "timeout": 30,
+    "tmpDir": ".tools/infection-zip-tmp",
+    "logs": {
+        "text": ".tools/infection-zip/infection.log",
+        "summary": ".tools/infection-zip/summary.log",
+        "github": true
+    },
+    // Floors at the scores measured on 2026-11-20 (94.21 % and 96.02 % covered), rounded down.
+    // They may only rise.
+    "minMsi": 94,
+    "minCoveredMsi": 96,
+    "mutators": {
+        "@default": true
+    }
+}

@@ -1,0 +1,36 @@
+name: Can this change alter the mutation score?
+description: >-
+  On a pull request, decide from the files it changes whether a mutation run can have another
+  result than on its base. A push always runs, and so does a pull request whose files cannot be
+  listed. Needs a checkout with fetch-depth 2, so that the merge commit's two parents are there.
+inputs:
+  watched:
+    description: Extended regular expression of the paths that the result depends on.
+    required: true
+  label:
+    description: The same paths in words, for the notice of a skipped run.
+    required: true
+outputs:
+  run:
+    description: "'true' if the mutation run is needed."
+    value: ${{ steps.changes.outputs.run }}
+runs:
+  using: composite
+  steps:
+    - id: changes
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        WATCHED: ${{ inputs.watched }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        run=true
+        if [ "$EVENT_NAME" = 'pull_request' ]; then
+          if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null || ! git diff --name-only --no-renames -z 'HEAD^1' HEAD > "$RUNNER_TEMP/changed-files"; then
+            echo 'The files of the pull request could not be listed: running in full.'
+          elif ! tr '\0' '\n' < "$RUNNER_TEMP/changed-files" | grep -Eq "$WATCHED"; then
+            run=false
+            echo "::notice::Mutation testing skipped: this pull request changes none of the files the run depends on ($LABEL). A push to main always runs it."
+          fi
+        fi
+        echo "run=$run" >> "$GITHUB_OUTPUT"

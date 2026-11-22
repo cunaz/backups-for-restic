@@ -87,11 +87,27 @@
         ],
         "mutation": [
             "Composer\\Config::disableProcessTimeout",
-            ".tools/bin/infection --threads=max"
+            ".tools/bin/infection --threads=max --with-uncovered"
         ],
         "mutation:planner": [
             "Composer\\Config::disableProcessTimeout",
-            ".tools/bin/infection --configuration=infection-planner.json5.dist --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"
+            ".tools/bin/infection --configuration=infection-planner.json5.dist --threads=max --with-uncovered --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"
+        ],
+        "mutation:restore": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --configuration=infection-restore.json5.dist --threads=max --with-uncovered --only-covering-test-cases"
+        ],
+        "mutation:apply": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --configuration=infection-apply.json5.dist --threads=max --with-uncovered --only-covering-test-cases"
+        ],
+        "mutation:zip": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --configuration=infection-zip.json5.dist --threads=max --with-uncovered"
+        ],
+        "mutation:database": [
+            "Composer\\Config::disableProcessTimeout",
+            ".tools/bin/infection --configuration=infection-database.json5.dist --threads=max --with-uncovered --only-covering-test-cases"
         ],
         "fuzz": "php bin/fuzz.php --seconds=10",
         "bench": "php -d opcache.enable_cli=0 bin/bench.php",

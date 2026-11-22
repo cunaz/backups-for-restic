@@ -1,0 +1,29 @@
+// Mutation testing of the file half of the apply jobs: plan build, file plans, file changes and
+// their journal (docs/04 §5.6). composer mutation:apply counts code that no test reaches
+// (--with-uncovered). The database half needs a server: infection-database.json5.dist.
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": ["src/Jobs/Apply"],
+        "excludes": ["DatabaseChanges.php", "DatabaseGeneration.php", "DatabaseReview.php"]
+    },
+    "bootstrap": "tests/bootstrap.php",
+    "phpUnit": {
+        "configDir": "tests/Mutation"
+    },
+    "testFrameworkOptions": "--testsuite=restore",
+    "timeout": 30,
+    "tmpDir": ".tools/infection-apply-tmp",
+    "logs": {
+        "text": ".tools/infection-apply/infection.log",
+        "summary": ".tools/infection-apply/summary.log",
+        "github": true
+    },
+    // Floors at the scores measured on 2026-11-20 (67.62 % and 74.06 % covered), rounded down.
+    // They may only rise; ADR 0024's 90 % is the goal.
+    "minMsi": 67,
+    "minCoveredMsi": 74,
+    "mutators": {
+        "@default": true
+    }
+}

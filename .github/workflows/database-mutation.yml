@@ -1,0 +1,94 @@
+# Mutation testing of the code that only a real database reaches (docs/04 §5.6): the import,
+# the atomic exchange and the database half of the apply jobs, killed by tests/Unit/Database and
+# tests/Database against MySQL. It is too slow for every pull request: it runs on every push to
+# main, on pull requests that change that code, and on request. The release gate requires a
+# successful run for the release commit (docs/04 §7).
+name: Database mutation testing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/Database/**'
+      - 'src/Jobs/Apply/**'
+      - 'tests/Database/**'
+      - 'tests/Unit/Database/**'
+      - 'tests/Support/**'
+      - 'tests/Mutation/**'
+      - 'infection-database.json5.dist'
+      - 'composer.json'
+      - 'composer.lock'
+      - 'bin/install-test-tools.sh'
+      - '.github/workflows/database-mutation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A pull request cancels its superseded runs. Runs on main never cancel each other: every commit
+# keeps the results that the release gate reads.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Composer verified against the SHA-256 of its release PHAR, as in ci.yml.
+  PHP_TOOLS: composer:2.11.2@sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
+
+jobs:
+  mutation:
+    name: Mutation testing (database code, MySQL 8.4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    services:
+      database:
+        # The image of the database job in ci.yml, by digest.
+        image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 33306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      BFR_TEST_MYSQL_HOST: 127.0.0.1:33306
+      BFR_TEST_MYSQL_USER: root
+      BFR_TEST_MYSQL_PASSWORD: root
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, mysqli, zstd
+          coverage: pcov
+          tools: ${{ env.PHP_TOOLS }}
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: bin/install-test-tools.sh infection
+      # Without a server every database test skips, no mutant is covered and the scores fall;
+      # fail at once and say why instead. Two classes skip in setUpBeforeClass(), which
+      # --fail-on-skipped does not count, so the JUnit log is checked.
+      - name: The database suite runs against the server
+        run: |
+          vendor/bin/phpunit --testsuite database --log-junit "$RUNNER_TEMP/database.xml"
+          php bin/check-skipped-tests.php "$RUNNER_TEMP/database.xml" tests/Skips/database-mysql.txt
+      # composer mutation:database passes --with-uncovered; the floors live in
+      # infection-database.json5.dist.
+      - run: composer mutation:database -- --no-progress
+      - name: Require a measured mutation score
+        if: always()
+        run: |
+          cat .tools/infection-database/summary.log
+          grep -Eq '^Total: [1-9]' .tools/infection-database/summary.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: database-mutation-logs
+          path: .tools/infection-database/
+          retention-days: 14

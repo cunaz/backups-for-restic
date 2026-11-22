@@ -1,5 +1,6 @@
 // Separate 90% gate for reviewed file destinations and fresh-install path mapping.
-// composer mutation:planner selects the two planner files from this source root.
+// composer mutation:planner selects the two planner files from this source root and counts
+// code that no test reaches (--with-uncovered) against minMsi.
 {
     "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
     "source": {
@@ -17,7 +18,10 @@
         "summary": ".tools/infection-planner/summary.log",
         "github": true
     },
+    // minMsi is a floor at the value measured on 2026-11-20 (96.02 %), rounded down; it may
+    // only rise.
     "minCoveredMsi": 90,
+    "minMsi": 96,
     "mutators": {
         "@default": true
     }
