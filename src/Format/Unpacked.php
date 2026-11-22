@@ -30,13 +30,14 @@ final class Unpacked {
 	 * decrypting the file, the decoder then works beside one copy of the compressed bytes
 	 * instead of two.
 	 *
-	 * @param string $plaintext Decrypted file content.
-	 * @param int    $version   Repository version.
+	 * @param string                     $plaintext Decrypted file content.
+	 * @param int                        $version   Repository version.
+	 * @param (\Closure(int): void)|null $reserve   Told what decoding takes before it starts, and may refuse (Compression::decompress()).
 	 * @return string JSON.
 	 * @throws UnsupportedRepository If the file is compressed and zstd is unavailable.
 	 * @throws FormatException If the encoding byte is unknown or decompression fails.
 	 */
-	public static function decode( string $plaintext, int $version ): string {
+	public static function decode( string $plaintext, int $version, ?\Closure $reserve = null ): string {
 		if ( $version < 2 || '' === $plaintext || '[' === $plaintext[0] || '{' === $plaintext[0] ) {
 			return $plaintext;
 		}
@@ -45,6 +46,6 @@ final class Unpacked {
 		}
 		$compressed = substr( $plaintext, 1 );
 		unset( $plaintext );
-		return Compression::decompress( $compressed );
+		return Compression::decompress( $compressed, null, $reserve );
 	}
 }

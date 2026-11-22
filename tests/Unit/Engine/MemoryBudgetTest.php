@@ -169,6 +169,19 @@ final class MemoryBudgetTest extends TestCase {
 		$budget->check_index_input( 6 * self::MIB );
 	}
 
+	public function test_decoding_a_compressed_index_file_needs_room_beside_the_memory_in_use(): void {
+		$budget = new MemoryBudget( self::reserved() + 2 * self::MIB + 20 * self::MIB );
+		$budget->check_index_decoding( 20 * self::MIB - self::BLOCK );
+		try {
+			$budget->check_index_decoding( 20 * self::MIB + self::BLOCK );
+			self::fail( 'Decoding takes more than is left.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertSame( 'The next index file does not fit beside the memory already in use.', $error->getMessage() );
+			self::assertSame( [ 'memory_limit', 'reserved', 'decoding_bytes' ], array_keys( $error->context() ) );
+			self::assertSame( 20 * self::MIB + self::BLOCK, $error->context()['decoding_bytes'] );
+		}
+	}
+
 	public function test_an_oversized_index_is_refused_before_the_backend_loads_its_body(): void {
 		$backend    = new CountingBackend();
 		$repository = Repository::initialize( $backend, 'budget password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
@@ -305,6 +318,27 @@ final class MemoryBudgetTest extends TestCase {
 		// The decoder's two buffers beside one copy of the stored file: the sealed bytes and the
 		// plaintext are let go before decoding starts.
 		self::assertLessThan( 2 * $json + 1.5 * $stored, $peak );
+	}
+
+	public function test_a_compressed_index_file_that_cannot_be_decoded_beside_the_memory_in_use_is_an_index_too_large(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		self::limit_memory( self::reserved() + 128 * self::MIB );
+		[ $repository, $json, $stored ] = $this->compressed_index_repository();
+		// Room for the smallest job and for the stored file with its decryption copies, which the
+		// checks before the download ask for, but not for decoding twice the JSON.
+		$limit = self::reserved() + max( self::SMALLEST_JOB, 4 * $stored + 2 * self::MIB ) + self::BLOCK;
+		self::limit_memory( $limit );
+		$repository->limit_memory( new MemoryBudget( $limit ) );
+
+		try {
+			$repository->load_index();
+			self::fail( 'Decoding the file takes twice its JSON.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertSame( 'The next index file does not fit beside the memory already in use.', $error->getMessage() );
+			self::assertSame( 2 * $json, $error->context()['decoding_bytes'] );
+		}
 	}
 
 	public function test_an_index_that_does_not_fit_stops_loading_from_the_index_files(): void {

@@ -237,7 +237,8 @@ final class Repository {
 	 * @throws IndexTooLarge If an index file cannot fit beside the current process state.
 	 */
 	public function load_unpacked( ObjectType $type, Id $id ): string {
-		$length = null;
+		$length  = null;
+		$reserve = null;
 		if ( ObjectType::Index === $type && null !== $this->memory ) {
 			// A per-pack check alone is too late: the next encrypted file can exhaust the
 			// limit before the decoder yields its first pack. Bound the response as well.
@@ -250,11 +251,14 @@ final class Repository {
 				FormatException::raise( 'The index file is empty.', [ 'type' => $type->value ] );
 			}
 			$this->memory->check_index_input( $length );
+			// A compressed index file that cannot be decoded beside the memory in use is an
+			// index that does not fit, and the budget says so before the decoder would refuse.
+			$reserve = $this->memory->check_index_decoding( ... );
 		}
 		// Each copy is let go once the next one exists: the sealed bytes when they are
 		// decrypted, the plaintext when the compressed bytes are taken out of it. A compressed
 		// file is then decoded beside one copy of itself (ADR 0019).
-		return Unpacked::decode( $this->cipher->open( $this->load_named( $type, $id, $length ) ), $this->config->version );
+		return Unpacked::decode( $this->cipher->open( $this->load_named( $type, $id, $length ) ), $this->config->version, $reserve );
 	}
 
 	/**
