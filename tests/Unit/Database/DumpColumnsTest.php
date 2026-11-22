@@ -195,6 +195,43 @@ final class DumpColumnsTest extends TestCase {
 		self::assertSame( 'SELECT `id`, `ratio` + 0e0 AS `ratio`, `ratio` + 0e0 AS `__bfr_key_0` FROM `wp_rows` ORDER BY `wp_rows`.`ratio` LIMIT 500', $db->queries[0], 'ORDER BY names the column, not the alias.' );
 	}
 
+	/** @return iterable<string, array{int, bool}> */
+	public static function reads(): iterable {
+		yield 'one page that ends the table' => [ 499, true ];
+		yield 'a full page and a read that finds nothing more' => [ 500, false ];
+		yield 'two pages' => [ 501, false ];
+	}
+
+	#[DataProvider( 'reads' )]
+	public function test_outside_a_snapshot_every_read_is_a_moment_of_its_own( int $rows, bool $snapshot ): void {
+		$db      = new class( $rows ) implements Connection {
+			public function __construct( private readonly int $total ) {
+			}
+
+			public function rows( string $sql ): array {
+				$after = 1 === preg_match( '/`id` > (\d+)/', $sql, $match ) ? (int) $match[1] : 0;
+				$limit = 1 === preg_match( '/LIMIT (\d+)/', $sql, $match ) ? (int) $match[1] : 0;
+				return array_map( static fn ( int $id ): array => [ 'id' => (string) $id ], $after >= $this->total ? [] : range( $after + 1, min( $this->total, $after + $limit ) ) );
+			}
+		};
+		$table   = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`id` int)', [ 'id' => SqlFormatter::NUMERIC ], 'PRIMARY', [ new KeyColumn( 'id', KeyColumn::INTEGER ) ], 'InnoDB' );
+		$results = [];
+		$source  = new TableSource(
+			$db,
+			$table,
+			'',
+			null,
+			static function ( array $result ) use ( &$results ): void {
+				$results[] = $result;
+			}
+		);
+		while ( '' !== $source->read( 65536 ) ) {
+			continue;
+		}
+		self::assertSame( $rows, $results[0]['rows'] ?? null );
+		self::assertSame( $snapshot, $results[0]['snapshot'] ?? null, 'Rows read at two moments are no snapshot, even if the second read finds nothing.' );
+	}
+
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {
 		$db     = new class() implements Connection {
 			public function rows( string $sql ): array {

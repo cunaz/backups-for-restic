@@ -250,9 +250,9 @@ final class TableSource implements ResumableByteSource {
 	 * @param Connection                                                                                                   $connection  Database; a DedicatedConnection inside begin() for one snapshot.
 	 * @param Table                                                                                                        $table       Table.
 	 * @param string                                                                                                       $preamble    Session settings, one statement per line.
-	 * @param string|null                                                                                                  $cursor Cursor from an earlier source, or null to start.
+	 * @param string|null                                                                                                  $cursor      Cursor from an earlier source, or null to start.
 	 * @param \Closure(array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int, largest: int}): void $on_complete Receives the counts and how the rows were read, once the trailer is written.
-	 * @param (\Closure(): Table)|null                                                                                     $describe Reads the definition again, to see whether it changed during a tick outside a snapshot.
+	 * @param (\Closure(): Table)|null                                                                                     $describe    Reads the definition again, to see whether it changed during a tick outside a snapshot.
 	 * @throws DatabaseFailed If the table has started over too often.
 	 */
 	public function __construct(
@@ -535,7 +535,7 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
-	 * Counts a statement that returned rows: one view per snapshot, one per statement outside.
+	 * Counts a read of rows: one view per snapshot, one per statement outside.
 	 */
 	private function viewed(): void {
 		if ( ! $this->snapshot || ! $this->viewed ) {
@@ -577,6 +577,7 @@ final class TableSource implements ResumableByteSource {
 			$table = SqlFormatter::identifier( $this->table->name );
 			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ( $this->offset > 0 ? ' LIMIT 18446744073709551615 OFFSET ' . $this->offset : '' ) );
 			$this->streaming = true;
+			$this->viewed();
 		}
 		$rows        = null === $this->carry ? [] : [ $this->carry ];
 		$length      = null === $this->carry ? 0 : $this->bound( $this->carry );
@@ -598,7 +599,6 @@ final class TableSource implements ResumableByteSource {
 			$length += $bound;
 		}
 		if ( [] !== $rows ) {
-			$this->viewed();
 			$this->write( $rows );
 			$this->rows   += count( $rows );
 			$this->offset += count( $rows );
@@ -688,7 +688,7 @@ final class TableSource implements ResumableByteSource {
 	 */
 	private function large( array $row, int $bound ): int {
 		$limit = ini_parse_quantity( ini_get( 'memory_limit' ) );
-		if ( $limit > 0 && memory_get_usage() + $bound + self::ENCODING_RESERVE > $limit ) {
+		if ( $limit > 0 && memory_get_usage( true ) + $bound + self::ENCODING_RESERVE > $limit ) {
 			DatabaseFailed::raise(
 				'A database row is too large to be backed up within the PHP memory limit.',
 				[
@@ -741,11 +741,12 @@ final class TableSource implements ResumableByteSource {
 			$sql = 'SELECT ' . $selection . ' FROM ' . $table . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;
 		}
 		$rows = $this->connection->rows( $sql );
+		// Also a read that finds nothing more is a moment of its own outside a snapshot.
+		$this->viewed();
 		if ( [] === $rows ) {
 			$this->exhausted = true;
 			return;
 		}
-		$this->viewed();
 
 		if ( [] !== $this->table->order ) {
 			$last  = $rows[ array_key_last( $rows ) ];
