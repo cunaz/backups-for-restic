@@ -27,11 +27,15 @@ defined( 'ABSPATH' ) || exit;
  * in the job's directory, together with the row and byte counts of finished tables, so the
  * dump stays consistent across ticks.
  *
- * Every read runs with utf8mb4 results and the time zone +00:00 (SharedConnection), and the
- * files say so: TIMESTAMP values are UTC, as with mysqldump --tz-utc, and text arrives in the
- * one character set the manifest names. A dump that an earlier version started recorded the
- * session's offset instead; it keeps reading in the session's time zone until it is done, so
- * that all of its files agree with the one offset in its manifest.
+ * The dump reads through a connection of its own where one can be opened and verified
+ * (DedicatedConnection): each table's part of a tick is then one read-only transaction, and
+ * InnoDB serves all of it from one snapshot. Otherwise it reads through the site's connection
+ * (SharedConnection), without snapshots. Either way every read runs with utf8mb4 results and
+ * the time zone +00:00, and the files say so: TIMESTAMP values are UTC, as with mysqldump
+ * --tz-utc, and text arrives in the one character set the manifest names. A dump that an
+ * earlier version started recorded the session's offset instead; it keeps reading in the
+ * session's time zone until it is done, so that all of its files agree with the one offset in
+ * its manifest.
  */
 final class DatabaseDump {
 
@@ -50,18 +54,20 @@ final class DatabaseDump {
 	/**
 	 * Prepares the dump.
 	 *
-	 * @param Connection   $connection Database.
-	 * @param string       $state_file JSON state file in the job's directory.
-	 * @param string       $prefix     Only tables with this prefix; empty for all.
-	 * @param list<string> $exclude    Tables to leave out.
-	 * @param int          $time       Unix time of the backup, used as file mtime.
+	 * @param Connection                                     $connection The site's connection.
+	 * @param string                                         $state_file JSON state file in the job's directory.
+	 * @param string                                         $prefix     Only tables with this prefix; empty for all.
+	 * @param list<string>                                   $exclude    Tables to leave out.
+	 * @param int                                            $time       Unix time of the backup, used as file mtime.
+	 * @param (\Closure(?string): ?DedicatedConnection)|null $dedicated Opens a connection of the dump's own with the given time zone, or returns null if it cannot; null to read through $connection only.
 	 */
 	public function __construct(
 		private readonly Connection $connection,
 		private readonly string $state_file,
 		private readonly string $prefix,
 		private readonly array $exclude,
-		private readonly int $time
+		private readonly int $time,
+		private readonly ?\Closure $dedicated = null
 	) {
 	}
 
@@ -73,9 +79,8 @@ final class DatabaseDump {
 	 */
 	public function files(): array {
 		$state    = $this->state();
-		$reader   = $this->reader( $state['version'] );
+		$version  = $state['version'];
 		$preamble = $this->preamble( $state['time_zone'] );
-		$catalog  = new Catalog( $reader );
 		$files    = [];
 
 		$header  = '-- ' . TableSource::FORMAT . "\n";
@@ -85,23 +90,15 @@ final class DatabaseDump {
 
 		foreach ( $state['tables'] as $name ) {
 			$file    = ( new Table( $name, '', [], null, [] ) )->file();
-			$files[] = $this->file(
-				$file,
-				fn ( ?string $cursor ): ByteSource => new TableSource(
-					$reader,
-					$catalog->table( $name ),
-					$preamble,
-					$cursor,
-					fn ( int $rows, int $bytes ) => $this->record( $file, $name, $rows, $bytes )
-				)
-			);
+			$files[] = $this->file( $file, fn ( ?string $cursor ): ByteSource => $this->table( $version, $name, $file, $preamble, $cursor ) );
 		}
 
 		$views   = $state['views'];
 		$files[] = $this->file(
 			'900-views.sql',
-			static function () use ( $catalog, $views, $preamble ): ByteSource {
-				$sql = '-- ' . TableSource::FORMAT . " views\n" . $preamble;
+			function () use ( $version, $views, $preamble ): ByteSource {
+				$catalog = new Catalog( $this->reader( $version ) );
+				$sql     = '-- ' . TableSource::FORMAT . " views\n" . $preamble;
 				foreach ( $views as $view ) {
 					$sql .= 'DROP VIEW IF EXISTS ' . SqlFormatter::identifier( $view ) . ";\n" . $catalog->view( $view ) . ";\n";
 				}
@@ -113,13 +110,40 @@ final class DatabaseDump {
 	}
 
 	/**
-	 * The connection with the dump's session settings.
+	 * Opens one table's file at a cursor. On a connection of the dump's own, its transaction
+	 * starts before the definition is read, so that definition and rows belong together.
+	 *
+	 * @param int         $version  Version of the dump's state.
+	 * @param string      $name     Table name.
+	 * @param string      $file     File name.
+	 * @param string      $preamble Session settings.
+	 * @param string|null $cursor   Cursor, or null to start.
+	 * @return TableSource Source.
+	 * @throws DatabaseFailed If the table cannot be described.
+	 */
+	private function table( int $version, string $name, string $file, string $preamble, ?string $cursor ): TableSource {
+		$reader = $this->reader( $version );
+		if ( $reader instanceof DedicatedConnection ) {
+			$reader->begin( $name );
+		}
+		return new TableSource( $reader, ( new Catalog( $reader ) )->table( $name ), $preamble, $cursor, fn ( array $result ) => $this->record( $file, $name, $result ) );
+	}
+
+	/**
+	 * The connection with the dump's session settings: one of its own if it can be opened and
+	 * verified, otherwise the site's. A connection of its own that a table closed after an
+	 * unfinished read is replaced.
 	 *
 	 * @param int $version Version of the dump's state.
 	 * @return Connection Reader.
 	 */
 	private function reader( int $version ): Connection {
-		return $this->reader ??= new SharedConnection( $this->connection, self::STATE_VERSION === $version ? '+00:00' : null );
+		if ( null === $this->reader || ( $this->reader instanceof DedicatedConnection && $this->reader->closed() ) ) {
+			$time_zone    = self::STATE_VERSION === $version ? '+00:00' : null;
+			$dedicated    = null === $this->dedicated ? null : ( $this->dedicated )( $time_zone );
+			$this->reader = $dedicated instanceof DedicatedConnection ? $dedicated : new SharedConnection( $this->connection, $time_zone );
+		}
+		return $this->reader;
 	}
 
 	/**
@@ -145,14 +169,22 @@ final class DatabaseDump {
 		$state  = $this->state();
 		$tables = [];
 		foreach ( $state['tables'] as $name ) {
-			$file     = ( new Table( $name, '', [], null, [] ) )->file();
-			$result   = $state['results'][ $file ] ?? null;
-			$tables[] = [
+			$file   = ( new Table( $name, '', [], null, [] ) )->file();
+			$result = $state['results'][ $file ] ?? null;
+			$entry  = [
 				'name'  => $name,
 				'file'  => $file,
 				'rows'  => $result['rows'] ?? null,
 				'bytes' => $result['bytes'] ?? null,
 			];
+			// How the rows were read, for tables that this version dumped: the columns of the
+			// key that ordered the pages (empty without one), and whether all rows come from
+			// one read view, so that an import can explain a duplicate key.
+			if ( isset( $result['key'], $result['snapshot'] ) ) {
+				$entry['key']      = $result['key'];
+				$entry['snapshot'] = $result['snapshot'];
+			}
+			$tables[] = $entry;
 		}
 		return (string) json_encode(
 			[
@@ -173,25 +205,20 @@ final class DatabaseDump {
 	/**
 	 * Records a finished table.
 	 *
-	 * @param string $file  File name.
-	 * @param string $name  Table name.
-	 * @param int    $rows  Rows.
-	 * @param int    $bytes Bytes of the file.
+	 * @param string                                                          $file   File name.
+	 * @param string                                                          $name   Table name.
+	 * @param array{rows: int, bytes: int, snapshot: bool, key: list<string>} $result Counts and how the rows were read.
 	 */
-	private function record( string $file, string $name, int $rows, int $bytes ): void {
+	private function record( string $file, string $name, array $result ): void {
 		$state                     = $this->state();
-		$state['results'][ $file ] = [
-			'table' => $name,
-			'rows'  => $rows,
-			'bytes' => $bytes,
-		];
+		$state['results'][ $file ] = [ 'table' => $name ] + $result;
 		Files::write_atomic( $this->state_file, (string) json_encode( $state ) );
 	}
 
 	/**
 	 * Loads the state, listing tables and views on first use.
 	 *
-	 * @return array{version: int, tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int}>} State.
+	 * @return array{version: int, tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int, snapshot?: bool, key?: list<string>}>} State.
 	 * @throws DatabaseFailed If the tables cannot be listed.
 	 */
 	private function state(): array {
@@ -206,6 +233,11 @@ final class DatabaseDump {
 						'rows'  => is_int( $result['rows'] ?? null ) ? $result['rows'] : 0,
 						'bytes' => is_int( $result['bytes'] ?? null ) ? $result['bytes'] : 0,
 					];
+					$key              = $result['key'] ?? null;
+					if ( is_bool( $result['snapshot'] ?? null ) && is_array( $key ) && array_is_list( $key ) && $key === array_filter( $key, 'is_string' ) ) {
+						$results[ $file ]['snapshot'] = $result['snapshot'];
+						$results[ $file ]['key']      = $key;
+					}
 				}
 			}
 			return [

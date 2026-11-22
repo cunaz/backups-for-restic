@@ -23,6 +23,7 @@ use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Database\Dump\DatabaseDump;
+use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Database\Restore\MysqliConnection;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Jobs\Restore\DatabasePreview;
@@ -627,7 +628,7 @@ final class Container {
 					array_push( $exclude, ...DatabaseGeneration::exclusions( $this->database_connection(), $owner ) );
 				}
 			}
-			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, $exclude, $job->created_at );
+			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, $exclude, $job->created_at, fn ( ?string $time_zone ): ?DedicatedConnection => WpdbConnection::dedicated( $wpdb, $this->random(), $time_zone ) );
 			$database = $dump->files( ... );
 		}
 		return ( new PlanFactory( $this->site(), $settings, $this->private_dir(), self::strings( $roots ), self::strings( $excludes ), $database, $job->id, $job->created_at ) )->plan();

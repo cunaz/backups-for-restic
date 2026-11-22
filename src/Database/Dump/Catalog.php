@@ -102,7 +102,9 @@ final class Catalog {
 			}
 		}
 		[ $key, $order ] = $this->key( $quoted, $usable );
-		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $order );
+		// The table options follow the line that closes the column list; no literal can start a line.
+		$engine = 1 === preg_match( '/^\) ENGINE=([A-Za-z0-9_]+)/m', $create[0]['Create Table'], $match ) ? $match[1] : '';
+		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $order, $engine );
 	}
 
 	/**

@@ -3,8 +3,10 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Database;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
+use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Support\ResumableByteSource;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -62,6 +64,16 @@ final class DatabaseDumpTest extends TestCase {
 	}
 
 	/**
+	 * Opens connections of the dump's own to the source database, as the WordPress adapter
+	 * does with the site's connection settings.
+	 *
+	 * @return \Closure(?string): DedicatedConnection Factory.
+	 */
+	private static function dedicated(): \Closure {
+		return static fn ( ?string $time_zone ): DedicatedConnection => new DedicatedConnection( self::database( self::$source )->mysqli, $time_zone );
+	}
+
+	/**
 	 * Tables that exercise every code path: keyset and offset paging, composite and missing
 	 * keys, binary data, invalid UTF-8 in a latin1 column, NUL bytes, line breaks, quotes,
 	 * backslashes, emoji, NULLs, a generated column and a view.
@@ -103,8 +115,15 @@ final class DatabaseDumpTest extends TestCase {
 		$db->execute( 'CREATE VIEW bfr_titles AS SELECT id, title FROM bfr_posts WHERE id < 10' );
 	}
 
-	public function test_dump_imports_with_the_mariadb_client_into_identical_tables(): void {
-		$dump  = new DatabaseDump( self::database( self::$source ), $this->directory . '/state.json', 'bfr_', [], 1767323100 );
+	/** @return iterable<string, array{bool}> */
+	public static function connections(): iterable {
+		yield 'the site connection' => [ false ];
+		yield 'a connection of its own' => [ true ];
+	}
+
+	#[DataProvider( 'connections' )]
+	public function test_dump_imports_with_the_mariadb_client_into_identical_tables( bool $dedicated ): void {
+		$dump  = new DatabaseDump( self::database( self::$source ), $this->directory . '/state.json', 'bfr_', [], 1767323100, $dedicated ? self::dedicated() : null );
 		$files = [];
 		foreach ( $dump->files() as $file ) {
 			$files[ $file->name ] = $this->read( $file->source, 3 );
@@ -316,12 +335,89 @@ final class DatabaseDumpTest extends TestCase {
 		}
 	}
 
-	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone(): void {
+	/**
+	 * A transient that expires during a tick is deleted and set again with a new option_id,
+	 * after the pages already read. On a connection of its own, the tick reads the table from
+	 * one snapshot: the option appears once, with its value from the start of the tick.
+	 */
+	public function test_a_row_deleted_and_inserted_again_with_a_new_key_within_one_tick_is_read_once(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'CREATE TABLE snap_options (option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, option_name VARCHAR(191) NOT NULL, option_value LONGTEXT NOT NULL, UNIQUE KEY option_name (option_name)) ENGINE=InnoDB' );
+		$values = [];
+		for ( $i = 1; $i <= 3000; ++$i ) {
+			$values[] = sprintf( "('%s', '%s')", 10 === $i ? '_transient_feed' : sprintf( 'option_%05d', $i ), str_repeat( 'v', 400 ) );
+		}
+		foreach ( array_chunk( $values, 500 ) as $chunk ) {
+			$db->execute( 'INSERT INTO snap_options (option_name, option_value) VALUES ' . implode( ',', $chunk ) );
+		}
+		$expected = $db->rows( 'SELECT * FROM snap_options ORDER BY option_id' );
+
+		$files = $this->dump_with_change(
+			$db,
+			'snap_',
+			'010-snap_options.sql',
+			static function () use ( $db ): void {
+				$db->execute( "DELETE FROM snap_options WHERE option_name = '_transient_feed'" );
+				$db->execute( "INSERT INTO snap_options (option_name, option_value) VALUES ('_transient_feed', 'renewed')" );
+			}
+		);
+
+		self::assertSame( $expected, self::database( self::$target )->rows( 'SELECT * FROM snap_options ORDER BY option_id' ), 'The option is there once, as the snapshot saw it.' );
+		$table = self::manifest_table( $files, 'snap_options' );
+		self::assertTrue( $table['snapshot'], 'The manifest records that the rows come from one snapshot.' );
+		self::assertSame( [ 'option_id' ], $table['key'] );
+	}
+
+	/**
+	 * A table without a key, read with one statement on the dump's own connection: rows
+	 * deleted while it is read are still in the dump, because the statement reads one snapshot.
+	 * Read in several parts, or in pages through the site's connection, it is marked in the
+	 * manifest and the backup warns.
+	 */
+	public function test_a_table_without_a_key_is_read_in_one_statement_or_marked_when_it_is_not(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'CREATE TABLE nokey_log (at INT, message VARCHAR(700)) ENGINE=InnoDB' );
+		$values = [];
+		// About 3.7 MB: more than one statement of 1 MiB even after half of it is deleted.
+		for ( $i = 1; $i <= 6000; ++$i ) {
+			$values[] = sprintf( "(%d, '%s')", $i % 1000, str_repeat( 'm', 600 + $i % 7 ) );
+		}
+		foreach ( array_chunk( $values, 500 ) as $chunk ) {
+			$db->execute( 'INSERT INTO nokey_log VALUES ' . implode( ',', $chunk ) );
+		}
+		$query    = 'SELECT at, message FROM nokey_log ORDER BY at, message';
+		$expected = $db->rows( $query );
+
+		$files = $this->dump_with_change( $db, 'nokey_', '010-nokey_log.sql', static fn () => $db->execute( 'DELETE FROM nokey_log WHERE at < 500' ) );
+
+		self::assertSame( $expected, self::database( self::$target )->rows( $query ), 'Every row, duplicates included, as the statement saw them.' );
+		$table = self::manifest_table( $files, 'nokey_log' );
+		self::assertSame( [], $table['key'] );
+		self::assertTrue( $table['snapshot'] );
+		self::assertSame( [], $this->warnings );
+
+		foreach ( [
+			'several parts on its own connection' => self::dedicated(),
+			'pages through the site connection'   => null,
+		] as $case => $dedicated ) {
+			$this->warnings = [];
+			$manifest       = $this->dump_and_import( $db, 'nokey_', null, $dedicated );
+			$entry          = array_values( array_filter( $manifest['tables'], static fn ( array $table ): bool => 'nokey_log' === $table['name'] ) )[0];
+			self::assertFalse( $entry['snapshot'], $case );
+			self::assertCount( 1, $this->warnings, $case );
+			self::assertStringContainsString( 'nokey_log has no primary key', $this->warnings[0], $case );
+			self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), $case );
+		}
+	}
+
+	#[DataProvider( 'connections' )]
+	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone( bool $dedicated ): void {
 		$db   = self::database( self::$source );
 		$zone = self::daylight_saving_zone( $db );
 		if ( null === $zone ) {
 			self::markTestSkipped( 'The server knows no time zone with daylight saving time: no time zone tables, and a SYSTEM zone without it.' );
 		}
+		$db->execute( 'DROP TABLE IF EXISTS tz_events' );
 		$db->execute( 'CREATE TABLE tz_events (id INT PRIMARY KEY, at TIMESTAMP(6) NULL, plain TIMESTAMP NULL)' );
 		$instants = [
 			1 => gmmktime( 10, 0, 0, 1, 15, 2026 ),
@@ -337,7 +433,7 @@ final class DatabaseDumpTest extends TestCase {
 		$session = 'SELECT @@SESSION.time_zone AS zone';
 		$before  = $db->rows( $session );
 
-		$manifest = $this->dump_and_import( $db, 'tz_' );
+		$manifest = $this->dump_and_import( $db, 'tz_', null, $dedicated ? self::dedicated() : null );
 
 		$query = 'SELECT id, UNIX_TIMESTAMP(at) AS at, UNIX_TIMESTAMP(plain) AS plain FROM tz_events ORDER BY id';
 		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), 'Every instant survives, including both of the repeated autumn hour.' );
@@ -347,8 +443,10 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( $before, $db->rows( $session ), 'The site connection keeps its time zone.' );
 	}
 
-	public function test_a_latin1_connection_dumps_and_restores_the_stored_bytes_of_latin1_and_utf8mb4_columns(): void {
+	#[DataProvider( 'connections' )]
+	public function test_a_latin1_connection_dumps_and_restores_the_stored_bytes_of_latin1_and_utf8mb4_columns( bool $dedicated ): void {
 		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS cs_rows' );
 		$db->execute( 'CREATE TABLE cs_rows (id INT PRIMARY KEY, legacy TEXT CHARACTER SET latin1, label VARCHAR(40) CHARACTER SET latin1, modern TEXT CHARACTER SET utf8mb4) DEFAULT CHARSET=utf8mb4' );
 		$db->execute( "INSERT INTO cs_rows (id, modern) VALUES (1, '内容 Архив 😀 Åtgärd'), (2, NULL)" );
 		// A site with DB_CHARSET latin1 sends UTF-8 bytes through a latin1 connection: the
@@ -360,7 +458,7 @@ final class DatabaseDumpTest extends TestCase {
 		$before   = $db->rows( $settings );
 		self::assertSame( 'latin1', $before[0]['results'] );
 
-		$this->dump_and_import( $db, 'cs_' );
+		$this->dump_and_import( $db, 'cs_', null, $dedicated ? self::dedicated() : null );
 
 		$query = 'SELECT id, HEX(legacy) AS legacy, HEX(label) AS label, HEX(modern) AS modern FROM cs_rows ORDER BY id';
 		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ), 'Both columns hold the same bytes after the import.' );
@@ -382,15 +480,68 @@ final class DatabaseDumpTest extends TestCase {
 	}
 
 	/**
+	 * Dumps the tables with a prefix in one tick on a connection of the dump's own. One table is
+	 * changed after its first block was read, while its source is still open, and the files are
+	 * imported into the target database.
+	 *
+	 * @param \Closure(): mixed $change Changes the table.
+	 * @return array<string, string> File contents by name.
+	 */
+	private function dump_with_change( MysqliConnection $db, string $prefix, string $changed, \Closure $change ): array {
+		$files = [];
+		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'change.json', $prefix, [], 1767323100, self::dedicated() ) )->files() as $file ) {
+			if ( $changed !== $file->name ) {
+				$files[ $file->name ] = $this->read( $file->source, PHP_INT_MAX );
+				continue;
+			}
+			$source  = ( $file->source )( null );
+			$content = $source->read( 65536 );
+			$change();
+			for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
+				$content .= $block;
+			}
+			self::assertInstanceOf( ResumableByteSource::class, $source );
+			self::assertNull( $source->cursor(), 'The table was read in one tick.' );
+			array_push( $this->warnings, ...$source->warnings() );
+			$files[ $file->name ] = $content;
+		}
+		foreach ( $files as $name => $content ) {
+			if ( str_ends_with( $name, '.sql' ) ) {
+				file_put_contents( $this->directory . '/' . $name, $content );
+			}
+		}
+		MysqliConnection::import( self::$target, array_map( fn ( string $name ): string => $this->directory . '/' . $name, array_values( array_filter( array_keys( $files ), static fn ( string $name ): bool => str_ends_with( $name, '.sql' ) ) ) ) );
+		return $files;
+	}
+
+	/**
+	 * A table's entry in the manifest of dumped files.
+	 *
+	 * @param array<string, string> $files File contents by name.
+	 * @return array<string, mixed> Entry.
+	 */
+	private static function manifest_table( array $files, string $name ): array {
+		$manifest = json_decode( $files['manifest.json'], true );
+		self::assertIsArray( $manifest );
+		foreach ( $manifest['tables'] as $table ) {
+			if ( $name === $table['name'] ) {
+				return $table;
+			}
+		}
+		self::fail( 'The manifest does not list ' . $name . '.' );
+	}
+
+	/**
 	 * Dumps the tables with a prefix in pages with a stop after every read, writes the files
 	 * and imports them into the target database with the command-line client.
 	 *
-	 * @param (\Closure(string, int): void)|null $between Runs between two parts of a table file, with its name and the part number.
+	 * @param (\Closure(string, int): void)|null $between   Runs between two parts of a table file, with its name and the part number.
+	 * @param \Closure|null                      $dedicated Opens the dump's own connection, or null for the site connection only.
 	 * @return array<string, mixed> The decoded manifest.
 	 */
-	private function dump_and_import( MysqliConnection $db, string $prefix, ?\Closure $between = null ): array {
+	private function dump_and_import( MysqliConnection $db, string $prefix, ?\Closure $between = null, ?\Closure $dedicated = null ): array {
 		$files = [];
-		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'state.json', $prefix, [], 1767323100 ) )->files() as $file ) {
+		foreach ( ( new DatabaseDump( $db, $this->directory . '/' . $prefix . 'state.json', $prefix, [], 1767323100, $dedicated ) )->files() as $file ) {
 			$files[ $file->name ] = $this->read( $file->source, 1, null === $between ? null : static fn ( int $part ) => $between( $file->name, $part ) );
 			if ( str_ends_with( $file->name, '.sql' ) ) {
 				file_put_contents( $this->directory . '/' . $file->name, $files[ $file->name ] );

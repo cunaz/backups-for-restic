@@ -22,10 +22,21 @@ defined( 'ABSPATH' ) || exit;
  * Pages follow the table's primary key, or a unique key over NOT NULL columns, in full: each
  * page asks for the rows after the last key it wrote (KeyColumn), so an insert or a delete
  * elsewhere in the table cannot shift a row into or out of a page, and a row that exists
- * for the whole dump of its table appears exactly once. A table without such a key is read
- * by its position in the table. The page size adapts so that one page stays near 2 MiB of
- * SQL. A page is the unit of resumption: the backup stops between pages and continues with
- * the next one in a later request.
+ * for the whole dump of its table appears exactly once. The page size adapts so that one
+ * page stays near 2 MiB of SQL. A page is the unit of resumption: the backup stops between
+ * pages and continues with the next one in a later request.
+ *
+ * On a DedicatedConnection, DatabaseDump starts a read-only transaction for the table before
+ * its definition is read, and this source ends it when it stops or finishes: an InnoDB table
+ * is then read from one snapshot per tick. A table without a usable key is read there with
+ * one unbuffered statement, which is consistent by itself; only when a tick ends before that
+ * statement does, the next tick continues at the row's position with a new one. Elsewhere such
+ * a table is read in pages by position.
+ *
+ * The source counts the read views its rows came from: one per tick inside a snapshot, one
+ * per statement outside. The manifest records whether that was one, and a table without a key
+ * that needed more than one gets a warning, because rows added or removed between the reads
+ * can then be missing or repeated.
  */
 final class TableSource implements ResumableByteSource {
 
@@ -35,6 +46,9 @@ final class TableSource implements ResumableByteSource {
 	public const int MAX_STATEMENT_BYTES = 16777216;
 
 	private const int STATEMENT_BYTES = 1048576;
+
+	/** At most as many rows per INSERT as the importer accepts (InsertStatement::MAX_ROWS). */
+	private const int STATEMENT_ROWS = 20000;
 
 	private const int TARGET_PAGE_BYTES = 2097152;
 
@@ -133,13 +147,55 @@ final class TableSource implements ResumableByteSource {
 	private int $page;
 
 	/**
+	 * Read views the rows written so far came from.
+	 *
+	 * @var int
+	 */
+	private int $views;
+
+	/**
+	 * Whether every read of this source sees one snapshot: an InnoDB table inside begin().
+	 *
+	 * @var bool
+	 */
+	private bool $snapshot;
+
+	/**
+	 * Whether this source's snapshot was counted as a read view.
+	 *
+	 * @var bool
+	 */
+	private bool $viewed = false;
+
+	/**
+	 * Whether an unbuffered statement is being read.
+	 *
+	 * @var bool
+	 */
+	private bool $streaming = false;
+
+	/**
+	 * A row read from the stream that did not fit into the statement before.
+	 *
+	 * @var string|null
+	 */
+	private ?string $carry = null;
+
+	/**
+	 * Start of every INSERT statement of the table.
+	 *
+	 * @var string
+	 */
+	private string $prefix;
+
+	/**
 	 * Opens the table at a cursor.
 	 *
-	 * @param Connection               $connection  Database.
-	 * @param Table                    $table       Table.
-	 * @param string                   $preamble    Session settings, one statement per line.
-	 * @param string|null              $cursor      Cursor from an earlier source, or null to start.
-	 * @param \Closure(int, int): void $on_complete Receives rows and bytes once the trailer is written.
+	 * @param Connection                                                                      $connection  Database; a DedicatedConnection inside begin() for one snapshot.
+	 * @param Table                                                                           $table       Table.
+	 * @param string                                                                          $preamble    Session settings, one statement per line.
+	 * @param string|null                                                                     $cursor      Cursor from an earlier source, or null to start.
+	 * @param \Closure(array{rows: int, bytes: int, snapshot: bool, key: list<string>}): void $on_complete Receives the counts and how the rows were read, once the trailer is written.
 	 */
 	public function __construct(
 		private readonly Connection $connection,
@@ -163,6 +219,9 @@ final class TableSource implements ResumableByteSource {
 		$this->rows      = $state['rows'] ?? 0;
 		$this->bytes     = $state['bytes'] ?? 0;
 		$this->page      = $state['page'] ?? 500;
+		$this->views     = $state['views'] ?? 0;
+		$this->snapshot  = $connection instanceof DedicatedConnection && $connection->in_snapshot() && $table->versioned();
+		$this->prefix    = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $table->columns ) ) ) . ') VALUES ';
 	}
 
 	/**
@@ -171,14 +230,14 @@ final class TableSource implements ResumableByteSource {
 	 *
 	 * @param string|null $cursor Cursor.
 	 * @param Table       $table  Table.
-	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int}|null State, or null to start the table from its beginning.
+	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int, views: int}|null State, or null to start the table from its beginning.
 	 */
 	private static function saved( ?string $cursor, Table $table ): ?array {
 		$state = null === $cursor ? null : json_decode( $cursor, true );
 		if ( ! is_array( $state ) || self::CURSOR_VERSION !== ( $state['v'] ?? null ) ) {
 			return null;
 		}
-		foreach ( [ 'offset', 'rows', 'bytes', 'page' ] as $field ) {
+		foreach ( [ 'offset', 'rows', 'bytes', 'page', 'views' ] as $field ) {
 			if ( ! is_int( $state[ $field ] ?? null ) || $state[ $field ] < 0 ) {
 				return null;
 			}
@@ -208,6 +267,7 @@ final class TableSource implements ResumableByteSource {
 			'rows'   => $state['rows'],
 			'bytes'  => $state['bytes'],
 			'page'   => max( 1, min( 20000, $state['page'] ) ),
+			'views'  => $state['views'],
 		];
 	}
 
@@ -253,6 +313,7 @@ final class TableSource implements ResumableByteSource {
 				'rows'   => $this->rows,
 				'bytes'  => $this->bytes,
 				'page'   => $this->page,
+				'views'  => $this->views,
 			]
 		);
 	}
@@ -267,12 +328,16 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
-	 * A table has no warnings.
+	 * A complete table without a key that was read in more than one view can miss rows or
+	 * repeat them; the backup says so.
 	 *
-	 * @return list<string> None.
+	 * @return list<string> Warning, or none.
 	 */
 	public function warnings(): array {
-		return [];
+		if ( ! $this->finished || [] !== $this->table->order || $this->views < 2 ) {
+			return [];
+		}
+		return [ sprintf( 'Database table %s has no primary key and no unique key over NOT NULL columns and was read at %d moments: rows that were added or removed meanwhile can be missing or repeated in the backup.', $this->table->name, $this->views ) ];
 	}
 
 	/**
@@ -290,23 +355,63 @@ final class TableSource implements ResumableByteSource {
 		if ( ! $this->exhausted ) {
 			if ( $this->stopping ) {
 				$this->stopped = true;
+				// A row carried over from the stream was not written; the next tick reads it again.
+				$this->carry = null;
+				$this->release();
 				return;
 			}
-			$this->page();
+			if ( [] === $this->table->order && $this->snapshot ) {
+				$this->stream();
+			} else {
+				$this->page();
+			}
 			return;
 		}
 		$this->emit( '-- end table rows=' . $this->rows . ' bytes=' . $this->bytes . "\n" );
 		$this->finished = true;
-		( $this->on_complete )( $this->rows, $this->bytes );
+		$this->release();
+		( $this->on_complete )(
+			[
+				'rows'     => $this->rows,
+				'bytes'    => $this->bytes,
+				'snapshot' => $this->views <= 1,
+				'key'      => array_map( static fn ( KeyColumn $column ): string => $column->name, $this->table->order ),
+			]
+		);
 	}
 
 	/**
-	 * Fetches one page and turns it into INSERT statements.
+	 * Ends this tick's snapshot: a stream that stopped early closes its connection.
 	 *
-	 * @throws DatabaseFailed If the query fails or a key value is not what its column holds.
+	 * @throws DatabaseFailed If the transaction cannot be ended.
 	 */
-	private function page(): void {
-		$table = SqlFormatter::identifier( $this->table->name );
+	private function release(): void {
+		if ( $this->connection instanceof DedicatedConnection ) {
+			if ( $this->streaming ) {
+				$this->streaming = false;
+				$this->connection->abandon();
+			}
+			$this->connection->end();
+		}
+	}
+
+	/**
+	 * Counts a statement that returned rows: one view per snapshot, one per statement outside.
+	 */
+	private function viewed(): void {
+		if ( ! $this->snapshot || ! $this->viewed ) {
+			++$this->views;
+			$this->viewed = true;
+		}
+	}
+
+	/**
+	 * The selected columns: every insertable column, a FLOAT as the DOUBLE it converts to
+	 * exactly, and the cursor values that need an expression.
+	 *
+	 * @return string Selection list.
+	 */
+	private function selection(): string {
 		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
 		$selection = [];
 		foreach ( $this->table->columns as $name => $kind ) {
@@ -319,7 +424,84 @@ final class TableSource implements ResumableByteSource {
 			}
 		}
 		// A generated-only table still has rows: one empty INSERT tuple recreates each one.
-		$selection = [] === $selection ? '1' : implode( ', ', $selection );
+		return [] === $selection ? '1' : implode( ', ', $selection );
+	}
+
+	/**
+	 * Reads one statement's worth of rows of a table without a key from the unbuffered read of
+	 * this tick, which starts at the first row not yet written.
+	 *
+	 * @throws DatabaseFailed If the read fails.
+	 */
+	private function stream(): void {
+		if ( ! $this->streaming && $this->connection instanceof DedicatedConnection ) {
+			$table = SqlFormatter::identifier( $this->table->name );
+			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ( $this->offset > 0 ? ' LIMIT 18446744073709551615 OFFSET ' . $this->offset : '' ) );
+			$this->streaming = true;
+		}
+		$tuples      = null === $this->carry ? [] : [ $this->carry ];
+		$length      = null === $this->carry ? 0 : strlen( $this->carry ) + 1;
+		$this->carry = null;
+		while ( true ) {
+			$row = $this->connection instanceof DedicatedConnection ? $this->connection->next() : null;
+			if ( null === $row ) {
+				$this->streaming = false;
+				$this->exhausted = true;
+				break;
+			}
+			$tuple = $this->tuple( $row );
+			if ( [] !== $tuples && ( $length + strlen( $tuple ) > self::STATEMENT_BYTES || count( $tuples ) >= self::STATEMENT_ROWS ) ) {
+				$this->carry = $tuple;
+				break;
+			}
+			$tuples[] = $tuple;
+			$length  += strlen( $tuple ) + 1;
+		}
+		if ( [] !== $tuples ) {
+			$this->viewed();
+			$this->statement( $tuples );
+			$this->rows   += count( $tuples );
+			$this->offset += count( $tuples );
+		}
+	}
+
+	/**
+	 * One row as an INSERT tuple.
+	 *
+	 * @param array<string, string|null> $row Row.
+	 * @return string Tuple.
+	 * @throws DatabaseFailed If the row exceeds the importer's statement limit.
+	 */
+	private function tuple( array $row ): string {
+		$values = [];
+		foreach ( $this->table->columns as $column => $kind ) {
+			$values[] = SqlFormatter::value( $row[ $column ] ?? null, $kind );
+		}
+		$tuple = '(' . implode( ',', $values ) . ')';
+		if ( strlen( $this->prefix ) + strlen( $tuple ) + 1 > self::MAX_STATEMENT_BYTES ) {
+			DatabaseFailed::raise( 'A database row exceeds the 16 MiB SQL statement limit and cannot be backed up.', [ 'table' => $this->table->name ] );
+		}
+		return $tuple;
+	}
+
+	/**
+	 * Writes tuples as one INSERT statement.
+	 *
+	 * @param list<string> $tuples Tuples.
+	 * @return int Bytes written.
+	 */
+	private function statement( array $tuples ): int {
+		return $this->emit( $this->prefix . implode( ',', $tuples ) . ";\n" );
+	}
+
+	/**
+	 * Fetches one page and turns it into INSERT statements.
+	 *
+	 * @throws DatabaseFailed If the query fails or a key value is not what its column holds.
+	 */
+	private function page(): void {
+		$table     = SqlFormatter::identifier( $this->table->name );
+		$selection = $this->selection();
 		if ( [] !== $this->table->order ) {
 			$where = null === $this->after ? '' : ' WHERE ' . KeyColumn::after( $this->table->order, $this->after );
 			// Qualified, so that ORDER BY names the column even where the selection has an alias of the same name.
@@ -333,6 +515,7 @@ final class TableSource implements ResumableByteSource {
 			$this->exhausted = true;
 			return;
 		}
+		$this->viewed();
 
 		if ( [] !== $this->table->order ) {
 			$last  = $rows[ array_key_last( $rows ) ];
@@ -346,29 +529,20 @@ final class TableSource implements ResumableByteSource {
 			}
 			$this->after = $after;
 		}
-		$columns = $this->table->columns;
-		$prefix  = 'INSERT INTO ' . $table . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $columns ) ) ) . ') VALUES ';
-		$tuples  = [];
-		$length  = 0;
-		$size    = 0;
+		$tuples = [];
+		$length = 0;
+		$size   = 0;
 		foreach ( $rows as $row ) {
-			$values = [];
-			foreach ( $columns as $column => $kind ) {
-				$values[] = SqlFormatter::value( $row[ $column ] ?? null, $kind );
-			}
-			$tuple = '(' . implode( ',', $values ) . ')';
-			if ( strlen( $prefix ) + strlen( $tuple ) + 1 > self::MAX_STATEMENT_BYTES ) {
-				DatabaseFailed::raise( 'A database row exceeds the 16 MiB SQL statement limit and cannot be backed up.', [ 'table' => $this->table->name ] );
-			}
+			$tuple = $this->tuple( $row );
 			if ( [] !== $tuples && $length + strlen( $tuple ) > self::STATEMENT_BYTES ) {
-				$size  += $this->emit( $prefix . implode( ',', $tuples ) . ";\n" );
+				$size  += $this->statement( $tuples );
 				$tuples = [];
 				$length = 0;
 			}
 			$tuples[] = $tuple;
 			$length  += strlen( $tuple ) + 1;
 		}
-		$size += $this->emit( $prefix . implode( ',', $tuples ) . ";\n" );
+		$size += $this->statement( $tuples );
 
 		$count         = count( $rows );
 		$this->rows   += $count;
@@ -379,7 +553,7 @@ final class TableSource implements ResumableByteSource {
 		if ( $size > 2 * self::TARGET_PAGE_BYTES ) {
 			$this->page = max( 1, intdiv( $this->page, 2 ) );
 		} elseif ( $size < intdiv( self::TARGET_PAGE_BYTES, 2 ) && $count === $this->page ) {
-			$this->page = min( 20000, $this->page * 2 );
+			$this->page = min( self::STATEMENT_ROWS, $this->page * 2 );
 		}
 	}
 

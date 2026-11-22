@@ -24,14 +24,25 @@ final readonly class Table {
 	 * @param array<string, string> $columns Column kinds by column name, in table order.
 	 * @param string|null           $key     Name of the primary or unique key whose columns order the pages, or null if the table has none that can.
 	 * @param list<KeyColumn>       $order   Columns of that key, in key order; empty without a key.
+	 * @param string                $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
 	 */
 	public function __construct(
 		public string $name,
 		public string $create,
 		public array $columns,
 		public ?string $key,
-		public array $order
+		public array $order,
+		public string $engine = ''
 	) {
+	}
+
+	/**
+	 * Whether a transaction gives every read of the table the same snapshot.
+	 *
+	 * @return bool True for InnoDB.
+	 */
+	public function versioned(): bool {
+		return 0 === strcasecmp( $this->engine, 'InnoDB' );
 	}
 
 	/**
