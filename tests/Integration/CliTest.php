@@ -101,6 +101,57 @@ final class CliTest extends TestCase {
 		}
 	}
 
+	public function test_while_a_file_job_holds_maintenance_only_the_plugins_commands_boot_without_other_plugins(): void {
+		[ $status, $output ] = TestSite::wp( [ 'plugin', 'activate', 'hello' ] );
+		self::assertSame( 0, $status, $output );
+		// The marker and the job's private copy are one inode, so they share a filesystem.
+		$work = dirname( TestSite::root() ) . '/bfr-maintenance-' . bin2hex( random_bytes( 6 ) );
+		$job  = '20261120T120000Z-0a0b0c';
+		mkdir( $work . '/' . $job, 0700, true );
+		file_put_contents(
+			$work . '/probe.php',
+			'<?php WP_CLI::add_wp_hook( "plugins_loaded", static function (): void {
+				require_once ABSPATH . "wp-admin/includes/plugin.php";
+				$stored = update_option( "active_plugins", [] );
+				deactivate_plugins( "backups-for-restic/backups-for-restic.php", true );
+				WP_CLI::log( "probe: hello=" . ( function_exists( "hello_dolly" ) ? "loaded" : "absent" ) . " stored=" . var_export( $stored, true ) );
+			}, PHP_INT_MAX );'
+		);
+		// WP-CLI ignores maintenance, so an eval command can still release the marker.
+		$marker = sprintf(
+			'$marker = new BackupsForRestic\Restore\FileMaintenance( (string) realpath( ABSPATH ), "backups-for-restic/backups-for-restic.php", rest_url( "backups-for-restic/v1" ), admin_url( "admin.php" ) ); $job = %s; $dir = (string) realpath( %s );',
+			var_export( $job, true ),
+			var_export( $work . '/' . $job, true )
+		);
+		try {
+			[ $status, $before ] = TestSite::wp( [ 'option', 'get', 'active_plugins', '--format=json' ] );
+			self::assertSame( 0, $status, $before );
+			[ $status, $output ] = TestSite::wp( [ 'eval', $marker . ' $marker->enter( $job, $dir, "" );' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertFileExists( TestSite::root() . '/.maintenance' );
+
+			[ $status, $output ] = TestSite::wp( [ 'plugin', 'list', '--status=active', '--field=name' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertContains( 'hello', explode( "\n", $output ), 'Another command boots with the site\'s plugins.' );
+			self::assertContains( 'backups-for-restic', explode( "\n", $output ) );
+			foreach ( [ [ 'backups-for-restic', 'status' ], [ '--skip-plugins=hello', '--skip-themes', 'backups-for-restic', 'status' ] ] as $command ) {
+				[ $status, $output ] = TestSite::wp( [ '--require=' . $work . '/probe.php', ...$command ] );
+				self::assertSame( 0, $status, $output );
+				self::assertStringContainsString( 'probe: hello=absent stored=false', $output );
+				self::assertStringContainsString( 'Active job: -', $output );
+			}
+			[ $status, $after ] = TestSite::wp( [ 'option', 'get', 'active_plugins', '--format=json' ] );
+			self::assertSame( 0, $status, $after );
+			self::assertSame( $before, $after, 'No command stored the plugin list that the plugin\'s own commands boot with.' );
+		} finally {
+			[ $status, $output ] = TestSite::wp( [ 'eval', $marker . ' $marker->release( $job, $dir );' ] );
+			TestSite::wp( [ 'plugin', 'deactivate', 'hello' ] );
+			TempDir::remove( $work );
+		}
+		self::assertSame( 0, $status, $output );
+		self::assertFileDoesNotExist( TestSite::root() . '/.maintenance' );
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
 		$before            = TestSite::state( 'recovery_kit' );
