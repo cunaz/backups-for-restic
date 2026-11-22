@@ -278,9 +278,11 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Writes a probe file into the private directory for the browser to request (ADR 0007).
+	 * Writes a probe file into the private directory for the browser to request (ADR 0007),
+	 * and names the known file that the browser requests beside it: without that file a
+	 * refusal of the probe proves nothing (Storage\BrowserProbe).
 	 *
-	 * @return \WP_REST_Response|\WP_Error Response with the probe's name and URL, or null as URL if the directory has none.
+	 * @return \WP_REST_Response|\WP_Error Response with the probe's name and URL and the control's URL, or null as URL if the directory has none.
 	 */
 	public function begin_probe(): \WP_REST_Response|\WP_Error {
 		try {
@@ -289,11 +291,13 @@ final class RestRoutes {
 			if ( null === $location ) {
 				return $this->respond( [ 'url' => null ] );
 			}
-			$probe = $this->container->browser_probe()->begin( $location );
+			$control = $exposure->control( $location );
+			$probe   = $this->container->browser_probe()->begin( $location, null === $control ? null : hash( 'sha256', $control['content'] ) );
 			return $this->respond(
 				[
-					'url'   => $exposure->probe_url( $probe ),
-					'probe' => $probe,
+					'url'     => $exposure->probe_url( $probe ),
+					'probe'   => $probe,
+					'control' => null === $control ? null : $control['url'],
 				]
 			);
 		} catch ( PluginException $e ) {
@@ -302,16 +306,20 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Takes what the browser got for the probe file.
+	 * Takes what the browser got for the probe file and for the known file beside it.
 	 *
-	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the probe's name, the HTTP status (0 if the request failed) and the body.
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the probe's name, the HTTP status (0 if the request failed) and
+	 *                                                        the body, and the same for the control file as control_status and control_body.
 	 * @return \WP_REST_Response Response: exposed is true, false, or null if the report says nothing.
 	 */
 	public function report_probe( \WP_REST_Request $request ): \WP_REST_Response {
-		$status = $request->get_param( 'status' );
+		$status  = $request->get_param( 'status' );
+		$control = $request->get_param( 'control_status' );
 		// The token has 32 characters; a page that serves the file starts with it.
 		$body = substr( self::text( $request, 'body' ), 0, 4096 );
-		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( self::text( $request, 'probe' ), is_numeric( $status ) ? (int) $status : 0, $body ) ] );
+		// One byte more than the control file may have, so that a longer answer does not match.
+		$control_body = substr( self::text( $request, 'control_body' ), 0, WpExposureCheck::CONTROL_BYTES + 1 );
+		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( self::text( $request, 'probe' ), is_numeric( $status ) ? (int) $status : 0, $body, is_numeric( $control ) ? (int) $control : 0, $control_body ) ] );
 	}
 
 	/**

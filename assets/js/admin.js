@@ -2483,7 +2483,9 @@
 
 	/**
 	 * Lets this browser request a probe file in the working directory, where the site could not
-	 * request it from itself, and reports what came back. Never fails: a probe that cannot run
+	 * request it from itself, and reports what came back. The same kind of request for a known
+	 * file of the plugin shows whether a refusal came from this site or from something in
+	 * between, such as a firewall or a CDN challenge. Never fails: a probe that cannot run
 	 * leaves the check as it was.
 	 *
 	 * @return {Promise} Settled when the report is in.
@@ -2499,15 +2501,28 @@
 				const timer = window.setTimeout( function () {
 					patience.abort();
 				}, 10000 );
-				return window
-					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal } )
-					.then( function ( answer ) {
-						return answer.text().then( function ( body ) {
-							return { status: answer.status, body: body.slice( 0, 1024 ) };
+				const options = { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal };
+				function look( url, limit ) {
+					return window
+						.fetch( url, options )
+						.then( function ( answer ) {
+							return answer.text().then( function ( body ) {
+								return { status: answer.status, body: body.slice( 0, limit ) };
+							} );
+						} )
+						.catch( function () {
+							return { status: 0, body: '' };
 						} );
-					} )
-					.catch( function () {
-						return { status: 0, body: '' };
+				}
+				return look( probe.url, 1024 )
+					.then( function ( seen ) {
+						if ( ! probe.control ) {
+							return Object.assign( seen, { control_status: 0, control_body: '' } );
+						}
+						// One character more than the file may have, so that a longer answer does not match.
+						return look( probe.control, 65537 ).then( function ( control ) {
+							return Object.assign( seen, { control_status: control.status, control_body: control.body } );
+						} );
 					} )
 					.then( function ( seen ) {
 						window.clearTimeout( timer );
