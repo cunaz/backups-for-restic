@@ -130,6 +130,7 @@ final class DumpColumnsTest extends TestCase {
 		yield 'a missing count' => [ self::cursor( [ 'largest' => null ] ) ];
 		yield 'another definition' => [ self::cursor( [ 'digest' => hash( 'sha256', 'another' ) ] ) ];
 		yield 'a definition that changed during its tick' => [ self::cursor( [ 'changed' => true ] ) ];
+		yield 'rows written without the key values that follow them' => [ self::cursor( [ 'after' => null ] ) ];
 	}
 
 	/**
@@ -174,6 +175,36 @@ final class DumpColumnsTest extends TestCase {
 		self::assertTrue( $source->restarted() );
 		self::assertSame( "-- backups-for-restic-dump/1 table `wp_rows`\nDROP TABLE IF EXISTS `wp_rows`;\nCREATE TABLE `wp_rows` (`id` int);\n-- end table rows=0 bytes=112\n", $source->read( 10000 ) );
 		self::assertSame( [ 'SELECT `id` FROM `wp_rows` ORDER BY `wp_rows`.`id` LIMIT 500' ], $db->queries, 'The first page starts at the beginning of the key.' );
+	}
+
+	public function test_a_cursor_before_the_first_page_of_a_keyed_table_starts_at_its_first_key(): void {
+		$db     = new class() implements Connection {
+			/** @var list<string> */
+			public array $queries = [];
+
+			public function rows( string $sql ): array {
+				$this->queries[] = $sql;
+				return [];
+			}
+		};
+		$table  = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`id` int)', [ 'id' => SqlFormatter::NUMERIC ], 'PRIMARY', [ new KeyColumn( 'id', KeyColumn::INTEGER ) ] );
+		$source = new TableSource(
+			$db,
+			$table,
+			'',
+			self::cursor(
+				[
+					'after'  => null,
+					'offset' => 0,
+					'rows'   => 0,
+					'bytes'  => 112,
+				]
+			),
+			static function (): void {}
+		);
+		self::assertFalse( $source->restarted(), 'Only the header was written.' );
+		self::assertSame( "-- end table rows=0 bytes=112\n", $source->read( 10000 ) );
+		self::assertSame( [ 'SELECT `id` FROM `wp_rows` ORDER BY `wp_rows`.`id` LIMIT 64' ], $db->queries );
 	}
 
 	public function test_a_cursor_of_this_version_continues_after_its_key(): void {

@@ -346,6 +346,11 @@ final class TableSource implements ResumableByteSource {
 			}
 		}
 		$after = $state['after'] ?? null;
+		if ( null === $after && [] !== $table->order && $state['rows'] > 0 ) {
+			// Pages of a keyed table record their key values before any row is written: rows
+			// without them would be read again from the first key.
+			return null;
+		}
 		if ( null !== $after ) {
 			if ( ! is_array( $after ) || ! array_is_list( $after ) ) {
 				return null;
