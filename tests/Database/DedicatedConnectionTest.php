@@ -99,7 +99,9 @@ final class DedicatedConnectionTest extends TestCase {
 		if ( '' === ( $site->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" )[0]['Value'] ?? '' ) ) {
 			self::markTestSkipped( 'The server did not encrypt the connection.' );
 		}
+		$attempts = self::$admin?->rows( "SHOW GLOBAL STATUS LIKE 'Connections'" );
 		self::assertNull( WpdbConnection::dedicated( $this->wpdb( $site, self::$database ), new SystemRandom(), '+00:00' ), 'Without MYSQL_CLIENT_FLAGS the dump connection would not be encrypted.' );
+		self::assertSame( $attempts, self::$admin?->rows( "SHOW GLOBAL STATUS LIKE 'Connections'" ), 'It did not even connect: the account would have authenticated in the clear.' );
 	}
 
 	public function test_a_table_that_another_connection_locks_ends_the_transaction_after_a_bounded_wait(): void {

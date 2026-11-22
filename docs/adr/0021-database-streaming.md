@@ -50,7 +50,10 @@ and makes an interrupted dump start from zero.
   connection with the host, port or socket, user, password, database and client flags that
   `$wpdb` connected with. It uses it only after checks that it reaches the same server
   (the site's connection takes a lock with a random name, and only the same server sees it
-  taken), the same database, and is encrypted if the site's connection is. Each table's
+  taken), the same database, and is encrypted if the site's connection is. Where the site's
+  connection is encrypted but the client flags (`MYSQL_CLIENT_FLAGS`) do not ask for
+  encryption, for example behind a drop-in that sets up TLS itself, the dump does not even
+  connect, so that the account never authenticates in the clear. Each table's
   part of a tick is one `READ ONLY` transaction there; it begins with a read of the table
   before its definition is read, so the table's metadata lock holds the definition for the
   tick, and InnoDB serves every page from one snapshot. A transaction is never started on

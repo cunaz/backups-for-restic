@@ -72,7 +72,10 @@ final class WpdbConnection implements Connection {
 	 * tick in one snapshot without a transaction on the site's connection (ADR 0021). It uses
 	 * the host, port or socket, user, password, database and client flags that $wpdb connected
 	 * with, and is used only after checks that it reaches the same server and database as the
-	 * site's connection, and is encrypted if that one is. Otherwise, for example behind a
+	 * site's connection, and is encrypted if that one is. Where the site's connection is
+	 * encrypted, it is not even opened unless the client flags ask for encryption from the first
+	 * packet, as they do for wpdb: otherwise the account would authenticate in the clear before
+	 * the check could refuse the connection. Otherwise, for example behind a
 	 * database drop-in with connection settings of its own, the dump reads through the site's
 	 * connection, without snapshots.
 	 *
@@ -96,6 +99,17 @@ final class WpdbConnection implements Connection {
 		$hostname = $ipv6 && extension_loaded( 'mysqlnd' ) ? '[' . $hostname . ']' : $hostname;
 		$port     = is_numeric( $port ) ? (int) $port : null;
 		$flags    = defined( 'MYSQL_CLIENT_FLAGS' ) ? constant( 'MYSQL_CLIENT_FLAGS' ) : 0;
+		$flags    = is_int( $flags ) ? $flags : 0;
+		$site     = new self( $wpdb );
+		try {
+			$cipher = self::cipher( $site );
+		} catch ( DatabaseFailed ) {
+			return null;
+		}
+		if ( '' !== $cipher && 0 === ( $flags & MYSQLI_CLIENT_SSL ) ) {
+			// A database drop-in can encrypt the site's connection with settings of its own.
+			return null;
+		}
 		try {
 			// phpcs:ignore WordPress.DB.RestrictedFunctions.mysql_mysqli_init -- The dump's own connection, with $wpdb's settings, holds the read-only snapshot that the site's connection must not (ADR 0021).
 			$mysqli = mysqli_init();
@@ -105,7 +119,7 @@ final class WpdbConnection implements Connection {
 			$mysqli->options( MYSQLI_OPT_CONNECT_TIMEOUT, 5 );
 			$mysqli->options( MYSQLI_OPT_INT_AND_FLOAT_NATIVE, 0 );
 			// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A failed connection only means that the dump reads through $wpdb; PHP's warning would name the account.
-			if ( ! @$mysqli->real_connect( $hostname, $user, $password, $name, $port, $socket, is_int( $flags ) ? $flags : 0 ) ) {
+			if ( ! @$mysqli->real_connect( $hostname, $user, $password, $name, $port, $socket, $flags ) ) {
 				return null;
 			}
 			$dedicated = new DedicatedConnection( $mysqli, $time_zone );
@@ -113,7 +127,7 @@ final class WpdbConnection implements Connection {
 			return null;
 		}
 		try {
-			if ( self::same_database( new self( $wpdb ), $dedicated, $random ) ) {
+			if ( self::same_database( $site, $cipher, $dedicated, $random ) ) {
 				return $dedicated;
 			}
 		} catch ( DatabaseFailed ) {
@@ -171,12 +185,13 @@ final class WpdbConnection implements Connection {
 	 * second server with a copy of the database does not.
 	 *
 	 * @param Connection          $site      The site's connection.
+	 * @param string              $cipher    TLS cipher of the site's connection, empty if it is not encrypted.
 	 * @param DedicatedConnection $dedicated The dump's connection.
 	 * @param RandomSource        $random    Randomness for the lock name.
 	 * @return bool True if both reach the same database.
 	 * @throws DatabaseFailed If a check cannot run.
 	 */
-	private static function same_database( Connection $site, DedicatedConnection $dedicated, RandomSource $random ): bool {
+	private static function same_database( Connection $site, string $cipher, DedicatedConnection $dedicated, RandomSource $random ): bool {
 		$lock = '0x' . bin2hex( 'bfr_dump_' . bin2hex( $random->bytes( 8 ) ) );
 		$site->rows( 'DO GET_LOCK(' . $lock . ', 0)' );
 		try {
@@ -185,8 +200,17 @@ final class WpdbConnection implements Connection {
 			$site->rows( 'DO RELEASE_LOCK(' . $lock . ')' );
 		}
 		$database = $site->rows( 'SELECT DATABASE() AS name' )[0]['name'] ?? null;
-		$cipher   = $site->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" )[0]['Value'] ?? '';
-		$own      = $dedicated->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" )[0]['Value'] ?? '';
-		return null !== $holder && null !== $database && $database === ( $dedicated->rows( 'SELECT DATABASE() AS name' )[0]['name'] ?? null ) && ( '' === $cipher || '' !== $own );
+		return null !== $holder && null !== $database && $database === ( $dedicated->rows( 'SELECT DATABASE() AS name' )[0]['name'] ?? null ) && ( '' === $cipher || '' !== self::cipher( $dedicated ) );
+	}
+
+	/**
+	 * The TLS cipher of a connection.
+	 *
+	 * @param Connection $connection Connection.
+	 * @return string Cipher, or empty if the connection is not encrypted.
+	 * @throws DatabaseFailed If it cannot be read.
+	 */
+	private static function cipher( Connection $connection ): string {
+		return $connection->rows( "SHOW SESSION STATUS LIKE 'Ssl_cipher'" )[0]['Value'] ?? '';
 	}
 }
