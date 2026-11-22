@@ -24,6 +24,7 @@ defined( 'ABSPATH' ) || exit;
  *
  * @phpstan-type Action array{path: string, destination: string|null, action: string, reason: string}
  * @phpstan-type Writer array{uid: int, groups: list<int>|null}
+ * @phpstan-type Guard array{reason: string, key: string, keys: list<string>, decided: list<bool>}
  */
 final class ApplyPlan {
 
@@ -32,6 +33,23 @@ final class ApplyPlan {
 
 	/** Wider folders share a disk index across read-only worker requests. */
 	private const int DISK_THRESHOLD = 2048;
+
+	/**
+	 * Code points that a case-insensitive filesystem may ignore in a name: Unicode's
+	 * Default_Ignorable_Code_Point property, which contains those that HFS+ skips.
+	 */
+	private const string IGNORABLE = '/[\x{00AD}\x{034F}\x{061C}\x{115F}\x{1160}\x{17B4}\x{17B5}\x{180B}-\x{180F}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{3164}\x{FE00}-\x{FE0F}\x{FEFF}\x{FFA0}\x{FFF0}-\x{FFF8}\x{1BCA0}-\x{1BCA3}\x{1D173}-\x{1D17A}\x{E0000}-\x{E0FFF}]/u';
+
+	/**
+	 * Characters that a filesystem equates with ASCII beyond full case folding: NTFS and SMB
+	 * uppercase a dotless i to I, and canonical decomposition turns the Greek question mark
+	 * and the varia into ASCII punctuation.
+	 */
+	private const array LOOKALIKES = [
+		"\u{0131}" => 'i',
+		"\u{037E}" => ';',
+		"\u{1FEF}" => '`',
+	];
 
 	/**
 	 * Bounded sibling indexes shared only within one read-only worker.
@@ -48,10 +66,11 @@ final class ApplyPlan {
 	private array $roots = [];
 
 	/**
-	 * Locations that must never be replaced, in every spelling that a canonical live target
-	 * can have, each with the reason code of the entries it skips.
+	 * Locations that must never be replaced, keyed by every spelling that a canonical live
+	 * target can have, with the reason code of the entries they skip and the comparison keys
+	 * of their names.
 	 *
-	 * @var array<string, string>
+	 * @var array<string, Guard>
 	 */
 	private array $guards = [];
 
@@ -64,6 +83,13 @@ final class ApplyPlan {
 	private array|false $process;
 
 	/**
+	 * Whether the intl extension normalizes names for the comparison with protected paths.
+	 *
+	 * @var bool
+	 */
+	private bool $normalizer;
+
+	/**
 	 * Opens the destination policy.
 	 *
 	 * @param list<string>      $roots          Allowed live roots, absolute existing directories.
@@ -73,14 +99,16 @@ final class ApplyPlan {
 	 * @param SiteLayout|null   $layout Optional mapping for a verified fresh-site restore.
 	 * @param list<string>      $bootstrap Bootstrap locations requiring an offline restore.
 	 * @param Writer|false|null $process Identity that writes the files, false when it is unknown, null to ask the POSIX extension.
+	 * @param bool|null         $normalizer Whether to compare names with intl's normalization, null where it is loaded.
 	 * @throws InvalidArgument If the site has no usable live root or a protected location is not
 	 *                         an absolute path without dot segments.
 	 */
-	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, array $bootstrap = [], array|false|null $process = null ) {
+	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, array $bootstrap = [], array|false|null $process = null, ?bool $normalizer = null ) {
 		if ( $include_config && null !== $layout ) {
 			throw new InvalidArgument( 'A fresh-site import preserves the current installation configuration.' );
 		}
-		$this->process = $process ?? self::process();
+		$this->process    = $process ?? self::process();
+		$this->normalizer = $normalizer ?? class_exists( \Normalizer::class );
 		foreach ( $roots as $root ) {
 			$root = rtrim( $root, '/' );
 			if ( '' !== $root && str_starts_with( $root, '/' ) && is_dir( $root ) && realpath( $root ) === $root ) {
@@ -217,6 +245,10 @@ final class ApplyPlan {
 			}
 			foreach ( $parts as $name ) {
 				Names::validate( $name );
+				// A filesystem that ignores invisible characters would read these as dot entries.
+				if ( in_array( preg_replace( self::IGNORABLE, '', $name ), [ '', '.', '..' ], true ) ) {
+					return self::decision( $path, $target, 'refuse', 'invalid_path' );
+				}
 			}
 		} catch ( FormatException | InvalidArgument ) {
 			return self::decision( $path, $target, 'refuse', 'invalid_path' );
@@ -231,11 +263,9 @@ final class ApplyPlan {
 		} catch ( FormatException | InvalidArgument ) {
 			return self::decision( $path, null, 'refuse', 'ambiguous_destination' );
 		}
-		$folded = null === $target ? null : self::fold( $target );
-		foreach ( $this->guards as $guard => $reason ) {
-			if ( null !== $folded && self::within( $folded, self::fold( $guard ) ) ) {
-				return self::decision( $path, $target, 'skip', $reason );
-			}
+		$guard = null === $target ? null : $this->protection( $target );
+		if ( null !== $guard && 'unverified_name' !== $guard ) {
+			return self::decision( $path, $target, 'skip', $guard );
 		}
 		if ( self::spool( $files, $parts ) ) {
 			return self::decision( $path, $target, 'skip', 'snapshot_spool' );
@@ -254,6 +284,9 @@ final class ApplyPlan {
 				return self::decision( $path, $target, 'refuse', 'unavailable_destination_root' );
 			}
 			return self::decision( $path, $target, 'skip', 'outside_roots' );
+		}
+		if ( null !== $guard && null !== $root ) {
+			return self::decision( $path, $target, 'refuse', 'unverified_name' );
 		}
 		clearstatcache( true );
 		$source = $files . $path;
@@ -484,8 +517,118 @@ final class ApplyPlan {
 			InvalidArgument::raise( 'A location that file apply protects is not an absolute path without dot segments.', [ 'code' => 'protected_path_invalid' ], $error );
 		}
 		foreach ( [ $path, self::resolved( $path ) ] as $spelling ) {
-			$this->guards[ $spelling ] ??= $reason;
+			[ $keys, $decided ]          = $this->keys( $spelling );
+			$this->guards[ $spelling ] ??= [
+				'reason'  => $reason,
+				'key'     => implode( '/', $keys ),
+				'keys'    => $keys,
+				'decided' => $decided,
+			];
 		}
+	}
+
+	/**
+	 * Finds the protection that covers a live target.
+	 *
+	 * @param string $target Canonical live path.
+	 * @return string|null Reason of the first protection that covers the target, unverified_name
+	 *                     when one may cover it but only normalization could tell, or null.
+	 */
+	private function protection( string $target ): ?string {
+		[ $keys, $decided ] = $this->keys( $target );
+		$key                = implode( '/', $keys );
+		foreach ( $this->guards as $guard ) {
+			if ( self::within( $key, $guard['key'] ) ) {
+				return $guard['reason'];
+			}
+		}
+		if ( in_array( false, $decided, true ) ) {
+			foreach ( $this->guards as $guard ) {
+				if ( self::undecided( $guard, $keys, $decided ) ) {
+					return 'unverified_name';
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Whether a protection may cover a target whose keys differ from its own: each pair of
+	 * names is equal, or both keep characters that only normalization could compare and
+	 * agree in everything that canonical equivalence leaves alone.
+	 *
+	 * @param Guard        $guard   Protected path.
+	 * @param list<string> $keys    Keys of the target's names.
+	 * @param list<bool>   $decided Whether each of them decides a comparison.
+	 * @return bool Whether the target must be refused rather than guessed.
+	 */
+	private static function undecided( array $guard, array $keys, array $decided ): bool {
+		if ( count( $keys ) < count( $guard['keys'] ) ) {
+			return false;
+		}
+		foreach ( $guard['keys'] as $index => $key ) {
+			if ( $key !== $keys[ $index ] && ( $guard['decided'][ $index ] || $decided[ $index ] || self::skeleton( $key ) !== self::skeleton( $keys[ $index ] ) ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Keeps what canonical equivalence cannot change in a folded name: the ASCII characters
+	 * that no combining mark follows. A decomposed letter is its base followed by marks, so
+	 * two names whose skeletons differ are different on every filesystem.
+	 *
+	 * @param string $key Folded name in valid UTF-8.
+	 * @return string Skeleton.
+	 */
+	private static function skeleton( string $key ): string {
+		return preg_replace( '/[\x00-\x7f](?=\p{M})|[^\x00-\x7f]/u', '', $key ) ?? '';
+	}
+
+	/**
+	 * Splits an absolute path into the comparison keys of its names.
+	 *
+	 * @param string $path Absolute path without empty or dot components.
+	 * @return array{list<string>, list<bool>} Keys, and whether each decides every comparison.
+	 */
+	private function keys( string $path ): array {
+		$keys    = [];
+		$decided = [];
+		foreach ( explode( '/', substr( $path, 1 ) ) as $name ) {
+			[ $key, $exact ] = $this->key( $name );
+			$keys[]          = $key;
+			$decided[]       = $exact;
+		}
+		return [ $keys, $decided ];
+	}
+
+	/**
+	 * Builds the key that compares a name with protected names at least as loosely as any
+	 * case-insensitive filesystem does. ext4 and f2fs casefolding decompose to NFD and fold
+	 * fully, HFS+ and APFS also ignore normalization and some invisible characters, and NTFS
+	 * uppercases a dotless i to I. The key folds fully, drops default-ignorable code points
+	 * and, with the intl extension, applies compatibility normalization (NFKC_Casefold).
+	 * Without intl an ASCII key still decides every comparison, because each character that
+	 * a filesystem equates with ASCII is folded or mapped; two keys that both keep other
+	 * characters could only be compared normalized.
+	 *
+	 * @param string $name One name.
+	 * @return array{string, bool} Key, and whether it decides every comparison.
+	 */
+	private function key( string $name ): array {
+		if ( 1 !== preg_match( '/[\x80-\xff]/', $name ) || ! mb_check_encoding( $name, 'UTF-8' ) ) {
+			return [ strtolower( $name ), true ];
+		}
+		$name = strtr( $name, self::LOOKALIKES );
+		if ( $this->normalizer ) {
+			$key = \Normalizer::normalize( $name, \Normalizer::FORM_KC_CF );
+			if ( is_string( $key ) ) {
+				return [ $key, true ];
+			}
+		}
+		$key = mb_convert_case( preg_replace( self::IGNORABLE, '', $name ) ?? '', MB_CASE_FOLD, 'UTF-8' );
+		return [ $key, 1 !== preg_match( '/[\x80-\xff]/', $key ) ];
 	}
 
 	/**

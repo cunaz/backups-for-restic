@@ -11,6 +11,7 @@ use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class PlannerPolicyTest extends TestCase {
@@ -101,6 +102,89 @@ final class PlannerPolicyTest extends TestCase {
 		}
 		// A configuration file that the review includes is not protected, so it is not checked.
 		self::assertSame( 'live_root', ( new ApplyPlan( [ $this->live ], [], [ 'wp-config.php' ], true ) )->inspect( $this->files, $this->live )['reason'] );
+	}
+
+	/**
+	 * @return iterable<string, array{bool}>
+	 */
+	public static function normalizers(): iterable {
+		yield 'with intl' => [ true ];
+		yield 'without intl' => [ false ];
+	}
+
+	#[DataProvider( 'normalizers' )]
+	public function test_protected_names_are_compared_as_loosely_as_case_insensitive_filesystems_compare_them( bool $normalizer ): void {
+		if ( $normalizer && ! class_exists( \Normalizer::class ) ) {
+			self::markTestSkipped( 'The intl extension is not loaded.' );
+		}
+		$plan     = new ApplyPlan( [ $this->live ], [ $this->live . '/plugins/backups-for-restic', $this->live . '/privé', $this->live . "/\xff-dir", $this->live . '/a;b' ], [ $this->live . '/wp-config.php' ], false, null, [ $this->live . '/mu-plugins', $this->live . '/.htaccess' ], false, $normalizer );
+		$expected = [
+			// Full case folding, as ext4 and f2fs casefolding apply it.
+			'/WP-CONFIG.PHP'                       => 'protected',
+			"/wp-con\u{FB01}g.php"                 => 'protected',
+			"/plugins/backups-for-re\u{FB06}ic/x"  => 'protected',
+			"/plugins/backups-for-re\u{FB05}ic"    => 'protected',
+			"/plugins/bac\u{212A}ups-for-restic/x" => 'protected',
+			"/mu-plugin\u{017F}/loader.php"        => 'offline_restore_required',
+			"/.htacce\u{00DF}"                     => 'offline_restore_required',
+			// Characters that HFS+ and older casefolding kernels ignore.
+			"/wp-con\u{200C}fig.php"               => 'protected',
+			"/mu-\u{FEFF}plugins/loader.php"       => 'offline_restore_required',
+			// NTFS and SMB uppercase a dotless i to I; decomposition maps the Greek question mark.
+			"/wp-conf\u{0131}g.php"                => 'protected',
+			"/a\u{037E}b/c"                        => 'protected',
+			// Names without valid UTF-8 differ only in ASCII case.
+			"/\xFF-DIR/x"                          => 'protected',
+			"/\xfe-dir/x"                          => 'missing_or_linked_source',
+			// The same spelling needs no normalization.
+			'/privé/key'                           => 'protected',
+			// Neighbours stay ordinary names.
+			'/wp-config.php.bak'                   => 'missing_or_linked_source',
+			"/wp-con\u{FB02}g.php"                 => 'missing_or_linked_source',
+			'/plugins/backups-for-restic-old/x'    => 'missing_or_linked_source',
+			"/uploads/caf\u{00E9}.jpg"             => 'missing_or_linked_source',
+		];
+		// Compatibility and canonical equivalence need intl; without it, two names that both
+		// keep other characters are refused rather than guessed.
+		$expected["/prive\u{0301}/key"]    = $normalizer ? 'protected' : 'unverified_name';
+		$expected['/wp-config.ｐｈｐ']        = $normalizer ? 'protected' : 'missing_or_linked_source';
+		$expected["/priv\u{00E8}/key"]     = $normalizer ? 'missing_or_linked_source' : 'unverified_name';
+		$expected["/priv\u{00E9}\u{00E9}"] = $normalizer ? 'missing_or_linked_source' : 'unverified_name';
+		// What canonical equivalence leaves alone still tells other names apart.
+		$expected["/pr\u{00EF}vate/key"] = 'missing_or_linked_source';
+		$expected["/caf\u{00E9}/key"]    = 'missing_or_linked_source';
+		foreach ( $expected as $suffix => $reason ) {
+			$entry = $plan->inspect( $this->files, $this->live . $suffix );
+			self::assertSame( $reason, $entry['reason'], $suffix );
+			self::assertSame( in_array( $reason, [ 'unverified_name', 'missing_or_linked_source' ], true ) ? 'refuse' : 'skip', $entry['action'], $suffix );
+		}
+		// Outside the live roots nothing is written, so an uncertain name needs no refusal.
+		$outside = new ApplyPlan( [ $this->live ], [ $this->root . '/privé' ], [], false, null, [], false, $normalizer );
+		self::assertSame( $normalizer ? 'protected' : 'outside_roots', $outside->inspect( $this->files, $this->root . "/prive\u{0301}/key" )['reason'] );
+		self::assertSame( 'outside_roots', $outside->inspect( $this->files, $this->root . "/priv\u{00EA}/key" )['reason'] );
+		// A name that keeps other characters never equals an ASCII name, in either direction,
+		// and a parent directory of a protected path is not protected itself.
+		$nested = new ApplyPlan( [ $this->live ], [ $this->live . '/priv', $this->live . '/café/deep' ], [], false, null, [], false, $normalizer );
+		foreach ( [ "/priv\u{00E9}/key", "/caf/\u{00E9}", "/cafe\u{0301}", "/caf\u{00E9}" ] as $suffix ) {
+			self::assertSame( 'missing_or_linked_source', $nested->inspect( $this->files, $this->live . $suffix )['reason'], $suffix );
+		}
+		self::assertSame( $normalizer ? 'protected' : 'unverified_name', $nested->inspect( $this->files, $this->live . "/cafe\u{0301}/deep/x" )['reason'] );
+	}
+
+	public function test_names_that_read_as_dot_entries_without_invisible_characters_are_refused(): void {
+		$plan = new ApplyPlan( [ $this->live ], [] );
+		foreach ( [ "/\u{200B}", "/\u{FEFF}.", "/..\u{200D}", "/x/\u{2060}\u{00AD}../y" ] as $suffix ) {
+			self::assertSame( 'invalid_path', $plan->inspect( $this->files, $this->live . $suffix )['reason'], bin2hex( $suffix ) );
+		}
+		foreach ( [ "/a\u{200B}b", "/\u{200B}.php", '/...' ] as $suffix ) {
+			self::assertSame( 'missing_or_linked_source', $plan->inspect( $this->files, $this->live . $suffix )['reason'], bin2hex( $suffix ) );
+		}
+	}
+
+	public function test_names_are_normalized_wherever_the_intl_extension_is_loaded(): void {
+		$plan   = new ApplyPlan( [ $this->live ], [ $this->live . '/privé' ] );
+		$reason = $plan->inspect( $this->files, $this->live . "/prive\u{0301}/key" )['reason'];
+		self::assertSame( class_exists( \Normalizer::class ) ? 'protected' : 'unverified_name', $reason );
 	}
 
 	public function test_roots_and_staging_are_checked_again_after_the_plan_was_created(): void {
