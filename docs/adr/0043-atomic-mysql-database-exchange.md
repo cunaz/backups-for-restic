@@ -19,9 +19,9 @@ maintenance marker on the same filesystem as the private job directory.
 The destination must be a writable MySQL server with atomic InnoDB DDL, support for
 renaming tables held with WRITE locks (MySQL 8.0.13 or later), a server UUID,
 case-sensitive table names and enabled InnoDB table locks. Its Performance Schema must list
-the sessions of the site's account (`performance_schema.processlist`, new in
+every session of the server (`performance_schema.processlist`, new in
 [MySQL 8.0.22](https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-22.html), with
-`performance_schema` enabled). Binary logging, where it is on for the session, must not use
+`performance_schema` enabled and enough thread instances for every connection). Binary logging, where it is on for the session, must not use
 the statement format, and the server must not be a Galera node. Source and live tables must
 have names the plugin can match exactly to the InnoDB dictionary. Up to 128 tables can
 participate. The source prefix must equal the local WordPress prefix. Both generations
@@ -130,7 +130,26 @@ also behind `SHOW PROCESSLIST`, and the restore port refuses warnings.
 [`performance_schema.processlist`](https://dev.mysql.com/doc/refman/8.4/en/performance-schema-processlist-table.html)
 gives a non-anonymous account its own sessions without PROCESS. On MySQL 8.4.11 with the
 Performance Schema disabled it listed nothing, not even the asking session, so the preflight
-requires that session to be listed with the site's database (blocker `performance_schema`).
+and every listing require that session to be listed with the site's database (blocker and
+code `performance_schema`).
+
+An empty list must also be a complete one. A server that has run out of Performance Schema
+thread instances (`performance_schema_max_thread_instances`) leaves further sessions out of
+`performance_schema.processlist` for every observer, while `Threads_connected` counts them.
+On MySQL 8.4.11 with the limit at 44, five client sessions were connected and three listed:
+each listed session saw the other two listed ones and nothing of the remaining two, which
+did not see their own rows either. With the limit at 8, none of six sessions was listed.
+Neither `setup_actors` nor `setup_threads` hid a session; they change only what is
+instrumented. `Performance_schema_thread_instances_lost` cannot prove completeness, because
+`FLUSH STATUS` resets it to zero. So every listing first compares `Threads_connected` from
+`performance_schema.global_status` with the number of listed sessions that are not daemon
+threads, and uses the list only when at least as many are listed as are connected; three
+readings allow for a connection that opens or closes between the two counts. Counting the
+sessions of other accounts needs PROCESS, which the exchange already needs for the InnoDB
+dictionary; without it the preflight reports `dictionary_privilege`. A list that cannot be
+shown complete never counts as empty: the preflight reports `performance_schema`, and a wait
+that ends with an incomplete list stops the job with that code, which is not retried,
+because it names a server setting.
 The listing leaves out this session by its connection ID: "Every connection has an ID that
 is unique among the set of currently connected clients"
 ([CONNECTION_ID()](https://dev.mysql.com/doc/refman/8.4/en/information-functions.html)).
@@ -148,7 +167,8 @@ statements each wait at most three seconds for a lock.
 What remains: a request that needs more than two seconds from WordPress's maintenance check
 to its first query is not waited for, nor one that stays without a session for longer than
 the quiet interval before it reconnects, for example after the server closed its idle
-connection, nor a session of the account without a default database. Between the last
+connection, nor a session of the account without a default database. A session that opens
+and closes between two listings, within 0.2 seconds, is not seen either. Between the last
 empty listing and LOCK TABLES lie a few statements on the exchange's session, a few
 milliseconds in which a new session is not seen. Clients that do not stop at the marker,
 WP-CLI among them, are waited for only while their sessions are listed; other database
@@ -263,10 +283,14 @@ to the undo's RENAME followed by cleanup in the same request, a later tick and t
 `OPTIMIZE TABLE` on a live table, on the witness and on a retained table inside the window;
 a stuck newer generation in front of an expired older one; statement-based logging and
 disabled InnoDB table locks; and a batch beyond `max_allowed_packet`. Unit tests cover the
-drain's grace period, quiet interval and bounds on an injected clock, the session listing, the setting blockers, the plan's
+drain's grace period, quiet interval and bounds on an injected clock, the session listing
+and its completeness check, the setting blockers, the plan's
 validation and rebinding, and the job-level handling of foreign bindings and lost sessions.
 A separate MySQL 8.4.11 account restricted to the privileges listed above rehearsed,
-applied, undid and expired its own private tables. Removing PROCESS or withholding
+applied, undid and expired its own private tables; without PROCESS its session list could
+not be shown complete. By hand, a MySQL 8.4.11 server with
+`performance_schema_max_thread_instances` at 8 and at 44 left sessions out of the list as
+described above. Removing PROCESS or withholding
 SHOW VIEW on a schema containing a view produced specific preflight blockers.
 
 The server behavior is described in the MySQL manual. [RENAME TABLE](https://dev.mysql.com/doc/refman/8.4/en/rename-table.html), [LOCK TABLES](https://dev.mysql.com/doc/refman/8.4/en/lock-tables.html), [atomic DDL](https://dev.mysql.com/doc/refman/8.4/en/atomic-ddl.html).

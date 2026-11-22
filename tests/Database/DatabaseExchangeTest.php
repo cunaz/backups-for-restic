@@ -1041,10 +1041,11 @@ final class DatabaseExchangeTest extends TestCase {
 			$missing      = ( new SwapCatalog( $this->direct ) )->inspect( $names );
 			self::assertSame( [ 'PROCESS' ], $missing['missing_privileges'] );
 			self::assertSame( [ 'dictionary_privilege' ], $missing['blockers'] );
-			// The Performance Schema lists an account's own sessions without PROCESS.
+			// Without PROCESS the Performance Schema lists only this account's sessions, so the
+			// list cannot be shown to hold every connection while another account is connected.
 			$peer    = $connect();
 			$catalog = new SwapCatalog( $this->direct );
-			self::assertSame( [ $peer->rows( 'SELECT CONNECTION_ID() AS id' )[0]['id'] ], $catalog->sessions( $this->database ) );
+			self::assertNull( $catalog->sessions( $this->database ) );
 			unset( $peer );
 
 			// Rehearsal completes even without access to the native InnoDB dictionary.
@@ -1060,6 +1061,11 @@ final class DatabaseExchangeTest extends TestCase {
 			$this->direct = $connect(); // Global privileges take effect on a new connection.
 			$catalog      = new SwapCatalog( $this->direct );
 			self::assertSame( [], $catalog->inspect( $names )['blockers'] );
+			$peer     = $connect();
+			$sessions = $catalog->sessions( $this->database );
+			self::assertNotNull( $sessions, 'With PROCESS the list is shown to hold every connection.' );
+			self::assertContains( $peer->rows( 'SELECT CONNECTION_ID() AS id' )[0]['id'], $sessions );
+			unset( $peer );
 			$this->db->execute( 'CREATE VIEW reporting_posts AS SELECT title FROM wp_posts' );
 			self::assertContains( 'SHOW VIEW', $catalog->inspect( $names )['missing_privileges'] );
 			$this->admin->execute( 'GRANT SHOW VIEW ON `' . $scope . '`.* TO ' . $account );

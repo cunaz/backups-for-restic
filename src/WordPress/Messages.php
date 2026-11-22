@@ -181,8 +181,8 @@ final class Messages {
 				'hint'    => __( 'The job tries again automatically. Persistent database connections, long-running WP-CLI processes or another application using the same database account keep connections open; stop them before the next attempt.', 'backups-for-restic' ),
 			],
 			'performance_schema' => [
-				'message' => __( 'The database server does not list the connections of the site database account.', 'backups-for-restic' ),
-				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled. Otherwise use the manual SQL restore procedure.', 'backups-for-restic' ),
+				'message' => __( 'The database server does not list every connection, so the table exchange cannot tell whether earlier requests have ended.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled and enough Performance Schema thread instances for every connection (performance_schema_max_thread_instances), and a database account with the PROCESS privilege. Otherwise use the manual SQL restore procedure.', 'backups-for-restic' ),
 			],
 			'database_exchange_foreign' => [
 				'message' => __( 'A database restore keeps private tables on another database server or in another database.', 'backups-for-restic' ),

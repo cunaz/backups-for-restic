@@ -19,6 +19,8 @@ final class SessionDrainTest extends TestCase {
 
 	private const string OWN = 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()';
 
+	private const string COUNTS = "SELECT (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Threads_connected') AS connected,(SELECT COUNT(*) FROM performance_schema.processlist WHERE COMMAND<>'Daemon') AS listed";
+
 	/** Simulated time, in seconds. */
 	private float $now = 1000.0;
 
@@ -27,15 +29,16 @@ final class SessionDrainTest extends TestCase {
 
 	/**
 	 * A server whose other sessions of the account `wp` in the database `site` change with
-	 * every listing; the last listing repeats.
+	 * every listing; the last listing repeats. Counts are complete unless scripted.
 	 *
 	 * @param list<list<string>>                   $listings Session IDs per listing.
 	 * @param list<array<string,string|null>>|null $own The Performance Schema row of this session.
+	 * @param list<array{string,string}>           $counts Threads_connected and listed rows per reading.
 	 */
-	private function server( array $listings, ?array $own = null ): object {
+	private function server( array $listings, ?array $own = null, array $counts = [] ): object {
 		$own ??= [ self::row( 'wp', 'site' ) ];
 		$clock = fn (): float => $this->now;
-		return new class( $listings, $own, $clock ) implements Connection {
+		return new class( $listings, $own, $counts, $clock ) implements Connection {
 			/** @var list<string> */
 			public array $queries = [];
 			/** @var list<float> */
@@ -45,9 +48,10 @@ final class SessionDrainTest extends TestCase {
 			/**
 			 * @param list<list<string>>              $listings
 			 * @param list<array<string,string|null>> $own
+			 * @param list<array{string,string}>      $counts
 			 * @param \Closure():float                $clock
 			 */
-			public function __construct( private array $listings, private array $own, private \Closure $clock ) {}
+			public function __construct( private array $listings, private array $own, private array $counts, private \Closure $clock ) {}
 
 			public function rows( string $sql ): array {
 				$this->queries[] = $sql;
@@ -56,6 +60,15 @@ final class SessionDrainTest extends TestCase {
 						throw $this->own_error;
 					}
 					return $this->own;
+				}
+				if ( SessionDrainTest::counts() === $sql ) {
+					[ $connected, $listed ] = [] === $this->counts ? [ '3', '3' ] : array_shift( $this->counts );
+					return [
+						[
+							'connected' => $connected,
+							'listed'    => $listed,
+						],
+					];
 				}
 				if ( str_starts_with( $sql, 'SELECT ID FROM performance_schema.processlist WHERE ' ) ) {
 					$this->listed[] = ( $this->clock )();
@@ -73,6 +86,10 @@ final class SessionDrainTest extends TestCase {
 
 	public static function own(): string {
 		return self::OWN;
+	}
+
+	public static function counts(): string {
+		return self::COUNTS;
 	}
 
 	/** @return array<string,string|null> */
@@ -172,6 +189,25 @@ final class SessionDrainTest extends TestCase {
 		self::assertSame( 2001.0, $this->now, 'A spent tick still grants the minimum wait.' );
 	}
 
+	public function test_a_session_list_that_stays_incomplete_is_refused_as_such(): void {
+		$server = $this->server( [ [] ], null, array_fill( 0, 40, [ '5', '3' ] ) );
+		self::assertSame( 'performance_schema', $this->wait( $this->drain( 0.0, 1.0, 0.0, 0.25, 0.0 ), $server, 1000.0, 2000.0 ) );
+		self::assertSame( [], $server->listed, 'An incomplete list is never read as quiet.' );
+	}
+
+	public function test_a_list_that_becomes_complete_lets_the_exchange_start(): void {
+		$counts = [ [ '5', '3' ], [ '5', '3' ], [ '5', '3' ], [ '5', '5' ] ];
+		$server = $this->server( [ [] ], null, $counts );
+		self::assertNull( $this->wait( $this->drain( 0.0, 10.0, 0.0, 0.25, 0.0 ), $server, 1000.0, 2000.0 ) );
+		self::assertSame( [ 1000.25 ], $server->listed );
+	}
+
+	public function test_an_incomplete_list_at_the_bound_is_reported_even_after_a_quiet_moment(): void {
+		$counts = [ [ '3', '3' ], ...array_fill( 0, 30, [ '4', '3' ] ) ];
+		$server = $this->server( [ [] ], null, $counts );
+		self::assertSame( 'performance_schema', $this->wait( $this->drain( 0.0, 0.5, 0.0, 0.25, 1.0 ), $server, 1000.0, 2000.0 ) );
+	}
+
 	public function test_by_default_the_account_must_stay_quiet_for_a_second_after_a_two_second_grace(): void {
 		$server = $this->server( [ [] ] );
 		$drain  = new SessionDrain(
@@ -194,6 +230,48 @@ final class SessionDrainTest extends TestCase {
 		self::assertSame( 0.75, ( new SessionDrain( 0.25, 9.0, 0.5 ) )->budget() );
 	}
 
+	public function test_completeness_tolerates_two_spoiled_readings_but_not_three(): void {
+		$server = $this->server( [ [ '7' ] ], null, [ [ '4', '3' ], [ '4', '3' ], [ '4', '4' ] ] );
+		self::assertSame( [ '7' ], ( new SwapCatalog( $server ) )->sessions( 'site' ) );
+		self::assertSame( 3, count( array_keys( $server->queries, self::COUNTS, true ) ) );
+		$server = $this->server( [ [ '7' ] ], null, [ [ '4', '3' ], [ '4', '3' ], [ '4', '3' ], [ '4', '4' ] ] );
+		self::assertNull( ( new SwapCatalog( $server ) )->sessions( 'site' ) );
+		self::assertSame( 3, count( array_keys( $server->queries, self::COUNTS, true ) ) );
+		self::assertSame( [], $server->listed );
+		$catalog = new SwapCatalog( $this->server( [ [ '7' ] ], null, [ [ '4', '5' ] ] ) );
+		self::assertSame( [ '7' ], $catalog->sessions( 'site' ), 'Listed threads that are no connection do not make the list incomplete.' );
+	}
+
+	/** @return iterable<string, array{string,string}> */
+	public static function unreadable_counts(): iterable {
+		yield 'no connection count' => [ '', '3' ];
+		yield 'no listed count' => [ '3', '' ];
+		yield 'a negative count' => [ '-1', '3' ];
+		yield 'not a number' => [ '3', 'x' ];
+		yield 'too large' => [ '3', '1234567890' ];
+	}
+
+	#[DataProvider( 'unreadable_counts' )]
+	public function test_unreadable_counts_are_refused( string $connected, string $listed ): void {
+		$catalog = new SwapCatalog( $this->server( [ [] ], null, [ [ $connected, $listed ] ] ) );
+		try {
+			$catalog->sessions( 'site' );
+			self::fail( 'Unreadable session counts were trusted.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertArrayNotHasKey( 'code', $refused->context() );
+		}
+	}
+
+	public function test_the_preflight_names_an_incomplete_list_only_when_other_accounts_are_visible(): void {
+		$catalog = new SwapCatalog( $this->server( [ [] ], null, array_fill( 0, 3, [ '4', '3' ] ) ) );
+		self::assertSame( [ 'performance_schema' ], $catalog->visibility( 'site', true ) );
+		$server = $this->server( [ [] ], null, array_fill( 0, 3, [ '4', '3' ] ) );
+		self::assertSame( [], ( new SwapCatalog( $server ) )->visibility( 'site', false ), 'Without PROCESS the dictionary blocker already explains it.' );
+		self::assertSame( [ self::OWN ], $server->queries );
+		self::assertSame( [], ( new SwapCatalog( $this->server( [ [] ] ) ) )->visibility( 'site', true ) );
+		self::assertSame( [ 'performance_schema' ], ( new SwapCatalog( $this->server( [ [] ], [] ) ) )->visibility( 'site', false ) );
+	}
+
 	/** @return iterable<string, array{list<array<string,string|null>>}> */
 	public static function invisible(): iterable {
 		yield 'performance schema disabled' => [ [] ];
@@ -210,6 +288,7 @@ final class SessionDrainTest extends TestCase {
 		self::assertSame( 'performance_schema', $this->wait( $this->drain( 0.0, 5.0, 0.0, 0.25, 0.0 ), $server, 1000.0, 1005.0 ) );
 		self::assertSame( [], $server->listed );
 		self::assertSame( [], $this->slept, 'An invisible list is refused at once, without waiting.' );
+		self::assertSame( [ 'performance_schema' ], ( new SwapCatalog( $this->server( [ [] ], $own ) ) )->visibility( 'site', true ) );
 	}
 
 	/** @return iterable<string, array{int}> */
@@ -245,7 +324,7 @@ final class SessionDrainTest extends TestCase {
 	public function test_the_session_list_is_bounded_and_validated(): void {
 		$server  = $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS ) ) ] );
 		$catalog = new SwapCatalog( $server );
-		self::assertCount( SwapCatalog::MAX_SESSIONS, $catalog->sessions( 'site' ) );
+		self::assertCount( SwapCatalog::MAX_SESSIONS, $catalog->sessions( 'site' ) ?? [] );
 		self::assertSame( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( 'wp' ) . ' AND DB=' . Session::literal( 'site' ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT 4097', end( $server->queries ) );
 		$catalog = new SwapCatalog( $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS + 1 ) ) ] ) );
 		try {

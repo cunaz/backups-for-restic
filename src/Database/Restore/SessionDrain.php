@@ -68,14 +68,15 @@ final readonly class SessionDrain {
 	/**
 	 * Waits until the account has had no other session in the site's database for the quiet
 	 * interval, looking first after the grace period. The wait ends at the tick's deadline,
-	 * but never later than the bound and never sooner than the minimum.
+	 * but never later than the bound and never sooner than the minimum. A session list that
+	 * cannot be shown complete never counts as quiet.
 	 *
 	 * @param Connection $connection The session that will take the exchange locks.
 	 * @param string     $database Site database, as bound by the reviewed plan.
 	 * @param float      $entered Time maintenance was entered, on this drain's clock.
 	 * @param float      $deadline End of the tick, on the same clock.
 	 * @throws DatabaseFailed With the code database_exchange_sessions if other sessions stay, or
-	 *                        performance_schema if the sessions cannot be listed.
+	 *                        performance_schema if the list stays incomplete until the end.
 	 */
 	public function wait( Connection $connection, string $database, float $entered, float $deadline ): void {
 		$catalog = new SwapCatalog( $connection );
@@ -95,6 +96,9 @@ final readonly class SessionDrain {
 				$since = null;
 			}
 			if ( $now >= $until ) {
+				if ( null === $others ) {
+					DatabaseFailed::raise( 'The Performance Schema did not show every session of the server before the wait ended.', [ 'code' => 'performance_schema' ] );
+				}
 				DatabaseFailed::raise( 'Other sessions of the site database account did not end, or did not stay away, before the wait ended.', [ 'code' => 'database_exchange_sessions' ] );
 			}
 			$this->pause( min( $this->poll, $until - $now ) );

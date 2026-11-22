@@ -106,9 +106,6 @@ final readonly class SwapCatalog {
 		if ( $facts['mariadb'] ) {
 			$issues[] = 'write_locked_rename';
 		} else {
-			if ( null === $this->account( $facts['database'] ) ) {
-				$issues[] = 'performance_schema';
-			}
 			array_push( $issues, ...$this->settings() );
 		}
 		if ( [] !== $missing ) {
@@ -155,6 +152,10 @@ final readonly class SwapCatalog {
 			if ( ! in_array( 'dictionary_privilege', $issues, true ) && [] !== array_diff( array_column( $live, 'TABLE_NAME' ), array_keys( $ids ) ) ) {
 				$issues[] = 'live_object_identity';
 			}
+		}
+		if ( ! $facts['mariadb'] ) {
+			// Without PROCESS other accounts' sessions stay hidden, which dictionary_privilege reports.
+			array_push( $issues, ...$this->visibility( $facts['database'], ! in_array( 'dictionary_privilege', $issues, true ) ) );
 		}
 		return [
 			'facts'              => $facts,
@@ -238,13 +239,17 @@ final readonly class SwapCatalog {
 	 * without PROCESS, and nothing at all while the Performance Schema is disabled.
 	 *
 	 * @param string $database Site database.
-	 * @return list<string> Connection IDs in ascending order, without this session.
+	 * @return list<string>|null Connection IDs in ascending order, without this session, or
+	 *                           null while the list cannot be shown to be complete.
 	 * @throws DatabaseFailed If the sessions cannot be listed, with the code performance_schema.
 	 */
-	public function sessions( string $database ): array {
+	public function sessions( string $database ): ?array {
 		$account = $this->account( $database );
 		if ( null === $account ) {
 			DatabaseFailed::raise( 'The Performance Schema does not list the sessions of the site database account.', [ 'code' => 'performance_schema' ] );
+		}
+		if ( ! $this->complete() ) {
+			return null;
 		}
 		$rows = $this->connection->rows( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( $account ) . ' AND DB=' . Session::literal( $database ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT ' . ( self::MAX_SESSIONS + 1 ) );
 		if ( count( $rows ) > self::MAX_SESSIONS ) {
@@ -259,6 +264,45 @@ final readonly class SwapCatalog {
 			$ids[] = $id;
 		}
 		return $ids;
+	}
+
+	/**
+	 * The preflight's view of the session list that the drain relies on: this session must
+	 * be listed with the site's database, and the list must show every connection.
+	 *
+	 * @param string $database Site database.
+	 * @param bool   $all Whether this account can see other accounts' sessions.
+	 * @return list<string> The blocker performance_schema, or nothing.
+	 * @throws DatabaseFailed If an unexpected server error prevents the lookup.
+	 */
+	public function visibility( string $database, bool $all ): array {
+		return null === $this->account( $database ) || ( $all && ! $this->complete() ) ? [ 'performance_schema' ] : [];
+	}
+
+	/**
+	 * Whether the Performance Schema lists every connection of the server. A server out of
+	 * thread instances leaves later connections out of performance_schema.processlist while
+	 * Threads_connected counts them; on MySQL 8.4.11 such a session was missing for every
+	 * other session too, and FLUSH STATUS reset Performance_schema_thread_instances_lost, so
+	 * that counter proves nothing. A connection that opens or closes between the two counts
+	 * can spoil one reading, so three are taken. Needs PROCESS to count other accounts.
+	 *
+	 * @return bool Whether at least as many sessions are listed as are connected.
+	 * @throws DatabaseFailed If the server reports unreadable counts.
+	 */
+	private function complete(): bool {
+		for ( $reading = 0; $reading < 3; ++$reading ) {
+			$row       = $this->connection->rows( "SELECT (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Threads_connected') AS connected,(SELECT COUNT(*) FROM performance_schema.processlist WHERE COMMAND<>'Daemon') AS listed" )[0] ?? [];
+			$connected = $row['connected'] ?? '';
+			$listed    = $row['listed'] ?? '';
+			if ( 1 !== preg_match( '/\A[0-9]{1,9}\z/', $connected ) || 1 !== preg_match( '/\A[0-9]{1,9}\z/', $listed ) ) {
+				throw new DatabaseFailed( 'The database server reported no readable session counts.' );
+			}
+			if ( (int) $listed >= (int) $connected ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

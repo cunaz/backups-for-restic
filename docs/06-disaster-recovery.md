@@ -285,7 +285,7 @@ active plugins, roles, confirming administrator and sessions, backup configurati
 cron schedule carry across.
 
 The automatic exchange supports writable MySQL 8.0.22 or later with the Performance
-Schema enabled, InnoDB tables with InnoDB table locks, binary logging in the row or mixed
+Schema enabled and enough of its thread instances to list every connection, InnoDB tables with InnoDB table locks, binary logging in the row or mixed
 format where it is on, no Galera cluster, a matching prefix and WordPress schema version,
 and a standard single-site connection with a local object cache. MariaDB supports the rehearsal and the manual recovery
 procedure above. Missing source trigger information, views, foreign keys, triggers,
