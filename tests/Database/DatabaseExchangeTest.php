@@ -29,6 +29,7 @@ use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\TableExchange;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
+use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -478,6 +479,47 @@ final class DatabaseExchangeTest extends TestCase {
 			usleep( 10000 );
 		}
 		self::assertSame( [], $catalog->sessions( $database ) );
+	}
+
+	/** Whether a table of this name exists in the test database. */
+	private function present( string $table ): bool {
+		return [] !== $this->db->rows( 'SELECT 1 AS present FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=\'' . trim( $table, '`' ) . '\'' );
+	}
+
+	public function test_a_stuck_newer_generation_does_not_keep_an_older_one_from_expiring(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		self::assertSame( 'applied', $applied->result['database_generation'] );
+		$retained = $this->holder( $applied, 'wp_posts', 'retained' );
+		self::assertTrue( $this->present( $retained ) );
+		$facts                       = ( new SwapCatalog( $this->direct ) )->facts();
+		$services['clock']->seconds += DatabaseGeneration::WINDOW + 1;
+		$stuck                       = new Job( gmdate( 'Ymd\THis\Z', $services['clock']->seconds ) . '-abcdef', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$stuck->state                = JobState::Failed;
+		$stuck->data                 = [
+			'database_owner'   => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => 1,
+				'token'       => bin2hex( random_bytes( 16 ) ),
+				'database'    => $facts['database'],
+				'uuid'        => $facts['uuid'],
+			],
+			'database_cleanup' => 'unreadable',
+		];
+		$services['jobs']->save( $stuck );
+		try {
+			$services['changes']->expire( false, microtime( true ) + 10 );
+			self::fail( 'The stuck generation was not reported.' );
+		} catch ( FormatException $error ) {
+			self::assertSame( 'The database cleanup cursor is unreadable.', $error->getMessage() );
+		}
+		self::assertTrue( $services['jobs']->get( $stuck->id )?->result['database_cleanup_pending'] ?? false );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $applied->id )?->data ?? [ 'database_owner' => true ] );
+		self::assertFalse( $this->present( $retained ), 'The older, expired generation was dropped.' );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
 
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {

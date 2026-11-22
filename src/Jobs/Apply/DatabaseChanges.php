@@ -451,16 +451,19 @@ final readonly class DatabaseChanges implements StepProvider {
 
 	/**
 	 * Expires database generations under the directory-specific runner lock. Staging's
-	 * short guard serializes undo creation and the durable start of expiry.
+	 * short guard serializes undo creation and the durable start of expiry. A generation
+	 * whose cleanup fails is reported on its job, and the older ones are still expired.
 	 *
 	 * @param bool  $uninstall Remove owned generations, including active ones.
 	 * @param float $deadline End of request.
 	 * @return bool Whether all cleanup due in this directory has completed.
+	 * @throws PluginException The first cleanup failure, after every other due generation had its turn.
 	 */
 	public function expire( bool $uninstall, float $deadline ): bool {
 		return $this->staging->guard(
 			function () use ( $uninstall, $deadline ): bool {
-				$active = $this->jobs->active();
+				$active  = $this->jobs->active();
+				$failure = null;
 				foreach ( $this->jobs->database_owners() as $job ) {
 					if ( ! $uninstall && ( ! $job->state->is_terminal() || ( JobType::DatabaseUndo === $active?->type && ( $active->data['apply'] ?? null ) === $job->id ) ) ) {
 						continue;
@@ -469,28 +472,29 @@ final readonly class DatabaseChanges implements StepProvider {
 					if ( ! $uninstall && is_int( $job->data['retained_until'] ?? null ) && $job->data['retained_until'] > $now && ! isset( $job->data['database_cleanup_generation'] ) ) {
 						continue;
 					}
-					do {
-						try {
+					try {
+						do {
 							$done = DatabaseGeneration::clean( ( $this->connection )(), $this->jobs, $job, $deadline, $now, $uninstall );
 							if ( $done ) {
 								unset( $job->result['database_cleanup_pending'] );
 							}
-						} catch ( PluginException $error ) {
-							if ( true !== ( $job->result['database_cleanup_pending'] ?? false ) ) {
-								$job->result['database_cleanup_pending'] = true;
-								$job->warn( 'Database generation cleanup is overdue. Restore the original database connection and permissions so that the heartbeat can finish.' );
-								$this->jobs->save( $job );
-								$this->jobs->log( $job )->write( 'warning', 'Database generation cleanup was deferred.', [ 'code' => 'database_exchange_cleanup' ] );
-							}
-							throw $error;
+							$this->jobs->save( $job );
+						} while ( ! $done && microtime( true ) < $deadline );
+					} catch ( PluginException $error ) {
+						// One stuck generation must not keep older ones from expiring.
+						if ( true !== ( $job->result['database_cleanup_pending'] ?? false ) ) {
+							$job->result['database_cleanup_pending'] = true;
+							$job->warn( 'Database generation cleanup is overdue. Restore the original database connection and permissions so that the heartbeat can finish.' );
+							$this->jobs->save( $job );
+							$this->jobs->log( $job )->write( 'warning', 'Database generation cleanup was deferred.', [ 'code' => 'database_exchange_cleanup' ] );
 						}
-						$this->jobs->save( $job );
-						if ( microtime( true ) >= $deadline ) {
-							return false;
-						}
-					} while ( ! $done );
+						$failure ??= $error;
+					}
+					if ( microtime( true ) >= $deadline ) {
+						return null === $failure ? false : throw $failure;
+					}
 				}
-				return true;
+				return null === $failure ? true : throw $failure;
 			}
 		);
 	}
