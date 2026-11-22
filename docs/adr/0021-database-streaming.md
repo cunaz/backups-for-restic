@@ -25,7 +25,10 @@ and makes an interrupted dump start from zero.
   character set of the connection and of its results, whatever `DB_CHARSET` is, and with the
   session time zone `+00:00`, as `mysqldump --tz-utc` does. The manifest and the preambles
   record `+00:00`. TIMESTAMP values therefore import to the same instant in every half of
-  the year, and text arrives as the one character set the manifest names (below).
+  the year, and text arrives as the one character set the manifest names (below). Every read
+  also runs without a row limit: a session can inherit `sql_select_limit` from the server's
+  settings, and the limit cuts `SELECT` and, on MySQL 8, `SHOW FULL TABLES`, `SHOW FULL
+  COLUMNS` and `SHOW KEYS` short without an error.
 - **Pages follow a key in full.** A table is read in pages along its primary key, or else a
   unique key over NOT NULL stored columns, with all of its columns: each page asks for the
   rows after the last key written, with the row-value comparison `(a, b) > (x, y)` written

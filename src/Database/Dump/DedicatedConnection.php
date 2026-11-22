@@ -15,8 +15,8 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * The dump's own session on the site's database server (ADR 0021). Because nothing else
- * uses it, the dump's settings are made once (utf8mb4, +00:00, the dump's SQL mode and the
- * largest sort length), and the pages of a table can be read inside a read-only transaction:
+ * uses it, the dump's settings are made once (utf8mb4, +00:00, the dump's SQL mode, the
+ * largest sort length and no row limit), and the pages of a table can be read inside a read-only transaction:
  * InnoDB then serves every page of one tick from one consistent snapshot. The site's own
  * connection never sees a transaction or a changed setting of the dump.
  *
@@ -65,7 +65,9 @@ final class DedicatedConnection implements Connection {
 				throw new DatabaseFailed( 'The character set of the dump connection could not be set.' );
 			}
 			$zone = null === $time_zone ? '' : ', time_zone = 0x' . bin2hex( $time_zone );
-			$this->rows( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', sql_quote_show_create = 1, max_sort_length = 8388608" . $zone );
+			// A new session inherits sql_select_limit from the server's settings, and the limit
+			// cuts SELECT and, on MySQL 8, SHOW short without an error.
+			$this->rows( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', sql_quote_show_create = 1, max_sort_length = 8388608, sql_select_limit = 18446744073709551615" . $zone );
 			$this->rows( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' );
 		} catch ( DatabaseFailed $error ) {
 			$this->close();

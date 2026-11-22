@@ -589,7 +589,8 @@ final class TableSource implements ResumableByteSource {
 	private function stream(): void {
 		if ( ! $this->streaming && $this->connection instanceof DedicatedConnection ) {
 			$table = SqlFormatter::identifier( $this->table->name );
-			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ( $this->offset > 0 ? ' LIMIT 18446744073709551615 OFFSET ' . $this->offset : '' ) );
+			// An explicit limit, so that no sql_select_limit of the session applies.
+			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ' LIMIT 18446744073709551615' . ( $this->offset > 0 ? ' OFFSET ' . $this->offset : '' ) );
 			$this->streaming = true;
 			$this->viewed();
 		}

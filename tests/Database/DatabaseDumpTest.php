@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Database;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Database\Dump\TableSource;
@@ -618,6 +619,34 @@ final class DatabaseDumpTest extends TestCase {
 		}
 		$tables = array_column( $manifest['tables'], null, 'name' );
 		self::assertSame( [ '0', '123' ], $tables['num_keyed']['key'] ?? null, 'Pages followed the key over the columns 0 and 123.' );
+	}
+
+	#[DataProvider( 'connections' )]
+	public function test_a_select_limit_left_on_a_session_cuts_no_read_short( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS lim_keyless, lim_keyed' );
+		$db->execute( 'CREATE TABLE lim_keyless (a INT, b VARCHAR(20)) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE lim_keyed (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TRIGGER lim_keyed_insert BEFORE INSERT ON lim_keyed FOR EACH ROW SET NEW.id = NEW.id' );
+		$db->execute( "INSERT INTO lim_keyless VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')" );
+		$db->execute( 'INSERT INTO lim_keyed VALUES (1), (2), (3), (4), (5)' );
+		$triggers = ( new Catalog( self::database( self::$source ) ) )->trigger_tables( [ 'lim_keyed', 'lim_keyless' ] );
+		// A limit that a plugin can leave on the site's session, or that every new session
+		// inherits from the server's settings.
+		$db->execute( 'SET SESSION sql_select_limit = 2' );
+		$open = static function ( ?string $time_zone ): DedicatedConnection {
+			$mysqli = self::database( self::$source )->mysqli;
+			$mysqli->query( 'SET SESSION sql_select_limit = 2' );
+			return new DedicatedConnection( $mysqli, $time_zone );
+		};
+
+		$manifest = $this->dump_and_import( $db, 'lim_', null, $dedicated ? $open : null );
+
+		$target = self::database( self::$target );
+		self::assertSame( [ [ 'n' => '5' ] ], $target->rows( 'SELECT COUNT(*) AS n FROM lim_keyless' ) );
+		self::assertSame( [ [ 'n' => '5' ] ], $target->rows( 'SELECT COUNT(*) AS n FROM lim_keyed' ) );
+		self::assertSame( $triggers, $manifest['trigger_tables'], 'The grants were read in full.' );
+		self::assertSame( [ [ 'l' => '2' ] ], $db->rows( 'SELECT @@SESSION.sql_select_limit AS l' ), 'The site connection keeps its limit.' );
 	}
 
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
