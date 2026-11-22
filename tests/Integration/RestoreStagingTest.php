@@ -271,6 +271,16 @@ final class RestoreStagingTest extends TestCase {
 		self::assertSame( 'restores/' . $id . '/entries.jsonl', $entry['report'] ?? null );
 		self::assertFileExists( TestSite::private_dir() . '/' . $entry['report'] );
 
+		// Where a web server ignores the deny files and lists directories, the index.php keeps
+		// it from listing the job IDs and what each restore staged.
+		foreach ( [ '/restores', '/restores/' . $id ] as $directory ) {
+			foreach ( [ '.htaccess', 'web.config', 'index.php' ] as $name ) {
+				self::assertSame( file_get_contents( TestSite::private_dir() . '/' . $name ), file_get_contents( TestSite::private_dir() . $directory . '/' . $name ), $directory . '/' . $name );
+			}
+			self::assertSame( 403, TestSite::visit( TestSite::url() . '/wp-content/backups-for-restic' . $directory . '/' )[0], $directory );
+		}
+		self::assertSame( [ '.', '..', '.htaccess', 'entries.jsonl', 'files', 'index.php', 'web.config' ], scandir( TestSite::private_dir() . '/restores/' . $id ) );
+
 		// Only the ID of a job that has staging names something to remove.
 		foreach (
 			[

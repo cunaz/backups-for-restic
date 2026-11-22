@@ -369,7 +369,7 @@ final class AccessTest extends TestCase {
 		[ $status, , $raw ] = TestSite::api( 'GET', '/status' );
 		self::assertSame( 200, $status, $raw );
 
-		foreach ( [ '/', '/index.php', '/.htaccess', '/web.config', '/jobs/', '/cache/', '/restores/' ] as $path ) {
+		foreach ( [ '/', '/index.php', '/.htaccess', '/web.config', '/jobs/', '/cache/', '/restores/', '/restores/index.php', '/restores/.htaccess', '/restores/web.config' ] as $path ) {
 			self::assertFileExists( TestSite::private_dir() . $path );
 			$handle = curl_init( TestSite::url() . '/wp-content/' . PrivateDirectory::NAME . $path );
 			curl_setopt_array(

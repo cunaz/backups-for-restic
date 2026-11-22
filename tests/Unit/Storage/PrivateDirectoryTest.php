@@ -38,6 +38,31 @@ final class PrivateDirectoryTest extends TestCase {
 		self::assertSame( 0600, fileperms( $directory->path . '/.htaccess' ) & 0777 );
 	}
 
+	public function test_restores_and_every_staging_directory_get_the_deny_files_of_the_root(): void {
+		$directory = new PrivateDirectory( $this->root . '/' . PrivateDirectory::NAME );
+		$directory->ensure();
+		$restores = $directory->subdirectory( 'restores' );
+		$staging  = $restores . '/20270115T030000Z-abcdef';
+		mkdir( $staging . '/files', 0700, true );
+		mkdir( $restores . '/.removing-20270114T030000Z-abcdef' );
+		mkdir( $this->root . '/elsewhere' );
+		symlink( $this->root . '/elsewhere', $restores . '/20270113T030000Z-abcdef' );
+
+		// Staging from before, or one that a job created a moment ago, gets them on the next request.
+		$directory->ensure();
+
+		foreach ( [ $restores, $staging ] as $protected ) {
+			foreach ( [ '.htaccess', 'web.config', 'index.php' ] as $name ) {
+				self::assertSame( file_get_contents( $directory->path . '/' . $name ), file_get_contents( $protected . '/' . $name ), $protected . '/' . $name );
+				self::assertSame( 0600, fileperms( $protected . '/' . $name ) & 0777 );
+			}
+		}
+		self::assertSame( [ '.', '..', 'files' ], array_values( array_diff( (array) scandir( $staging ), [ '.htaccess', 'web.config', 'index.php' ] ) ), 'The staged tree itself is not touched.' );
+		self::assertSame( [ '.', '..' ], scandir( $staging . '/files' ) );
+		self::assertSame( [ '.', '..' ], scandir( $restores . '/.removing-20270114T030000Z-abcdef' ), 'A directory on its way out stays as it is.' );
+		self::assertSame( [ '.', '..' ], scandir( $this->root . '/elsewhere' ), 'A link is not followed.' );
+	}
+
 	public function test_only_absolute_paths_without_dot_segments_can_claim_private_storage(): void {
 		foreach ( [ 'relative-backups', 'file://' . $this->root, $this->root . '/scratch/../claimed' ] as $path ) {
 			try {
