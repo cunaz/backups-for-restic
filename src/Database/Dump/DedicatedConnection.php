@@ -123,7 +123,9 @@ final class DedicatedConnection implements Connection {
 	public function end(): void {
 		if ( $this->transaction && ! $this->closed ) {
 			$this->transaction = false;
-			$this->rows( 'COMMIT' );
+			// A plain COMMIT follows completion_type, which the server's settings can make
+			// RELEASE (close the connection) or CHAIN (start another read-only transaction).
+			$this->rows( 'COMMIT AND NO CHAIN NO RELEASE' );
 		}
 	}
 

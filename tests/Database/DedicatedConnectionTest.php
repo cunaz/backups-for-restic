@@ -8,6 +8,7 @@ use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Tests\Support\FixedRandom;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\WordPress\WpdbConnection;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 require_once dirname( __DIR__ ) . '/Support/WordPress/wpdb.php';
@@ -96,6 +97,29 @@ final class DedicatedConnectionTest extends TestCase {
 			self::markTestSkipped( 'The server did not encrypt the connection.' );
 		}
 		self::assertNull( WpdbConnection::dedicated( $this->wpdb( $site, self::$database ), new SystemRandom(), '+00:00' ), 'Without MYSQL_CLIENT_FLAGS the dump connection would not be encrypted.' );
+	}
+
+	/** @return iterable<string, array{string}> */
+	public static function completion_types(): iterable {
+		yield 'release' => [ 'RELEASE' ];
+		yield 'chain' => [ 'CHAIN' ];
+	}
+
+	#[DataProvider( 'completion_types' )]
+	public function test_the_end_of_a_table_neither_closes_the_connection_nor_starts_another_transaction( string $completion ): void {
+		self::$admin?->execute( 'CREATE TABLE IF NOT EXISTS `' . self::$database . '`.completion (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		$mysqli = $this->site( self::$database )->mysqli;
+		// As if the server's settings gave every new session this completion type.
+		$mysqli->query( "SET SESSION completion_type = '" . $completion . "'" );
+		$dedicated = new DedicatedConnection( $mysqli, '+00:00' );
+
+		$dedicated->begin( 'completion' );
+		$dedicated->end();
+		self::assertSame( [], $dedicated->rows( 'DELETE FROM completion' ), 'No read-only transaction was chained to the one that ended.' );
+		$dedicated->begin( 'completion' );
+		self::assertSame( [ [ 'n' => '0' ] ], $dedicated->rows( 'SELECT COUNT(*) AS n FROM completion' ), 'The connection is still open.' );
+		$dedicated->end();
+		$dedicated->close();
 	}
 
 	private function site( string $database ): MysqliConnection {
