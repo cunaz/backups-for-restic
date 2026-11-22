@@ -112,21 +112,28 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   again at the next recheck. The index keeps at most 524,288 names as salted 64-bit codes,
   about 20 MiB; a folder that alone holds more is listed for every recheck, as before. Each
   publication and removal is preceded by a recheck.
-- Residual risks. Between the last check and the rename or unlink, a process of the same user
-  that maintenance mode does not stop, such as an SFTP client or a deploy script, can still
-  change the live entry, and that change is lost without a copy. Keeping the displaced inode
-  through a hard link was not adopted, because a replacement would then need hard links,
-  which a create already needs but a replacement does not. A directory rename can likewise
-  replace an empty directory that such a process creates at the same name in that moment. In
-  a folder of more than 2,048 names, a second spelling of a name that another process
-  creates in the same second as one of the worker's own changes can stay hidden from the
-  rechecks for up to about one and a quarter seconds; on a case-insensitive file system the
-  publication itself meets it, and a case-sensitive one keeps both names. On a network file
-  system whose clients cache directory attributes, a change made on another host can leave
-  a folder's identity unchanged for as long as that cache holds it. A directory that someone
-  removes and creates again can get the recorded inode number on a file system that reuses
-  them; with the recorded permissions, owner and group, and while it is empty, the undo
-  removes it as the one that the apply created.
+- Residual risks. Between the last check and the rename or unlink, a process of the same
+  user that maintenance mode does not stop, such as an SFTP client or a deploy script, can
+  still change the live entry, and that change is lost without a copy. Keeping the displaced
+  inode through a hard link was not adopted, because a replacement would then need hard
+  links, which a create already needs but a replacement does not. For a removal, moving the
+  entry into the private item directory with a rename and checking the moved inode before it
+  is deleted would make the removal itself act on the verified inode, and put anything else
+  back with a no-clobber link; it costs a rename, a private unlink, one more synchronisation
+  and a journal state for an entry that a stopped worker left moved aside, and was not
+  adopted in this change. A restore cannot be made to act on the verified inode that way:
+  PHP has no atomic exchange of two names, and moving the live file aside first would leave
+  the name missing for the site until the original is in place. A directory rename can
+  likewise replace an empty directory that such a process creates at the same name in that
+  moment. In a folder of more than 2,048 names, a second spelling of a name that another
+  process creates in the same second as one of the worker's own changes can stay hidden from
+  the rechecks for up to about one and a quarter seconds; on a case-insensitive file system
+  the publication itself meets it, and a case-sensitive one keeps both names. On a network
+  file system whose clients cache directory attributes, a change made on another host can
+  leave a folder's identity unchanged for as long as that cache holds it. A directory that
+  someone removes and creates again can get the recorded inode number on a file system that
+  reuses them; with the recorded permissions, owner and group, and while it is empty, the
+  undo removes it as the one that the apply created.
 - Measured with PHP 8.3.37 on tmpfs: 500 new files beside 20,000 others took 27.2 seconds of
   rechecks before and 0.44 seconds with seven folder listings after.
 - Every job document is written durably as well (`JobStore::save()`), and a new job directory
@@ -203,11 +210,17 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   `undo_journal`.
 - The worker reads the identity of the live file, which covers its device, inode, owner,
   group, mode, size and both change times, before it verifies the content. It compares it
-  after the verification and once more immediately before the rename or unlink, after the
-  folder and policy rechecks and, for a restore, after the record that precedes the rename;
-  a difference keeps the entry. The inode that was verified is the one that is replaced or
-  removed, within the residual risk of a change in the same second that the apply has too.
-  A created directory is removed only while it is empty at that moment.
+  after the verification and once more as the last check before the rename or unlink, after
+  the folder and policy rechecks and, for a restore, after the record that precedes the
+  rename; a difference keeps the entry. Two gaps remain, and the checks do not close them.
+  The times have whole seconds: a write in place that keeps the size and falls in the same
+  second as a change the checks already saw leaves the identity as it was, after the content
+  was read; the apply has the same gap. And the rename or unlink acts on the name, not on the
+  verified inode: a process that replaces the file between the last check and that call,
+  with another inode and other times, has its file replaced or removed instead, as the
+  residual risks above describe; the same holds for an empty directory put in place of a
+  created one before its `rmdir()`. A created directory is removed only while it is empty,
+  which `rmdir()` itself enforces.
 - The confirmed review binds the exact set of entries. Its digest covers every entry with
   its action and reason. An inline undo stores the reviewed decisions with its job, a
   background one reads them from the sealed review, whose header now also carries the

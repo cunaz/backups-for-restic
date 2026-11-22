@@ -349,8 +349,9 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Reverts one entry, checking again around the rename or unlink that the verified inode,
-	 * with its size and change times, is the one that is replaced or removed.
+	 * Reverts one entry, checking again as late as possible before the rename or unlink that
+	 * the live file is still the verified inode with its size and change times. The rename or
+	 * unlink itself acts on the name: a replacement in between is not seen (ADR 0041).
 	 *
 	 * As an apply does, every tick advances at least one entry, also one that begins after
 	 * the tick's deadline; the verification of a large file still yields after a block.
