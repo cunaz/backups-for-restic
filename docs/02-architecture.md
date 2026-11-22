@@ -301,9 +301,9 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
   by the heartbeat after a successful backup, not a step of the backup job.
 - An error with a retryable code (`repository_unreachable`, `repository_locked`,
-  `database_restore_busy`, `database_dump_locked`) does not fail the job at once: the runner
-  waits 30 s, then twice as long after each further failure in a row, and fails the job at
-  the sixth.
+  `database_restore_busy`, `database_exchange_sessions`, `database_dump_locked`) does not fail
+  the job at once: the runner waits 30 s, then twice as long after each further failure in a
+  row, and fails the job at the sixth.
 - A **restore job** ([ADR 0037](adr/0037-restore-job.md)) carries its request in the job
   document from its creation: `data.snapshot`, the full ID, and `data.paths`, the selected
   snapshot paths (`Jobs\Restore\RestoreRequest`; an invalid request creates no job).
@@ -662,8 +662,11 @@ file; chunk boundaries are content-defined, so unchanged parts of a table dedupl
 yesterday's dump. When a tick's time is up, the table stops after the current page and the
 next tick continues after it, so tables of any size finish. Pages follow the primary key, or
 a unique key over NOT NULL columns, in full, with a row-value comparison that orders exactly
-as `ORDER BY` for every column type: a row that exists for the whole dump of its table
-appears exactly once, whatever is inserted or deleted meanwhile.
+as `ORDER BY` for every column type: a row that exists for the whole dump of its table, and
+whose values in that key do not change meanwhile, appears exactly once, whatever is inserted
+or deleted meanwhile. A row whose key value changes between two ticks can be missing or
+appear twice: once before and once after the change, if it moves from behind the cursor to
+ahead of it, or not at all if it moves the other way.
 
 Consistency is one snapshot per table and tick. The dump reads through a connection of its
 own, opened with `$wpdb`'s settings and used only once it is verified to reach the same
@@ -1416,8 +1419,8 @@ translated message and a hint. The codes:
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |
 
-Only `repository_unreachable`, `repository_locked`, `database_restore_busy` and
-`database_dump_locked` are retryable (§4.4). A cancelled job
+Only `repository_unreachable`, `repository_locked`, `database_restore_busy`,
+`database_exchange_sessions` and `database_dump_locked` are retryable (§4.4). A cancelled job
 ends in the state `cancelled` without an error code, and there is no `timeout` code: a tick
 that runs out of time simply continues in the next one. Codes for restore
 (`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.

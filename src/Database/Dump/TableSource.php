@@ -26,7 +26,7 @@ defined( 'ABSPATH' ) || exit;
  * Pages follow the table's primary key, or a unique key over NOT NULL columns, in full: each
  * page asks for the rows after the last key it wrote (KeyColumn), so an insert or a delete
  * elsewhere in the table cannot shift a row into or out of a page, and a row that exists
- * for the whole dump of its table appears exactly once. The page size adapts so that one
+ * for the whole dump of its table, with the same key values, appears exactly once. The page size adapts so that one
  * page stays near 2 MiB of SQL. A page is the unit of resumption: the backup stops between
  * pages and continues with the next one in a later request.
  *

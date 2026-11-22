@@ -39,8 +39,9 @@ and makes an interrupted dump start from zero.
   as their stored bytes in their own character set and collation, binary strings byte by
   byte, dates and times as checked quoted text. The session's sort length is raised to its
   maximum, so that a sort compares whole key values. An insert or a delete before the cursor
-  can therefore not shift rows: a row that exists for the whole dump of its table appears
-  exactly once. Keys over TEXT, BLOB, JSON or spatial columns are not used, because an index
+  can therefore not shift rows: a row that exists for the whole dump of its table, with the
+  same values in that key, appears exactly once. A row whose key value changes across the
+  cursor between two ticks can appear twice or be missing. Keys over TEXT, BLOB, JSON or spatial columns are not used, because an index
   and a sort compare only a prefix of such values.
 - **Resumable per page.** When a tick's deadline passes, the table source finishes the
   current page, the chunker emits the bytes it holds as a final chunk, and the checkpoint
