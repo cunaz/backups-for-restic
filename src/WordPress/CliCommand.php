@@ -433,6 +433,11 @@ final class CliCommand {
 				$this->run_until_idle( $this->container->tick_budget() );
 				$preview = $service->request_preview( $id, true, false, $plan );
 			}
+			if ( ! $preview instanceof Job && true === ( $preview['undone'] ?? null ) && is_array( $preview['totals'] ?? null ) ) {
+				self::undo_totals( $preview['totals'] );
+				\WP_CLI::success( __( 'Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', 'backups-for-restic' ) );
+				return;
+			}
 			do {
 				if ( $preview instanceof Job ) {
 					\WP_CLI::error( __( 'The undo preview is still being prepared.', 'backups-for-restic' ) );
@@ -447,8 +452,7 @@ final class CliCommand {
 			} while ( null !== $next );
 			$totals = $preview['totals'] ?? null;
 			if ( is_array( $totals ) ) {
-				/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
-				\WP_CLI::line( sprintf( __( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), $totals['restore'], $totals['remove'], $totals['keep'] ) );
+				self::undo_totals( $totals );
 				if ( 0 === $totals['restore'] + $totals['remove'] ) {
 					$texts = Messages::job_error( 'undo_nothing_to_revert' );
 					\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
@@ -464,6 +468,16 @@ final class CliCommand {
 		} catch ( PluginException $error ) {
 			\WP_CLI::error( $error->getMessage() );
 		}
+	}
+
+	/**
+	 * Prints the totals of an undo review by action.
+	 *
+	 * @param array{restore:int,remove:int,keep:int} $totals Totals.
+	 */
+	private static function undo_totals( array $totals ): void {
+		/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
+		\WP_CLI::line( sprintf( __( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), $totals['restore'], $totals['remove'], $totals['keep'] ) );
 	}
 
 	/**

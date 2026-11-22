@@ -45,7 +45,7 @@ defined( 'ABSPATH' ) || exit;
  * @phpstan-import-type Row from ApplyManifest
  * @phpstan-import-type Outcome from FileChange
  * @phpstan-type Totals array{restore:int,remove:int,keep:int}
- * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,totals?:Totals|null}
+ * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,totals?:Totals|null,undone?:true}
  * @phpstan-type Counts array{restored:int,removed:int,unchanged:int,kept:int,changed_after_review:int}
  * @phpstan-type KeptPage array{entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,total:int,offset:int,next_offset:int|null,plan_job:string,digest:string}
  */
@@ -122,7 +122,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @param bool        $config Include configuration.
 	 * @param string|null $plan_job Previously completed background job.
 	 * @param int         $offset First presentation ordinal.
-	 * @return Preview|array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:Totals|null}|Job Preview or queued job.
+	 * @return Preview|array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:Totals|null,undone?:true}|Job Preview or queued job; an undo review that found nothing left to revert has undone, and its apply is recorded as undone.
 	 * @throws InvalidArgument If a requested page or option is invalid.
 	 */
 	public function request_preview( string $id, bool $undo, bool $config, ?string $plan_job = null, int $offset = 0 ): Job|array {
@@ -132,10 +132,19 @@ final readonly class FileChanges implements StepProvider {
 		$original = $undo ? $this->journal->original( $id ) : null;
 		$restore  = null === $original ? $id : ApplyJournal::field( $original, 'restore' );
 		if ( null !== $plan_job ) {
-			return $this->plans->plan_page( $id, $restore, $undo, $config, $plan_job, $offset );
+			$page = $this->plans->plan_page( $id, $restore, $undo, $config, $plan_job, $offset );
+			if ( null !== $original && 0 === $offset && $this->settle_review( $original, $page['totals'] ?? null, $this->plans->settled( $plan_job ) ) ) {
+				$page['undone'] = true;
+			}
+			return $page;
 		}
 		if ( null !== $original && ! is_string( $original->data['plan_job'] ?? null ) ) {
-			return $this->undo_summary( $original );
+			$review  = $this->undo_summary( $original );
+			$settled = array_filter( $review['entries'], static fn ( array $entry ): bool => 'keep' === $entry['action'] && FileChange::settled( $entry['reason'] ) );
+			if ( $this->settle_review( $original, $review['totals'] ?? null, count( $settled ) ) ) {
+				$review['undone'] = true;
+			}
+			return $review;
 		}
 		if ( ! $undo && ! $this->plans->large( $restore ) ) {
 			try {
@@ -233,6 +242,39 @@ final readonly class FileChanges implements StepProvider {
 	 */
 	public function preview_undo( string $apply_job ): array {
 		return $this->undo_summary( $this->journal->original( $apply_job ) );
+	}
+
+	/**
+	 * Records an apply as undone when its review finds every entry with nothing left to
+	 * revert: the reverted marker ends its undo window, so that its staging and journal can
+	 * expire, and the review says so instead of offering an undo that would be refused. While
+	 * a job is active the apply stays as it is, and a later review records it.
+	 *
+	 * @param Job         $apply Apply.
+	 * @param Totals|null $totals Totals of its review by action.
+	 * @param int|null    $settled Entries kept with nothing left to revert, null if not counted.
+	 * @return bool Whether the apply is now recorded as undone.
+	 */
+	private function settle_review( Job $apply, ?array $totals, ?int $settled ): bool {
+		if ( null === $totals || 0 !== $totals['restore'] + $totals['remove'] || $settled !== $totals['keep'] ) {
+			return false;
+		}
+		try {
+			$this->staging->guard(
+				fn () => $this->jobs->while_idle(
+					function () use ( $apply ): void {
+						$current = $this->journal->original( $apply->id );
+						Files::write_durable( $this->journal->workspace( $current ) . '/reverted', '1' );
+						$current->result['undo_state'] = 'undone';
+						$current->result['undo_kept']  = 0;
+						$this->jobs->save( $current );
+					}
+				)
+			);
+		} catch ( JobConflict ) {
+			return false;
+		}
+		return true;
 	}
 
 	/**

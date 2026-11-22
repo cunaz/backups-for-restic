@@ -106,9 +106,10 @@ The site records each delivery. Store the file with the other offline recovery m
    and lists every kept entry with its reason. Kept entries stay undoable until the expiry
    time, and the apply stays listed as partly undone: if a kept entry is put back as the
    apply left it, for example by undoing a later apply over the same files, preview the
-   undo again. An undo with nothing left to revert is refused. Restore files that should
-   not stay as they are offline as in step 4. Use **Delete staged files** to remove the
-   private downloads when you are finished.
+   undo again. When nothing is left to revert, the preview says so and the apply is no
+   longer listed; an undo that could only keep changed entries is refused. Restore files
+   that should not stay as they are offline as in step 4. Use **Delete staged files** to
+   remove the private downloads when you are finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.

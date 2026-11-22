@@ -153,6 +153,18 @@ final readonly class FilePlans {
 
 
 	/**
+	 * The number of entries that a completed undo review kept with nothing left to revert.
+	 *
+	 * @param string $plan_job Undo review whose page was just read.
+	 * @return int|null Count, or null for a review sealed before it was counted.
+	 */
+	public function settled( string $plan_job ): ?int {
+		$settled = $this->jobs->get( $plan_job )?->result['settled'] ?? null;
+		return is_int( $settled ) && $settled >= 0 ? $settled : null;
+	}
+
+
+	/**
 	 * Opens plan material inside the original staging. Staging pinning also pins all
 	 * authenticated indexes needed during an apply's undo window.
 	 *
@@ -297,7 +309,7 @@ final readonly class FilePlans {
 			'refused' => $builder->refused,
 		];
 		if ( $undo ) {
-			$job->result += $actions;
+			$job->result += $actions + [ 'settled' => $builder->settled ];
 		}
 		return true;
 	}

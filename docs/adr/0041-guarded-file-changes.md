@@ -158,10 +158,15 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   is damaged). An entry with nothing left to revert is listed as kept with `not_applied`,
   `already_undone` or `removed_since_apply`; it counts as `unchanged`, not as kept. The
   review, inline and background, shows each entry's action and reason and the totals by
-  action. An undo with nothing to revert is refused (`undo_nothing_to_revert`). Before, a
-  partial apply stopped by `file_space` could become impossible to undo through one upload
-  into a folder that it created, and the journal with the only copies of the original
-  files expired with its window.
+  action. A review that finds every entry with nothing left to revert, as after an undo
+  that stopped after its last revert or once the kept entries were removed, records the
+  apply as undone and writes the `reverted` marker, while no job is active, and says so
+  (`undone`) instead of offering an undo that would be refused; a background review
+  counts these entries in its result and decides when its first page is read. An undo
+  with nothing to revert that still keeps a changed entry is refused
+  (`undo_nothing_to_revert`). Before, a partial apply stopped by `file_space` could become
+  impossible to undo through one upload into a folder that it created, and the journal
+  with the only copies of the original files expired with its window.
 - Whether an entry is still what the apply left there is decided by content and attributes,
   not by the inode alone. The inode that the apply published, with the attributes it
   recorded, counts as before while its content has the reviewed digest. A regular file with
@@ -218,13 +223,13 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   before its next entry, and the undo is reviewed again.
 - Kept entries stay undoable within the 24-hour window, which does not change. A kept
   entry's journal record and retained copy are left as they are, and only an undo that kept
-  no entry writes the `reverted` marker that ends the window early. Otherwise the apply
-  stays listed for undo and pinned, and a later undo of the same apply reviews every
-  entry again, for example after a later apply over the same files was undone; what an
-  earlier undo reverted is `already_undone`. The apply's document records `undo_state`
-  (`undone` or `partly_undone`), `undo_kept` (the number of entries the last finished undo
-  kept, null after an undo that stopped after a revert) and `undo_job`; the undo list shows
-  this state.
+  no entry, or a review that finds nothing left to revert, writes the `reverted` marker
+  that ends the window early. Otherwise the apply stays listed for undo and pinned, and a
+  later undo of the same apply reviews every entry again, for example after a later apply
+  over the same files was undone; what an earlier undo reverted is `already_undone`. The
+  apply's document records `undo_state` (`undone` or `partly_undone`), `undo_kept` (the
+  number of entries the last finished undo kept, null after an undo that stopped after a
+  revert) and `undo_job`; the undo list shows this state.
 - An undo's result counts the entries by outcome, `restored`, `removed`, `unchanged`, `kept`
   and `changed_after_review`, and names `apply_state`. The kept entries with their reasons
   are written to a paged list in the undo job's directory, in pages of 100 that a sealed

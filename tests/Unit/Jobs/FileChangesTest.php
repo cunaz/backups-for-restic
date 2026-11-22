@@ -924,6 +924,86 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 	}
 
+	public function test_a_review_that_finds_nothing_left_to_revert_records_the_apply_as_undone(): void {
+		$job = $this->run_job( $this->start() );
+		$new = $this->live . '/b-new/new.txt';
+		file_put_contents( $new, 'edited' );
+		$first = $this->undo( $job );
+		self::assertSame( 2, $first->result['kept'] );
+		// The edit is taken back by hand, and a second undo is stopped after it removed both
+		// entries, before it came to the replaced file, which the first undo restored.
+		file_put_contents( $new, 'created' );
+		$review = $this->changes->preview_undo( $job->id );
+		$undo   = $this->changes->start_undo( $job->id, $review['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The created file.
+		$this->runner->tick( 0.0 ); // The created directory.
+		$this->runner->cancel( $undo->id );
+		$cancelled = $this->run_job( $undo, JobState::Cancelled );
+		self::assertSame( [ 2, 'partly_undone' ], [ $cancelled->result['removed'], $cancelled->result['apply_state'] ] );
+		self::assertSame( 'partly_undone', $this->changes->undoable()[0]['state'] );
+		// While another job is active the review only shows that nothing is left to revert.
+		$other = $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds );
+		$busy  = $this->changes->request_preview( $job->id, true, false );
+		self::assertIsArray( $busy );
+		self::assertArrayNotHasKey( 'undone', $busy );
+		self::assertSame( $job->id, $this->changes->undoable()[0]['job'] );
+		$other->state       = JobState::Cancelled;
+		$other->finished_at = $this->clock->seconds;
+		$this->jobs->save( $other );
+		// Then it records the apply as undone instead of offering an undo that would be refused.
+		$third = $this->changes->request_preview( $job->id, true, false );
+		self::assertIsArray( $third );
+		self::assertTrue( $third['undone'] ?? null );
+		self::assertFalse( $third['applicable'] );
+		self::assertSame(
+			[
+				'restore' => 0,
+				'remove'  => 0,
+				'keep'    => 3,
+			],
+			$third['totals']
+		);
+		self::assertSame( [ 'already_undone' ], array_values( array_unique( array_column( $third['entries'], 'reason' ) ) ) );
+		self::assertFileExists( $this->jobs->directory( $job ) . '/undo/reverted' );
+		$apply = $this->jobs->get( $job->id );
+		self::assertNotNull( $apply );
+		self::assertSame( [ 'undone', 0, $undo->id ], [ $apply->result['undo_state'], $apply->result['undo_kept'], $apply->result['undo_job'] ] );
+		self::assertSame( [], $this->changes->undoable() );
+		// Its staging and journal are no longer pinned.
+		$this->clock->advance( 3601 );
+		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( $this->files );
+		$this->expectException( JobConflict::class );
+		$this->expectExceptionMessage( 'This apply has no available undo.' );
+		$this->changes->request_preview( $job->id, true, false );
+	}
+
+	public function test_a_background_review_that_finds_nothing_left_to_revert_records_the_apply_as_undone(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+		$review = $this->run_job( $this->changes->request_preview( $apply->id, true, false ) );
+		$page   = $this->changes->request_preview( $apply->id, true, false, $review->id );
+		self::assertIsArray( $page );
+		self::assertArrayNotHasKey( 'undone', $page );
+		$undo = $this->run_job( $this->changes->start_undo( $apply->id, $page['digest'], '', $review->id ) );
+		self::assertSame( [ 1, 2, 'partly_undone' ], [ $undo->result['restored'], $undo->result['kept'], $undo->result['apply_state'] ] );
+		// The kept directory is deleted with the edited file in it: nothing is left to revert.
+		TempDir::remove( $this->live . '/b-new' );
+		$again = $this->run_job( $this->changes->request_preview( $apply->id, true, false ) );
+		self::assertSame( [ 0, 0, 3, 3 ], [ $again->result['restore'], $again->result['remove'], $again->result['keep'], $again->result['settled'] ] );
+		// A later page does not decide; the first one does.
+		$later = $this->changes->request_preview( $apply->id, true, false, $again->id, 3 );
+		self::assertIsArray( $later );
+		self::assertArrayNotHasKey( 'undone', $later );
+		$first = $this->changes->request_preview( $apply->id, true, false, $again->id );
+		self::assertIsArray( $first );
+		self::assertTrue( $first['undone'] ?? null );
+		self::assertFileExists( $this->jobs->directory( $apply ) . '/undo/reverted' );
+		self::assertSame( [], $this->changes->undoable() );
+	}
+
 	public function test_an_undo_with_nothing_left_to_revert_is_refused_with_its_own_code(): void {
 		$job = $this->run_job( $this->start() );
 		file_put_contents( $this->live . '/a-existing', 'edited' );

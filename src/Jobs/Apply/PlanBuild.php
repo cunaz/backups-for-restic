@@ -67,6 +67,13 @@ final class PlanBuild {
 	public array $actions = [];
 
 	/**
+	 * Rows of an undo review kept with nothing left to revert.
+	 *
+	 * @var int
+	 */
+	public int $settled = 0;
+
+	/**
 	 * Conservative data allocation, or null for a plan started by an older version.
 	 *
 	 * @var int|null
@@ -97,7 +104,8 @@ final class PlanBuild {
 		$refused = $data['refused'] ?? 0;
 		$pending = $data['pending'] ?? [];
 		$actions = $data['actions'] ?? [];
-		if ( ! is_array( $counts ) || ! is_int( $offset ) || $offset < 0 || ! is_int( $changes ) || ! is_int( $refused ) || ! is_array( $pending ) || ! is_array( $actions ) ) {
+		$settled = $data['settled'] ?? 0;
+		if ( ! is_array( $counts ) || ! is_int( $offset ) || $offset < 0 || ! is_int( $changes ) || ! is_int( $refused ) || ! is_array( $pending ) || ! is_array( $actions ) || ! is_int( $settled ) || $settled < 0 ) {
 			throw new StorageFailed( 'The background file preview checkpoint is invalid.' );
 		}
 		$this->counts  = self::tally( $counts );
@@ -110,6 +118,7 @@ final class PlanBuild {
 		$this->offset         = $offset;
 		$this->changes        = $changes;
 		$this->refused        = $refused;
+		$this->settled        = $settled;
 		foreach ( $pending as $key => $value ) {
 			if ( is_string( $key ) ) {
 				$this->pending[ $key ] = $value;
@@ -225,6 +234,7 @@ final class PlanBuild {
 			$done                 = 0;
 			$this->changes        = 0;
 			$this->refused        = 0;
+			$this->settled        = 0;
 			$this->actions        = [];
 			$this->pending        = [];
 			$this->counts['rows'] = 0;
@@ -267,6 +277,7 @@ final class PlanBuild {
 			$row['reason'] = $decision['reason'];
 			$this->disk->put( 'rows', $done, $row );
 			$this->changes                       += 'keep' === $decision['action'] ? 0 : 1;
+			$this->settled                       += 'keep' === $decision['action'] && FileChange::settled( $decision['reason'] ) ? 1 : 0;
 			$this->actions[ $decision['action'] ] = ( $this->actions[ $decision['action'] ] ?? 0 ) + 1;
 			$this->counts['rows']                 = ++$done;
 			if ( microtime( true ) >= $deadline ) {
@@ -359,6 +370,7 @@ final class PlanBuild {
 			'pending'        => $this->pending,
 			'required_bytes' => $this->required_bytes,
 			'actions'        => $this->actions,
+			'settled'        => $this->settled,
 		];
 	}
 

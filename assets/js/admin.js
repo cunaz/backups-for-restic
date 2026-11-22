@@ -1478,9 +1478,21 @@
 					track( plan.job.id );
 					return;
 				}
+				const totals = undo && plan.totals ? plan.totals : null;
+				const totalsLine = totals ? el( 'p', { className: 'bfr-undo-totals' }, [ sprintf(
+					/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
+					__( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), totals.restore, totals.remove, totals.keep,
+				) ] ) : null;
+				if ( undo && plan.undone ) {
+					// The review recorded the apply as undone; there is nothing to preview again.
+					remember( null );
+					const done = __( 'Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', 'backups-for-restic' );
+					status.textContent = done;
+					replace( report, [ totalsLine, notice( 'success', done ) ] );
+					return;
+				}
 				busy( false );
 				status.textContent = false === plan.enough_space ? __( 'File preview ready. The destination needs more disk space.', 'backups-for-restic' ) : __( 'File preview ready.', 'backups-for-restic' );
-				const totals = undo && plan.totals ? plan.totals : null;
 				let refusal = __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' );
 				if ( totals && 0 === totals.restore + totals.remove ) {
 					refusal = __( 'Nothing of this apply can be undone now: every entry is already undone, or changed after the apply and is kept. The list gives the reason for each entry.', 'backups-for-restic' );
@@ -1511,10 +1523,7 @@
 						[ __( 'Additional disk space needed at peak', 'backups-for-restic' ), 'number' === typeof plan.required_bytes ? formatBytes( plan.required_bytes ) : __( 'Open a new preview for an estimate.', 'backups-for-restic' ) ],
 						[ __( 'Available disk space', 'backups-for-restic' ), 'number' === typeof plan.available_bytes ? formatBytes( plan.available_bytes ) : __( 'Unknown on this host', 'backups-for-restic' ) ],
 					] ) : null,
-					totals ? el( 'p', { className: 'bfr-undo-totals' }, [ sprintf(
-						/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
-						__( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), totals.restore, totals.remove, totals.keep,
-					) ] ) : null,
+					totalsLine,
 					fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
 					controls,
 				] );
