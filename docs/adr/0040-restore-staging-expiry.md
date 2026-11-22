@@ -65,6 +65,14 @@ packages must never be offered a tree that is half gone.
 - A directory that the file system refuses to delete stays under its `.removing-` name.
   It is counted in the answer of `GET /restores` and every heartbeat tries again; nothing
   reports it by name yet.
+- The heartbeat removes the preview data of file reviews and the undo workspaces of
+  applies that are due before it looks at `restores/`. Since 2026-11-21 one that the file
+  system refuses to remove, or whose job document cannot be saved afterwards, is counted
+  as failed and tried again by the next heartbeat; it never keeps the staging of other
+  restores from expiring. Before, one such failure stopped every later expiry.
+- A private directory that the configuration names through a symbolic link is used by its
+  real path ([ADR 0007](0007-private-directory.md)), so the checks that refuse a path
+  whose real location differs from its spelling hold for it.
 - The download of package 2.4 and the apply of phase 4 have to find their files through
   the list of `Staging`, so that expired staging is not served. A job that reads the
   staging of another job has to become known to `Staging`: today a directory is protected

@@ -305,7 +305,9 @@ carries `Cache-Control: no-store`.
   directory, after a preflight that refuses a directory that is served. The staging
   directory, `files/` in it and every entry below are owner-only
   ([ADR 0036](adr/0036-selected-file-staging.md), next point); a job that fails or is
-  cancelled removes what it staged. The staged files of a finished restore expire
+  cancelled removes what it staged. A request to cancel that comes after the last file is
+  staged ends only the archive or the database rehearsal, and the job keeps its complete
+  staging until it expires like any other. The staged files of a finished restore expire
   ([ADR 0040](adr/0040-restore-staging-expiry.md)): `restore.staging_expiry_hours` after
   the job finished, 24 by default and 168 at most, they leave the list, and the next
   heartbeat deletes them, as it deletes at once what a job that did not succeed left
@@ -314,7 +316,10 @@ carries `Cache-Control: no-store`.
   removes symbolic links without following them. Residual risk: until then an exposure of
   the private directory exposes the staged files too, for the configured hours and, where
   WP-Cron does not run, until the next request brings a heartbeat; a tree that the file
-  system refuses to delete stays, unlisted, and is tried again at every heartbeat. Two
+  system refuses to delete stays, unlisted, and is tried again at every heartbeat. So do
+  the preview data and undo workspaces that the file system refuses to remove; neither
+  keeps other staging from expiring, and a private directory that the configuration names
+  through a symbolic link is used by its real path, so that its checks hold. Two
   states keep staged files past their expiry with no heartbeat to end them. A deactivated
   plugin has no heartbeat: what is staged stays until the plugin is activated again, whose
   first heartbeat removes what is due, or uninstalled. A staging directory whose job

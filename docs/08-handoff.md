@@ -73,8 +73,6 @@ Smaller points that are recorded nowhere else:
 - `replace()` in `assets/js/admin.js` hands its arguments to `replaceChildren()`; a `null`
   among them would be shown as the text "null". Two callers on the Settings tab pass
   `null`. Seen by reading and in a stand-in page, not on a real site: check it there.
-- The engine reports too little free space for a restore as a format error, so the job
-  shows `repository_damaged` (ADR 0037).
 
 ## 4. How changes are made here
 

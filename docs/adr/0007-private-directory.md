@@ -83,3 +83,20 @@ Uninstall checks both the current filtered location and the previous default or 
 location for outstanding database cleanup before deleting options or local files. If an
 owned job document cannot be read, or a live restore still owns the maintenance marker,
 the job history and recovery material stay in place for a retry.
+
+## Canonical path (2026-11)
+
+The plugin uses the directory by its canonical path: `PrivateDirectory` resolves the
+longest existing part of the configured path with `realpath()` and appends the parts that
+do not exist yet, so the directories it creates there have that path. Everything the
+plugin keeps lies below it. Staging, file previews and the restore engine refuse a path
+whose real location differs from its spelling; with the configured path, a host that names
+the directory through a link, as `BACKUPS_FOR_RESTIC_PRIVATE_DIR=/home/acme/private` where
+`/home` is a link on FreeBSD, failed every large file preview and then stopped the expiry
+of all staging. The configured path is kept where its spelling matters: the refusal of
+relative paths and dot segments, the URLs that the exposure probe derives from the web
+roots (a web server that follows a link serves the directory under the root that the
+configured path names), the containment in the document root, the protected paths of a
+file apply, and the uninstall, which does not remove a directory that the configuration
+names through a link of its own. The probe's observations are bound to the real path as
+before.
