@@ -376,7 +376,9 @@ final class Container {
 			[ $site->abspath . '/wp-config.php', dirname( $site->abspath ) . '/wp-config.php' ],
 			$include_config,
 			$layout,
-			$bootstrap
+			$bootstrap,
+			// The apply builds its copies in the private directory, whose group they can take.
+			ApplyPlan::process( $this->private_dir()->path )
 		);
 	}
 
