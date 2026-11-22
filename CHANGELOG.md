@@ -401,7 +401,11 @@ All notable changes are documented here. The format follows
 - File apply and undo put each journal record and private copy on disk before the live
   change that depends on it, and each live change on disk before recording it, so that a
   power loss or a crash of the server during an apply leaves a state that the next attempt
-  and the undo recognise, as a stopped request already did.
+  and the undo recognise, as a stopped request already did. Every job document and each
+  new job directory are now put on disk as well, so that a power loss cannot bring back a
+  document that lost what a running apply, undo or database exchange had recorded. Each
+  saved job document waits for the disk, which on slow storage adds a few hundredths of a
+  second to a backup step and to each file of an apply.
 - A file apply stopped right after it created a directory can be resumed and undone:
   directories are prepared privately and renamed into place. Before, the retry could not
   prove that it had created the directory, so every entry below it failed and undo left it.

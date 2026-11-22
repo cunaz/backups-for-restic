@@ -100,9 +100,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   second just after PHP's clock has passed it. A folder of up to 2,048 names is listed again
   after each of the worker's own changes, as every recheck listed it before. A wider folder
   learns the worker's own changes and is trusted only until the second of its last change
-  and the quarter second have passed. The index keeps at most 524,288 names as salted 64-bit
-  codes, about 20 MiB; a folder that alone holds more is listed for every recheck, as before.
-  Each publication and removal is preceded by a recheck.
+  and the quarter second have passed. A wide folder that already looks settled right after
+  one of the worker's own changes, because its change time did not move with it, is listed
+  again at the next recheck. The index keeps at most 524,288 names as salted 64-bit codes,
+  about 20 MiB; a folder that alone holds more is listed for every recheck, as before. Each
+  publication and removal is preceded by a recheck.
 - Residual risks. Between the last check and the rename or unlink, a process of the same user
   that maintenance mode does not stop, such as an SFTP client or a deploy script, can still
   change the live entry, and that change is lost without a copy. Keeping the displaced inode
@@ -112,9 +114,24 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   a folder of more than 2,048 names, a second spelling of a name that another process
   creates in the same second as one of the worker's own changes can stay hidden from the
   rechecks for up to about one and a quarter seconds; on a case-insensitive file system the
-  publication itself meets it, and a case-sensitive one keeps both names.
+  publication itself meets it, and a case-sensitive one keeps both names. On a network file
+  system whose clients cache directory attributes, a change made on another host can leave
+  a folder's identity unchanged for as long as that cache holds it.
 - Measured with PHP 8.3.37 on tmpfs: 500 new files beside 20,000 others took 27.2 seconds of
   rechecks before and 0.44 seconds with seven folder listings after.
+- Every job document is written durably as well (`JobStore::save()`), and a new job directory
+  is synchronised in `jobs/` before its first document is written. Without that, a power loss
+  could bring back an older `job.json`, for example one without the manifest hash and the
+  `applying` step that the apply records before its first live change, while the journal on
+  disk shows a partial apply, and undo could no longer read it. Every save is durable, not
+  only the saves that precede a live change: an empty document makes its job unreadable in
+  any case, and the saves that precede a live change or a table exchange are spread over
+  several job types. A backup, restore or maintenance tick saves its document twice; an
+  apply or undo tick saves it once for each finished entry and twice more.
 - Each changed entry now waits for about eleven synchronisations, a replaced file for fourteen,
-  and each reversed entry for three to six. On slow or network storage this lengthens the
-  maintenance window of a large apply.
+  and each reversed entry for three to six, plus two for the job document. On the ext4 disk of
+  the measurement machine a durable job document took about 6 ms against 0.14 ms for an
+  atomic one, and a created file spent about 29 ms in its own synchronisations. At 10 ms per
+  synchronisation, as on slow or network storage, the document adds about 40 ms to a backup
+  tick and 20 ms to each applied entry, and the maintenance window of a large apply grows
+  accordingly.

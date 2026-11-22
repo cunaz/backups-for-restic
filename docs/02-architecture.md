@@ -359,9 +359,12 @@ virtual file with its cursor); and `database.json` with the dump's table list an
 tables. Forget, prune and check jobs keep the checkpoint of their engine run in
 `maintenance/state.json`; the key derivation keeps its state and table in
 `<private>/kdf/<id>/`. Every write is atomic or append-only, so a killed tick loses at most
-the work since its last checkpoint. Memory per tick is bounded by the directory listings on
-the walk, one page of rows and one pack buffer per blob type, plus the merged index, which
-grows with the number of blobs in the repository (§2, principle 3).
+the work since its last checkpoint. `job.json` and the journal of a live file apply are also
+synchronised to disk before what follows relies on them, so that a power loss cannot bring
+back an older document or record ([ADR 0041](adr/0041-guarded-file-changes.md)). Memory per
+tick is bounded by the directory listings on the walk, one page of rows and one pack buffer
+per blob type, plus the merged index, which grows with the number of blobs in the
+repository (§2, principle 3).
 
 Backup working files are created with mode `0600`; every write must finish and close before
 the checkpoint can refer to its bytes. Resume refuses a failed truncation of an uncommitted
@@ -829,7 +832,7 @@ a request left behind is removed once it is a minute old.
 ├── cache/<repo-id>/trees/<tree-id>.bin    tree blobs for browsing, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
-├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
+├── jobs/<job-id>/                         job.json (atomic and synchronised), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
 ├── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
