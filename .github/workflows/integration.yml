@@ -37,9 +37,12 @@ on:
 permissions:
   contents: read
 
+# A pull request cancels its superseded runs. Runs on main never cancel each other: a push does
+# not cancel the nightly run of the acceptance size, and every commit keeps the results that the
+# release gate reads (docs/04 §7).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   wordpress:
