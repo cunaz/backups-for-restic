@@ -225,7 +225,7 @@ rows of 3 MiB. Only on the dump's own run a row deleted and inserted again withi
 DDL that waits for the metadata lock, a definition that changes at every tick and a row too
 large for the memory limit, which depend on its snapshot or its single read of a table
 without a key. Only on the site's connection run keys of every type and rows changed
-before the cursor, a FLOAT key in exponent notation, resumed against uninterrupted dumps, a
+before the cursor, a DOUBLE key in exponent notation, resumed against uninterrupted dumps, a
 change within one tick, the row above 16 MiB and the definitions in other scripts.
 `DedicatedConnectionTest` checks the opening of the dump's own connection against a
 stand-in for `wpdb`, its encryption, the end of a table's transaction under every
