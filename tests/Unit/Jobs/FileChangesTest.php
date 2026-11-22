@@ -47,13 +47,29 @@ final class FileChangesTest extends TestCase {
 	 */
 	private array $plans = [];
 
+	/**
+	 * Told of each new job directory, synchronisation and document rename of the store.
+	 *
+	 * @var (\Closure(string, string): void)|null
+	 */
+	private ?\Closure $job_writes = null;
+
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'apply-job' );
 		$this->live      = $this->directory . '/live';
 		mkdir( $this->live );
 		$this->clock         = new FrozenClock();
 		$random              = new SystemRandom();
-		$this->jobs          = new JobStore( $this->directory . '/jobs', new Redactor(), $random );
+		$this->jobs          = new JobStore(
+			$this->directory . '/jobs',
+			new Redactor(),
+			$random,
+			function ( string $operation, string $path ): void {
+				if ( null !== $this->job_writes ) {
+					( $this->job_writes )( $operation, $path );
+				}
+			}
+		);
 		$this->staging       = new Staging( $this->directory . '/restores', $this->jobs, $this->clock );
 		$source              = $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds - 60 );
 		$source->state       = JobState::Succeeded;
@@ -296,6 +312,26 @@ final class FileChangesTest extends TestCase {
 		$this->run_job( $job, JobState::Failed );
 		self::assertFileDoesNotExist( $this->live . '/b-new/new.txt' );
 		self::assertFalse( $this->changes->preview_undo( $job->id )['applicable'] );
+	}
+
+	public function test_the_apply_document_that_names_the_manifest_is_on_disk_before_the_first_live_change(): void {
+		$job       = $this->start();
+		$directory = $this->directory . '/jobs/' . $job->id;
+		$live      = null;
+		// Without it a power loss can bring back a document without the manifest hash, and undo
+		// cannot read the journal of a partial apply.
+		$this->job_writes = function ( string $operation, string $path ) use ( $directory, &$live ): void {
+			if ( null !== $live || 'sync' !== $operation || $directory !== $path ) {
+				return;
+			}
+			$document = json_decode( (string) file_get_contents( $directory . '/job.json' ), true );
+			if ( is_array( $document ) && 'applying' === ( $document['step'] ?? null ) && is_string( $document['data']['manifest_hash'] ?? null ) ) {
+				$live = file_get_contents( $this->live . '/a-existing' );
+			}
+		};
+		$this->run_job( $job );
+		self::assertSame( 'original', $live );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
 	public function test_a_worker_killed_after_publishing_a_directory_lets_the_apply_and_its_undo_finish(): void {

@@ -38,26 +38,30 @@ final class Files {
 	 * the record survives a power loss once this returns. Hosts that cannot synchronise a
 	 * directory keep the rename that the file system already ordered.
 	 *
-	 * @param string $file    Target file.
-	 * @param string $content Content.
+	 * @param string                                $file     Target file.
+	 * @param string                                $content  Content.
+	 * @param (\Closure(string, string): void)|null $observer Optional observer of each synchronisation and of the
+	 *                                                         rename, with the path, in order.
 	 * @throws StorageFailed If the file cannot be written or synchronised.
 	 */
-	public static function write_durable( string $file, string $content ): void {
-		self::write_atomic_pieces( $file, [ $content ], PHP_INT_MAX, true );
+	public static function write_durable( string $file, string $content, ?\Closure $observer = null ): void {
+		self::write_atomic_pieces( $file, [ $content ], PHP_INT_MAX, true, $observer );
 	}
 
 	/**
 	 * Writes a file atomically from pieces, so that a large content never has to exist as one
 	 * string. The temporary file is private before the first byte is written.
 	 *
-	 * @param string           $file    Target file.
-	 * @param iterable<string> $pieces  Content in order.
-	 * @param int              $limit   Largest size to write, in bytes.
-	 * @param bool             $durable Whether to synchronise the file and its directory (write_durable()).
+	 * @param string                                $file     Target file.
+	 * @param iterable<string>                      $pieces   Content in order.
+	 * @param int                                   $limit    Largest size to write, in bytes.
+	 * @param bool                                  $durable  Whether to synchronise the file and its directory (write_durable()).
+	 * @param (\Closure(string, string): void)|null $observer Optional observer of each synchronisation and of the
+	 *                                                         rename, with the path, in order.
 	 * @return bool False if the content is larger than the limit; the target is then left as it was.
 	 * @throws StorageFailed If the file cannot be written.
 	 */
-	public static function write_atomic_pieces( string $file, iterable $pieces, int $limit = PHP_INT_MAX, bool $durable = false ): bool {
+	public static function write_atomic_pieces( string $file, iterable $pieces, int $limit = PHP_INT_MAX, bool $durable = false, ?\Closure $observer = null ): bool {
 		$temporary = $file . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
 		$umask     = umask( 0077 );
 		try {
@@ -86,8 +90,13 @@ final class Files {
 			if ( ! fflush( $handle ) ) {
 				StorageFailed::raise( 'A file in the private directory could not be flushed.', [ 'file' => basename( $file ) ] );
 			}
-			if ( $durable && ! fsync( $handle ) ) {
-				StorageFailed::raise( 'A file in the private directory could not be synchronised to disk.', [ 'file' => basename( $file ) ] );
+			if ( $durable ) {
+				if ( ! fsync( $handle ) ) {
+					StorageFailed::raise( 'A file in the private directory could not be synchronised to disk.', [ 'file' => basename( $file ) ] );
+				}
+				if ( null !== $observer ) {
+					$observer( 'sync', $temporary );
+				}
 			}
 			$closed = fclose( $handle );
 			$handle = null;
@@ -98,8 +107,11 @@ final class Files {
 				StorageFailed::raise( 'A file in the private directory could not be replaced.', [ 'file' => basename( $file ) ] );
 			}
 			$complete = true;
+			if ( null !== $observer ) {
+				$observer( 'rename', $file );
+			}
 			if ( $durable ) {
-				self::sync_directory( dirname( $file ) );
+				self::sync_directory( dirname( $file ), $observer );
 			}
 			return true;
 		} finally {
@@ -140,15 +152,20 @@ final class Files {
 	 * the BSDs; where it cannot, or where the file system refuses to synchronise a directory,
 	 * this returns without it and the file system's own ordering applies.
 	 *
-	 * @param string $directory Existing directory.
+	 * @param string                                $directory Existing directory.
+	 * @param (\Closure(string, string): void)|null $observer  Optional observer, told of a completed synchronisation.
 	 */
-	public static function sync_directory( string $directory ): void {
+	public static function sync_directory( string $directory, ?\Closure $observer = null ): void {
 		$handle = @fopen( $directory, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Not every platform opens a directory as a stream; synchronising it is then skipped.
 		if ( false === $handle ) {
 			return;
 		}
 		try {
-			@fsync( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Some file systems refuse to synchronise a directory; the rename stays as the file system ordered it.
+			// Some file systems refuse to synchronise a directory; the rename stays as the file
+			// system ordered it.
+			if ( @fsync( $handle ) && null !== $observer ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A refusal is expected on some file systems and is not an error here.
+				$observer( 'sync', $directory );
+			}
 		} finally {
 			fclose( $handle );
 		}

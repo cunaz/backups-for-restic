@@ -68,6 +68,21 @@ final class FilesTest extends TestCase {
 		self::assertSame( [], glob( $file . '.*.tmp' ) );
 	}
 
+	public function test_a_durable_write_synchronises_the_file_before_its_rename_and_the_directory_after(): void {
+		$file  = $this->directory . '/job.json';
+		$steps = [];
+		Files::write_durable(
+			$file,
+			'{"step":"applying"}',
+			static function ( string $operation, string $path ) use ( &$steps ): void {
+				// The temporary name is random.
+				$steps[] = $operation . ' ' . preg_replace( '/\.[0-9a-f]{8}\.tmp\z/', '.tmp', $path );
+			}
+		);
+		self::assertSame( [ 'sync ' . $file . '.tmp', 'rename ' . $file, 'sync ' . $this->directory ], $steps );
+		self::assertSame( '{"step":"applying"}', file_get_contents( $file ) );
+	}
+
 	public function test_synchronisation_accepts_read_only_copies_and_skips_what_cannot_be_opened(): void {
 		$copy = $this->directory . '/candidate';
 		file_put_contents( $copy, 'bytes' );
