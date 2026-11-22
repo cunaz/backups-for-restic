@@ -46,6 +46,7 @@ final class FileMaintenanceTest extends TestCase {
 						'REQUEST_METHOD' => $method,
 					],
 					$plain ? [ 'rest_route' => '/backups-for-restic/v1' . $path ] : [],
+					[],
 					null === $secret ? [] : [ 'bfr_file_control' => $secret ]
 				);
 			};
@@ -56,6 +57,54 @@ final class FileMaintenanceTest extends TestCase {
 			self::assertFalse( $check( '/jobs/20261120T000000Z-ffffff', 'GET', $token ) );
 			self::assertFalse( $check( $job . '/cancel', 'GET', $token ) );
 		}
+	}
+
+	public function test_a_form_body_cannot_send_an_admitted_request_to_another_route(): void {
+		$token  = bin2hex( random_bytes( 32 ) );
+		$grant  = hash( 'sha256', $token );
+		$cancel = '/backups-for-restic/v1/jobs/' . self::ID . '/cancel';
+		// WP::parse_request() takes rest_route from $_POST before the permalink and $_GET.
+		$requests = [
+			'pretty cancel' => [ self::API, '/wp-json' . $cancel, 'POST', [] ],
+			'plain cancel'  => [ 'https://example.com/?rest_route=/backups-for-restic/v1', '/', 'POST', [ 'rest_route' => $cancel ] ],
+			'admin page'    => [ self::API, '/wp-admin/admin.php', 'GET', [ 'page' => 'backups-for-restic' ] ],
+		];
+		foreach ( $requests as $name => [ $api, $uri, $method, $query ] ) {
+			$admitted = static fn ( array $body ): bool => FileMaintenanceGate::admitted(
+				self::ID,
+				$grant,
+				$api,
+				self::ADMIN,
+				[
+					'REQUEST_URI'    => $uri,
+					'REQUEST_METHOD' => $method,
+				],
+				$query,
+				$body,
+				[ 'bfr_file_control' => $token ]
+			);
+			self::assertTrue( $admitted( [] ), $name );
+			self::assertTrue( $admitted( [ 'status' => 'inactive' ] ), $name );
+			self::assertFalse( $admitted( [ 'rest_route' => '/wp/v2/plugins/backups-for-restic/backups-for-restic' ] ), $name );
+			self::assertFalse( $admitted( [ 'rest_route' => [ '/wp/v2/plugins' ] ] ), $name );
+			self::assertFalse( $admitted( [ 'rest_route' => '' ] ), $name );
+		}
+		self::assertFalse(
+			FileMaintenanceGate::admitted(
+				self::ID,
+				$grant,
+				'https://example.com/?rest_route=/backups-for-restic/v1',
+				self::ADMIN,
+				[
+					'REQUEST_URI'    => '/',
+					'REQUEST_METHOD' => 'POST',
+				],
+				[ 'rest_route' => $cancel ],
+				[ 'rest_route' => $cancel ],
+				[ 'bfr_file_control' => $token ]
+			),
+			'A plain-permalink route belongs in the address only.'
+		);
 	}
 
 	/**
@@ -183,12 +232,21 @@ final class FileMaintenanceTest extends TestCase {
 		$root = TempDir::create( 'maintenance' );
 		try {
 			$token    = bin2hex( random_bytes( 32 ) );
+			$cancel   = '/wp-json/backups-for-restic/v1/jobs/' . self::ID . '/cancel';
 			$requests = [
 				'visitor'            => [
 					'server' => [
 						'REQUEST_URI'    => '/',
 						'REQUEST_METHOD' => 'GET',
 					],
+				],
+				'form body route'    => [
+					'server'  => [
+						'REQUEST_URI'    => $cancel,
+						'REQUEST_METHOD' => 'POST',
+					],
+					'post'    => [ 'rest_route' => '/wp/v2/plugins/backups-for-restic/backups-for-restic' ],
+					'cookies' => [ 'bfr_file_control' => $token ],
 				],
 				'command of another' => [
 					'cli'  => true,

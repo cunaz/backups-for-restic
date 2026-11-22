@@ -43,7 +43,7 @@ final class FileMaintenanceGate {
 			// site's plugins and options, even when it defines DOING_CRON early.
 			$admitted = self::own_command( $GLOBALS['argv'] ?? null );
 		} else {
-			$admitted = ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) || self::admitted( $id, $grant, $api, $admin, $_SERVER, $_GET, $_COOKIE ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This controls early boot only. WordPress verifies the REST nonce at the route.
+			$admitted = ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) || self::admitted( $id, $grant, $api, $admin, $_SERVER, $_GET, $_POST, $_COOKIE ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.NonceVerification.Missing -- This controls early boot only. WordPress verifies the REST nonce at the route.
 		}
 		if ( ! $admitted ) {
 			// A float still expires under core's ten-minute grace period. Core reserves
@@ -134,14 +134,17 @@ final class FileMaintenanceGate {
 	 * @param string                 $admin Configured admin.php URL.
 	 * @param array<array-key,mixed> $server Server environment.
 	 * @param array<array-key,mixed> $query Parsed query.
+	 * @param array<array-key,mixed> $body Parsed form body.
 	 * @param array<array-key,mixed> $cookies Cookies.
 	 * @return bool Whether to let this request reach the ordinary authenticated route.
 	 */
-	public static function admitted( string $id, string $grant, string $api, string $admin, array $server, array $query, array $cookies ): bool {
+	public static function admitted( string $id, string $grant, string $api, string $admin, array $server, array $query, array $body, array $cookies ): bool {
 		$token  = $server['HTTP_X_BACKUPS_FOR_RESTIC_CONTROL'] ?? $cookies['bfr_file_control'] ?? null;
 		$uri    = $server['REQUEST_URI'] ?? null;
 		$method = $server['REQUEST_METHOD'] ?? null;
-		if ( ! is_string( $token ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $token ) || ! hash_equals( $grant, hash( 'sha256', $token ) ) || ! is_string( $uri ) || ! is_string( $method ) || isset( $query['_method'] ) || isset( $server['HTTP_X_HTTP_METHOD_OVERRIDE'] ) ) {
+		// WordPress takes rest_route from a form body before the one in the address or the
+		// path, so a body could send an admitted address to any other route.
+		if ( ! is_string( $token ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $token ) || ! hash_equals( $grant, hash( 'sha256', $token ) ) || ! is_string( $uri ) || ! is_string( $method ) || isset( $query['_method'] ) || isset( $server['HTTP_X_HTTP_METHOD_OVERRIDE'] ) || isset( $body['rest_route'] ) ) {
 			return false;
 		}
 		// phpcs:disable WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() loads after the maintenance gate.
