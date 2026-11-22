@@ -49,6 +49,40 @@ final class DumpRestartTest extends TestCase {
 		}
 	}
 
+	public function test_a_cursor_whose_key_values_no_longer_fit_still_counts_its_restarts(): void {
+		// The key had two columns when the cursor was handed out; the table now has one.
+		$cursor = (string) json_encode(
+			[
+				'v'        => 2,
+				'after'    => [ '1', '2' ],
+				'offset'   => 500,
+				'rows'     => 500,
+				'bytes'    => 9000,
+				'page'     => 500,
+				'views'    => 1,
+				'restarts' => TableSource::MAX_RESTARTS - 1,
+				'digest'   => hash( 'sha256', 'first' ),
+				'changed'  => false,
+				'largest'  => 100,
+			]
+		);
+		$source = $this->source( $this->table( 'first' ), $cursor );
+		self::assertTrue( $source->restarted() );
+		$next = json_decode( $this->stop_after_first_page( $source ), true );
+		self::assertSame( TableSource::MAX_RESTARTS, is_array( $next ) ? $next['restarts'] : null, 'The count goes on from the rejected cursor.' );
+
+		$this->expectException( DatabaseFailed::class );
+		$this->source(
+			$this->table( 'first' ),
+			(string) json_encode(
+				[
+					'after'    => [ '1', '2' ],
+					'restarts' => TableSource::MAX_RESTARTS,
+				] + (array) json_decode( $cursor, true )
+			)
+		);
+	}
+
 	public function test_outside_a_snapshot_a_change_during_the_tick_holds_back_the_trailer(): void {
 		$source = $this->source( $this->table( 'first' ), null, fn (): Table => $this->table( 'second' ) );
 		$output = $this->read_all( $source );

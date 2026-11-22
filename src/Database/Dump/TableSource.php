@@ -271,7 +271,7 @@ final class TableSource implements ResumableByteSource {
 			$this->aliases[ $position ] = $alias;
 		}
 		$state    = self::saved( $cursor, $table );
-		$restarts = $state['restarts'] ?? 0;
+		$restarts = self::restarts( $cursor );
 		if ( null !== $cursor && ( null === $state || $state['changed'] || $state['digest'] !== $table->digest ) ) {
 			// The file was started with another definition, by an earlier version, or the
 			// cursor is damaged: what was written cannot be continued.
@@ -300,6 +300,20 @@ final class TableSource implements ResumableByteSource {
 		$this->views    = $state['views'] ?? 0;
 		$this->snapshot = $connection instanceof DedicatedConnection && $connection->in_snapshot() && $table->versioned();
 		$this->prefix   = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $table->columns ) ) ) . ') VALUES ';
+	}
+
+	/**
+	 * How often the table started over before this cursor was handed out. Read on its own, so
+	 * that a cursor rejected for its key values, for example after the key changed, still counts
+	 * towards MAX_RESTARTS.
+	 *
+	 * @param string|null $cursor Cursor.
+	 * @return int Restarts, or 0 for no cursor or one of an earlier version.
+	 */
+	private static function restarts( ?string $cursor ): int {
+		$state = null === $cursor ? null : json_decode( $cursor, true );
+		$count = is_array( $state ) && self::CURSOR_VERSION === ( $state['v'] ?? null ) ? $state['restarts'] ?? 0 : 0;
+		return is_int( $count ) && $count > 0 ? $count : 0;
 	}
 
 	/**
