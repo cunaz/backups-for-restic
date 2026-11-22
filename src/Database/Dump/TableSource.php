@@ -308,7 +308,11 @@ final class TableSource implements ResumableByteSource {
 	private function page(): void {
 		$table = SqlFormatter::identifier( $this->table->name );
 		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
-		$selection = array_map( SqlFormatter::identifier( ... ), array_keys( $this->table->columns ) );
+		$selection = [];
+		foreach ( $this->table->columns as $name => $kind ) {
+			$column      = SqlFormatter::identifier( $name );
+			$selection[] = SqlFormatter::FLOAT === $kind ? $column . ' + 0e0 AS ' . $column : $column;
+		}
 		foreach ( $this->table->order as $position => $column ) {
 			if ( $column->computed() ) {
 				$selection[] = $column->value() . ' AS ' . SqlFormatter::identifier( $this->aliases[ $position ] );
@@ -318,7 +322,8 @@ final class TableSource implements ResumableByteSource {
 		$selection = [] === $selection ? '1' : implode( ', ', $selection );
 		if ( [] !== $this->table->order ) {
 			$where = null === $this->after ? '' : ' WHERE ' . KeyColumn::after( $this->table->order, $this->after );
-			$order = implode( ', ', array_map( static fn ( KeyColumn $column ): string => SqlFormatter::identifier( $column->name ), $this->table->order ) );
+			// Qualified, so that ORDER BY names the column even where the selection has an alias of the same name.
+			$order = implode( ', ', array_map( static fn ( KeyColumn $column ): string => $table . '.' . SqlFormatter::identifier( $column->name ), $this->table->order ) );
 			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $where . ' ORDER BY ' . $order . ' LIMIT ' . $this->page;
 		} else {
 			$sql = 'SELECT ' . $selection . ' FROM ' . $table . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;

@@ -141,7 +141,7 @@ final class DumpColumnsTest extends TestCase {
 		$source = new TableSource( $db, $table, '', $cursor, static function (): void {} );
 		self::assertTrue( $source->restarted() );
 		self::assertSame( "-- backups-for-restic-dump/1 table `wp_rows`\nDROP TABLE IF EXISTS `wp_rows`;\nCREATE TABLE `wp_rows` (`id` int);\n-- end table rows=0 bytes=112\n", $source->read( 10000 ) );
-		self::assertSame( [ 'SELECT `id` FROM `wp_rows` ORDER BY `id` LIMIT 500' ], $db->queries, 'The first page starts at the beginning of the key.' );
+		self::assertSame( [ 'SELECT `id` FROM `wp_rows` ORDER BY `wp_rows`.`id` LIMIT 500' ], $db->queries, 'The first page starts at the beginning of the key.' );
 	}
 
 	public function test_a_cursor_of_this_version_continues_after_its_key(): void {
@@ -158,7 +158,41 @@ final class DumpColumnsTest extends TestCase {
 		$source = new TableSource( $db, $table, '', '{"v":2,"after":["17"],"offset":17,"rows":17,"bytes":900,"page":64}', static function (): void {} );
 		self::assertFalse( $source->restarted() );
 		self::assertSame( "-- end table rows=17 bytes=900\n", $source->read( 10000 ) );
-		self::assertSame( [ 'SELECT `id` FROM `wp_rows` WHERE (`id` > 17) ORDER BY `id` LIMIT 64' ], $db->queries );
+		self::assertSame( [ 'SELECT `id` FROM `wp_rows` WHERE (`id` > 17) ORDER BY `wp_rows`.`id` LIMIT 64' ], $db->queries );
+	}
+
+	public function test_a_float_column_is_read_as_the_double_it_holds_and_written_with_every_digit(): void {
+		self::assertSame( SqlFormatter::FLOAT, SqlFormatter::kind( 'float' ) );
+		self::assertSame( SqlFormatter::FLOAT, SqlFormatter::kind( 'float(7,4) unsigned' ) );
+		self::assertSame( SqlFormatter::NUMERIC, SqlFormatter::kind( 'double' ) );
+		$db     = new class() implements Connection {
+			/** @var list<string> */
+			public array $queries = [];
+
+			public function rows( string $sql ): array {
+				$this->queries[] = $sql;
+				return 1 === count( $this->queries ) ? [
+					[
+						'id'          => '1',
+						'ratio'       => '0.10000000149011612',
+						'__bfr_key_0' => '0.10000000149011612',
+					],
+				] : [];
+			}
+		};
+		$table  = new Table(
+			'wp_rows',
+			'CREATE TABLE `wp_rows` (`id` int, `ratio` float)',
+			[
+				'id'    => SqlFormatter::NUMERIC,
+				'ratio' => SqlFormatter::FLOAT,
+			],
+			'ratio',
+			[ new KeyColumn( 'ratio', KeyColumn::FLOAT ) ]
+		);
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		self::assertStringContainsString( '(`id`,`ratio`) VALUES (1,0.10000000149011612);', $source->read( 10000 ) );
+		self::assertSame( 'SELECT `id`, `ratio` + 0e0 AS `ratio`, `ratio` + 0e0 AS `__bfr_key_0` FROM `wp_rows` ORDER BY `wp_rows`.`ratio` LIMIT 500', $db->queries[0], 'ORDER BY names the column, not the alias.' );
 	}
 
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {

@@ -20,6 +20,7 @@ final class SqlFormatter {
 
 	public const string BINARY  = 'binary';
 	public const string BIT     = 'bit';
+	public const string FLOAT   = 'float';
 	public const string NUMERIC = 'numeric';
 	public const string TEXT    = 'text';
 
@@ -49,6 +50,11 @@ final class SqlFormatter {
 		if ( 1 === preg_match( '/\Abit\b/i', $type ) ) {
 			return self::BIT;
 		}
+		// The server prints a FLOAT with about six digits, fewer than it holds; TableSource
+		// reads it as the DOUBLE it converts to exactly, which also imports exactly.
+		if ( 1 === preg_match( '/\Afloat\b/i', $type ) ) {
+			return self::FLOAT;
+		}
 		return 1 === preg_match( self::NUMERIC_TYPES, $type ) ? self::NUMERIC : self::TEXT;
 	}
 
@@ -70,7 +76,7 @@ final class SqlFormatter {
 			// mysqlnd sends BIT values as decimal numbers, other drivers as raw bytes.
 			return '' !== $value && strspn( $value, '0123456789' ) === strlen( $value ) ? $value : '0x' . bin2hex( '' === $value ? "\0" : $value );
 		}
-		if ( self::NUMERIC === $kind && 1 === preg_match( '/\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/', $value ) ) {
+		if ( ( self::NUMERIC === $kind || self::FLOAT === $kind ) && 1 === preg_match( '/\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/', $value ) ) {
 			return $value;
 		}
 		if ( ! mb_check_encoding( $value, 'UTF-8' ) ) {

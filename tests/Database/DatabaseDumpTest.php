@@ -252,10 +252,10 @@ final class DatabaseDumpTest extends TestCase {
 
 	/**
 	 * Keys of every type that can order pages, each with the same changes before the cursor:
-	 * unsigned 64-bit values above PHP_INT_MAX, negative numbers, DECIMAL, DOUBLE, dates and
-	 * times, TIMESTAMP across changes of daylight saving time, YEAR, ENUM and SET (which sort
-	 * by index and bits), BIT, BINARY and VARBINARY with zero bytes, and a key over a DATE and
-	 * an INT.
+	 * unsigned 64-bit values above PHP_INT_MAX, negative numbers, DECIMAL, DOUBLE, FLOAT (which
+	 * the server prints with fewer digits than it holds), dates and times, TIMESTAMP across
+	 * changes of daylight saving time, YEAR, ENUM and SET (which sort by index and bits), BIT,
+	 * BINARY and VARBINARY with zero bytes, and a key over a DATE and an INT.
 	 */
 	public function test_keys_of_every_type_page_exactly_while_rows_before_the_cursor_change(): void {
 		$db = self::database( self::$source );
@@ -269,6 +269,7 @@ final class DatabaseDumpTest extends TestCase {
 			'i32'  => [ 'INT', static fn ( int $i ): string => (string) ( $i - 1000 ), [ '-2147483648', '-2147483647' ] ],
 			'dec'  => [ 'DECIMAL(20,6)', static fn ( int $i ): string => sprintf( "'%s%d.%06d'", $i < 1000 ? '-' : '', abs( $i - 1000 ), ( $i * 7919 ) % 1000000 ), [ "'-99999999999999.999999'", "'-99999999999999.999998'" ] ],
 			'dbl'  => [ 'DOUBLE', static fn ( int $i ): string => sprintf( '%.17g', ( $i - 1000 ) / 7 ), [ '-1e300', '-1e299' ] ],
+			'flt'  => [ 'FLOAT', static fn ( int $i ): string => sprintf( '%.9g', ( $i - 1000 ) / 7 ), [ '-3e38', '-2e38' ] ],
 			'dt6'  => [ 'DATETIME(6)', static fn ( int $i ): string => "'" . gmdate( 'Y-m-d H:i:s', 1700000000 + $i * 3700 ) . sprintf( '.%06d', $i ) . "'", [ "'1000-01-01 00:00:00.000000'", "'1000-01-01 00:00:00.000001'" ] ],
 			'ts'   => [ 'TIMESTAMP', static fn ( int $i ): string => 'FROM_UNIXTIME(' . ( 1700000000 + $i * 3601 ) . ')', [ 'FROM_UNIXTIME(1)', 'FROM_UNIXTIME(2)' ] ],
 			'tm'   => [ 'TIME(3)', static fn ( int $i ): string => sprintf( 'SEC_TO_TIME(%d.%03d)', ( $i - 1000 ) * 2801, $i % 1000 ), [ "'-838:59:59.000'", "'-838:59:58.999'" ] ],
