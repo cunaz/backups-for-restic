@@ -52,12 +52,12 @@ The [release-candidate report](benchmarks/2026-11-20-release-candidate.md) recor
 | `phpunit/phpunit` 12 | unit, database, conformance and integration tests |
 | Node.js 22 with npm | runs ESLint; `node --check assets/js/admin.js` stays as a syntax check that needs no packages |
 | ESLint 10 with `@wordpress/eslint-plugin` 28 (two packages with exact versions in `package.json`; `package-lock.json` pins the about 400 packages they bring) | lints `assets/js` with the rulesets `esnext`, `custom` and `i18n` (§3); development only, nothing from npm ships |
-| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format`, `Engine\Forget` and the database import filter; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
+| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing in six gates (§5.6): `Crypto`, `Format`, `Engine\Forget` and the database import filter as the merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)), the file restore code, ZIP downloads and, with a database, the import and exchange |
 | Built-in fuzzer (`bin/fuzz.php`, `tests/Fuzz/`) | structure-aware fuzzing of every parser that reads server data ([ADR 0028](adr/0028-built-in-fuzzer.md)) |
 | **restic CLI** 0.20.0, 0.19.1, 0.18.1 and 0.14.0 (upstream releases, checksum-verified by `bin/install-test-tools.sh`) | conformance oracle ([ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md)); never shipped |
 | **rest-server** 0.14.0 (upstream release, checksum-verified), with TLS, normal, `--append-only` and `--max-size` | local repository server for conformance and integration tests |
 | WordPress 7.1.5, 7.0.9 and 6.7.12 (checksum-pinned in `bin/test-site.sh`, selectable with `BFR_WP_VERSION`) | the real WordPress of the integration suite, served by PHP's built-in server. The project uses no WordPress test library, no function mocking and no `@wordpress/env`: the adapters are tested against a running WordPress or not at all ([ADR 0029](adr/0029-wordpress-free-core.md)) |
-| Plugin Check through `wordpress/plugin-check-action` (pinned SHA) | the WordPress.org review team's scanner, in CI on the built package (§5.8). The action installs the current Plugin Check and the current WordPress, so a new check can fail a pull request that did not cause it |
+| Plugin Check 2.2.0 (pinned and checked file by file by `.github/actions/check-package`) | the WordPress.org review team's scanner, in CI on the built package, through WP-CLI in a test site (§5.8) |
 | WP-CLI 2.12.0 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh wp-cli`) | `wp i18n make-pot` for the translation template (§5.8); it needs no WordPress for that |
 | `@playwright/test` 1.63.0 (pinned in `package.json`) | the browser tests of §5.5; its browser is installed in CI by the same version |
 | CodeQL | JavaScript analysis of the shipped admin interface on changes and weekly |
@@ -215,7 +215,10 @@ the files with the `mariadb` client exactly as the disaster-recovery guide says,
 `CHECKSUM TABLE` results. The conformance suite's `BackupJobTest` runs the whole backup job
 without WordPress against a TLS rest-server and the database.
 
-The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
+The CI database matrix uses MySQL 8.4.13 and MariaDB 11.4.13, pinned by image digest. Every
+test of the suite skips when no server answers, so CI compares the skipped tests with
+`tests/Skips` (§6): none may skip on MySQL, and on MariaDB exactly the eight cases of the
+atomic exchange, which is MySQL-only by design. Shadow-import tests compare table
 checksums, including invisible columns and expression defaults, and check that live tables
 stay unchanged. A parent sends SIGKILL at six DDL/transaction boundaries, then resumes the
 import and verifies duplicate rows exactly once. Foreign table collisions, an active
@@ -249,7 +252,13 @@ a user) they run PHP inside the site's WordPress on the command line, and for wh
 files show (a job's lease, its log) they read the private directory. `tests/Support/TestSite.php`
 is that access. The classes share one site and one repository, so
 `phpunit-integration.xml.dist` names the files in order. A class whose tool or site is not
-installed is skipped:
+installed, or does not answer, skips in `setUpBeforeClass()`. No skip is expected in this
+suite: the configuration fails a run in which a test skips (`failOnSkipped`), and because
+PHPUnit does not count a class that skips in `setUpBeforeClass()` there, CI also compares the
+JUnit log with the empty list `tests/Skips/integration.txt` (§6). After the suite, and after the
+browser tests of §5.5, `bin/test-site.sh check-logs` fails the job when `.tools/php-errors.log`
+or the site's `wp-content/debug.log` holds an entry that names a file of the plugin: a notice,
+warning or deprecation reaches neither a response nor a test, only these logs. The classes:
 
 - **`AccessTest`**: every route without credentials and as an editor; its list of routes is
   compared with what WordPress has registered, so a new route cannot go untested; the files
@@ -306,7 +315,9 @@ the nightly CI run uses 2048 and 300. The tests that catch a backup in the middl
 
 The integration tests request `wp-cron.php` directly to control the timing of jobs.
 A separate acceptance run on 2026-11-20 exercised visitor-triggered cron with the
-release ZIP (SHA-256 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`).
+release ZIP (SHA-256 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`,
+the package of the commits from `5b9dbea` to `eec2a46`, not the one of `acaecdc` on `main`).
+It was a manual, one-off run that no workflow or script of the repository reproduces.
 It used WordPress 7.1.5, PHP 8.3.36, a 128 MiB memory limit, a 30-second request
 limit, a five-second tick budget and automatic loopback chaining. The fixture marked
 the previous daily backup slot as missed and waited for the heartbeat already on
@@ -378,23 +389,65 @@ directory, created for that test from the same package.
 
 ### 5.6 Mutation testing and fuzzing
 
-Infection runs on `Crypto`, `Format`, `Engine\Forget` and covered `Database\Restore` code;
-the covered mutation score
-indicator must stay at or above 90 % (`infection.json5.dist`). The run takes about 40
-minutes. It runs on every push to `main`, and on every pull request that changes a file the
-result can depend on: anything under `src/Crypto`, `src/Format`, `src/Engine`,
-`src/Support`, `src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets`, `src/Database` or `tests/`,
-or one of `infection.json5.dist`, `composer.json`, `composer.lock`, `phpunit.xml.dist`,
-`bin/install-test-tools.sh` and `.github/workflows/ci.yml`. The list is wider than the
-mutated code on purpose. On any other pull request the job says in a notice that it skipped
-the run, and ends green, so that it can stay a required check. When the job cannot list the
-files of a pull request, it runs.
+Infection runs in six gates, each with its own code, its own tests from
+`tests/Mutation/phpunit.xml.dist` and its own thresholds:
 
-A separate file-planner job runs on every pull request and push to `main`.
-`composer mutation:planner` exercises `Restore\ApplyPlan` and `Restore\SiteLayout`
-using the real filesystem and the planner PHPUnit suite. It sets its own minimum covered
-mutation score of 90 % in `infection-planner.json5.dist`. Each mutation job checks for a
-nonempty report. The planner log and score appear in the `planner-mutation-logs` artifact.
+| Gate (Composer script, configuration) | Mutated code | Runs in | MSI floor | Covered MSI |
+| --- | --- | --- | ---: | ---: |
+| Core (`mutation`, `infection.json5.dist`) | `Crypto`, `Format`, `Engine\Forget` and `Database\Restore` without the ten classes that only the database suite reaches | `ci.yml` | 87 % | 90 % |
+| Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 96 % | 90 % |
+| File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 80 % | 85 % |
+| File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its three `Database*` classes | `ci.yml` | 67 % | 74 % |
+| ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 94 % | 95 % |
+| Database (`mutation:database`) | all of `Database\Restore` and the `Database*` classes of `src/Jobs/Apply`, killed by `tests/Unit/Database` and `tests/Database` against MySQL | `database-mutation.yml` | 73 % | 79 % |
+
+Every script passes `--with-uncovered`. Without it Infection mutates only lines that a test
+covers, so code that no test reaches produced no mutant and counted nowhere: before
+2026-11-22 the core gate listed `Database\Restore`, but ten of its classes, reached only by
+the database suite, created no mutant at all. The MSI counts such code as not killed. The
+covered MSI of the core and of the planner stays ADR 0024's merge gate at 90 %. The other
+thresholds are floors: the lowest scores of repeated local runs on 2026-11-20 and
+2026-11-22 (PHP 8.3 with ext-zstd and pcov, MySQL 8.4.11), rounded down. A floor may only
+rise; the pull request that adds the tests raises it. The goal for every gate is ADR 0024's
+90 %.
+
+| Gate | Mutants | Not covered | MSI | Covered MSI | Spread over the runs |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Core | 4,406 | 121 | 87.90 % | 90.39 % | two runs, identical |
+| Planner | 477 | 9 | 96.02 % | 97.86 % | two runs, identical |
+| File restore | 2,857 | 150 | 80.96 % | 85.45 % | 80.96 to 80.99 % |
+| File apply jobs | 1,254 | 109 | 67.62 % | 74.06 % | 67.62 to 67.86 % |
+| ZIP downloads | 794 | 15 | 94.08 % | 95.89 % | 94.08 to 94.21 % |
+| Database | 3,295 | 227 | 73.75 % | 79.20 % | one run without other load |
+
+The table names the lowest result of each gate. A mutant that runs into the timeout counts as
+killed, and Infection leaves one out ("skipped") when its tests took at least the timeout in
+the first run, so a run on a loaded machine differs. Two runs during other test runs are not in
+the table: one of the file-restore gate left out 254 mutants and scored 80.02 %, and one of the
+database gate counted 530 timeouts instead of 8 and scored 88.10 %. One mutant of the ZIP
+writer writes its checkpoint files into the working directory; delete `.head`, `.names` and
+`.state` there after a local run.
+
+The core job runs with ext-zstd since 2026-11-22, so the native decompression of format 2 is
+mutated and tested too. With it, 78 mutants of `Format\Compression` are covered and 44 of
+them escape; the covered MSI of the core fell from 91.21 % (4,210 covered mutants, the CI run
+of `acaecdc`) to 90.39 % (4,285). The run takes about 40 minutes. The core and the four
+restore gates run on every push to `main`, and on every pull request that changes a file their
+result can depend on (`.github/actions/mutation-scope`): for the core anything under
+`src/Crypto`, `src/Format`, `src/Engine`, `src/Support`, `src/Exception`, `src/Backend`,
+`src/Storage`, `src/Secrets`, `src/Database` or `tests/`, or one of `infection.json5.dist`,
+`composer.json`, `composer.lock`, `phpunit.xml.dist`, `bin/install-test-tools.sh` and
+`.github/workflows/ci.yml`; for the restore gates anything under `src/` or `tests/`, their
+configurations and the same tool files. The list is wider than the mutated code on purpose.
+On any other pull request a job says in a notice that it skipped the run, and ends green, so
+that it can stay a required check. When the job cannot list the files of a pull request, it
+runs. Each job checks for a nonempty report and uploads its logs.
+
+The database gate needs a server and takes longer than a pull request should wait (six minutes
+with 23 threads locally, so presumably most of an hour on a runner with four). It runs in
+`database-mutation.yml` on every push to `main`, on pull requests that change the database
+code, its tests or its configuration, and on request. It is not a required check of a pull
+request; the release gate requires a successful run for the release commit (§7).
 
 The [built-in fuzzer](adr/0028-built-in-fuzzer.md) exercises 26 parsers. It covers
 repository metadata, pack framing and decryption, REST listings, persisted listings and
@@ -402,7 +455,10 @@ chunks, Go quoting, timestamps, durations and IDs. Restore targets cover selecti
 snapshot paths, manifest locators, site manifests, and SQL dump schemas, rows and
 manifests. The unit suite runs 2,000 deterministic inputs per target. The nightly
 workflow runs each target for two minutes. It saves each finding with a replay command
-so that a reproducible input can be added to `tests/Fixtures/fuzz/<target>/`.
+so that a reproducible input can be added to `tests/Fixtures/fuzz/<target>/`. The job's name
+states the seconds per target, and a run seeds the fuzzer with its run ID, so re-running a
+run that found a crash finds it again. The release gate requires a run of at least 120
+seconds per target for the release commit, and no run of that commit with a finding (§7).
 
 ### 5.7 Live smoke tests
 
@@ -412,15 +468,18 @@ The private smoke workflow runs on Monday at 04:43 UTC and on manual dispatch fr
 plugin's core it creates a backup under a lock, checks v2 listing sizes and ranged pack
 bytes, restores the canary and compares its contents. It confirms that deleting its own
 snapshot fails on the append-only server. A second append-only run verifies earlier
-test snapshots can remain in place. These checks have passed locally.
+test snapshots can remain in place. These checks have passed locally; the workflow had not run
+yet on 2026-11-22.
 
 The hosted job runs only after the local job passes and the operator enables
 `BFR_LIVE_SMOKE_ENABLED` as a repository variable. Configure the protected
 `live-smoke` environment with the `BFR_LIVE_REPOSITORIES` secret. Each provider needs
 a pair of dedicated, initialized repositories and the expected authenticated repository
 IDs. The job removes only objects it created in the normal fixture and leaves the
-append-only history in place. Dispatch the workflow on the candidate's `main` commit
-before a release and record the passing provider/mode pairs. On 2026-11-20 the same hosted command passed directly on the owner's normal and append-only BorgBase fixtures. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
+append-only history in place. The release gate requires a run for the release commit whose
+hosted job succeeded, not skipped (§7): dispatch the workflow on `main` before tagging. On
+2026-11-20 the same hosted command passed directly on the owner's normal and append-only
+BorgBase fixtures, in a manual run that no workflow recorded. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
 
 ### 5.8 Checks on the package
 
@@ -428,9 +487,15 @@ before a release and record the passing provider/mode pairs. On 2026-11-20 the s
 that Git tracks, without the paths in `.distignore`, with the modes 0644 and 0755. A file
 that Git does not track cannot reach the package. Two CI jobs work on that directory.
 
-**Plugin Check.** The scanner of the WordPress.org review team runs through
-`wordpress/plugin-check-action`, in a WordPress that the action starts with `wp-env`.
-Errors fail the job, warnings are listed as annotations. The first run, with Plugin Check
+**Plugin Check.** The scanner of the WordPress.org review team runs through WP-CLI in a test
+site of `bin/test-site.sh` (`.github/actions/check-package`), with the package installed as a
+copy. Every part is pinned and checked: WordPress 7.1.5 by the checksum in `bin/test-site.sh`,
+WP-CLI 2.12.0 by the checksum in `bin/install-test-tools.sh`, and Plugin Check 2.2.0 by a
+digest of its 3,039 files, recorded after comparing each with the checksums that WordPress.org
+publishes for that version. Until 2026-11-22 the job used `wordpress/plugin-check-action`,
+which installs the latest `@wordpress/env` from npm and the latest WordPress and Plugin Check,
+unverified. A new version of each is a reviewed change now, as for restic. Errors fail the
+job, warnings are listed as annotations (`report.py` beside the action). The first run, with Plugin Check
 2.2.0 on 2026-11-10, reported 63 errors and 2 warnings. Two findings were fixed in the
 plugin. `readme.txt` said `Stable tag: trunk`; it now names the version of the plugin
 header, and the scanner reports it when the two differ. And the `ABSPATH` guard of
@@ -474,30 +539,67 @@ copy would only go stale.
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled; the database suite against MySQL and MariaDB; the repository mutation gate and a separate file-planner mutation gate (§5.6) |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package with the release rehearsal and the tests of the release gate, and the translation template built from the package (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled, and once more on PHP 8.3 with ext-zstd; the database suite against MySQL and MariaDB; the core mutation gate and the four restore gates (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
-| `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
-| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; records with `strace` and core dumps how the server's PHP processes ended. **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5). |
+| `database-mutation.yml` | push to `main`, pull requests that change the database code, its tests or its configuration, manual dispatch | the database mutation gate against MySQL (§5.6) |
+| `fuzz.yml` | nightly, manual dispatch | fuzzing per parser, two minutes each unless the dispatch says otherwise; the job's name states the seconds; findings uploaded as an artifact |
+| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; their job names then end in "(acceptance size)". Records with `strace` and core dumps how the server's PHP processes ended, and fails when the PHP or WordPress log holds an entry from the plugin's files (§5.3). **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5) and the same log check. |
 | `live-servers.yml` | weekly and manual dispatch on main, manual pre-release verification | disposable TLS rest-server pair and opt-in operator-configured repository pairs (§5.7) |
-| `codeql.yml` | admin script changes on main or pull requests, weekly, manual dispatch | CodeQL against the shipped JavaScript in `assets/js` |
-| `deploy-wordpress-org.yml` | stable signed tag, manual retry | build with `.distignore`, Plugin Check, manual approval, SVN deploy (`trunk`, `tags/x.y.z`, `assets/`), post-deploy diff, GitHub release notes only |
+| `codeql.yml` | every push to `main`, admin script changes in pull requests, weekly, manual dispatch | CodeQL against the shipped JavaScript in `assets/js` |
+| `deploy-wordpress-org.yml` | a pushed tag `vX.Y.Z`; a retry by re-running the tag's run, or by a dispatch on the tag | verification of the tag, the repository's protections and the test results of the tagged commit, the versions and changelogs, the package and Plugin Check (§7); the owner's approval; SVN deploy (`trunk`, `tags/x.y.z`, `assets/`); post-deploy diff; GitHub release notes, once the tag is shown to name the deployed commit |
 
-The release workflow is prepared for the approved WordPress.org repository. Actions are pinned to commit SHAs;
-Dependabot proposes updates of the actions and of the Composer lock file every week. For
-npm it is set to the lock file only as well. `package.json` names exact versions, so that
-weekly run proposes no new version of ESLint or of its WordPress plugin: a new version is
-a change of `package.json` and the lock file by hand, like a new PHPStan or restic.
-Whether Dependabot's security updates, which can replace a vulnerable package in a lock
-file, are switched on is a setting of the repository that no file here records. The quality jobs use read-only repository access. CodeQL publishes its analysis to code scanning. The release workflow uses its protected environment for SVN and a separate write token for release notes. CI installs the npm packages with
-`npm ci --ignore-scripts`, so only what the lock file names is installed and no package
-runs a script while it is installed.
+**Runs on `main` never cancel each other.** Pull requests cancel their superseded runs, but a
+push to `main` cancels neither the nightly runs nor the runs of the commit before it: the
+concurrency group of a run on `main` is the run itself. Until 2026-11-22 a push could cancel
+the nightly acceptance run and the release commit's own runs, and the release gate then
+refused the release.
 
-Checks that must be green before a merge: lint, ESLint, analyse, unit and mutation
-testing, Plugin Check, the translation template and the sign-off check; conformance when
-`Crypto`, `Format`, `Backend` or `Engine` are touched; integration once it has passed for
-the first time. A `readme.txt` that names another version than the plugin header fails
-Plugin Check, which is the consistency check planned earlier; the check for a stale
-template has no subject, because the template is not committed.
+**A skip cannot turn a job green.** Every PHPUnit configuration fails a run that selected no
+test (`failOnEmptyTestSuite`). After each PHPUnit run CI compares the skipped tests of its
+JUnit log with a list in `tests/Skips` (`bin/check-skipped-tests.php`): the unit tests without
+ext-zstd (`unit.txt`) and with it (`unit-zstd.txt`), the database suite on MySQL
+(`database-mysql.txt`, empty) and on MariaDB (`database-mariadb.txt`), the two conformance
+jobs, and the integration suite (`integration.txt`, empty). A skip that is not listed fails the
+job, and so does a listed test that ran or no longer exists. A class that skips in
+`setUpBeforeClass()`, as the database and integration classes do without their server or site,
+runs none of its tests and fails the job whatever the list says; PHPUnit's own
+`failOnSkipped` counts only tests that skip one by one and would miss it. Change a list only
+together with the test, and say why in the pull request.
+
+**What is pinned.** Actions are pinned to commit SHAs. Composer is 2.11.2, checked by setup-php
+against the SHA-256 of its PHAR; the PHAR's OpenPGP signature by Composer's release key
+`161D FBE3 4288 9F01 DDAC 4E61 CBB3 D576 F2A0 946F` was checked when the pin was recorded. The
+PHPStan PHAR is checked by Composer against the SHA-1 in `composer.json` and `composer.lock`,
+the only checksum Composer offers for a package repository; its signature by PHPStan's release
+key `CA7C 2C7A 30C8 E8E1 274A 8476 51C6 7305 FFC2 E5C0` was checked when it was recorded, and
+the release asset equals the PHAR in PHPStan's repository at tag 2.3.5. The MySQL and MariaDB
+service images are pinned by digest (MySQL 8.4.13, MariaDB 11.4.13). WordPress, WP-CLI, Plugin
+Check, restic, rest-server and Infection are checked against checksums in the repository.
+Dependabot proposes updates of the actions and of the Composer and npm lock files every week;
+`package.json` names exact versions, so a new version of ESLint or of its WordPress plugin is a
+change by hand, like a new PHPStan, Composer, image, Plugin Check or restic. Not pinned: the
+runner image and the packages that jobs install with apt (Subversion, strace, gdb, Apache,
+nginx), the patch release of PHP that setup-php installs, the patch release of Node.js 22, the
+browser that Playwright downloads for its pinned version, and the CodeQL bundle that
+`github/codeql-action` selects. CI installs the npm packages with `npm ci --ignore-scripts`, so
+only what the lock file names is installed and no package runs a script while it is installed.
+
+Whether Dependabot's security updates, which can replace a vulnerable package in a lock file,
+are switched on is a setting of the repository that no file here records. The quality jobs use
+read-only repository access. CodeQL publishes its analysis to code scanning. The release
+workflow uses its protected environment for SVN and a separate write token for release notes.
+
+Checks that must be green before a merge: lint, ESLint, analyse, unit, database and mutation
+testing (core and the four restore gates), Plugin Check, the translation template and the
+sign-off check, and the WordPress compatibility, memory and browser jobs of `integration.yml`;
+conformance when `Crypto`, `Format`, `Backend` or `Engine` are touched. GitHub enforces this
+only through the ruleset on `main` of §7.1: until the owner has created it, these checks are
+advice, and the release workflow refuses to deploy. Conformance cannot be a required check,
+because its path filter leaves a pull request without its result; the release gate requires it
+for the release commit instead, as it does the database mutation gate, which runs only on some
+pull requests. A `readme.txt` that names another version than the plugin header fails Plugin
+Check, which is the consistency check planned earlier; the check for a stale template has no
+subject, because the template is not committed.
 
 The job "Commits are signed off" runs on pull requests. It fails when a commit between the
 base and the head of the pull request, merge commits included, has no `Signed-off-by`
@@ -518,32 +620,139 @@ for an installable archive. CI runs Plugin Check against the packaged files. Dir
 lives in `.wordpress-org/` and is excluded from the plugin ZIP. The owner approves the
 listing artwork, signs the release tag and authorizes deployment to WordPress.org.
 
-After WordPress.org grants access to the plugin's SVN repository, configure the GitHub
-`wordpress-org` environment to require the owner's review. Store the dedicated credentials
-as environment secrets `WORDPRESS_ORG_SVN_USERNAME` and `WORDPRESS_ORG_SVN_PASSWORD`.
-Set the repository variable `RELEASE_SIGNING_PUBLIC_KEY` to the owner's ASCII-armored
-OpenPGP public key, including its signing subkeys. The workflow verifies the signature in
-an isolated keyring and checks that the tagged commit is on `main`. It verifies successful
-CI, conformance and integration runs for that exact commit on the repository's main branch.
-If conformance was skipped by path filters, dispatch it on the release revision before
-tagging. The deployment job rebuilds the ZIP
-after approval and compares its SHA-256 with the archive that passed Plugin Check. The
-SVN transaction publishes the package and listing together. Repeating a successful run
-verifies the existing tag. A different tag with a lower version is refused. [GitHub workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow).
+A pushed tag `vX.Y.Z` starts `deploy-wordpress-org.yml`; a release candidate such as
+`v0.3.0-rc.1` starts nothing. Before the owner is asked to approve, its check job verifies,
+with the copies of the scripts on `main`:
 
-`tests/Release/test-wordpress-org.sh` rehearses signing and publication with temporary
-local Git and SVN repositories, including changes and deletions between releases. It
-requires Git, GnuPG, Subversion, rsync and Python 3. [WordPress SVN handbook](https://developer.wordpress.org/plugins/wordpress-org/how-to-use-subversion/) · [GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+1. **The tag** (`bin/verify-release-tag.sh`): a stable version, annotated, its tag object
+   named as the tag, on a commit that is on `main`, and signed by the key in the repository
+   variable `RELEASE_SIGNING_PUBLIC_KEY`, whose primary fingerprint must be pinned in
+   `.github/release-signing-key.txt` as committed on `main`. Replacing the variable alone
+   therefore authorises no other key; a new key needs a reviewed pull request. A signature by a
+   signing subkey of the pinned key counts; an expired or revoked key does not.
+2. **The protections** (`bin/check-release-gates.py protections`): an active ruleset on
+   `main` that requires pull requests and status checks and blocks force pushes and deletion;
+   an active tag ruleset that keeps the release tag from being moved or deleted; and the
+   `wordpress-org` environment with the owner as required reviewer, without administrator
+   bypass, deploying only tags that match `v*`. The job's own token reads these: rulesets
+   through the repository's metadata, the environment and its deployment policies with
+   `actions: read`. GitHub answers 404 for an environment that does not exist, and creates
+   it without protection on its first use; the check fails then too.
+3. **The test results** (`bin/check-release-gates.py evidence`): for the exact commit on
+   `main`, every run of `ci.yml`, `conformance.yml`, `integration.yml`,
+   `database-mutation.yml`, `live-servers.yml`, `fuzz.yml` and `codeql.yml` ended in
+   success, and among them are an integration run of the acceptance size, a live smoke whose
+   hosted job succeeded, a fuzz run of at least 120 seconds per target and a CodeQL run;
+   code scanning shows no open alert on `main`. A failed run is not outweighed by a later
+   successful one: re-run the failed run if the failure was not caused by the commit. "For
+   this commit" means the run's head commit and branch, its event and its repository; results
+   of a commit do not age, so no time limit applies.
+4. **Versions and changelogs** (`bin/prepare-wordpress-org.py --check-only`): the plugin
+   header, `Stable tag`, `Plugin::VERSION`, the newest entry of `CHANGELOG.md` and of the
+   readme's changelog name the release, and `CHANGELOG.md` has no unreleased entries left.
+5. **The package**: built from the tagged commit, checked by Plugin Check.
 
-1. Update `CHANGELOG.md` and the `== Changelog ==` section of `readme.txt`; bump the version
+The job lists every requirement that is not met. Then the deploy job waits for the owner's
+approval of the protected environment, rebuilds the ZIP and compares its SHA-256 with the
+archive that passed Plugin Check. The SVN transaction publishes the package and listing
+together. Repeating a successful run verifies the existing tag. A different tag with a lower
+version is refused. The notes job publishes the GitHub release only after the API shows that
+the tag still names the tag object and the commit that were verified and deployed.
+
+Before tagging, make sure the release commit has the results that only a schedule or a
+dispatch produces: dispatch **Integration** on `main` with *acceptance* (or wait for the
+nightly run), **Private repository smoke** and, unless the nightly runs have covered the
+commit, **Fuzzing** and, when its path filter left the commit out, **Conformance**. To retry a deployment, re-run the tag's own run; GitHub allows that for 30 days.
+After that, dispatch the workflow on the tag itself ("Use workflow from: Tags"); a dispatch on
+a branch is refused, and the environment would refuse it too.
+[GitHub workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow) ·
+[GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+
+`tests/Release/test-wordpress-org.sh` rehearses signing and publication with temporary local
+Git and SVN repositories, including changes and deletions between releases, and checks every
+refusal by its message: release candidates, a missing, unsigned or lightweight tag, a tag
+object stored under another name, a commit off `main`, an unpinned, expired or revoked key, a
+replaced key variable, a missing or empty fingerprint file, and versions or changelogs that do
+not name the release. `tests/Release/test_release_gates.py` checks the release gate against
+recorded GitHub responses. Both run in CI. They need Git, GnuPG, Subversion, rsync and Python
+3. [WordPress SVN handbook](https://developer.wordpress.org/plugins/wordpress-org/how-to-use-subversion/)
+
+What the workflow cannot verify, and the residual risk: GitHub returns the bypass list of a
+ruleset only to a caller with write access to it, which the workflow's token never has; the
+token cannot list secrets; and nothing on GitHub shows WordPress.org's settings. The owner
+checks these by hand (§7.1). Someone who holds the owner's GitHub credentials with
+administrator rights can change the rulesets, the environment, the variable and, through a
+pull request they merge themselves, the pinned fingerprint, and can approve the deployment.
+WordPress.org's release confirmation is the factor outside GitHub: each new release waits for
+a link that WordPress.org e-mails to the plugin's committers.
+
+### 7.1 Settings the owner makes
+
+The release workflow refuses to deploy until the first three are in place. They are settings of
+the repository, not files, so a pull request cannot make them.
+
+1. **Ruleset for `main`** (Settings → Rules → Rulesets → New branch ruleset): target the
+   default branch; enforcement *Active*; bypass list empty. Rules: *Restrict deletions*,
+   *Block force pushes*, *Require a pull request before merging* (no approval required: the
+   owner is the only maintainer, and the pull request is the record), and *Require status
+   checks to pass* with the jobs listed in §6, as GitHub names them (for example "Unit tests
+   (PHP 8.3)"). Merge through GitHub (the merge button or `gh pr merge`), because a merge
+   pushed from a local clone is refused.
+2. **Ruleset for release tags** (New tag ruleset): include the pattern `v*`; enforcement
+   *Active*; bypass list empty. Rules: *Restrict updates* and *Restrict deletions*. A
+   published release tag can then neither be moved nor deleted, not even by the owner, without
+   first changing the ruleset.
+3. **Environment `wordpress-org`** (Settings → Environments), before the first tag: required
+   reviewer the owner, *Prevent self-review* off (the owner approves the releases they tag);
+   *Allow administrators to bypass configured protection rules* off; deployment branches and
+   tags: *Selected branches and tags*, one rule of type *Tag* with the pattern `v*` and no
+   branch rule. Store the WordPress.org user name and a dedicated SVN password (generated in
+   the WordPress.org profile, never the account password) as the environment secrets
+   `WORDPRESS_ORG_SVN_USERNAME` and `WORDPRESS_ORG_SVN_PASSWORD`, never as repository secrets,
+   which every workflow on every branch could read. Rotate the password yearly and on
+   suspicion.
+4. **Release key**: add the primary key's fingerprint to `.github/release-signing-key.txt` in
+   a pull request, and set the repository variable `RELEASE_SIGNING_PUBLIC_KEY` to the
+   ASCII-armored public key with its signing subkeys. A renewed expiry date or a new signing
+   subkey changes only the variable; another key needs the pull request.
+5. **Live smoke**: the repository variable `BFR_LIVE_SMOKE_ENABLED` set to `true`, and the
+   `live-smoke` environment with the secret `BFR_LIVE_REPOSITORIES` ([operator
+   setup](../tests/Live/README.md)). Without them the hosted job is skipped and the release
+   gate refuses.
+6. **Tokens on development machines**: fine-grained personal access tokens for this
+   repository only, with the permissions daily work needs (for example *Contents* and *Pull
+   requests* write, *Actions* read) and no write access to *Administration*, *Actions*,
+   *Deployments*, *Environments*, *Secrets*, *Variables* or *Workflows*. No token with the
+   classic `repo` scope: the one that `gh auth login` obtains in the browser has it, so give
+   `gh auth login --with-token` a fine-grained token instead. A token with that scope can
+   replace variables, push to `main` and approve deployments through the API. Change rulesets, environments, variables and secrets, and approve deployments, in the
+   browser, with two-factor authentication.
+7. **WordPress.org release confirmation**: once the plugin is in the directory, turn on
+   *Release Confirmation* for it, an opt-in setting of the directory. A new tag in SVN is then
+   released only after a committer confirms it on the Release Management dashboard through a
+   link that WordPress.org e-mails to all committers; committers must be able to receive
+   e-mail directly. The handbook does not describe how to turn it off again, so treat it as
+   permanent. After each deployment, confirm the release from that e-mail; an e-mail that no
+   deployment of yours explains means someone else published a tag.
+   [Release confirmation emails](https://developer.wordpress.org/plugins/wordpress-org/release-confirmation-emails/)
+8. **By hand before each release**, because the workflow cannot read them: the bypass lists of
+   both rulesets are empty, no repository secret named `WORDPRESS_ORG_SVN_*` exists, and
+   release confirmation is on.
+
+### 7.2 Release steps
+
+1. Update `CHANGELOG.md` and the `== Changelog ==` section of `readme.txt`, moving the
+   unreleased entries to the new version (the release workflow refuses changelogs that do
+   not start with it); bump the version
    in the plugin header, `readme.txt` (`Stable tag`) and `Plugin::VERSION`; verify `Tested up
    to`, `Requires PHP`, `Requires at least`; attach the benchmark results. Between releases
    the three places name the same prerelease version, for example `0.3.0-rc.1`.
 2. Pull request "Release x.y.z" with the completed release checklist (self-review, live
    smoke tests green, benchmarks attached); CI runs Plugin Check on the built package and
    the full conformance suite.
-3. Signed tag `vx.y.z` on `main`. `deploy-wordpress-org.yml` builds the package with
-   `.distignore`, waits for the manual approval of the protected environment, then commits
+3. Signed tag `vx.y.z` on `main`. `deploy-wordpress-org.yml` checks what §7 lists, builds the
+   package with `.distignore`, waits for the manual approval of the protected environment,
+   then commits
    to SVN `trunk`, creates `tags/x.y.z` and syncs `.wordpress-org/` to `assets/`. Credentials:
    the WordPress.org username and a dedicated SVN password (generated in the WordPress.org
    profile, never the account password), stored as environment secrets.
@@ -651,8 +860,8 @@ for every point that applies, "not affected" for the others.
 8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`
    or `Engine` the conformance run is green; for `Crypto`, `Format`, `Engine\Forget` and the
    database import filter the
-   covered mutation score stays at or above 90 %. Documents and decision records say what
-   changed.
+   covered mutation score stays at or above 90 %, and no other mutation gate falls below its
+   floor (§5.6). Documents and decision records say what changed.
 9. **Cooling-off.** A change to `Crypto`, `Format` or `Engine` is merged no earlier than 24
    hours after the last commit that touches these namespaces, and the author reads the
    whole diff once more before merging.

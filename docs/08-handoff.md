@@ -114,7 +114,12 @@ the ones that are easy to get wrong.
 - The first revision of the description of the pull requests carries a link that the
   tooling added; delete those revisions in the "edited" menu of each description (7 to 25,
   and 37 to 46).
-- A ruleset for `main` would have to allow the pushes that merge pull requests, or the way
-  of merging has to change first.
+- Make the settings of [04-development-and-quality.md](04-development-and-quality.md) §7.1
+  before the first release: the rulesets for `main` and for release tags, the `wordpress-org`
+  environment, the pinned release key and its variable, the live smoke, fine-grained tokens on
+  development machines and, once the plugin is listed, WordPress.org's release confirmation.
+  The release workflow refuses to deploy without the first three. With the ruleset on `main`,
+  merges go through GitHub (the merge button or `gh pr merge`); a merge pushed from a local
+  clone is refused.
 - Open decisions D2 to D9 of [07-milestone-3-plan.md](07-milestone-3-plan.md) §7, and the
   WordPress.org user name for the plugin directory.

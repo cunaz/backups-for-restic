@@ -75,9 +75,11 @@ composer mutation
 `.tools/fuzz-findings/` with the command that replays it; after the fix, copy the input to
 `tests/Fixtures/fuzz/<target>/` so the unit suite replays it forever. `composer mutation`
 needs pcov or Xdebug. It requires a covered mutation score of at least 90 % across
-`Crypto`, `Format`, `Engine\Forget` and `Database\Restore`. In CI it runs on `main` and on pull requests
-that change the engine, the code below it, the tests or the tools
-([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
+`Crypto`, `Format`, `Engine\Forget` and the database import filter, and counts code that no
+test reaches against a floor. `composer mutation:planner`, `mutation:restore`,
+`mutation:apply`, `mutation:zip` and, with a database server, `mutation:database` are the
+other gates. In CI they run on `main` and on pull requests that change the code they depend
+on ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
 
 The package that would ship, and the translation template built from it:
 

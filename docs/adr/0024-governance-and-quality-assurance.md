@@ -91,4 +91,32 @@ can operate.
 - A release review uses the [pre-release security checklist](../03-security-and-threat-model.md#15-pre-release-security-checklist)
   and the [publishing procedure](../04-development-and-quality.md). The release candidate's
   [verification record](../benchmarks/2026-11-20-release-candidate.md) records the local
-  results and outstanding operator approvals.
+  results and outstanding operator approvals, each with the package and commit it was
+  observed on and whether a workflow reproduces it.
+- 2026-11-22: point 6 and the merge gates were not enforced by the repository: `main` had no
+  ruleset and no branch protection, and the `wordpress-org` environment did not exist, so
+  GitHub would have created it without the owner's approval on the first release. The release
+  workflow now refuses to deploy until GitHub enforces what this decision relies on: a ruleset
+  on `main` with pull requests, status checks and no force push, a ruleset that keeps release
+  tags from being moved or deleted, and the environment with the owner as required reviewer,
+  without administrator bypass and for `v*` tags only. It also requires, for the release
+  commit, every run of the test workflows to have succeeded, including the acceptance-size
+  integration run, the hosted live smoke, two minutes of fuzzing per parser and CodeQL. The
+  owner's settings are listed in the [development guide](../04-development-and-quality.md)
+  §7.1. The bypass lists of the rulesets cannot be read with the workflow's token; the owner
+  checks them by hand.
+- The trust anchor of a release is the fingerprint of the owner's key, pinned in
+  `.github/release-signing-key.txt` on `main`: the repository variable alone authorises no
+  other key, and a new key needs a pull request. A stolen session or token of the owner with
+  administrator rights can still change rulesets, the environment and the variable, merge such
+  a pull request and approve the deployment. Accepted residual risk; WordPress.org's release
+  confirmation, which waits for a link e-mailed to the committers, is the factor outside
+  GitHub, and the owner keeps only fine-grained tokens without administration, variable,
+  environment, deployment or workflow rights on development machines.
+- Point 3 is wider: six mutation gates count code that no test reaches (`--with-uncovered`
+  and a minimum MSI), and besides `Crypto`, `Format`, `Engine\Forget` and the database import
+  filter they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL,
+  the import and the atomic exchange. The covered score of the core and of the file planner
+  stays the merge gate at 90 %; the others have floors at the scores measured on 2026-11-22,
+  which may only rise. 90 % is the goal for all of them. The database gate is too slow for
+  every pull request; the release gate requires it.
