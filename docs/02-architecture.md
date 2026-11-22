@@ -1412,7 +1412,7 @@ filter:
 | Recovery | once, when that job type succeeds again after a failure or stale notice; a check that finishes with errors sends the check-findings notice instead | follows the notice it answers |
 | Check findings | every check that finds errors | `on_failure` |
 | Retention external | when retention switches to `external`: the probe of a forget or prune job or of the heartbeat found the server append-only, or the server refused a deletion (ADR 0010) | `on_failure` |
-| Clock | once, when the heartbeat finds a handled schedule slot or the time the stale notice counts from more than an hour after the current time: the server clock was ahead and has been set back. The slot is put back to the current slot of its schedule, and the age of the backups counts from the moment this was found ([ADR 0011](adr/0011-scheduling.md)) | `on_failure` |
+| Clock | once, when the heartbeat finds a handled schedule slot or the time the stale notice counts from more than an hour after the current time: the server clock was ahead and has been set back. The slot is put back to the current slot of its schedule, and the age of the backups counts from the moment this was found, until a newer backup replaces the record that lay ahead ([ADR 0011](adr/0011-scheduling.md)) | `on_failure` |
 
 An e-mail is built from codes, times and counts only, never from log lines, paths or
 settings, so it cannot carry a secret. Notices wait in an outbox (`backups_for_restic_notifications`)

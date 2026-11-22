@@ -394,6 +394,29 @@ final class NotifierTest extends TestCase {
 		self::assertSame( 0, $this->options->values[ Notifier::OPTION ]['clock'] ?? null, 'A backup by the right clock ends the correction.' );
 	}
 
+	public function test_the_age_counts_from_when_a_time_ahead_was_found_also_after_the_clock_reaches_that_time(): void {
+		$notifier = $this->notifier();
+		$found    = self::SETUP + 10 * self::HOUR;
+		// The backup finished by a clock a day ahead, which was set back before the next heartbeat.
+		$this->backup_succeeded( $notifier, $found + 24 * self::HOUR );
+
+		for ( $hour = 0; $hour < 36; ++$hour ) {
+			$notifier->heartbeat( $found + $hour * self::HOUR );
+		}
+		self::assertSame( [ 'clock' ], $this->mailer->kinds(), 'Not stale yet, and the clock reaching the wrong time within the hour changes nothing.' );
+		$notifier->heartbeat( $found + 36 * self::HOUR );
+
+		self::assertSame( [ 'clock', 'stale' ], $this->mailer->kinds(), 'Stale 36 hours after the wrong time was found, not 36 hours after the wrong time.' );
+		self::assertSame( $found, $this->mailer->sent[1]->since );
+		$this->backup_succeeded( $notifier, $found + 40 * self::HOUR );
+		$notifier->heartbeat( $found + 41 * self::HOUR );
+		self::assertSame( [ 'clock', 'stale', 'recovery' ], $this->mailer->kinds() );
+		self::assertSame( 0, $this->options->values[ Notifier::OPTION ]['clock'] ?? null, 'The newer backup has a record of its own.' );
+		$notifier->heartbeat( $found + 40 * self::HOUR + 36 * self::HOUR );
+		self::assertSame( [ 'clock', 'stale', 'recovery', 'stale' ], $this->mailer->kinds() );
+		self::assertSame( $found + 40 * self::HOUR, $this->mailer->sent[3]->since, 'From then on the age counts from that backup.' );
+	}
+
 	public function test_a_clock_set_back_is_reported_once_however_many_times_lay_ahead(): void {
 		$notifier = $this->notifier();
 		$real     = self::SETUP + 10 * self::HOUR;

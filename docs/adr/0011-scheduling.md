@@ -108,7 +108,11 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   back to the current slot of its schedule. The current slot counts as handled, because a
   job ran while the clock was ahead; the schedule goes on with its next slot. The notifier
   counts the age of the backups from the moment it finds the time they would count from
-  ahead, and reports the setting back once by e-mail (§14 of the architecture). With a
+  ahead, until a newer backup or another repository replaces that record: the clock
+  coming within the hour of the wrong time does not end it, or the age would count from
+  the wrong time again. It reports the setting back once by e-mail (§14 of the
+  architecture). A handled slot needs no such memory: once it is put back, the wrong
+  value is gone. With a
   clock that only moves forward nothing recorded lies ahead of it, so this never happens
   in the normal case, daylight-saving changes included: they move no Unix time. The hour
   keeps what a correction of the clock back by up to an hour leaves ahead (NTP, a leap

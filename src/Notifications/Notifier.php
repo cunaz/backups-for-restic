@@ -35,9 +35,10 @@ defined( 'ABSPATH' ) || exit;
  * A server clock that was ahead and is set back leaves recorded times in the future
  * (SchedulePolicy::ahead()): the age of the last backup would be negative, and no stale
  * notice would come until the clock caught up. Such a time is not used; the age counts from
- * the moment it was found instead, and the administrator hears of that moment once.
+ * the moment it was found instead, until a newer backup replaces it, and the administrator
+ * hears of that moment once.
  *
- * @phpstan-type Data array{repository: string|null, failing: array<string, int>, stale: int, clock: int, outbox: list<array<mixed>>}
+ * @phpstan-type Data array{repository: string|null, failing: array<string, int>, stale: int, clock: int, clock_since: int, outbox: list<array<mixed>>}
  */
 final class Notifier {
 
@@ -155,28 +156,46 @@ final class Notifier {
 		$this->change(
 			function ( array $data ) use ( $now ): ?array {
 				[ $job, $since ] = $this->stale_since();
-				$changed         = false;
-				if ( SchedulePolicy::ahead( $since, $now ) ) {
+				$before          = $data;
+				$data            = $this->reference( $data, $since, $now );
+				if ( 0 !== $data['clock'] ) {
 					// Recorded by a clock that was ahead: the age counts from when that was found.
-					if ( 0 === $data['clock'] || SchedulePolicy::ahead( $data['clock'], $now ) ) {
-						$data    = $this->clock_found( $data, $now, $since );
-						$changed = true;
-					}
 					$since = $data['clock'];
-				} elseif ( 0 !== $data['clock'] ) {
-					$data['clock'] = 0;
-					$changed       = true;
 				}
 				$stale = $this->stale_notice( $data, $job, $since, $now );
 				if ( null !== $stale ) {
 					$data['stale']    = $now;
 					$data['outbox'][] = $this->entry( $stale );
-					$changed          = true;
 				}
-				return $changed ? $data : null;
+				return $before === $data ? null : $data;
 			}
 		);
 		$this->flush( $now );
+	}
+
+	/**
+	 * Keeps the time from which the age of the backups counts while the record they would
+	 * count from is one that lay ahead of the clock when it was found. It ends only when a
+	 * newer backup, or another repository, gives the age a record of its own: once the clock
+	 * comes within the hour of the wrong record, that record would pass for a right one, and
+	 * the age would count from it again, as much later as the clock had been ahead.
+	 *
+	 * @param Data $data  State.
+	 * @param int  $since The time the record of the last backup, or of the setup, gives.
+	 * @param int  $now   Unix time.
+	 * @return Data State.
+	 */
+	private function reference( array $data, int $since, int $now ): array {
+		if ( 0 !== $data['clock'] && $data['clock_since'] !== $since ) {
+			$data['clock']       = 0;
+			$data['clock_since'] = 0;
+		}
+		if ( SchedulePolicy::ahead( $since, $now ) && ( 0 === $data['clock'] || SchedulePolicy::ahead( $data['clock'], $now ) ) ) {
+			$data['clock']       = $now;
+			$data['clock_since'] = $since;
+			$data                = $this->clock_notice( $data, $now, $since );
+		}
+		return $data;
 	}
 
 	/**
@@ -190,25 +209,31 @@ final class Notifier {
 	public function clock_set_back( int $now, int $ahead ): void {
 		$this->change(
 			function ( array $data ) use ( $now, $ahead ): ?array {
-				if ( 0 !== $data['clock'] && ! SchedulePolicy::ahead( $data['clock'], $now ) ) {
+				[ , $since ] = $this->stale_since();
+				if ( 0 !== $data['clock'] && $data['clock_since'] === $since && ! SchedulePolicy::ahead( $data['clock'], $now ) ) {
+					// Found with the record of the last backup, which lies ahead too, and reported then.
 					return null;
 				}
-				return $this->clock_found( $data, $now, $ahead );
+				if ( SchedulePolicy::ahead( $since, $now ) ) {
+					// The same setting back: the age of the backups counts from now as well.
+					$data['clock']       = $now;
+					$data['clock_since'] = $since;
+				}
+				return $this->clock_notice( $data, $now, max( $ahead, $since ) );
 			}
 		);
 		$this->flush( $now );
 	}
 
 	/**
-	 * Remembers when a time ahead of the clock was found, and queues the notice about it.
+	 * Queues the notice that a recorded time lay ahead of the clock.
 	 *
 	 * @param Data $data  State.
 	 * @param int  $now   Unix time.
-	 * @param int  $ahead The time that lay ahead.
-	 * @return Data State with the finding.
+	 * @param int  $ahead The latest time that lay ahead.
+	 * @return Data State with the notice.
 	 */
-	private function clock_found( array $data, int $now, int $ahead ): array {
-		$data['clock'] = $now;
+	private function clock_notice( array $data, int $now, int $ahead ): array {
 		if ( $this->settings->bool( 'notifications.email.on_failure' ) ) {
 			$data['outbox'][] = $this->entry( new Notice( NoticeKind::Clock, $now, '', '', '', $ahead ) );
 		}
@@ -376,11 +401,12 @@ final class Notifier {
 			$stale   = 0;
 		}
 		return [
-			'repository' => is_string( $bound ) ? $bound : ( is_string( $known ) ? $known : null ),
-			'failing'    => $failing,
-			'stale'      => $stale,
-			'clock'      => Decoded::int( $stored['clock'] ?? null ),
-			'outbox'     => Decoded::arrays( $stored['outbox'] ?? null ),
+			'repository'  => is_string( $bound ) ? $bound : ( is_string( $known ) ? $known : null ),
+			'failing'     => $failing,
+			'stale'       => $stale,
+			'clock'       => Decoded::int( $stored['clock'] ?? null ),
+			'clock_since' => Decoded::int( $stored['clock_since'] ?? null ),
+			'outbox'      => Decoded::arrays( $stored['outbox'] ?? null ),
 		];
 	}
 
