@@ -725,6 +725,8 @@ test( 'a files-only snapshot still restores individual files', async ( { page } 
 	await page.getByRole( 'button', { name: 'Restore to staging' } ).click();
 	await expect( notice( page, 'success', 'Restored 1 file to staging' ) ).toBeVisible( { timeout: 120000 } );
 	const staged = page.locator( 'section.bfr-card' ).filter( { hasText: id } ).first();
+	// A restored file is site content: its download needs the WordPress password.
+	await staged.getByLabel( 'WordPress password for downloads' ).fill( ADMIN.password );
 	const pending = page.waitForEvent( 'download' );
 	await staged.getByRole( 'button', { name: 'Download file', exact: true } ).click();
 	const downloaded = await pending;
