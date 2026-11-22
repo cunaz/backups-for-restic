@@ -4,9 +4,11 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Format;
 
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Unpacked;
 use BackupsForRestic\Format\ZstdFrame;
+use BackupsForRestic\Tests\Support\ResticFrame;
 use BackupsForRestic\Tests\Support\ResticIndexFile;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -430,6 +432,43 @@ final class CompressionTest extends TestCase {
 		// A request limited to 128 MiB, with WordPress loaded and the compressed file in memory.
 		self::limit_memory( memory_get_usage( true ) + 128 * self::MIB - self::WORDPRESS - strlen( $frame ) );
 		self::assertSame( $digest, hash( 'sha256', Compression::decompress( $frame ) ) );
+	}
+
+	/** @return iterable<string, array{int, int}> */
+	public static function libzstd_bounds(): iterable {
+		// ZSTD_COMPRESSBOUND: the content, a 256th of it, and below 128 KiB up to 64 bytes more.
+		yield 'nothing' => [ 0, 64 ];
+		yield 'one byte' => [ 1, 64 ];
+		yield 'one byte less than a block' => [ 131071, 131582 ];
+		yield 'one block' => [ 131072, 131584 ];
+		yield 'a full chunk' => [ RabinChunker::MAX_SIZE, 8421376 ];
+	}
+
+	#[DataProvider( 'libzstd_bounds' )]
+	public function test_the_largest_frame_of_some_content_is_the_bound_of_libzstd( int $size, int $bound ): void {
+		self::assertSame( $bound, Compression::bound( $size ) );
+	}
+
+	public function test_frames_of_data_that_does_not_compress_stay_within_the_bound(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		foreach ( [ 1, 1000, 131071, 131072, 131073, 1048576 ] as $size ) {
+			self::assertLessThanOrEqual( Compression::bound( $size ), strlen( (string) zstd_compress( random_bytes( $size ), 3 ) ) );
+		}
+	}
+
+	public function test_a_full_chunk_in_the_frame_restic_writes_for_it_decodes(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$content = random_bytes( RabinChunker::MAX_SIZE );
+		$frame   = ResticFrame::raw( $content );
+		self::assertSame( RabinChunker::MAX_SIZE + 202, strlen( $frame ), 'The frame is 202 bytes longer than the chunk.' );
+		self::assertLessThanOrEqual( Compression::bound( RabinChunker::MAX_SIZE ), strlen( $frame ) );
+		$read = ZstdFrame::read( $frame, 0, Compression::MAX_DECOMPRESSED_SIZE );
+		self::assertSame( [ RabinChunker::MAX_SIZE, RabinChunker::MAX_SIZE, 524288 ], [ $read->size, $read->bound, $read->window ] );
+		self::assertSame( hash( 'sha256', $content ), hash( 'sha256', Compression::decompress( $frame, RabinChunker::MAX_SIZE ) ) );
 	}
 
 	public function test_an_unknown_encoding_byte_is_refused_before_anything_is_decompressed(): void {

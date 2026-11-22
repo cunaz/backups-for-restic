@@ -44,6 +44,18 @@ final class Compression {
 	}
 
 	/**
+	 * The largest frame an encoder writes for content of the given size: libzstd's
+	 * ZSTD_COMPRESSBOUND. Content that does not compress is stored in raw blocks, each with a
+	 * header of its own, so its frame is larger than the content itself.
+	 *
+	 * @param int $size Content size in bytes.
+	 * @return int Frame size in bytes.
+	 */
+	public static function bound( int $size ): int {
+		return $size + ( $size >> 8 ) + ( $size < 131072 ? ( 131072 - $size ) >> 11 : 0 );
+	}
+
+	/**
 	 * Decompresses zstd data.
 	 *
 	 * @param string                     $data     Compressed bytes.
