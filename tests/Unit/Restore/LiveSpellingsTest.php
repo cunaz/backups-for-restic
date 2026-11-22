@@ -99,6 +99,17 @@ final class LiveSpellingsTest extends TestCase {
 		self::assertSame( 2, $index->listings() );
 	}
 
+	public function test_a_wide_folder_that_looks_settled_after_an_own_change_is_listed_again(): void {
+		$this->settle();
+		$index = new LiveSpellings( LiveSpellings::MAX_NAMES, 2 );
+		self::assertTrue( $index->unique( $this->folder, 'gamma' ) );
+		// A change after which the folder's change time stays where it was, as under the
+		// attribute cache of a network file system: its identity cannot show another change.
+		$index->changed( $this->folder . '/delta', true );
+		self::assertTrue( $index->unique( $this->folder, 'gamma' ) );
+		self::assertSame( 2, $index->listings() );
+	}
+
 	public function test_a_listing_within_the_folders_change_second_answers_only_its_own_check(): void {
 		touch( $this->folder . '/recent' );
 		$index = new LiveSpellings();

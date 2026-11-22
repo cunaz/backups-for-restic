@@ -31,7 +31,8 @@ defined( 'ABSPATH' ) || exit;
  * trusts that folder only until that second and the margin have passed: a change by another
  * process in the same second as the writer's own can stay hidden from the rechecks that long,
  * at most about one and a quarter seconds, and the first recheck after it lists the folder
- * again.
+ * again. An own change after which the folder already looks settled, because its change time
+ * did not move, makes the index list that folder again at the next recheck.
  *
  * Names are kept as salted 64-bit codes of the folded name and of the exact spelling, so that
  * a wide folder fits in memory: a code collision can only refuse a name or, for two spellings
@@ -132,8 +133,11 @@ final class LiveSpellings {
 			return;
 		}
 		$after = self::observe( $directory );
-		// Listing a narrow folder again is cheap and sees every other change as well.
-		if ( null === $after || count( $this->folders[ $directory ]['names'] ) <= $this->wide ) {
+		// Listing a narrow folder again is cheap and sees every other change as well. A folder
+		// that looks settled just after the writer's own change did not move its change time
+		// with that change, for example under a network file system's attribute cache. Its
+		// identity cannot show another process's change either, so it is listed again too.
+		if ( null === $after || self::settled( $after ) || count( $this->folders[ $directory ]['names'] ) <= $this->wide ) {
 			$this->forget( $directory );
 			return;
 		}
@@ -152,7 +156,7 @@ final class LiveSpellings {
 		}
 		$folder['identity'] = $after['key'];
 		// A folder that is already trusted only until an earlier second keeps that deadline.
-		if ( null === $folder['until'] && ! self::settled( $after ) ) {
+		if ( null === $folder['until'] ) {
 			$folder['until'] = $after['ctime'];
 		}
 		unset( $folder );
