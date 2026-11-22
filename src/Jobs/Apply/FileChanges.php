@@ -317,7 +317,8 @@ final readonly class FileChanges implements StepProvider {
 		ApplyJournal::directory( $dir );
 		$mutations = array_values( array_filter( $rows, ApplyManifest::mutates( ... ) ) );
 		$json      = self::json( $mutations );
-		Files::write_atomic( $dir . '/manifest.json', $json );
+		// Undo reads this manifest after a crash as well, so it is on disk before maintenance.
+		Files::write_durable( $dir . '/manifest.json', $json );
 		$job->data['manifest_hash'] = hash( 'sha256', $json );
 		$job->progress['total']     = count( $mutations );
 		$this->enter_maintenance( $job );
@@ -523,7 +524,9 @@ final readonly class FileChanges implements StepProvider {
 				FileSpace::require_space( $this->space->estimate( FileSpace::add( $later, $need ) ) );
 				if ( $this->journal->attempted( $original ) <= $i ) {
 					ApplyJournal::directory( $item );
-					Files::write_atomic( $dir . '/attempted', (string) ( $i + 1 ) );
+					// Undo covers this ordinal after a power loss too: the count is on disk
+					// before the entry's first record, and so before its first live change.
+					Files::write_durable( $dir . '/attempted', (string) ( $i + 1 ) );
 				}
 				$complete = $change->apply( $path, $row['action'], $row['source'], $row['original'], $deadline, $row['mode'] );
 				if ( $complete ) {
@@ -577,7 +580,7 @@ final readonly class FileChanges implements StepProvider {
 			if ( null === $apply ) {
 				throw new StorageFailed( 'The original apply is missing.' );
 			}
-			Files::write_atomic( $this->journal->workspace( $apply ) . '/reverted', '1' );
+			Files::write_durable( $this->journal->workspace( $apply ) . '/reverted', '1' );
 		}
 		$job->result = [
 			'restore'       => ApplyJournal::field( $job, 'restore' ),

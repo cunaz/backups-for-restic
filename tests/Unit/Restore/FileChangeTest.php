@@ -10,6 +10,7 @@ use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\FileChange;
 use BackupsForRestic\Restore\FileSpace;
+use BackupsForRestic\Restore\LiveSpellings;
 use BackupsForRestic\Tests\Support\TempDir;
 
 final class FileChangeTest extends TestCase {
@@ -259,5 +260,272 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'mkdir' ) );
 		self::assertTrue( $this->change->undo( $this->path, 'mkdir', INF ) );
 		self::assertDirectoryDoesNotExist( $this->path );
+	}
+
+	public function test_records_and_copies_reach_the_disk_before_the_live_changes_they_authorise(): void {
+		file_put_contents( $this->path, 'old' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		$steps  = [];
+		$record = static function ( string $operation, string $subject ) use ( &$steps ): void {
+			$steps[] = $operation . ' ' . $subject;
+		};
+		$change = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, 'apply', $record );
+		self::assertTrue( $change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		$copy      = $this->journal . '/original';
+		$candidate = $this->journal . '/candidate';
+		self::assertSame(
+			[
+				'journal copy',
+				'sync ' . $copy,
+				'journal copy',
+				'sync ' . $candidate,
+				'journal ready',
+				'rename ' . $this->path,
+				'sync ' . $this->site,
+				'journal done',
+			],
+			$steps
+		);
+		$steps = [];
+		self::assertTrue( $change->undo( $this->path, 'replace', INF ) );
+		self::assertSame( [ 'sync ' . $copy, 'journal restore', 'rename ' . $this->path, 'sync ' . $this->site, 'journal undone' ], $steps );
+		self::assertSame( 'old', file_get_contents( $this->path ) );
+
+		$created = $this->site . '/created.php';
+		$journal = $this->root . '/journal-created';
+		file_put_contents( $this->staging . $created, 'created' );
+		$steps  = [];
+		$change = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $journal, null, 'apply', $record );
+		self::assertTrue( $change->apply( $created, 'create', hash( 'sha256', 'created' ), null, INF ) );
+		self::assertSame(
+			[
+				'journal copy',
+				'sync ' . $journal . '/candidate',
+				'journal ready',
+				'link ' . $created,
+				'unlink ' . $journal . '/candidate',
+				'sync ' . $this->site,
+				'journal done',
+			],
+			$steps
+		);
+		$steps = [];
+		self::assertTrue( $change->undo( $created, 'create', INF ) );
+		self::assertSame( [ 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
+	}
+
+	public function test_undo_removes_a_created_file_whose_private_name_survived_a_power_loss(): void {
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF ) );
+		// The completed record survived, the earlier unlink of the private name did not.
+		link( $this->path, $this->journal . '/candidate' );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+		self::assertTrue( $this->change->undo( $this->path, 'create', INF ) );
+		self::assertFileDoesNotExist( $this->path );
+		self::assertFileDoesNotExist( $this->journal . '/candidate' );
+	}
+
+	public function test_a_kill_at_any_step_of_a_directory_creation_resumes_and_undo_removes_only_that_directory(): void {
+		$plugin = $this->site . '/plugin';
+		$code   = $plugin . '/main.php';
+		mkdir( $this->staging . $plugin, 0700 );
+		file_put_contents( $this->staging . $code, 'code' );
+		mkdir( $this->site . '/kept' );
+		$plan    = fn (): ApplyPlan => new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$journal = $this->root . '/journal-uninterrupted';
+		$steps   = [];
+		$record  = static function ( string $operation, string $subject ) use ( &$steps ): void {
+			$steps[] = $operation . ' ' . $subject;
+		};
+		$change  = new FileChange( $plan(), $this->staging, $journal, null, 'apply', $record );
+		self::assertTrue( $change->apply( $plugin, 'mkdir', null, null, INF ) );
+		self::assertSame(
+			[
+				'journal copy',
+				'mkdir ' . $journal . '/directory',
+				'sync ' . $journal . '/directory',
+				'journal ready',
+				'rename ' . $plugin,
+				'sync ' . $this->site,
+				'journal done',
+			],
+			$steps
+		);
+		$crash_points = count( $steps );
+		self::assertTrue( $change->undo( $plugin, 'mkdir', INF ) );
+		self::assertDirectoryDoesNotExist( $plugin );
+
+		for ( $stop = 0; $stop < $crash_points; ++$stop ) {
+			$journal = $this->root . '/journal-' . $stop;
+			$seen    = 0;
+			$kill    = static function () use ( &$seen, $stop ): void {
+				if ( $seen++ === $stop ) {
+					throw new \DomainException( 'The worker was killed.' );
+				}
+			};
+			try {
+				( new FileChange( $plan(), $this->staging, $journal, null, 'apply', $kill ) )->apply( $plugin, 'mkdir', null, null, INF );
+				self::fail( 'The worker must stop after step ' . $stop . '.' );
+			} catch ( \DomainException $killed ) {
+				self::assertSame( 'The worker was killed.', $killed->getMessage() );
+			}
+			// The next request completes the entry, owns the directory and publishes a child.
+			$next      = $plan();
+			$directory = new FileChange( $next, $this->staging, $journal );
+			self::assertTrue( $directory->apply( $plugin, 'mkdir', null, null, INF ), 'Step ' . $stop );
+			self::assertSame( 'remove', $directory->undo_action( $plugin, 'mkdir' ), 'Step ' . $stop );
+			$child = new FileChange( $next, $this->staging, $journal . '-child' );
+			self::assertTrue( $child->apply( $code, 'create', hash( 'sha256', 'code' ), null, INF ) );
+			self::assertTrue( $child->undo( $code, 'create', INF ) );
+			self::assertTrue( $directory->undo( $plugin, 'mkdir', INF ) );
+			self::assertSame( [ '.', '..', 'kept' ], scandir( $this->site ), 'Step ' . $stop );
+		}
+	}
+
+	public function test_a_created_directory_keeps_the_permissions_of_one_made_in_place(): void {
+		$shared = $this->site . '/shared';
+		$album  = $shared . '/album';
+		mkdir( $shared );
+		chmod( $shared, 02755 );
+		mkdir( $this->staging . $album, 0700, true );
+		$umask = umask( 027 );
+		try {
+			self::assertTrue( $this->change->apply( $album, 'mkdir', null, null, INF, 0755 ) );
+		} finally {
+			umask( $umask );
+		}
+		clearstatcache();
+		self::assertSame( 02750, fileperms( $album ) & 07777 );
+		self::assertSame( filegroup( $shared ), filegroup( $album ) );
+		self::assertSame( 'remove', $this->change->undo_action( $album, 'mkdir' ) );
+	}
+
+	/** Waits until the folders set up so far have settled, as a kept listing needs. */
+	private static function settle(): void {
+		$ready = time() + 1 + LiveSpellings::CLOCK_MARGIN;
+		while ( microtime( true ) < $ready ) {
+			usleep( 10000 );
+		}
+	}
+
+	public function test_many_changes_in_one_wide_folder_list_each_folder_about_once_per_second(): void {
+		$uploads = $this->site . '/uploads';
+		mkdir( $uploads );
+		mkdir( $this->staging . $uploads, 0700 );
+		for ( $i = 0; $i < 2500; ++$i ) {
+			touch( $uploads . '/existing-' . $i );
+		}
+		for ( $i = 0; $i < 120; ++$i ) {
+			file_put_contents( $this->staging . $uploads . '/new-' . $i, 'new ' . $i );
+		}
+		mkdir( $this->journal );
+		// The staging root and one staged folder per path component, then the live root and
+		// the written folder. Before, each of the five rechecks of every change listed them all.
+		$folders = substr_count( $uploads, '/' ) + 3;
+		self::settle();
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$started = time();
+		for ( $i = 0; $i < 120; ++$i ) {
+			$change = new FileChange( $plan, $this->staging, $this->journal . '/item-' . $i );
+			self::assertTrue( $change->apply( $uploads . '/new-' . $i, 'create', hash( 'sha256', 'new ' . $i ), null, INF ) );
+		}
+		// The written folder is listed again about once for each second in which it changed.
+		self::assertLessThanOrEqual( $folders + 1 + time() - $started, $plan->listings() );
+		self::assertSame( 'new 119', file_get_contents( $uploads . '/new-119' ) );
+
+		// The undo needs no wait: the other folders have settled, and the wide one keeps a
+		// listing made in the second of its last change until that second has passed.
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$started = time();
+		for ( $i = 119; $i >= 0; --$i ) {
+			$change = new FileChange( $plan, $this->staging, $this->journal . '/item-' . $i );
+			self::assertTrue( $change->undo( $uploads . '/new-' . $i, 'create', INF ) );
+		}
+		self::assertLessThanOrEqual( $folders + 1 + time() - $started, $plan->listings() );
+		self::assertCount( 2502, (array) scandir( $uploads ) );
+	}
+
+	public function test_an_alias_that_appears_during_the_request_is_refused_before_the_write(): void {
+		$wide = $this->site . '/wide';
+		mkdir( $wide );
+		mkdir( $this->staging . $wide, 0700 );
+		foreach ( [ 'a', 'b', 'c' ] as $name ) {
+			file_put_contents( $this->staging . $wide . '/' . $name, $name );
+		}
+		mkdir( $this->journal );
+		self::settle();
+		$plan  = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$apply = fn ( string $name ): bool => ( new FileChange( $plan, $this->staging, $this->journal . '/' . $name ) )->apply( $wide . '/' . $name, 'create', hash( 'sha256', $name ), null, INF );
+		self::assertTrue( $apply( 'a' ) );
+		// Another process adds a second spelling of a folder on the chain, in the same second.
+		mkdir( $this->site . '/WIDE' );
+		try {
+			$apply( 'b' );
+			self::fail( 'A second spelling of a folder on the chain must refuse the write.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'plan changed', $refused->getMessage() );
+		}
+		rmdir( $this->site . '/WIDE' );
+		// And at once a second spelling of the next name, in the folder that the writer changed.
+		touch( $wide . '/C' );
+		try {
+			$apply( 'c' );
+			self::fail( 'A second spelling of the name must refuse the write.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'plan changed', $refused->getMessage() );
+		}
+		self::assertFileDoesNotExist( $wide . '/b' );
+		self::assertFileDoesNotExist( $wide . '/c' );
+		self::assertSame( 'a', file_get_contents( $wide . '/a' ) );
+	}
+
+	public function test_undo_review_keeps_entries_created_below_a_removed_directory(): void {
+		$plugin = $this->site . '/plugin';
+		$code   = $plugin . '/main.php';
+		mkdir( $this->staging . $plugin, 0700 );
+		file_put_contents( $this->staging . $code, 'plugin code' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		file_put_contents( $this->path, 'old' );
+		$plan      = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$directory = new FileChange( $plan, $this->staging, $this->root . '/journal-directory' );
+		$created   = new FileChange( $plan, $this->staging, $this->root . '/journal-created' );
+		$replaced  = new FileChange( $plan, $this->staging, $this->root . '/journal-replaced' );
+		self::assertTrue( $directory->apply( $plugin, 'mkdir', null, null, INF ) );
+		self::assertTrue( $created->apply( $code, 'create', hash( 'sha256', 'plugin code' ), null, INF ) );
+		self::assertTrue( $replaced->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		// The administrator deletes the restored plugin within the undo window.
+		TempDir::remove( $plugin );
+		self::assertSame( 'keep', $created->undo_action( $code, 'create' ) );
+		self::assertSame( 'keep', $directory->undo_action( $plugin, 'mkdir' ) );
+		self::assertSame( 'restore', $replaced->undo_action( $this->path, 'replace' ) );
+		self::assertTrue( $created->undo( $code, 'create', INF ) );
+		self::assertTrue( $directory->undo( $plugin, 'mkdir', INF ) );
+		self::assertTrue( $replaced->undo( $this->path, 'replace', INF ) );
+		self::assertSame( 'old', file_get_contents( $this->path ) );
+		self::assertDirectoryDoesNotExist( $plugin );
+	}
+
+	public function test_undo_review_refuses_a_replacement_whose_directory_was_removed_or_linked(): void {
+		$folder = $this->site . '/folder';
+		$file   = $folder . '/settings.json';
+		mkdir( $folder );
+		mkdir( $this->staging . $folder, 0700 );
+		file_put_contents( $file, 'old' );
+		file_put_contents( $this->staging . $file, 'new' );
+		self::assertTrue( $this->change->apply( $file, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		TempDir::remove( $folder );
+		self::assertSame( 'refuse', $this->change->undo_action( $file, 'replace' ) );
+		try {
+			$this->change->undo( $file, 'replace', INF );
+			self::fail( 'Undo cannot restore a replaced file into a removed directory.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'later change', $refused->getMessage() );
+		}
+		// A link in place of the removed directory is not the recorded parent either.
+		mkdir( $this->root . '/elsewhere' );
+		file_put_contents( $this->root . '/elsewhere/settings.json', 'new' );
+		symlink( $this->root . '/elsewhere', $folder );
+		self::assertSame( 'refuse', $this->change->undo_action( $file, 'replace' ) );
+		self::assertSame( 'new', file_get_contents( $this->root . '/elsewhere/settings.json' ) );
 	}
 }
