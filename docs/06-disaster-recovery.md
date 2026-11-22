@@ -575,8 +575,9 @@ the memory available to PHP. It is a local capacity limit, not a finding that th
 is damaged. A backup first tries smaller packs, down to 4 MiB, and records that adjustment
 in the job log. If the budget still does not fit, the job stops.
 
-The budget is checked after each pack in an index has been decoded. A single large index
-file or pack can exhaust PHP memory before this check, so a PHP out-of-memory error is
+The budget is checked after each pack in an index has been decoded. A compressed index file
+is also checked before it is decoded, against what decoding it takes. A single large index
+file or pack can exhaust PHP memory before these checks, so a PHP out-of-memory error is
 also possible. The same capacity guidance below applies; neither error proves repository
 damage.
 
