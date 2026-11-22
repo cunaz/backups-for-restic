@@ -19,14 +19,14 @@ final readonly class Table {
 	/**
 	 * Describes a table.
 	 *
-	 * @param string                $name    Table name.
-	 * @param string                $create  CREATE TABLE statement on one line.
-	 * @param array<string, string> $columns Column kinds by column name, in table order.
-	 * @param string|null           $key     Name of the primary or unique key whose columns order the pages, or null if the table has none that can.
-	 * @param list<KeyColumn>       $order   Columns of that key, in key order; empty without a key.
-	 * @param string                $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
-	 * @param string                $digest  Hash of the definition without its AUTO_INCREMENT counter, of the columns and of the key; see Catalog.
-	 * @param bool                  $wide    Whether a column can hold values of any size: TEXT, BLOB, JSON or spatial.
+	 * @param string                    $name    Table name.
+	 * @param string                    $create  CREATE TABLE statement on one line.
+	 * @param array<int|string, string> $columns Column kinds by column name, in table order; PHP makes a name of digits such as "123" an integer key.
+	 * @param string|null               $key     Name of the primary or unique key whose columns order the pages, or null if the table has none that can.
+	 * @param list<KeyColumn>           $order   Columns of that key, in key order; empty without a key.
+	 * @param string                    $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
+	 * @param string                    $digest  Hash of the definition without its AUTO_INCREMENT counter, of the columns and of the key; see Catalog.
+	 * @param bool                      $wide    Whether a column can hold values of any size: TEXT, BLOB, JSON or spatial.
 	 */
 	public function __construct(
 		public string $name,

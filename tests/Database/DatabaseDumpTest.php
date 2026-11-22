@@ -596,6 +596,30 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( $before, $db->rows( $settings ), 'The site connection keeps its character set.' );
 	}
 
+	#[DataProvider( 'connections' )]
+	public function test_columns_named_with_digits_only_dump_and_import_unchanged( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		// PHP turns a column name of digits into an integer array key.
+		$db->execute( 'DROP TABLE IF EXISTS num_keyed, num_keyless' );
+		$db->execute( 'CREATE TABLE num_keyed (`0` INT NOT NULL, `123` VARCHAR(20) NOT NULL, `-1` FLOAT, `07` VARCHAR(20), PRIMARY KEY (`0`, `123`)) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE num_keyless (`1` INT, `2` VARCHAR(20)) ENGINE=InnoDB' );
+		$values = [];
+		for ( $i = 1; $i <= 1200; ++$i ) {
+			$values[] = sprintf( "(%d, 'r%d', %d.5, '%d')", intdiv( $i, 3 ), $i, $i, $i );
+		}
+		$db->execute( 'INSERT INTO num_keyed VALUES ' . implode( ',', $values ) );
+		$db->execute( 'INSERT INTO num_keyless SELECT `0`, `123` FROM num_keyed' );
+
+		$manifest = $this->dump_and_import( $db, 'num_', null, $dedicated ? self::dedicated() : null );
+
+		$target = self::database( self::$target );
+		foreach ( [ 'SELECT * FROM num_keyed ORDER BY `0`, `123`', 'SELECT * FROM num_keyless ORDER BY `1`, `2`' ] as $query ) {
+			self::assertSame( $db->rows( $query ), $target->rows( $query ), $query );
+		}
+		$tables = array_column( $manifest['tables'], null, 'name' );
+		self::assertSame( [ '0', '123' ], $tables['num_keyed']['key'] ?? null, 'Pages followed the key over the columns 0 and 123.' );
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().

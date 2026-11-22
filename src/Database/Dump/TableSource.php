@@ -299,7 +299,7 @@ final class TableSource implements ResumableByteSource {
 		$this->largest  = $state['largest'] ?? 0;
 		$this->views    = $state['views'] ?? 0;
 		$this->snapshot = $connection instanceof DedicatedConnection && $connection->in_snapshot() && $table->versioned();
-		$this->prefix   = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $table->columns ) ) ) . ') VALUES ';
+		$this->prefix   = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( static fn ( int|string $name ): string => SqlFormatter::identifier( (string) $name ), array_keys( $table->columns ) ) ) . ') VALUES ';
 	}
 
 	/**
@@ -568,7 +568,7 @@ final class TableSource implements ResumableByteSource {
 		// SELECT * omits invisible columns even though SHOW COLUMNS includes them.
 		$selection = [];
 		foreach ( $this->table->columns as $name => $kind ) {
-			$column      = SqlFormatter::identifier( $name );
+			$column      = SqlFormatter::identifier( (string) $name );
 			$selection[] = SqlFormatter::FLOAT === $kind ? $column . ' + 0e0 AS ' . $column : $column;
 		}
 		foreach ( $this->table->order as $position => $column ) {

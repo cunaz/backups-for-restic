@@ -260,6 +260,85 @@ final class DumpColumnsTest extends TestCase {
 		self::assertSame( [], array_filter( $db->queries, static fn ( string $query ): bool => str_contains( $query, 'HEX(' ) ) );
 	}
 
+	public function test_columns_named_with_digits_only_are_selected_inserted_and_paged_by_their_names(): void {
+		$db    = new class() implements Connection {
+			/** @var list<string> */
+			public array $queries = [];
+
+			public function rows( string $sql ): array {
+				if ( str_starts_with( $sql, 'SELECT `0`' ) ) {
+					$this->queries[] = $sql;
+				}
+				return match ( true ) {
+					str_starts_with( $sql, 'SELECT @@SESSION.sql_quote_show_create' ) => [
+						[
+							'quote_names' => '1',
+							'mode'        => 'NO_AUTO_VALUE_ON_ZERO',
+						],
+					],
+					str_starts_with( $sql, 'SHOW CREATE TABLE' ) => [ [ 'Create Table' => "CREATE TABLE `wp_digits` (\n  `0` int NOT NULL,\n  `123` varchar(20) NOT NULL,\n  `-1` float DEFAULT NULL,\n  PRIMARY KEY (`0`,`123`)\n) ENGINE=InnoDB" ] ],
+					str_starts_with( $sql, 'SHOW FULL COLUMNS' ) => [
+						self::column( '0', 'int', null, 'NO' ),
+						self::column( '123', 'varchar(20)', 'utf8mb4_bin', 'NO' ),
+						self::column( '-1', 'float', null, 'YES' ),
+					],
+					str_starts_with( $sql, 'SHOW KEYS' ) => [
+						self::part( '1', '0' ),
+						self::part( '2', '123' ),
+					],
+					// Rows arrive as mysqli returns them: a name of digits is an integer key.
+					1 === count( $this->queries ) => array_map(
+						static fn ( int $row ): array => [
+							'0'           => (string) $row,
+							'123'         => 'r' . $row,
+							'-1'          => '0.5',
+							'__bfr_key_1' => 'r' . $row,
+						],
+						range( 1, 500 )
+					),
+					default => [],
+				};
+			}
+
+			/** @return array<string, string|null> */
+			private static function column( string $field, string $type, ?string $collation, string $nullable ): array {
+				return [
+					'Field'     => $field,
+					'Type'      => $type,
+					'Collation' => $collation,
+					'Null'      => $nullable,
+					'Extra'     => '',
+				];
+			}
+
+			/** @return array<string, string|null> */
+			private static function part( string $position, string $column ): array {
+				return [
+					'Key_name'     => 'PRIMARY',
+					'Non_unique'   => '0',
+					'Seq_in_index' => $position,
+					'Column_name'  => $column,
+					'Sub_part'     => null,
+				];
+			}
+		};
+		$table = ( new Catalog( $db ) )->table( 'wp_digits' );
+		self::assertSame( [ 0, 123, -1 ], array_keys( $table->columns ), 'PHP turns a name of digits into an integer key.' );
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		$dump   = '';
+		for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
+			$dump .= $block;
+		}
+		self::assertSame( 'SELECT `0`, `123`, `-1` + 0e0 AS `-1`, CAST(`123` AS BINARY) AS `__bfr_key_1` FROM `wp_digits` ORDER BY `wp_digits`.`0`, `wp_digits`.`123` LIMIT 500', $db->queries[0] );
+		self::assertStringContainsString( "WHERE (`0` > 500) OR (`0` = 500 AND `123` > _utf8mb4 X'72353030' COLLATE utf8mb4_bin)", $db->queries[1] );
+		$statement = strstr( (string) strstr( $dump, 'INSERT INTO' ), "\n", true );
+		self::assertIsString( $statement );
+		self::assertStringStartsWith( "INSERT INTO `wp_digits` (`0`,`123`,`-1`) VALUES (1,'r1',0.5),", $statement );
+		$batch = InsertStatement::parse( $statement, 'wp_digits', 'shadow' );
+		self::assertSame( [ '0', '123', '-1' ], $batch->columns );
+		self::assertSame( 500, $batch->rows );
+	}
+
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {
 		$db     = new class() implements Connection {
 			public function rows( string $sql ): array {
