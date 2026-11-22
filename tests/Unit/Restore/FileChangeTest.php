@@ -760,12 +760,16 @@ final class FileChangeTest extends TestCase {
 		file_put_contents( $this->staging . $replaced, 'new' );
 		self::assertTrue( $change->apply( $replaced, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
 		clearstatcache();
-		$mtime = (int) filemtime( $replaced );
-		foreach ( [ 'another inode', 'the installed inode' ] as $case ) {
+		$mtime     = (int) filemtime( $replaced );
+		$installed = fileinode( $replaced );
+		// The installed inode first: the copy replaces it.
+		foreach ( [ 'the installed inode', 'another inode' ] as $case ) {
 			if ( 'another inode' === $case ) {
 				$this->rewrite_as_copy( $replaced );
 			}
 			touch( $replaced, $mtime + 1 );
+			clearstatcache();
+			self::assertSame( 'the installed inode' === $case, fileinode( $replaced ) === $installed, $case );
 			self::assertSame( $kept, $change->undo_review( $replaced, 'replace' ), $case );
 			self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $change->undo( $replaced, 'replace', INF, 'restore' ), $case );
 			self::assertSame( 'new', file_get_contents( $replaced ) );
