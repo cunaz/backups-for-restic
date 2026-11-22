@@ -639,8 +639,9 @@ final class DatabaseDumpTest extends TestCase {
 		$db->execute( 'CREATE TABLE grow_rows (id INT NOT NULL PRIMARY KEY, body LONGBLOB) ENGINE=InnoDB' );
 		$db->execute( "INSERT INTO grow_rows VALUES (1, 'one'), (2, 'two'), (3, 'three')" );
 		$writer = self::database( self::$source );
-		// The site's connection, which grows the second row to 12 MiB right after the first
-		// read of sizes, and counts those reads.
+		// The site's connection, which grows the second row to 6 MiB right after the first read
+		// of sizes, and counts those reads. As SQL the row takes 12 MiB, within the 16 MiB that
+		// MariaDB allows a statement by default.
 		$site  = new class( $db, $writer ) implements Connection {
 			public int $sizes = 0;
 
@@ -650,7 +651,7 @@ final class DatabaseDumpTest extends TestCase {
 			public function rows( string $sql ): array {
 				$rows = $this->db->rows( $sql );
 				if ( str_contains( $sql, ' AS size FROM `grow_rows`' ) && 1 === ++$this->sizes ) {
-					$this->writer->execute( 'UPDATE grow_rows SET body = REPEAT(0xA5, 12582912) WHERE id = 2' );
+					$this->writer->execute( 'UPDATE grow_rows SET body = REPEAT(0xA5, 6291456) WHERE id = 2' );
 				}
 				return $rows;
 			}
@@ -658,8 +659,8 @@ final class DatabaseDumpTest extends TestCase {
 		$files = ( new DatabaseDump( $site, $this->directory . '/grow.json', 'grow_', [], 1767323100 ) )->files();
 		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-grow_rows.sql' === $file->name ) )[0];
 		$limit = (string) ini_get( 'memory_limit' );
-		// 48 MiB besides the reserve: a third of it for each of three rows is less than the grown
-		// row, all of it is enough for that row on its own.
+		// 48 MiB besides the reserve: with its SQL, a row may take a third of it as one of three
+		// rows, about 5.3 MiB, and all of it on its own, about 16 MiB.
 		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 64 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test sets the limit for one read and restores it.
 		try {
 			$this->read_to_file( $table->source, $this->directory . '/010-grow_rows.sql' );
