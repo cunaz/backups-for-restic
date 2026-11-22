@@ -253,18 +253,18 @@ final readonly class DatabaseGeneration {
 					}
 				}
 				$job->data['database_cleanup_generation'] = $phase;
-				$rebuilt                                  = $exchange->rebuilt( $plan, $phase );
-				if ( [] !== $rebuilt ) {
-					$job->data['database_rebuilt'] = $rebuilt;
-					$job->warn( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $rebuilt ), implode( ', ', $rebuilt ) ) );
-					$jobs->log( $job )->write( 'warning', 'Rebuilt private tables were kept.', [ 'code' => 'database_exchange_rebuilt' ] );
-				}
+				self::kept( $jobs, $job, $exchange->rebuilt( $plan, $phase ) );
 				$jobs->save( $job );
 			}
 			if ( ! is_string( $phase ) ) {
 				throw new FormatException( 'The database cleanup generation is unreadable.' );
 			}
 			$next = $exchange->clean( $plan, $phase, $cursor, $deadline );
+			if ( $next > $binding->count ) {
+				// A table rebuilt while the cleanup ran over several ticks is named before the
+				// binding that leads to it is forgotten.
+				self::kept( $jobs, $job, $exchange->rebuilt( $plan, $phase ) );
+			}
 		}
 		$job->data['database_cleanup'] = $next;
 		if ( $next <= $binding->count ) {
@@ -272,6 +272,24 @@ final readonly class DatabaseGeneration {
 		}
 		self::forget( $job );
 		return true;
+	}
+
+	/**
+	 * Reports the rebuilt private tables that cleanup keeps, each name once.
+	 *
+	 * @param JobStore     $jobs Directory-local store.
+	 * @param Job          $job Owning apply; the caller saves it.
+	 * @param list<string> $rebuilt Rebuilt private tables found now.
+	 */
+	private static function kept( JobStore $jobs, Job $job, array $rebuilt ): void {
+		$known = is_array( $job->data['database_rebuilt'] ?? null ) ? array_values( array_filter( $job->data['database_rebuilt'], 'is_string' ) ) : [];
+		$new   = array_values( array_diff( $rebuilt, $known ) );
+		if ( [] === $new ) {
+			return;
+		}
+		$job->data['database_rebuilt'] = [ ...$known, ...$new ];
+		$job->warn( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $new ), implode( ', ', $new ) ) );
+		$jobs->log( $job )->write( 'warning', 'Rebuilt private tables were kept.', [ 'code' => 'database_exchange_rebuilt' ] );
 	}
 
 	/**

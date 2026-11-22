@@ -242,7 +242,8 @@ and comment survive a rebuild; `TRUNCATE` also removes the rows.
 - A rebuilt retained table or shadow cannot be proven to be this operation's copy. The undo
   review refuses with `database_exchange_rebuilt`. Expiry keeps such a table, records its
   name on the job (`database_rebuilt`) with a warning, and drops the tables it can prove as
-  before.
+  before. It looks when it starts and again after its last DROP, before it forgets the
+  binding, so a table rebuilt while expiry runs over several ticks is named as well.
 - An apply still binds to the live identities confirmed at its review: a live table rebuilt
   during the import makes the apply refuse, and the administrator reviews it again.
 

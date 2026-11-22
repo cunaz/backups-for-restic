@@ -944,6 +944,30 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( [ $retained ], array_values( array_filter( $this->private_tables(), static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $applied->data['database_owner']['token'] ) ) ) );
 	}
 
+	public function test_a_retained_table_rebuilt_while_expiry_runs_over_several_ticks_is_reported(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		$plan     = DatabaseGeneration::load( $this->direct, $applied )->exchange();
+		$replaced = array_keys( array_filter( $plan->document['pairs'], static fn ( array $pair ): bool => null !== $pair['before'] ) );
+		self::assertGreaterThan( 1, count( $replaced ) );
+		$last                       = $plan->owned->retained( max( $replaced ) );
+		$services['clock']->seconds = $applied->data['retained_until'] + 1;
+		// A spent tick drops one table and stops.
+		self::assertFalse( $services['changes']->expire( false, microtime( true ) - 1 ) );
+		$started = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $started );
+		self::assertSame( 'applied', $started->data['database_cleanup_generation'] ?? null );
+		self::assertArrayNotHasKey( 'database_rebuilt', $started->data );
+		self::assertTrue( $this->present( $last ) );
+		$this->optimize( $last );
+		$expired = self::expire_all( $services, $applied );
+		self::assertSame( [ $last ], $expired->data['database_rebuilt'] ?? null );
+		self::assertStringContainsString( $last, implode( ' ', $expired->warnings ) );
+		self::assertTrue( $this->present( $last ), 'An object whose identity is not proven is never dropped.' );
+		self::assertSame( [ $last ], array_values( array_filter( $this->private_tables(), static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $applied->data['database_owner']['token'] ) ) ) );
+	}
+
 	public function test_a_batch_beyond_max_allowed_packet_is_refused_before_it_is_sent(): void {
 		$this->db->execute( 'CREATE TABLE wp_big (id INT PRIMARY KEY, v LONGTEXT) ENGINE=InnoDB' );
 		$this->db->execute( "INSERT INTO wp_big VALUES (1, REPEAT('x', 1100000))" );
