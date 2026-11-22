@@ -1052,6 +1052,26 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( [], $this->changes->undoable() );
 	}
 
+	public function test_a_stopped_undo_lists_its_kept_entries_after_a_page_was_written_before_its_slot(): void {
+		$job = $this->run_job( $this->start() );
+		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The edited file is kept and counted.
+		self::assertSame( 1, $this->jobs->get( $undo->id )?->data['undo_counts']['kept'] );
+		// The worker wrote the list's page with the next kept entry, the folder, and was stopped
+		// before the page's slot and the document; then the undo is cancelled.
+		$page    = $this->jobs->directory( $undo ) . '/kept/rows-0';
+		$rows    = json_decode( (string) file_get_contents( $page ), true, flags: JSON_THROW_ON_ERROR );
+		$rows[]  = ApplyManifest::row( Bytes::base64url_encode( $this->live . '/b-new' ), $this->live . '/b-new', 'keep', 'new_children' );
+		$encoded = json_encode( $rows, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
+		file_put_contents( $page, $encoded );
+		$this->runner->cancel( $undo->id );
+		$cancelled = $this->run_job( $undo, JobState::Cancelled );
+		self::assertSame( [ 0, 1 ], [ $cancelled->result['removed'], $cancelled->result['kept'] ] );
+		self::assertSame( [ $this->live . '/b-new/new.txt' => 'changed_since_apply' ], $this->kept( $cancelled ) );
+	}
+
 	public function test_an_undo_with_nothing_left_to_revert_is_refused_with_its_own_code(): void {
 		$job = $this->run_job( $this->start() );
 		file_put_contents( $this->live . '/a-existing', 'edited' );

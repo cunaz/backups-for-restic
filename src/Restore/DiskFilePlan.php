@@ -301,6 +301,7 @@ final class DiskFilePlan {
 			if ( strlen( $data ) !== $expected ) {
 				throw new StorageFailed( 'A private file plan index is incomplete.' );
 			}
+			$this->agree( $name, $count, $data );
 			$indexes[ $name ] = hash( 'sha256', $data );
 		}
 		$header = [
@@ -329,6 +330,37 @@ final class DiskFilePlan {
 			Files::write_atomic( $this->directory . '/sealed.json', $body );
 		}
 		return hash( 'sha256', $body );
+	}
+
+	/**
+	 * Makes the last counted page of a stream agree with its slot before the index is sealed.
+	 * A worker stopped after it wrote that page with a record beyond the counted ones and
+	 * before it updated the page's slot leaves a page that the slot no longer authenticates;
+	 * its counted records are still the ones the slot was written for. Such a page is cut to
+	 * them. A page that does not match its slot in any other way is refused.
+	 *
+	 * @param string $stream Stream name.
+	 * @param int    $count Counted records.
+	 * @param string $index Index of the stream, cut to the counted pages.
+	 * @throws StorageFailed If the page does not match its slot.
+	 */
+	private function agree( string $stream, int $count, string $index ): void {
+		$page = intdiv( $count - 1, self::PAGE );
+		$file = $this->directory . '/' . $stream . '-' . $page;
+		$body = self::read( $file, self::PAGE_BYTES );
+		$slot = substr( $index, $page * 64, 64 );
+		if ( hash_equals( $slot, hash( 'sha256', $body ) ) ) {
+			return;
+		}
+		$counted = json_encode( array_slice( self::decode_page( $body ), 0, $count - $page * self::PAGE ), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
+		if ( ! hash_equals( $slot, hash( 'sha256', $counted ) ) ) {
+			throw new StorageFailed( 'A private file plan page does not match its index.' );
+		}
+		if ( $this->durable ) {
+			Files::write_durable( $file, $counted );
+		} else {
+			Files::write_atomic( $file, $counted );
+		}
 	}
 
 	/**

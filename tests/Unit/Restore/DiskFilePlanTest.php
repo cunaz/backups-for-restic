@@ -102,6 +102,26 @@ final class DiskFilePlanTest extends TestCase {
 		}
 	}
 
+	public function test_a_page_written_before_its_slot_is_cut_to_its_counted_records_when_sealed(): void {
+		$kept = new DiskFilePlan( $this->directory, true );
+		$kept->put( 'rows', 0, self::row( 0 ) );
+		$kept->flush();
+		$slot = (string) file_get_contents( $this->directory . '/rows.idx' );
+		// The worker wrote the page with the next record and was stopped before that page's slot.
+		$kept->put( 'rows', 1, self::row( 1 ) );
+		$kept->flush();
+		file_put_contents( $this->directory . '/rows.idx', $slot );
+		$digest = ( new DiskFilePlan( $this->directory, true ) )->seal( 'apply', 'restore', true, false, [ 'rows' => 1 ], 0, 0, null, [ 'keep' => 1 ] );
+		$sealed = new DiskFilePlan( $this->directory, true );
+		self::assertSame( 1, $sealed->open( $digest )['entries'] );
+		self::assertSame( [ self::row( 0 ) ], $sealed->page( 0 ) );
+		// A page whose counted records are not the ones its slot was written for is refused.
+		file_put_contents( $this->directory . '/rows-0', (string) json_encode( [ self::row( 2 ), self::row( 1 ) ], JSON_UNESCAPED_SLASHES ) );
+		$this->expectException( StorageFailed::class );
+		$this->expectExceptionMessage( 'does not match its index' );
+		( new DiskFilePlan( $this->directory, true ) )->seal( 'apply', 'restore', true, false, [ 'rows' => 1 ], 0, 0, null, [ 'keep' => 1 ] );
+	}
+
 	public function test_a_page_written_beyond_the_count_is_cut_when_the_list_is_sealed(): void {
 		$kept = new DiskFilePlan( $this->directory, true );
 		for ( $number = 0; $number <= DiskFilePlan::PAGE; ++$number ) {
