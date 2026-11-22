@@ -69,6 +69,7 @@ final class RestRoutes {
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})'     => [ 'GET', 'job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/cancel' => [ 'POST', 'cancel_job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/log' => [ 'GET', 'job_log' ],
+			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/kept-entries' => [ 'GET', 'undo_kept' ],
 			'/snapshots'                                 => [ 'GET', 'snapshots' ],
 			// Any text is taken as the ID, so that a malformed one is answered as such and not as an unknown route.
 			'/snapshots/(?P<snapshot>[^/]+)'             => [ 'GET', 'snapshot' ],
@@ -648,6 +649,26 @@ final class RestRoutes {
 		return $this->respond( [ 'jobs' => $this->container->file_changes()->undoable() ] );
 	}
 
+	/**
+	 * One page of the entries that an undo kept, with their reasons.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Page or refusal.
+	 */
+	public function undo_kept( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$offset = $request->get_param( 'offset' ) ?? '0';
+		if ( ! is_scalar( $offset ) || 1 !== preg_match( '/\A[0-9]{1,7}\z/', (string) $offset ) ) {
+			return $this->error( 'invalid_plan_page', 400 );
+		}
+		try {
+			return $this->respond( $this->container->file_changes()->kept_page( Decoded::string( $request->get_url_params()['id'] ?? null ), (int) $offset ) );
+		} catch ( JobConflict ) {
+			return $this->error( 'not_found', 404 );
+		} catch ( InvalidArgument ) {
+			return $this->error( 'invalid_plan_page', 400 );
+		}
+	}
+
 	/** Lists database exchanges with a retained original generation available for undo. */
 	public function database_undoable(): \WP_REST_Response {
 		return $this->respond( [ 'jobs' => $this->container->database_changes()->undoable() ] );
@@ -915,7 +936,7 @@ final class RestRoutes {
 	private function plan_error( InvalidArgument|JobConflict $refused, bool $database = false ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
 			$code = JobError::from_throwable( $refused )->code;
-			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused' ], true ) ? $code : 'live_plan_conflict', 409 );
+			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert' ], true ) ? $code : 'live_plan_conflict', 409 );
 		}
 		$code = JobError::from_throwable( $refused )->code;
 		return $this->error( $database ? 'database_review_required' : ( 'protected_path_invalid' === $code ? $code : 'live_plan_unavailable' ), 400 );

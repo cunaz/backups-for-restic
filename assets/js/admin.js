@@ -257,6 +257,9 @@
 			/* translators: %s: amount of data such as 15 MB. */
 			return notice( 'success', sprintf( __( 'Deleted %s of data that no snapshot uses.', 'backups-for-restic' ), formatBytes( result.bytes_deleted || 0 ) ) );
 		}
+		if ( 'succeeded' === job.state && 'undo' === job.type ) {
+			return undoOutcome( job );
+		}
 		if ( 'succeeded' === job.state && 'forget' === job.type ) {
 			/* translators: %d: number of snapshots. */
 			return notice( 'success', sprintf( _n( 'Removed %d old snapshot.', 'Removed %d old snapshots.', result.removed || 0, 'backups-for-restic' ), result.removed || 0 ) );
@@ -271,6 +274,61 @@
 			);
 		}
 		return notice( 'info', job.state_label );
+	}
+
+	/**
+	 * What a finished undo did, with the entries it kept and why, page by page.
+	 *
+	 * @param {Object} job Finished undo job.
+	 * @return {Element} Outcome.
+	 */
+	function undoOutcome( job ) {
+		const result = job.result || {};
+		const kept = el( 'div' );
+		const path = '/jobs/' + encodeURIComponent( job.id ) + '/kept-entries';
+		if ( result.kept ) {
+			api( path ).then( function ( page ) {
+				replace( kept, [ fileActions( page, ( offset ) => api( path + '?offset=' + offset ), false ) ] );
+			} ).catch( function ( error ) {
+				replace( kept, [ notice( 'error', errorText( error ) ) ] );
+			} );
+		}
+		const summary = 'undone' === result.apply_state
+			? notice( 'success', sprintf(
+				/* translators: 1: restored files, 2: removed files and folders. */
+				__( 'The apply is fully undone: %1$d restored, %2$d removed.', 'backups-for-restic' ), result.restored || 0, result.removed || 0,
+			) )
+			: notice( 'warning', sprintf(
+				/* translators: 1: restored files, 2: removed files and folders, 3: kept entries. */
+				__( 'The apply is partly undone: %1$d restored, %2$d removed, %3$d kept because they changed after the apply. Kept entries stay undoable until the recovery window ends.', 'backups-for-restic' ), result.restored || 0, result.removed || 0, result.kept || 0,
+			) );
+		return el( 'div', {}, [
+			summary,
+			result.changed_after_review ? el( 'p', {}, [ sprintf(
+				/* translators: %d: entries that changed between the review and the undo. */
+				_n( '%d entry changed after the review and was kept.', '%d entries changed after the review and were kept.', result.changed_after_review, 'backups-for-restic' ), result.changed_after_review,
+			) ] ) : null,
+			kept,
+		] );
+	}
+
+	/**
+	 * Says that an apply is partly undone, and what is left of it.
+	 *
+	 * @param {Object} job Undo opportunity.
+	 * @return {?Element} Notice, or null for an apply that no undo has changed.
+	 */
+	function undoState( job ) {
+		if ( 'partly_undone' !== job.state ) {
+			return null;
+		}
+		if ( 'number' !== typeof job.kept ) {
+			return notice( 'warning', __( 'Partly undone: the last undo stopped before it finished. Preview the undo again to revert the rest.', 'backups-for-restic' ) );
+		}
+		return notice( 'warning', sprintf(
+			/* translators: %d: entries that the last undo kept. */
+			_n( 'Partly undone: the last undo kept %d entry because it changed after the apply. Preview the undo again to see whether it can be reverted now.', 'Partly undone: the last undo kept %d entries because they changed after the apply. Preview the undo again to see whether they can be reverted now.', job.kept, 'backups-for-restic' ), job.kept,
+		) );
 	}
 
 	/**
@@ -1254,7 +1312,16 @@
 			existing_file: __( 'File already exists', 'backups-for-restic' ),
 			unstaged_special_entry: __( 'Special entry recorded in the restore report', 'backups-for-restic' ),
 			changed_since_apply: __( 'Live file changed after the apply job', 'backups-for-restic' ),
-			undo_journal: __( 'From the original apply job', 'backups-for-restic' ),
+			undo_journal: __( 'Still as the apply job left it', 'backups-for-restic' ),
+			installed_content: __( 'Another copy with the content and attributes that the apply job installed', 'backups-for-restic' ),
+			not_applied: __( 'The apply job did not change this entry', 'backups-for-restic' ),
+			already_undone: __( 'Already undone', 'backups-for-restic' ),
+			removed_since_apply: __( 'Removed after the apply job', 'backups-for-restic' ),
+			deleted_since_apply: __( 'Deleted after the apply job', 'backups-for-restic' ),
+			parent_changed: __( 'The folder that holds it was replaced or moved after the apply job', 'backups-for-restic' ),
+			new_children: __( 'The folder holds entries that this undo keeps', 'backups-for-restic' ),
+			destination_changed: __( 'The site now maps this snapshot path to another live path', 'backups-for-restic' ),
+			original_unavailable: __( 'The saved original copy is damaged', 'backups-for-restic' ),
 		};
 		const remote = !! plan.plan_job;
 		const mapped = fresh || remote || plan.entries.some( ( entry ) => 'source' in entry && entry.source !== entry.destination );
@@ -1413,6 +1480,11 @@
 				}
 				busy( false );
 				status.textContent = false === plan.enough_space ? __( 'File preview ready. The destination needs more disk space.', 'backups-for-restic' ) : __( 'File preview ready.', 'backups-for-restic' );
+				const totals = undo && plan.totals ? plan.totals : null;
+				let refusal = __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' );
+				if ( totals && 0 === totals.restore + totals.remove ) {
+					refusal = __( 'Nothing of this apply can be undone now: every entry is already undone, or changed after the apply and is kept. The list gives the reason for each entry.', 'backups-for-restic' );
+				}
 				let controls;
 				if ( false === plan.enough_space ) {
 					controls = notice( 'warning', __( 'There is too little disk space for these file changes. Free space on the destination and open a new preview.', 'backups-for-restic' ) );
@@ -1432,13 +1504,17 @@
 				} else {
 					controls = notice( 'info', plan.applicable
 						? __( 'This account or installation does not permit live file changes.', 'backups-for-restic' )
-						: __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' ) );
+						: refusal );
 				}
 				replace( report, [
 					'required_bytes' in plan ? detailTable( 'bfr-file-space', [
 						[ __( 'Additional disk space needed at peak', 'backups-for-restic' ), 'number' === typeof plan.required_bytes ? formatBytes( plan.required_bytes ) : __( 'Open a new preview for an estimate.', 'backups-for-restic' ) ],
 						[ __( 'Available disk space', 'backups-for-restic' ), 'number' === typeof plan.available_bytes ? formatBytes( plan.available_bytes ) : __( 'Unknown on this host', 'backups-for-restic' ) ],
 					] ) : null,
+					totals ? el( 'p', { className: 'bfr-undo-totals' }, [ sprintf(
+						/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
+						__( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), totals.restore, totals.remove, totals.keep,
+					) ] ) : null,
 					fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
 					controls,
 				] );
@@ -1753,6 +1829,7 @@
 							/* translators: %s: date and time when the saved original files expire. */
 							sprintf( __( 'Original files available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
 						] ),
+						undoState( job ),
 						liveChange( job.job, true ),
 					] ) ),
 				] : [] );
