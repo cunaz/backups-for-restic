@@ -262,7 +262,9 @@ later, the heartbeat retries and the job log names it. Expiry depends neither on
 binary log format nor on Galera or the Performance Schema (`SwapCatalog::EXCHANGE_ONLY`).
 
 The importer reads the session's `max_allowed_packet` once per tick and refuses a batch that
-would not fit before sending it (`database_restore_packet`, ADR 0035).
+would not fit before sending it (`database_restore_packet`, ADR 0035). The refusal names the
+batch's SQL size, the limit it needs and the session's limit. The needed limit is a multiple
+of 1024, because MySQL 8.4.11 rounded a larger value down to one without a warning.
 
 ### Several generations
 

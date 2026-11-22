@@ -238,7 +238,7 @@ All notable changes are documented here. The format follows
 - `OPTIMIZE TABLE` and other table rebuilds after a database exchange no longer cost the undo of a rebuilt live table, and a rebuilt witness no longer stops expiry and uninstall. A rebuilt retained table is kept and listed on the job instead of being left behind unnoticed.
 - One database restore whose cleanup keeps failing no longer stops older ones from expiring.
 - The database review reports disabled InnoDB table locks, statement-based binary logging and a Galera node before the import starts, instead of failing after it.
-- A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent. It was reported as a busy database and retried.
+- A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent, and the job log names its size, the limit it needs and the server's limit. It was reported as a busy database and retried.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a

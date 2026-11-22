@@ -105,14 +105,17 @@ final readonly class InsertStatement {
 	/**
 	 * Refuses a batch the server would not accept. A packet larger than max_allowed_packet
 	 * makes the server close the session, which a client cannot tell from a lost connection.
-	 * The shadow's generated name can make a batch longer than its line in the dump.
+	 * The shadow's generated name can make a batch longer than its line in the dump. The
+	 * server rounds max_allowed_packet down to a multiple of 1024, so the limit that the
+	 * refusal names as needed is one.
 	 *
 	 * @param int $packet The session's max_allowed_packet.
 	 * @throws DatabaseFailed With the code database_restore_packet if the batch is too large.
 	 */
 	public function fits( int $packet ): void {
-		if ( strlen( $this->sql ) + self::PACKET_MARGIN > $packet ) {
-			DatabaseFailed::raise( sprintf( 'A row batch of %1$d bytes exceeds the database server\'s max_allowed_packet of %2$d bytes.', strlen( $this->sql ), $packet ), [ 'code' => 'database_restore_packet' ] );
+		$length = strlen( $this->sql );
+		if ( $length + self::PACKET_MARGIN > $packet ) {
+			DatabaseFailed::raise( sprintf( 'A row batch of %1$d bytes of SQL needs a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes.', $length, intdiv( $length + self::PACKET_MARGIN + 1023, 1024 ) * 1024, $packet ), [ 'code' => 'database_restore_packet' ] );
 		}
 	}
 }
