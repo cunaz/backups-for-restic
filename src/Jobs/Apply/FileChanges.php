@@ -139,12 +139,7 @@ final readonly class FileChanges implements StepProvider {
 			return $page;
 		}
 		if ( null !== $original && ! is_string( $original->data['plan_job'] ?? null ) ) {
-			$review  = $this->undo_summary( $original );
-			$settled = array_filter( $review['entries'], static fn ( array $entry ): bool => 'keep' === $entry['action'] && FileChange::settled( $entry['reason'] ) );
-			if ( $this->settle_review( $original, $review['totals'] ?? null, count( $settled ) ) ) {
-				$review['undone'] = true;
-			}
-			return $review;
+			return $this->review_undo( $original );
 		}
 		if ( ! $undo && ! $this->plans->large( $restore ) ) {
 			try {
@@ -241,7 +236,23 @@ final readonly class FileChanges implements StepProvider {
 	 * @return Preview Undo preview.
 	 */
 	public function preview_undo( string $apply_job ): array {
-		return $this->undo_summary( $this->journal->original( $apply_job ) );
+		return $this->review_undo( $this->journal->original( $apply_job ) );
+	}
+
+	/**
+	 * The inline undo review of an apply, which records the apply as undone when nothing of
+	 * it is left to revert.
+	 *
+	 * @param Job $apply Apply.
+	 * @return Preview Undo preview.
+	 */
+	private function review_undo( Job $apply ): array {
+		$review  = $this->undo_summary( $apply );
+		$settled = array_filter( $review['entries'], static fn ( array $entry ): bool => 'keep' === $entry['action'] && FileChange::settled( $entry['reason'] ) );
+		if ( $this->settle_review( $apply, $review['totals'] ?? null, count( $settled ) ) ) {
+			$review['undone'] = true;
+		}
+		return $review;
 	}
 
 	/**
@@ -295,7 +306,7 @@ final readonly class FileChanges implements StepProvider {
 				$this->require_writes( '' === $control_hash ? null : $user );
 				$original = $this->journal->original( $apply_job );
 				$restore  = ApplyJournal::field( $original, 'restore' );
-				$preview  = null === $plan_job ? $this->preview_undo( $apply_job ) : $this->plans->plan_page( $apply_job, $restore, true, false, $plan_job, 0 );
+				$preview  = null === $plan_job ? $this->undo_summary( $original ) : $this->plans->plan_page( $apply_job, $restore, true, false, $plan_job, 0 );
 				$totals   = $preview['totals'] ?? null;
 				if ( null !== $totals && 0 === $totals['restore'] + $totals['remove'] && hash_equals( $preview['digest'], $digest ) ) {
 					JobConflict::raise( 'Nothing of this apply can be undone now.', [ 'code' => 'undo_nothing_to_revert' ] );

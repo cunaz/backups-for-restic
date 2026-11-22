@@ -992,8 +992,7 @@ final class FileChangesTest extends TestCase {
 		$other->finished_at = $this->clock->seconds;
 		$this->jobs->save( $other );
 		// Then it records the apply as undone instead of offering an undo that would be refused.
-		$third = $this->changes->request_preview( $job->id, true, false );
-		self::assertIsArray( $third );
+		$third = $this->changes->preview_undo( $job->id );
 		self::assertTrue( $third['undone'] ?? null );
 		self::assertFalse( $third['applicable'] );
 		self::assertSame(
