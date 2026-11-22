@@ -136,7 +136,23 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.check.outputs.tag }}
+      TAG_OBJECT: ${{ needs.check.outputs.tag_object }}
+      RELEASE_COMMIT: ${{ needs.check.outputs.commit }}
     steps:
+      # The notes must describe what was deployed: a tag moved while the deployment waited for
+      # approval would give them another commit.
+      - name: The tag still names the verified and deployed commit
+        run: |
+          ref="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')"
+          if [[ "$ref" != "tag $TAG_OBJECT" ]]; then
+            echo "::error::$TAG now names the $ref, not the tag object $TAG_OBJECT that was verified and deployed. Find out why before writing release notes by hand."
+            exit 1
+          fi
+          target="$(gh api "repos/$GH_REPO/git/tags/$TAG_OBJECT" --jq '.object.type + " " + .object.sha')"
+          if [[ "$target" != "commit $RELEASE_COMMIT" ]]; then
+            echo "::error::The tag object $TAG_OBJECT names the $target, not the deployed commit $RELEASE_COMMIT."
+            exit 1
+          fi
       - run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
