@@ -188,6 +188,10 @@ final class Messages {
 				'message' => __( 'The private tables of this database restore are in the connected database, so its binding is not discarded.', 'backups-for-restic' ),
 				'hint'    => __( 'The heartbeat removes them when their recovery window ends.', 'backups-for-restic' ),
 			],
+			'database_exchange_rebuilt' => [
+				'message' => __( 'A private table kept for the database undo was rebuilt and has a new physical identity.', 'backups-for-restic' ),
+				'hint'    => __( 'OPTIMIZE TABLE, ALTER TABLE … FORCE and TRUNCATE TABLE renumber a table, so the undo cannot prove that it is the original generation. Restore from a snapshot instead; the job lists the tables to check and drop by hand.', 'backups-for-restic' ),
+			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job contains the database error.', 'backups-for-restic' ),

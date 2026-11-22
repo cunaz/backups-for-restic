@@ -161,19 +161,113 @@ final readonly class TableExchange {
 	/**
 	 * Reads the same object and WordPress account bindings used at commit. A fresh check
 	 * under write locks remains necessary because this preview does not lock live tables.
+	 * The undo binds to the tables that hold the applied generation's names now: a rebuild
+	 * of a live table renumbers it without replacing it, and the administrator confirms
+	 * the identities observed here. The retained generation must still be the recorded one.
 	 *
 	 * @param ExchangePlan $plan Stored owning apply.
 	 * @param int          $admin Proposed undo administrator.
+	 * @return ExchangePlan The plan with the observed identities, for the confirmation.
+	 * @throws DatabaseFailed With the code database_exchange_rebuilt if a retained table was rebuilt.
 	 */
-	public function review_undo( ExchangePlan $plan, int $admin ): void {
-		$plan->owned->locked(
+	public function review_undo( ExchangePlan $plan, int $admin ): ExchangePlan {
+		return $plan->owned->locked(
 			null,
-			function () use ( $plan, $admin ): void {
+			function () use ( $plan, $admin ): ExchangePlan {
 				$facts       = $this->destination( $plan );
-				[ $targets ] = $this->moves( $plan, $facts, 'applied', true );
+				$current     = $this->observed( $this->rebuilt_witness( $plan, $facts ) ?? $plan, $facts );
+				[ $targets ] = $this->moves( $current, $facts, 'applied', true );
 				( new WordPressState( $this->connection ) )->check( $plan->document['prefix'], $targets, $admin );
+				return $current;
 			}
 		);
+	}
+
+	/**
+	 * Recognises this operation's witness after a rebuild gave it a new identity.
+	 *
+	 * @param ExchangePlan $plan Persisted plan.
+	 * @return ExchangePlan|null The plan with the witness's new identity, or null if it was not rebuilt.
+	 * @throws DatabaseFailed If the witness name is occupied by a table this operation does not own.
+	 */
+	public function rebound_witness( ExchangePlan $plan ): ?ExchangePlan {
+		return $plan->owned->locked( null, fn (): ?ExchangePlan => $this->rebuilt_witness( $plan, $this->destination( $plan ) ) );
+	}
+
+	/**
+	 * Names the private tables of a generation that still exist but no longer have their
+	 * recorded identity, mostly after OPTIMIZE TABLE. They cannot be proven to be this
+	 * operation's copies, so cleanup keeps them and reports them instead.
+	 *
+	 * @param ExchangePlan $plan Persisted plan.
+	 * @param string       $generation prepared, applied or undone: the generation to expire.
+	 * @return list<string> Private table names.
+	 */
+	public function rebuilt( ExchangePlan $plan, string $generation ): array {
+		return $plan->owned->locked(
+			null,
+			function () use ( $plan, $generation ): array {
+				$ids   = $this->catalog->identities( $this->destination( $plan ), $plan->all_names() );
+				$names = [];
+				foreach ( $plan->document['pairs'] as $number => $pair ) {
+					$name = 'applied' === $generation ? $plan->owned->retained( $number ) : $plan->owned->shadow( $number );
+					$id   = 'applied' === $generation ? $pair['before'] : $pair['after'];
+					if ( null !== $id && isset( $ids[ $name ] ) && $ids[ $name ] !== $id ) {
+						$names[] = $name;
+					}
+				}
+				return $names;
+			}
+		);
+	}
+
+	/**
+	 * Finds the witness by its ownership comment when its recorded identity is gone from all
+	 * three witness names and exactly one of them holds an owned table. The comment binds
+	 * the table to this operation's random token, as for every other table of an import.
+	 *
+	 * @param ExchangePlan $plan Persisted plan.
+	 * @param Facts        $facts Verified current database.
+	 * @return ExchangePlan|null The plan with the witness's new identity, or null if unchanged or lost.
+	 * @throws DatabaseFailed If the witness name is occupied by a table this operation does not own.
+	 */
+	private function rebuilt_witness( ExchangePlan $plan, array $facts ): ?ExchangePlan {
+		$ids  = $this->catalog->identities( $facts, array_map( $plan->owned->marker( ... ), [ 'prepared', 'applied', 'undone' ] ) );
+		$name = array_key_first( $ids );
+		if ( null === $name || 1 !== count( $ids ) || in_array( $plan->document['witness'], $ids, true ) || ! $plan->owned->exists( $name ) ) {
+			return null;
+		}
+		return $plan->rebind( [], $ids[ $name ] );
+	}
+
+	/**
+	 * Binds the applied generation to the tables now under its live names.
+	 *
+	 * @param ExchangePlan $plan Plan with the current witness.
+	 * @param Facts        $facts Verified current database.
+	 * @return ExchangePlan The plan with the observed live identities.
+	 * @throws DatabaseFailed If a retained table was rebuilt or replaced, or a live table is missing.
+	 */
+	private function observed( ExchangePlan $plan, array $facts ): ExchangePlan {
+		$ids   = $this->catalog->identities( $facts, $plan->all_names() );
+		$after = [];
+		foreach ( $plan->document['pairs'] as $number => $pair ) {
+			$retained = $plan->owned->retained( $number );
+			if ( null !== $pair['before'] && ( $ids[ $retained ] ?? null ) !== $pair['before'] ) {
+				if ( isset( $ids[ $retained ] ) ) {
+					DatabaseFailed::raise( 'A retained database table was rebuilt and cannot be proven to be the original generation.', [ 'code' => 'database_exchange_rebuilt' ] );
+				}
+				throw new DatabaseFailed( 'A retained database table is missing.' );
+			}
+			$live = $ids[ $pair['name'] ] ?? null;
+			if ( null === $live ) {
+				throw new DatabaseFailed( 'A table of the applied database generation is missing.' );
+			}
+			if ( $live !== $pair['after'] ) {
+				$after[ $number ] = $live;
+			}
+		}
+		return [] === $after ? $plan : $plan->rebind( $after, null );
 	}
 
 	/**

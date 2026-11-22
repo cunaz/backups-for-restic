@@ -316,10 +316,13 @@ final readonly class DatabaseChanges implements StepProvider {
 	/**
 	 * Revalidates the current objects and opening of the undo window.
 	 *
+	 * The confirmation covers the identities observed now. After a rebuild of a live table
+	 * or of the witness these differ from the recorded ones; the undo job keeps the change.
+	 *
 	 * @param Job  $owner Owning apply.
 	 * @param int  $user Initiating administrator.
 	 * @param bool $pinned A queued undo pins the original window.
-	 * @return array{preview:Preview,authority:string} Undo review and private binding.
+	 * @return array{preview:Preview,authority:string,rebound:array{after:array<int,string>,witness:string|null}} Undo review and private binding.
 	 * @throws JobConflict If the recovery window expired.
 	 */
 	private function undo_review( Job $owner, int $user, bool $pinned ): array {
@@ -327,7 +330,8 @@ final readonly class DatabaseChanges implements StepProvider {
 			JobConflict::raise( 'This database undo window is no longer available.', [ 'code' => 'database_exchange_changed' ] );
 		}
 		$connection = ( $this->connection )();
-		$plan       = DatabaseGeneration::load( $connection, $owner )->exchange();
+		$recorded   = DatabaseGeneration::load( $connection, $owner )->exchange();
+		$plan       = $recorded;
 		$entries    = [];
 		foreach ( $plan->document['pairs'] as $pair ) {
 			$entries[] = [
@@ -343,16 +347,51 @@ final readonly class DatabaseChanges implements StepProvider {
 		if ( [] === $blockers ) {
 			try {
 				$authority = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
-				( new TableExchange( $connection ) )->review_undo( $plan, $user );
+				$plan      = ( new TableExchange( $connection ) )->review_undo( $recorded, $user );
 			} catch ( DatabaseFailed | FormatException $error ) {
 				$code       = $error->context()['code'] ?? null;
 				$blockers[] = is_string( $code ) ? $code : 'database_exchange_changed';
 			}
 		}
+		$after = [];
+		foreach ( $plan->document['pairs'] as $number => $pair ) {
+			if ( $pair['after'] !== $recorded->document['pairs'][ $number ]['after'] ) {
+				$after[ $number ] = $pair['after'];
+			}
+		}
 		return [
 			'preview'   => DatabaseReview::summary( self::field( $owner, 'restore' ), $user, $entries, $blockers, [], [ 'undo', $owner->id, $owner->data['retained_until'], $plan->document, $authority ] ),
 			'authority' => $authority,
+			'rebound'   => [
+				'after'   => $after,
+				'witness' => $plan->document['witness'] !== $recorded->document['witness'] ? $plan->document['witness'] : null,
+			],
 		];
+	}
+
+	/**
+	 * Applies the identities that the administrator confirmed for an undo to the recorded
+	 * plan. Only identities of the applied generation and of the witness can change.
+	 *
+	 * @param Job          $undo Database undo.
+	 * @param ExchangePlan $plan Recorded plan of the owning apply.
+	 * @return ExchangePlan The plan to exchange.
+	 * @throws FormatException If the confirmed identities are unreadable.
+	 */
+	private static function confirmed_plan( Job $undo, ExchangePlan $plan ): ExchangePlan {
+		$rebound = $undo->data['rebound'] ?? null;
+		$witness = is_array( $rebound ) ? ( $rebound['witness'] ?? null ) : null;
+		if ( ! is_array( $rebound ) || ! is_array( $rebound['after'] ?? null ) || ( null !== $witness && ! is_string( $witness ) ) ) {
+			throw new FormatException( 'The confirmed database undo lost its table identities.' );
+		}
+		$after = [];
+		foreach ( $rebound['after'] as $number => $id ) {
+			if ( ! is_int( $number ) || ! is_string( $id ) ) {
+				throw new FormatException( 'The confirmed database undo has an invalid table identity.' );
+			}
+			$after[ $number ] = $id;
+		}
+		return $plan->rebind( $after, $witness );
 	}
 
 	/**
@@ -421,6 +460,7 @@ final readonly class DatabaseChanges implements StepProvider {
 			$review = $this->undo_review( $this->original( self::field( $job, 'apply' ) ), $user, true );
 			self::confirmed( $review['preview'], $digest );
 			$job->data['authority'] = $review['authority'];
+			$job->data['rebound']   = $review['rebound'];
 			return true;
 		}
 		$connection = ( $this->connection )();
@@ -538,6 +578,7 @@ final readonly class DatabaseChanges implements StepProvider {
 		$owner      = $undo ? $this->original( self::field( $job, 'apply' ) ) : $job;
 		$connection = ( $this->connection )();
 		$plan       = DatabaseGeneration::load( $connection, $owner )->exchange();
+		$plan       = $undo ? self::confirmed_plan( $job, $plan ) : $plan;
 		$exchange   = new TableExchange( $connection );
 		$user       = self::user( $job );
 		$state      = $undo ? 'undone' : 'applied';
@@ -560,7 +601,9 @@ final readonly class DatabaseChanges implements StepProvider {
 				$job->data['database_swapping_at'] = $this->clock->now()[0];
 				$this->jobs->save( $job );
 				if ( $undo ) {
-					// The heartbeat can then recognise a committed undo after a lost reply.
+					// The heartbeat can then recognise a committed undo after a lost reply, and
+					// every later step works with the identities that the undo moves.
+					$owner->data['exchange_plan']         = $plan->document;
 					$owner->data['database_undo_attempt'] = [
 						'job' => $job->id,
 						'at'  => $job->data['database_swapping_at'],

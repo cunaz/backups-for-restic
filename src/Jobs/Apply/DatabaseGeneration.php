@@ -155,6 +155,28 @@ final readonly class DatabaseGeneration {
 	}
 
 	/**
+	 * Uses a rebuilt witness under its new identity, recognised by its ownership comment.
+	 * Without this, every status read and the final DROP would refuse or miss it for ever.
+	 *
+	 * @param JobStore      $jobs Directory-local store.
+	 * @param Job           $job Owning apply.
+	 * @param TableExchange $exchange Exchange on the verified server.
+	 * @param ExchangePlan  $plan Saved plan.
+	 * @return ExchangePlan The plan to clean up with.
+	 */
+	private static function witness( JobStore $jobs, Job $job, TableExchange $exchange, ExchangePlan $plan ): ExchangePlan {
+		$rebound = $exchange->rebound_witness( $plan );
+		if ( null === $rebound ) {
+			return $plan;
+		}
+		$job->data['exchange_plan'] = $rebound->document;
+		$job->warn( 'The witness table of this database restore was rebuilt, for example by OPTIMIZE TABLE, and has a new physical identity. It was recognised by its ownership comment and is used under the new identity.' );
+		$jobs->save( $job );
+		$jobs->log( $job )->write( 'warning', 'The database exchange witness was rebuilt.', [ 'code' => 'database_exchange_rebuilt' ] );
+		return $rebound;
+	}
+
+	/**
 	 * Records an undo that committed although its request lost the reply, from the attempt
 	 * that the undo saved on the owner before its RENAME. The undo job, if it still exists,
 	 * shows the recovered outcome as well. Without that attempt nothing is recorded.
@@ -205,9 +227,10 @@ final readonly class DatabaseGeneration {
 			$next = $binding->owned->clean( $binding->count, $cursor, $deadline );
 		} else {
 			$exchange = new TableExchange( $connection );
+			$plan     = self::witness( $jobs, $job, $exchange, $binding->plan );
 			$phase    = $job->data['database_cleanup_generation'] ?? null;
 			if ( null === $phase ) {
-				$phase = $exchange->status( $binding->plan );
+				$phase = $exchange->status( $plan );
 				if ( 'prepared' !== $phase ) {
 					if ( 'applied' === $phase && ! isset( $job->data['database_generation'] ) ) {
 						self::record( $job, $job, $phase );
@@ -227,12 +250,18 @@ final readonly class DatabaseGeneration {
 					}
 				}
 				$job->data['database_cleanup_generation'] = $phase;
+				$rebuilt                                  = $exchange->rebuilt( $plan, $phase );
+				if ( [] !== $rebuilt ) {
+					$job->data['database_rebuilt'] = $rebuilt;
+					$job->warn( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $rebuilt ), implode( ', ', $rebuilt ) ) );
+					$jobs->log( $job )->write( 'warning', 'Rebuilt private tables were kept.', [ 'code' => 'database_exchange_rebuilt' ] );
+				}
 				$jobs->save( $job );
 			}
 			if ( ! is_string( $phase ) ) {
 				throw new FormatException( 'The database cleanup generation is unreadable.' );
 			}
-			$next = $exchange->clean( $binding->plan, $phase, $cursor, $deadline );
+			$next = $exchange->clean( $plan, $phase, $cursor, $deadline );
 		}
 		$job->data['database_cleanup'] = $next;
 		if ( $next <= $binding->count ) {

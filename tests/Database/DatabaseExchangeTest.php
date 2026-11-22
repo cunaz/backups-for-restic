@@ -751,6 +751,96 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
 
+	/** Rebuilds a table as OPTIMIZE TABLE does for InnoDB, which assigns it a new TABLE_ID. */
+	private function optimize( string $table ): string {
+		$name   = trim( $table, '`' );
+		$before = ( new SwapCatalog( $this->direct ) )->identities( ( new SwapCatalog( $this->direct ) )->facts(), [ $name ] )[ $name ] ?? null;
+		$this->db->rows( 'OPTIMIZE TABLE `' . $name . '`' );
+		$after = ( new SwapCatalog( $this->direct ) )->identities( ( new SwapCatalog( $this->direct ) )->facts(), [ $name ] )[ $name ] ?? null;
+		self::assertNotNull( $after );
+		self::assertNotSame( $before, $after, 'OPTIMIZE TABLE is expected to renumber an InnoDB table.' );
+		return $after;
+	}
+
+	/**
+	 * Runs a reviewed undo of the given apply to its end.
+	 *
+	 * @param array{changes:DatabaseChanges,runner:Runner} $services Job services.
+	 */
+	private static function undo( array $services, Job $apply ): Job {
+		$review = $services['changes']->preview_undo( $apply->id, 1 );
+		self::assertTrue( $review['applicable'], implode( ',', $review['blockers'] ) );
+		return self::advance( $services['runner'], $services['changes']->start_undo( $apply->id, 1, $review['digest'] ) );
+	}
+
+	/** Expires the generations of one owner as the heartbeat would, after its window. */
+	private static function expire_all( array $services, Job $owner ): Job {
+		for ( $i = 0; $i < 16; ++$i ) {
+			$job = $services['jobs']->get( $owner->id );
+			self::assertNotNull( $job );
+			if ( ! isset( $job->data['database_owner'] ) ) {
+				return $job;
+			}
+			$services['changes']->expire( false, microtime( true ) + 2 );
+		}
+		self::fail( 'The generation did not expire.' );
+	}
+
+	public function test_an_undo_binds_to_a_live_table_that_was_optimized_after_the_apply(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		$this->db->execute( "INSERT INTO wp_posts VALUES (77,'after-apply')" );
+		$rebuilt = $this->optimize( 'wp_posts' );
+		$undone  = self::undo( $services, $applied );
+		self::assertSame( JobState::Succeeded, $undone->state, $undone->error?->message ?? '' );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		// The optimized table is retained under its new identity and expires after the window.
+		$owner    = $services['jobs']->get( $applied->id );
+		$plan     = DatabaseGeneration::load( $this->direct, $owner )->exchange();
+		$number   = array_search( 'wp_posts', array_column( $plan->document['pairs'], 'name' ), true );
+		$retained = $plan->owned->shadow( $number );
+		self::assertSame( $rebuilt, $plan->document['pairs'][ $number ]['after'] );
+		self::assertSame( 'after-apply', $this->db->rows( 'SELECT title FROM `' . $retained . '` WHERE id=77' )[0]['title'] );
+		$services['clock']->seconds = $owner->data['retained_until'] + 1;
+		self::assertArrayNotHasKey( 'database_rebuilt', self::expire_all( $services, $applied )->data );
+		self::assertFalse( $this->present( $retained ) );
+	}
+
+	public function test_a_rebuilt_witness_is_recognised_for_undo_and_expiry(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		$plan     = DatabaseGeneration::load( $this->direct, $applied )->exchange();
+		$witness  = $plan->owned->marker( 'applied' );
+		$this->optimize( $witness );
+		self::assertTrue( $services['changes']->preview_undo( $applied->id, 1 )['applicable'], 'A rebuilt witness does not cost the undo.' );
+		// Without an undo the heartbeat recognises the witness and expires the generation.
+		$services['clock']->seconds = $applied->data['retained_until'] + 1;
+		$expired                    = self::expire_all( $services, $applied );
+		self::assertContains( 'database_exchange_rebuilt', array_column( array_column( $services['jobs']->log( $expired )->read( 20 ), 'context' ), 'code' ) );
+		self::assertFalse( $this->present( $witness ), 'The witness is dropped last under its new identity.' );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	public function test_a_rebuilt_retained_table_refuses_the_undo_and_is_kept_and_reported_at_expiry(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		$retained = trim( $this->holder( $applied, 'wp_posts', 'retained' ), '`' );
+		$this->optimize( $retained );
+		$review = $services['changes']->preview_undo( $applied->id, 1 );
+		self::assertFalse( $review['applicable'] );
+		self::assertContains( 'database_exchange_rebuilt', $review['blockers'] );
+		$services['clock']->seconds = $applied->data['retained_until'] + 1;
+		$expired                    = self::expire_all( $services, $applied );
+		self::assertSame( [ $retained ], $expired->data['database_rebuilt'] ?? null );
+		self::assertStringContainsString( $retained, implode( ' ', $expired->warnings ) );
+		self::assertTrue( $this->present( $retained ), 'An object whose identity is not proven is never dropped.' );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM `' . $retained . '`' )[0]['title'] );
+		self::assertSame( [ $retained ], array_values( array_filter( $this->private_tables(), static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $applied->data['database_owner']['token'] ) ) ) );
+	}
+
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
 		$this->mysql_only();
 		$site     = $this->directory . '/site';
