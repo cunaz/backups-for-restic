@@ -72,6 +72,10 @@ final class Messages {
 				'message' => __( 'There is too little disk space to complete these file changes.', 'backups-for-restic' ),
 				'hint'    => __( 'Free space on the destination, then open a new preview to check the estimate and available space.', 'backups-for-restic' ),
 			],
+			'protected_path_invalid'         => [
+				'message' => __( 'A WordPress location that file apply protects is not an absolute path without "." or ".." segments.', 'backups-for-restic' ),
+				'hint'    => __( 'Check WP_CONTENT_DIR, WPMU_PLUGIN_DIR and BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php, then open the preview again. The staged files remain available for download.', 'backups-for-restic' ),
+			],
 			'index_too_large'                => [
 				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
 				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),

@@ -9,7 +9,9 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Restore;
 
+use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Engine\Restore\Names;
+use BackupsForRestic\Engine\Snapshot\Manifest;
 use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
@@ -23,14 +25,42 @@ defined( 'ABSPATH' ) || exit;
  * exists during inspection; a writer must check again immediately before changing it.
  *
  * @phpstan-type Action array{path: string, destination: string|null, action: string, reason: string}
+ * @phpstan-type Writer array{uid: int, groups: list<int>|null}
+ * @phpstan-type Guard array{reason: string, keys: list<string>, decided: list<bool>}
  */
 final class ApplyPlan {
 
 	/** Number of sibling spellings retained across a read-only batch. */
 	private const int CACHED_NAMES = 16384;
 
+	/** Number of staged directories named spool whose examination is remembered. */
+	private const int CACHED_SPOOLS = 256;
+
+	/** Number of files named like a dump's that are read in one database directory of a spool. */
+	private const int SPOOL_FILES = 1024;
+
+	/** Number of names that are listed in one database directory of a spool. */
+	private const int SPOOL_NAMES = 65536;
+
 	/** Wider folders share a disk index across read-only worker requests. */
 	private const int DISK_THRESHOLD = 2048;
+
+	/**
+	 * Code points that a case-insensitive filesystem may ignore in a name: Unicode's
+	 * Default_Ignorable_Code_Point property, which contains those that HFS+ skips.
+	 */
+	private const string IGNORABLE = '/[\x{00AD}\x{034F}\x{061C}\x{115F}\x{1160}\x{17B4}\x{17B5}\x{180B}-\x{180F}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{3164}\x{FE00}-\x{FE0F}\x{FEFF}\x{FFA0}\x{FFF0}-\x{FFF8}\x{1BCA0}-\x{1BCA3}\x{1D173}-\x{1D17A}\x{E0000}-\x{E0FFF}]/u';
+
+	/**
+	 * Characters that a filesystem equates with ASCII beyond full case folding: NTFS and SMB
+	 * uppercase a dotless i to I, and canonical decomposition turns the Greek question mark
+	 * and the varia into ASCII punctuation.
+	 */
+	private const array LOOKALIKES = [
+		"\u{0131}" => 'i',
+		"\u{037E}" => ';',
+		"\u{1FEF}" => '`',
+	];
 
 	/**
 	 * Bounded sibling indexes shared only within one read-only worker.
@@ -54,6 +84,13 @@ final class ApplyPlan {
 	private bool $rechecking = false;
 
 	/**
+	 * Staged directories named spool, and whether a backup of this plugin wrote them.
+	 *
+	 * @var array<string, bool>
+	 */
+	private array $spools = [];
+
+	/**
 	 * Live directories in their canonical form.
 	 *
 	 * @var list<string>
@@ -61,27 +98,50 @@ final class ApplyPlan {
 	private array $roots = [];
 
 	/**
-	 * Locations that must never be replaced.
+	 * Locations that must never be replaced, keyed by every spelling that a canonical live
+	 * target can have, with the reason code of the entries they skip and the comparison keys
+	 * of their names.
 	 *
-	 * @var list<string>
+	 * @var array<string, Guard>
 	 */
-	private array $protected = [];
+	private array $guards = [];
+
+	/**
+	 * Effective user of this process and the groups a file it writes can have, null for any
+	 * group; false where the POSIX extension cannot tell.
+	 *
+	 * @var Writer|false
+	 */
+	private array|false $process;
+
+	/**
+	 * Whether the intl extension normalizes names for the comparison with protected paths.
+	 *
+	 * @var bool
+	 */
+	private bool $normalizer;
 
 	/**
 	 * Opens the destination policy.
 	 *
-	 * @param list<string>    $roots          Allowed live roots, absolute existing directories.
-	 * @param list<string>    $excluded      Private state and the running plugin.
-	 * @param list<string>    $config_files   Live configuration files skipped by default.
-	 * @param bool            $include_config Whether configuration files were explicitly requested.
-	 * @param SiteLayout|null $layout Optional mapping for a verified fresh-site restore.
-	 * @param list<string>    $bootstrap Bootstrap locations requiring an offline restore.
-	 * @throws InvalidArgument If the site has no usable live root or a protected path is ambiguous.
+	 * @param list<string>      $roots          Allowed live roots, absolute existing directories.
+	 * @param list<string>      $excluded      Private state and the running plugin.
+	 * @param list<string>      $config_files   Live configuration files skipped by default.
+	 * @param bool              $include_config Whether configuration files were explicitly requested.
+	 * @param SiteLayout|null   $layout Optional mapping for a verified fresh-site restore.
+	 * @param list<string>      $bootstrap Bootstrap locations requiring an offline restore.
+	 * @param Writer|false|null $process Identity that writes the files, false when it is unknown, null to ask the POSIX extension.
+	 * @param bool|null         $normalizer Whether to compare names with intl's normalization, null where it is loaded.
+	 * @throws InvalidArgument If the site has no usable live root or a protected location is not
+	 *                         an absolute path without dot segments.
 	 */
-	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, private readonly array $bootstrap = [] ) {
+	public function __construct( array $roots, array $excluded, array $config_files = [], bool $include_config = false, private readonly ?SiteLayout $layout = null, array $bootstrap = [], array|false|null $process = null, ?bool $normalizer = null ) {
 		if ( $include_config && null !== $layout ) {
 			throw new InvalidArgument( 'A fresh-site import preserves the current installation configuration.' );
 		}
+		$this->process = $process ?? self::process();
+		// intl defines NFKC_Casefold only when it was built with ICU 56 or later.
+		$this->normalizer = $normalizer ?? ( class_exists( \Normalizer::class ) && defined( 'Normalizer::FORM_KC_CF' ) );
 		foreach ( $roots as $root ) {
 			$root = rtrim( $root, '/' );
 			if ( '' !== $root && str_starts_with( $root, '/' ) && is_dir( $root ) && realpath( $root ) === $root ) {
@@ -92,13 +152,10 @@ final class ApplyPlan {
 			throw new InvalidArgument( 'No canonical live directory is available for file apply.' );
 		}
 		foreach ( array_merge( $excluded, $include_config ? [] : $config_files ) as $path ) {
-			$path = rtrim( $path, '/' );
-			Path::parts( $path );
-			$this->protected[] = $path;
-			$real              = realpath( $path );
-			if ( false !== $real && $real !== $path ) {
-				$this->protected[] = $real;
-			}
+			$this->protect( $path, 'protected' );
+		}
+		foreach ( $bootstrap as $path ) {
+			$this->protect( $path, 'offline_restore_required' );
 		}
 	}
 
@@ -252,6 +309,10 @@ final class ApplyPlan {
 			}
 			foreach ( $parts as $name ) {
 				Names::validate( $name );
+				// A filesystem that ignores invisible characters would read these as dot entries.
+				if ( in_array( preg_replace( self::IGNORABLE, '', $name ), [ '', '.', '..' ], true ) ) {
+					return self::decision( $path, $target, 'refuse', 'invalid_path' );
+				}
 			}
 		} catch ( FormatException | InvalidArgument ) {
 			return self::decision( $path, $target, 'refuse', 'invalid_path' );
@@ -266,15 +327,12 @@ final class ApplyPlan {
 		} catch ( FormatException | InvalidArgument ) {
 			return self::decision( $path, null, 'refuse', 'ambiguous_destination' );
 		}
-		foreach ( $this->protected as $excluded ) {
-			if ( null !== $target && self::within( self::fold( $target ), self::fold( $excluded ) ) ) {
-				return self::decision( $path, $target, 'skip', 'protected' );
-			}
+		$guard = null === $target ? null : $this->protection( $target );
+		if ( null !== $guard && 'unverified_name' !== $guard ) {
+			return self::decision( $path, $target, 'skip', $guard );
 		}
-		foreach ( $this->bootstrap as $critical ) {
-			if ( null !== $target && self::within( self::fold( $target ), self::fold( $critical ) ) ) {
-				return self::decision( $path, $target, 'skip', 'offline_restore_required' );
-			}
+		if ( $this->spool( $files, $parts ) ) {
+			return self::decision( $path, $target, 'skip', 'snapshot_spool' );
 		}
 		$root     = null;
 		$ancestor = $this->layout?->is_ancestor( $path ) ?? false;
@@ -290,6 +348,9 @@ final class ApplyPlan {
 				return self::decision( $path, $target, 'refuse', 'unavailable_destination_root' );
 			}
 			return self::decision( $path, $target, 'skip', 'outside_roots' );
+		}
+		if ( null !== $guard && null !== $root ) {
+			return self::decision( $path, $target, 'refuse', 'unverified_name' );
 		}
 		clearstatcache( true );
 		$source = $files . $path;
@@ -344,7 +405,71 @@ final class ApplyPlan {
 		if ( $directory || false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) || 1 !== $stat['nlink'] ) {
 			return self::decision( $path, $target, 'refuse', 'type_conflict' );
 		}
-		return is_writable( dirname( $target ) ) ? self::decision( $path, $target, 'replace', 'existing_file' ) : self::decision( $path, $target, 'refuse', 'unwritable_destination' );
+		if ( ! is_writable( dirname( $target ) ) ) {
+			return self::decision( $path, $target, 'refuse', 'unwritable_destination' );
+		}
+		$conflict = $this->metadata_conflict( $stat );
+		return null === $conflict ? self::decision( $path, $target, 'replace', 'existing_file' ) : self::decision( $path, $target, 'refuse', $conflict );
+	}
+
+	/**
+	 * The identity that writes the replacements: the process's effective user, which owns
+	 * every file it creates, and the groups such a file can have. These are the groups the
+	 * user can give a file it owns, and the group of the directory the apply builds its
+	 * copies in: below a setgid directory, and on filesystems with BSD group semantics, a
+	 * new file takes the group of its directory even when the user is not a member of it.
+	 * A file that the apply created is published with that group, and the checks after
+	 * publication and during undo must accept it. Root can give any group.
+	 *
+	 * @param string|null $storage Directory in which the apply builds its copies, the private directory.
+	 * @return Writer|false Identity, or false where the POSIX extension cannot tell.
+	 */
+	public static function process( ?string $storage = null ): array|false {
+		// A host can disable single functions, and PHP then leaves them undefined.
+		if ( ! function_exists( 'posix_geteuid' ) || ! function_exists( 'posix_getegid' ) || ! function_exists( 'posix_getgroups' ) ) {
+			return false;
+		}
+		$uid = posix_geteuid();
+		if ( 0 === $uid ) {
+			return [
+				'uid'    => $uid,
+				'groups' => null,
+			];
+		}
+		$member = posix_getgroups();
+		$groups = array_merge( [ posix_getegid() ], false === $member ? [] : $member );
+		$stat   = null === $storage || ! is_dir( $storage ) ? false : stat( $storage );
+		if ( false !== $stat ) {
+			$groups[] = $stat['gid'];
+		}
+		return [
+			'uid'    => $uid,
+			'groups' => $groups,
+		];
+	}
+
+	/**
+	 * Predicts whether the apply can keep the owner, group and mode of a file it replaces.
+	 * The apply builds each replacement as its own effective user, gives it the group of
+	 * the live file, and refuses to publish it when either differs; it never replaces a file
+	 * with setuid, setgid or sticky bits. The review refuses such a file up front, before an
+	 * apply could stop half-way. Without the POSIX extension the user and its groups are
+	 * unknown, and the apply-time check before each replacement remains the only one.
+	 *
+	 * @param array<int|string, int> $stat Live regular file.
+	 * @return string|null Reason of the refusal, or null when the replacement keeps them.
+	 */
+	private function metadata_conflict( array $stat ): ?string {
+		if ( 0 !== ( $stat['mode'] & 07000 ) ) {
+			return 'special_permissions';
+		}
+		if ( false === $this->process ) {
+			return null;
+		}
+		if ( $stat['uid'] !== $this->process['uid'] ) {
+			return 'foreign_owner';
+		}
+		return null === $this->process['groups'] || in_array( $stat['gid'], $this->process['groups'], true ) ? null : 'foreign_group';
 	}
 
 	/**
@@ -430,6 +555,297 @@ final class ApplyPlan {
 			$cache[ $cache_key ] = $names;
 		}
 		return $valid;
+	}
+
+	/**
+	 * Recognizes a snapshot's spool. Every backup records the site manifest and the
+	 * plaintext database dump in spool/ of the private directory, at the location the
+	 * directory had then. Once the private directory has moved, nothing else protects that
+	 * location, and the dump carries none of the deny files of a private directory. So no
+	 * apply writes a spool anywhere; the database rehearsal reads it from staging instead.
+	 *
+	 * @param string       $files Canonical staging directory.
+	 * @param list<string> $parts Names of the snapshot path.
+	 * @return bool Whether the path is a staged spool or lies in one.
+	 */
+	private function spool( string $files, array $parts ): bool {
+		$prefix = $files;
+		foreach ( $parts as $name ) {
+			$prefix .= '/' . $name;
+			if ( 'spool' !== $name ) {
+				continue;
+			}
+			if ( ! isset( $this->spools[ $prefix ] ) ) {
+				if ( count( $this->spools ) >= self::CACHED_SPOOLS ) {
+					$this->spools = [];
+				}
+				$this->spools[ $prefix ] = self::written_by_backup( $prefix );
+			}
+			if ( $this->spools[ $prefix ] ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Tells a backup's spool from another directory with that name by what only the backup
+	 * writes: a site manifest that declares its format, or a database directory with a dump
+	 * manifest or an SQL file that starts with the dump's format line. Every file of a
+	 * dump starts with that line, so a selection of one table file is recognized as well.
+	 * The database directory is listed, and the files named as a dump names its own
+	 * (manifest.json, and three digits, a hyphen and a name ending in .sql) are read. Both
+	 * are bounded, so that one directory cannot use up a request. What cannot be decided
+	 * counts as the backup's: a file that cannot be read, and a directory in which neither
+	 * SPOOL_NAMES listed names nor SPOOL_FILES read files showed a dump.
+	 *
+	 * @param string $directory Staged directory named spool.
+	 * @return bool Whether a backup of this plugin wrote it.
+	 */
+	private static function written_by_backup( string $directory ): bool {
+		if ( is_link( $directory ) || ! is_dir( $directory ) ) {
+			return false;
+		}
+		if ( self::declares( $directory . '/manifest.json', Manifest::FORMAT ) ) {
+			return true;
+		}
+		$database = $directory . '/database';
+		if ( is_link( $database ) || ! is_dir( $database ) ) {
+			return false;
+		}
+		$handle = @opendir( $database ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable staged directory is reported by the return value.
+		if ( false === $handle ) {
+			return true;
+		}
+		$line   = '-- ' . explode( '/', TableSource::FORMAT )[0] . '/';
+		$read   = 0;
+		$listed = 0;
+		try {
+			while ( true ) {
+				$name = readdir( $handle );
+				if ( false === $name ) {
+					return false;
+				}
+				++$listed;
+				if ( $listed > self::SPOOL_NAMES + 2 ) {
+					// Too many to list them all, and a later one could be a dump's.
+					return true;
+				}
+				// The names the dump gives its files: 000-header.sql, 010-<table>.sql, 900-views.sql.
+				$manifest = 'manifest.json' === $name;
+				if ( ! $manifest && 1 !== preg_match( '/\A[0-9]{3}-.+\.sql\z/s', $name ) ) {
+					continue;
+				}
+				$file = $database . '/' . $name;
+				if ( is_link( $file ) || ! is_file( $file ) ) {
+					continue;
+				}
+				// An unreadable file is not shown to be something else.
+				if ( $manifest ? self::declares( $file, TableSource::FORMAT ) : in_array( self::head( $file, strlen( $line ) ), [ $line, null ], true ) ) {
+					return true;
+				}
+				++$read;
+				if ( $read >= self::SPOOL_FILES ) {
+					// Too many to read them all, and a later one could be a dump's.
+					return true;
+				}
+			}
+		} finally {
+			closedir( $handle );
+		}
+	}
+
+	/**
+	 * Whether a JSON file declares the format name of one of the backup's manifests near its
+	 * start, whatever the version. Both manifests are written with the format as their
+	 * first member.
+	 *
+	 * @param string $file   Staged file.
+	 * @param string $format Format name and version, for example backups-for-restic-site/1.
+	 * @return bool Whether the file declares that format, or cannot be read.
+	 */
+	private static function declares( string $file, string $format ): bool {
+		if ( is_link( $file ) || ! is_file( $file ) ) {
+			return false;
+		}
+		$head = self::head( $file, 4096 );
+		// json_encode() writes the slash escaped; a manifest written by hand need not.
+		return null === $head || 1 === preg_match( '/"format"\s*:\s*"' . preg_quote( explode( '/', $format )[0], '/' ) . '\\\\?\/[0-9]+"/', $head );
+	}
+
+	/**
+	 * Reads the first bytes of a staged file.
+	 *
+	 * @param string      $file   Regular file.
+	 * @param int<1, max> $length Number of bytes.
+	 * @return string|null Bytes, or null when the file cannot be read.
+	 */
+	private static function head( string $file, int $length ): ?string {
+		$head = @file_get_contents( $file, false, null, 0, $length ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable staged file is reported by its return value.
+		return false === $head ? null : $head;
+	}
+
+	/**
+	 * Protects a location under each spelling that a writable target can have. Every target
+	 * is canonical, so repeated and trailing slashes are dropped, and the deepest existing
+	 * ancestor is resolved: a location configured through a symbolic link, or a drop-in that
+	 * does not exist yet, then also names the directory that WordPress actually loads from.
+	 * A location listed twice keeps the reason it was listed with first.
+	 *
+	 * @param string $path   Configured location.
+	 * @param string $reason Reason code of the entries it skips.
+	 * @throws InvalidArgument If the location is not an absolute path without dot segments.
+	 */
+	private function protect( string $path, string $reason ): void {
+		while ( str_contains( $path, '//' ) ) {
+			$path = str_replace( '//', '/', $path );
+		}
+		$path = rtrim( $path, '/' );
+		try {
+			Path::parts( $path );
+		} catch ( InvalidArgument $error ) {
+			// A location that cannot be compared would be silently unprotected.
+			InvalidArgument::raise( 'A location that file apply protects is not an absolute path without dot segments.', [ 'code' => 'protected_path_invalid' ], $error );
+		}
+		$resolved = self::resolved( $path );
+		if ( '' === $resolved ) {
+			// A location that is a link to the filesystem root would cover every target.
+			InvalidArgument::raise( 'A location that file apply protects resolves to the filesystem root.', [ 'code' => 'protected_path_invalid' ] );
+		}
+		foreach ( [ $path, $resolved ] as $spelling ) {
+			[ $keys, $decided ]          = $this->keys( $spelling );
+			$this->guards[ $spelling ] ??= [
+				'reason'  => $reason,
+				'keys'    => $keys,
+				'decided' => $decided,
+			];
+		}
+	}
+
+	/**
+	 * Finds the protection that covers a live target.
+	 *
+	 * @param string $target Canonical live path.
+	 * @return string|null Reason of the first protection that covers the target, unverified_name
+	 *                     when one may cover it but only normalization could tell, or null.
+	 */
+	private function protection( string $target ): ?string {
+		[ $keys, $decided ] = $this->keys( $target );
+		foreach ( $this->guards as $guard ) {
+			// Name by name: a key can contain a slash that normalization made of another
+			// character, which is no boundary between names.
+			if ( array_slice( $keys, 0, count( $guard['keys'] ) ) === $guard['keys'] ) {
+				return $guard['reason'];
+			}
+		}
+		if ( in_array( false, $decided, true ) ) {
+			foreach ( $this->guards as $guard ) {
+				if ( self::undecided( $guard, $keys, $decided ) ) {
+					return 'unverified_name';
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Whether a protection may cover a target whose keys differ from its own: each pair of
+	 * names is equal, or both keep characters that only normalization could compare and
+	 * agree in everything that canonical equivalence leaves alone.
+	 *
+	 * @param Guard        $guard   Protected path.
+	 * @param list<string> $keys    Keys of the target's names.
+	 * @param list<bool>   $decided Whether each of them decides a comparison.
+	 * @return bool Whether the target must be refused rather than guessed.
+	 */
+	private static function undecided( array $guard, array $keys, array $decided ): bool {
+		if ( count( $keys ) < count( $guard['keys'] ) ) {
+			return false;
+		}
+		foreach ( $guard['keys'] as $index => $key ) {
+			if ( $key !== $keys[ $index ] && ( $guard['decided'][ $index ] || $decided[ $index ] || self::skeleton( $key ) !== self::skeleton( $keys[ $index ] ) ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Keeps what canonical equivalence cannot change in a folded name: the ASCII characters
+	 * that no combining mark follows. A decomposed letter is its base followed by marks, so
+	 * two names whose skeletons differ are different on every filesystem.
+	 *
+	 * @param string $key Folded name in valid UTF-8.
+	 * @return string Skeleton.
+	 */
+	private static function skeleton( string $key ): string {
+		return preg_replace( '/[\x00-\x7f](?=\p{M})|[^\x00-\x7f]/u', '', $key ) ?? '';
+	}
+
+	/**
+	 * Splits an absolute path into the comparison keys of its names.
+	 *
+	 * @param string $path Absolute path without empty or dot components.
+	 * @return array{list<string>, list<bool>} Keys, and whether each decides every comparison.
+	 */
+	private function keys( string $path ): array {
+		$keys    = [];
+		$decided = [];
+		foreach ( explode( '/', substr( $path, 1 ) ) as $name ) {
+			[ $key, $exact ] = $this->key( $name );
+			$keys[]          = $key;
+			$decided[]       = $exact;
+		}
+		return [ $keys, $decided ];
+	}
+
+	/**
+	 * Builds the key that compares a name with protected names at least as loosely as any
+	 * case-insensitive filesystem does. ext4 and f2fs casefolding decompose to NFD and fold
+	 * fully, HFS+ and APFS also ignore normalization and some invisible characters, and NTFS
+	 * uppercases a dotless i to I. The key folds fully, drops default-ignorable code points
+	 * and, with the intl extension, applies compatibility normalization (NFKC_Casefold).
+	 * Without intl an ASCII key still decides every comparison, because each character that
+	 * a filesystem equates with ASCII is folded or mapped; two keys that both keep other
+	 * characters could only be compared normalized.
+	 *
+	 * @param string $name One name.
+	 * @return array{string, bool} Key, and whether it decides every comparison.
+	 */
+	private function key( string $name ): array {
+		if ( 1 !== preg_match( '/[\x80-\xff]/', $name ) || ! mb_check_encoding( $name, 'UTF-8' ) ) {
+			return [ strtolower( $name ), true ];
+		}
+		$name = strtr( $name, self::LOOKALIKES );
+		if ( $this->normalizer ) {
+			$key = \Normalizer::normalize( $name, \Normalizer::FORM_KC_CF );
+			if ( is_string( $key ) ) {
+				return [ $key, true ];
+			}
+		}
+		$key = mb_convert_case( preg_replace( self::IGNORABLE, '', $name ) ?? '', MB_CASE_FOLD, 'UTF-8' );
+		return [ $key, 1 !== preg_match( '/[\x80-\xff]/', $key ) ];
+	}
+
+	/**
+	 * Resolves the deepest existing ancestor of a path and keeps the names below it.
+	 *
+	 * @param string $path Absolute path without empty or dot components.
+	 * @return string Canonical spelling, or the path itself when no ancestor resolves.
+	 */
+	private static function resolved( string $path ): string {
+		clearstatcache( true );
+		$parts   = explode( '/', substr( $path, 1 ) );
+		$missing = '';
+		while ( [] !== $parts ) {
+			// An ancestor outside open_basedir does not resolve; the spelling as configured stays.
+			$real = @realpath( '/' . implode( '/', $parts ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir warns for every ancestor above the site.
+			if ( false !== $real ) {
+				return rtrim( $real, '/' ) . $missing;
+			}
+			$missing = '/' . array_pop( $parts ) . $missing;
+		}
+		return $path;
 	}
 
 	/**
