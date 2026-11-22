@@ -212,10 +212,14 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   background review shows a created directory for removal only if every entry in it is a
   removal in the same review: a row that it reviews again, after a tick whose document a
   stopped worker did not write or from a checkpoint of an earlier version, which starts
-  over with the refused count cleared, withdraws the removal that it claimed before. The worker
-  reverts only entries that the review showed for a revert. It checks each one again
+  over with the refused count cleared, withdraws the removal that it claimed before. The
+  worker reverts only entries that the review showed for a revert. It checks each one again
   immediately before it touches it and keeps one that changed since the review, counted in
-  `changed_after_review`, instead of failing the job. Its preflight therefore no longer
+  `changed_after_review`, instead of failing the job. An entry that the review showed with
+  nothing left to revert is checked against its live path as well and counts as `unchanged`
+  only while that still holds; one that came back since is kept, not reverted, and counted
+  in `changed_after_review`, so that the undo does not end the window while that entry
+  could still be reverted. Its preflight therefore no longer
   rechecks every live entry before maintenance; it checks that the confirmed review belongs
   to the apply and its manifest. An inline undo queued by an earlier version has no stored
   decisions, so nothing says which entries the administrator saw as kept: it is refused

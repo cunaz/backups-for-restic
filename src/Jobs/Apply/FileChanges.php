@@ -683,9 +683,10 @@ final readonly class FileChanges implements StepProvider {
 			[ $action, $reason ] = null === $review ? $reviewed[ $done ] : self::reviewed_row( $review->row( $done ), $row );
 			$source              = Bytes::base64url_decode( $row['path'] );
 			$path                = self::target( $row );
+			$change              = new FileChange( $plan, $files, $this->journal->workspace( $original ) . '/item-' . $index, $source, $job->id );
 			if ( 'keep' === $action ) {
-				$outcome = [
-					'outcome' => FileChange::settled( $reason ) ? 'unchanged' : 'kept',
+				$outcome = FileChange::settled( $reason ) ? self::still_settled( $change, $plan, $source, $path, $row['action'], $reason, $deadline ) : [
+					'outcome' => 'kept',
 					'reason'  => $reason,
 				];
 			} elseif ( $plan->destination( $source ) !== $path ) {
@@ -694,15 +695,15 @@ final readonly class FileChanges implements StepProvider {
 					'reason'  => 'destination_changed',
 				];
 			} else {
-				$change  = new FileChange( $plan, $files, $this->journal->workspace( $original ) . '/item-' . $index, $source, $job->id );
 				$outcome = $change->undo( $path, $row['action'], $deadline, $action );
-				if ( null === $outcome ) {
-					return false;
-				}
+			}
+			if ( null === $outcome ) {
+				return false;
 			}
 			++$counts[ $outcome['outcome'] ];
 			if ( 'kept' === $outcome['outcome'] ) {
-				$counts['changed_after_review'] += in_array( $action, [ 'restore', 'remove' ], true ) ? 1 : 0;
+				// A revert, or an entry that had nothing left to revert, changed since the review.
+				$counts['changed_after_review'] += 'keep' !== $action || FileChange::settled( $reason ) ? 1 : 0;
 				$kept                          ??= $this->kept( $job, true );
 				$kept->put( 'rows', $counts['kept'] - 1, ApplyManifest::row( $row['path'], $path, 'keep', $outcome['reason'] ) );
 				$kept->flush();
@@ -712,6 +713,42 @@ final readonly class FileChanges implements StepProvider {
 			$this->jobs->save( $job );
 		} while ( $done < $total && microtime( true ) < $deadline && ! $this->jobs->cancel_requested( $job ) );
 		return $done === $total;
+	}
+
+	/**
+	 * The outcome of an entry that the review showed with nothing left to revert: unchanged
+	 * while that still holds. An entry that came back since, or that the site now treats
+	 * otherwise, is kept, not reverted against the confirmation, so that the apply stays
+	 * partly undone and a later review can revert it.
+	 *
+	 * @param FileChange $change Entry.
+	 * @param ApplyPlan  $plan Current policy.
+	 * @param string     $source Snapshot path.
+	 * @param string     $path Live destination.
+	 * @param string     $action Forward action.
+	 * @param string     $reason Reviewed reason.
+	 * @param float      $deadline Tick deadline.
+	 * @return Outcome|null Outcome, or null when the check needs another tick.
+	 */
+	private static function still_settled( FileChange $change, ApplyPlan $plan, string $source, string $path, string $action, string $reason, float $deadline ): ?array {
+		try {
+			$now = $plan->destination( $source ) === $path ? $change->undo_review( $path, $action, $deadline ) : [
+				'action' => 'keep',
+				'reason' => 'destination_changed',
+			];
+		} catch ( FileWorkPending ) {
+			return null;
+		}
+		if ( 'keep' === $now['action'] && FileChange::settled( $now['reason'] ) ) {
+			return [
+				'outcome' => 'unchanged',
+				'reason'  => $reason,
+			];
+		}
+		return [
+			'outcome' => 'kept',
+			'reason'  => 'keep' === $now['action'] ? $now['reason'] : 'changed_since_apply',
+		];
 	}
 
 	/**

@@ -691,6 +691,41 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'restore', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
 	}
 
+	public function test_an_entry_with_nothing_left_to_revert_that_comes_back_before_the_worker_keeps_the_apply_open(): void {
+		// A file that the apply creates in a folder that exists already.
+		$file = $this->live . '/c-new.txt';
+		file_put_contents( $this->files . $file, 'created' );
+		$this->write_report( $this->live . '/skipped-link' );
+		$job = $this->run_job( $this->start() );
+		clearstatcache();
+		$installed = [ fileperms( $file ) & 0777, (int) filemtime( $file ) ];
+		unlink( $file );
+		$review = $this->changes->preview_undo( $job->id );
+		self::assertSame( [ 'keep', 'removed_since_apply' ], [ array_column( $review['entries'], 'action', 'path' )[ $file ], array_column( $review['entries'], 'reason', 'path' )[ $file ] ] );
+		$undo = $this->changes->start_undo( $job->id, $review['digest'] );
+		// Before the worker comes, the file is back as the apply left it.
+		file_put_contents( $file, 'created' );
+		chmod( $file, $installed[0] );
+		touch( $file, $installed[1] );
+		$done = $this->run_job( $undo );
+		self::assertSame(
+			[
+				'restored'             => 1,
+				'removed'              => 2,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 1,
+				'apply_state'          => 'partly_undone',
+			],
+			self::outcomes( $done )
+		);
+		self::assertSame( [ $file => 'changed_since_apply' ], $this->kept( $done ) );
+		self::assertSame( 'created', file_get_contents( $file ) );
+		// The undo window stays open, and the next undo reverts it.
+		self::assertFileDoesNotExist( $this->jobs->directory( $job ) . '/undo/reverted' );
+		self::assertSame( 'remove', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
+	}
+
 	public function test_an_entry_that_someone_else_removed_after_the_review_is_not_counted_as_removed(): void {
 		$job    = $this->run_job( $this->start() );
 		$review = $this->changes->preview_undo( $job->id );
