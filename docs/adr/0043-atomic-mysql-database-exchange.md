@@ -185,7 +185,9 @@ the code `database_exchange_foreign`. A server without a readable UUID cannot be
 from the original one and counts as unreachable, as before.
 
 - The job's cleanup and the heartbeat record such a binding once on its job
-  (`database_foreign`) with what to do. Backups and all other jobs start again; only a new
+  (`database_foreign`) with what to do: run the discard command below, which shows the
+  database, the server UUID and the table names and drops nothing, and drop the tables by
+  hand only where they can be verified. Backups and all other jobs start again; only a new
   database apply waits, in `JobStore::create()` and as the review blocker
   `database_exchange_foreign`. A binding whose server answers again is cleaned up as usual.
 - `wp backups-for-restic database-discard <apply-job>` and

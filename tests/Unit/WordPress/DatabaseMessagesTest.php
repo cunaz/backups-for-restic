@@ -43,6 +43,14 @@ final class DatabaseMessagesTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_the_foreign_binding_hint_names_the_command_first_and_says_it_drops_nothing(): void {
+		$text = self::text( 'database_exchange_foreign' );
+		self::assertStringContainsString( 'the database, the server UUID and the table names', $text );
+		self::assertStringContainsString( 'without dropping anything', $text );
+		self::assertLessThan( (int) strpos( $text, 'by hand only where you can verify them' ), (int) strpos( $text, 'database-discard' ) );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_an_incomplete_session_list_names_what_the_server_needs(): void {
 		$text = self::text( 'performance_schema' );
 		self::assertStringContainsString( 'does not list every connection', $text );

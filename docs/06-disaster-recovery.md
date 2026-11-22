@@ -316,11 +316,11 @@ hand when you no longer need it.
 **After the database moved to another server.** A migration, a failover to a replica or a
 restore of the database server's data directory gives the server a new identity. A database
 restore that still keeps private tables then reports on its job that they are on another
-server. Backups go on. Another database restore waits until you decide: drop the private
-tables on the server that holds them, then run
-`wp backups-for-restic database-discard <apply-job-id>`. The command lists the database,
+server. Backups go on. Another database restore waits until you decide. Run
+`wp backups-for-restic database-discard <apply-job-id>`: the command lists the database,
 the old server's UUID and the table names, and forgets the binding after you confirm. It
-drops nothing. Deleting the plugin forgets such a binding as well, without dropping
+drops nothing, and the names are not shown again afterwards, so note them first. Drop the
+tables by hand only on the server and in the database where you can verify them. Deleting the plugin forgets such a binding as well, without dropping
 anything; the leftover tables have names that begin with `_bfr_r_` or `bfr_r_`.
 
 **Selective recovery by a database administrator.** Use the original database apply job

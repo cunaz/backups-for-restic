@@ -186,7 +186,7 @@ final class Messages {
 			],
 			'database_exchange_foreign' => [
 				'message' => __( 'A database restore keeps private tables on another database server or in another database.', 'backups-for-restic' ),
-				'hint'    => __( 'Backups go on. Before another database restore, drop those tables there by hand and discard the binding with "wp backups-for-restic database-discard" and the ID of that restore job; the command lists the table names.', 'backups-for-restic' ),
+				'hint'    => __( 'Backups go on. Before another database restore, run "wp backups-for-restic database-discard" with the ID of that restore job: it shows the database, the server UUID and the table names, and confirming forgets the binding without dropping anything. Drop those tables by hand only where you can verify them.', 'backups-for-restic' ),
 			],
 			'database_binding_missing' => [
 				'message' => __( 'No finished database restore holds a binding with this job ID.', 'backups-for-restic' ),

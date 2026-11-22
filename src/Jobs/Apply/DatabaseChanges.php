@@ -793,7 +793,7 @@ final readonly class DatabaseChanges implements StepProvider {
 			return;
 		}
 		$owner->data['database_foreign'] = $this->clock->now()[0];
-		$owner->warn( sprintf( 'The private tables of this database restore are on another database server or in another database. Drop them there by hand, then discard the binding with: wp backups-for-restic database-discard %s', $owner->id ) );
+		$owner->warn( sprintf( 'The private tables of this database restore are on another database server or in another database. Run "wp backups-for-restic database-discard %s" to see the database, the server UUID and the table names; confirming forgets the binding and drops nothing. Drop the tables by hand only where you can verify them.', $owner->id ) );
 		$this->jobs->save( $owner );
 		$this->jobs->log( $owner )->write( 'warning', 'The database restore binding belongs to another server or database.', [ 'code' => 'database_exchange_foreign' ] );
 	}

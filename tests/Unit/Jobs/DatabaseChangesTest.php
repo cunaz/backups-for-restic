@@ -208,6 +208,9 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertArrayHasKey( 'database_owner', $saved->data, 'Nothing is forgotten without a decision.' );
 		self::assertCount( 1, $saved->warnings );
 		self::assertStringContainsString( 'database-discard ' . $owner->id, $saved->warnings[0] );
+		// The command shows what to drop; it drops nothing itself, so it comes first.
+		self::assertStringContainsString( 'drops nothing', $saved->warnings[0] );
+		self::assertLessThan( strpos( $saved->warnings[0], 'by hand' ), strpos( $saved->warnings[0], 'database-discard' ) );
 		self::refused( 'database_exchange_foreign', fn () => $this->jobs->create( JobType::DatabaseApply, 'manual', $this->clock->seconds ) );
 		self::assertTrue( $this->jobs->while_idle( static fn (): bool => true ) );
 		$backup = $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds );
