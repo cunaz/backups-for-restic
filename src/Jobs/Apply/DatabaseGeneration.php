@@ -116,7 +116,7 @@ final readonly class DatabaseGeneration {
 	 * @param Job $job Owning apply.
 	 */
 	public static function forget( Job $job ): void {
-		unset( $job->data['database_owner'], $job->data['database_cleanup'], $job->data['database_cleanup_generation'], $job->data['exchange_plan'], $job->data['database_generation'], $job->data['retained_until'], $job->data['database_foreign'] );
+		unset( $job->data['database_owner'], $job->data['database_cleanup'], $job->data['database_cleanup_generation'], $job->data['exchange_plan'], $job->data['database_generation'], $job->data['retained_until'], $job->data['database_foreign'], $job->data['database_undo_attempt'] );
 	}
 
 	/**
@@ -143,12 +143,42 @@ final readonly class DatabaseGeneration {
 		if ( ! in_array( $state, [ 'applied', 'undone' ], true ) || ! is_int( $at ) || $at < 1 ) {
 			throw new FormatException( 'The database restore lost its recovery timestamp.' );
 		}
+		if ( 'undone' === $state ) {
+			unset( $owner->data['database_undo_attempt'] );
+		}
 		$owner->data['database_generation']    = $state;
 		$owner->data['retained_until']         = $at + self::WINDOW;
 		$worker->result['database_generation'] = $state;
 		$worker->result['retained_until']      = $at + self::WINDOW;
 		$worker->result['database_tables']     = is_array( $owner->data['database_owner'] ?? null ) && is_int( $owner->data['database_owner']['count'] ?? null ) ? $owner->data['database_owner']['count'] : 0;
 		$worker->result['restore']             = is_string( $owner->data['restore'] ?? null ) ? $owner->data['restore'] : '';
+	}
+
+	/**
+	 * Records an undo that committed although its request lost the reply, from the attempt
+	 * that the undo saved on the owner before its RENAME. The undo job, if it still exists,
+	 * shows the recovered outcome as well. Without that attempt nothing is recorded.
+	 *
+	 * @param JobStore $jobs Directory-local store.
+	 * @param Job      $owner Original apply.
+	 */
+	private static function undone( JobStore $jobs, Job $owner ): void {
+		$attempt = $owner->data['database_undo_attempt'] ?? null;
+		$at      = is_array( $attempt ) ? ( $attempt['at'] ?? null ) : null;
+		if ( ! is_int( $at ) || $at < 1 ) {
+			return;
+		}
+		$owner->data['database_generation'] = 'undone';
+		$owner->data['retained_until']      = $at + self::WINDOW;
+		unset( $owner->data['database_undo_attempt'] );
+		$jobs->save( $owner );
+		$worker = is_string( $attempt['job'] ?? null ) ? $jobs->get( $attempt['job'] ) : null;
+		if ( null !== $worker && JobType::DatabaseUndo === $worker->type && $worker->state->is_terminal() ) {
+			$worker->result['database_generation'] = 'undone';
+			$worker->result['retained_until']      = $at + self::WINDOW;
+			$worker->warn( 'The database undo had committed although its request lost the reply; the heartbeat recorded it.' );
+			$jobs->save( $worker );
+		}
 	}
 
 	/**
@@ -182,6 +212,9 @@ final readonly class DatabaseGeneration {
 					if ( 'applied' === $phase && ! isset( $job->data['database_generation'] ) ) {
 						self::record( $job, $job, $phase );
 						$jobs->save( $job );
+					}
+					if ( 'undone' === $phase && 'applied' === ( $job->data['database_generation'] ?? null ) ) {
+						self::undone( $jobs, $job );
 					}
 					if ( ! $uninstall && ( $job->data['database_generation'] ?? null ) !== $phase ) {
 						throw new FormatException( 'The database undo result must be reconciled before its retention window can expire.' );

@@ -591,6 +591,166 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
 
+	/**
+	 * The site's connection as WordPress requests see it. A lost reply closes the session,
+	 * the rest of that request reaches only the closed handle, and the next request opens a
+	 * new session. While the server is down, no request gets one.
+	 *
+	 * @return array{0:\Closure():Connection,1:\ArrayObject<string,mixed>} Provider and its switches.
+	 */
+	private function requests(): array {
+		$wire     = new \ArrayObject(
+			[
+				'request' => 0,
+				'opened'  => 0,
+				'down'    => false,
+				'lose'    => null,
+			]
+		);
+		$provider = function () use ( $wire ): Connection {
+			if ( true === $wire['down'] ) {
+				throw new DatabaseFailed( 'The database server is unreachable.', [ 'code' => 2006 ] );
+			}
+			if ( $wire['opened'] !== $wire['request'] && self::gone( $this->db->mysqli ) ) {
+				$fresh = MysqliConnection::connect( $this->database );
+				self::assertNotNull( $fresh );
+				$this->db     = $fresh;
+				$this->direct = new Direct( $fresh->mysqli );
+			}
+			$wire['opened'] = $wire['request'];
+			return new class( $this->direct, $this->db->mysqli, $wire ) implements Connection {
+				/** @param \ArrayObject<string,mixed> $wire */
+				public function __construct( private Direct $direct, private \mysqli $mysqli, private \ArrayObject $wire ) {}
+
+				public function rows( string $sql ): array {
+					return $this->direct->rows( $sql );
+				}
+
+				public function execute( string $sql ): int {
+					$rows = $this->direct->execute( $sql );
+					$lose = $this->wire['lose'];
+					if ( $lose instanceof \Closure && str_starts_with( $sql, 'RENAME TABLE ' ) ) {
+						// The server committed; the reply never arrives and the session is gone.
+						$this->wire['lose'] = null;
+						$this->mysqli->close();
+						$lose();
+						throw new DatabaseFailed( 'The reply to a committed statement was lost.', [ 'code' => 2013 ] );
+					}
+					return $rows;
+				}
+			};
+		};
+		return [ $provider, $wire ];
+	}
+
+	/** Whether a test connection was closed. */
+	private static function gone( \mysqli $mysqli ): bool {
+		try {
+			return ! is_int( $mysqli->thread_id );
+		} catch ( \Error ) {
+			return true;
+		}
+	}
+
+	/**
+	 * Applies the rehearsal, then loses the reply to the undo's committed RENAME while a
+	 * cancellation arrives, so that the runner moves on to cleanup in the same request.
+	 *
+	 * @return array{services:array{changes:DatabaseChanges,runner:Runner,jobs:JobStore,staging:Staging,clock:FrozenClock,source:Job,files:string,site:string},wire:\ArrayObject<string,mixed>,apply:Job,undo:Job}
+	 */
+	private function lost_undo_reply(): array {
+		[ $provider, $wire ] = $this->requests();
+		$services            = $this->services( connection: $provider );
+		$apply               = self::advance( $services['runner'], self::before_swap( $services ) );
+		self::assertSame( 'applied', $apply->result['database_generation'] );
+		$services['clock']->seconds += 10;
+		$review                      = $services['changes']->preview_undo( $apply->id, 1 );
+		self::assertTrue( $review['applicable'], implode( ',', $review['blockers'] ) );
+		$undo         = self::advance( $services['runner'], $services['changes']->start_undo( $apply->id, 1, $review['digest'] ), static fn ( Job $job ): bool => 'swapping_database' === $job->step );
+		$jobs         = $services['jobs'];
+		$wire['lose'] = static function () use ( $jobs, $undo ): void {
+			$jobs->request_cancel( $undo );
+		};
+		$undo         = self::advance( $services['runner'], $undo, static fn ( Job $job ): bool => null === $wire['lose'] );
+		// The cleanup did not touch the closed session and waits for a later request.
+		self::assertSame( JobState::Running, $undo->state );
+		self::assertSame( 'cleaning_up', $undo->step );
+		self::assertSame( JobState::Cancelled, $undo->outcome );
+		self::assertFileDoesNotExist( $services['site'] . '/.maintenance' );
+		$owner = $jobs->get( $apply->id );
+		self::assertNotNull( $owner );
+		self::assertSame( 'applied', $owner->data['database_generation'] );
+		self::assertSame(
+			[
+				'job' => $undo->id,
+				'at'  => $undo->data['database_swapping_at'],
+			],
+			$owner->data['database_undo_attempt'] ?? null
+		);
+		$check = MysqliConnection::connect( $this->database );
+		self::assertNotNull( $check );
+		self::assertSame( 'undone', ( new TableExchange( new Direct( $check->mysqli ) ) )->status( DatabaseGeneration::load( new Direct( $check->mysqli ), $owner )->exchange() ) );
+		$check->mysqli->close();
+		return [
+			'services' => $services,
+			'wire'     => $wire,
+			'apply'    => $apply,
+			'undo'     => $undo,
+		];
+	}
+
+	public function test_a_lost_reply_to_the_undo_is_reconciled_by_its_cleanup_on_a_new_session(): void {
+		$this->mysql_only();
+		[ 'services' => $services, 'wire' => $wire, 'apply' => $apply, 'undo' => $undo ] = $this->lost_undo_reply();
+		++$wire['request'];
+		$undone = self::advance( $services['runner'], $undo );
+		self::assertSame( JobState::Succeeded, $undone->state, $undone->error?->message ?? '' );
+		self::assertSame( 'undone', $undone->result['database_generation'] );
+		$owner = $services['jobs']->get( $apply->id );
+		self::assertNotNull( $owner );
+		self::assertSame( 'undone', $owner->data['database_generation'] );
+		self::assertSame( $undone->data['database_swapping_at'] + DatabaseGeneration::WINDOW, $owner->data['retained_until'] );
+		self::assertArrayNotHasKey( 'database_undo_attempt', $owner->data );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	public function test_the_heartbeat_reconciles_an_undo_whose_worker_gave_up_after_a_lost_reply(): void {
+		$this->mysql_only();
+		[ 'services' => $services, 'wire' => $wire, 'apply' => $apply, 'undo' => $undo ] = $this->lost_undo_reply();
+		$wire['down'] = true;
+		++$wire['request'];
+		$waiting = $services['runner']->tick( 0.08 )->job;
+		self::assertNotNull( $waiting );
+		self::assertFalse( $waiting->state->is_terminal(), 'An unreachable server keeps the cleanup waiting.' );
+		$services['clock']->seconds += 601;
+		$ended                       = self::advance( $services['runner'], $undo );
+		self::assertSame( JobState::Cancelled, $ended->state );
+		self::assertSame( 'applied', $services['jobs']->get( $apply->id )?->data['database_generation'] );
+		// The server returns after the original window: the heartbeat records the committed undo.
+		$wire['down'] = false;
+		++$wire['request'];
+		$services['clock']->seconds = $apply->result['retained_until'] + 1;
+		self::assertTrue( $services['changes']->expire( false, microtime( true ) + 10 ) );
+		$owner = $services['jobs']->get( $apply->id );
+		self::assertNotNull( $owner );
+		self::assertSame( 'undone', $owner->data['database_generation'] );
+		self::assertSame( $ended->data['database_swapping_at'] + DatabaseGeneration::WINDOW, $owner->data['retained_until'] );
+		$worker = $services['jobs']->get( $undo->id );
+		self::assertNotNull( $worker );
+		self::assertSame( 'undone', $worker->result['database_generation'] ?? null );
+		self::assertStringContainsString( 'the heartbeat recorded it', implode( ' ', $worker->warnings ) );
+		// The replaced generation expires after its own window.
+		$services['clock']->seconds = $owner->data['retained_until'] + 1;
+		for ( $i = 0; $i < 16; ++$i ) {
+			if ( ! isset( $services['jobs']->get( $apply->id )?->data['database_owner'] ) ) {
+				break;
+			}
+			$services['changes']->expire( false, microtime( true ) + 1 );
+		}
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $apply->id )?->data ?? [ 'database_owner' => true ] );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
 		$this->mysql_only();
 		$site     = $this->directory . '/site';

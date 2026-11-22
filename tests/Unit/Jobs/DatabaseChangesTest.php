@@ -300,4 +300,69 @@ final class DatabaseChangesTest extends TestCase {
 		self::refused( 'job_conflict', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli' ) );
 		self::refused( null, fn () => $this->changes( $this->server( '' ) )->foreign_binding( $here->id ) );
 	}
+
+	/**
+	 * A server whose replies are lost: every statement fails as after a dropped session.
+	 *
+	 * @param \ArrayObject<int,string> $queries Statements that reached it.
+	 */
+	private function lost( \ArrayObject $queries ): Connection {
+		return new class( $queries ) implements Connection {
+			/** @param \ArrayObject<int,string> $queries */
+			public function __construct( private \ArrayObject $queries ) {}
+
+			public function rows( string $sql ): array {
+				$this->queries[] = $sql;
+				throw new DatabaseFailed( 'Lost connection to the server.', [ 'code' => 2013 ] );
+			}
+
+			public function execute( string $sql ): int {
+				$this->queries[] = $sql;
+				throw new DatabaseFailed( 'Lost connection to the server.', [ 'code' => 2013 ] );
+			}
+		};
+	}
+
+	public function test_cleanup_after_a_lost_session_waits_for_a_later_tick_and_a_bound(): void {
+		$job       = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ], JobState::Running );
+		$job->step = 'swapping_database';
+		$queries   = new \ArrayObject();
+		$changes   = $this->changes( $this->lost( $queries ) );
+		$log       = $this->jobs->log( $job );
+		try {
+			$changes->step( JobType::DatabaseApply, 'swapping_database' )->advance( $job, $log, microtime( true ) + 30 );
+			self::fail( 'A lost session was not reported.' );
+		} catch ( DatabaseFailed $busy ) {
+			self::assertSame( 'database_restore_busy', $busy->context()['code'] ?? null );
+		}
+		$asked   = count( $queries );
+		$cleanup = $changes->step( JobType::DatabaseApply, 'cleaning_up' );
+		self::assertFalse( $cleanup->advance( $job, $log, microtime( true ) + 5 ), 'The cleanup of that request does not use the lost session.' );
+		self::assertCount( $asked, $queries );
+		// A later tick tries again; while the server stays unreachable it waits ten minutes at most.
+		self::assertFalse( $cleanup->advance( $job, $log, microtime( true ) + 5 ) );
+		self::assertGreaterThan( $asked, count( $queries ) );
+		self::assertSame( $this->clock->seconds + 600, $job->data['database_reconcile_until'] ?? null );
+		$this->clock->seconds += 599;
+		self::assertFalse( $cleanup->advance( $job, $log, microtime( true ) + 5 ) );
+		$this->clock->seconds += 1;
+		try {
+			$cleanup->advance( $job, $log, microtime( true ) + 5 );
+			self::fail( 'The cleanup waited beyond its bound.' );
+		} catch ( DatabaseFailed $busy ) {
+			self::assertSame( 'database_restore_busy', $busy->context()['code'] ?? null );
+		}
+	}
+
+	public function test_cleanup_reports_other_failures_at_once(): void {
+		$job       = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => array_replace( self::binding( str_repeat( 'c', 32 ) ), [ 'version' => 2 ] ) ], JobState::Running );
+		$job->step = 'cleaning_up';
+		try {
+			$this->changes( $this->server() )->step( JobType::DatabaseApply, 'cleaning_up' )->advance( $job, $this->jobs->log( $job ), microtime( true ) + 5 );
+			self::fail( 'A damaged binding was not reported.' );
+		} catch ( DatabaseFailed $failed ) {
+			self::assertSame( 'database_exchange_cleanup', $failed->context()['code'] ?? null );
+		}
+		self::assertArrayNotHasKey( 'database_reconcile_until', $job->data );
+	}
 }

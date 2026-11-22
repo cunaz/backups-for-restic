@@ -676,17 +676,41 @@ final class Container {
 	}
 
 	/**
-	 * Obtains the single WordPress connection without its query retry machinery.
+	 * Obtains the single WordPress connection without its query retry machinery. After a
+	 * lost reply the restore port closes the session; the next caller then gets a new
+	 * WordPress connection, and nothing continues the old session's transaction or locks.
 	 *
 	 * @return MysqliConnection Current SQL session.
 	 * @throws DatabaseFailed If a drop-in does not expose a usable mysqli handle.
 	 */
 	private function database_connection(): MysqliConnection {
-		$handle = self::wpdb()->__get( 'dbh' );
+		$wpdb   = self::wpdb();
+		$handle = $wpdb->__get( 'dbh' );
+		if ( $handle instanceof \mysqli && self::closed( $handle ) ) {
+			if ( ! $wpdb->db_connect( false ) ) {
+				DatabaseFailed::raise( 'The database connection could not be opened again.', [ 'code' => 'database_restore_busy' ] );
+			}
+			$handle = $wpdb->__get( 'dbh' );
+		}
 		if ( ! $handle instanceof \mysqli ) {
 			throw new DatabaseFailed( 'Database preview requires the WordPress mysqli connection.' );
 		}
 		return new MysqliConnection( $handle );
+	}
+
+	/**
+	 * Whether a mysqli handle was closed or its last call lost the server. PHP refuses every
+	 * property of a closed handle, and mysqli never reconnects one that lost its session.
+	 *
+	 * @param \mysqli $handle WordPress connection.
+	 * @return bool True if closed or gone.
+	 */
+	private static function closed( \mysqli $handle ): bool {
+		try {
+			return in_array( $handle->errno, [ 2006, 2013, 2055 ], true );
+		} catch ( \Error ) {
+			return true;
+		}
 	}
 
 	/**

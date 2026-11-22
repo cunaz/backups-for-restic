@@ -44,12 +44,23 @@ defined( 'ABSPATH' ) || exit;
  */
 final readonly class DatabaseChanges implements StepProvider {
 
+	/** Client errors after which a session is gone and its last statement's outcome unknown. */
+	private const array LOST = [ 2006, 2013, 2055 ];
+
 	/**
 	 * Checked source and live review builder.
 	 *
 	 * @var DatabaseReview
 	 */
 	private DatabaseReview $reviews;
+
+	/**
+	 * Jobs whose database session was lost in this request, by job ID. Their cleanup waits
+	 * for a later tick, which works on a new session.
+	 *
+	 * @var \ArrayObject<string,true>
+	 */
+	private \ArrayObject $interrupted;
 
 	/**
 	 * Builds a worker on the checked target and directory-local stores.
@@ -79,7 +90,14 @@ final readonly class DatabaseChanges implements StepProvider {
 		private \Closure $refresh,
 		private SessionDrain $drain = new SessionDrain()
 	) {
-		$this->reviews = new DatabaseReview( $jobs, $staging, $hours, $prefix );
+		/**
+		 * No session was lost yet in this request.
+		 *
+		 * @var \ArrayObject<string,true> $interrupted
+		 */
+		$interrupted       = new \ArrayObject();
+		$this->reviews     = new DatabaseReview( $jobs, $staging, $hours, $prefix );
+		$this->interrupted = $interrupted;
 	}
 
 	/**
@@ -360,6 +378,10 @@ final readonly class DatabaseChanges implements StepProvider {
 					};
 				} catch ( DatabaseFailed | FormatException $error ) {
 					$code = $error->context()['code'] ?? null;
+					if ( in_array( $code, self::LOST, true ) ) {
+						$this->interrupted[ $job->id ] = true;
+						$this->renew();
+					}
 					if ( in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) ) {
 						DatabaseFailed::raise( 'The database restore is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] );
 					}
@@ -370,6 +392,19 @@ final readonly class DatabaseChanges implements StepProvider {
 				}
 			}
 		);
+	}
+
+	/**
+	 * Asks for a session again after a lost one, so that WordPress can go on in this
+	 * request. The cleanup still waits for a later tick before it reads the outcome.
+	 */
+	private function renew(): void {
+		try {
+			( $this->connection )();
+		} catch ( PluginException ) {
+			// The next tick tries again with the connection WordPress has then.
+			return;
+		}
 	}
 
 	/**
@@ -524,6 +559,14 @@ final readonly class DatabaseChanges implements StepProvider {
 				$this->drain->wait( $connection, $plan->document['database'], $entered, $deadline );
 				$job->data['database_swapping_at'] = $this->clock->now()[0];
 				$this->jobs->save( $job );
+				if ( $undo ) {
+					// The heartbeat can then recognise a committed undo after a lost reply.
+					$owner->data['database_undo_attempt'] = [
+						'job' => $job->id,
+						'at'  => $job->data['database_swapping_at'],
+					];
+					$this->jobs->save( $owner );
+				}
 				$exchange->run( $plan, $user, $undo, self::field( $job, 'authority' ) );
 			}
 			DatabaseGeneration::record( $owner, $job, $state );
@@ -538,14 +581,52 @@ final readonly class DatabaseChanges implements StepProvider {
 	/**
 	 * Reconciles an unknown RENAME outcome before cancellation or error cleanup. A committed
 	 * exchange is recorded as completed, including its original 24-hour retention window.
+	 * After a lost session the reconciliation waits for a later tick and a new session, and
+	 * while the old session still holds its locks, for at most ten minutes. The heartbeat
+	 * reconciles from the durable records after that.
 	 *
 	 * @param Job   $job Current worker.
 	 * @param float $deadline End of tick.
 	 * @return bool Whether cleanup is complete.
 	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 * @throws JobConflict If a lock stays held beyond the bound.
 	 */
 	private function cleanup( Job $job, float $deadline ): bool {
 		$this->maintenance->release( $job->id, $this->jobs->directory( $job ) );
+		if ( $this->interrupted->offsetExists( $job->id ) ) {
+			$this->interrupted->offsetUnset( $job->id );
+			return false;
+		}
+		try {
+			return $this->reconcile( $job, $deadline );
+		} catch ( DatabaseFailed | JobConflict $error ) {
+			$code = $error->context()['code'] ?? null;
+			if ( ! in_array( $code, [ ...self::LOST, 1205, 1213, 'database_restore_busy' ], true ) ) {
+				throw $error;
+			}
+			$now   = $this->clock->now()[0];
+			$until = $job->data['database_reconcile_until'] ?? null;
+			if ( ! is_int( $until ) ) {
+				$until                                 = $now + 600;
+				$job->data['database_reconcile_until'] = $until;
+			}
+			if ( $now >= $until ) {
+				throw $error;
+			}
+			return false;
+		}
+	}
+
+	/**
+	 * Records a committed exchange of this job, or removes an unfinished import.
+	 *
+	 * @param Job   $job Current worker.
+	 * @param float $deadline End of tick.
+	 * @return bool Whether cleanup is complete.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 * @throws JobConflict If the owning apply is gone or another session holds its tables.
+	 */
+	private function reconcile( Job $job, float $deadline ): bool {
 		$undo  = JobType::DatabaseUndo === $job->type;
 		$owner = $undo ? $this->original( self::field( $job, 'apply' ) ) : $job;
 		if ( ! isset( $owner->data['database_owner'] ) ) {
