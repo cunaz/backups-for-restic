@@ -224,8 +224,11 @@ final readonly class FileChange {
 				if ( ApplyManifest::identity( $path ) !== $live ) {
 					throw new StorageFailed( 'The live original changed during verification of its undo copy.' );
 				}
+				// The digests above can take long: recheck the folders and the name last.
+				$this->require_action( $path, $action );
 				$this->publish( $next, $path );
 			} else {
+				$this->require_action( $path, $action );
 				$this->link( $next, $path );
 				$this->remove_file( $next );
 			}
@@ -349,14 +352,15 @@ final readonly class FileChange {
 			$this->sync_file( $old );
 			$record['phase'] = 'restore';
 			$this->save( $record );
-			$this->require_action( $path, 'replace' );
 			$this->require_parent( $path, $record );
 			if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $record['source'] ) ) {
 				throw new StorageFailed( 'The live file changed during undo.' );
 			}
+			$this->require_action( $path, 'replace' );
 			$this->publish( $old, $path );
 		} elseif ( 'remove' === $decision ) {
 			$this->require_parent( $path, $record );
+			$this->require_action( $path, 'mkdir' === $action ? 'keep' : 'replace' );
 			if ( 'mkdir' === $action ) {
 				$this->remove_directory( $path );
 			} else {
@@ -436,6 +440,7 @@ final readonly class FileChange {
 			if ( ! rename( $prepared, $path ) ) {
 				throw new StorageFailed( 'The prepared directory could not be renamed into place.' );
 			}
+			$this->plan->changed( $path, true );
 			$this->observe( 'rename', $path );
 		}
 		// Also after a retry: the publication is on disk before the record that completes it.
@@ -791,6 +796,7 @@ final readonly class FileChange {
 		if ( ! rename( $from, $to ) ) {
 			throw new StorageFailed( 'An atomic file replacement was refused.' );
 		}
+		$this->plan->changed( $to, true );
 		$this->observe( 'rename', $to );
 	}
 
@@ -805,6 +811,7 @@ final readonly class FileChange {
 		if ( ! function_exists( 'link' ) || ! link( $from, $to ) ) {
 			throw new StorageFailed( 'The new file could not be published without replacing an existing entry.' );
 		}
+		$this->plan->changed( $to, true );
 		$this->observe( 'link', $to );
 	}
 
@@ -818,6 +825,7 @@ final readonly class FileChange {
 		if ( ! unlink( $path ) ) {
 			throw new StorageFailed( 'A file change could not remove its file.' );
 		}
+		$this->plan->changed( $path, false );
 		$this->observe( 'unlink', $path );
 	}
 
@@ -831,6 +839,7 @@ final readonly class FileChange {
 		if ( [ '.', '..' ] !== scandir( $path ) || ! rmdir( $path ) ) {
 			throw new StorageFailed( 'A directory created by file apply is no longer empty or cannot be removed.' );
 		}
+		$this->plan->changed( $path, false );
 		$this->observe( 'rmdir', $path );
 	}
 

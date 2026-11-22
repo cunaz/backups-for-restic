@@ -40,6 +40,20 @@ final class ApplyPlan {
 	private array $review_names = [];
 
 	/**
+	 * Name index that a live writer's rechecks share within this request.
+	 *
+	 * @var LiveSpellings|null
+	 */
+	private ?LiveSpellings $writer = null;
+
+	/**
+	 * Whether the running check is a live writer's recheck.
+	 *
+	 * @var bool
+	 */
+	private bool $rechecking = false;
+
+	/**
 	 * Live directories in their canonical form.
 	 *
 	 * @var list<string>
@@ -121,7 +135,9 @@ final class ApplyPlan {
 
 	/**
 	 * Rechecks an entry. Read-only previews can share sibling indexes within a worker.
-	 * Every mutation uses a fresh enumeration immediately before publication.
+	 * A live writer's rechecks in one request share an index that lists each folder once
+	 * for each of its identities and learns the writer's own changes (LiveSpellings); every
+	 * recheck still reads each folder's identity and the entry itself from the filesystem.
 	 *
 	 * @param string                  $files Canonical private staging files/ directory.
 	 * @param string                  $path  Absolute snapshot path.
@@ -137,7 +153,34 @@ final class ApplyPlan {
 		if ( null !== $review ) {
 			return $this->check( $files, $path, $this->review_names, $review );
 		}
-		return $this->check( $files, $path, $cache );
+		$this->writer   ??= new LiveSpellings();
+		$this->rechecking = true;
+		try {
+			return $this->check( $files, $path, $cache );
+		} finally {
+			$this->rechecking = false;
+		}
+	}
+
+	/**
+	 * Lets the following rechecks in this request account for an entry that the writer has
+	 * just created, replaced or removed, after a recheck validated its folder immediately
+	 * before the operation.
+	 *
+	 * @param string $path Live entry.
+	 * @param bool   $exists Whether the entry exists after the operation.
+	 */
+	public function changed( string $path, bool $exists ): void {
+		$this->writer?->changed( $path, $exists );
+	}
+
+	/**
+	 * Number of folders that the writer's rechecks listed in this request, for diagnostics.
+	 *
+	 * @return int Folder listings.
+	 */
+	public function listings(): int {
+		return null === $this->writer ? 0 : $this->writer->listings();
 	}
 
 	/**
@@ -304,7 +347,9 @@ final class ApplyPlan {
 
 	/**
 	 * Checks names by exact bytes and simple Unicode case folding. Bounds the aggregate and
-	 * individual sibling indexes. Larger directories are scanned in bounded memory.
+	 * individual sibling indexes. Larger directories are scanned in bounded memory. A live
+	 * writer's recheck asks the request's LiveSpellings instead. check() calls this method
+	 * through self::, which binds this plan.
 	 *
 	 * @param string                                     $directory Existing parent directory.
 	 * @param string                                     $name      Requested spelling.
@@ -313,7 +358,10 @@ final class ApplyPlan {
 	 * @param bool                                       $inline Whether a wide folder must defer this synchronous request.
 	 * @return bool Whether no other spelling of this name exists.
 	 */
-	private static function unambiguous( string $directory, string $name, array &$cache, ?DirectorySpellings $review = null, bool $inline = false ): bool {
+	private function unambiguous( string $directory, string $name, array &$cache, ?DirectorySpellings $review = null, bool $inline = false ): bool {
+		if ( $this->rechecking && null !== $this->writer ) {
+			return $this->writer->unique( $directory, $name );
+		}
 		$key       = self::fold( $name );
 		$cache_key = $directory;
 		if ( null !== $review ) {

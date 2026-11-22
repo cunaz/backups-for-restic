@@ -10,6 +10,7 @@ use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\FileChange;
 use BackupsForRestic\Restore\FileSpace;
+use BackupsForRestic\Restore\LiveSpellings;
 use BackupsForRestic\Tests\Support\TempDir;
 
 final class FileChangeTest extends TestCase {
@@ -397,6 +398,85 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 02750, fileperms( $album ) & 07777 );
 		self::assertSame( filegroup( $shared ), filegroup( $album ) );
 		self::assertSame( 'remove', $this->change->undo_action( $album, 'mkdir' ) );
+	}
+
+	/** Waits until the folders set up so far have settled, as a kept listing needs. */
+	private static function settle(): void {
+		$ready = time() + 1 + LiveSpellings::CLOCK_MARGIN;
+		while ( microtime( true ) < $ready ) {
+			usleep( 10000 );
+		}
+	}
+
+	public function test_many_changes_in_one_wide_folder_list_each_folder_about_once_per_second(): void {
+		$uploads = $this->site . '/uploads';
+		mkdir( $uploads );
+		mkdir( $this->staging . $uploads, 0700 );
+		for ( $i = 0; $i < 2500; ++$i ) {
+			touch( $uploads . '/existing-' . $i );
+		}
+		for ( $i = 0; $i < 120; ++$i ) {
+			file_put_contents( $this->staging . $uploads . '/new-' . $i, 'new ' . $i );
+		}
+		mkdir( $this->journal );
+		// The staging root and one staged folder per path component, then the live root and
+		// the written folder. Before, each of the five rechecks of every change listed them all.
+		$folders = substr_count( $uploads, '/' ) + 3;
+		self::settle();
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$started = time();
+		for ( $i = 0; $i < 120; ++$i ) {
+			$change = new FileChange( $plan, $this->staging, $this->journal . '/item-' . $i );
+			self::assertTrue( $change->apply( $uploads . '/new-' . $i, 'create', hash( 'sha256', 'new ' . $i ), null, INF ) );
+		}
+		// The written folder is listed again about once for each second in which it changed.
+		self::assertLessThanOrEqual( $folders + 1 + time() - $started, $plan->listings() );
+		self::assertSame( 'new 119', file_get_contents( $uploads . '/new-119' ) );
+
+		// The undo needs no wait: the other folders have settled, and the wide one keeps a
+		// listing made in the second of its last change until that second has passed.
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$started = time();
+		for ( $i = 119; $i >= 0; --$i ) {
+			$change = new FileChange( $plan, $this->staging, $this->journal . '/item-' . $i );
+			self::assertTrue( $change->undo( $uploads . '/new-' . $i, 'create', INF ) );
+		}
+		self::assertLessThanOrEqual( $folders + 1 + time() - $started, $plan->listings() );
+		self::assertCount( 2502, (array) scandir( $uploads ) );
+	}
+
+	public function test_an_alias_that_appears_during_the_request_is_refused_before_the_write(): void {
+		$wide = $this->site . '/wide';
+		mkdir( $wide );
+		mkdir( $this->staging . $wide, 0700 );
+		foreach ( [ 'a', 'b', 'c' ] as $name ) {
+			file_put_contents( $this->staging . $wide . '/' . $name, $name );
+		}
+		mkdir( $this->journal );
+		self::settle();
+		$plan  = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$apply = fn ( string $name ): bool => ( new FileChange( $plan, $this->staging, $this->journal . '/' . $name ) )->apply( $wide . '/' . $name, 'create', hash( 'sha256', $name ), null, INF );
+		self::assertTrue( $apply( 'a' ) );
+		// Another process adds a second spelling of a folder on the chain, in the same second.
+		mkdir( $this->site . '/WIDE' );
+		try {
+			$apply( 'b' );
+			self::fail( 'A second spelling of a folder on the chain must refuse the write.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'plan changed', $refused->getMessage() );
+		}
+		rmdir( $this->site . '/WIDE' );
+		// And at once a second spelling of the next name, in the folder that the writer changed.
+		touch( $wide . '/C' );
+		try {
+			$apply( 'c' );
+			self::fail( 'A second spelling of the name must refuse the write.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'plan changed', $refused->getMessage() );
+		}
+		self::assertFileDoesNotExist( $wide . '/b' );
+		self::assertFileDoesNotExist( $wide . '/c' );
+		self::assertSame( 'a', file_get_contents( $wide . '/a' ) );
 	}
 
 	public function test_undo_review_keeps_entries_created_below_a_removed_directory(): void {
