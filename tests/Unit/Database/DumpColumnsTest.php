@@ -155,7 +155,7 @@ final class DumpColumnsTest extends TestCase {
 			}
 		};
 		$table  = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`id` int)', [ 'id' => SqlFormatter::NUMERIC ], 'PRIMARY', [ new KeyColumn( 'id', KeyColumn::INTEGER ) ] );
-		$source = new TableSource( $db, $table, '', '{"v":2,"after":["17"],"offset":17,"rows":17,"bytes":900,"page":64,"views":1,"restarts":0,"digest":"","changed":false}', static function (): void {} );
+		$source = new TableSource( $db, $table, '', '{"v":2,"after":["17"],"offset":17,"rows":17,"bytes":900,"page":64,"views":1,"restarts":0,"digest":"","changed":false,"largest":0}', static function (): void {} );
 		self::assertFalse( $source->restarted() );
 		self::assertSame( "-- end table rows=17 bytes=900\n", $source->read( 10000 ) );
 		self::assertSame( [ 'SELECT `id` FROM `wp_rows` WHERE (`id` > 17) ORDER BY `wp_rows`.`id` LIMIT 64' ], $db->queries );

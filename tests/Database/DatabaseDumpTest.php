@@ -7,6 +7,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
+use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Support\ResumableByteSource;
@@ -505,6 +506,31 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( $db->rows( 'SELECT * FROM locked_items ORDER BY id' ), self::database( self::$target )->rows( 'SELECT * FROM locked_items ORDER BY id' ) );
 		self::assertSame( 0, self::manifest_table( $files, 'locked_items' )['restarts'] );
 		self::assertTrue( self::manifest_table( $files, 'locked_items' )['snapshot'] );
+	}
+
+	/**
+	 * A LONGBLOB of 8.5 MiB is 17 MiB as a hex literal, more than the plugin's importer reads
+	 * in one statement. The backup keeps it, as a statement of its own, and the manifest
+	 * records the size, so that an importer can tell what max_allowed_packet it needs.
+	 */
+	public function test_a_row_above_16_mib_is_backed_up_as_a_statement_of_its_own(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'CREATE TABLE huge_rows (id INT NOT NULL PRIMARY KEY, body LONGBLOB) ENGINE=InnoDB' );
+		$db->execute( "INSERT INTO huge_rows VALUES (1, 'small'), (2, REPEAT(0xA5, 8912896)), (3, 'small too')" );
+
+		$files = [];
+		foreach ( ( new DatabaseDump( $db, $this->directory . '/huge.json', 'huge_', [], 1767323100 ) )->files() as $file ) {
+			$files[ $file->name ] = $this->read( $file->source, 1 );
+		}
+
+		$lines = explode( "\n", rtrim( $files['010-huge_rows.sql'], "\n" ) );
+		$large = array_values( array_filter( $lines, static fn ( string $line ): bool => strlen( $line ) > TableSource::MAX_STATEMENT_BYTES ) );
+		self::assertCount( 1, $large, 'One statement holds the large row alone.' );
+		self::assertStringStartsWith( 'INSERT INTO `huge_rows` (`id`,`body`) VALUES (2,0x', $large[0] );
+		self::assertSame( $db->rows( 'SELECT SHA2(LOWER(HEX(body)), 256) AS digest FROM huge_rows WHERE id = 2' )[0]['digest'], hash( 'sha256', substr( $large[0], strlen( 'INSERT INTO `huge_rows` (`id`,`body`) VALUES (2,0x' ), -2 ) ) );
+		$trailer = (string) end( $lines );
+		self::assertSame( '-- end table rows=3 bytes=' . ( strlen( $files['010-huge_rows.sql'] ) - strlen( $trailer ) - 1 ), $trailer );
+		self::assertSame( strlen( $large[0] ), self::manifest_table( $files, 'huge_rows' )['largest_statement'] );
 	}
 
 	#[DataProvider( 'connections' )]

@@ -17,7 +17,11 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Produces the dump file of one table page by page, without writing it to disk (ADR 0021):
  * the session settings, DROP and CREATE, INSERT statements of about 1 MiB, and a trailer
- * with the row and byte counts.
+ * with the row and byte counts. A row too large to share a statement gets one of its own,
+ * whatever its size: the backup keeps every row that PHP can hold, also when an importer's
+ * limit is smaller, and the manifest records each table's largest statement so that an
+ * importer can compare it with its max_allowed_packet. A row whose statement would not fit
+ * into the memory limit stops the dump with its own code instead of ending PHP.
  *
  * Pages follow the table's primary key, or a unique key over NOT NULL columns, in full: each
  * page asks for the rows after the last key it wrote (KeyColumn), so an insert or a delete
@@ -49,8 +53,14 @@ final class TableSource implements ResumableByteSource {
 
 	public const string FORMAT = 'backups-for-restic-dump/1';
 
-	/** Hard format limit including the semicolon, excluding the physical newline. */
+	/**
+	 * The plugin's importer reads statements up to this size, including the semicolon and
+	 * excluding the physical newline (ADR 0035). The writer does not refuse larger ones.
+	 */
 	public const int MAX_STATEMENT_BYTES = 16777216;
+
+	/** Memory left for the backup to read a large row's statement in chunks. */
+	private const int ENCODING_RESERVE = 16777216;
 
 	private const int STATEMENT_BYTES = 1048576;
 
@@ -66,11 +76,33 @@ final class TableSource implements ResumableByteSource {
 	public const int MAX_RESTARTS = 3;
 
 	/**
-	 * Produced but not yet read output.
+	 * Produced but not yet read output, in the pieces it was produced in: a large statement is
+	 * never copied into one string, and reading does not copy what is left.
 	 *
-	 * @var string
+	 * @var list<string>
 	 */
-	private string $buffer = '';
+	private array $pieces = [];
+
+	/**
+	 * Bytes of the first piece already read.
+	 *
+	 * @var int
+	 */
+	private int $head = 0;
+
+	/**
+	 * Bytes produced and not yet read.
+	 *
+	 * @var int
+	 */
+	private int $available = 0;
+
+	/**
+	 * Length of the longest statement so far, with its semicolon and without the newline.
+	 *
+	 * @var int
+	 */
+	private int $largest;
 
 	/**
 	 * Whether the header has been written.
@@ -201,9 +233,9 @@ final class TableSource implements ResumableByteSource {
 	/**
 	 * A row read from the stream that did not fit into the statement before.
 	 *
-	 * @var string|null
+	 * @var array<string, string|null>|null
 	 */
-	private ?string $carry = null;
+	private ?array $carry = null;
 
 	/**
 	 * Start of every INSERT statement of the table.
@@ -215,12 +247,12 @@ final class TableSource implements ResumableByteSource {
 	/**
 	 * Opens the table at a cursor.
 	 *
-	 * @param Connection                                                                                     $connection  Database; a DedicatedConnection inside begin() for one snapshot.
-	 * @param Table                                                                                          $table       Table.
-	 * @param string                                                                                         $preamble    Session settings, one statement per line.
-	 * @param string|null                                                                                    $cursor Cursor from an earlier source, or null to start.
-	 * @param \Closure(array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int}): void $on_complete Receives the counts and how the rows were read, once the trailer is written.
-	 * @param (\Closure(): Table)|null                                                                       $describe Reads the definition again, to see whether it changed during a tick outside a snapshot.
+	 * @param Connection                                                                                                   $connection  Database; a DedicatedConnection inside begin() for one snapshot.
+	 * @param Table                                                                                                        $table       Table.
+	 * @param string                                                                                                       $preamble    Session settings, one statement per line.
+	 * @param string|null                                                                                                  $cursor Cursor from an earlier source, or null to start.
+	 * @param \Closure(array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int, largest: int}): void $on_complete Receives the counts and how the rows were read, once the trailer is written.
+	 * @param (\Closure(): Table)|null                                                                                     $describe Reads the definition again, to see whether it changed during a tick outside a snapshot.
 	 * @throws DatabaseFailed If the table has started over too often.
 	 */
 	public function __construct(
@@ -262,7 +294,9 @@ final class TableSource implements ResumableByteSource {
 		$this->offset   = $state['offset'] ?? 0;
 		$this->rows     = $state['rows'] ?? 0;
 		$this->bytes    = $state['bytes'] ?? 0;
-		$this->page     = $state['page'] ?? 500;
+		// Fewer rows in the first page of a table whose values have no bound.
+		$this->page     = $state['page'] ?? ( $table->wide ? 50 : 500 );
+		$this->largest  = $state['largest'] ?? 0;
 		$this->views    = $state['views'] ?? 0;
 		$this->snapshot = $connection instanceof DedicatedConnection && $connection->in_snapshot() && $table->versioned();
 		$this->prefix   = 'INSERT INTO ' . SqlFormatter::identifier( $table->name ) . ' (' . implode( ',', array_map( SqlFormatter::identifier( ... ), array_keys( $table->columns ) ) ) . ') VALUES ';
@@ -274,14 +308,14 @@ final class TableSource implements ResumableByteSource {
 	 *
 	 * @param string|null $cursor Cursor.
 	 * @param Table       $table  Table.
-	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int, views: int, restarts: int, digest: string, changed: bool}|null State, or null to start the table from its beginning.
+	 * @return array{after: list<string>|null, offset: int, rows: int, bytes: int, page: int, views: int, restarts: int, digest: string, changed: bool, largest: int}|null State, or null to start the table from its beginning.
 	 */
 	private static function saved( ?string $cursor, Table $table ): ?array {
 		$state = null === $cursor ? null : json_decode( $cursor, true );
 		if ( ! is_array( $state ) || self::CURSOR_VERSION !== ( $state['v'] ?? null ) || ! is_string( $state['digest'] ?? null ) || ! is_bool( $state['changed'] ?? null ) ) {
 			return null;
 		}
-		foreach ( [ 'offset', 'rows', 'bytes', 'page', 'views', 'restarts' ] as $field ) {
+		foreach ( [ 'offset', 'rows', 'bytes', 'page', 'views', 'restarts', 'largest' ] as $field ) {
 			if ( ! is_int( $state[ $field ] ?? null ) || $state[ $field ] < 0 ) {
 				return null;
 			}
@@ -315,6 +349,7 @@ final class TableSource implements ResumableByteSource {
 			'restarts' => $state['restarts'],
 			'digest'   => $state['digest'],
 			'changed'  => $state['changed'],
+			'largest'  => $state['largest'],
 		];
 	}
 
@@ -326,13 +361,24 @@ final class TableSource implements ResumableByteSource {
 	 * @throws DatabaseFailed If a query fails.
 	 */
 	public function read( int $length ): string {
-		$available = strlen( $this->buffer );
-		while ( $available < $length && ! $this->finished && ! $this->stopped ) {
+		while ( $this->available < $length && ! $this->finished && ! $this->stopped ) {
 			$this->produce();
-			$available = strlen( $this->buffer );
 		}
-		$block        = substr( $this->buffer, 0, $length );
-		$this->buffer = substr( $this->buffer, strlen( $block ) );
+		$block = '';
+		$taken = 0;
+		while ( $taken < $length && [] !== $this->pieces ) {
+			$piece       = $this->pieces[0];
+			$size        = strlen( $piece );
+			$take        = min( $size - $this->head, $length - $taken );
+			$block      .= 0 === $this->head && $take === $size ? $piece : substr( $piece, $this->head, $take );
+			$taken      += $take;
+			$this->head += $take;
+			if ( $this->head === $size ) {
+				array_shift( $this->pieces );
+				$this->head = 0;
+			}
+		}
+		$this->available -= $taken;
 		return $block;
 	}
 
@@ -364,6 +410,7 @@ final class TableSource implements ResumableByteSource {
 				'restarts' => $this->restarts,
 				'digest'   => $this->table->digest,
 				'changed'  => $this->changed,
+				'largest'  => $this->largest,
 			]
 		);
 	}
@@ -441,6 +488,7 @@ final class TableSource implements ResumableByteSource {
 				'snapshot' => $this->views <= 1,
 				'key'      => array_map( static fn ( KeyColumn $column ): string => $column->name, $this->table->order ),
 				'restarts' => $this->restarts,
+				'largest'  => $this->largest,
 			]
 		);
 	}
@@ -530,8 +578,8 @@ final class TableSource implements ResumableByteSource {
 			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ( $this->offset > 0 ? ' LIMIT 18446744073709551615 OFFSET ' . $this->offset : '' ) );
 			$this->streaming = true;
 		}
-		$tuples      = null === $this->carry ? [] : [ $this->carry ];
-		$length      = null === $this->carry ? 0 : strlen( $this->carry ) + 1;
+		$rows        = null === $this->carry ? [] : [ $this->carry ];
+		$length      = null === $this->carry ? 0 : $this->bound( $this->carry );
 		$this->carry = null;
 		while ( true ) {
 			$row = $this->connection instanceof DedicatedConnection ? $this->connection->next() : null;
@@ -540,20 +588,37 @@ final class TableSource implements ResumableByteSource {
 				$this->exhausted = true;
 				break;
 			}
-			$tuple = $this->tuple( $row );
-			if ( [] !== $tuples && ( $length + strlen( $tuple ) > self::STATEMENT_BYTES || count( $tuples ) >= self::STATEMENT_ROWS ) ) {
-				$this->carry = $tuple;
+			$bound = $this->bound( $row );
+			// About a page's worth, which write() puts into statements of about 1 MiB.
+			if ( [] !== $rows && ( $length + $bound > self::TARGET_PAGE_BYTES || count( $rows ) >= self::STATEMENT_ROWS ) ) {
+				$this->carry = $row;
 				break;
 			}
-			$tuples[] = $tuple;
-			$length  += strlen( $tuple ) + 1;
+			$rows[]  = $row;
+			$length += $bound;
 		}
-		if ( [] !== $tuples ) {
+		if ( [] !== $rows ) {
 			$this->viewed();
-			$this->statement( $tuples );
-			$this->rows   += count( $tuples );
-			$this->offset += count( $tuples );
+			$this->write( $rows );
+			$this->rows   += count( $rows );
+			$this->offset += count( $rows );
 		}
+	}
+
+	/**
+	 * At most how many bytes a row takes in an INSERT statement: every value at most twice its
+	 * length plus quotes, as escaping or hex can make it, or NULL.
+	 *
+	 * @param array<string, string|null> $row Row.
+	 * @return int Bytes.
+	 */
+	private function bound( array $row ): int {
+		$bytes = strlen( $this->prefix ) + 4 + count( $this->table->columns );
+		foreach ( array_keys( $this->table->columns ) as $column ) {
+			$value  = $row[ $column ] ?? null;
+			$bytes += null === $value ? 4 : 2 + 2 * strlen( $value );
+		}
+		return $bytes;
 	}
 
 	/**
@@ -561,18 +626,90 @@ final class TableSource implements ResumableByteSource {
 	 *
 	 * @param array<string, string|null> $row Row.
 	 * @return string Tuple.
-	 * @throws DatabaseFailed If the row exceeds the importer's statement limit.
 	 */
 	private function tuple( array $row ): string {
 		$values = [];
 		foreach ( $this->table->columns as $column => $kind ) {
 			$values[] = SqlFormatter::value( $row[ $column ] ?? null, $kind );
 		}
-		$tuple = '(' . implode( ',', $values ) . ')';
-		if ( strlen( $this->prefix ) + strlen( $tuple ) + 1 > self::MAX_STATEMENT_BYTES ) {
-			DatabaseFailed::raise( 'A database row exceeds the 16 MiB SQL statement limit and cannot be backed up.', [ 'table' => $this->table->name ] );
+		return '(' . implode( ',', $values ) . ')';
+	}
+
+	/**
+	 * Writes rows as INSERT statements of about STATEMENT_BYTES and at most STATEMENT_ROWS
+	 * rows. A row larger than a statement gets one of its own.
+	 *
+	 * @param list<array<string, string|null>> $rows Rows.
+	 * @return array{int, int} Bytes written, and the most that one row took.
+	 * @throws DatabaseFailed If a row cannot be encoded within the memory limit.
+	 */
+	private function write( array $rows ): array {
+		$size   = 0;
+		$widest = 0;
+		$tuples = [];
+		$length = 0;
+		foreach ( $rows as $row ) {
+			$bound = $this->bound( $row );
+			// A row that certainly needs a statement of its own is written in pieces.
+			if ( $bound > 2 * self::STATEMENT_BYTES ) {
+				if ( [] !== $tuples ) {
+					$size  += $this->statement( $tuples );
+					$tuples = [];
+					$length = 0;
+				}
+				$size  += $this->large( $row, $bound );
+				$widest = max( $widest, $bound );
+				continue;
+			}
+			$tuple  = $this->tuple( $row );
+			$widest = max( $widest, strlen( $tuple ) );
+			if ( [] !== $tuples && ( $length + strlen( $tuple ) > self::STATEMENT_BYTES || count( $tuples ) >= self::STATEMENT_ROWS ) ) {
+				$size  += $this->statement( $tuples );
+				$tuples = [];
+				$length = 0;
+			}
+			$tuples[] = $tuple;
+			$length  += strlen( $tuple ) + 1;
 		}
-		return $tuple;
+		if ( [] !== $tuples ) {
+			$size += $this->statement( $tuples );
+		}
+		return [ $size, $widest ];
+	}
+
+	/**
+	 * Writes one large row as a statement of its own, value by value, after checking that its
+	 * pieces and what the backup needs to read them fit into the memory limit.
+	 *
+	 * @param array<string, string|null> $row   Row.
+	 * @param int                        $bound At most its bytes in the statement.
+	 * @return int Bytes written.
+	 * @throws DatabaseFailed If the statement would not fit into the memory limit.
+	 */
+	private function large( array $row, int $bound ): int {
+		$limit = ini_parse_quantity( ini_get( 'memory_limit' ) );
+		if ( $limit > 0 && memory_get_usage() + $bound + self::ENCODING_RESERVE > $limit ) {
+			DatabaseFailed::raise(
+				'A database row is too large to be backed up within the PHP memory limit.',
+				[
+					'table' => $this->table->name,
+					'bytes' => $bound,
+					'code'  => 'database_dump_row_memory',
+				]
+			);
+		}
+		$size  = $this->emit( $this->prefix . '(' );
+		$first = true;
+		foreach ( $this->table->columns as $column => $kind ) {
+			if ( ! $first ) {
+				$size += $this->emit( ',' );
+			}
+			$first = false;
+			$size += $this->emit( SqlFormatter::value( $row[ $column ] ?? null, $kind ) );
+		}
+		$size         += $this->emit( ");\n" );
+		$this->largest = max( $this->largest, $size - 1 );
+		return $size;
 	}
 
 	/**
@@ -582,7 +719,9 @@ final class TableSource implements ResumableByteSource {
 	 * @return int Bytes written.
 	 */
 	private function statement( array $tuples ): int {
-		return $this->emit( $this->prefix . implode( ',', $tuples ) . ";\n" );
+		$size          = $this->emit( $this->prefix . implode( ',', $tuples ) . ";\n" );
+		$this->largest = max( $this->largest, $size - 1 );
+		return $size;
 	}
 
 	/**
@@ -620,20 +759,7 @@ final class TableSource implements ResumableByteSource {
 			}
 			$this->after = $after;
 		}
-		$tuples = [];
-		$length = 0;
-		$size   = 0;
-		foreach ( $rows as $row ) {
-			$tuple = $this->tuple( $row );
-			if ( [] !== $tuples && $length + strlen( $tuple ) > self::STATEMENT_BYTES ) {
-				$size  += $this->statement( $tuples );
-				$tuples = [];
-				$length = 0;
-			}
-			$tuples[] = $tuple;
-			$length  += strlen( $tuple ) + 1;
-		}
-		$size += $this->statement( $tuples );
+		[ $size, $widest ] = $this->write( $rows );
 
 		$count         = count( $rows );
 		$this->rows   += $count;
@@ -646,6 +772,8 @@ final class TableSource implements ResumableByteSource {
 		} elseif ( $size < intdiv( self::TARGET_PAGE_BYTES, 2 ) && $count === $this->page ) {
 			$this->page = min( self::STATEMENT_ROWS, $this->page * 2 );
 		}
+		// A page is held in memory whole: no more of the widest rows seen than fit twice the target.
+		$this->page = max( 1, min( $this->page, intdiv( 2 * self::TARGET_PAGE_BYTES, max( 1, $widest ) ) ) );
 	}
 
 	/**
@@ -655,8 +783,12 @@ final class TableSource implements ResumableByteSource {
 	 * @return int Its length.
 	 */
 	private function emit( string $text ): int {
-		$this->buffer .= $text;
-		$this->bytes  += strlen( $text );
-		return strlen( $text );
+		$length = strlen( $text );
+		if ( $length > 0 ) {
+			$this->pieces[]   = $text;
+			$this->available += $length;
+			$this->bytes     += $length;
+		}
+		return $length;
 	}
 }

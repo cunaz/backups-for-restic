@@ -87,6 +87,7 @@ final class Catalog {
 		}
 		$columns = [];
 		$usable  = [];
+		$wide    = false;
 		foreach ( $this->connection->rows( 'SHOW FULL COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
 			// Their values are not read, so they cannot order pages either.
@@ -97,6 +98,7 @@ final class Catalog {
 			$field             = (string) $column['Field'];
 			$type              = (string) $column['Type'];
 			$columns[ $field ] = SqlFormatter::kind( $type );
+			$wide              = $wide || 1 === preg_match( '/\A(?:tinytext|text|mediumtext|longtext|tinyblob|blob|mediumblob|longblob|json|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection|geomcollection|vector)\b/i', $type );
 			if ( 'NO' === ( $column['Null'] ?? null ) ) {
 				$usable[ $field ] = KeyColumn::of( $field, $type, $column['Collation'] ?? null );
 			}
@@ -114,7 +116,7 @@ final class Catalog {
 		foreach ( $order as $column ) {
 			$parts[] = $column->name . "\t" . $column->kind . "\t" . $column->collation;
 		}
-		return new Table( $name, SqlFormatter::one_line( $raw ), $columns, $key, $order, $engine, hash( 'sha256', implode( "\n", $parts ) ) );
+		return new Table( $name, SqlFormatter::one_line( $raw ), $columns, $key, $order, $engine, hash( 'sha256', implode( "\n", $parts ) ), $wide );
 	}
 
 	/**

@@ -180,12 +180,14 @@ final class DatabaseDump {
 			];
 			// How the rows were read, for tables that this version dumped: the columns of the
 			// key that ordered the pages (empty without one), whether all rows come from one
-			// read view, so that an import can explain a duplicate key, and how often the table
-			// started over because its definition changed.
-			if ( isset( $result['key'], $result['snapshot'], $result['restarts'] ) ) {
-				$entry['key']      = $result['key'];
-				$entry['snapshot'] = $result['snapshot'];
-				$entry['restarts'] = $result['restarts'];
+			// read view, so that an import can explain a duplicate key, how often the table
+			// started over because its definition changed, and its longest statement in bytes,
+			// with the semicolon and without the newline, to compare with max_allowed_packet.
+			if ( isset( $result['key'], $result['snapshot'], $result['restarts'], $result['largest'] ) ) {
+				$entry['key']               = $result['key'];
+				$entry['snapshot']          = $result['snapshot'];
+				$entry['restarts']          = $result['restarts'];
+				$entry['largest_statement'] = $result['largest'];
 			}
 			$tables[] = $entry;
 		}
@@ -208,9 +210,9 @@ final class DatabaseDump {
 	/**
 	 * Records a finished table.
 	 *
-	 * @param string                                                                         $file   File name.
-	 * @param string                                                                         $name   Table name.
-	 * @param array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int} $result Counts and how the rows were read.
+	 * @param string                                                                                       $file   File name.
+	 * @param string                                                                                       $name   Table name.
+	 * @param array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int, largest: int} $result Counts and how the rows were read.
 	 */
 	private function record( string $file, string $name, array $result ): void {
 		$state                     = $this->state();
@@ -221,7 +223,7 @@ final class DatabaseDump {
 	/**
 	 * Loads the state, listing tables and views on first use.
 	 *
-	 * @return array{version: int, tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int, snapshot?: bool, key?: list<string>, restarts?: int}>} State.
+	 * @return array{version: int, tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int, snapshot?: bool, key?: list<string>, restarts?: int, largest?: int}>} State.
 	 * @throws DatabaseFailed If the tables cannot be listed.
 	 */
 	private function state(): array {
@@ -237,10 +239,11 @@ final class DatabaseDump {
 						'bytes' => is_int( $result['bytes'] ?? null ) ? $result['bytes'] : 0,
 					];
 					$key              = $result['key'] ?? null;
-					if ( is_bool( $result['snapshot'] ?? null ) && is_array( $key ) && array_is_list( $key ) && $key === array_filter( $key, 'is_string' ) && is_int( $result['restarts'] ?? null ) ) {
+					if ( is_bool( $result['snapshot'] ?? null ) && is_array( $key ) && array_is_list( $key ) && $key === array_filter( $key, 'is_string' ) && is_int( $result['restarts'] ?? null ) && is_int( $result['largest'] ?? null ) ) {
 						$results[ $file ]['snapshot'] = $result['snapshot'];
 						$results[ $file ]['key']      = $key;
 						$results[ $file ]['restarts'] = $result['restarts'];
+						$results[ $file ]['largest']  = $result['largest'];
 					}
 				}
 			}

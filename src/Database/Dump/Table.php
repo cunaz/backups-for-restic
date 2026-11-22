@@ -26,6 +26,7 @@ final readonly class Table {
 	 * @param list<KeyColumn>       $order   Columns of that key, in key order; empty without a key.
 	 * @param string                $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
 	 * @param string                $digest  Hash of the definition without its AUTO_INCREMENT counter, of the columns and of the key; see Catalog.
+	 * @param bool                  $wide    Whether a column can hold values of any size: TEXT, BLOB, JSON or spatial.
 	 */
 	public function __construct(
 		public string $name,
@@ -34,7 +35,8 @@ final readonly class Table {
 		public ?string $key,
 		public array $order,
 		public string $engine = '',
-		public string $digest = ''
+		public string $digest = '',
+		public bool $wide = false
 	) {
 	}
 
