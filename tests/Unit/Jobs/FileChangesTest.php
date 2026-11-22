@@ -15,6 +15,7 @@ use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Runner;
 use BackupsForRestic\Jobs\RunnerLock;
+use BackupsForRestic\Restore\ApplyManifest;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\ChunkDigest;
 use BackupsForRestic\Restore\DiskFilePlan;
@@ -1619,6 +1620,48 @@ final class FileChangesTest extends TestCase {
 		$this->jobs->save( $saved );
 		$failed = $this->run_job( $broken, JobState::Failed );
 		self::assertSame( 'The background file preview checkpoint is invalid.', $failed->error?->message );
+	}
+
+	public function test_a_folder_kept_after_its_scan_yielded_leaves_no_position_to_the_next_folder(): void {
+		// Two folders that the apply creates side by side, and the usual many unchanged files.
+		foreach ( [ 'a-dir/1.txt', 'a-dir/2.txt', 'z-dir/1.txt' ] as $name ) {
+			if ( ! is_dir( dirname( $this->files . $this->live . '/' . $name ) ) ) {
+				mkdir( dirname( $this->files . $this->live . '/' . $name ), 0700 );
+			}
+			file_put_contents( $this->files . $this->live . '/' . $name, 'created' );
+		}
+		$queued = $this->queue_large_preview();
+		// The report lists a-dir last, before the queued preview reads it, so that the undo,
+		// which goes backwards, reviews a-dir before the other created folders.
+		$report = dirname( $this->files ) . '/entries.jsonl';
+		$lines  = array_filter( explode( "\n", (string) file_get_contents( $report ) ) );
+		$moved  = array_filter( $lines, fn ( string $line ): bool => str_starts_with( (string) json_decode( $line, true, flags: JSON_THROW_ON_ERROR )['path'], $this->live . '/a-dir' ) );
+		file_put_contents( $report, implode( "\n", [ ...array_diff( $lines, $moved ), ...$moved ] ) . "\n" );
+		$plan  = $this->run_job( $queued );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		clearstatcache();
+		$folder = ApplyManifest::identity( $this->live . '/a-dir' );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		// Ticks without budget until the review yields in a-dir's names.
+		for ( $tick = 0; $tick < 20; ++$tick ) {
+			$this->runner->tick( 0.0 );
+			$saved = $this->jobs->get( $review->id );
+			if ( null !== ( $saved?->data['plan_cursor']['pending']['identity'] ?? null ) ) {
+				break;
+			}
+		}
+		self::assertSame( $folder, $saved?->data['plan_cursor']['pending']['identity'] ?? null );
+		// a-dir changes before the review goes on, so that it is kept for another reason.
+		chmod( $this->live . '/a-dir', 0750 );
+		$done = $this->run_job( $review );
+		$page = $this->changes->request_preview( $apply->id, true, false, $done->id );
+		self::assertIsArray( $page );
+		$rows = array_column( $page['entries'], null, 'path' );
+		self::assertSame( [ 'keep', 'changed_since_apply' ], [ $rows[ $this->live . '/a-dir' ]['action'], $rows[ $this->live . '/a-dir' ]['reason'] ] );
+		foreach ( [ 'z-dir', 'b-new' ] as $name ) {
+			self::assertSame( [ 'remove', 'undo_journal' ], [ $rows[ $this->live . '/' . $name ]['action'], $rows[ $this->live . '/' . $name ]['reason'] ], $name );
+		}
 	}
 
 	/**

@@ -258,7 +258,6 @@ final class PlanBuild {
 				if ( null === $covered ) {
 					return false;
 				}
-				$this->pending = [];
 				if ( ! $covered ) {
 					$decision = [
 						'action' => 'keep',
@@ -276,6 +275,9 @@ final class PlanBuild {
 			$row['action'] = $decision['action'];
 			$row['reason'] = $decision['reason'];
 			$this->disk->put( 'rows', $done, $row );
+			// A position in a folder's names belongs to the row that yielded in it, also when
+			// that row is decided otherwise once it is reviewed again.
+			$this->pending                        = [];
 			$this->changes                       += 'keep' === $decision['action'] ? 0 : 1;
 			$this->settled                       += 'keep' === $decision['action'] && FileChange::settled( $decision['reason'] ) ? 1 : 0;
 			$this->actions[ $decision['action'] ] = ( $this->actions[ $decision['action'] ] ?? 0 ) + 1;
