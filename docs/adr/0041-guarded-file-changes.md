@@ -88,10 +88,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   synchronised before the record that names it, the candidate with its attributes before the
   `ready` record, the restored original's attributes before the `restore` record, the
   `remove` record before an undo removes an entry, and the live directory after a
-  publication or removal and before the record that completes it, also on a retry. Where PHP cannot open a directory or the file system cannot synchronise one, the
-  rename keeps the order that the file system gives it. A created file whose completed
-  record survived a power loss, while the unlink of its private name before it did not, is
-  undone like an interrupted link.
+  publication or removal and before the record that completes it, also on a retry. Where
+  PHP cannot open a directory or the file system cannot synchronise one, the rename keeps
+  the order that the file system gives it. A created file whose completed record survived a
+  power loss, while the unlink of its private name before it did not, is undone like an
+  interrupted link.
 - A new directory is prepared in the entry's private item directory with the permissions that
   `mkdir()` in place gave: the reviewed mode narrowed by the umask and, below a set-group-ID
   parent, that group and the bit where the worker may set the group. Its inode is recorded in
