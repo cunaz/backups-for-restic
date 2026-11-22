@@ -18,7 +18,7 @@
         "summary": ".tools/infection-planner/summary.log",
         "github": true
     },
-    // minMsi is a floor at the value measured on 2026-11-20 (96.02 %), rounded down; it may
+    // minMsi is a floor at the value measured on 2026-11-22 (96.64 %), rounded down; it may
     // only rise.
     "minCoveredMsi": 90,
     "minMsi": 96,

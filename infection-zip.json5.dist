@@ -17,10 +17,11 @@
         "summary": ".tools/infection-zip/summary.log",
         "github": true
     },
-    // Floors at the scores measured on 2026-11-20 (94.21 % and 96.02 % covered), rounded down.
-    // They may only rise.
-    "minMsi": 94,
-    "minCoveredMsi": 96,
+    // Floors at the scores measured on 2026-11-22 (97.98 % and 99.87 % covered), rounded down.
+    // They may only rise. The one mutant that escapes is equivalent: a 33rd row of the matrix
+    // in Crc32::power(), which no 32-bit vector reads.
+    "minMsi": 97,
+    "minCoveredMsi": 99,
     "mutators": {
         "@default": true
     }

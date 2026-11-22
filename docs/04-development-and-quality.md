@@ -398,7 +398,7 @@ Infection runs in six gates, each with its own code, its own tests from
 | Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 96 % | 90 % |
 | File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 80 % | 85 % |
 | File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its three `Database*` classes | `ci.yml` | 67 % | 74 % |
-| ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 94 % | 95 % |
+| ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 97 % | 99 % |
 | Database (`mutation:database`) | all of `Database\Restore` and the `Database*` classes of `src/Jobs/Apply`, killed by `tests/Unit/Database` and `tests/Database` against MySQL | `database-mutation.yml` | 73 % | 79 % |
 
 Every script passes `--with-uncovered`. Without it Infection mutates only lines that a test
@@ -414,10 +414,10 @@ rise; the pull request that adds the tests raises it. The goal for every gate is
 | Gate | Mutants | Not covered | MSI | Covered MSI | Spread over the runs |
 | --- | ---: | ---: | ---: | ---: | --- |
 | Core | 4,406 | 121 | 87.90 % | 90.39 % | two runs, identical |
-| Planner | 477 | 9 | 96.02 % | 97.86 % | two runs, identical |
+| Planner | 745 | 13 | 96.64 % | 98.36 % | two runs, identical |
 | File restore | 2,857 | 150 | 80.96 % | 85.45 % | 80.96 to 80.99 % |
 | File apply jobs | 1,254 | 109 | 67.62 % | 74.06 % | 67.62 to 67.86 % |
-| ZIP downloads | 794 | 15 | 94.08 % | 95.89 % | 94.08 to 94.21 % |
+| ZIP downloads | 794 | 15 | 97.98 % | 99.87 % | two runs, identical |
 | Database | 3,295 | 227 | 73.75 % | 79.20 % | one run without other load |
 
 The table names the lowest result of each gate. A mutant that runs into the timeout counts as

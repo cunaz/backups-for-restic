@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Restore;
 
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Restore\ApplyPlan;
+use BackupsForRestic\Restore\LiveSpellings;
 use BackupsForRestic\Tests\Support\TempDir;
 
 final class ApplyPlanTest extends TestCase {
@@ -184,11 +185,14 @@ final class ApplyPlanTest extends TestCase {
 		file_put_contents( $stage . '/queue/spool/database/export.sql', "-- MySQL dump 10.13\n-- backups-for-restic-dump/1\n" );
 		file_put_contents( $stage . '/queue/spool/database/empty.sql', '' );
 		mkdir( $stage . '/queue/spool/database/010-wp_users.sql' );
+		// A regular file with that name is no directory of a backup.
+		mkdir( $stage . '/logs' );
+		file_put_contents( $stage . '/logs/spool', 'a log' );
 		$rows = array_column( iterator_to_array( $this->plan->actions( $this->files ) ), 'action', 'path' );
 		foreach ( [ '/mailer', '/mailer/spool', '/mailer/spool/queue', '/mailer/database', '/spool', '/queue/spool', '/queue/spool/database', '/queue/spool/database/010-wp_users.sql' ] as $directory ) {
 			self::assertSame( 'mkdir', $rows[ $this->live . $directory ], $directory );
 		}
-		foreach ( [ '/mailer/spool/queue/message.eml', '/mailer/spool/database.sql', '/mailer/manifest.json', '/spool/manifest.json.bak', '/queue/spool/manifest.json', '/queue/spool/database/jobs.json', '/queue/spool/database/manifest.json', '/queue/spool/database/export.sql', '/queue/spool/database/empty.sql' ] as $file ) {
+		foreach ( [ '/mailer/spool/queue/message.eml', '/mailer/spool/database.sql', '/mailer/manifest.json', '/spool/manifest.json.bak', '/queue/spool/manifest.json', '/queue/spool/database/jobs.json', '/queue/spool/database/manifest.json', '/queue/spool/database/export.sql', '/queue/spool/database/empty.sql', '/logs/spool' ] as $file ) {
 			self::assertSame( 'create', $rows[ $this->live . $file ], $file );
 		}
 	}
@@ -215,6 +219,34 @@ final class ApplyPlanTest extends TestCase {
 			chmod( $stage . '/b/spool/manifest.json', 0600 );
 			chmod( $stage . '/c/spool/database', 0700 );
 		}
+	}
+
+	public function test_a_writers_rechecks_keep_one_listing_of_a_folder_until_the_writer_reports_a_change(): void {
+		file_put_contents( $this->files . $this->live . '/file', 'staged' );
+		// Before the first recheck there is no index: nothing was listed, and a reported
+		// change has nothing to correct.
+		self::assertSame( 0, $this->plan->listings() );
+		$this->plan->changed( $this->live . '/file', true );
+		self::assertSame( 0, $this->plan->listings() );
+		// A listing is kept once the second of the folder's last change and the clock margin
+		// have passed (LiveSpellings).
+		$ready = time() + 1 + LiveSpellings::CLOCK_MARGIN;
+		while ( microtime( true ) < $ready ) {
+			usleep( 10000 );
+		}
+		self::assertSame( 'create', $this->plan->inspect( $this->files, $this->live . '/file' )['action'] );
+		self::assertSame( 1, $this->plan->listings( $this->live ) );
+		self::assertSame( 'create', $this->plan->inspect( $this->files, $this->live . '/file' )['action'] );
+		self::assertSame( 1, $this->plan->listings( $this->live ) );
+		// The staged folders are listed as well, each of them once.
+		$all = $this->plan->listings();
+		self::assertGreaterThan( 1, $all );
+		// The report alone makes the next recheck list the folder again: the index does not
+		// wait for the folder's change time to show the writer's own change.
+		$this->plan->changed( $this->live . '/file', true );
+		self::assertSame( 'create', $this->plan->inspect( $this->files, $this->live . '/file' )['action'] );
+		self::assertSame( 2, $this->plan->listings( $this->live ) );
+		self::assertSame( $all + 1, $this->plan->listings() );
 	}
 
 	public function test_recheck_refuses_aliases_links_untrusted_parents_and_a_disappeared_root(): void {

@@ -100,9 +100,19 @@ final class ZipRecordsTest extends TestCase {
 
 		$early = $records->local( 'a', 0, 86400, 0 );
 		self::assertSame( ( 1 << 5 ) | 1, self::word( $early, 12 ), 'A time before 1980 becomes the first day the format knows.' );
+		self::assertSame( 0, self::word( $early, 10 ), 'That day begins at midnight.' );
 
+		// 2100-01-01 00:00:00 UTC.
+		$century = $records->local( 'a', 0, 4102444800, 0 );
+		self::assertSame( 0, self::word( $century, 10 ) );
+		self::assertSame( ( 120 << 9 ) | ( 1 << 5 ) | 1, self::word( $century, 12 ) );
+		self::assertSame( 31, strlen( $century ), 'A time beyond 2038 has no 32-bit field.' );
+
+		// 2112: the format ends with 2107-12-31 23:59:58.
 		$late = $records->local( 'a', 0, 4500000000, 0 );
-		self::assertSame( 31, strlen( $late ), 'A time beyond 2038 has no 32-bit field.' );
+		self::assertSame( ( 23 << 11 ) | ( 59 << 5 ) | 29, self::word( $late, 10 ), 'A time after 2107 becomes the last two seconds the format knows.' );
+		self::assertSame( ( 127 << 9 ) | ( 12 << 5 ) | 31, self::word( $late, 12 ) );
+		self::assertSame( 31, strlen( $late ) );
 	}
 
 	private static function word( string $bytes, int $offset ): int {
