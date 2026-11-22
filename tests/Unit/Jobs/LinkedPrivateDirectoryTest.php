@@ -23,7 +23,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * A private directory that the configuration names through a symbolic link, as
- * BACKUPS_FOR_RESTIC_PRIVATE_DIR=/home/acme/private does where /home is one: the services
+ * BACKUPS_FOR_RESTIC_PRIVATE_DIR=/data/acme/private does where /data is one: the services
  * are built from it as the composition root builds them, and the checks that refuse a path
  * whose real location differs from its spelling must still let the plugin work.
  */
@@ -40,14 +40,14 @@ final class LinkedPrivateDirectoryTest extends TestCase {
 	}
 
 	public function test_a_large_file_preview_is_built_read_and_expired_through_the_link(): void {
-		mkdir( $this->directory . '/usr/home', 0700, true );
-		if ( ! symlink( $this->directory . '/usr/home', $this->directory . '/home' ) ) {
+		mkdir( $this->directory . '/volumes/data', 0700, true );
+		if ( ! symlink( $this->directory . '/volumes/data', $this->directory . '/data' ) ) {
 			self::markTestSkipped( 'Symbolic links cannot be created here.' );
 		}
 		$live = $this->directory . '/site';
 		mkdir( $live );
 		file_put_contents( $live . '/a-existing', 'original' );
-		$private = PrivateDirectory::locate( $this->directory . '/home/acme/private', $live, $live );
+		$private = PrivateDirectory::locate( $this->directory . '/data/acme/private', $live, $live );
 		$private->ensure();
 		$clock   = new FrozenClock();
 		$random  = new SystemRandom();

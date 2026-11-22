@@ -61,21 +61,21 @@ final class PrivateDirectoryTest extends TestCase {
 	}
 
 	public function test_a_directory_named_through_a_link_is_used_by_its_real_path(): void {
-		mkdir( $this->root . '/usr/home', 0700, true );
-		if ( ! symlink( $this->root . '/usr/home', $this->root . '/home' ) ) {
+		mkdir( $this->root . '/volumes/data', 0700, true );
+		if ( ! symlink( $this->root . '/volumes/data', $this->root . '/data' ) ) {
 			self::markTestSkipped( 'Symbolic links cannot be created here.' );
 		}
-		$real = realpath( $this->root . '/usr/home' ) . '/acme/private';
+		$real = realpath( $this->root . '/volumes/data' ) . '/acme/private';
 		// As on the first request after BACKUPS_FOR_RESTIC_PRIVATE_DIR was set: nothing exists yet.
-		$directory = PrivateDirectory::locate( $this->root . '/home/acme//private/', $this->root . '/content', $this->root . '/uploads' );
-		self::assertSame( $this->root . '/home/acme//private', $directory->configured );
+		$directory = PrivateDirectory::locate( $this->root . '/data/acme//private/', $this->root . '/content', $this->root . '/uploads' );
+		self::assertSame( $this->root . '/data/acme//private', $directory->configured );
 		self::assertSame( $real, $directory->path );
 
 		$directory->ensure();
 		foreach ( PrivateDirectory::SUBDIRECTORIES as $name ) {
 			self::assertSame( realpath( $directory->subdirectory( $name ) ), $directory->subdirectory( $name ), $name );
 		}
-		self::assertSame( $real, ( new PrivateDirectory( $this->root . '/home/acme/private' ) )->path, 'Every later request uses the same form.' );
+		self::assertSame( $real, ( new PrivateDirectory( $this->root . '/data/acme/private' ) )->path, 'Every later request uses the same form.' );
 		self::assertTrue( $directory->owns_contents() );
 
 		$directory->remove_contents();

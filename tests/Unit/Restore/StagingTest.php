@@ -579,12 +579,12 @@ final class StagingTest extends TestCase {
 	}
 
 	public function test_a_private_directory_named_through_a_link_expires_preview_data_and_staging(): void {
-		mkdir( $this->directory . '/usr/home', 0700, true );
-		if ( ! symlink( $this->directory . '/usr/home', $this->directory . '/home' ) ) {
+		mkdir( $this->directory . '/volumes/data', 0700, true );
+		if ( ! symlink( $this->directory . '/volumes/data', $this->directory . '/data' ) ) {
 			self::markTestSkipped( 'Symbolic links cannot be created here.' );
 		}
-		// As the plugin builds them from BACKUPS_FOR_RESTIC_PRIVATE_DIR=<...>/home/acme/private.
-		$private = PrivateDirectory::locate( $this->directory . '/home/acme/private', $this->directory, $this->directory );
+		// As the plugin builds them from BACKUPS_FOR_RESTIC_PRIVATE_DIR=<...>/data/acme/private.
+		$private = PrivateDirectory::locate( $this->directory . '/data/acme/private', $this->directory, $this->directory );
 		$private->ensure();
 		$jobs     = new JobStore( $private->subdirectory( 'jobs' ), new Redactor(), new SystemRandom() );
 		$restores = $private->subdirectory( 'restores' );

@@ -22,8 +22,8 @@ defined( 'ABSPATH' ) || exit;
  * and backups while the directory is reachable from the web.
  *
  * The plugin works with one form of the path: the canonical one, with every symbolic link on
- * the way resolved. A host can name the directory through a link, as /home on FreeBSD is
- * one, and the checks that refuse a path whose real location differs from its spelling
+ * the way resolved. A host can name the directory through a link, as a mounted data
+ * volume often is one, and the checks that refuse a path whose real location differs from its spelling
  * (staging, file previews, the restore engine) must hold for everything below it. The form
  * that was configured is kept for what depends on how a path is written: whether it is
  * absolute and free of dot segments, and where a web server maps it.

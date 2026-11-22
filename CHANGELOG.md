@@ -372,7 +372,7 @@ All notable changes are documented here. The format follows
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
 - A private directory that `BACKUPS_FOR_RESTIC_PRIVATE_DIR` names through a symbolic link,
-  as `/home` is one on FreeBSD, is used by its real path. Large file previews failed there,
+  as some hosts mount their data volume, is used by its real path. Large file previews failed there,
   and after one had failed, no restore staging expired any more. Expiry also goes on when
   the preview data or the undo workspace of one job cannot be removed.
 - Restores run on hosts that disable `disk_free_space()` or do not report the free space:
