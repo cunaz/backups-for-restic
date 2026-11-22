@@ -89,6 +89,9 @@ final readonly class FileMaintenance {
 		if ( false === $active || $ours['dev'] !== $active['dev'] || $ours['ino'] !== $active['ino'] || ! touch( $temp ) ) {
 			throw new StorageFailed( 'The active WordPress maintenance marker has changed.' );
 		}
+		// Every job publishes its marker under the same name. OPcache without timestamp
+		// checks would otherwise keep running an earlier job's marker in this server.
+		self::invalidate( $marker );
 	}
 
 	/**
@@ -112,13 +115,29 @@ final readonly class FileMaintenance {
 		$expected  = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
 		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < self::MAX_BYTES && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
 		$active    = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
-		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] && ! unlink( $marker ) ) {
-			throw new StorageFailed( 'The site could not leave maintenance mode.' );
+		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] ) {
+			// OPcache finds a cached script only while its file exists.
+			self::invalidate( $marker );
+			if ( ! unlink( $marker ) ) {
+				throw new StorageFailed( 'The site could not leave maintenance mode.' );
+			}
 		}
 		if ( ! unlink( $temp ) ) {
 			throw new StorageFailed( 'The private maintenance marker could not be removed.' );
 		}
 	}
+
+	/**
+	 * Drops a compiled marker from this server's OPcache, where the extension is loaded.
+	 *
+	 * @param string $marker Live marker path.
+	 */
+	private static function invalidate( string $marker ): void {
+		if ( function_exists( 'opcache_invalidate' ) ) {
+			opcache_invalidate( $marker, true );
+		}
+	}
+
 	/**
 	 * Checks local paths before using a job-owned marker.
 	 *

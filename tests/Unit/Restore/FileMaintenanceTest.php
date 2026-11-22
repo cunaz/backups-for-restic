@@ -356,6 +356,50 @@ final class FileMaintenanceTest extends TestCase {
 		}
 	}
 
+	public function test_opcache_without_timestamp_checks_runs_the_current_marker(): void {
+		$root = TempDir::create( 'maintenance' );
+		try {
+			$process = proc_open(
+				[
+					PHP_BINARY,
+					'-d',
+					'opcache.enable=1',
+					'-d',
+					'opcache.enable_cli=1',
+					'-d',
+					'opcache.validate_timestamps=0',
+					'-d',
+					'opcache.file_update_protection=0',
+					'-d',
+					'opcache.jit=disable',
+					dirname( __DIR__, 2 ) . '/Fixtures/maintenance/opcache.php',
+					$root,
+				],
+				[
+					1 => [ 'pipe', 'w' ],
+					2 => [ 'pipe', 'w' ],
+				],
+				$pipes
+			);
+			self::assertIsResource( $process );
+			$output = (string) stream_get_contents( $pipes[1] );
+			$errors = (string) stream_get_contents( $pipes[2] );
+			self::assertSame( 0, proc_close( $process ), $output . $errors );
+			$result = json_decode( $output, true, 8, JSON_THROW_ON_ERROR );
+			self::assertIsArray( $result );
+			if ( false === $result['opcache'] ) {
+				self::markTestSkipped( 'OPcache is not available to the PHP command line.' );
+			}
+			self::assertTrue( $result['cached'], 'The first marker must be in the cache for this test to mean anything.' );
+			self::assertIsFloat( $result['first'] );
+			self::assertGreaterThan( 0.0, $result['first'], 'The first job does not admit the second job\'s controller.' );
+			self::assertSame( 0.0, $result['second'], 'The second job\'s marker must run, not the first job\'s compiled one.' );
+			self::assertSame( 1763600000, $result['core'], 'Core\'s next marker must run, not the second job\'s compiled one.' );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
 	public function test_unrelated_updater_can_replace_marker_in_place_without_losing_it_at_cleanup(): void {
 		$root = TempDir::create( 'maintenance' );
 		try {
