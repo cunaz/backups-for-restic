@@ -48,6 +48,14 @@ final class RestoreSteps implements StepProvider {
 	public const int MAX_RESUMPTIONS = 3;
 
 	/**
+	 * Free space that building an archive leaves on the volume. The archive is a second copy
+	 * of every staged byte, and while it grows the site writes beside it: uploads, sessions,
+	 * the database where it shares the volume, and the documents of this job. 64 MiB is four
+	 * times the reserve that staging keeps for its report and checkpoints alone.
+	 */
+	private const int ARCHIVE_RESERVE = 67108864;
+
+	/**
 	 * Creates the steps.
 	 *
 	 * @param RestoreServices $services Dependencies.
@@ -236,6 +244,26 @@ final class RestoreSteps implements StepProvider {
 			$job->progress['phase'] = 'complete';
 			return true;
 		}
+		if ( 0 === $writer->progress()['bytes'] && ! $writer->is_complete() ) {
+			// Before the first byte: a second copy that does not fit would run the volume down
+			// to nothing before a write failed, and every other writer there with it.
+			$needed = $this->archive_space( $job );
+			$free   = $this->services->free_space( $this->services->staging_dir( $job ) );
+			if ( null !== $free && $free < $needed ) {
+				$job->warn( sprintf( 'ZIP unavailable. It needs about %d MiB of free disk space, and %d MiB are free. The staged files can be downloaded one by one.', (int) ceil( $needed / 1048576 ), (int) floor( $free / 1048576 ) ) );
+				$log->write(
+					'warning',
+					'The ZIP is not built: the disk has too little free space for a second copy.',
+					[
+						'needed' => $needed,
+						'free'   => $free,
+					]
+				);
+				self::discard( $job, $writer );
+				$job->progress['phase'] = 'complete';
+				return true;
+			}
+		}
 		try {
 			if ( ! $writer->advance( $deadline ) ) {
 				$job->progress['archive_bytes'] = $writer->progress()['bytes'];
@@ -248,6 +276,23 @@ final class RestoreSteps implements StepProvider {
 		}
 		$job->progress['phase'] = 'complete';
 		return true;
+	}
+
+	/**
+	 * The most that an archive of the staged files needs: every staged byte once more, the
+	 * headers of every entry and the reserve. A stored entry writes its name three times,
+	 * in its local header, in its record of the central directory and in the spool that
+	 * collects those records, with at most 228 bytes of fields besides. A line of the report
+	 * holds the same name and more than a hundred bytes of fields, so three times the report
+	 * covers the headers of every entry, also of those that a ZIP leaves out.
+	 *
+	 * @param Job $job Job with completed staging.
+	 * @return float Bytes.
+	 */
+	private function archive_space( Job $job ): float {
+		$report = $this->services->work_dir( $job ) . '/' . RestoreServices::REPORT;
+		$size   = is_file( $report ) ? filesize( $report ) : false;
+		return (float) Decoded::int( $job->progress['bytes'] ?? null ) + 3.0 * ( false === $size ? 0 : $size ) + self::ARCHIVE_RESERVE;
 	}
 
 	/**

@@ -240,6 +240,23 @@ final class RestoreStepsTest extends TestCase {
 		$this->assert_staged_without_archive( $stopped );
 	}
 
+	public function test_a_zip_that_would_not_fit_is_not_begun_and_the_staged_files_stay(): void {
+		$job = $this->restore_job( $this->backup(), [ $this->site . '/docs' ], true );
+		$this->drive( $job, static fn ( Job $pending ): bool => 'archiving' === ( $pending->progress['phase'] ?? null ) );
+		// The files are staged. A second copy of them and the reserve beside it do not fit.
+		$this->space = static fn ( string $path ): float => 32.0 * 1048576;
+
+		$done = $this->drive( $job );
+
+		self::assertSame( JobState::Succeeded, $done->state, (string) $done->error?->message );
+		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+		foreach ( [ '', '.part', '.entries', '.state' ] as $suffix ) {
+			self::assertFileDoesNotExist( $this->staging( $job ) . '/selection.zip' . $suffix, 'Not a byte of the archive was written.' );
+		}
+		self::assertCount( 1, $done->warnings );
+		self::assertStringContainsString( 'ZIP unavailable. It needs about 66 MiB of free disk space, and 32 MiB are free.', $done->warnings[0] );
+	}
+
 	public function test_a_backup_and_a_restore_in_many_short_ticks_stage_identical_bytes(): void {
 		$snapshot = $this->backup();
 
