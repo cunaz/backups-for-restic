@@ -213,6 +213,23 @@ All notable changes are documented here. The format follows
   options table did not keep it.
 - Job files and logs also redact the REST credentials in the form the `Authorization`
   header carries them.
+- File apply no longer writes a snapshot's private database dump and site manifest to the
+  live site. After the private directory had moved, applying `wp-content` from an older
+  snapshot recreated `spool/database/*.sql` in the web root without its deny files. A
+  directory named `spool` that holds a backup's site manifest or database dump is now
+  skipped in every apply (`snapshot_spool`); it is recognized by the format line that the
+  backup writes at the start of these files, so another directory with that name is
+  applied as usual. The database rehearsal reads the dump from staging.
+- Must-use plugins, drop-ins and the other startup and private locations stay protected
+  when they are configured with repeated or trailing slashes or through a symbolic link, for
+  example below a `WP_CONTENT_DIR` that ends in a slash. A location that is not an absolute
+  path without `.` or `..` segments makes file apply unavailable (`protected_path_invalid`)
+  instead of leaving it unprotected.
+- Protected names are compared the way case-insensitive filesystems compare them: with full
+  case folding, without invisible characters and, with the intl extension, after Unicode
+  normalization. A name such as `wp-conﬁg.php` with a ligature no longer passes for an
+  ordinary file. Without intl, a name that only normalization could tell apart from a
+  protected one is refused (`unverified_name`).
 - While a live file change holds the site in maintenance, a request that the job's control
   token admits can no longer reach another REST route through a `rest_route` field in its
   form body, and no admitted request can store the shortened list of active plugins that
@@ -378,6 +395,12 @@ All notable changes are documented here. The format follows
 - Cancelling a forget releases its lock even when the retention settings became unusable.
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
+- The file review refuses a replacement that the apply could not finish: a file owned by
+  another user than PHP (`foreign_owner`), with a group that a file written by PHP cannot
+  have (`foreign_group`), or with setuid, setgid or sticky bits (`special_permissions`). Before,
+  the review called such a plan applicable, and the apply stopped at the first such file
+  after earlier changes were made. Without the POSIX extension the review cannot check the
+  owner, and the apply still stops before it replaces such a file.
 - While a live file change holds the site in maintenance, WP-CLI commands other than the
   plugin's own run with the site's plugins, as during a WordPress update. Before, every
   command started with this plugin alone: `wp plugin activate`, or deactivating this

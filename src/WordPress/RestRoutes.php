@@ -917,7 +917,8 @@ final class RestRoutes {
 			$code = JobError::from_throwable( $refused )->code;
 			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused' ], true ) ? $code : 'live_plan_conflict', 409 );
 		}
-		return $this->error( $database ? 'database_review_required' : 'live_plan_unavailable', 400 );
+		$code = JobError::from_throwable( $refused )->code;
+		return $this->error( $database ? 'database_review_required' : ( 'protected_path_invalid' === $code ? $code : 'live_plan_unavailable' ), 400 );
 	}
 
 	/**

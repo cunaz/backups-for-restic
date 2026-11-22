@@ -38,6 +38,7 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * At least 128 MB of free disk space for the plugin's working files.
 * Outbound HTTPS to the repository server.
 * For an existing repository in restic's format 2 with compressed data, the zstd PHP extension. Repositories that the plugin creates do not need it.
+* For applying restored files to the live site, the POSIX and intl PHP extensions are recommended: with them, the review checks file ownership and Unicode file names before any file is changed.
 * A restic REST server: your own [rest-server](https://github.com/restic/rest-server), or a hosted one.
 * Multisite networks are not supported yet.
 
