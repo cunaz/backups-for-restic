@@ -122,9 +122,11 @@ final class BrowserProbe {
 			return null;
 		}
 		$entry['result'] = [
-			'location' => $pending['location'] ?? null,
-			'exposed'  => $exposed,
-			'at'       => $now,
+			'location'  => $pending['location'] ?? null,
+			'exposed'   => $exposed,
+			// A refusal counts only with the known file beside it; result() asks for this mark.
+			'confirmed' => $confirmed,
+			'at'        => $now,
 		];
 		$this->state->set( self::ENTRY, $entry );
 		return $exposed;
@@ -140,6 +142,10 @@ final class BrowserProbe {
 		$result  = $this->state->get( self::ENTRY )['result'] ?? null;
 		$exposed = is_array( $result ) ? ( $result['exposed'] ?? null ) : null;
 		if ( ! is_bool( $exposed ) || $this->location( $location ) !== ( $result['location'] ?? null ) || $this->clock->now()[0] - Decoded::int( $result['at'] ?? null ) >= self::RESULT_SECONDS ) {
+			return null;
+		}
+		// A refusal recorded before refusals needed the known file beside them proves nothing.
+		if ( ! $exposed && true !== ( $result['confirmed'] ?? null ) ) {
 			return null;
 		}
 		return $exposed;

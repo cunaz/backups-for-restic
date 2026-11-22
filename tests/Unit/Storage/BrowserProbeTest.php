@@ -118,6 +118,26 @@ final class BrowserProbeTest extends TestCase {
 		self::assertNull( $this->probe()->result( '/one/' ) );
 	}
 
+	public function test_a_refusal_recorded_before_the_known_file_was_required_says_nothing(): void {
+		$state = new SiteState( $this->options );
+		$this->begin();
+		self::assertFalse( $this->finish( 403, '' ) );
+		self::assertTrue( $state->get( 'exposure_browser' )['result']['confirmed'] );
+		// As an earlier version stored it: location, verdict and time only.
+		$entry = $state->get( 'exposure_browser' );
+		unset( $entry['result']['confirmed'] );
+		$state->set( 'exposure_browser', $entry );
+		self::assertNull( $this->probe()->result(), 'An unconfirmed refusal must not permit staging.' );
+		$entry['result']['confirmed'] = false;
+		$state->set( 'exposure_browser', $entry );
+		self::assertNull( $this->probe()->result() );
+		// A record that the directory was served needs no confirmation to count.
+		$entry['result']['exposed'] = true;
+		unset( $entry['result']['confirmed'] );
+		$state->set( 'exposure_browser', $entry );
+		self::assertTrue( $this->probe()->result() );
+	}
+
 	public function test_the_content_under_any_status_means_that_the_file_was_read(): void {
 		$name  = $this->begin();
 		$token = (string) file_get_contents( $this->file( $name ) );
