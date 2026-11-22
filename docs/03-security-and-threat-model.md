@@ -82,7 +82,7 @@ STRIDE class in brackets. "Residual" is what remains after the control.
 
 | ID | Threat | Control(s) | Residual |
 | --- | --- | --- | --- |
-| T-01 | Unauthorised user starts a backup/restore, changes settings or downloads staged files [E, T] | The menu and every REST route enforce the configured backup capability. Live file writes also require `update_core` and permission under the host file modification policy. Live database writes require `manage_options`, `edit_users`, `promote_users` and `update_core` alongside the backup capability. A download grant authorizes one exact staged subject; a grant of a restored file or archive also needs the user's WordPress password and is recorded (§5.5). Staging itself needs the capability alone, because the staged copy stays in the private directory (§8). | Compromised administrator account or unredeemed download grant; a holder of the capability can stage any path of a snapshot and read the reports |
+| T-01 | Unauthorised user starts a backup/restore, changes settings or downloads staged files [E, T] | The menu and every REST route enforce the configured backup capability. Live file writes also require `update_core` and permission under the host file modification policy, both checked again for the confirming user, read from the database, on every tick of the job. Live database writes require `manage_options`, `edit_users`, `promote_users` and `update_core` alongside the backup capability. A download grant authorizes one exact staged subject; a grant of a restored file or archive also needs the user's WordPress password and is recorded (§5.5). Staging itself needs the capability alone, because the staged copy stays in the private directory (§8). | Compromised administrator account or unredeemed download grant; a holder of the capability can stage any path of a snapshot and read the reports |
 | T-02 | CSRF on destructive actions [T] | WordPress authenticates REST requests with its cookie nonce or an Application Password. File and database apply/undo each require an operation-specific signed review, explicit acknowledgment, the exact home URL and the confirming user’s WordPress password in the JSON body. The download form uses a one-time POST token. Wrong WordPress passwords are counted per user and slowed down, and reported to login limiters (§5.5). | An authenticated administrator can intentionally authorize a destructive change. |
 | T-03 | Secrets leak through the database (SQL injection elsewhere, leaked DB dump) [I] | repository password, REST password and cached master key encrypted with a key derived from `wp-config.php` salts (§5); `autoload = no`; constants in `wp-config.php` as an alternative | attacker with DB **and** `wp-config.php` |
 | T-04 | Secrets leak via logs, notices, e-mails, REST responses, HTML forms [I] | `Secret` type redacts itself; `Redactor` masks the registered secret values in job files and event lines (§12); REST errors and e-mails are built from codes, not from log lines; secret fields are write-only; after the setup the recovery kit is sent only with the administrator's WordPress password (§5.5); the stored REST password goes only to the server it was saved for (T-28); tests search the files under `jobs/` and four REST responses for both passwords | browser extensions on the admin's machine |
@@ -344,6 +344,16 @@ Every route that asks for the WordPress password asks through one check
   ([ADR 0032](adr/0032-run-checkpoint-files-and-cleanup.md)). The event log is created with
   the mode that the process umask gives; it relies on its `0700` directory. Nothing is
   written to the system temp directory.
+- Besides the live files it changes, a live apply or undo writes one file outside the
+  private directory, its maintenance marker: `.maintenance` in the WordPress root, a hard
+  link to `maintenance.php` in the job's `0700` directory. The inode has mode `0644`, as
+  core gives its own marker, because PHP processes of other system users read it in every
+  request. It names the job, the plugin, two URLs and the SHA-256 of the control token; it
+  holds no secret. Its content proof, `maintenance.sha256`, is `0600`. Every tick checks
+  the private copy against the proof before it renews the marker, and cleanup removes the
+  marker only while it is that inode with that content (ADR 0041). Where OPcache refuses to
+  drop the compiled marker (`opcache.restrict_api`) on a server without timestamp checks,
+  the job stops before its next change.
 - The cache holds one file per repository, the merged index, sealed with the master key
   (encrypted and authenticated). A cache that fails authentication is ignored and rebuilt
   from the repository. The lengths between its sealed pieces are not authenticated; a
@@ -437,7 +447,14 @@ Multisite is refused. The download handler accepts a one-time bearer grant issue
 the authenticated REST API; the grant of a restored file or ZIP also needs the WordPress
 password and is recorded (§5.5). It uses POST, streams the verified descriptor and disables
 caching. File-change maintenance admits the initiating control cookie or header to the
-ordinary WordPress authorization checks for that job. The plugin enqueues admin assets
+ordinary WordPress authorization checks for that job; a `rest_route` in a form body, by
+which WordPress would route the request elsewhere, is refused. It also admits
+`wp-cron.php` and the plugin's own WP-CLI command. Any other WP-CLI command runs with the
+site's plugins, as during core's maintenance. An admitted request loads only this plugin,
+releases only its cron events and cannot store the plugin list it booted with. During
+maintenance the worker sees filters only from `wp-config.php` and must-use plugins, so a
+`file_mod_allowed` or capability filter in a regular plugin or the theme applies at
+confirmation and preflight only (ADR 0041). The plugin enqueues admin assets
 only on its own screen and uses local WordPress scripts.
 
 The routes and the command that read snapshots (`GET /snapshots…`, `ls`) treat every name,

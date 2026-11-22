@@ -230,6 +230,13 @@ All notable changes are documented here. The format follows
   normalization. A name such as `wp-conﬁg.php` with a ligature no longer passes for an
   ordinary file. Without intl, a name that only normalization could tell apart from a
   protected one is refused (`unverified_name`).
+- While a live file change holds the site in maintenance, a request that the job's control
+  token admits can no longer reach another REST route through a `rest_route` field in its
+  form body, and no admitted request can store the shortened list of active plugins that
+  it starts with. Every tick of a file apply or undo checks again that the administrator
+  who confirmed it still has the backup capability and `update_core`
+  (`file_writes_refused`). The check reads the account from the database, so a role taken
+  away also stops a running `wp backups-for-restic tick --until-idle`.
 - Downloading a restored file or a restore's ZIP asks for the WordPress password, as the
   recovery kit does, and every grant is recorded with time, account, restore job, kind and
   path; the Settings tab lists the latest beside the deliveries of the recovery kit, and
@@ -440,3 +447,23 @@ All notable changes are documented here. The format follows
 - Applying many files into one large folder no longer lists the folder several times for
   every file while the site is in maintenance: 500 new files beside 20,000 others needed
   27 seconds of checks before and less than half a second now.
+- While a live file change holds the site in maintenance, WP-CLI commands other than the
+  plugin's own run with the site's plugins, as during a WordPress update. Before, every
+  command started with this plugin alone: `wp plugin activate`, or deactivating this
+  plugin, could leave every other plugin inactive, and `wp cron event run --due-now`
+  dropped other plugins' due events. Requests that run cron themselves, as with
+  `ALTERNATE_WP_CRON`, release only this plugin's events during the job.
+- A file apply or undo keeps the maintenance marker that its first tick wrote and the
+  uploads directory it was confirmed with. URL and upload-directory filters in the theme or
+  a regular plugin, which do not load during maintenance, made its first change fail or
+  refused uploads after other files had changed.
+- The maintenance marker is readable like WordPress's own, so PHP processes of other
+  system users show the maintenance page instead of a fatal error. It is also cleared from
+  OPcache, so hosts without timestamp checks run the current job's marker. Where
+  `opcache.restrict_api` keeps the plugin from clearing it, a host without timestamp checks
+  stops the change before it touches a file (`maintenance_opcache`), and a host with them
+  waits until OPcache has seen the new marker.
+- A file job that the site's file modification policy stops reports `file_writes_refused`
+  instead of "Another backup job is still running". A confirmation that finds the
+  permission gone just before the job would start reports it too, instead of asking the
+  administrator to wait for active work to finish.

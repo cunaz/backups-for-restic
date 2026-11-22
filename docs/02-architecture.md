@@ -1150,7 +1150,8 @@ usual. Once it succeeds, send the same preview request with its `plan_job` ID an
 `plan_job` ID and digest. Completed previews expire after one hour.
 
 Live file apply and undo also require `update_core` and permission to modify files under the
-site's `wp_is_file_mod_allowed()` policy. Preview reports list actions and their reasons.
+site's `wp_is_file_mod_allowed()` policy. Every tick of the job checks both again for the
+confirming user. Preview reports list actions and their reasons.
 Confirmation uses the preview digest, a review token bound to the authenticated session,
 source job, site URL and configuration choice, explicit acknowledgment, the site's exact
 home URL and the account's WordPress password. Send those fields in a JSON POST body.
@@ -1158,7 +1159,8 @@ The initiating response returns a short-lived `control_token` and sets it in an 
 SameSite=Strict cookie. HTTPS adds Secure. During the job's maintenance window the
 initiating client can poll or cancel the job using the cookie or the
 `X-Backups-For-Restic-Control` header. The normal WordPress capability and nonce checks
-also apply.
+also apply. Such a request cannot name a `rest_route` in a form body. It boots, like the
+job's workers, with only this plugin and without the theme.
 
 Live database apply and undo require the configured backup capability plus
 `manage_options`, `edit_users`, `promote_users` and `update_core`. The worker checks the
@@ -1295,6 +1297,9 @@ private staging. `apply-plan <job> [--include-wp-config]` prints file actions as
 records. Configuration and startup files require offline recovery. `undo <apply-job>`
 reviews and confirms reversal of live file changes. The recovery guide includes the
 `--skip-plugins` procedure for a site whose active plugin prevents normal startup.
+While a file job holds WordPress maintenance, the plugin's own commands boot like its
+workers, with only this plugin and without the theme. Every other WP-CLI command runs with
+the site's plugins, as during core's maintenance ([ADR 0041](adr/0041-guarded-file-changes.md)).
 Use the admin page to initiate live changes, configure a repository or review retention.
 `recovery-kit` exports credentials on an interactive terminal after setup. The explicit
 `--force` option permits a pipe or file. Every delivery is audited.
