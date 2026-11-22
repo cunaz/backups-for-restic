@@ -162,7 +162,10 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   that stopped after its last revert or once the kept entries were removed, records the
   apply as undone and writes the `reverted` marker, while no job is active, and says so
   (`undone`) instead of offering an undo that would be refused; a background review
-  counts these entries in its result and decides when its first page is read. An undo
+  counts these entries in its result and decides when its first page is read. Before it
+  writes the marker, it decides every entry against its live path again: an entry that
+  came back since the review, a check that does not finish within two seconds, such as one
+  that verifies a large file, and anything it cannot read leave the apply eligible. An undo
   with nothing to revert that still keeps a changed entry is refused
   (`undo_nothing_to_revert`). Before, a partial apply stopped by `file_space` could become
   impossible to undo through one upload into a folder that it created, and the journal

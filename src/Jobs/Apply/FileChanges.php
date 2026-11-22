@@ -11,6 +11,7 @@ namespace BackupsForRestic\Jobs\Apply;
 
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
@@ -50,6 +51,12 @@ defined( 'ABSPATH' ) || exit;
  * @phpstan-type KeptPage array{entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,total:int,offset:int,next_offset:int|null,plan_job:string,digest:string}
  */
 final readonly class FileChanges implements StepProvider {
+
+	/**
+	 * Seconds in which a review checks every entry of an apply against its live path again
+	 * before it records the apply as undone. An apply that takes longer stays eligible.
+	 */
+	private const float SETTLE_SECONDS = 2.0;
 
 	/**
 	 * Read-only background plans.
@@ -271,18 +278,63 @@ final readonly class FileChanges implements StepProvider {
 			return false;
 		}
 		try {
-			$this->staging->guard(
-				fn () => $this->jobs->while_idle(
-					function () use ( $apply ): void {
+			return true === $this->staging->guard(
+				fn (): bool => $this->jobs->while_idle(
+					function () use ( $apply ): bool {
 						$current = $this->journal->original( $apply->id );
+						// The review can be older than this request: each entry is decided again now.
+						if ( ! $this->nothing_to_revert( $current ) ) {
+							return false;
+						}
 						Files::write_durable( $this->journal->workspace( $current ) . '/reverted', '1' );
 						$current->result['undo_state'] = 'undone';
 						$current->result['undo_kept']  = 0;
 						$this->jobs->save( $current );
+						return true;
 					}
 				)
 			);
 		} catch ( JobConflict ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Whether every attempted entry of an apply has nothing left to revert, decided against its
+	 * live path now. An entry that came back since a review, a check that does not finish in
+	 * SETTLE_SECONDS, such as one that verifies a large file, and anything that cannot be read
+	 * leave the apply as it is.
+	 *
+	 * @param Job $apply Apply.
+	 * @return bool Whether nothing of it can be reverted any more.
+	 */
+	private function nothing_to_revert( Job $apply ): bool {
+		$deadline = microtime( true ) + self::SETTLE_SECONDS;
+		try {
+			$restore = ApplyJournal::field( $apply, 'restore' );
+			$files   = $this->journal->files( $restore, true );
+			$plan    = ( $this->planner )( true === ( $apply->data['include_config'] ?? null ), $restore, null );
+			$forward = is_string( $apply->data['plan_job'] ?? null ) ? $this->plans->approved( $apply ) : null;
+			$rows    = null === $forward ? $this->load( $apply ) : [];
+			$total   = $this->journal->attempted( $apply );
+			for ( $i = 0; $i < $total; ++$i ) {
+				$record = $forward?->mutation( $i );
+				$row    = $record['row'] ?? $rows[ $i ] ?? null;
+				if ( null === $row || microtime( true ) >= $deadline ) {
+					return false;
+				}
+				$source = Bytes::base64url_decode( $row['path'] );
+				$path   = self::target( $row );
+				$change = new FileChange( $plan, $files, $this->journal->workspace( $apply ) . '/item-' . ( $record['index'] ?? $i ), $source );
+				$now    = $plan->destination( $source ) === $path ? $change->undo_review( $path, $row['action'], $deadline ) : [
+					'action' => 'keep',
+					'reason' => 'destination_changed',
+				];
+				if ( 'keep' !== $now['action'] || ! FileChange::settled( $now['reason'] ) ) {
+					return false;
+				}
+			}
+		} catch ( PluginException | FileWorkPending ) {
 			return false;
 		}
 		return true;

@@ -1107,6 +1107,27 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( [ $this->live . '/b-new/new.txt' => 'changed_since_apply' ], $this->kept( $cancelled ) );
 	}
 
+	public function test_a_review_does_not_retire_an_apply_whose_entry_came_back_since(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+		$review = $this->run_job( $this->changes->request_preview( $apply->id, true, false ) );
+		$page   = $this->changes->request_preview( $apply->id, true, false, $review->id );
+		self::assertIsArray( $page );
+		$this->run_job( $this->changes->start_undo( $apply->id, $page['digest'], '', $review->id ) );
+		// The kept folder is deleted, and the background review finds nothing left to revert.
+		TempDir::remove( $this->live . '/b-new' );
+		$again = $this->run_job( $this->changes->request_preview( $apply->id, true, false ) );
+		self::assertSame( [ 0, 0, 3, 3 ], [ $again->result['restore'], $again->result['remove'], $again->result['keep'], $again->result['settled'] ] );
+		// Before its first page is read, the folder is there again.
+		mkdir( $this->live . '/b-new' );
+		$first = $this->changes->request_preview( $apply->id, true, false, $again->id );
+		self::assertIsArray( $first );
+		self::assertArrayNotHasKey( 'undone', $first );
+		self::assertFileDoesNotExist( $this->jobs->directory( $apply ) . '/undo/reverted' );
+		self::assertSame( [ $apply->id, 'partly_undone' ], [ $this->changes->undoable()[0]['job'], $this->changes->undoable()[0]['state'] ] );
+	}
+
 	public function test_an_undo_with_nothing_left_to_revert_is_refused_with_its_own_code(): void {
 		$job = $this->run_job( $this->start() );
 		file_put_contents( $this->live . '/a-existing', 'edited' );
