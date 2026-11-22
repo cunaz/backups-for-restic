@@ -72,6 +72,14 @@ final class Messages {
 				'message' => __( 'There is too little disk space to complete these file changes.', 'backups-for-restic' ),
 				'hint'    => __( 'Free space on the destination, then open a new preview to check the estimate and available space.', 'backups-for-restic' ),
 			],
+			'file_writes_refused'            => [
+				'message' => __( 'The site no longer allows these file changes, or the administrator who confirmed them may no longer make them.', 'backups-for-restic' ),
+				'hint'    => __( 'Check that WordPress allows file modifications and that the administrator who confirmed the changes can still manage backups and update WordPress. Changes already made can be undone on the Restores tab.', 'backups-for-restic' ),
+			],
+			'maintenance_opcache'            => [
+				'message' => __( 'OPcache did not let the plugin clear its cached copy of the WordPress maintenance file.', 'backups-for-restic' ),
+				'hint'    => __( 'The PHP setting opcache.restrict_api leaves this site out. With opcache.validate_timestamps off, or with opcache.revalidate_freq above four seconds, the server could keep serving the site from an earlier maintenance file while files change. Add the WordPress directory to opcache.restrict_api, or turn timestamp checks on with a short interval, then start again. Changes already made can be undone on the Restores tab.', 'backups-for-restic' ),
+			],
 			'protected_path_invalid'         => [
 				'message' => __( 'A WordPress location that file apply protects is not an absolute path without "." or ".." segments.', 'backups-for-restic' ),
 				'hint'    => __( 'Check WP_CONTENT_DIR, WPMU_PLUGIN_DIR and BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php, then open the preview again. The staged files remain available for download.', 'backups-for-restic' ),
@@ -114,7 +122,7 @@ final class Messages {
 			],
 			'staging_unverified'             => [
 				'message' => __( 'The restore stopped because the privacy of its staging directory could not be verified.', 'backups-for-restic' ),
-				'hint'    => __( 'Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
+				'hint'    => __( 'Restored files are staged only outside the web root, or where the web server verifiably refuses the directory: the same check has to get the plugin\'s own stylesheet back, so that a refusal from a firewall, a CDN or another site does not count. Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
 			],
 			'environment'                    => [
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
@@ -144,9 +152,13 @@ final class Messages {
 				'message' => __( 'The database rehearsal could not finish.', 'backups-for-restic' ),
 				'hint'    => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
 			],
+			'database_restore_packet' => [
+				'message' => __( 'A row batch of the snapshot is larger than the database server accepts in one statement.', 'backups-for-restic' ),
+				'hint'    => __( 'Ask the host to raise max_allowed_packet on the database server. When the plugin refused a row batch before sending it, the job log names the limit that batch needs. For an import by hand, stage the snapshot’s database directory again with the rehearsal switched off and download the SQL files or request a ZIP; the importing client and the database server both need a packet limit large enough for the largest statement.', 'backups-for-restic' ),
+			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
-				'hint'    => __( 'The job retries automatically using its saved database progress and operation witness.', 'backups-for-restic' ),
+				'hint'    => __( 'The job tried again several times from its saved database progress and operation witness, then stopped. When the database server answers and no other client holds long locks on the site tables, start the rehearsal or the database change again.', 'backups-for-restic' ),
 			],
 			'database_admin_collision' => [
 				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
@@ -171,6 +183,30 @@ final class Messages {
 			'database_exchange_cleanup' => [
 				'message' => __( 'The database restore could not finish its cleanup.', 'backups-for-restic' ),
 				'hint'    => __( 'Keep the private job directory, reconnect the original database with its restore permissions, and allow the next heartbeat to retry.', 'backups-for-restic' ),
+			],
+			'database_exchange_sessions' => [
+				'message' => __( 'Other connections to the site database did not end during maintenance in several attempts, so the table exchange did not start and the job stopped.', 'backups-for-restic' ),
+				'hint'    => __( 'Persistent database connections, long-running WP-CLI processes or another application using the same database account keep connections open. Stop them, then review and confirm the database change again.', 'backups-for-restic' ),
+			],
+			'performance_schema' => [
+				'message' => __( 'The database server does not list every connection, so the table exchange cannot tell whether earlier requests have ended.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled and enough Performance Schema thread instances for every connection (performance_schema_max_thread_instances), and a database account with the PROCESS privilege. Otherwise use the manual SQL restore procedure.', 'backups-for-restic' ),
+			],
+			'database_exchange_foreign' => [
+				'message' => __( 'A database restore keeps private tables on another database server or in another database.', 'backups-for-restic' ),
+				'hint'    => __( 'Backups go on. Before another database restore, run "wp backups-for-restic database-discard" with the ID of that restore job: it shows the database, the server UUID and the table names, and confirming forgets the binding without dropping anything. Drop those tables by hand only where you can verify them.', 'backups-for-restic' ),
+			],
+			'database_binding_missing' => [
+				'message' => __( 'No finished database restore holds a binding with this job ID.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the job ID in the job history.', 'backups-for-restic' ),
+			],
+			'database_binding_verified' => [
+				'message' => __( 'The private tables of this database restore are in the connected database, so its binding is not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The heartbeat removes them when their recovery window ends.', 'backups-for-restic' ),
+			],
+			'database_exchange_rebuilt' => [
+				'message' => __( 'A private table kept for the database undo was rebuilt and has a new physical identity.', 'backups-for-restic' ),
+				'hint'    => __( 'OPTIMIZE TABLE, ALTER TABLE … FORCE and TRUNCATE TABLE renumber a table, so the undo cannot prove that it is the original generation. Restore from a snapshot instead; the job lists the tables to check and drop by hand.', 'backups-for-restic' ),
 			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
@@ -301,7 +337,7 @@ final class Messages {
 			'private_directory/outside_web_root'         => self::pair( __( 'The working directory is outside the web root', 'backups-for-restic' ), '' ),
 			'private_directory/unverified'               => self::pair(
 				__( 'The protection of the working directory could not be verified', 'backups-for-restic' ),
-				__( 'The site could not request its own address. Consider a directory outside the web root via BACKUPS_FOR_RESTIC_PRIVATE_DIR.', 'backups-for-restic' )
+				__( 'The site could not request its own address, or a refusal it got could not be confirmed: the same check did not get the plugin\'s own stylesheet back, so a firewall, a CDN or another site may have answered. Restores are refused until protection is verified. Consider a directory outside the web root via BACKUPS_FOR_RESTIC_PRIVATE_DIR.', 'backups-for-restic' )
 			),
 			'private_directory/protected_inside_web_root' => self::pair(
 				__( 'The working directory is protected', 'backups-for-restic' ),
@@ -469,6 +505,25 @@ final class Messages {
 			'cancelled' => __( 'Cancelled', 'backups-for-restic' ),
 			default     => $state,
 		};
+	}
+
+	/**
+	 * Message and hint for a WordPress password that is not checked yet, because too many
+	 * wrong ones came before it (Storage\ConfirmationThrottle).
+	 *
+	 * @param int $seconds Seconds until the password is checked again.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function password_throttled( int $seconds ): array {
+		$minutes = max( 1, (int) ceil( $seconds / 60 ) );
+		return [
+			'message' => __( 'Too many wrong WordPress passwords were entered for this account.', 'backups-for-restic' ),
+			'hint'    => sprintf(
+				/* translators: %d: number of minutes. */
+				_n( 'The password is checked again in %d minute. If you did not enter them, change your WordPress password, log out everywhere else and revoke application passwords you do not know in your profile.', 'The password is checked again in %d minutes. If you did not enter them, change your WordPress password, log out everywhere else and revoke application passwords you do not know in your profile.', $minutes, 'backups-for-restic' ),
+				$minutes
+			),
+		];
 	}
 
 	/**

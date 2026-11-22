@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Database\Restore;
 
 use BackupsForRestic\Database\Dump\SqlFormatter;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 
 defined( 'ABSPATH' ) || exit;
@@ -22,6 +23,12 @@ final readonly class InsertStatement {
 
 	/** The dump writer's largest page, even when every row is very small. */
 	public const int MAX_ROWS = 20000;
+
+	/**
+	 * Bytes a packet carries besides the statement. MySQL 8.4 refused a statement of
+	 * max_allowed_packet - 1 bytes and accepted max_allowed_packet - 2; the rest is margin.
+	 */
+	public const int PACKET_MARGIN = 64;
 
 	/**
 	 * Records a checked batch.
@@ -93,5 +100,22 @@ final readonly class InsertStatement {
 		} while ( $more );
 		$lexer->end();
 		return new self( 'INSERT INTO ' . SqlFormatter::identifier( $shadow ) . substr( $sql, $table->end ), $columns, $rows );
+	}
+
+	/**
+	 * Refuses a batch the server would not accept. A packet larger than max_allowed_packet
+	 * makes the server close the session, which a client cannot tell from a lost connection.
+	 * The shadow's generated name can make a batch longer than its line in the dump. The
+	 * server rounds max_allowed_packet down to a multiple of 1024, so the limit that the
+	 * refusal names as needed is one.
+	 *
+	 * @param int $packet The session's max_allowed_packet.
+	 * @throws DatabaseFailed With the code database_restore_packet if the batch is too large.
+	 */
+	public function fits( int $packet ): void {
+		$length = strlen( $this->sql );
+		if ( $length + self::PACKET_MARGIN > $packet ) {
+			DatabaseFailed::raise( sprintf( 'A row batch of %1$d bytes of SQL needs a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes.', $length, intdiv( $length + self::PACKET_MARGIN + 1023, 1024 ) * 1024, $packet ), [ 'code' => 'database_restore_packet' ] );
+		}
 	}
 }

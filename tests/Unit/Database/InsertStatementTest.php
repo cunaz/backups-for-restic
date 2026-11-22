@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Restore\InsertStatement;
 use BackupsForRestic\Database\Restore\SqlLexer;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 
 final class InsertStatementTest extends TestCase {
@@ -92,5 +93,45 @@ final class InsertStatementTest extends TestCase {
 	public function test_an_oversized_statement_is_refused_before_tokenizing(): void {
 		$this->expectException( FormatException::class );
 		InsertStatement::parse( str_repeat( ' ', SqlLexer::MAX_BYTES + 1 ), 'wp_posts', 'shadow' );
+	}
+
+	public function test_a_batch_that_the_shadow_name_makes_too_large_for_the_packet_limit_is_refused(): void {
+		$line   = "INSERT INTO `wp_postmeta` (`v`) VALUES ('" . str_repeat( 'x', 1000 ) . "');";
+		$batch  = InsertStatement::parse( $line, 'wp_postmeta', '_bfr_r_0123456789abcdef0123456789abcdef_t12' );
+		$length = strlen( $batch->sql );
+		self::assertSame( 1076, $length );
+		self::assertGreaterThan( strlen( $line ), $length );
+		$batch->fits( $length + InsertStatement::PACKET_MARGIN );
+		try {
+			$batch->fits( $length + InsertStatement::PACKET_MARGIN - 1 );
+			self::fail( 'A batch beyond the packet limit was accepted.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet', $refused->context()['code'] ?? null );
+			self::assertSame( 'A row batch of 1076 bytes of SQL needs a max_allowed_packet of at least 2048 bytes; the database server allows 1139 bytes.', $refused->getMessage() );
+		}
+	}
+
+	/** @return iterable<string, array{int,int}> */
+	public static function packet_needs(): iterable {
+		yield 'just fits a multiple of 1024' => [ 2048 - InsertStatement::PACKET_MARGIN, 2048 ];
+		yield 'one byte more' => [ 2049 - InsertStatement::PACKET_MARGIN, 3072 ];
+	}
+
+	/** The server rounds max_allowed_packet down to a multiple of 1024 without a warning. */
+	#[DataProvider( 'packet_needs' )]
+	public function test_the_refusal_names_the_sql_size_the_limit_it_needs_and_the_configured_one( int $length, int $needed ): void {
+		$shadow = '_bfr_r_0123456789abcdef0123456789abcdef_t12';
+		$empty  = strlen( InsertStatement::parse( "INSERT INTO `wp_postmeta` (`v`) VALUES ('');", 'wp_postmeta', $shadow )->sql );
+		$batch  = InsertStatement::parse( "INSERT INTO `wp_postmeta` (`v`) VALUES ('" . str_repeat( 'x', $length - $empty ) . "');", 'wp_postmeta', $shadow );
+		self::assertSame( $length, strlen( $batch->sql ) );
+		$batch->fits( $needed );
+		foreach ( array_unique( [ $needed - 1024, $length + InsertStatement::PACKET_MARGIN - 1 ] ) as $packet ) {
+			try {
+				$batch->fits( $packet );
+				self::fail( 'A batch beyond the packet limit was accepted.' );
+			} catch ( DatabaseFailed $refused ) {
+				self::assertSame( sprintf( 'A row batch of %1$d bytes of SQL needs a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes.', $length, $needed, $packet ), $refused->getMessage() );
+			}
+		}
 	}
 }

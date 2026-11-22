@@ -37,6 +37,13 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
   records each table's largest statement ([ADR 0021](0021-database-streaming.md)). The
   importer keeps its 16 MiB bound, so a table with a larger statement is restored with an
   external client, as dumps written before the limit existed are.
+  Each import tick reads the session's `max_allowed_packet` and refuses a batch that would
+  not fit before sending it, with `database_restore_packet`; the generated shadow name can
+  make a batch longer than its line in the dump. A server that receives a larger packet
+  closes the session ([Packet Too Large](https://dev.mysql.com/doc/refman/8.4/en/packet-too-large.html)),
+  which a client cannot tell from a lost connection. On MySQL 8.4.11 a statement of
+  `max_allowed_packet - 1` bytes was refused and one of `max_allowed_packet - 2` accepted;
+  the check keeps a margin of 64 bytes.
   A table with only generated columns uses a constant SELECT projection and one empty
   INSERT tuple per row. The importer accepts these tuples only with the CREATE's matching
   empty insertable-column list.
