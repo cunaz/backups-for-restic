@@ -10,6 +10,7 @@ use BackupsForRestic\Database\Dump\Table;
 use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Jobs\JobError;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -113,6 +114,42 @@ final class DumpRestartTest extends TestCase {
 		$cursor = $source->cursor();
 		self::assertNotNull( $cursor );
 		self::assertTrue( $this->source( $this->table( 'first' ), $cursor )->restarted(), 'The next tick starts over.' );
+	}
+
+	/** @return iterable<string, array{int, bool}> */
+	public static function definition_reads(): iterable {
+		// Which read of the definition waits too long for its lock, and whether the tick stops
+		// first. Each page is followed by one: the pages hold 500 and 1,000 of the 1,500 rows.
+		yield 'the read before a stop' => [ 2, true ];
+		yield 'the read before the trailer' => [ 3, false ];
+	}
+
+	#[DataProvider( 'definition_reads' )]
+	public function test_outside_a_snapshot_a_lock_on_the_definition_makes_the_job_try_again( int $locked, bool $stop ): void {
+		$reads  = 0;
+		$source = $this->source(
+			$this->table( 'first' ),
+			null,
+			function () use ( &$reads, $locked ): Table {
+				if ( ++$reads === $locked ) {
+					DatabaseFailed::raise( 'A query of the database dump failed.', [ 'errno' => 1205 ] );
+				}
+				return $this->table( 'first' );
+			}
+		);
+		try {
+			if ( $stop ) {
+				$this->stop_after_first_page( $source );
+			} else {
+				$this->read_all( $source );
+			}
+			self::fail( 'The definition could not be read.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_locked', JobError::from_throwable( $error )->code );
+			self::assertTrue( JobError::from_throwable( $error )->retryable );
+			self::assertSame( 'wp_rows', $error->context()['table'] ?? null );
+		}
+		self::assertSame( $locked, $reads );
 	}
 
 	public function test_outside_a_snapshot_a_page_that_fails_because_of_a_change_starts_the_table_over(): void {

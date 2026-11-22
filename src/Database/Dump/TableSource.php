@@ -579,7 +579,13 @@ final class TableSource implements ResumableByteSource {
 		if ( null === $this->describe || ( $this->connection instanceof DedicatedConnection && $this->connection->in_snapshot() ) ) {
 			return false;
 		}
-		return ( $this->describe )()->digest !== $this->table->digest;
+		try {
+			return ( $this->describe )()->digest !== $this->table->digest;
+		} catch ( DatabaseFailed $error ) {
+			// The definition is read like a page: a lock that another connection holds
+			// makes the job try again later.
+			self::rethrow( $error, $this->table->name );
+		}
 	}
 
 	/**
