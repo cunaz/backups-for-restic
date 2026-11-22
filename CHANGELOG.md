@@ -216,8 +216,10 @@ All notable changes are documented here. The format follows
 - File apply no longer writes a snapshot's private database dump and site manifest to the
   live site. After the private directory had moved, applying `wp-content` from an older
   snapshot recreated `spool/database/*.sql` in the web root without its deny files. A
-  directory named `spool` that holds `manifest.json` or `database/` is now skipped in every
-  apply (`snapshot_spool`); the database rehearsal reads the dump from staging.
+  directory named `spool` that holds a backup's site manifest or database dump is now
+  skipped in every apply (`snapshot_spool`); it is recognized by the format line that the
+  backup writes at the start of these files, so another directory with that name is
+  applied as usual. The database rehearsal reads the dump from staging.
 - Must-use plugins, drop-ins and the other startup and private locations stay protected
   when they are configured with repeated or trailing slashes or through a symbolic link, for
   example below a `WP_CONTENT_DIR` that ends in a slash. A location that is not an absolute
@@ -387,8 +389,8 @@ All notable changes are documented here. The format follows
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
 - The file review refuses a replacement that the apply could not finish: a file owned by
-  another user than PHP (`foreign_owner`), with a group PHP cannot give it
-  (`foreign_group`), or with setuid, setgid or sticky bits (`special_permissions`). Before,
+  another user than PHP (`foreign_owner`), with a group that a file written by PHP cannot
+  have (`foreign_group`), or with setuid, setgid or sticky bits (`special_permissions`). Before,
   the review called such a plan applicable, and the apply stopped at the first such file
   after earlier changes were made. Without the POSIX extension the review cannot check the
   owner, and the apply still stops before it replaces such a file.

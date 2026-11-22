@@ -52,9 +52,11 @@ final class ApplyPlanTest extends TestCase {
 		$old   = $this->live . '/backups-for-restic';
 		$stage = $this->files . $old;
 		mkdir( $stage . '/spool/database', 0700, true );
-		file_put_contents( $stage . '/spool/manifest.json', '{"format":"backups-for-restic-site/1"}' );
-		file_put_contents( $stage . '/spool/database/000-header.sql', 'SET NAMES utf8mb4;' );
-		file_put_contents( $stage . '/spool/database/010-wp_users.sql', 'INSERT INTO wp_users VALUES (1, "admin", "$P$hash");' );
+		// As the backup writes them: json_encode() escapes the slash of the format.
+		$site = '{"format":"backups-for-restic-site\/1","created":"2026-11-20T10:00:00Z"}';
+		file_put_contents( $stage . '/spool/manifest.json', $site );
+		file_put_contents( $stage . '/spool/database/000-header.sql', "-- backups-for-restic-dump/1\nSET NAMES utf8mb4;\n" );
+		file_put_contents( $stage . '/spool/database/010-wp_users.sql', "-- backups-for-restic-dump/1 table `wp_users`\nINSERT INTO `wp_users` VALUES (1,'admin','\$P\$hash');\n" );
 		$rows = array_column( iterator_to_array( $this->plan->actions( $this->files ) ), null, 'path' );
 		self::assertSame( 'mkdir', $rows[ $old ]['action'] );
 		self::assertSame(
@@ -70,13 +72,57 @@ final class ApplyPlanTest extends TestCase {
 		foreach ( [ '/spool/manifest.json', '/spool/database', '/spool/database/010-wp_users.sql' ] as $suffix ) {
 			self::assertSame( 'snapshot_spool', $this->plan->inspect( $this->files, $old . $suffix )['reason'], $suffix );
 		}
-		// A selection of one table file or of the manifest alone is recognized as well.
-		unlink( $stage . '/spool/manifest.json' );
-		self::assertSame( 'snapshot_spool', $this->plan->inspect( $this->files, $old . '/spool/database/000-header.sql' )['reason'] );
-		TempDir::remove( $stage . '/spool/database' );
-		file_put_contents( $stage . '/spool/manifest.json', '{}' );
-		self::assertSame( 'snapshot_spool', $this->plan->inspect( $this->files, $old . '/spool' )['reason'] );
 		self::assertFileDoesNotExist( $old );
+	}
+
+	public function test_a_partial_selection_of_a_spool_is_recognized_by_what_the_backup_writes(): void {
+		$old   = $this->live . '/backups-for-restic';
+		$spool = $this->files . $old . '/spool';
+		$table = "-- backups-for-restic-dump/1 table `wp_users`\nINSERT INTO `wp_users` VALUES (1);\n";
+		$cases = [
+			'one table file'            => [ 'database/010-wp_users.sql' => $table ],
+			'the views file'            => [ 'database/900-views.sql' => "-- backups-for-restic-dump/1 views\n" ],
+			'a later dump format'       => [ 'database/000-header.sql' => "-- backups-for-restic-dump/2\n" ],
+			'the dump manifest'         => [ 'database/manifest.json' => '{"format":"backups-for-restic-dump\/1","tables":[]}' ],
+			'the site manifest'         => [ 'manifest.json' => "{\n  \"format\": \"backups-for-restic-site/1\"\n}" ],
+			'a table beside other data' => [
+				'database/notes.txt'        => 'kept beside the dump',
+				'database/010-wp_posts.sql' => $table,
+			],
+		];
+		foreach ( $cases as $case => $files ) {
+			TempDir::remove( $this->files . $old );
+			foreach ( $files as $name => $content ) {
+				if ( ! is_dir( dirname( $spool . '/' . $name ) ) ) {
+					mkdir( dirname( $spool . '/' . $name ), 0700, true );
+				}
+				file_put_contents( $spool . '/' . $name, $content );
+			}
+			// A new plan: one plan remembers what it found in a staged directory.
+			$plan = new ApplyPlan( [ $this->live ], [ $this->live . '/private' ], [ $this->live . '/wp-config.php' ] );
+			foreach ( array_keys( $files ) as $name ) {
+				self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, $old . '/spool/' . $name )['reason'], $case . ': ' . $name );
+			}
+			self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, $old . '/spool' )['reason'], $case );
+		}
+	}
+
+	public function test_a_plan_remembers_only_a_bounded_number_of_examined_spools(): void {
+		$stage = $this->files . $this->live;
+		for ( $i = 0; $i < 300; $i++ ) {
+			mkdir( $stage . '/queue-' . $i . '/spool', 0700, true );
+			file_put_contents( $stage . '/queue-' . $i . '/spool/job', 'queued' );
+		}
+		mkdir( $stage . '/backup/spool/database', 0700, true );
+		file_put_contents( $stage . '/backup/spool/database/010-wp_users.sql', "-- backups-for-restic-dump/1 table `wp_users`\n" );
+		for ( $round = 0; $round < 2; $round++ ) {
+			for ( $i = 0; $i < 300; $i++ ) {
+				self::assertSame( 'create', $this->plan->inspect( $this->files, $this->live . '/queue-' . $i . '/spool/job' )['action'] );
+			}
+			self::assertSame( 'snapshot_spool', $this->plan->inspect( $this->files, $this->live . '/backup/spool/database/010-wp_users.sql' )['reason'] );
+		}
+		$remembered = new \ReflectionProperty( ApplyPlan::class, 'spools' );
+		self::assertLessThanOrEqual( 256, count( $remembered->getValue( $this->plan ) ) );
 	}
 
 	public function test_other_directories_named_spool_are_applied_as_usual(): void {
@@ -88,12 +134,44 @@ final class ApplyPlanTest extends TestCase {
 		file_put_contents( $stage . '/mailer/manifest.json', 'not in a spool' );
 		mkdir( $stage . '/mailer/database' );
 		file_put_contents( $stage . '/spool/manifest.json.bak', 'other name' );
+		// An application's own spool with the same layout as a backup's, but none of its files.
+		mkdir( $stage . '/queue/spool/database', 0700, true );
+		file_put_contents( $stage . '/queue/spool/manifest.json', '{"version":3,"format":"queue-site\/1","note":"backups-for-restic-site"}' );
+		file_put_contents( $stage . '/queue/spool/database/jobs.json', '{"jobs":[]}' );
+		file_put_contents( $stage . '/queue/spool/database/manifest.json', '{"format":"queue\/1"}' );
+		file_put_contents( $stage . '/queue/spool/database/export.sql', "-- MySQL dump 10.13\n-- backups-for-restic-dump/1\n" );
+		file_put_contents( $stage . '/queue/spool/database/empty.sql', '' );
+		mkdir( $stage . '/queue/spool/database/010-wp_users.sql' );
 		$rows = array_column( iterator_to_array( $this->plan->actions( $this->files ) ), 'action', 'path' );
-		foreach ( [ '/mailer', '/mailer/spool', '/mailer/spool/queue', '/mailer/database', '/spool' ] as $directory ) {
+		foreach ( [ '/mailer', '/mailer/spool', '/mailer/spool/queue', '/mailer/database', '/spool', '/queue/spool', '/queue/spool/database', '/queue/spool/database/010-wp_users.sql' ] as $directory ) {
 			self::assertSame( 'mkdir', $rows[ $this->live . $directory ], $directory );
 		}
-		foreach ( [ '/mailer/spool/queue/message.eml', '/mailer/spool/database.sql', '/mailer/manifest.json', '/spool/manifest.json.bak' ] as $file ) {
+		foreach ( [ '/mailer/spool/queue/message.eml', '/mailer/spool/database.sql', '/mailer/manifest.json', '/spool/manifest.json.bak', '/queue/spool/manifest.json', '/queue/spool/database/jobs.json', '/queue/spool/database/manifest.json', '/queue/spool/database/export.sql', '/queue/spool/database/empty.sql' ] as $file ) {
 			self::assertSame( 'create', $rows[ $this->live . $file ], $file );
+		}
+	}
+
+	public function test_a_staged_spool_that_cannot_be_read_counts_as_the_backups(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root reads every file.' );
+		}
+		$stage = $this->files . $this->live;
+		mkdir( $stage . '/a/spool/database', 0700, true );
+		file_put_contents( $stage . '/a/spool/database/010-wp_users.sql', "-- backups-for-restic-dump/1 table `wp_users`\n" );
+		chmod( $stage . '/a/spool/database/010-wp_users.sql', 0000 );
+		mkdir( $stage . '/b/spool', 0700, true );
+		file_put_contents( $stage . '/b/spool/manifest.json', '{"format":"backups-for-restic-site\/1"}' );
+		chmod( $stage . '/b/spool/manifest.json', 0000 );
+		mkdir( $stage . '/c/spool/database', 0700, true );
+		chmod( $stage . '/c/spool/database', 0000 );
+		try {
+			foreach ( [ '/a/spool/database/010-wp_users.sql', '/b/spool/manifest.json', '/c/spool/database' ] as $path ) {
+				self::assertSame( 'snapshot_spool', $this->plan->inspect( $this->files, $this->live . $path )['reason'], $path );
+			}
+		} finally {
+			chmod( $stage . '/a/spool/database/010-wp_users.sql', 0600 );
+			chmod( $stage . '/b/spool/manifest.json', 0600 );
+			chmod( $stage . '/c/spool/database', 0700 );
 		}
 	}
 

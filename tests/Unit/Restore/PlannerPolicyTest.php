@@ -100,6 +100,17 @@ final class PlannerPolicyTest extends TestCase {
 				}
 			}
 		}
+		// A location that is a link to the filesystem root would cover every path.
+		symlink( '/', $this->root . '/top' );
+		foreach ( [ $this->root . '/top', $this->root . '/top/' ] as $location ) {
+			try {
+				new ApplyPlan( [ $this->live ], [ $location ] );
+				self::fail( 'A plan was built with a protected location that resolves to the root.' );
+			} catch ( InvalidArgument $error ) {
+				self::assertSame( 'protected_path_invalid', $error->context()['code'] ?? null );
+				self::assertSame( 'A location that file apply protects resolves to the filesystem root.', $error->getMessage() );
+			}
+		}
 		// A configuration file that the review includes is not protected, so it is not checked.
 		self::assertSame( 'live_root', ( new ApplyPlan( [ $this->live ], [], [ 'wp-config.php' ], true ) )->inspect( $this->files, $this->live )['reason'] );
 	}
@@ -142,6 +153,9 @@ final class PlannerPolicyTest extends TestCase {
 			'/wp-config.php.bak'                   => 'missing_or_linked_source',
 			"/wp-con\u{FB02}g.php"                 => 'missing_or_linked_source',
 			'/plugins/backups-for-restic-old/x'    => 'missing_or_linked_source',
+			// One name with a fullwidth solidus, which normalization turns into a slash, is not two names.
+			"/plugins\u{FF0F}backups-for-restic/x" => 'missing_or_linked_source',
+			"/mu-plugins\u{FF0F}loader.php"        => 'missing_or_linked_source',
 			"/uploads/caf\u{00E9}.jpg"             => 'missing_or_linked_source',
 		];
 		// Compatibility and canonical equivalence need intl; without it, two names that both
@@ -344,7 +358,7 @@ final class PlannerPolicyTest extends TestCase {
 		// The snapshot's own spool, and a copy that an earlier apply left in the content tree.
 		foreach ( [ '/old/private/spool', '/old/content/backups-for-restic/spool' ] as $spool ) {
 			mkdir( $this->files . $spool . '/database', 0700, true );
-			file_put_contents( $this->files . $spool . '/database/010-wp_users.sql', 'INSERT INTO wp_users VALUES (1);' );
+			file_put_contents( $this->files . $spool . '/database/010-wp_users.sql', "-- backups-for-restic-dump/1 table `wp_users`\nINSERT INTO `wp_users` VALUES (1);\n" );
 		}
 		file_put_contents( $this->files . '/old/content/theme.css', 'body {}' );
 		$rows = array_column( iterator_to_array( $plan->actions( $this->files ) ), null, 'path' );
@@ -433,13 +447,29 @@ final class PlannerPolicyTest extends TestCase {
 		}
 		$groups = posix_getgroups();
 		self::assertIsArray( $groups );
+		$member = 0 === posix_geteuid() ? null : array_merge( [ posix_getegid() ], $groups );
 		self::assertSame(
 			[
 				'uid'    => posix_geteuid(),
-				'groups' => 0 === posix_geteuid() ? null : array_merge( [ posix_getegid() ], $groups ),
+				'groups' => $member,
 			],
 			ApplyPlan::process()
 		);
+		// The apply builds its copies in the private directory. Below a setgid directory a new
+		// file takes the directory's group, also one the user is not a member of.
+		$storage = stat( $this->root );
+		self::assertIsArray( $storage );
+		self::assertSame(
+			[
+				'uid'    => posix_geteuid(),
+				'groups' => null === $member ? null : array_merge( $member, [ $storage['gid'] ] ),
+			],
+			ApplyPlan::process( $this->root )
+		);
+		// Something that is not a directory adds no group.
+		file_put_contents( $this->root . '/file', '' );
+		self::assertSame( ApplyPlan::process(), ApplyPlan::process( $this->root . '/missing' ) );
+		self::assertSame( ApplyPlan::process(), ApplyPlan::process( $this->root . '/file' ) );
 		// The default identity is this process, which owns the files the tests create.
 		file_put_contents( $this->staged . '/own.php', 'restored' );
 		file_put_contents( $this->live . '/own.php', 'live' );

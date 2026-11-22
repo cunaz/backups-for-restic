@@ -44,16 +44,27 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   refused (`unverified_name`). A name that reads as `.` or `..` once default-ignorable code
   points are dropped is an invalid path. Duplicate sibling names are still detected with
   simple case folding.
-- No apply writes a snapshot's spool. A directory named `spool` that holds `manifest.json`
-  or `database/` is skipped (`snapshot_spool`) in ordinary and fresh-site applies, wherever
-  the snapshot recorded it. The check relies on the spool's fixed layout because an
-  ordinary restore does not record the manifest locator; it also covers older snapshots
-  without one and copies of a spool at other paths. The database rehearsal reads the dump
-  from staging.
+- No apply writes a snapshot's spool. A directory named `spool` is skipped
+  (`snapshot_spool`) in ordinary and fresh-site applies, wherever the snapshot recorded it,
+  when it holds what only a backup writes: a `manifest.json` that opens with the site
+  manifest's format, or a `database/` directory with a dump manifest or a file that starts
+  with the dump's format line. Every file of a dump starts with that line, so a selection
+  of a single table file is recognized too. Another directory named `spool`, also one with
+  a `database/` directory of its own, is applied as usual. The check reads the staged
+  files because an ordinary restore does not record the manifest locator; it also covers
+  older snapshots without one and copies of a spool at other paths. The database rehearsal
+  reads the dump from staging.
 - The review refuses a replacement that the apply could not finish: a live file with setuid,
   setgid or sticky bits (`special_permissions`), a file whose owner is not the process's
-  effective user (`foreign_owner`), and a file whose group the process cannot give
-  (`foreign_group`; root can give any group). The identity comes from the POSIX extension.
-  Without it the review cannot know the identity, and the check before each replacement
-  remains the only one. Refusing every replacement instead would also refuse the undo of
-  each file an apply created, because the undo review asks the same question.
+  effective user (`foreign_owner`), and a file whose group a copy written by the process
+  cannot have (`foreign_group`). A copy can have the groups the user belongs to and the
+  group of the private directory, in which the apply builds it: below a setgid directory,
+  and with BSD group semantics, a new file takes its directory's group even when the user
+  is not a member. Root can give any group. A file that an apply created has one of these
+  groups, so the checks after publication and during undo accept it. The identity comes
+  from the POSIX extension. Without it, or where a host disables its functions, the
+  review cannot know the identity, and the check before each replacement remains the only
+  one. Refusing every replacement instead would also refuse the undo of each file an apply
+  created, because the undo review asks the same question.
+- A protected location that resolves to the filesystem root makes the plan unavailable
+  (`protected_path_invalid`), as an invalid spelling does.

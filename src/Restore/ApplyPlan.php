@@ -9,7 +9,9 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Restore;
 
+use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Engine\Restore\Names;
+use BackupsForRestic\Engine\Snapshot\Manifest;
 use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
@@ -24,12 +26,18 @@ defined( 'ABSPATH' ) || exit;
  *
  * @phpstan-type Action array{path: string, destination: string|null, action: string, reason: string}
  * @phpstan-type Writer array{uid: int, groups: list<int>|null}
- * @phpstan-type Guard array{reason: string, key: string, keys: list<string>, decided: list<bool>}
+ * @phpstan-type Guard array{reason: string, keys: list<string>, decided: list<bool>}
  */
 final class ApplyPlan {
 
 	/** Number of sibling spellings retained across a read-only batch. */
 	private const int CACHED_NAMES = 16384;
+
+	/** Number of staged directories named spool whose examination is remembered. */
+	private const int CACHED_SPOOLS = 256;
+
+	/** Number of entries of a spool's database directory that are examined. */
+	private const int SPOOL_ENTRIES = 256;
 
 	/** Wider folders share a disk index across read-only worker requests. */
 	private const int DISK_THRESHOLD = 2048;
@@ -59,6 +67,13 @@ final class ApplyPlan {
 	private array $review_names = [];
 
 	/**
+	 * Staged directories named spool, and whether a backup of this plugin wrote them.
+	 *
+	 * @var array<string, bool>
+	 */
+	private array $spools = [];
+
+	/**
 	 * Live directories in their canonical form.
 	 *
 	 * @var list<string>
@@ -75,8 +90,8 @@ final class ApplyPlan {
 	private array $guards = [];
 
 	/**
-	 * Effective user of this process and the groups it can give a file it owns, null for any
-	 * group; false where the POSIX extension is missing.
+	 * Effective user of this process and the groups a file it writes can have, null for any
+	 * group; false where the POSIX extension cannot tell.
 	 *
 	 * @var Writer|false
 	 */
@@ -107,8 +122,9 @@ final class ApplyPlan {
 		if ( $include_config && null !== $layout ) {
 			throw new InvalidArgument( 'A fresh-site import preserves the current installation configuration.' );
 		}
-		$this->process    = $process ?? self::process();
-		$this->normalizer = $normalizer ?? class_exists( \Normalizer::class );
+		$this->process = $process ?? self::process();
+		// intl defines NFKC_Casefold only when it was built with ICU 56 or later.
+		$this->normalizer = $normalizer ?? ( class_exists( \Normalizer::class ) && defined( 'Normalizer::FORM_KC_CF' ) );
 		foreach ( $roots as $root ) {
 			$root = rtrim( $root, '/' );
 			if ( '' !== $root && str_starts_with( $root, '/' ) && is_dir( $root ) && realpath( $root ) === $root ) {
@@ -267,7 +283,7 @@ final class ApplyPlan {
 		if ( null !== $guard && 'unverified_name' !== $guard ) {
 			return self::decision( $path, $target, 'skip', $guard );
 		}
-		if ( self::spool( $files, $parts ) ) {
+		if ( $this->spool( $files, $parts ) ) {
 			return self::decision( $path, $target, 'skip', 'snapshot_spool' );
 		}
 		$root     = null;
@@ -350,20 +366,37 @@ final class ApplyPlan {
 
 	/**
 	 * The identity that writes the replacements: the process's effective user, which owns
-	 * every file it creates, and the groups that user can give a file it owns. Root can give
-	 * any group.
+	 * every file it creates, and the groups such a file can have. These are the groups the
+	 * user can give a file it owns, and the group of the directory the apply builds its
+	 * copies in: below a setgid directory, and on filesystems with BSD group semantics, a
+	 * new file takes the group of its directory even when the user is not a member of it.
+	 * A file that the apply created is published with that group, and the checks after
+	 * publication and during undo must accept it. Root can give any group.
 	 *
-	 * @return Writer|false Identity, or false without the POSIX extension.
+	 * @param string|null $storage Directory in which the apply builds its copies, the private directory.
+	 * @return Writer|false Identity, or false where the POSIX extension cannot tell.
 	 */
-	public static function process(): array|false {
-		if ( ! function_exists( 'posix_geteuid' ) ) {
+	public static function process( ?string $storage = null ): array|false {
+		// A host can disable single functions, and PHP then leaves them undefined.
+		if ( ! function_exists( 'posix_geteuid' ) || ! function_exists( 'posix_getegid' ) || ! function_exists( 'posix_getgroups' ) ) {
 			return false;
 		}
-		$uid    = posix_geteuid();
-		$groups = posix_getgroups();
+		$uid = posix_geteuid();
+		if ( 0 === $uid ) {
+			return [
+				'uid'    => $uid,
+				'groups' => null,
+			];
+		}
+		$member = posix_getgroups();
+		$groups = array_merge( [ posix_getegid() ], false === $member ? [] : $member );
+		$stat   = null === $storage || ! is_dir( $storage ) ? false : stat( $storage );
+		if ( false !== $stat ) {
+			$groups[] = $stat['gid'];
+		}
 		return [
 			'uid'    => $uid,
-			'groups' => 0 === $uid ? null : array_merge( [ posix_getegid() ], false === $groups ? [] : $groups ),
+			'groups' => $groups,
 		];
 	}
 
@@ -472,26 +505,117 @@ final class ApplyPlan {
 	}
 
 	/**
-	 * Recognizes a snapshot's spool by its fixed layout. Every backup records the site
-	 * manifest and the plaintext database dump in spool/ of the private directory, at the
-	 * location the directory had then. Once the private directory has moved, nothing else
-	 * protects that location, and the dump carries none of the deny files of a private
-	 * directory. So no apply writes a spool anywhere; the database rehearsal reads it from
-	 * staging instead.
+	 * Recognizes a snapshot's spool. Every backup records the site manifest and the
+	 * plaintext database dump in spool/ of the private directory, at the location the
+	 * directory had then. Once the private directory has moved, nothing else protects that
+	 * location, and the dump carries none of the deny files of a private directory. So no
+	 * apply writes a spool anywhere; the database rehearsal reads it from staging instead.
 	 *
 	 * @param string       $files Canonical staging directory.
 	 * @param list<string> $parts Names of the snapshot path.
 	 * @return bool Whether the path is a staged spool or lies in one.
 	 */
-	private static function spool( string $files, array $parts ): bool {
+	private function spool( string $files, array $parts ): bool {
 		$prefix = $files;
 		foreach ( $parts as $name ) {
 			$prefix .= '/' . $name;
-			if ( 'spool' === $name && ( is_file( $prefix . '/manifest.json' ) || is_dir( $prefix . '/database' ) ) ) {
+			if ( 'spool' !== $name ) {
+				continue;
+			}
+			if ( ! isset( $this->spools[ $prefix ] ) ) {
+				if ( count( $this->spools ) >= self::CACHED_SPOOLS ) {
+					$this->spools = [];
+				}
+				$this->spools[ $prefix ] = self::written_by_backup( $prefix );
+			}
+			if ( $this->spools[ $prefix ] ) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Tells a backup's spool from another directory with that name by what only the backup
+	 * writes: a site manifest that declares its format, or a database directory with a dump
+	 * manifest or an SQL file that starts with the dump's format line. Every file of a
+	 * dump starts with that line, so a selection of one table file is recognized as well.
+	 * A file that cannot be read is not shown to be something else and counts as the
+	 * backup's.
+	 *
+	 * @param string $directory Staged directory named spool.
+	 * @return bool Whether a backup of this plugin wrote it.
+	 */
+	private static function written_by_backup( string $directory ): bool {
+		if ( is_link( $directory ) || ! is_dir( $directory ) ) {
+			return false;
+		}
+		if ( self::declares( $directory . '/manifest.json', Manifest::FORMAT ) ) {
+			return true;
+		}
+		$database = $directory . '/database';
+		if ( is_link( $database ) || ! is_dir( $database ) ) {
+			return false;
+		}
+		$handle = @opendir( $database ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable staged directory is reported by the return value.
+		if ( false === $handle ) {
+			return true;
+		}
+		$line = '-- ' . explode( '/', TableSource::FORMAT )[0] . '/';
+		$seen = 0;
+		try {
+			while ( $seen < self::SPOOL_ENTRIES ) {
+				$name = readdir( $handle );
+				if ( false === $name ) {
+					break;
+				}
+				if ( '.' === $name || '..' === $name ) {
+					continue;
+				}
+				++$seen;
+				$file = $database . '/' . $name;
+				if ( is_link( $file ) || ! is_file( $file ) ) {
+					continue;
+				}
+				// An unreadable file is not shown to be something else.
+				if ( 'manifest.json' === $name ? self::declares( $file, TableSource::FORMAT ) : in_array( self::head( $file, strlen( $line ) ), [ $line, null ], true ) ) {
+					return true;
+				}
+			}
+		} finally {
+			closedir( $handle );
+		}
+		return false;
+	}
+
+	/**
+	 * Whether a JSON file declares the format name of one of the backup's manifests near its
+	 * start, whatever the version. Both manifests are written with the format as their
+	 * first member.
+	 *
+	 * @param string $file   Staged file.
+	 * @param string $format Format name and version, for example backups-for-restic-site/1.
+	 * @return bool Whether the file declares that format, or cannot be read.
+	 */
+	private static function declares( string $file, string $format ): bool {
+		if ( is_link( $file ) || ! is_file( $file ) ) {
+			return false;
+		}
+		$head = self::head( $file, 4096 );
+		// json_encode() writes the slash escaped; a manifest written by hand need not.
+		return null === $head || 1 === preg_match( '/"format"\s*:\s*"' . preg_quote( explode( '/', $format )[0], '/' ) . '\\\\?\/[0-9]+"/', $head );
+	}
+
+	/**
+	 * Reads the first bytes of a staged file.
+	 *
+	 * @param string      $file   Regular file.
+	 * @param int<1, max> $length Number of bytes.
+	 * @return string|null Bytes, or null when the file cannot be read.
+	 */
+	private static function head( string $file, int $length ): ?string {
+		$head = @file_get_contents( $file, false, null, 0, $length ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- An unreadable staged file is reported by its return value.
+		return false === $head ? null : $head;
 	}
 
 	/**
@@ -516,11 +640,15 @@ final class ApplyPlan {
 			// A location that cannot be compared would be silently unprotected.
 			InvalidArgument::raise( 'A location that file apply protects is not an absolute path without dot segments.', [ 'code' => 'protected_path_invalid' ], $error );
 		}
-		foreach ( [ $path, self::resolved( $path ) ] as $spelling ) {
+		$resolved = self::resolved( $path );
+		if ( '' === $resolved ) {
+			// A location that is a link to the filesystem root would cover every target.
+			InvalidArgument::raise( 'A location that file apply protects resolves to the filesystem root.', [ 'code' => 'protected_path_invalid' ] );
+		}
+		foreach ( [ $path, $resolved ] as $spelling ) {
 			[ $keys, $decided ]          = $this->keys( $spelling );
 			$this->guards[ $spelling ] ??= [
 				'reason'  => $reason,
-				'key'     => implode( '/', $keys ),
 				'keys'    => $keys,
 				'decided' => $decided,
 			];
@@ -536,9 +664,10 @@ final class ApplyPlan {
 	 */
 	private function protection( string $target ): ?string {
 		[ $keys, $decided ] = $this->keys( $target );
-		$key                = implode( '/', $keys );
 		foreach ( $this->guards as $guard ) {
-			if ( self::within( $key, $guard['key'] ) ) {
+			// Name by name: a key can contain a slash that normalization made of another
+			// character, which is no boundary between names.
+			if ( array_slice( $keys, 0, count( $guard['keys'] ) ) === $guard['keys'] ) {
 				return $guard['reason'];
 			}
 		}
