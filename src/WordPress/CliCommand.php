@@ -447,7 +447,7 @@ final class CliCommand {
 			} while ( null !== $next );
 			$totals = $preview['totals'] ?? null;
 			if ( is_array( $totals ) ) {
-				/* translators: 1: files to restore, 2: entries to remove, 3: entries to keep. */
+				/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
 				\WP_CLI::line( sprintf( __( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), $totals['restore'], $totals['remove'], $totals['keep'] ) );
 				if ( 0 === $totals['restore'] + $totals['remove'] ) {
 					$texts = Messages::job_error( 'undo_nothing_to_revert' );
