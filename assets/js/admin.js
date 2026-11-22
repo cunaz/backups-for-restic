@@ -1667,14 +1667,30 @@
 		const endpoint = '/restores/' + encodeURIComponent( staged.job );
 		const message = el( 'div' );
 		const path = el( 'input', { type: 'text', className: 'regular-text code', value: staged.file || '', placeholder: '/wp-content/uploads/photo.jpg' } );
+		// Restored files can be wp-config.php or the database, so they need the WordPress
+		// password; the reports hold names and counts and do not.
+		const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
 		function download( label, kind ) {
+			const content = [ 'file', 'archive' ].includes( kind );
 			const control = button( label, function () {
+				const data = { kind };
+				if ( 'file' === kind ) {
+					data.path = path.value;
+				}
+				if ( content ) {
+					// Only in the JSON body of this one request, and gone from the form at once.
+					data.user_password = password.value;
+					password.value = '';
+				}
 				control.disabled = true;
 				replace( message, [] );
-				api( endpoint + '/download', { method: 'POST', data: 'file' === kind ? { kind, path: path.value } : { kind } } )
+				api( endpoint + '/download', { method: 'POST', data } )
 					.then( submitDownload )
 					.catch( function ( error ) {
 						replace( message, [ notice( 'error', errorText( error ) ) ] );
+						if ( content && error.data && [ 403, 429 ].includes( error.data.status ) ) {
+							password.focus();
+						}
 					} )
 					.finally( function () {
 						control.disabled = false;
@@ -1709,6 +1725,7 @@
 				[ __( 'Expires', 'backups-for-restic' ), formatTime( staged.expires ) ],
 			] ),
 			field( __( 'Absolute file path in the snapshot', 'backups-for-restic' ), path ),
+			field( __( 'WordPress password for downloads', 'backups-for-restic' ), password, __( 'Your WordPress password, needed for every download of a restored file or the ZIP, which is recorded. The reports need no password.', 'backups-for-restic' ) ),
 			el( 'p', {}, [
 				download( __( 'Download file', 'backups-for-restic' ), 'file' ), ' ',
 				staged.archive ? download( __( 'Download ZIP', 'backups-for-restic' ), 'archive' ) : null, ' ',
@@ -2134,12 +2151,13 @@
 							save.disabled = false;
 						} );
 				}, true );
-				// The record of who saw the kit, kept current without touching the form above it.
-				const views = el( 'div', {}, [ kitViews( response.kit_views ) ] );
+				// The record of who saw the kit, kept current without touching the form above it,
+				// and of who downloaded restored files, which can hold the same secrets.
+				const views = el( 'div', {}, [ kitViews( response.kit_views ), downloadGrants( response.downloads ) ] );
 				const kit = recoveryKitForm( function () {
 					api( '/settings' )
 						.then( function ( fresh ) {
-							replace( views, [ kitViews( fresh.kit_views ) ] );
+							replace( views, [ kitViews( fresh.kit_views ), downloadGrants( fresh.downloads ) ] );
 						} )
 						.catch( function () {} );
 				} );
@@ -2374,6 +2392,42 @@
 	}
 
 	/**
+	 * Who asked for downloads of restored files or archives lately, and for which. The
+	 * server sends each path with its control characters quoted.
+	 *
+	 * @param {Array} grants Latest download grants, newest first.
+	 * @return {Element|null} List, or null if no restored content was downloaded.
+	 */
+	function downloadGrants( grants ) {
+		if ( ! grants || ! grants.length ) {
+			return null;
+		}
+		return el( 'div', { className: 'description bfr-download-grants' }, [
+			el( 'p', {}, [ __( 'Recent downloads of restored files:', 'backups-for-restic' ) ] ),
+			el( 'ul', {}, grants.map( function ( grant ) {
+				return el( 'li', {}, [
+					'archive' === grant.kind
+						? sprintf(
+							/* translators: 1: date and time, 2: user name, 3: ID of the restore job. */
+							__( '%1$s: %2$s asked for the ZIP of restore %3$s.', 'backups-for-restic' ),
+							formatTime( grant.at ),
+							grant.login,
+							grant.job,
+						)
+						: sprintf(
+							/* translators: 1: date and time, 2: user name, 3: file path in the snapshot, 4: ID of the restore job. */
+							__( '%1$s: %2$s asked for %3$s from restore %4$s.', 'backups-for-restic' ),
+							formatTime( grant.at ),
+							grant.login,
+							grant.path,
+							grant.job,
+						),
+				] );
+			} ) ),
+		] );
+	}
+
+	/**
 	 * The form that shows the recovery kit. Its second part puts the form back in place of a
 	 * kit that is on the screen: after a password or the certificate changed, that kit is no
 	 * longer the one to keep.
@@ -2434,7 +2488,9 @@
 
 	/**
 	 * Lets this browser request a probe file in the working directory, where the site could not
-	 * request it from itself, and reports what came back. Never fails: a probe that cannot run
+	 * request it from itself, and reports what came back. The same kind of request for a known
+	 * file of the plugin shows whether a refusal came from this site or from something in
+	 * between, such as a firewall or a CDN challenge. Never fails: a probe that cannot run
 	 * leaves the check as it was.
 	 *
 	 * @return {Promise} Settled when the report is in.
@@ -2450,15 +2506,28 @@
 				const timer = window.setTimeout( function () {
 					patience.abort();
 				}, 10000 );
-				return window
-					.fetch( probe.url, { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal } )
-					.then( function ( answer ) {
-						return answer.text().then( function ( body ) {
-							return { status: answer.status, body: body.slice( 0, 1024 ) };
+				const options = { credentials: 'omit', cache: 'no-store', redirect: 'manual', signal: patience.signal };
+				function look( url, limit ) {
+					return window
+						.fetch( url, options )
+						.then( function ( answer ) {
+							return answer.text().then( function ( body ) {
+								return { status: answer.status, body: body.slice( 0, limit ) };
+							} );
+						} )
+						.catch( function () {
+							return { status: 0, body: '' };
 						} );
-					} )
-					.catch( function () {
-						return { status: 0, body: '' };
+				}
+				return look( probe.url, 1024 )
+					.then( function ( seen ) {
+						if ( ! probe.control ) {
+							return Object.assign( seen, { control_status: 0, control_body: '' } );
+						}
+						// One character more than the file may have, so that a longer answer does not match.
+						return look( probe.control, 65537 ).then( function ( control ) {
+							return Object.assign( seen, { control_status: control.status, control_body: control.body } );
+						} );
 					} )
 					.then( function ( seen ) {
 						window.clearTimeout( timer );
@@ -2511,8 +2580,13 @@
 				replace( root, [
 					jobTable( response.jobs, function ( job ) {
 						api( '/jobs/' + job.id + '/log' ).then( function ( log ) {
+							const user = log.job.user;
 							replace( detail, [
 								el( 'h2', {}, [ formatTime( job.created_at ) + ' – ' + job.state_label ] ),
+								user ? el( 'p', {}, [
+									/* translators: %s: user name, or the number of a deleted user account. */
+									sprintf( __( 'Started by %s.', 'backups-for-restic' ), user.login || '#' + user.id ),
+								] ) : null,
 								el(
 									'table',
 									{ className: 'widefat striped bfr-log' },

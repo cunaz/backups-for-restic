@@ -264,6 +264,37 @@ final class CliTest extends TestCase {
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_snapshots_prints_a_host_name_with_its_control_characters_quoted(): void {
+		TestSite::idle( 600 );
+		// Any client of a shared repository chooses the host names of its snapshots.
+		$host    = "evil\e[2J\e]0;spoofed\x07\nline";
+		$fixture = TempDir::create( 'cli-host-name' );
+		$id      = '';
+		try {
+			file_put_contents( $fixture . '/file.txt', 'a file of another client' );
+			foreach ( explode( "\n", TestSite::restic()->must( [ 'backup', '--json', '--host', $host, $fixture . '/file.txt' ] ) ) as $line ) {
+				$message = json_decode( $line, true );
+				if ( is_array( $message ) && 'summary' === ( $message['message_type'] ?? null ) ) {
+					$id = (string) ( $message['snapshot_id'] ?? '' );
+				}
+			}
+			self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $id );
+
+			[ $status, $output ] = self::command( [ 'snapshots' ] );
+
+			self::assertSame( 0, $status, $output );
+			self::assertMatchesRegularExpression( '/^' . substr( $id, 0, 8 ) . '  \S+  "evil\\\\x1b\[2J\\\\x1b\]0;spoofed\\\\a\\\\nline"$/m', $output );
+			self::assertStringNotContainsString( "\e", $output, 'No escape sequence reaches the terminal.' );
+			self::assertStringNotContainsString( "\x07", $output );
+		} finally {
+			if ( '' !== $id ) {
+				TestSite::restic()->must( [ 'forget', $id ] );
+			}
+			TempDir::remove( $fixture );
+		}
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_ls_lists_a_directory_of_a_snapshot(): void {
 		TestSite::idle( 600 );
 		$ids = self::snapshots();

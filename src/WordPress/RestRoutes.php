@@ -28,6 +28,7 @@ use BackupsForRestic\Scheduling\SchedulePolicy;
 use BackupsForRestic\Secrets\Secret;
 use BackupsForRestic\Secrets\SecretName;
 use BackupsForRestic\Settings\Schema;
+use BackupsForRestic\Storage\ConfirmationThrottle;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Decoded;
 
@@ -119,7 +120,8 @@ final class RestRoutes {
 
 	/**
 	 * Runs the method of a route. What a method does not answer itself, such as settings that
-	 * the database refused to store, becomes an error response instead of a fatal error.
+	 * the database refused to store, becomes an error response instead of a fatal error. A
+	 * refusal that says how long to wait also says it in a Retry-After header.
 	 *
 	 * @param \Closure                               $route   The method.
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
@@ -127,10 +129,17 @@ final class RestRoutes {
 	 */
 	private function answer( \Closure $route, \WP_REST_Request $request ): mixed {
 		try {
-			return $route( $request );
+			$answer = $route( $request );
 		} catch ( PluginException $e ) {
 			return $this->error( JobError::from_throwable( $e )->code, 500 );
 		}
+		$data = $answer instanceof \WP_Error ? $answer->get_error_data() : null;
+		if ( $answer instanceof \WP_Error && is_array( $data ) && is_int( $data['retry_after'] ?? null ) ) {
+			$response = rest_convert_error_to_response( $answer );
+			$response->header( 'Retry-After', (string) $data['retry_after'] );
+			return $response;
+		}
+		return $answer;
 	}
 
 	/**
@@ -269,9 +278,11 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Writes a probe file into the private directory for the browser to request (ADR 0007).
+	 * Writes a probe file into the private directory for the browser to request (ADR 0007),
+	 * and names the known file that the browser requests beside it: without that file a
+	 * refusal of the probe proves nothing (Storage\BrowserProbe).
 	 *
-	 * @return \WP_REST_Response|\WP_Error Response with the probe's name and URL, or null as URL if the directory has none.
+	 * @return \WP_REST_Response|\WP_Error Response with the probe's name and URL and the control's URL, or null as URL if the directory has none.
 	 */
 	public function begin_probe(): \WP_REST_Response|\WP_Error {
 		try {
@@ -280,11 +291,13 @@ final class RestRoutes {
 			if ( null === $location ) {
 				return $this->respond( [ 'url' => null ] );
 			}
-			$probe = $this->container->browser_probe()->begin( $location );
+			$control = $exposure->control( $location );
+			$probe   = $this->container->browser_probe()->begin( $location, null === $control ? null : hash( 'sha256', $control['content'] ) );
 			return $this->respond(
 				[
-					'url'   => $exposure->probe_url( $probe ),
-					'probe' => $probe,
+					'url'     => $exposure->probe_url( $probe ),
+					'probe'   => $probe,
+					'control' => null === $control ? null : $control['url'],
 				]
 			);
 		} catch ( PluginException $e ) {
@@ -293,16 +306,20 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Takes what the browser got for the probe file.
+	 * Takes what the browser got for the probe file and for the known file beside it.
 	 *
-	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the probe's name, the HTTP status (0 if the request failed) and the body.
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request with the probe's name, the HTTP status (0 if the request failed) and
+	 *                                                        the body, and the same for the control file as control_status and control_body.
 	 * @return \WP_REST_Response Response: exposed is true, false, or null if the report says nothing.
 	 */
 	public function report_probe( \WP_REST_Request $request ): \WP_REST_Response {
-		$status = $request->get_param( 'status' );
+		$status  = $request->get_param( 'status' );
+		$control = $request->get_param( 'control_status' );
 		// The token has 32 characters; a page that serves the file starts with it.
 		$body = substr( self::text( $request, 'body' ), 0, 4096 );
-		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( self::text( $request, 'probe' ), is_numeric( $status ) ? (int) $status : 0, $body ) ] );
+		// One byte more than the control file may have, so that a longer answer does not match.
+		$control_body = substr( self::text( $request, 'control_body' ), 0, WpExposureCheck::CONTROL_BYTES + 1 );
+		return $this->respond( [ 'exposed' => $this->container->browser_probe()->finish( self::text( $request, 'probe' ), is_numeric( $status ) ? (int) $status : 0, $body, is_numeric( $control ) ? (int) $control : 0, $control_body ) ] );
 	}
 
 	/**
@@ -341,6 +358,8 @@ final class RestRoutes {
 			} catch ( InvalidArgument $refused ) {
 				return $this->error( Decoded::string( $refused->context()['code'] ?? 'invalid_paths' ), 400 );
 			}
+			// Staging needs the capability alone (docs/03 §8); the job view shows who asked for it.
+			$data['user'] = get_current_user_id();
 		}
 		$refusal = $type->refusal( $this->container->settings() );
 		if ( null !== $refusal ) {
@@ -560,13 +579,25 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Issues the form fields for one download to an authorized administrator.
+	 * Issues the form fields for one download to an authorized administrator. A restored file
+	 * or archive can hold wp-config.php and the database dump, which together decrypt the
+	 * stored secrets, so its grant needs the WordPress password as the recovery kit does and
+	 * is recorded (docs/03-security-and-threat-model.md §5.5). The reports hold names, counts
+	 * and table metadata, which the page fetches by itself for its previews; they need the
+	 * capability alone.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return \WP_REST_Response|\WP_Error One-time form, or a missing download.
+	 * @return \WP_REST_Response|\WP_Error One-time form, a refused confirmation, or a missing download.
 	 */
 	public function download( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$form = ( new Downloads( $this->container ) )->issue( Decoded::string( $request->get_url_params()['id'] ?? null ), self::text( $request, 'kind' ), self::text( $request, 'path' ) );
+		$kind = self::text( $request, 'kind' );
+		if ( ! Downloads::is_metadata( $kind ) ) {
+			$refusal = $this->password_refusal( $request );
+			if ( null !== $refusal ) {
+				return $refusal;
+			}
+		}
+		$form = ( new Downloads( $this->container ) )->issue( Decoded::string( $request->get_url_params()['id'] ?? null ), $kind, self::text( $request, 'path' ) );
 		return null === $form ? $this->error( 'download_not_found', 404 ) : $this->respond( $form, 200, true );
 	}
 
@@ -883,9 +914,9 @@ final class RestRoutes {
 		if ( ! is_bool( $include_config ) || ( ( $undo || $database ) && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $undo, $id, $include_config, $digest, $plan_job, $database ) ) ) {
 			return $this->error( $database ? 'database_exchange_changed' : 'live_plan_changed', 409 );
 		}
-		$user = wp_get_current_user();
-		if ( ! is_string( $body['user_password'] ?? null ) || ! wp_check_password( $body['user_password'], $user->user_pass, $user->ID ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->password_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		return [ $id, $digest, $include_config, $plan_job ];
 	}
@@ -963,6 +994,7 @@ final class RestRoutes {
 				'private_dir' => $this->container->private_dir()->path,
 				'cache_bytes' => $this->container->cache()->size(),
 				'kit_views'   => $this->kit_views(),
+				'downloads'   => $this->download_grants(),
 			]
 		);
 	}
@@ -1157,8 +1189,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function create_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		if ( ! $this->may_see_kit( $request ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->kit_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		try {
 			// The answer is the recovery kit: what the kit needs has to be there before a repository exists.
@@ -1185,8 +1218,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function connect_repository( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		if ( ! $this->may_see_kit( $request ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->kit_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		try {
 			// The answer contains the recovery kit: what the kit needs has to be there first.
@@ -1291,8 +1325,9 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function recovery_kit( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		if ( ! $this->password_confirmed( $request ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$refusal = $this->password_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		try {
 			$kit = RecoveryKit::deliver( $this->container, 'settings' );
@@ -1320,6 +1355,26 @@ final class RestRoutes {
 	}
 
 	/**
+	 * The latest grants to download restored files and archives, for the Settings tab next to
+	 * the deliveries of the recovery kit.
+	 *
+	 * @return list<array{at: int, login: string, job: string, kind: string, path: string}> Newest first.
+	 */
+	private function download_grants(): array {
+		$grants = [];
+		foreach ( Decoded::arrays( $this->container->state()->get( Downloads::AUDIT )['grants'] ?? null ) as $grant ) {
+			$grants[] = [
+				'at'    => Decoded::int( $grant['at'] ?? null ),
+				'login' => Decoded::string( $grant['login'] ?? null ),
+				'job'   => Decoded::string( $grant['job'] ?? null ),
+				'kind'  => Decoded::string( $grant['kind'] ?? null ),
+				'path'  => Decoded::string( $grant['path'] ?? null ),
+			];
+		}
+		return array_slice( $grants, 0, 5 );
+	}
+
+	/**
 	 * The error for a recovery kit that cannot be complete, or for another failure on the way
 	 * to it.
 	 *
@@ -1335,15 +1390,34 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Whether the request carries the WordPress password of the current user, as proof that the
-	 * administrator is present and not only a session of theirs.
+	 * Checks the WordPress password of the current user, as proof that the administrator is
+	 * present and not only a session of theirs. Every route that asks for the password asks
+	 * here (docs/03-security-and-threat-model.md §5.5). The password is taken from the JSON
+	 * body only, never from the address, which access logs keep. Wrong passwords are counted
+	 * per user; after too many the password is not checked for a while (PasswordConfirmation).
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return bool True if the password is right.
+	 * @return \WP_Error|null Null if the password is right, otherwise the refusal.
 	 */
-	private function password_confirmed( \WP_REST_Request $request ): bool {
-		$user = wp_get_current_user();
-		return wp_check_password( self::text( $request, 'user_password' ), $user->user_pass, $user->ID );
+	private function password_refusal( \WP_REST_Request $request ): ?\WP_Error {
+		$checker = new PasswordConfirmation( new ConfirmationThrottle( $this->container->state(), $this->container->clock() ) );
+		$refusal = $checker->check( $request->get_json_params()['user_password'] ?? null );
+		if ( null === $refusal ) {
+			return null;
+		}
+		if ( 'user_password_throttled' !== $refusal['code'] ) {
+			return $this->error( 'wrong_user_password', 403 );
+		}
+		$texts = Messages::password_throttled( $refusal['wait'] );
+		return new \WP_Error(
+			'backups_for_restic_user_password_throttled',
+			$texts['message'],
+			[
+				'status'      => 429,
+				'hint'        => $texts['hint'],
+				'retry_after' => $refusal['wait'],
+			]
+		);
 	}
 
 	/**
@@ -1352,10 +1426,10 @@ final class RestRoutes {
 	 * for the recovery kit route (docs/03-security-and-threat-model.md §5.5).
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return bool True if allowed.
+	 * @return \WP_Error|null Null if allowed, otherwise the refusal.
 	 */
-	private function may_see_kit( \WP_REST_Request $request ): bool {
-		return ! $this->container->settings()->bool( 'setup.completed' ) || $this->password_confirmed( $request );
+	private function kit_refusal( \WP_REST_Request $request ): ?\WP_Error {
+		return $this->container->settings()->bool( 'setup.completed' ) ? $this->password_refusal( $request ) : null;
 	}
 
 	/**
@@ -1511,6 +1585,26 @@ final class RestRoutes {
 			'result'           => $job->result,
 			'warnings'         => $job->warnings,
 			'error'            => $error,
+			'user'             => self::job_user( $job ),
+		];
+	}
+
+	/**
+	 * Who started a job that records it: a restore, or a database change that its
+	 * administrator confirmed.
+	 *
+	 * @param Job $job Job.
+	 * @return array{id: int, login: string}|null User ID and login, '' for a deleted account; null if the job records none.
+	 */
+	private static function job_user( Job $job ): ?array {
+		$id = $job->data['user'] ?? null;
+		if ( ! is_int( $id ) || $id < 1 ) {
+			return null;
+		}
+		$user = get_userdata( $id );
+		return [
+			'id'    => $id,
+			'login' => $user instanceof \WP_User ? $user->user_login : '',
 		];
 	}
 

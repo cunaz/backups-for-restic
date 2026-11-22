@@ -25,10 +25,18 @@ require dirname( __DIR__ ) . '/Support/InMemoryOptions.php';
 
 $directory = new PrivateDirectory( WP_CONTENT_DIR . '/backups-for-restic' );
 $directory->ensure();
+// The plugin's stylesheet at its place in the document root: a refusal of the probe counts
+// only when the same check gets it back from the same server.
+$plugin  = WP_PLUGIN_DIR . '/backups-for-restic';
+$control = $plugin . '/' . WpExposureCheck::CONTROL;
+if ( ! is_dir( dirname( $control ) ) && ! mkdir( dirname( $control ), 0755, true ) ) {
+	throw new RuntimeException( 'The control file could not be placed in the document root.' );
+}
+copy( $package . '/' . WpExposureCheck::CONTROL, $control );
 $state   = new SiteState( new InMemoryOptions() );
 $random  = new SystemRandom();
 $browser = new BrowserProbe( $directory, $state, $random, new SystemClock() );
-$probe   = new WpExposureCheck( $directory, $state, $random, $browser );
+$probe   = new WpExposureCheck( $directory, $state, $random, $browser, $plugin . '/backups-for-restic.php' );
 $exposed = $probe->exposed( true );
 $staging = $probe->permits_staging();
 

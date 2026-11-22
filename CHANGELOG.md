@@ -237,6 +237,34 @@ All notable changes are documented here. The format follows
   who confirmed it still has the backup capability and `update_core`
   (`file_writes_refused`). The check reads the account from the database, so a role taken
   away also stops a running `wp backups-for-restic tick --until-idle`.
+- Downloading a restored file or a restore's ZIP asks for the WordPress password, as the
+  recovery kit does, and every grant is recorded with time, account, restore job, kind and
+  path; the Settings tab lists the latest beside the deliveries of the recovery kit, and
+  the action `backups_for_restic_download_granted` fires. A restored `wp-config.php` and
+  database dump together decrypt the stored passwords; before, any session or application
+  password with the plugin's capability could download them without a trace. Staging and
+  the two reports still need the capability alone. Restore jobs record who started them,
+  and the job view shows it.
+- Wrong WordPress passwords at the recovery kit, at creating and connecting a repository,
+  at live file and database changes and at downloads are counted per account. The first
+  three cost nothing; then each makes the next attempt wait longer, from one minute
+  doubling up to 32, and from the tenth on each locks the confirmation of that account for
+  an hour (HTTP 429 `user_password_throttled` with `Retry-After`). Each fires core's
+  `wp_login_failed` action, so that login limiters and fail2ban rules count it. The
+  password is read from the JSON body of a request only.
+- A refusal of the probe of the private directory counts as protection only when the same
+  check also gets the plugin's own stylesheet back from the site. A 403 or 404 from a
+  firewall, a CDN challenge or another virtual host no longer allows plaintext restore
+  staging; the probe says it could not be verified instead. `restores/` and every staging
+  directory get the deny files and `index.php` of the private directory, so that a server
+  that lists directories does not list the restores.
+- Deleting the plugin on a PHP older than 8.3 stops with a message that asks to switch
+  back first. Before, the uninstall did nothing there and WordPress deleted the plugin,
+  leaving staged files, retained database tables and the encrypted secrets behind with
+  nothing left to expire them.
+- `wp backups-for-restic snapshots` prints host names with control characters quoted, as
+  `ls` prints names; a client of a shared repository could send escape sequences to the
+  terminal through the host name of a snapshot.
 
 ### Fixed
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.

@@ -10,8 +10,11 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Storage\DownloadTokens;
 use BackupsForRestic\Support\Bytes;
+use BackupsForRestic\Support\Decoded;
+use BackupsForRestic\Support\GoQuote;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -21,10 +24,27 @@ defined( 'ABSPATH' ) || exit;
  * A capability-checked REST call issues a form for a browser download. Submitting it
  * consumes the token and checks expiry again before opening the file. POST keeps both
  * the credential and the original file name out of the request URL.
+ *
+ * A restored file or archive is site content: it can be wp-config.php or the database dump,
+ * which together decrypt the stored secrets. Its grant is issued only after the route has
+ * checked the WordPress password, and only once it is recorded (docs/03 §5.5). The two
+ * reports hold names, counts and table metadata, and need the capability alone.
  */
 final readonly class Downloads {
 
+	/** Entry of the state option that records the grants of restored content. */
+	public const string AUDIT = 'downloads';
+
+	/** Kinds that hold metadata only: the report of the staged entries and the database rehearsal's report. */
+	public const array METADATA = [ 'report', 'database_report' ];
+
 	private const string ACTION = 'backups_for_restic_download';
+
+	/** Number of grants retained for the administrator's audit history. */
+	private const int GRANTS = 20;
+
+	/** Longest path the audit keeps, in bytes of its quoted form. */
+	private const int PATH_BYTES = 1024;
 
 	/**
 	 * Creates the download handler.
@@ -41,12 +61,25 @@ final readonly class Downloads {
 	}
 
 	/**
-	 * Issues a form for a file that exists in a completed restore.
+	 * Whether a kind of download holds metadata only. Every other kind, an unknown one
+	 * included, counts as content.
+	 *
+	 * @param string $kind Download kind.
+	 * @return bool True for the restore report and the database rehearsal's report.
+	 */
+	public static function is_metadata( string $kind ): bool {
+		return in_array( $kind, self::METADATA, true );
+	}
+
+	/**
+	 * Issues a form for a file that exists in a completed restore. The caller has checked
+	 * the WordPress password for every kind that is not metadata.
 	 *
 	 * @param string $id   Job ID.
-	 * @param string $kind file, archive or report.
+	 * @param string $kind file, archive, report or database_report.
 	 * @param string $path Absolute snapshot path for a file.
 	 * @return array{url: string, fields: array<string, string>}|null Browser form or unavailable.
+	 * @throws StorageFailed If the grant of content cannot be recorded; no token is issued then.
 	 */
 	public function issue( string $id, string $kind, string $path ): ?array {
 		$handle = $this->open( $id, $kind, $path );
@@ -54,6 +87,9 @@ final readonly class Downloads {
 			return null;
 		}
 		fclose( $handle );
+		if ( ! self::is_metadata( $kind ) ) {
+			$this->record( $id, $kind, $path );
+		}
 		// Encoding also preserves newlines and other name bytes through an HTML form.
 		$subject = Bytes::base64url_encode( $id . "\0" . $kind . "\0" . $path );
 		return [
@@ -114,6 +150,54 @@ final readonly class Downloads {
 		fpassthru( $handle );
 		fclose( $handle );
 		exit;
+	}
+
+	/**
+	 * Records a grant of restored content before its token exists: the time, the user, the
+	 * restore job, the kind and the path. The latest twenty stay in the state option, where
+	 * the Settings tab shows them beside the deliveries of the recovery kit, and the action
+	 * backups_for_restic_download_granted fires for audit plugins.
+	 *
+	 * @param string $id   Restore job ID, checked by open().
+	 * @param string $kind file or archive.
+	 * @param string $path Absolute snapshot path, empty for an archive.
+	 * @throws StorageFailed If the entry cannot be stored.
+	 */
+	private function record( string $id, string $kind, string $path ): void {
+		$user  = wp_get_current_user();
+		$shown = self::shown( $path );
+		$grant = [
+			'at'    => time(),
+			'user'  => $user->ID,
+			'login' => $user->user_login,
+			'job'   => $id,
+			'kind'  => $kind,
+			'path'  => $shown,
+		];
+		$this->container->state()->update( self::AUDIT, static fn ( array $entry ): array => [ 'grants' => array_slice( [ $grant, ...Decoded::arrays( $entry['grants'] ?? null ) ], 0, self::GRANTS ) ], true );
+		/**
+		 * Fires when a download of restored content has been granted to an authorized user.
+		 *
+		 * @param int    $user_id WordPress user ID.
+		 * @param string $job     ID of the restore job.
+		 * @param string $kind    file or archive.
+		 * @param string $path    Snapshot path in Go's quoting, empty for an archive.
+		 */
+		do_action( 'backups_for_restic_download_granted', $user->ID, $id, $kind, $shown );
+	}
+
+	/**
+	 * A snapshot path as the audit keeps it: in Go's quoting, the form of names in restic's
+	 * tree JSON, so that control characters, line breaks and bytes that are not UTF-8 appear
+	 * as escapes and cannot break a list or a log line. A longer one is cut, marked with
+	 * three dots.
+	 *
+	 * @param string $path Snapshot path as the request named it.
+	 * @return string Printable, valid UTF-8 text of at most 1027 bytes.
+	 */
+	public static function shown( string $path ): string {
+		$quoted = GoQuote::quote( $path );
+		return strlen( $quoted ) > self::PATH_BYTES ? mb_strcut( $quoted, 0, self::PATH_BYTES, 'UTF-8' ) . '...' : $quoted;
 	}
 
 	/**
