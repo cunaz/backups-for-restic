@@ -56,6 +56,30 @@ plugins from WordPress.org only) and double the release testing.
   `wordpress-org` environment for publication. A local release rehearsal exercises the
   SVN transaction and byte comparison. First submission, account setup and public
   deployment require the owner. See the [release process](../04-development-and-quality.md#7-release-process-wordpressorg).
+- Since 2026-11-22 the deployment workflow (`.github/workflows/deploy-wordpress-org.yml`)
+  fails closed, and its checks run before the owner is asked to approve:
+  - It starts for stable `vX.Y.Z` tags only, and its first step refuses any other run. The
+    `tag` input of a manual start is gone: a retry re-runs the tag's own run, or starts the
+    workflow on the tag itself.
+  - `bin/verify-release-tag.sh`, in the copy on `main`, accepts an annotated tag that names
+    itself, lies on `main` and is signed by the key in the repository variable
+    `RELEASE_SIGNING_PUBLIC_KEY`. The primary fingerprint of that key must be pinned in
+    `.github/release-signing-key.txt` as committed on `main`, so replacing the variable
+    authorises no other key. The script reads GnuPG's status itself and requires `GOODSIG`:
+    an expired or revoked key is refused whatever the installed Git accepts.
+  - `bin/check-release-gates.py` checks what GitHub enforces (the rulesets of `main` and of
+    release tags, the `wordpress-org` environment) and what CI has shown for the tagged
+    commit. `bin/prepare-wordpress-org.py --check-only` checks the versions and both
+    changelogs. A requirement that cannot be read counts as failed.
+  - The release notes are published only if the tag still names the commit that was
+    verified and deployed.
+- The package check (`.github/actions/check-package`) refuses a package with anything but
+  the plugin's files at its top, so a development file that `.distignore` forgets fails the
+  check instead of shipping. `.distignore` names the configurations of the new mutation
+  gates (`infection-*.json5.dist`). Plugin Check runs through WP-CLI in a WordPress
+  set up by `bin/test-site.sh`, with WordPress, WP-CLI and Plugin Check pinned by checksum;
+  the codes it ignores and the one file it leaves out are listed in the action with their
+  reasons.
 - Since 2026-11-10 Plugin Check runs in CI on the built package, for every pull request.
   Its errors about native file functions in the WordPress-free core are set aside in the
   workflow, with the reason; the reviewers will see them
