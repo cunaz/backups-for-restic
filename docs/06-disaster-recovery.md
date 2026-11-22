@@ -102,6 +102,12 @@ If the database or a worker goes away during a confirmed operation, restore serv
 resume the same job with `wp backups-for-restic tick --until-idle`. Its journal records
 completed changes and checks their identities during recovery.
 
+While a file job keeps the site in maintenance, the commands of Backups for restic load
+only this plugin and no theme. Other WP-CLI commands, such as `wp plugin` or
+`wp cron event run`, load the site's plugins as during a WordPress update. A restored
+plugin that stops WordPress from starting stops them as well; skip it with
+`--skip-plugins`.
+
 ## Scenario B — the server is gone
 
 1. **Provision** a new server or hosting account with PHP, a web server and MariaDB/MySQL.

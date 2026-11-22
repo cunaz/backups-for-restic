@@ -213,6 +213,12 @@ All notable changes are documented here. The format follows
   options table did not keep it.
 - Job files and logs also redact the REST credentials in the form the `Authorization`
   header carries them.
+- While a live file change holds the site in maintenance, a request that the job's control
+  token admits can no longer reach another REST route through a `rest_route` field in its
+  form body, and no admitted request can store the shortened list of active plugins that
+  it starts with. Every tick of a file apply or undo checks again that the administrator
+  who confirmed it still has the backup capability and `update_core`
+  (`file_writes_refused`).
 
 ### Fixed
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
@@ -371,3 +377,18 @@ All notable changes are documented here. The format follows
 - Cancelling a forget releases its lock even when the retention settings became unusable.
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
+- While a live file change holds the site in maintenance, WP-CLI commands other than the
+  plugin's own run with the site's plugins, as during a WordPress update. Before, every
+  command started with this plugin alone: `wp plugin activate`, or deactivating this
+  plugin, could leave every other plugin inactive, and `wp cron event run --due-now`
+  dropped other plugins' due events. Requests that run cron themselves, as with
+  `ALTERNATE_WP_CRON`, release only this plugin's events during the job.
+- A file apply or undo keeps the maintenance marker that its first tick wrote and the
+  uploads directory it was confirmed with. URL and upload-directory filters in the theme or
+  a regular plugin, which do not load during maintenance, made its first change fail or
+  refused uploads after other files had changed.
+- The maintenance marker is readable like WordPress's own, so PHP processes of other
+  system users show the maintenance page instead of a fatal error. It is also cleared from
+  OPcache, so hosts without timestamp checks run the current job's marker.
+- A file job that the site's file modification policy stops reports `file_writes_refused`
+  instead of "Another backup job is still running".
