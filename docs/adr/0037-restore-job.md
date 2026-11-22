@@ -64,7 +64,11 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   and the entry of the last restore. Since 2026-11-21 this holds for every failure of
   `releasing` and `cleaning_up` after a complete run, an Error of PHP included, such as a
   function that the host disabled, and for opening the repository to look for a leftover
-  lock.
+  lock. It holds as well for a failure in the call that stages the last file, once the
+  run's checkpoint says that every file is staged and the directories it names are still
+  the ones the run bound: the release of the lock or the checkpoint written after it. The
+  job keeps the files and goes on with a warning (log code `restore_release_deferred`);
+  `releasing` asks for the lock again, and a lock that stays expires after 30 minutes.
 - **Restore jobs are not reported by e-mail.** An administrator starts a restore and
   watches it, as with an unlock; failure streaks and recovery notices are for unattended
   jobs.

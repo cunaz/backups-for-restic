@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Unit\Jobs;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
@@ -482,6 +483,105 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( 'staging_write', $job->error?->code, 'The user is told about the disk, not about damage in the repository.' );
 		self::assertSame( [], $this->locks() );
 		self::assertDirectoryDoesNotExist( $this->staging( $job ), 'A failed restore leaves no partial tree.' );
+	}
+
+	/**
+	 * What a restore that stages every file and then meets a failure in the same call leaves:
+	 * a job that succeeded, every staged byte, one warning, and no lock once it ended.
+	 */
+	private function assert_complete_despite( Job $job, string $cause ): void {
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		$staged = $this->staging( $job ) . '/files' . $this->site;
+		foreach ( [ '/hello.txt', '/empty.txt', '/docs/readme.md', '/docs/deep/large.bin' ] as $file ) {
+			self::assertFileEquals( $this->site . $file, $staged . $file );
+		}
+		self::assertSame( 4, $job->result['files'] ?? null );
+		self::assertSame( 100, $job->progress['percent'] ?? null );
+		self::assertCount( 1, $job->warnings );
+		self::assertStringContainsString( 'Every file is staged, but what followed the last one failed (' . $cause . ')', $job->warnings[0] );
+		$log = (string) file_get_contents( $this->directory . '/private/jobs/' . $job->id . '/events.log' );
+		self::assertStringContainsString( '"code":"' . RestoreSteps::RELEASE_DEFERRED . '"', $log );
+		self::assertSame( [], $this->locks(), 'The lock went with a later attempt.' );
+		self::assertSame( $job->id, ( new SiteState( $this->options ) )->get( 'last_restore' )['job'] ?? null );
+	}
+
+	/**
+	 * @return iterable<string, array{\Closure(): ?HttpResponse, string}>
+	 */
+	public static function failed_releases(): iterable {
+		yield 'the server refuses it' => [ static fn (): HttpResponse => new HttpResponse( 401, [], '' ), 'unauthorized' ];
+		yield 'an error of PHP' => [
+			static function (): never {
+				throw new \Error( 'Call to undefined function disk_free_space()' );
+			},
+			'internal',
+		];
+	}
+
+	/**
+	 * @param \Closure(): ?HttpResponse $answer What the first deletion of a lock gets.
+	 */
+	#[DataProvider( 'failed_releases' )]
+	public function test_a_lock_release_that_fails_when_the_last_file_is_staged_keeps_the_restore( \Closure $answer, string $cause ): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot );
+		$failed   = false;
+		// The first lock the restore deletes is its own, in the call that stages its last file.
+		$this->server->before = static function ( string $method, string $path ) use ( &$failed, $answer ): ?HttpResponse {
+			if ( $failed || 'DELETE' !== $method || ! str_starts_with( $path, '/site/locks/' ) ) {
+				return null;
+			}
+			$failed = true;
+			return $answer();
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertTrue( $failed, 'The release failed.' );
+		$this->assert_complete_despite( $job, $cause );
+	}
+
+	public function test_a_checkpoint_that_cannot_be_written_after_the_last_file_keeps_the_restore(): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot );
+		$work     = $this->directory . '/private/jobs/' . $job->id . '/restore';
+		$planted  = false;
+		// While the lock is released after the last file, a directory takes the place of the
+		// checkpoint's temporary file: the checkpoint that forgets the lock cannot be written.
+		$this->server->before = static function ( string $method, string $path ) use ( &$planted, $work ): ?HttpResponse {
+			if ( ! $planted && 'DELETE' === $method && str_starts_with( $path, '/site/locks/' ) ) {
+				$planted = mkdir( $work . '/restore.json.tmp' );
+			}
+			return null;
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertTrue( $planted );
+		$this->assert_complete_despite( $job, 'repository_damaged' );
+		self::assertDirectoryDoesNotExist( $work, 'The cleanup removed the working files.' );
+	}
+
+	public function test_a_failure_after_the_last_file_ends_the_job_when_the_staging_directory_was_replaced(): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot );
+		$files    = $this->staging( $job ) . '/files';
+		$failed   = false;
+		// While the lock is released, the staged tree is swapped for another directory.
+		$this->server->before = static function ( string $method, string $path ) use ( &$failed, $files ): ?HttpResponse {
+			if ( $failed || 'DELETE' !== $method || ! str_starts_with( $path, '/site/locks/' ) ) {
+				return null;
+			}
+			$failed = rename( $files, $files . '-moved' ) && mkdir( $files, 0700 );
+			return new HttpResponse( 401, [], '' );
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertTrue( $failed );
+		self::assertSame( JobState::Failed, $job->state, 'A checkpoint that names another directory proves nothing.' );
+		self::assertSame( 'unauthorized', $job->error?->code );
+		self::assertDirectoryDoesNotExist( $files );
 	}
 
 	public function test_an_error_of_php_while_a_finished_restore_releases_its_lock_keeps_the_staged_files(): void {

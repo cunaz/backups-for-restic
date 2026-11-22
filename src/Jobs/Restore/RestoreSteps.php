@@ -48,6 +48,13 @@ final class RestoreSteps implements StepProvider {
 	public const int MAX_RESUMPTIONS = 3;
 
 	/**
+	 * The code of the warning of a run whose checkpoint says that every file is staged when
+	 * what follows in the same call fails, as the release of its repository lock: the step
+	 * releasing tries the lock again, and a lock that stays expires after 30 minutes.
+	 */
+	public const string RELEASE_DEFERRED = 'restore_release_deferred';
+
+	/**
 	 * Free space that building an archive leaves on the volume. The archive is a second copy
 	 * of every staged byte, and while it grows the site writes beside it: uploads, sessions,
 	 * the database where it shares the volume, and the documents of this job. 64 MiB is four
@@ -440,30 +447,55 @@ final class RestoreSteps implements StepProvider {
 	 * job fails rather than go on for ever. A snapshot that the repository does not hold, never
 	 * held or was made to forget, does not come back: the job fails in the tick that finds out.
 	 *
+	 * A run whose checkpoint says that every file is staged is complete, whatever fails after
+	 * that in the same call, as the release of its repository lock or the checkpoint written
+	 * after it. Failing the job then would cost the staged files (ADR 0037): the job keeps
+	 * them and goes on with a warning (RELEASE_DEFERRED), the step releasing asks for the lock
+	 * again, and a lock that stays expires after 30 minutes. Before the checkpoint says so, or
+	 * when the directories it names are not the ones the run bound, an error ends the job.
+	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return string The phase of the run after the tick: plan, restore or complete.
 	 * @throws RepositoryChanged If the lock was lost too often or the snapshot is gone.
+	 * @throws \Throwable If the run failed before every file was staged.
 	 */
 	private function advance( Job $job, EventLog $log, float $deadline ): string {
-		$run = $this->run( $job, $log );
+		$run      = $this->run( $job, $log );
+		$progress = null;
 		try {
 			$run->advance( $deadline );
-		} catch ( RepositoryChanged $changed ) {
-			$resumptions = Decoded::int( $job->data['resumptions'] ?? 0 ) + 1;
-			if ( $resumptions > self::MAX_RESUMPTIONS || RestoreRun::SNAPSHOT_MISSING === ( $changed->context()['cause'] ?? null ) ) {
-				throw $changed;
+		} catch ( \Throwable $failure ) {
+			$progress = $this->completed( $job );
+			if ( null !== $progress ) {
+				$code = JobError::from_throwable( $failure )->code;
+				$job->warn( 'Every file is staged, but what followed the last one failed (' . $code . '), so the repository lock may still be held. The cleanup releases it; a lock that stays expires after 30 minutes.' );
+				$log->write(
+					'warning',
+					'The restore is complete; a failure after its last file leaves the release of its repository lock to the cleanup.',
+					[
+						'code'  => self::RELEASE_DEFERRED,
+						'cause' => $code,
+					]
+				);
+			} elseif ( ! $failure instanceof RepositoryChanged ) {
+				throw $failure;
+			} else {
+				$resumptions = Decoded::int( $job->data['resumptions'] ?? 0 ) + 1;
+				if ( $resumptions > self::MAX_RESUMPTIONS || RestoreRun::SNAPSHOT_MISSING === ( $failure->context()['cause'] ?? null ) ) {
+					throw $failure;
+				}
+				$job->data['resumptions'] = $resumptions;
+				$log->write( 'warning', 'The repository lock of the restore did not hold; the restore takes up its work again.', [ 'resumption' => $resumptions ] + $failure->context() );
 			}
-			$job->data['resumptions'] = $resumptions;
-			$log->write( 'warning', 'The repository lock of the restore did not hold; the restore takes up its work again.', [ 'resumption' => $resumptions ] + $changed->context() );
 		}
 		if ( $run->space_unknown() && true !== ( $job->data['space_unknown'] ?? null ) ) {
 			$job->data['space_unknown'] = true;
 			$job->warn( 'The free disk space is unknown because the host does not report it. The restore went on without checking it and stops if the disk is full.' );
 			$log->write( 'warning', 'The free disk space for the restore is unknown; the restore relies on its checked writes.' );
 		}
-		$progress      = $run->progress();
+		$progress    ??= $run->progress();
 		$job->progress = [
 			'phase'       => $progress['phase'],
 			'files'       => $progress['files'],
@@ -474,6 +506,35 @@ final class RestoreSteps implements StepProvider {
 			'percent'     => self::percent( $progress ),
 		];
 		return $progress['phase'];
+	}
+
+	/**
+	 * The progress of a run whose checkpoint says that every file is staged, read from that
+	 * checkpoint, while the working and the staging directory are still the ones the run
+	 * bound. The run counted every file and byte of the plan before it wrote the checkpoint.
+	 *
+	 * @param Job $job Job.
+	 * @return array{phase: string, files: int, bytes: int, total_files: int, total_bytes: int, skipped: int}|null Progress, or null if the run is not complete.
+	 */
+	private function completed( Job $job ): ?array {
+		try {
+			$state = StagingFiles::read( $this->services->work_dir( $job ) );
+			if ( 'complete' !== $state->phase ) {
+				return null;
+			}
+			StagingFiles::verify( $state->work );
+			StagingFiles::verify( $state->target );
+		} catch ( \Throwable ) {
+			return null;
+		}
+		return [
+			'phase'       => $state->phase,
+			'files'       => $state->files,
+			'bytes'       => $state->bytes,
+			'total_files' => $state->planned_files,
+			'total_bytes' => $state->planned_bytes,
+			'skipped'     => $state->skipped,
+		];
 	}
 
 	/**

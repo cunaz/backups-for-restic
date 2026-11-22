@@ -318,7 +318,9 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   the staged files, writes the job's result (`snapshot`, `files`, `bytes`, `skipped` for
   entries such as links that are recorded but not created, `staging` and `report` as names
   relative to the private directory) and the `last_restore` entry of the state.
-  `releasing` aborts the run, which releases its repository lock, on every path.
+  `releasing` aborts the run, which releases its repository lock, on every path; a run whose
+  checkpoint already says that every file is staged stays complete when the release in the
+  call that staged the last file fails, and `releasing` tries again.
   `cleaning_up` removes the run's working files, and after a failure or a cancellation the
   staging directory too: only a restore that succeeded leaves files behind. Once the last
   file is staged, `restoring` goes on with the database rehearsal and the archive where the
