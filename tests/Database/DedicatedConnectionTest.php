@@ -48,9 +48,10 @@ final class DedicatedConnectionTest extends TestCase {
 	}
 
 	public function test_a_connection_with_the_site_settings_reaches_the_same_database_with_the_dump_settings(): void {
-		$site      = $this->site( self::$database );
-		$lock      = '0x' . bin2hex( 'bfr_dump_' . bin2hex( ( new FixedRandom( 'lock' ) )->bytes( 8 ) ) );
-		$dedicated = WpdbConnection::dedicated( $this->wpdb( $site, self::$database ), new FixedRandom( 'lock' ), '+00:00' );
+		$site = $this->site( self::$database );
+		// The name of this run's database, so that runs against the same server do not share the lock.
+		$lock      = '0x' . bin2hex( 'bfr_dump_' . bin2hex( ( new FixedRandom( self::$database ) )->bytes( 8 ) ) );
+		$dedicated = WpdbConnection::dedicated( $this->wpdb( $site, self::$database ), new FixedRandom( self::$database ), '+00:00' );
 
 		self::assertInstanceOf( DedicatedConnection::class, $dedicated );
 		self::assertSame(
