@@ -96,6 +96,44 @@ final class SqlFormatter {
 	}
 
 	/**
+	 * Formats a value as value() does, in pieces of at most twice $slice bytes plus quotes,
+	 * so that a large value is never held twice as a whole: once as hex or escaped text and
+	 * once more with its prefix or quotes.
+	 *
+	 * @param string|null $value Value as the server sent it.
+	 * @param string      $kind  Column kind.
+	 * @param int         $slice Bytes of the value per piece.
+	 * @return \Generator<int, string> Pieces of the SQL literal.
+	 */
+	public static function pieces( ?string $value, string $kind, int $slice = 1048576 ): \Generator {
+		$length = null === $value ? 0 : strlen( $value );
+		if ( null === $value || $length <= $slice || self::BIT === $kind || ( ( self::NUMERIC === $kind || self::FLOAT === $kind ) && 1 === preg_match( '/\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/', $value ) ) ) {
+			yield self::value( $value, $kind );
+			return;
+		}
+		$hex = self::BINARY === $kind || ! mb_check_encoding( $value, 'UTF-8' );
+		yield $hex ? '0x' : "'";
+		for ( $offset = 0; $offset < $length; $offset += $slice ) {
+			$part = substr( $value, $offset, $slice );
+			// Each escape replaces a single byte, so a slice can end anywhere.
+			yield $hex ? bin2hex( $part ) : strtr(
+				$part,
+				[
+					'\\'   => '\\\\',
+					"'"    => "\\'",
+					"\0"   => '\\0',
+					"\n"   => '\\n',
+					"\r"   => '\\r',
+					"\x1a" => '\\Z',
+				]
+			);
+		}
+		if ( ! $hex ) {
+			yield "'";
+		}
+	}
+
+	/**
 	 * Puts a statement from SHOW CREATE on one line. Line breaks there are only whitespace
 	 * between clauses: the server escapes them inside string literals.
 	 *

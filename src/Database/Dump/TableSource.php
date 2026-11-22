@@ -736,8 +736,8 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
-	 * Writes one large row as a statement of its own, value by value, after checking that its
-	 * pieces and what the backup needs to read them fit into the memory limit.
+	 * Writes one large row as a statement of its own, in pieces of about 2 MiB, after checking
+	 * that its statement and what the backup needs to read it fit into the memory limit.
 	 *
 	 * @param array<string, string|null> $row   Row.
 	 * @param int                        $bound At most its bytes in the statement.
@@ -763,7 +763,9 @@ final class TableSource implements ResumableByteSource {
 				$size += $this->emit( ',' );
 			}
 			$first = false;
-			$size += $this->emit( SqlFormatter::value( $row[ $column ] ?? null, $kind ) );
+			foreach ( SqlFormatter::pieces( $row[ $column ] ?? null, $kind ) as $piece ) {
+				$size += $this->emit( $piece );
+			}
 		}
 		$size         += $this->emit( ");\n" );
 		$this->largest = max( $this->largest, $size - 1 );
