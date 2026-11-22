@@ -15,7 +15,7 @@ refuses() {
   local expected="$1" output
   shift
   if output="$("$@" 2>&1)"; then
-    printf 'Accepted, but a refusal was expected: %s\n' "$expected" >&2
+    printf 'Accepted, but a refusal was expected: %s\n%s\n' "$expected" "$output" >&2
     exit 1
   fi
   if [[ "$output" != *"$expected"* ]]; then
@@ -100,6 +100,8 @@ chmod 700 "$tmp/keys"
 export GNUPGHOME="$tmp/keys"
 newkey() { gpg --batch --pinentry-mode loopback --passphrase '' "$@" > /dev/null 2>&1; }
 fingerprint() { gpg --batch --with-colons --list-keys "$1" 2> /dev/null | awk -F: '$1=="fpr" {print $10; exit}'; }
+# The validity GnuPG gives a primary key: e for expired, r for revoked.
+validity() { gpg --batch --with-colons --list-keys "$1" 2> /dev/null | awk -F: '$1=="pub" {print $2; exit}'; }
 newkey --quick-generate-key 'Local release fixture <release@example.com>' ed25519 sign 2d
 release_key="$(fingerprint release@example.com)"
 export RELEASE_SIGNING_PUBLIC_KEY
@@ -175,10 +177,8 @@ refuses 'must hold exactly one primary key; it holds 2' env RELEASE_SIGNING_PUBL
 newkey --quick-generate-key 'Subkey fixture <subkey@example.com>' ed25519 cert 2d
 subkey_primary="$(fingerprint subkey@example.com)"
 newkey --quick-add-key "$subkey_primary" ed25519 sign 2d
-# An expired key: created and used in the past, verified now.
-printf '#!/bin/sh\nexec gpg --faked-system-time 20200101T120000 "$@"\n' > "$tmp/gpg-in-2020"
-chmod 700 "$tmp/gpg-in-2020"
-newkey --faked-system-time 20200101T000000 --quick-generate-key 'Expired fixture <expired@example.com>' ed25519 sign 1d
+# A key that expires after it signed. Its expiry is set once the tag exists.
+newkey --quick-generate-key 'Expired fixture <expired@example.com>' ed25519 sign 2d
 expired_key="$(fingerprint expired@example.com)"
 # A revoked key: GnuPG keeps a revocation certificate for every key it generates.
 newkey --quick-generate-key 'Revoked fixture <revoked@example.com>' ed25519 sign 2d
@@ -191,7 +191,14 @@ git tag -s -u "$subkey_primary" v1.3.0 -m 'Signed by a subkey'
 signer="$(git verify-tag --raw v1.3.0 2>&1 | awk '$2=="VALIDSIG" {print $3}')"
 test -n "$signer" && test "$signer" != "$subkey_primary"
 test "$(env RELEASE_SIGNING_PUBLIC_KEY="$(gpg --armor --export "$subkey_primary")" "$root/bin/verify-release-tag.sh" v1.3.0)" = "$(git rev-parse HEAD)"
-git -c gpg.program="$tmp/gpg-in-2020" tag -s -u "$expired_key" v1.3.1 -m 'Signed by a key that has expired since'
+git tag -s -u "$expired_key" v1.3.1 -m 'Signed by a key that has expired since'
+newkey --quick-set-expire "$expired_key" seconds=1
+sleep 2
+# The refusal below says something only if GnuPG itself counts the key as expired.
+if [[ "$(validity "$expired_key")" != e ]]; then
+  printf 'The fixture key did not expire:\n%s\n' "$(gpg --batch --with-colons --list-keys "$expired_key" 2>&1)" >&2
+  exit 1
+fi
 refuses 'The signature of v1.3.1 does not verify with the pinned release key (GnuPG status: ' env RELEASE_SIGNING_PUBLIC_KEY="$(gpg --armor --export "$expired_key")" "$root/bin/verify-release-tag.sh" v1.3.1
 reported EXPKEYSIG
 git tag -s -u "$revoked_key" v1.3.2 -m 'Signed by a key that was revoked since'
