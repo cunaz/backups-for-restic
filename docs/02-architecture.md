@@ -646,7 +646,10 @@ writer does not refuse a larger one: a row too large to share a statement is wri
 of its own, whatever its size, as long as PHP can hold it, and the manifest records each
 table's largest statement so that an importer can compare it with `max_allowed_packet`.
 Binary hex encoding can roughly double the source row size. A row whose statement would not
-fit into the PHP memory limit stops the dump with `database_dump_row_memory`. Generated-only
+fit into the PHP memory limit stops the dump with `database_dump_row_memory`. Tables with
+values of any size fetch only as many rows per page as fit into the memory left, after the
+server has reported their sizes, so a row that fits on its own is backed up and one that
+does not stops the dump before it is fetched. Generated-only
 tables use empty INSERT tuples to preserve their row counts without assigning generated
 values. These files remain importable by a normal MySQL/MariaDB client.
 

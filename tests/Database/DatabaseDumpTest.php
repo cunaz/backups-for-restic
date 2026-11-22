@@ -546,6 +546,57 @@ final class DatabaseDumpTest extends TestCase {
 	}
 
 	#[DataProvider( 'connections' )]
+	public function test_a_table_of_large_rows_is_read_a_page_that_fits_at_a_time_and_imports_unchanged( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS wide_rows' );
+		$db->execute( 'CREATE TABLE wide_rows (id INT NOT NULL PRIMARY KEY, body LONGBLOB, note TEXT) ENGINE=InnoDB' );
+		for ( $id = 1; $id <= 12; ++$id ) {
+			$db->execute( sprintf( "INSERT INTO wide_rows VALUES (%d, REPEAT(0x%02X, 3145728), 'row %d')", $id, $id, $id ) );
+		}
+		$db->execute( "INSERT INTO wide_rows VALUES (13, NULL, NULL), (14, '', '')" );
+
+		// 72 MiB of SQL: written to files as it is read, not kept.
+		$sql = [];
+		foreach ( ( new DatabaseDump( $db, $this->directory . '/wide.json', 'wide_', [], 1767323100, $dedicated ? self::dedicated() : null ) )->files() as $file ) {
+			$this->read_to_file( $file->source, $this->directory . '/' . $file->name );
+			if ( str_ends_with( $file->name, '.sql' ) ) {
+				$sql[] = $this->directory . '/' . $file->name;
+			}
+		}
+		MysqliConnection::import( self::$target, $sql );
+		$manifest = json_decode( (string) file_get_contents( $this->directory . '/manifest.json' ), true );
+		self::assertIsArray( $manifest );
+
+		$query = 'SELECT id, SHA2(body, 256) AS body, note FROM wide_rows ORDER BY id';
+		self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ) );
+		$tables = array_column( $manifest['tables'], null, 'name' );
+		self::assertSame( 14, $tables['wide_rows']['rows'] ?? null );
+	}
+
+	public function test_on_its_own_connection_a_row_too_large_for_the_memory_limit_is_refused_before_it_is_read(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS big_keyless' );
+		$db->execute( 'CREATE TABLE big_keyless (body LONGBLOB) ENGINE=InnoDB' );
+		$db->execute( "INSERT INTO big_keyless VALUES ('small'), (REPEAT(0x5A, 6291456))" );
+		$files = ( new DatabaseDump( $db, $this->directory . '/big.json', 'big_', [], 1767323100, self::dedicated() ) )->files();
+		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-big_keyless.sql' === $file->name ) )[0];
+		$limit = (string) ini_get( 'memory_limit' );
+		$seen  = (int) ( mysqli_get_client_stats()['bytes_received'] ?? 0 );
+		// The row of 6 MiB with its 12 MiB of SQL and the reserve for reading it do not fit.
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 24 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test lowers the limit for one read and restores it.
+		try {
+			$this->read( $table->source, PHP_INT_MAX );
+			self::fail( 'The row does not fit.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_row_memory', JobError::from_throwable( $error )->code );
+			self::assertSame( 'big_keyless', $error->context()['table'] ?? null );
+		} finally {
+			ini_set( 'memory_limit', $limit ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+		}
+		self::assertLessThan( 1048576, (int) ( mysqli_get_client_stats()['bytes_received'] ?? 0 ) - $seen, 'The stream did not fetch the row.' );
+	}
+
+	#[DataProvider( 'connections' )]
 	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone( bool $dedicated ): void {
 		$db   = self::database( self::$source );
 		$zone = self::daylight_saving_zone( $db );
@@ -836,6 +887,34 @@ final class DatabaseDumpTest extends TestCase {
 			array_push( $this->warnings, ...$source->warnings() );
 		}
 		return $content;
+	}
+
+	/**
+	 * Reads a virtual file as read() does with a stop after every read, into a file instead of
+	 * a string, for files too large to hold in the memory limit of the test run.
+	 *
+	 * @param \Closure(?string): \BackupsForRestic\Support\ByteSource $open Source factory.
+	 */
+	private function read_to_file( \Closure $open, string $path ): void {
+		$handle = fopen( $path, 'wb' );
+		self::assertIsResource( $handle );
+		$cursor = null;
+		do {
+			$source = $open( $cursor );
+			if ( null !== $cursor && $source instanceof ResumableByteSource && $source->restarted() ) {
+				ftruncate( $handle, 0 );
+				rewind( $handle );
+			}
+			$reads = 0;
+			for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
+				fwrite( $handle, $block );
+				if ( 1 === ++$reads && $source instanceof ResumableByteSource ) {
+					$source->stop_at_boundary();
+				}
+			}
+			$cursor = $source instanceof ResumableByteSource ? $source->cursor() : null;
+		} while ( null !== $cursor );
+		fclose( $handle );
 	}
 
 	/**

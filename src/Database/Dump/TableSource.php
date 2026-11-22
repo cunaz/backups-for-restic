@@ -632,6 +632,13 @@ final class TableSource implements ResumableByteSource {
 	private function stream(): void {
 		if ( ! $this->streaming && $this->connection instanceof DedicatedConnection ) {
 			$table = SqlFormatter::identifier( $this->table->name );
+			if ( $this->table->wide ) {
+				// The stream fetches each row whole; the widest must fit before it starts.
+				$widest = (int) ( $this->connection->rows( 'SELECT MAX(' . $this->size() . ') AS widest FROM ' . $table )[0]['widest'] ?? 0 );
+				if ( $widest + $this->estimate( $widest ) > self::room() ) {
+					$this->refuse( $this->estimate( $widest ) );
+				}
+			}
 			// An explicit limit, so that no sql_select_limit of the session applies.
 			$this->connection->stream( 'SELECT ' . $this->selection() . ' FROM ' . $table . ' LIMIT 18446744073709551615' . ( $this->offset > 0 ? ' OFFSET ' . $this->offset : '' ) );
 			$this->streaming = true;
@@ -745,16 +752,8 @@ final class TableSource implements ResumableByteSource {
 	 * @throws DatabaseFailed If the statement would not fit into the memory limit.
 	 */
 	private function large( array $row, int $bound ): int {
-		$limit = ini_parse_quantity( ini_get( 'memory_limit' ) );
-		if ( $limit > 0 && memory_get_usage( true ) + $bound + self::ENCODING_RESERVE > $limit ) {
-			DatabaseFailed::raise(
-				'A database row is too large to be backed up within the PHP memory limit.',
-				[
-					'table' => $this->table->name,
-					'bytes' => $bound,
-					'code'  => 'database_dump_row_memory',
-				]
-			);
+		if ( $bound > self::room() ) {
+			$this->refuse( $bound );
 		}
 		$size  = $this->emit( $this->prefix . '(' );
 		$first = true;
@@ -790,17 +789,21 @@ final class TableSource implements ResumableByteSource {
 	 * @throws DatabaseFailed If the query fails or a key value is not what its column holds.
 	 */
 	private function page(): void {
-		$table     = SqlFormatter::identifier( $this->table->name );
-		$selection = $this->selection();
+		$table = SqlFormatter::identifier( $this->table->name );
 		if ( [] !== $this->table->order ) {
 			$where = null === $this->after ? '' : ' WHERE ' . KeyColumn::after( $this->table->order, $this->after );
 			// Qualified, so that ORDER BY names the column even where the selection has an alias of the same name.
-			$order = implode( ', ', array_map( static fn ( KeyColumn $column ): string => $table . '.' . SqlFormatter::identifier( $column->name ), $this->table->order ) );
-			$sql   = 'SELECT ' . $selection . ' FROM ' . $table . $where . ' ORDER BY ' . $order . ' LIMIT ' . $this->page;
+			$order  = implode( ', ', array_map( static fn ( KeyColumn $column ): string => $table . '.' . SqlFormatter::identifier( $column->name ), $this->table->order ) );
+			$range  = ' FROM ' . $table . $where . ' ORDER BY ' . $order . ' LIMIT ';
+			$offset = '';
 		} else {
-			$sql = 'SELECT ' . $selection . ' FROM ' . $table . ' LIMIT ' . $this->page . ' OFFSET ' . $this->offset;
+			$range  = ' FROM ' . $table . ' LIMIT ';
+			$offset = ' OFFSET ' . $this->offset;
 		}
-		$rows = $this->connection->rows( $sql );
+		// Values of any size: the server first says how large the next rows are, so that the
+		// page fetches no more of them than PHP can hold.
+		[ $limit, $more ] = $this->table->wide ? $this->fitting( $range, $offset ) : [ $this->page, true ];
+		$rows             = 0 === $limit ? [] : $this->connection->rows( 'SELECT ' . $this->selection() . $range . $limit . $offset );
 		// Also a read that finds nothing more is a moment of its own outside a snapshot.
 		$this->viewed();
 		if ( [] === $rows ) {
@@ -825,7 +828,7 @@ final class TableSource implements ResumableByteSource {
 		$count         = count( $rows );
 		$this->rows   += $count;
 		$this->offset += $count;
-		if ( $count < $this->page ) {
+		if ( $count < $limit || ! $more ) {
 			$this->exhausted = true;
 		}
 		if ( $size > 2 * self::TARGET_PAGE_BYTES ) {
@@ -835,6 +838,90 @@ final class TableSource implements ResumableByteSource {
 		}
 		// A page is held in memory whole: no more of the widest rows seen than fit twice the target.
 		$this->page = max( 1, min( $this->page, intdiv( 2 * self::TARGET_PAGE_BYTES, max( 1, $widest ) ) ) );
+	}
+
+	/**
+	 * How many of the next rows of a table with values of any size one page fetches: as many
+	 * as fit, with their SQL, into the memory left, and about TARGET_PAGE_BYTES of SQL, at
+	 * least one. The server reports their sizes first.
+	 *
+	 * @param string $range  FROM, WHERE, ORDER BY and LIMIT keyword of the page.
+	 * @param string $offset OFFSET clause, or empty.
+	 * @return array{int, bool} Rows to fetch, 0 if none are left, and whether more may follow them.
+	 * @throws DatabaseFailed If the next row does not fit into the memory limit on its own.
+	 */
+	private function fitting( string $range, string $offset ): array {
+		$sizes = $this->connection->rows( 'SELECT ' . $this->size() . ' AS size' . $range . $this->page . $offset );
+		$room  = self::room();
+		$count = 0;
+		$need  = 0;
+		$sql   = 0;
+		foreach ( $sizes as $row ) {
+			$bytes = (int) ( $row['size'] ?? 0 );
+			$bound = $this->estimate( $bytes );
+			if ( 0 === $count && $bytes + $bound > $room ) {
+				$this->refuse( $bound );
+			}
+			if ( $count > 0 && ( $sql + $bound > self::TARGET_PAGE_BYTES || $need + $bytes + $bound > $room ) ) {
+				break;
+			}
+			$need += $bytes + $bound;
+			$sql  += $bound;
+			++$count;
+		}
+		return [ $count, $count < count( $sizes ) || count( $sizes ) === $this->page ];
+	}
+
+	/**
+	 * The bytes that the server sends for the selected values of a row.
+	 *
+	 * @return string SQL expression.
+	 */
+	private function size(): string {
+		$sizes = [];
+		foreach ( array_keys( $this->table->columns ) as $name ) {
+			$sizes[] = 'IFNULL(OCTET_LENGTH(' . SqlFormatter::identifier( (string) $name ) . '), 0)';
+		}
+		return [] === $sizes ? '0' : implode( ' + ', $sizes );
+	}
+
+	/**
+	 * At most how many bytes a row of the given size takes in an INSERT statement, as bound()
+	 * counts them.
+	 *
+	 * @param int $bytes Bytes of its values.
+	 * @return int Bytes.
+	 */
+	private function estimate( int $bytes ): int {
+		return strlen( $this->prefix ) + 4 + 5 * count( $this->table->columns ) + 2 * $bytes;
+	}
+
+	/**
+	 * The memory that a page's rows and their SQL may take: what the memory limit leaves,
+	 * less what the backup needs to read the SQL in chunks.
+	 *
+	 * @return int Bytes; PHP_INT_MAX without a limit.
+	 */
+	private static function room(): int {
+		$limit = ini_parse_quantity( ini_get( 'memory_limit' ) );
+		return $limit > 0 ? $limit - memory_get_usage( true ) - self::ENCODING_RESERVE : PHP_INT_MAX;
+	}
+
+	/**
+	 * Stops the dump for a row that PHP cannot hold with its SQL.
+	 *
+	 * @param int $bound At most the bytes of its statement.
+	 * @throws DatabaseFailed Always.
+	 */
+	private function refuse( int $bound ): never {
+		DatabaseFailed::raise(
+			'A database row is too large to be backed up within the PHP memory limit.',
+			[
+				'table' => $this->table->name,
+				'bytes' => $bound,
+				'code'  => 'database_dump_row_memory',
+			]
+		);
 	}
 
 	/**

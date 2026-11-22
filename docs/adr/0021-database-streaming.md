@@ -102,7 +102,15 @@ and makes an interrupted dump start from zero.
   The manifest records each table's largest statement (`"largest_statement"`, with the
   semicolon and without LF) for an importer to compare with `max_allowed_packet`. A row
   whose statement would not fit into the PHP memory limit stops the dump with
-  `database_dump_row_memory`, which names the table.
+  `database_dump_row_memory`, which names the table. A large value is written in pieces of
+  about 2 MiB, so that it is never held twice. A page is held in memory whole, so the pages
+  of a table with TEXT, BLOB, JSON or spatial columns first ask the server for the sizes of
+  their next rows and fetch only as many as fit, with their SQL, into what the memory limit
+  leaves, at least one. A row that cannot fit on its own stops the dump before it is
+  fetched; on the dump's own connection, a table without a key is checked for its largest
+  row before its one statement starts. Through `$wpdb`, a row can still grow between the
+  read of its size and its own read: the check before it is written then stops the dump,
+  unless the row has grown beyond what PHP can hold at all.
 - Restore: database files are restored to staging and executed through `$wpdb` in budgeted
   batches with maintenance mode and plugin state preserved (Milestone 3). The manual path is
   `cat *.sql | mariadb`, verified in the database test suite.

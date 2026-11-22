@@ -416,9 +416,11 @@ All notable changes are documented here. The format follows
   ENUM value or a column name are no longer damaged in the backup.
 - FLOAT columns are backed up with every digit they hold.
 - A row larger than 16 MiB as SQL no longer fails every backup: it is written as a statement
-  of its own, and the database manifest records each table's largest statement. A row too
-  large for the PHP memory limit stops the backup with its own message, and the log of the
-  job names the table of a failed database dump.
+  of its own, and the database manifest records each table's largest statement. A table of
+  large rows is read only as many rows at a time as fit into the PHP memory limit, so that
+  every row that fits on its own is backed up; before, a page of such rows could end the
+  request. A row too large for the PHP memory limit stops the backup with its own message,
+  before it is read, and the log of the job names the table of a failed database dump.
 - A table that another connection keeps locked, for example with `LOCK TABLES` or during
   a long `ALTER TABLE`, no longer holds a backup step for as long as the server lets a
   query wait for a lock, a year on MySQL and a day on MariaDB by default. The backup waits

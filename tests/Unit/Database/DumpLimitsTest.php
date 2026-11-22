@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Unit\Database;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\Connection;
+use BackupsForRestic\Database\Dump\KeyColumn;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Dump\Table;
 use BackupsForRestic\Database\Dump\TableSource;
@@ -23,14 +24,9 @@ final class DumpLimitsTest extends TestCase {
 	#[RunInSeparateProcess]
 	public function test_a_row_above_the_import_statement_limit_is_written_as_a_statement_of_its_own(): void {
 		$db      = new class() implements Connection {
-			public int $queries = 0;
-
 			public function rows( string $sql ): array {
 				// A small row, a row of 16 MiB and another small row, then the end of the table.
-				if ( 1 !== ++$this->queries ) {
-					return [];
-				}
-				return [
+				$rows = [
 					[
 						'id'   => '1',
 						'body' => 'before',
@@ -44,6 +40,12 @@ final class DumpLimitsTest extends TestCase {
 						'body' => "after'",
 					],
 				];
+				preg_match( '/LIMIT (\d+) OFFSET (\d+)\z/', $sql, $match );
+				$page = array_slice( $rows, (int) ( $match[2] ?? 0 ), (int) ( $match[1] ?? 0 ) );
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					return array_map( static fn ( array $row ): array => [ 'size' => (string) ( strlen( $row['id'] ) + strlen( $row['body'] ) ) ], $page );
+				}
+				return $page;
 			}
 		};
 		$table   = new Table(
@@ -160,6 +162,10 @@ final class DumpLimitsTest extends TestCase {
 		ini_set( 'memory_limit', '96M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This separate process checks the refusal under a limit like the plugin's minimum.
 		$db       = new class() implements Connection {
 			public function rows( string $sql ): array {
+				// On the site's connection a row can grow between the read of its size and its own.
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					return [ [ 'size' => '1' ] ];
+				}
 				return [ [ 'body' => str_repeat( "\0", 40 * 1048576 ) ] ];
 			}
 		};
@@ -184,5 +190,85 @@ final class DumpLimitsTest extends TestCase {
 			self::assertSame( 'wp_rows', $error->context()['table'] );
 			self::assertFalse( $complete );
 		}
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_page_of_large_rows_fetches_no_more_of_them_than_fit_into_memory(): void {
+		// Twenty rows of 3 MiB: fifty to a page would be 60 MiB of rows and 120 MiB of SQL.
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 64 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This separate process measures what one page fetches.
+		$db     = new class() implements Connection {
+			/** @var list<string> */
+			public array $fetches = [];
+
+			public function rows( string $sql ): array {
+				$after = 1 === preg_match( '/WHERE \(`id` > (\d+)\)/', $sql, $match ) ? (int) $match[1] : 0;
+				$limit = 1 === preg_match( '/LIMIT (\d+)\z/', $sql, $match ) ? (int) $match[1] : 0;
+				$ids   = $after >= 20 || 0 === $limit ? [] : range( $after + 1, min( 20, $after + $limit ) );
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					return array_map( static fn ( int $id ): array => [ 'size' => (string) ( strlen( (string) $id ) + 3 * 1048576 ) ], $ids );
+				}
+				$this->fetches[] = $sql;
+				return array_map(
+					static fn ( int $id ): array => [
+						'id'   => (string) $id,
+						'body' => str_repeat( chr( 64 + $id ), 3 * 1048576 ),
+					],
+					$ids
+				);
+			}
+		};
+		$table  = new Table(
+			'wp_blobs',
+			'CREATE TABLE `wp_blobs` (`id` int NOT NULL, `body` longblob, PRIMARY KEY (`id`)) ENGINE=InnoDB',
+			[
+				'id'   => SqlFormatter::NUMERIC,
+				'body' => SqlFormatter::BINARY,
+			],
+			'PRIMARY',
+			[ new KeyColumn( 'id', KeyColumn::INTEGER ) ],
+			'InnoDB',
+			'',
+			true
+		);
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		$lines  = 0;
+		$tail   = '';
+		for ( $block = $source->read( 65536 ); '' !== $block; $block = $source->read( 65536 ) ) {
+			$lines += substr_count( $block, "\n" );
+			$tail   = substr( $tail . $block, -200 );
+		}
+
+		self::assertSame( 3 + 20 + 1, $lines, 'The header, one statement per row and the trailer.' );
+		self::assertMatchesRegularExpression( '/\n-- end table rows=20 bytes=\d+\n\z/', $tail );
+		self::assertCount( 20, $db->fetches );
+		foreach ( $db->fetches as $sql ) {
+			self::assertStringEndsWith( ' LIMIT 1', $sql, 'A row of 6 MiB of SQL is a page of its own.' );
+		}
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_row_that_cannot_fit_into_memory_on_its_own_is_refused_before_it_is_fetched(): void {
+		ini_set( 'memory_limit', '256M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This separate process checks the refusal under a known limit.
+		$db    = new class() implements Connection {
+			/** @var list<string> */
+			public array $fetches = [];
+
+			public function rows( string $sql ): array {
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					return [ [ 'size' => (string) ( 300 * 1048576 ) ] ];
+				}
+				$this->fetches[] = $sql;
+				return [];
+			}
+		};
+		$table = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`body` longblob) ENGINE=InnoDB', [ 'body' => SqlFormatter::BINARY ], null, [], 'InnoDB', '', true );
+		try {
+			( new TableSource( $db, $table, '', null, static function (): void {} ) )->read( 65536 );
+			self::fail( 'A row of 300 MiB does not fit into 256 MiB.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_row_memory', JobError::from_throwable( $error )->code );
+			self::assertSame( 'wp_rows', $error->context()['table'] );
+		}
+		self::assertSame( [], $db->fetches, 'The row was never fetched, so PHP did not run out of memory.' );
 	}
 }
