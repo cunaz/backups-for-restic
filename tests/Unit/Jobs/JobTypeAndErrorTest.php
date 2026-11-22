@@ -89,6 +89,7 @@ final class JobTypeAndErrorTest extends TestCase {
 		yield 'damage' => [ new FormatException( 'damaged', [ 'code' => 'repository_damaged' ] ), 'repository_damaged' ];
 		yield 'online file review capacity' => [ new InvalidArgument( 'too large', [ 'code' => 'file_plan_too_large' ] ), 'file_plan_too_large' ];
 		yield 'no snapshots' => [ new InvalidArgument( 'empty', [ 'code' => 'no_snapshots' ] ), 'no_snapshots' ];
+		yield 'a protected location without a plain path' => [ new InvalidArgument( 'invalid', [ 'code' => 'protected_path_invalid' ] ), 'protected_path_invalid' ];
 		yield 'other context codes do not override' => [ new InvalidArgument( 'bad', [ 'code' => 'something_else' ] ), 'configuration' ];
 	}
 
