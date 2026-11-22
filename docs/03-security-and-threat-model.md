@@ -280,6 +280,16 @@ carries `Cache-Control: no-store`.
 - Requests from the site to itself (the exposure probe, the loopback check and loopback
   chaining) follow core's `https_local_ssl_verify` filter, as core's own loopback requests
   do. They carry no secrets and never reach the repository server.
+- The database dump opens a connection of its own to the site's database server, with the
+  host, user, password, database and client flags that `$wpdb` connected with
+  (`WordPress\WpdbConnection::dedicated()`, [ADR 0021](adr/0021-database-streaming.md)).
+  The plugin does not store the database password, and an error of that connection carries
+  the server's error number, never its text. The connection is used only after it is shown
+  to reach the same server and database as the site's, and it is refused when the site's
+  connection is encrypted and it is not; the dump then reads through `$wpdb`. Where the
+  site's encryption is set up by a database drop-in rather than by `MYSQL_CLIENT_FLAGS`,
+  the check sees only that the site's connection is encrypted, not how its certificate is
+  verified.
 
 ## 8. Filesystem
 

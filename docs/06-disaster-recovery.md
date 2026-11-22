@@ -153,6 +153,25 @@ completed changes and checks their identities during recovery.
    `-- end table rows=… bytes=…`; a file without it was truncated and that snapshot should
    not be used for the database.
 
+   TIMESTAMP values are in UTC; every file sets the session time zone it needs. A row can
+   make a statement larger than the client's default `max_allowed_packet` of 16 MiB:
+   `manifest.json` lists each table's `largest_statement` in bytes. Then pass a larger value
+   to the client, for example `--max-allowed-packet=1G`, and set the server's
+   `max_allowed_packet` at least as high.
+
+   If the import stops with `ERROR 1062 … Duplicate entry` in a table that `manifest.json`
+   marks with `"snapshot": false`, the backup read that table in several requests, and a
+   row that was deleted and inserted again with a new key in between is in the dump twice.
+   Import that file with `REPLACE` instead of `INSERT`, which keeps the later copy:
+
+   ```bash
+   sed 's/^INSERT INTO /REPLACE INTO /' 010-<table>.sql | mariadb -u <user> -p <database>
+   ```
+
+   A table marked `"key": []` has neither a primary key nor a unique key over NOT NULL
+   columns. If it is also marked `"snapshot": false`, rows that changed while it was read
+   can be missing or repeated; the backup's job named it in a warning.
+
 6. **Adjust `wp-config.php`** for the new database credentials. If the domain changed, run
    `wp search-replace` afterwards.
 7. **Check the plugin**: the restored files contain the plugin, and the imported database
@@ -249,7 +268,8 @@ cat -- 000-header.sql 010-*.sql 900-views.sql |
     mariadb --user=recovery_user --password recovery_database
 ```
 
-Use the `mysql` client for MySQL. Check the imported table counts against the rehearsal
+Use the `mysql` client for MySQL. The notes in step 5 of Scenario B on large statements
+and duplicate keys apply here as well. Check the imported table counts against the rehearsal
 or dump manifest, and start a private WordPress copy against the recovered database with
 the snapshot's table prefix. Confirm its home URL, administrator login and content
 before switching production. A manual SQL import restores the source accounts and

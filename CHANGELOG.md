@@ -371,3 +371,28 @@ All notable changes are documented here. The format follows
 - Cancelling a forget releases its lock even when the retention settings became unusable.
 - A `keep-within` value that is not a non-zero duration, and notification recipients that are
   not e-mail addresses, are rejected when the settings are saved instead of failing later.
+- The database backup reads every table along its whole primary key, or a unique key over
+  NOT NULL columns. Before, a table without a single-column integer key, such as
+  `wp_term_relationships`, was read by position: a row added or removed while the backup
+  ran made it skip a row that existed all along, or write one twice, which stopped the
+  import with a duplicate key.
+- The database backup reads each table's part of a backup step from one consistent
+  snapshot, on a database connection of its own that it opens with the site's settings and
+  checks before it uses it. A transient that is renewed while a table is read is no longer
+  in the backup twice. Where no such connection can be opened, the backup reads through the
+  site's connection as before. A table without a key is read with one statement, or marked
+  in the database manifest and named in a warning of the job when it could not be.
+- A table whose structure changes while it is backed up, for example by a plugin update, is
+  backed up again from its beginning instead of producing a file that cannot be imported.
+  A table that keeps changing stops the backup with its own message.
+- TIMESTAMP values keep their instant: the database is read and written in UTC. Before,
+  values from the other half of the year moved by the daylight saving hour on import.
+- Text is read in utf8mb4 whatever `DB_CHARSET` is, so a site with a latin1 connection
+  gets its stored bytes back and no longer loses characters outside latin1 as `?`.
+- Table definitions with characters such as "х", "内" or "Å" in a comment, a default, an
+  ENUM value or a column name are no longer damaged in the backup.
+- FLOAT columns are backed up with every digit they hold.
+- A row larger than 16 MiB as SQL no longer fails every backup: it is written as a statement
+  of its own, and the database manifest records each table's largest statement. A row too
+  large for the PHP memory limit stops the backup with its own message, and the log of the
+  job names the table of a failed database dump.

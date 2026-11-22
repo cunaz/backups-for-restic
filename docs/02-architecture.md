@@ -172,7 +172,7 @@ src/
 │   ├── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
 │   └── Restore/                   RestoreSteps (preflight, planning, restoring, recording, releasing, cleaning_up), RestoreServices, RestoreRequest (ADR 0037)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
-├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
+├── Database/Dump/                 Connection port, SharedConnection and DedicatedConnection (the dump's session settings and snapshots), Catalog, Table, KeyColumn, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
 ├── Restore/                       SnapshotBrowser (snapshot lists with the retention preview, details and directory pages as response data, §13.2); Staging (list, expiry and removal, ADR 0040), StagedRestore; (M3) Selection, Apply, database Importer
@@ -596,9 +596,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
    and `.nobackup` markers). A file whose size, mtime, ctime and inode match the parent
    reuses its blobs; others are chunked, deduplicated, encrypted and packed. Inside the
    private directory only `spool/` is walked: `spool/manifest.json` and the database files
-   of §7 are virtual. Directories become tree blobs bottom-up, then the snapshot is written
-   with `summary` and tags `backups-for-restic`, `site:<hash>` and `run:<job>`. The lock is
-   refreshed every five minutes and released at the end.
+   of §7 are virtual. A virtual file whose source cannot continue after its cursor, such as
+   a table whose definition changed, starts over, and the chunks of its earlier parts are
+   dropped; a complete source hands its warnings to the run. Directories become tree blobs
+   bottom-up, then the snapshot is written with `summary` and tags `backups-for-restic`,
+   `site:<hash>` and `run:<job>`. The lock is refreshed every five minutes and released at
+   the end.
 4. **Recording**: last result in `backups_for_restic_state` for the dashboard and Site Health.
 5. **Releasing** and **cleaning up** run on every path to the end: an unfinished run releases
    its lock, the scrypt files and the checkpoint are deleted, old jobs are pruned to
@@ -622,7 +625,7 @@ snapshot the database appears as a directory:
 <private>/spool/database/010-wp_posts.sql
 …
 <private>/spool/database/900-views.sql           CREATE OR REPLACE VIEW …
-<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows and bytes, views
+<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows, bytes and how they were read, views
 <private>/spool/manifest.json                    site manifest (format id, home URL, paths, roots, excludes, prefix, plugin, WordPress and PHP versions, repository format)
 ```
 
@@ -631,25 +634,44 @@ running SHA-256 cannot be carried across ticks ([ADR 0021](adr/0021-database-str
 
 Format `backups-for-restic-dump/1`: one SQL statement per line, escaped values, hex-encoded
 binary, ≈ 1 MiB `INSERT` batches, and a trailer line `-- end table rows=<n> bytes=<n>` per
-file ([ADR 0021](adr/0021-database-streaming.md)). The importer reads bounded lines and
+file ([ADR 0021](adr/0021-database-streaming.md)). Rows and definitions are read in
+utf8mb4 and with the session time zone `+00:00`, whatever `DB_CHARSET` and the site's
+session use; the files and the manifest say so. The importer reads bounded lines and
 validates a constrained CREATE/INSERT grammar; it never executes an arbitrary SQL script
 ([ADR 0035](adr/0035-transactional-shadow-import.md)).
 
-The writer and reader share a hard 16 MiB SQL statement limit, including the semicolon
-and excluding LF. An encoded row that cannot fit causes a database error before the dump
-is completed. Binary hex encoding can roughly double the source row size. Generated-only
+The importer reads statements up to 16 MiB, including the semicolon and excluding LF. The
+writer does not refuse a larger one: a row too large to share a statement is written as one
+of its own, whatever its size, as long as PHP can hold it, and the manifest records each
+table's largest statement so that an importer can compare it with `max_allowed_packet`.
+Binary hex encoding can roughly double the source row size. A row whose statement would not
+fit into the PHP memory limit stops the dump with `database_dump_row_memory`. Generated-only
 tables use empty INSERT tuples to preserve their row counts without assigning generated
 values. These files remain importable by a normal MySQL/MariaDB client.
 
 Streaming and resumability: a table is produced page by page and fed to the chunker like a
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
 yesterday's dump. When a tick's time is up, the table stops after the current page and the
-next tick continues after it, so tables of any size finish. Pages follow an integer primary
-key, otherwise an offset in primary-key order. Consistency is per page, as with a
-non-transactional `mysqldump`: every row comes from exactly one read, but the pages of a
-table and the tables themselves are read at different moments. That holds in every mode,
-WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
-remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
+next tick continues after it, so tables of any size finish. Pages follow the primary key, or
+a unique key over NOT NULL columns, in full, with a row-value comparison that orders exactly
+as `ORDER BY` for every column type: a row that exists for the whole dump of its table
+appears exactly once, whatever is inserted or deleted meanwhile.
+
+Consistency is one snapshot per table and tick. The dump reads through a connection of its
+own, opened with `$wpdb`'s settings and used only once it is verified to reach the same
+server and database, encrypted if the site's connection is. Each table's part of a tick is
+one read-only transaction there, which also holds the table's definition. The plugin never
+opens a transaction on the site's connection. Without a verified connection of its own the
+dump reads through `$wpdb`, with the same session settings around every query, and each
+page is then its own read. A table without a usable key is read with one statement on the
+dump's own connection; read in several parts, its rows can be missing or repeated, and the
+manifest and a job warning say so. Across ticks, the pages of one table and the tables
+themselves are read at different moments: a row deleted and inserted again with a new key
+between two ticks can appear twice, and an import then stops with a duplicate key. The
+manifest records for each table which key ordered its pages, whether all rows come from one
+read view, how often it started over and its largest statement. A table whose definition
+changes during its dump starts over, at most three times, then the backup stops with
+`database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)).
 
 Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
 rows, cursor and content transcript commit in one transaction. The report compares

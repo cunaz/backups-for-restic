@@ -212,7 +212,13 @@ The **database suite** dumps tables that exercise every code path (keyset and of
 paging, composite and missing keys, binary data, `BIT`, a latin1 column, NUL bytes, line
 breaks, quotes, emoji, a generated column, a view) with forced stops between pages, imports
 the files with the `mariadb` client exactly as the disaster-recovery guide says, and compares
-`CHECKSUM TABLE` results. The conformance suite's `BackupJobTest` runs the whole backup job
+`CHECKSUM TABLE` results. It also changes tables while they are dumped: rows deleted and
+inserted before the cursor for keys of every comparable type, a row deleted and inserted
+again within one tick, a table without a key, a column added between ticks and during one,
+and DDL that waits for the tick's metadata lock. It checks TIMESTAMP values across daylight
+saving time, a latin1 connection, definitions with Cyrillic, CJK and Nordic text and a row
+above 16 MiB, on the site's connection and on the dump's own, whose opening it checks
+against a stand-in for `wpdb`. The conformance suite's `BackupJobTest` runs the whole backup job
 without WordPress against a TLS rest-server and the database.
 
 The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
