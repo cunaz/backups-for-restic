@@ -594,15 +594,54 @@ final class FileChangeTest extends TestCase {
 		chmod( $this->path . '.copy', 0644 );
 		rename( $this->path . '.copy', $this->path );
 		self::assertSame( 'changed_since_apply', $reason() );
-		// A second link to the file is a change as well, and so is a directory in its place.
-		file_put_contents( $this->path, 'new' );
-		link( $this->path, $this->site . '/second-link' );
-		self::assertSame( 'changed_since_apply', $reason() );
-		unlink( $this->site . '/second-link' );
+		// A directory in its place is a change as well.
 		unlink( $this->path );
 		mkdir( $this->path );
 		self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $this->change->undo( $this->path, 'create', INF, 'remove' ) );
 		self::assertDirectoryExists( $this->path );
+	}
+
+	public function test_a_second_link_is_a_change_of_the_installed_file_and_of_any_other(): void {
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF, 0644 ) );
+		$second = $this->site . '/second-link';
+		$review = fn (): array => $this->change->undo_review( $this->path, 'create' );
+		$kept   = [
+			'action' => 'keep',
+			'reason' => 'changed_since_apply',
+		];
+		// The installed inode itself: the apply left it with one link. Its own state decides,
+		// not the site policy, which refuses every file with a second link as a type conflict.
+		link( $this->path, $second );
+		self::assertSame( $kept, $review() );
+		self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $this->change->undo( $this->path, 'create', INF, 'remove' ) );
+		self::assertSame( 'new', file_get_contents( $second ) );
+		unlink( $second );
+		self::assertSame( 'remove', $review()['action'] );
+		// Another inode with the installed bytes and attributes, made while the installed file
+		// still exists so that it cannot get the recorded number, and linked twice.
+		file_put_contents( $this->path . '.next', 'new' );
+		chmod( $this->path . '.next', 0644 );
+		link( $this->path . '.next', $second );
+		rename( $this->path . '.next', $this->path );
+		self::assertSame( $kept, $review() );
+		unlink( $second );
+		self::assertSame( 'installed_content', $review()['reason'] );
+	}
+
+	public function test_a_second_link_made_before_the_rename_keeps_the_file(): void {
+		file_put_contents( $this->path, 'old' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		$observer = function ( string $operation, string $subject ): void {
+			if ( 'journal' === $operation && 'restore' === $subject ) {
+				link( $this->path, $this->site . '/second-link' );
+			}
+		};
+		$change   = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, 'second-link', $observer );
+		self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $change->undo( $this->path, 'replace', INF, 'restore' ) );
+		self::assertSame( 'new', file_get_contents( $this->path ) );
+		self::assertSame( 'new', file_get_contents( $this->site . '/second-link' ) );
 	}
 
 	public function test_an_entry_recorded_without_its_installed_attributes_counts_only_its_own_inode(): void {

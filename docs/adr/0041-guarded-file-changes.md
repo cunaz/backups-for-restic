@@ -122,7 +122,10 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   rechecks for up to about one and a quarter seconds; on a case-insensitive file system the
   publication itself meets it, and a case-sensitive one keeps both names. On a network file
   system whose clients cache directory attributes, a change made on another host can leave
-  a folder's identity unchanged for as long as that cache holds it.
+  a folder's identity unchanged for as long as that cache holds it. A directory that someone
+  removes and creates again can get the recorded inode number on a file system that reuses
+  them; with the recorded permissions, owner and group, and while it is empty, the undo
+  removes it as the one that the apply created.
 - Measured with PHP 8.3.37 on tmpfs: 500 new files beside 20,000 others took 27.2 seconds of
   rechecks before and 0.44 seconds with seven folder listings after.
 - Every job document is written durably as well (`JobStore::save()`), and a new job directory
@@ -173,6 +176,14 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   verify: in the digest format of its review, a plain SHA-256 for an inline review, whose
   sources are at most 8 MiB, and the ordered 1 MiB block digest for a background review,
   which resumes across ticks.
+- The link count belongs to that state: the apply leaves one link, or two while the private
+  name of an interrupted create remains. A file with another count, the installed inode as
+  well as another one, is `changed_since_apply`, decided like the size before the site policy
+  is asked, which would refuse it as `type_conflict`. The answer therefore does not depend on
+  inode numbers. ext4 gives a file created after the installed one was freed the recorded
+  number, and a file written in the same second with the installed permissions, owner and
+  group then passes for the installed inode; it is reverted only with the installed link
+  count, size and content, as any other copy is, but its reason can be `undo_journal`.
 - The worker reads the identity of the live file, which covers its device, inode, owner,
   group, mode, size and both change times, before it verifies the content. It compares it
   after the verification and once more immediately before the rename or unlink, after the

@@ -444,19 +444,16 @@ final readonly class FileChange {
 		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
 			return 'parent_changed';
 		}
+		// The entry's own state before the site policy, as in decide().
+		if ( 'mkdir' === $action ? ! $this->installed( $path, $record ) : ( ! self::as_left( self::file( $path ), $record, $this->installed( $path, $record ), false ) || ! $this->holds( $path, $record['source'], 1 ) ) ) {
+			return 'changed_since_apply';
+		}
 		$policy = $this->live_policy( $path );
 		if ( ( 'mkdir' === $action ? 'keep' : 'replace' ) !== $policy['action'] ) {
 			return $policy['reason'];
 		}
 		if ( 'mkdir' === $action ) {
-			if ( ! $this->installed( $path, $record ) ) {
-				return 'changed_since_apply';
-			}
 			return [ '.', '..' ] === scandir( $path ) ? null : 'new_children';
-		}
-		$stat = self::file( $path );
-		if ( ( ! $this->installed( $path, $record ) && ! self::copy_of( $stat, $record ) ) || ! $this->holds( $path, $record['source'], 1 ) ) {
-			return 'changed_since_apply';
 		}
 		return self::live_identity( $path ) === $decision['live'] ? null : 'changed_since_apply';
 	}
@@ -502,14 +499,14 @@ final readonly class FileChange {
 			// An interrupted undo of this entry has put the original back already.
 			return self::decision( 'keep', 'already_undone' );
 		}
-		$stat = self::file( $path );
-		$same = $this->installed( $path, $record );
-		// Another inode counts only with the content and attributes that the apply installed,
-		// and a different size needs no hashing to tell.
-		if ( null === $stat || ( ! $same && ! self::copy_of( $stat, $record ) ) || ( null !== $record['stat'] && $record['stat']['size'] !== $stat['size'] ) ) {
+		$same   = $this->installed( $path, $record );
+		$linked = $same && self::private_link( $action, $record, $this->item_directory . '/candidate' );
+		// The file's own state is decided before the site policy, for the installed inode as for
+		// another one: the policy refuses every file with a second link, and a file system that
+		// reuses inode numbers can give a later file the recorded one.
+		if ( ! self::as_left( self::file( $path ), $record, $same, $linked ) ) {
 			return self::decision( 'keep', 'changed_since_apply' );
 		}
-		$linked = $same && self::private_link( $action, $record, $this->item_directory . '/candidate' );
 		if ( ! $linked ) {
 			$policy = $this->live_policy( $path, $review );
 			if ( 'replace' !== $policy['action'] ) {
@@ -546,16 +543,32 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Whether a regular file with one link has the size, type, permissions, owner and group
-	 * that the apply's candidate had. An entry recorded before these were kept has none.
+	 * Whether a live regular file has the state that the apply left there: one link, or two
+	 * while the private name of an interrupted create remains, and the installed size, which
+	 * needs no hashing to tell. Another inode than the recorded one also needs the installed
+	 * type, permissions, owner and group.
 	 *
 	 * @param array<int|string,int>|null $stat Live regular file.
 	 * @param Record                     $record Intent.
+	 * @param bool                       $same Whether it is the recorded inode with the recorded attributes.
+	 * @param bool                       $linked Whether the private name of an interrupted create is its second link.
+	 * @return bool Whether the file is as the apply left it, its content aside.
+	 */
+	private static function as_left( ?array $stat, array $record, bool $same, bool $linked ): bool {
+		return null !== $stat && ( $linked ? 2 : 1 ) === $stat['nlink'] && ( null === $record['stat'] || $record['stat']['size'] === $stat['size'] ) && ( $same || self::copy_of( $stat, $record ) );
+	}
+
+	/**
+	 * Whether a regular file has the size, type, permissions, owner and group that the apply's
+	 * candidate had. An entry recorded before these were kept has none.
+	 *
+	 * @param array<int|string,int> $stat Live regular file.
+	 * @param Record                $record Intent.
 	 * @return bool Whether the attributes match those installed.
 	 */
-	private static function copy_of( ?array $stat, array $record ): bool {
+	private static function copy_of( array $stat, array $record ): bool {
 		$installed = $record['stat'];
-		return null !== $stat && null !== $installed && 1 === $stat['nlink'] && $installed['size'] === $stat['size'] && $installed['mode'] === $stat['mode'] && $installed['uid'] === $stat['uid'] && $installed['gid'] === $stat['gid'];
+		return null !== $installed && $installed['size'] === $stat['size'] && $installed['mode'] === $stat['mode'] && $installed['uid'] === $stat['uid'] && $installed['gid'] === $stat['gid'];
 	}
 
 	/**
