@@ -368,10 +368,10 @@ final class FileChangeTest extends TestCase {
 		);
 		$steps = [];
 		self::assertSame( self::outcome( 'removed', 'undo_journal' ), $change->undo( $created, 'create', INF ) );
-		self::assertSame( [ 'journal remove', 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
+		self::assertSame( [ 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
 	}
 
-	public function test_a_retry_counts_only_a_removal_that_its_own_record_names(): void {
+	public function test_a_retry_counts_a_revert_only_from_the_record_that_proves_it(): void {
 		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
 		$number  = 0;
 		$applied = function ( string $action ) use ( $plan, &$number ): array {
@@ -404,49 +404,55 @@ final class FileChangeTest extends TestCase {
 			'mkdir'  => 'rmdir',
 		];
 		foreach ( $removal as $action => $removed ) {
-			// Stopped after the unlink or rmdir, or after the record that completes the entry,
-			// before the job counted it: the retry of the same undo counts its own removal.
-			foreach ( [ $removed, 'journal' ] as $operation ) {
-				[ $path, $worker, $record ] = $applied( $action );
-				try {
-					$worker( 'undo', $kill( $operation, 'journal' === $operation ? 'undone' : $path ) )->undo( $path, $action, INF, 'remove' );
-					self::fail( 'The worker must stop after ' . $operation . '.' );
-				} catch ( \DomainException ) {
-					self::assertFalse( file_exists( $path ) );
-				}
-				self::assertSame( self::outcome( 'removed', 'already_undone' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action . ' ' . $operation );
-				self::assertSame( [ 'undone', 'undo' ], $record() );
-				// Another undo did not remove it.
-				self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $worker( 'later-undo' )->undo( $path, $action, INF, 'remove' ) );
-			}
-			// Stopped between its record and the removal: the entry is as the apply left it.
+			// Stopped after the record that completes the entry, before the job counted it: that
+			// record names this undo, so its retry counts the removal as its own, another undo not.
 			[ $path, $worker, $record ] = $applied( $action );
 			try {
-				$worker( 'undo', $kill( 'journal', 'remove' ) )->undo( $path, $action, INF, 'remove' );
+				$worker( 'undo', $kill( 'journal', 'undone' ) )->undo( $path, $action, INF, 'remove' );
 				self::fail( 'The worker must stop after its record.' );
 			} catch ( \DomainException ) {
-				self::assertTrue( file_exists( $path ) );
+				self::assertFalse( file_exists( $path ) );
 			}
-			self::assertSame( [ 'remove', 'undo' ], $record() );
-			self::assertSame( self::outcome( 'removed', 'undo_journal' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
-			self::assertFalse( file_exists( $path ) );
-			// Removed by someone else after the review: nothing for the undo to count.
-			[ $path, $worker ] = $applied( $action );
-			'mkdir' === $action ? rmdir( $path ) : unlink( $path );
-			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
-			// Changed between the record and the removal: kept, and the record no longer names a
-			// removal, so that a removal by someone else later is not counted as the undo's own.
+			self::assertSame( [ 'undone', 'undo' ], $record() );
+			self::assertSame( self::outcome( 'removed', 'already_undone' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $worker( 'later-undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			// Stopped after the unlink or rmdir, before that record: the last record is the
+			// apply's, as when someone else removes the entry, and the retry cannot tell the two
+			// apart. It counts nothing, and its record names no undo.
 			[ $path, $worker, $record ] = $applied( $action );
-			$edit                       = static function ( string $done, string $on ) use ( $path, $action ): void {
-				if ( 'journal' === $done && 'remove' === $on ) {
-					file_put_contents( 'mkdir' === $action ? $path . '/upload.jpg' : $path, 'edited' );
-				}
-			};
-			self::assertSame( self::outcome( 'kept', 'mkdir' === $action ? 'new_children' : 'changed_since_apply' ), $worker( 'undo', $edit )->undo( $path, $action, INF, 'remove' ), $action );
+			try {
+				$worker( 'undo', $kill( $removed, $path ) )->undo( $path, $action, INF, 'remove' );
+				self::fail( 'The worker must stop after ' . $removed . '.' );
+			} catch ( \DomainException ) {
+				self::assertFalse( file_exists( $path ) );
+			}
 			self::assertSame( [ 'done', null ], $record() );
-			TempDir::remove( $path );
+			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			self::assertSame( [ 'undone', null ], $record() );
+			self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			// Stopped before the removal, and someone else removes the entry: the same record,
+			// and the same count. No record of this undo precedes a removal.
+			[ $path, $worker, $record ] = $applied( $action );
+			'mkdir' === $action ? rmdir( $path ) : unlink( $path );
+			self::assertSame( [ 'done', null ], $record() );
 			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
 		}
+		// A restore names this undo in the record before its rename, and only that rename puts
+		// the retained inode in place. Stopped after the record, and someone else deletes the
+		// file: nothing was restored, and the entry is kept with its saved original.
+		file_put_contents( $this->path, 'old' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		$restorer = fn ( ?\Closure $observer = null ): FileChange => new FileChange( $plan, $this->staging, $this->journal, null, 'undo', $observer );
+		try {
+			$restorer( $kill( 'journal', 'restore' ) )->undo( $this->path, 'replace', INF, 'restore' );
+			self::fail( 'The worker must stop after its record.' );
+		} catch ( \DomainException ) {
+			self::assertSame( 'new', file_get_contents( $this->path ) );
+		}
+		unlink( $this->path );
+		self::assertSame( self::outcome( 'kept', 'deleted_since_apply' ), $restorer()->undo( $this->path, 'replace', INF, 'restore' ) );
+		self::assertSame( 'old', file_get_contents( $this->journal . '/original' ) );
 	}
 
 	public function test_a_damaged_name_of_an_undo_is_refused(): void {

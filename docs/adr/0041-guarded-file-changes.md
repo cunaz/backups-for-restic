@@ -86,9 +86,9 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   `reverted` marker are written durably (`Storage\Files::write_durable()`): the temporary file
   is synchronised before its rename and the directory after it. The retained original is
   synchronised before the record that names it, the candidate with its attributes before the
-  `ready` record, the restored original's attributes before the `restore` record, the
-  `remove` record before an undo removes an entry, and the live directory after a
-  publication or removal and before the record that completes it, also on a retry. Where
+  `ready` record, the restored original's attributes before the `restore` record, and the
+  live directory after a publication or removal and before the record that completes it,
+  also on a retry. Where
   PHP cannot open a directory or the file system cannot synchronise one, the rename keeps
   the order that the file system gives it. A created file whose completed record survived a
   power loss, while the unlink of its private name before it did not, is undone like an
@@ -139,7 +139,7 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   several job types. A backup, restore or maintenance tick saves its document twice; an
   apply or undo tick saves it once for each finished entry and twice more.
 - Each changed entry now waits for about eleven synchronisations, a replaced file for fourteen,
-  and each reversed entry for five or six, plus two for the job document. On the ext4 disk of
+  and each reversed entry for three to six, plus two for the job document. On the ext4 disk of
   the measurement machine a durable job document took about 6 ms against 0.14 ms for an
   atomic one, and a created file spent about 29 ms in its own synchronisations. At 10 ms per
   synchronisation, as on slow or network storage, the document adds about 40 ms to a backup
@@ -201,7 +201,7 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
 - The worker reads the identity of the live file, which covers its device, inode, owner,
   group, mode, size and both change times, before it verifies the content. It compares it
   after the verification and once more immediately before the rename or unlink, after the
-  folder and policy rechecks and after the record that precedes the rename or unlink;
+  folder and policy rechecks and, for a restore, after the record that precedes the rename;
   a difference keeps the entry. The inode that was verified is the one that is replaced or
   removed, within the residual risk of a change in the same second that the apply has too.
   A created directory is removed only while it is empty at that moment.
@@ -243,17 +243,20 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   document does not count yet, and a kept entry is written again at the same place in the
   list. A kept entry costs one more synchronised write, its page of the list; a page that a
   stopped worker began beyond the counted entries is cut when the list is sealed.
-- The result counts what this undo did. The record before a restore's rename (`restore`)
-  and the one before a removal's unlink or `rmdir()` (`remove`, new in this version) name
-  the undo job, and the record that completes the entry keeps the name. A retry of the same
-  undo that finds the entry reverted under its own record counts it as restored or removed,
-  also when the document did not count it before the worker stopped. An entry that someone
-  else removed after the review, with no record of a removal, or that an earlier undo
-  reverted counts as `unchanged`. A removal that the last recheck keeps writes its record
-  back to `done`, so that a later removal by someone else is not taken for the undo's own.
-  Before, the worker counted an entry that it found reverted by the action the review had
-  shown, so a file that someone deleted between the review and the worker counted as
-  removed.
+- The result counts what this undo did, and a retry counts a revert as its own only from a
+  record of this undo that proves it. The record that completes an entry names the undo job
+  that reverted it, and so does the `restore` record before a restore's rename; the
+  retained inode back at the live path shows that the rename happened, because only that
+  rename puts it there. A retry of the same undo that finds the entry reverted under such a
+  record counts it as restored or removed, also when the document did not count it before
+  the worker stopped. A removal has no record before its unlink or `rmdir()`: a record
+  written there would say the same after a stop before the removal, when someone else may
+  remove the entry, as after one between the removal and the completing record. A retry
+  that finds the entry gone without the completing record therefore counts it as
+  `unchanged`, as it counts an entry that someone else removed after the review or that an
+  earlier undo reverted; the first case undercounts a removal that it did make. Before, the
+  worker counted an entry that it found reverted by the action the review had shown, so a
+  file that someone deleted between the review and the worker counted as removed.
 - An undo tick advances at least one entry, also one that begins after its deadline, as an
   apply tick does; the verification of a large file still yields after a block. Before, a
   tick that began late made no progress, and with a budget of zero none at all.

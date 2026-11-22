@@ -730,10 +730,10 @@ final class FileChangesTest extends TestCase {
 		$this->runner->tick( 0.0 ); // The created directory.
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 		$saved  = fn (): Job => $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
-		$counts = static fn ( int $removed, int $kept ): array => [
+		$counts = static fn ( int $removed, int $unchanged, int $kept ): array => [
 			'restored'             => 0,
 			'removed'              => $removed,
-			'unchanged'            => 0,
+			'unchanged'            => $unchanged,
 			'kept'                 => $kept,
 			'changed_after_review' => 0,
 		];
@@ -745,31 +745,39 @@ final class FileChangesTest extends TestCase {
 			$document->data['undo_counts'] = $outcomes;
 			$this->jobs->save( $document );
 		};
-		// A worker killed after it removed the directory, before the record that completes it
-		// and the document: the last record is the removal that names this undo.
+		// A worker killed after the record that completes the directory, before the document:
+		// that record names this undo, and the retry counts the removal as its own.
 		$entry  = $this->jobs->directory( $job ) . '/undo/item-1/entry.json';
 		$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
 		self::assertSame( [ 'undone', $undo->id ], [ $record['phase'], $record['undo'] ] );
-		$record['phase'] = 'remove';
-		file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
-		$rewind( 1, $counts( 1, 0 ) );
+		$rewind( 1, $counts( 1, 0, 0 ) );
 		$this->runner->tick( 0.0 ); // The directory again: gone, and removed by this undo.
 		self::assertSame( 2, $saved()->progress['done'] );
-		self::assertSame( $counts( 2, 0 ), $saved()->data['undo_counts'] );
+		self::assertSame( $counts( 2, 0, 0 ), $saved()->data['undo_counts'] );
+		// One killed after it removed the directory, before that record: the last record is the
+		// apply's, as after a removal by someone else, which the retry cannot tell apart.
+		$record['phase'] = 'done';
+		$record['undo']  = null;
+		file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
+		$rewind( 1, $counts( 1, 0, 0 ) );
+		$this->runner->tick( 0.0 );
+		self::assertSame( $counts( 1, 1, 0 ), $saved()->data['undo_counts'] );
+		$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertSame( [ 'undone', null ], [ $record['phase'], $record['undo'] ] );
 		$this->runner->tick( 0.0 ); // The edited file is kept and listed.
-		self::assertSame( $counts( 2, 1 ), $saved()->data['undo_counts'] );
+		self::assertSame( $counts( 1, 1, 1 ), $saved()->data['undo_counts'] );
 		// A worker killed after it listed the kept entry, before the document counted it.
-		$rewind( 2, $counts( 2, 0 ) );
+		$rewind( 2, $counts( 1, 1, 0 ) );
 		$this->runner->tick( 0.0 ); // The edited file again, at the same place in the list.
-		self::assertSame( $counts( 2, 1 ), $saved()->data['undo_counts'] );
+		self::assertSame( $counts( 1, 1, 1 ), $saved()->data['undo_counts'] );
 		// And one killed after the document counted the last entry, before the next step.
-		$rewind( 3, $counts( 2, 1 ) );
+		$rewind( 3, $counts( 1, 1, 1 ) );
 		$done = $this->run_job( $undo );
 		self::assertSame(
 			[
 				'restored'             => 0,
-				'removed'              => 2,
-				'unchanged'            => 0,
+				'removed'              => 1,
+				'unchanged'            => 1,
 				'kept'                 => 1,
 				'changed_after_review' => 0,
 				'apply_state'          => 'partly_undone',

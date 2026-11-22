@@ -55,7 +55,7 @@ final readonly class FileChange {
 	 * @param string                                $item_directory Unique private directory for this manifest row.
 	 * @param string|null                           $source_path Original snapshot path when the live target is mapped.
 	 * @param string                                $scope Current job, for independent verification checkpoints, and the
-	 *                                                     undo that a restore or removal record names.
+	 *                                                     undo that its restore and completing records name.
 	 * @param (\Closure(string, string): void)|null $observer Optional observer, called after each journal record
 	 *                                                         (with its phase), synchronisation and live operation
 	 *                                                         (with its path), in order. Tests use it to stop a
@@ -324,10 +324,12 @@ final readonly class FileChange {
 	 * its journal for a later undo. A confirmed undo names the reviewed action: an entry
 	 * reviewed for a revert that changed since is kept, never reverted in another way.
 	 *
-	 * The record that precedes the rename or unlink names this undo by its scope. A retry of
-	 * the same undo that finds the entry reverted under that record counts it as restored or
-	 * removed; an entry that someone else removed, or that another undo reverted, counts as
-	 * unchanged.
+	 * A retry counts a revert as its own only from a record of this undo, named by its scope,
+	 * that proves it: the record that completes the entry, or for a restore the record that
+	 * precedes the rename while the retained inode is back in place, which only that rename
+	 * puts there. An entry that someone else removed or another undo reverted counts as
+	 * unchanged, and so does a removal whose completing record a stop prevented: nothing tells
+	 * it apart from someone else's.
 	 *
 	 * @param string      $path Reviewed path.
 	 * @param string      $action Original action.
@@ -373,12 +375,11 @@ final readonly class FileChange {
 				// The entry stays as it is, and so does its journal.
 				return self::outcome( null === $record ? 'unchanged' : 'kept', $decision['reason'] );
 			}
-			// Only a revert under this undo's own record is its own: a retry after the rename or
-			// unlink, or after the record that completed the entry, before the job counted it.
-			// What someone else removed, or an earlier undo reverted, is unchanged.
-			$own = 'already_undone' === $decision['reason'] && $this->scope === $record['undo'];
+			// A retry of this undo, before the job counted the entry, finds it reverted under its
+			// own record. Anything else that it finds with nothing left to revert is unchanged.
+			$own = $this->scope === $record['undo'] && ( 'undone' === $record['phase'] || ( 'restore' === $record['phase'] && 'already_undone' === $decision['reason'] ) );
 			if ( 'undone' !== $record['phase'] ) {
-				$this->settle( $path, $action, $record );
+				$this->settle( $path, $action, $record, $own ? $this->scope : null );
 			}
 			return self::outcome( $own ? ( 'replace' === $action ? 'restored' : 'removed' ) : 'unchanged', $decision['reason'] );
 		}
@@ -388,21 +389,15 @@ final readonly class FileChange {
 		$old = $this->item_directory . '/original';
 		if ( 'restore' === $decision['action'] ) {
 			self::set_attributes( $old, $record, true );
-			// The restored permissions and time are on disk before the rename is authorised.
+			// The restored permissions and time are on disk before the rename is authorised,
+			// and so is the record that names this undo.
 			$this->sync_file( $old );
+			$record['phase'] = 'restore';
+			$record['undo']  = $this->scope;
+			$this->save( $record );
 		}
-		// The intent names this undo and is on disk before the rename or unlink.
-		$record['phase'] = $decision['action'];
-		$record['undo']  = $this->scope;
-		$this->save( $record );
 		$changed = $this->recheck_live( $path, $action, $record, $decision );
 		if ( null !== $changed ) {
-			if ( 'remove' === $record['phase'] ) {
-				// Nothing was removed: a later removal by someone else must not count as this undo's.
-				$record['phase'] = 'done';
-				$record['undo']  = null;
-				$this->save( $record );
-			}
 			return self::outcome( 'kept', $changed );
 		}
 		if ( 'restore' === $decision['action'] ) {
@@ -412,7 +407,7 @@ final readonly class FileChange {
 		} else {
 			$this->remove_file( $path );
 		}
-		$this->settle( $path, $action, $record );
+		$this->settle( $path, $action, $record, $this->scope );
 		return self::outcome( 'restore' === $decision['action'] ? 'restored' : 'removed', $decision['reason'] );
 	}
 
@@ -421,16 +416,18 @@ final readonly class FileChange {
 	 * retry, the reversal is on disk before the record that completes it. A directory that no
 	 * longer exists has nothing to synchronise.
 	 *
-	 * @param string $path Reviewed path.
-	 * @param string $action Forward action.
-	 * @param Record $record Intent.
+	 * @param string      $path Reviewed path.
+	 * @param string      $action Forward action.
+	 * @param Record      $record Intent.
+	 * @param string|null $undo The undo whose revert this record completes, null for an entry that had nothing left to revert.
 	 */
-	private function settle( string $path, string $action, array $record ): void {
+	private function settle( string $path, string $action, array $record, ?string $undo ): void {
 		$this->sync_directory( dirname( $path ) );
 		if ( 'mkdir' !== $action && 'copy' !== $record['phase'] ) {
 			self::invalidate( $path );
 		}
 		$record['phase'] = 'undone';
+		$record['undo']  = $undo;
 		$this->save( $record );
 	}
 
@@ -489,8 +486,7 @@ final readonly class FileChange {
 			return self::decision( 'keep', 'not_applied' );
 		}
 		if ( ! self::exists( $path ) ) {
-			// After the record of a removal, the undo that wrote it may have removed the entry.
-			return self::decision( 'keep', 'remove' === $record['phase'] ? 'already_undone' : ( 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' ) );
+			return self::decision( 'keep', 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' );
 		}
 		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
 			return self::decision( 'keep', 'parent_changed' );
@@ -1237,7 +1233,7 @@ final readonly class FileChange {
 		$text = $stat['size'] <= 4096 ? file_get_contents( $file ) : false;
 		$data = false === $text ? null : json_decode( $text, true );
 		if ( ! is_array( $data ) || hash( 'sha256', $path . "\0" . ( $this->source_path ?? $path ) ) !== ( $data['path'] ?? null ) || $action !== ( $data['action'] ?? null )
-			|| ! in_array( $data['phase'] ?? '', [ 'copy', 'ready', 'done', 'restore', 'remove', 'undone' ], true )
+			|| ! in_array( $data['phase'] ?? '', [ 'copy', 'ready', 'done', 'restore', 'undone' ], true )
 			|| ! is_int( $data['mode'] ?? null ) || $data['mode'] < 0 || $data['mode'] > 0777 ) {
 			throw new StorageFailed( 'The file change journal is damaged or belongs to another entry.' );
 		}
