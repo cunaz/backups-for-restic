@@ -12,6 +12,7 @@
          colors="true"
          failOnRisky="true"
          failOnWarning="true"
+         failOnEmptyTestSuite="true"
          beStrictAboutOutputDuringTests="true">
     <php>
         <ini name="memory_limit" value="128M"/>

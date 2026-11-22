@@ -1,0 +1,5 @@
+# Unit tests that skip with the zstd extension (ci.yml, "Unit tests (PHP 8.3, zstd)"): they test
+# the refusal of format 2 on a PHP that cannot read it. See tests/Skips/unit.txt for the format.
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_repository_this_php_cannot_read_is_not_reported_as_damaged
+BackupsForRestic\Tests\Unit\Format\RepositoryFilesTest::test_compressed_unpacked_files_need_zstd
+BackupsForRestic\Tests\Unit\Jobs\BackupStepsTest::test_a_repository_of_format_2_is_refused_without_zstd_and_recorded_for_the_doctor

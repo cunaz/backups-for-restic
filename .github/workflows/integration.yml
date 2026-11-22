@@ -121,7 +121,11 @@ jobs:
           BFR_SITE_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
           BFR_DB_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
         # The killed-tick test restarts the server from PHPUnit, which passes the limit on.
-        run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist
+        run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist --log-junit "$RUNNER_TEMP/integration.xml"
+      # A class whose site or tool does not answer skips in setUpBeforeClass(), which PHPUnit's
+      # failOnSkipped does not count.
+      - name: No integration test skipped
+        run: php bin/check-skipped-tests.php "$RUNNER_TEMP/integration.xml" tests/Skips/integration.txt
       - name: How the server's workers ended
         if: always()
         # Signals and exits other than the clean ones, from strace (BFR_SITE_TRACE).

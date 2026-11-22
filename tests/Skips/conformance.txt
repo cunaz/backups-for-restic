@@ -1,0 +1,4 @@
+# The conformance suite without the zstd extension (conformance.yml, "restic oracle"). Every class
+# skips when restic, rest-server or the database is missing. See tests/Skips/unit.txt for the
+# format.
+BackupsForRestic\Tests\Conformance\ResticConformanceTest::test_format_2_repositories_from_restic_restore_with_zstd

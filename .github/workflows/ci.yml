@@ -189,7 +189,12 @@ jobs:
         run: |
           php -r "exit(extension_loaded('zstd') === (\$argv[1] === 'true') ? 0 : 1);" "$ZSTD"
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: vendor/bin/phpunit --testsuite unit
+      - run: vendor/bin/phpunit --testsuite unit --log-junit "$RUNNER_TEMP/unit.xml"
+      # A test that skips because something is missing must not turn the job green.
+      - name: Skipped tests are the expected ones
+        env:
+          EXPECTED: tests/Skips/unit${{ matrix.zstd && '-zstd' || '' }}.txt
+        run: php bin/check-skipped-tests.php "$RUNNER_TEMP/unit.xml" "$EXPECTED"
 
   database:
     name: Database dump and restore (${{ matrix.database }})
@@ -202,9 +207,12 @@ jobs:
           - database: MySQL 8.4
             image: mysql:8.4
             health: mysqladmin ping -h 127.0.0.1 -proot --silent
+            skips: tests/Skips/database-mysql.txt
+          # MariaDB skips the cases of the atomic exchange, which is MySQL-only by design.
           - database: MariaDB 11.4
             image: mariadb:11.4
             health: healthcheck.sh --connect --innodb_initialized
+            skips: tests/Skips/database-mariadb.txt
     services:
       database:
         image: ${{ matrix.image }}
@@ -233,7 +241,12 @@ jobs:
           coverage: none
           tools: composer:v2
       - run: composer install --no-interaction --no-progress --prefer-dist
-      - run: vendor/bin/phpunit --testsuite database
+      - run: vendor/bin/phpunit --testsuite database --log-junit "$RUNNER_TEMP/database.xml"
+      # Every test of the suite skips when the server does not answer.
+      - name: Skipped tests are the expected ones
+        env:
+          EXPECTED: ${{ matrix.skips }}
+        run: php bin/check-skipped-tests.php "$RUNNER_TEMP/database.xml" "$EXPECTED"
 
   mutation:
     name: Mutation testing (Crypto, Format, Forget, database import)

@@ -68,7 +68,12 @@ jobs:
       - name: Conformance suite
         env:
           FILTER: ${{ matrix.zstd && 'format_2' || '' }}
-        run: vendor/bin/phpunit --testsuite conformance ${FILTER:+--filter "$FILTER"}
+        run: vendor/bin/phpunit --testsuite conformance --log-junit "$RUNNER_TEMP/conformance.xml" ${FILTER:+--filter "$FILTER"}
+      # A class skips when restic, rest-server or the database is missing.
+      - name: Skipped tests are the expected ones
+        env:
+          EXPECTED: tests/Skips/conformance${{ matrix.zstd && '-zstd' || '' }}.txt
+        run: php bin/check-skipped-tests.php "$RUNNER_TEMP/conformance.xml" "$EXPECTED"
 
   benchmarks:
     name: Benchmarks with gates

@@ -1,0 +1,11 @@
+# The database suite on MariaDB (ci.yml, "Database dump and restore (MariaDB 11.4)"). MariaDB
+# refuses the atomic exchange under WRITE locks, so its cases run on MySQL only; the refusal
+# itself is tested on MariaDB (ADR 0043). See tests/Skips/unit.txt for the format.
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_ambiguous_admin_id_and_unchanged_name_with_a_different_physical_table_refuse
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_killing_the_worker_on_either_side_of_rename_resumes_from_the_physical_witness
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_a_waiting_writer_lands_on_the_live_name_after_the_exchange
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_bounded_cleanup_replays_without_dropping_a_live_or_replaced_table
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_the_approving_credential_and_capabilities_are_checked_under_the_write_lock
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_a_site_account_with_only_the_documented_grants_can_apply_undo_and_expire
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_a_target_view_created_after_approval_blocks_the_exchange
