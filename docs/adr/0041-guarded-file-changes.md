@@ -235,7 +235,9 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   are written to a paged list in the undo job's directory, in pages of 100 that a sealed
   summary authenticates as a background review's pages are, and served by
   `GET /jobs/{id}/kept-entries`. WP-CLI `undo` prints the totals of its review, refuses an
-  undo with nothing to revert, and afterwards prints the kept entries and the counts. Each
+  undo with nothing to revert, and afterwards prints the kept entries and the counts, as the
+  admin page shows them, also for an undo that was cancelled or failed. Neither says that a
+  kept entry changed after the apply unless its reason is `changed_since_apply`. Each
   outcome is on disk before the job document that counts it: a kept entry's page is written
   durably, a revert's journal record is. A restarted tick repeats only the entry that the
   document does not count yet, and a kept entry is written again at the same place in the
