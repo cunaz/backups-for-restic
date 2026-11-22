@@ -119,11 +119,43 @@ final class DumpColumnsTest extends TestCase {
 
 	/** @return iterable<string, array{string}> */
 	public static function cursors_that_cannot_continue(): iterable {
-		yield 'an earlier version' => [ '{"after":"17","offset":0,"rows":17,"bytes":900,"page":500}' ];
+		// Each differs in one field from the cursor that test_a_cursor_of_this_version_continues_after_its_key() continues.
+		yield 'an earlier version' => [ self::cursor( [ 'v' => null ] ) ];
 		yield 'not JSON' => [ 'damaged' ];
-		yield 'a key value of another type' => [ '{"v":2,"after":["old-text-key"],"offset":0,"rows":17,"bytes":900,"page":500}' ];
-		yield 'too few key values' => [ '{"v":2,"after":[],"offset":0,"rows":17,"bytes":900,"page":500}' ];
-		yield 'a key value that is no string' => [ '{"v":2,"after":[17],"offset":0,"rows":17,"bytes":900,"page":500}' ];
+		yield 'a key value of another type' => [ self::cursor( [ 'after' => [ 'old-text-key' ] ] ) ];
+		yield 'too few key values' => [ self::cursor( [ 'after' => [] ] ) ];
+		yield 'too many key values' => [ self::cursor( [ 'after' => [ '17', '18' ] ] ) ];
+		yield 'a key value that is no string' => [ self::cursor( [ 'after' => [ 17 ] ] ) ];
+		yield 'a count below zero' => [ self::cursor( [ 'rows' => -1 ] ) ];
+		yield 'a missing count' => [ self::cursor( [ 'largest' => null ] ) ];
+		yield 'another definition' => [ self::cursor( [ 'digest' => hash( 'sha256', 'another' ) ] ) ];
+		yield 'a definition that changed during its tick' => [ self::cursor( [ 'changed' => true ] ) ];
+	}
+
+	/**
+	 * The cursor of a table that wrote 17 rows, with some fields changed.
+	 *
+	 * @param array<string, mixed> $changes Fields to change; null leaves a field out.
+	 * @return string Cursor.
+	 */
+	private static function cursor( array $changes = [] ): string {
+		$cursor = array_filter(
+			$changes + [
+				'v'        => 2,
+				'after'    => [ '17' ],
+				'offset'   => 17,
+				'rows'     => 17,
+				'bytes'    => 900,
+				'page'     => 64,
+				'views'    => 1,
+				'restarts' => 0,
+				'digest'   => '',
+				'changed'  => false,
+				'largest'  => 0,
+			],
+			static fn ( mixed $value ): bool => null !== $value
+		);
+			return (string) json_encode( $cursor );
 	}
 
 	#[DataProvider( 'cursors_that_cannot_continue' )]
@@ -155,7 +187,7 @@ final class DumpColumnsTest extends TestCase {
 			}
 		};
 		$table  = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`id` int)', [ 'id' => SqlFormatter::NUMERIC ], 'PRIMARY', [ new KeyColumn( 'id', KeyColumn::INTEGER ) ] );
-		$source = new TableSource( $db, $table, '', '{"v":2,"after":["17"],"offset":17,"rows":17,"bytes":900,"page":64,"views":1,"restarts":0,"digest":"","changed":false,"largest":0}', static function (): void {} );
+		$source = new TableSource( $db, $table, '', self::cursor(), static function (): void {} );
 		self::assertFalse( $source->restarted() );
 		self::assertSame( "-- end table rows=17 bytes=900\n", $source->read( 10000 ) );
 		self::assertSame( [ 'SELECT `id` FROM `wp_rows` WHERE (`id` > 17) ORDER BY `wp_rows`.`id` LIMIT 64' ], $db->queries );
