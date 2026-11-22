@@ -332,15 +332,21 @@ Every route that asks for the WordPress password asks through one check
   chaining) follow core's `https_local_ssl_verify` filter, as core's own loopback requests
   do. They carry no secrets and never reach the repository server.
 - The database dump opens a connection of its own to the site's database server, with the
-  host, user, password, database and client flags that `$wpdb` connected with
+  host, user, password and database that `$wpdb` connected with, or those of the `DB_HOST`,
+  `DB_USER`, `DB_PASSWORD` and `DB_NAME` constants in `wp-config.php` where `$wpdb` does not
+  expose them, and with the client flags of `MYSQL_CLIENT_FLAGS`
   (`WordPress\WpdbConnection::dedicated()`, [ADR 0021](adr/0021-database-streaming.md)).
   The plugin does not store the database password, and an error of that connection carries
-  the server's error number, never its text. The connection is used only after it is shown
-  to reach the same server and database as the site's, and it is refused when the site's
-  connection is encrypted and it is not; the dump then reads through `$wpdb`. Where the
-  site's encryption is set up by a database drop-in rather than by `MYSQL_CLIENT_FLAGS`,
-  the check sees only that the site's connection is encrypted, not how its certificate is
-  verified.
+  the server's error number, never its text. Before it connects, the adapter reads the TLS
+  cipher of the site's connection. Where that connection is encrypted and the client flags do
+  not ask for TLS (`MYSQLI_CLIENT_SSL`), for example because a database drop-in sets up the
+  encryption itself, or where the site's session shows no cipher at all, it opens no second
+  connection, so that the account never authenticates in the clear. A connection that it did
+  open is used only after it is shown to reach the same server and database as the site's
+  and to be encrypted if the site's connection is; otherwise it is closed. Either way the dump
+  then reads through `$wpdb`. With `MYSQLI_CLIENT_SSL` in the flags, the dump's connection
+  verifies the server's certificate as those flags say, which can differ from TLS settings
+  that a drop-in makes itself.
 
 ## 8. Filesystem
 
