@@ -394,7 +394,8 @@ final class Container {
 			$this->settings()->int( 'restore.staging_expiry_hours' ),
 			$this->apply_plan( ... ),
 			$this->file_maintenance(),
-			static fn (): bool => wp_is_file_mod_allowed( 'backups_for_restic_apply' ),
+			// RestRoutes::live_writes_allowed() for the user who confirmed the job, on every tick.
+			static fn ( ?int $user ): bool => wp_is_file_mod_allowed( 'backups_for_restic_apply' ) && ( null === $user || ( $user > 0 && user_can( $user, RestRoutes::capability() ) && user_can( $user, 'update_core' ) ) ),
 			null,
 			fn (): string => $this->site()->uploads_dir
 		);

@@ -820,7 +820,7 @@ final class RestRoutes {
 		$hash                                        = hash( 'sha256', $control );
 		try {
 			$service = $this->container->file_changes();
-			$job     = $undo ? $service->start_undo( $id, $digest, $hash, $plan_job ) : $service->start_apply( $id, $include_config, $digest, $hash, $plan_job );
+			$job     = $undo ? $service->start_undo( $id, $digest, $hash, $plan_job, get_current_user_id() ) : $service->start_apply( $id, $include_config, $digest, $hash, $plan_job, get_current_user_id() );
 		} catch ( InvalidArgument | JobConflict $refused ) {
 			return $this->plan_error( $refused );
 		}

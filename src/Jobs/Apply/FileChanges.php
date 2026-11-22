@@ -74,7 +74,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @param int                                          $hours Staging lifetime.
 	 * @param \Closure(bool,string,string|null=):ApplyPlan $planner Live site policy, with the uploads root a job was confirmed with or the current one.
 	 * @param FileMaintenance                              $maintenance WordPress maintenance marker.
-	 * @param \Closure():bool                              $allowed Host-wide permission to write live files.
+	 * @param \Closure(int|null):bool                      $allowed Host-wide permission to write live files, and the capabilities of the confirming user unless the job came from the command line.
 	 * @param FileSpace|null                               $space Host filesystem capacity.
 	 * @param (\Closure():string)|null                     $uploads Current uploads root, recorded with a confirmed job: its later ticks boot without the filters of the theme and ordinary plugins.
 	 */
@@ -167,14 +167,15 @@ final readonly class FileChanges implements StepProvider {
 	 * @param string      $restore Restore job ID.
 	 * @param bool        $include_config Include wp-config.php.
 	 * @param string      $digest Approved plan.
-	 * @param string      $control_hash SHA-256 of the scoped control token.
+	 * @param string      $control_hash SHA-256 of the scoped control token, empty on the command line.
 	 * @param string|null $plan_job Completed disk-backed preview ID.
+	 * @param int         $user WordPress user who confirmed the job in the browser.
 	 * @return Job Queued job.
 	 */
-	public function start_apply( string $restore, bool $include_config, string $digest, string $control_hash = '', ?string $plan_job = null ): Job {
+	public function start_apply( string $restore, bool $include_config, string $digest, string $control_hash = '', ?string $plan_job = null, int $user = 0 ): Job {
 		return $this->staging->guard(
-			function () use ( $restore, $include_config, $digest, $control_hash, $plan_job ): Job {
-				$this->require_writes();
+			function () use ( $restore, $include_config, $digest, $control_hash, $plan_job, $user ): Job {
+				$this->require_writes( '' === $control_hash ? null : $user );
 				self::confirmed( null === $plan_job ? $this->preview( $restore, $include_config ) : $this->plans->plan_page( $restore, $restore, false, $include_config, $plan_job, 0 ), $digest );
 				return $this->jobs->create(
 					JobType::Apply,
@@ -186,6 +187,7 @@ final readonly class FileChanges implements StepProvider {
 						'digest'            => $digest,
 						'maintenance_grant' => $control_hash,
 						'plan_job'          => $plan_job,
+						'user'              => $user,
 						'uploads_dir'       => null === $this->uploads ? null : ( $this->uploads )(),
 					]
 				);
@@ -227,14 +229,15 @@ final readonly class FileChanges implements StepProvider {
 	 *
 	 * @param string      $apply_job Apply job.
 	 * @param string      $digest Confirmed undo preview.
-	 * @param string      $control_hash SHA-256 of the scoped control token.
+	 * @param string      $control_hash SHA-256 of the scoped control token, empty on the command line.
 	 * @param string|null $plan_job Completed disk-backed preview ID.
+	 * @param int         $user WordPress user who confirmed the undo in the browser.
 	 * @return Job Queued undo job.
 	 */
-	public function start_undo( string $apply_job, string $digest, string $control_hash = '', ?string $plan_job = null ): Job {
+	public function start_undo( string $apply_job, string $digest, string $control_hash = '', ?string $plan_job = null, int $user = 0 ): Job {
 		return $this->staging->guard(
-			function () use ( $apply_job, $digest, $control_hash, $plan_job ): Job {
-				$this->require_writes();
+			function () use ( $apply_job, $digest, $control_hash, $plan_job, $user ): Job {
+				$this->require_writes( '' === $control_hash ? null : $user );
 				$original = $this->journal->original( $apply_job );
 				$restore  = ApplyJournal::field( $original, 'restore' );
 				$preview  = null === $plan_job ? $this->preview_undo( $apply_job ) : $this->plans->plan_page( $apply_job, $restore, true, false, $plan_job, 0 );
@@ -249,6 +252,7 @@ final readonly class FileChanges implements StepProvider {
 						'digest'            => $digest,
 						'maintenance_grant' => $control_hash,
 						'plan_job'          => $plan_job,
+						'user'              => $user,
 						'uploads_dir'       => null === $this->uploads ? null : ( $this->uploads )(),
 					]
 				);
@@ -291,7 +295,7 @@ final readonly class FileChanges implements StepProvider {
 			return $this->verify_plan( $job, $deadline );
 		}
 		$digest = ApplyJournal::field( $job, 'digest' );
-		$this->require_writes();
+		$this->require_writes( self::operator( $job ) );
 		if ( JobType::Undo === $job->type ) {
 			$original = $this->journal->original( ApplyJournal::field( $job, 'apply' ), true );
 			self::confirmed( $this->undo_summary( $original, self::uploads( $job ) ), $digest );
@@ -335,7 +339,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @throws JobConflict If the sealed plan has changed since review.
 	 */
 	private function verify_plan( Job $job, float $deadline ): bool {
-		$this->require_writes();
+		$this->require_writes( self::operator( $job ) );
 		$disk     = $this->plans->approved( $job );
 		$head     = $disk->header();
 		$undo     = JobType::Undo === $job->type;
@@ -450,7 +454,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @throws JobConflict If a directory changed after its creation.
 	 */
 	private function mutate( Job $job, float $deadline ): bool {
-		$this->require_writes();
+		$this->require_writes( self::operator( $job ) );
 		$undo     = JobType::Undo === $job->type;
 		$original = $undo ? $this->journal->original( ApplyJournal::field( $job, 'apply' ), true ) : $job;
 		$disk     = is_string( $original->data['plan_job'] ?? null ) ? $this->plans->approved( $original ) : null;
@@ -611,14 +615,31 @@ final readonly class FileChanges implements StepProvider {
 	}
 
 	/**
-	 * Checks the hosting policy even if it changed after the job was confirmed.
+	 * Checks the hosting policy and the confirming user's capabilities on every tick, even
+	 * if they changed after the job was confirmed.
 	 *
-	 * @throws JobConflict If WordPress disallows file modifications.
+	 * @param int|null $user Confirming WordPress user, null for the command line.
+	 * @throws JobConflict If WordPress or the user's capabilities disallow file modifications.
 	 */
-	private function require_writes(): void {
-		if ( ! ( $this->allowed )() ) {
-			throw new JobConflict( 'The site no longer permits live file modifications.' );
+	private function require_writes( ?int $user ): void {
+		if ( ! ( $this->allowed )( $user ) ) {
+			JobConflict::raise( 'The site or the confirming administrator no longer permits live file modifications.', [ 'code' => 'file_writes_refused' ] );
 		}
+	}
+
+	/**
+	 * Names the WordPress user whose capabilities the job keeps needing. Only a browser
+	 * confirmation creates a control grant; the command line has neither grant nor user.
+	 *
+	 * @param Job $job Apply or undo.
+	 * @return int|null Confirming user, zero if a browser job lacks one, or null for the command line.
+	 */
+	private static function operator( Job $job ): ?int {
+		if ( '' === ( $job->data['maintenance_grant'] ?? '' ) ) {
+			return null;
+		}
+		$user = $job->data['user'] ?? null;
+		return is_int( $user ) ? $user : 0;
 	}
 
 	/**

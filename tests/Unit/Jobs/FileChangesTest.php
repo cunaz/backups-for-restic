@@ -38,6 +38,8 @@ final class FileChangesTest extends TestCase {
 	private Runner $runner;
 	private bool $allowed = true;
 	private ?int $free    = PHP_INT_MAX;
+	/** @var list<int> Users who may still write live files. */
+	private array $administrators = [ 7 ];
 
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'apply-job' );
@@ -72,7 +74,7 @@ final class FileChangesTest extends TestCase {
 				return new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
 			},
 			new FileMaintenance( $this->live ),
-			fn (): bool => $this->allowed,
+			fn ( ?int $user = null ): bool => $this->allowed && ( null === $user || in_array( $user, $this->administrators, true ) ),
 			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free ),
 			fn (): string => $this->uploads
 		);
@@ -313,8 +315,32 @@ final class FileChangesTest extends TestCase {
 		$job = $this->start();
 		$this->runner->tick( 0.0 );
 		$this->allowed = false;
-		$this->run_job( $job, JobState::Failed );
+		$failed        = $this->run_job( $job, JobState::Failed );
+		self::assertSame( 'file_writes_refused', $failed->error?->code );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_every_tick_rechecks_the_administrator_who_confirmed_in_the_browser(): void {
+		$plan  = $this->changes->preview( $this->restore );
+		$grant = hash( 'sha256', 'control token' );
+		try {
+			$this->changes->start_apply( $this->restore, false, $plan['digest'], $grant );
+			self::fail( 'A browser confirmation needs the user who confirmed it.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'file_writes_refused', $refused->context()['code'] );
+		}
+		$job = $this->changes->start_apply( $this->restore, false, $plan['digest'], $grant, null, 7 );
+		self::assertSame( 7, $job->data['user'] );
+		$this->runner->tick( 0.0 );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		// The account loses its role while the site is in maintenance.
+		$this->administrators = [];
+		$failed               = $this->run_job( $job, JobState::Failed );
+		self::assertSame( 'file_writes_refused', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		// The command line has no WordPress account; the host policy alone applies to it.
+		$this->run_job( $this->start() );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
 	public function test_foreign_maintenance_marker_survives_and_blocks_publication(): void {

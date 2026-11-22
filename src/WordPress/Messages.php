@@ -72,6 +72,10 @@ final class Messages {
 				'message' => __( 'There is too little disk space to complete these file changes.', 'backups-for-restic' ),
 				'hint'    => __( 'Free space on the destination, then open a new preview to check the estimate and available space.', 'backups-for-restic' ),
 			],
+			'file_writes_refused'            => [
+				'message' => __( 'The site no longer allows these file changes, or the administrator who confirmed them may no longer make them.', 'backups-for-restic' ),
+				'hint'    => __( 'Check that WordPress allows file modifications and that the administrator who confirmed the changes can still manage backups and update WordPress. Changes already made can be undone on the Restores tab.', 'backups-for-restic' ),
+			],
 			'index_too_large'                => [
 				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
 				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),
