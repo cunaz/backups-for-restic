@@ -4,8 +4,11 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
@@ -172,5 +175,129 @@ final class DatabaseChangesTest extends TestCase {
 		} catch ( FormatException ) {
 			self::assertArrayNotHasKey( 'database_cleanup_pending', $this->jobs->get( $older->id )?->result ?? [] );
 		}
+	}
+
+	private const string OTHER = '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002';
+
+	/** The applied-and-failed import of another server, as a failover leaves it behind. */
+	private function stranded( string $id = '20260101T000001Z-aaaaaa', string $uuid = self::OTHER ): Job {
+		return $this->owner( $id, [ 'database_owner' => self::binding( str_repeat( 'c', 32 ), $uuid ) ] );
+	}
+
+	/**
+	 * Expects one refusal code, or a refusal without a code.
+	 *
+	 * @param \Closure():mixed $work Work that must be refused.
+	 */
+	private static function refused( ?string $code, \Closure $work ): void {
+		try {
+			$work();
+			self::fail( 'Expected the refusal ' . ( $code ?? 'without a code' ) );
+		} catch ( JobConflict | DatabaseFailed $refusal ) {
+			self::assertSame( $code, $refusal->context()['code'] ?? null, $refusal->getMessage() );
+		}
+	}
+
+	public function test_a_binding_of_another_server_lets_backups_start_and_holds_only_a_new_database_apply(): void {
+		$owner = $this->stranded();
+		self::refused( 'database_exchange_cleanup', fn () => $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds ) );
+		self::assertTrue( $this->changes( $this->server() )->expire( false, microtime( true ) + 5 ) );
+		$saved = $this->jobs->get( $owner->id );
+		self::assertNotNull( $saved );
+		self::assertSame( $this->clock->seconds, $saved->data['database_foreign'] ?? null );
+		self::assertArrayHasKey( 'database_owner', $saved->data, 'Nothing is forgotten without a decision.' );
+		self::assertCount( 1, $saved->warnings );
+		self::assertStringContainsString( 'database-discard ' . $owner->id, $saved->warnings[0] );
+		self::refused( 'database_exchange_foreign', fn () => $this->jobs->create( JobType::DatabaseApply, 'manual', $this->clock->seconds ) );
+		self::assertTrue( $this->jobs->while_idle( static fn (): bool => true ) );
+		$backup = $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		self::assertSame( JobState::Queued, $backup->state );
+		self::assertSame( [], DatabaseGeneration::exclusions( $this->server(), $saved ), 'Nothing here can be proven to be one of its tables.' );
+		// The heartbeat reports the binding once.
+		$backup->state = JobState::Succeeded;
+		$this->jobs->save( $backup );
+		self::assertTrue( $this->changes( $this->server() )->expire( false, microtime( true ) + 5 ) );
+		self::assertCount( 1, $this->jobs->get( $owner->id )?->warnings ?? [] );
+	}
+
+	public function test_a_failed_import_on_another_server_marks_its_binding_in_cleanup(): void {
+		$owner       = $this->stranded();
+		$owner->step = 'cleaning_up';
+		$this->jobs->save( $owner );
+		self::assertTrue( $this->changes( $this->server() )->step( JobType::DatabaseApply, 'cleaning_up' )->advance( $owner, $this->jobs->log( $owner ), microtime( true ) + 5 ) );
+		self::assertIsInt( $this->jobs->get( $owner->id )?->data['database_foreign'] ?? null );
+		$backup = $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds );
+		self::assertSame( JobState::Queued, $backup->state );
+	}
+
+	public function test_uninstall_forgets_a_binding_of_another_server_without_touching_any_table(): void {
+		$owner = $this->stranded();
+		self::assertTrue( $this->changes( $this->server() )->expire( true, microtime( true ) + 5 ) );
+		self::assertArrayNotHasKey( 'database_owner', $this->jobs->get( $owner->id )?->data ?? [ 'database_owner' => true ] );
+	}
+
+	public function test_a_server_that_names_another_database_or_no_uuid(): void {
+		$moved = $this->stranded( '20260101T000001Z-aaaaaa', self::UUID );
+		self::assertTrue( $this->changes( $this->server( self::UUID, 'renamed' ) )->expire( false, microtime( true ) + 5 ) );
+		self::assertArrayHasKey( 'database_foreign', $this->jobs->get( $moved->id )?->data ?? [] );
+		// Without a readable UUID the server cannot be told apart from the original one.
+		$unknown = $this->stranded( '20260101T000002Z-bbbbbb', self::UUID );
+		self::refused( null, fn () => $this->changes( $this->server( '' ) )->expire( false, microtime( true ) + 5 ) );
+		$saved = $this->jobs->get( $unknown->id );
+		self::assertArrayNotHasKey( 'database_foreign', $saved?->data ?? [] );
+		self::assertTrue( $saved?->result['database_cleanup_pending'] ?? false );
+		self::refused( 'database_exchange_cleanup', fn () => $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds ) );
+	}
+
+	public function test_a_foreign_binding_is_discarded_with_its_private_names_and_nothing_is_dropped(): void {
+		$owner     = $this->stranded();
+		$preview   = $this->changes( $this->server() )->foreign_binding( $owner->id );
+		$discarded = $this->changes( $this->server() )->discard( $owner->id, 7, 'rest' );
+		self::assertSame( $preview, $discarded );
+		$base = '_bfr_r_' . str_repeat( 'c', 32 );
+		self::assertSame(
+			[
+				'job'      => $owner->id,
+				'database' => 'site',
+				'server'   => self::OTHER,
+				'tables'   => [ $base . '_p', $base . '_a', $base . '_u', $base . '_t0', $base . '_b0', $base . '_t1', $base . '_b1' ],
+			],
+			$discarded
+		);
+		$saved = $this->jobs->get( $owner->id );
+		self::assertNotNull( $saved );
+		self::assertArrayNotHasKey( 'database_owner', $saved->data );
+		self::assertSame(
+			[
+				'at'   => $this->clock->seconds,
+				'user' => 7,
+				'via'  => 'rest',
+			] + $discarded,
+			$saved->data['database_discarded'] ?? null
+		);
+		self::assertStringContainsString( 'Nothing was dropped', $saved->warnings[0] ?? '' );
+		self::assertContains( 'database_exchange_foreign', array_column( array_column( $this->jobs->log( $saved )->read( 5 ), 'context' ), 'code' ) );
+		$backup = $this->jobs->create( JobType::DatabaseApply, 'manual', $this->clock->seconds );
+		self::assertSame( JobState::Queued, $backup->state, 'Once discarded, another database apply may start.' );
+		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( $owner->id, 7, 'rest' ) );
+	}
+
+	public function test_only_a_finished_binding_that_this_server_disowns_can_be_discarded(): void {
+		$here = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ] );
+		self::refused( 'database_binding_verified', fn () => $this->changes( $this->server() )->discard( $here->id, 1, 'wp-cli' ) );
+		self::assertArrayHasKey( 'database_owner', $this->jobs->get( $here->id )?->data ?? [] );
+		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( '20260101T000009Z-cccccc', 1, 'wp-cli' ) );
+		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( 'not-a-job', 1, 'wp-cli' ) );
+		$running        = $this->stranded( '20260101T000002Z-bbbbbb' );
+		$running->state = JobState::Running;
+		$this->jobs->save( $running );
+		self::refused( 'job_conflict', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli' ) );
+		$running->state = JobState::Failed;
+		$this->jobs->save( $running );
+		$undo       = new Job( '20260101T000003Z-dddddd', JobType::DatabaseUndo, 'manual', $this->clock->seconds );
+		$undo->data = [ 'apply' => $running->id ];
+		$this->jobs->save( $undo );
+		self::refused( 'job_conflict', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli' ) );
+		self::refused( null, fn () => $this->changes( $this->server( '' ) )->foreign_binding( $here->id ) );
 	}
 }

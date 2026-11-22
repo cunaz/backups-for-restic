@@ -27,6 +27,9 @@ final readonly class DatabaseGeneration {
 
 	public const int WINDOW = 86400;
 
+	/** A MySQL server UUID as SHOW VARIABLES reports it. */
+	private const string UUID = '/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/';
+
 	/**
 	 * Keeps the validated durable ownership binding.
 	 *
@@ -41,6 +44,9 @@ final readonly class DatabaseGeneration {
 	/**
 	 * Verifies the server UUID before looking up *or forgetting* retained objects. A
 	 * failover to an identically named empty database cannot complete cleanup by mistake.
+	 * A server that names itself differently, a MariaDB server or another database is
+	 * reported with the code database_exchange_foreign; a server without a readable UUID
+	 * cannot be told apart and is reported without it.
 	 *
 	 * @param Connection $connection Current SQL connection.
 	 * @param Job        $job Owning apply.
@@ -49,13 +55,11 @@ final readonly class DatabaseGeneration {
 	 * @throws DatabaseFailed If this is a different server, database or object map.
 	 */
 	public static function load( Connection $connection, Job $job ): self {
-		$data = $job->data['database_owner'] ?? null;
-		if ( JobType::DatabaseApply !== $job->type || ! is_array( $data ) || 1 !== ( $data['version'] ?? null ) || ! is_string( $data['prefix'] ?? null ) || 1 !== preg_match( '/\A[A-Za-z0-9_]{1,64}\z/', $data['prefix'] ) || ! is_string( $data['fingerprint'] ?? null ) || ! is_string( $data['token'] ?? null ) || ! is_int( $data['count'] ?? null ) || $data['count'] < 1 || $data['count'] > SwapCatalog::MAX_TABLES ) {
-			throw new FormatException( 'The database restore lost its saved table ownership.' );
-		}
+		$data  = self::binding( $job );
 		$facts = ( new SwapCatalog( $connection ) )->facts();
 		if ( $facts['mariadb'] || '' === $facts['uuid'] || $facts['uuid'] !== ( $data['uuid'] ?? null ) || $facts['database'] !== ( $data['database'] ?? null ) ) {
-			throw new DatabaseFailed( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.' );
+			$foreign = $facts['mariadb'] || $facts['database'] !== ( $data['database'] ?? null ) || ( 1 === preg_match( self::UUID, $facts['uuid'] ) && $facts['uuid'] !== ( $data['uuid'] ?? null ) );
+			DatabaseFailed::raise( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.', $foreign ? [ 'code' => 'database_exchange_foreign' ] : [] );
 		}
 		$owned = new OwnedTables( $connection, $data['prefix'], $data['fingerprint'], $data['token'] );
 		$plan  = isset( $job->data['exchange_plan'] ) ? ExchangePlan::load( $job->data['exchange_plan'], $owned, $data['prefix'] ) : null;
@@ -63,6 +67,56 @@ final readonly class DatabaseGeneration {
 			throw new DatabaseFailed( 'The saved physical exchange plan has a conflicting ownership binding.' );
 		}
 		return new self( $owned, $data['count'], $data['prefix'], $plan );
+	}
+
+	/**
+	 * Validates the saved ownership fields without asking the database.
+	 *
+	 * @param Job $job Owning apply.
+	 * @return array{version:1,prefix:string,fingerprint:string,token:string,count:int,database?:mixed,uuid?:mixed} Saved binding.
+	 * @throws FormatException If the filesystem document is corrupted.
+	 */
+	private static function binding( Job $job ): array {
+		$data = $job->data['database_owner'] ?? null;
+		if ( JobType::DatabaseApply !== $job->type || ! is_array( $data ) || 1 !== ( $data['version'] ?? null ) || ! is_string( $data['prefix'] ?? null ) || 1 !== preg_match( '/\A[A-Za-z0-9_]{1,64}\z/', $data['prefix'] ) || ! is_string( $data['fingerprint'] ?? null ) || ! is_string( $data['token'] ?? null ) || ! is_int( $data['count'] ?? null ) || $data['count'] < 1 || $data['count'] > SwapCatalog::MAX_TABLES ) {
+			throw new FormatException( 'The database restore lost its saved table ownership.' );
+		}
+		return $data;
+	}
+
+	/**
+	 * Names every private table the binding can own, for a database administrator who has
+	 * to remove them by hand on the server that holds them. Nothing is asked of the
+	 * connected database; none of these names starts with the site's table prefix.
+	 *
+	 * @param Connection $connection Any SQL session; only the names are derived.
+	 * @param Job        $job Owning apply.
+	 * @return array{job:string,database:string,server:string,tables:list<string>} Where the tables are and their names.
+	 * @throws FormatException If the filesystem document is corrupted.
+	 */
+	public static function names( Connection $connection, Job $job ): array {
+		$data   = self::binding( $job );
+		$owned  = new OwnedTables( $connection, $data['prefix'], $data['fingerprint'], $data['token'] );
+		$tables = [ $owned->marker( 'prepared' ), $owned->marker( 'applied' ), $owned->marker( 'undone' ) ];
+		for ( $number = 0; $number < $data['count']; ++$number ) {
+			$tables[] = $owned->shadow( $number );
+			$tables[] = $owned->retained( $number );
+		}
+		return [
+			'job'      => $job->id,
+			'database' => is_string( $data['database'] ?? null ) ? $data['database'] : '',
+			'server'   => is_string( $data['uuid'] ?? null ) ? $data['uuid'] : '',
+			'tables'   => $tables,
+		];
+	}
+
+	/**
+	 * Removes the binding and everything derived from it from the job document.
+	 *
+	 * @param Job $job Owning apply.
+	 */
+	public static function forget( Job $job ): void {
+		unset( $job->data['database_owner'], $job->data['database_cleanup'], $job->data['database_cleanup_generation'], $job->data['exchange_plan'], $job->data['database_generation'], $job->data['retained_until'], $job->data['database_foreign'] );
 	}
 
 	/**
@@ -151,13 +205,15 @@ final readonly class DatabaseGeneration {
 		if ( $next <= $binding->count ) {
 			return false;
 		}
-		unset( $job->data['database_owner'], $job->data['database_cleanup'], $job->data['database_cleanup_generation'], $job->data['exchange_plan'], $job->data['database_generation'], $job->data['retained_until'] );
+		self::forget( $job );
 		return true;
 	}
 
 	/**
 	 * Excludes verified private generations from all-tables SQL dumps. If a DBA has
 	 * replaced a generated name with their own table, that replacement stays in the backup.
+	 * A binding of another server or database proves nothing about the tables here, even
+	 * if a migration copied tables with these names: they all stay in the backup.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param Job        $job Owning job.
@@ -165,8 +221,25 @@ final readonly class DatabaseGeneration {
 	 * @throws DatabaseFailed If a remaining generation cannot safely be distinguished.
 	 */
 	public static function exclusions( Connection $connection, Job $job ): array {
-		$binding = self::load( $connection, $job );
-		$plan    = $binding->exchange();
+		try {
+			$binding = self::load( $connection, $job );
+		} catch ( DatabaseFailed $error ) {
+			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+				throw $error;
+			}
+			return [];
+		}
+		if ( null === $binding->plan ) {
+			// An unfinished import: shadows and its ledger still carry the ownership comment.
+			$private = [];
+			foreach ( [ $binding->owned->progress(), ...array_map( $binding->owned->shadow( ... ), range( 0, $binding->count - 1 ) ) ] as $name ) {
+				if ( $binding->owned->exists( $name, true ) ) {
+					$private[] = $name;
+				}
+			}
+			return $private;
+		}
+		$plan    = $binding->plan;
 		$catalog = new SwapCatalog( $connection );
 		$facts   = $catalog->facts();
 		$ids     = $catalog->identities( $facts, $plan->all_names() );

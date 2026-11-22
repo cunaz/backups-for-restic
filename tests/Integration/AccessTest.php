@@ -56,6 +56,7 @@ final class AccessTest extends TestCase {
 			[ 'GET', '/database-changes' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/undo-plan' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/undo' ],
+			[ 'POST', '/database-changes/' . self::JOB . '/discard' ],
 			[ 'GET', '/undo' ],
 			[ 'POST', '/undo/' . self::JOB . '/plan' ],
 			[ 'POST', '/undo/' . self::JOB ],
@@ -150,13 +151,13 @@ final class AccessTest extends TestCase {
 				$caps["update_core"] = false;
 				return $caps;
 			} );
-			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo" ] as $route ) {
+			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo", "/database-changes/" . $arguments[0] . "/discard" ] as $route ) {
 				echo rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1" . $route ) )->get_status(), "\n";
 			}
 			',
 			[ self::JOB ]
 		);
-		self::assertSame( [ '403', '403' ], explode( "\n", trim( $output ) ) );
+		self::assertSame( [ '403', '403', '403' ], explode( "\n", trim( $output ) ) );
 	}
 
 	public function test_database_writes_require_explicit_confirmation_in_the_json_body(): void {

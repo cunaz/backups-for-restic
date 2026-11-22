@@ -90,7 +90,40 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @return Preview Review.
 	 */
 	public function preview( string $restore, int $user ): array {
-		return $this->reviews->read( ( $this->connection )(), $restore, $user, ( $this->policy )( $user ), false )['preview'];
+		$connection = ( $this->connection )();
+		return $this->reviews->read( $connection, $restore, $user, $this->blockers( $connection, $user ), false )['preview'];
+	}
+
+	/**
+	 * Site blockers of a new database apply. A binding whose private tables are on another
+	 * server or database waits for the administrator's decision first.
+	 *
+	 * @param Connection $connection Current SQL session.
+	 * @param int        $user Confirming user.
+	 * @return list<string> Blocker codes.
+	 */
+	private function blockers( Connection $connection, int $user ): array {
+		$blockers = ( $this->policy )( $user );
+		foreach ( $this->jobs->database_owners() as $owner ) {
+			if ( ! $owner->state->is_terminal() ) {
+				continue;
+			}
+			if ( isset( $owner->data['database_foreign'] ) ) {
+				$blockers[] = 'database_exchange_foreign';
+				continue;
+			}
+			try {
+				DatabaseGeneration::load( $connection, $owner );
+			} catch ( DatabaseFailed $error ) {
+				if ( 'database_exchange_foreign' === ( $error->context()['code'] ?? null ) ) {
+					$blockers[] = 'database_exchange_foreign';
+				}
+			} catch ( FormatException ) {
+				// The heartbeat reports a damaged ownership record on its own job.
+				continue;
+			}
+		}
+		return array_values( array_unique( $blockers ) );
 	}
 
 	/**
@@ -177,6 +210,89 @@ final readonly class DatabaseChanges implements StepProvider {
 				);
 			}
 		);
+	}
+
+	/**
+	 * Describes a binding whose private tables the connected server positively identifies
+	 * as another server's or another database's. Read-only; nothing is asked of the
+	 * database beyond its identity.
+	 *
+	 * @param string $apply Owning database apply.
+	 * @return array{job:string,database:string,server:string,tables:list<string>} Where the tables are and their names.
+	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 */
+	public function foreign_binding( string $apply ): array {
+		return $this->foreign_owner( $apply )[1];
+	}
+
+	/**
+	 * Forgets a binding whose private tables are on another server or in another database,
+	 * after the administrator confirmed it. Nothing is dropped anywhere: the result names the
+	 * tables to remove by hand where they are. The caller holds the runner lock; staging's
+	 * guard keeps an undo of this binding from being queued at the same time.
+	 *
+	 * @param string $apply Owning database apply.
+	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.
+	 * @param string $via Where it was confirmed: rest or wp-cli.
+	 * @return array{job:string,database:string,server:string,tables:list<string>} The discarded binding.
+	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 */
+	public function discard( string $apply, int $user, string $via ): array {
+		return $this->staging->guard(
+			function () use ( $apply, $user, $via ): array {
+				$active = $this->jobs->active();
+				if ( JobType::DatabaseUndo === $active?->type && $apply === ( $active->data['apply'] ?? null ) ) {
+					JobConflict::raise( 'An undo of this database restore is still queued or running.', [ 'code' => 'job_conflict' ] );
+				}
+				[ $owner, $binding ] = $this->foreign_owner( $apply );
+				DatabaseGeneration::forget( $owner );
+				$owner->data['database_discarded'] = [
+					'at'   => $this->clock->now()[0],
+					'user' => $user,
+					'via'  => $via,
+				] + $binding;
+				$owner->warn( sprintf( 'The binding to %1$d private table names in the database %2$s on the server %3$s was discarded. Nothing was dropped; remove the tables that exist there by hand.', count( $binding['tables'] ), $binding['database'], $binding['server'] ) );
+				$this->jobs->save( $owner );
+				$this->jobs->log( $owner )->write(
+					'warning',
+					'Database restore binding discarded.',
+					[
+						'user' => $user,
+						'via'  => $via,
+						'code' => 'database_exchange_foreign',
+					]
+				);
+				return $binding;
+			}
+		);
+	}
+
+	/**
+	 * Finds a finished apply whose binding the connected server positively disowns.
+	 *
+	 * @param string $apply Owning database apply.
+	 * @return array{Job,array{job:string,database:string,server:string,tables:list<string>}} The job and its binding.
+	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 */
+	private function foreign_owner( string $apply ): array {
+		$owner = $this->jobs->get( $apply );
+		if ( null === $owner || JobType::DatabaseApply !== $owner->type || ! isset( $owner->data['database_owner'] ) ) {
+			JobConflict::raise( 'This job holds no database restore binding.', [ 'code' => 'database_binding_missing' ] );
+		}
+		if ( ! $owner->state->is_terminal() ) {
+			JobConflict::raise( 'The database restore that holds this binding is still running.', [ 'code' => 'job_conflict' ] );
+		}
+		$connection = ( $this->connection )();
+		try {
+			DatabaseGeneration::load( $connection, $owner );
+		} catch ( DatabaseFailed $error ) {
+			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+				throw $error;
+			}
+			return [ $owner, DatabaseGeneration::names( $connection, $owner ) ];
+		}
+		JobConflict::raise( 'This binding belongs to the connected database. The heartbeat removes its private tables when they expire.', [ 'code' => 'database_binding_verified' ] );
 	}
 
 	/**
@@ -272,7 +388,8 @@ final readonly class DatabaseChanges implements StepProvider {
 			$job->data['authority'] = $review['authority'];
 			return true;
 		}
-		$review = $this->reviews->read( ( $this->connection )(), self::field( $job, 'restore' ), $user, ( $this->policy )( $user ), true );
+		$connection = ( $this->connection )();
+		$review     = $this->reviews->read( $connection, self::field( $job, 'restore' ), $user, $this->blockers( $connection, $user ), true );
 		self::confirmed( $review['preview'], $digest );
 		if ( ! isset( $job->data['database_owner'] ) ) {
 			$job->data['database_owner'] = [
@@ -425,6 +542,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param Job   $job Current worker.
 	 * @param float $deadline End of tick.
 	 * @return bool Whether cleanup is complete.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
 	 */
 	private function cleanup( Job $job, float $deadline ): bool {
 		$this->maintenance->release( $job->id, $this->jobs->directory( $job ) );
@@ -434,7 +552,19 @@ final readonly class DatabaseChanges implements StepProvider {
 			return true;
 		}
 		$connection = ( $this->connection )();
-		$generation = DatabaseGeneration::load( $connection, $owner );
+		try {
+			$generation = DatabaseGeneration::load( $connection, $owner );
+		} catch ( DatabaseFailed $error ) {
+			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+				throw $error;
+			}
+			// Nothing on this server belongs to the binding, so nothing is removed or recorded
+			// here. A retained window stays as it is; an unfinished import awaits a decision.
+			if ( ! isset( $owner->data['retained_until'] ) ) {
+				$this->unverified( $owner );
+			}
+			return true;
+		}
 		if ( null !== $generation->plan && isset( $job->data['database_swapping_at'] ) && ! isset( $owner->data['database_cleanup_generation'] ) ) {
 			$state = $undo ? 'undone' : 'applied';
 			if ( ( new TableExchange( $connection ) )->status( $generation->plan ) === $state ) {
@@ -475,19 +605,25 @@ final readonly class DatabaseChanges implements StepProvider {
 					try {
 						do {
 							$done = DatabaseGeneration::clean( ( $this->connection )(), $this->jobs, $job, $deadline, $now, $uninstall );
+							unset( $job->data['database_foreign'] );
 							if ( $done ) {
 								unset( $job->result['database_cleanup_pending'] );
 							}
 							$this->jobs->save( $job );
 						} while ( ! $done && microtime( true ) < $deadline );
-					} catch ( PluginException $error ) {
-						// One stuck generation must not keep older ones from expiring.
-						if ( true !== ( $job->result['database_cleanup_pending'] ?? false ) ) {
-							$job->result['database_cleanup_pending'] = true;
-							$job->warn( 'Database generation cleanup is overdue. Restore the original database connection and permissions so that the heartbeat can finish.' );
+					} catch ( DatabaseFailed $error ) {
+						if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+							$this->deferred( $job );
+							$failure ??= $error;
+						} elseif ( $uninstall ) {
+							// The tables are not on this server: uninstall must neither drop nor wait for them.
+							DatabaseGeneration::forget( $job );
 							$this->jobs->save( $job );
-							$this->jobs->log( $job )->write( 'warning', 'Database generation cleanup was deferred.', [ 'code' => 'database_exchange_cleanup' ] );
+						} else {
+							$this->unverified( $job );
 						}
+					} catch ( PluginException $error ) {
+						$this->deferred( $job );
 						$failure ??= $error;
 					}
 					if ( microtime( true ) >= $deadline ) {
@@ -497,6 +633,38 @@ final readonly class DatabaseChanges implements StepProvider {
 				return null === $failure ? true : throw $failure;
 			}
 		);
+	}
+
+	/**
+	 * Reports once on the owning job that its cleanup failed and the heartbeat retries.
+	 * One stuck generation must not keep older ones from expiring.
+	 *
+	 * @param Job $job Owning apply.
+	 */
+	private function deferred( Job $job ): void {
+		if ( true !== ( $job->result['database_cleanup_pending'] ?? false ) ) {
+			$job->result['database_cleanup_pending'] = true;
+			$job->warn( 'Database generation cleanup is overdue. Restore the original database connection and permissions so that the heartbeat can finish.' );
+			$this->jobs->save( $job );
+			$this->jobs->log( $job )->write( 'warning', 'Database generation cleanup was deferred.', [ 'code' => 'database_exchange_cleanup' ] );
+		}
+	}
+
+	/**
+	 * Records once that the connected server positively is not the one holding the owning
+	 * job's private tables. Other jobs go on; only a new database apply waits for the
+	 * administrator to remove those tables there and discard the binding.
+	 *
+	 * @param Job $owner Owning apply.
+	 */
+	private function unverified( Job $owner ): void {
+		if ( isset( $owner->data['database_foreign'] ) ) {
+			return;
+		}
+		$owner->data['database_foreign'] = $this->clock->now()[0];
+		$owner->warn( sprintf( 'The private tables of this database restore are on another database server or in another database. Drop them there by hand, then discard the binding with: wp backups-for-restic database-discard %s', $owner->id ) );
+		$this->jobs->save( $owner );
+		$this->jobs->log( $owner )->write( 'warning', 'The database restore binding belongs to another server or database.', [ 'code' => 'database_exchange_foreign' ] );
 	}
 
 	/**

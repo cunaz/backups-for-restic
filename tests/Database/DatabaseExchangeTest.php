@@ -522,6 +522,75 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
 
+	/** The binding of a job as a failover to another server leaves it: a new server UUID. */
+	private static function failover( JobStore $jobs, Job $owner ): Job {
+		$moved = $jobs->get( $owner->id );
+		self::assertNotNull( $moved );
+		$moved->data['database_owner']['uuid'] = '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002';
+		if ( isset( $moved->data['exchange_plan'] ) ) {
+			$moved->data['exchange_plan']['uuid'] = '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002';
+		}
+		$jobs->save( $moved );
+		return $moved;
+	}
+
+	/**
+	 * Names of the private tables in the test database.
+	 *
+	 * @return list<string>
+	 */
+	private function private_tables(): array {
+		return array_column( $this->db->rows( "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME LIKE '\\_bfr\\_r\\_%' ORDER BY TABLE_NAME" ), 'TABLE_NAME' );
+	}
+
+	public function test_a_binding_of_another_server_lets_backups_start_and_is_discarded_without_dropping_anything(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$job      = self::failover( $services['jobs'], self::before_swap( $services ) );
+		$private  = $this->private_tables();
+		self::assertNotSame( [], $private );
+		$failed = self::advance( $services['runner'], $job );
+		self::assertSame( JobState::Failed, $failed->state );
+		self::assertSame( 'database_exchange_foreign', $failed->error?->code );
+		self::assertIsInt( $failed->data['database_foreign'] ?? null );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		// Backups and other jobs go on; a new database apply waits for the decision.
+		$backup        = $services['jobs']->create( JobType::Backup, 'schedule', $services['clock']->seconds );
+		$backup->state = JobState::Succeeded;
+		$services['jobs']->save( $backup );
+		self::assertSame( [], DatabaseGeneration::exclusions( $this->direct, $failed ) );
+		$preview = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertFalse( $preview['applicable'] );
+		self::assertContains( 'database_exchange_foreign', $preview['blockers'] );
+		try {
+			$services['jobs']->create( JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+			self::fail( 'A new database apply started before the old binding was settled.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'database_exchange_foreign', $refused->context()['code'] ?? null );
+		}
+		$discarded = $services['changes']->discard( $failed->id, 1, 'wp-cli' );
+		$own       = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $failed->data['database_owner']['token'] . '_' ) ) );
+		self::assertNotSame( [], $own );
+		self::assertSame( [], array_diff( $own, $discarded['tables'] ), 'Every private table of the binding is named for the administrator.' );
+		self::assertSame( $private, $this->private_tables(), 'Nothing is dropped on a server that cannot be verified.' );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $failed->id )?->data ?? [ 'database_owner' => true ] );
+		self::assertTrue( $services['changes']->preview( $services['source']->id, 1 )['applicable'] );
+	}
+
+	public function test_uninstall_forgets_a_generation_of_another_server_and_drops_nothing(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		self::assertSame( 'applied', $applied->result['database_generation'] );
+		$moved   = self::failover( $services['jobs'], $applied );
+		$private = $this->private_tables();
+		self::assertSame( [], DatabaseGeneration::exclusions( $this->direct, $moved ), 'An all-tables backup keeps every table it cannot verify.' );
+		self::assertTrue( $services['changes']->expire( true, microtime( true ) + 10 ) );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $moved->id )?->data ?? [ 'database_owner' => true ] );
+		self::assertSame( $private, $this->private_tables() );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
 		$this->mysql_only();
 		$site     = $this->directory . '/site';

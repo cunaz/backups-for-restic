@@ -176,6 +176,18 @@ final class Messages {
 				'message' => __( 'The database server does not list the connections of the site database account.', 'backups-for-restic' ),
 				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled. Otherwise use the manual SQL restore procedure.', 'backups-for-restic' ),
 			],
+			'database_exchange_foreign' => [
+				'message' => __( 'A database restore keeps private tables on another database server or in another database.', 'backups-for-restic' ),
+				'hint'    => __( 'Backups go on. Before another database restore, drop those tables there by hand and discard the binding with "wp backups-for-restic database-discard" and the ID of that restore job; the command lists the table names.', 'backups-for-restic' ),
+			],
+			'database_binding_missing' => [
+				'message' => __( 'No finished database restore holds a binding with this job ID.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the job ID in the job history.', 'backups-for-restic' ),
+			],
+			'database_binding_verified' => [
+				'message' => __( 'The private tables of this database restore are in the connected database, so its binding is not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The heartbeat removes them when their recovery window ends.', 'backups-for-restic' ),
+			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job contains the database error.', 'backups-for-restic' ),
