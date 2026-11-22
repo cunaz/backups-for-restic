@@ -5,7 +5,6 @@ namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\ScryptParameters;
-use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Backup\BackupRun;
 use BackupsForRestic\Engine\Backup\VirtualFile;
@@ -15,6 +14,7 @@ use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Support\ResumableByteSource;
 use BackupsForRestic\Support\SystemClock;
+use BackupsForRestic\Tests\Support\FixedRandom;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -42,9 +42,14 @@ final class ResumableVirtualFileTest extends TestCase {
 		$this->site      = TempDir::create( 'site' );
 		$this->cleanup[] = $this->site;
 		mkdir( $this->site . '/wp-content' );
+		// The same content and, with the repository's fixed randomness, the same chunker
+		// polynomial in every run: the chunks end at the same places, and the first slice
+		// ends inside the file. Random content could hold no chunk boundary for 8 MiB.
+		$first  = new FixedRandom( 'first version' );
+		$second = new FixedRandom( 'second version' );
 		for ( $unit = 0; $unit < 3; ++$unit ) {
-			$this->first[]  = random_bytes( 3145728 );
-			$this->second[] = random_bytes( 3145728 );
+			$this->first[]  = $first->bytes( 3145728 );
+			$this->second[] = $second->bytes( 3145728 );
 		}
 	}
 
@@ -95,7 +100,7 @@ final class ResumableVirtualFileTest extends TestCase {
 				? [ new VirtualFile( 'table.sql', fn ( ?string $cursor ): ResumableByteSource => $this->source( $cursor, $restart ), 1767323045 ) ]
 				: []
 		);
-		$repository = Repository::initialize( new InMemoryBackend(), 'test password', new Identity( 'example.com', 'www-data' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
+		$repository = Repository::initialize( new InMemoryBackend(), 'test password', new Identity( 'example.com', 'www-data' ), new FixedRandom( 'repository' ), new ScryptParameters( 1024, 8, 1 ) );
 		$work       = TempDir::create( 'work' );
 		$target     = TempDir::create( 'target' );
 		array_push( $this->cleanup, $work, $target );
