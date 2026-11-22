@@ -395,11 +395,12 @@ final readonly class FileChanges implements StepProvider {
 	 * Checks before maintenance that the confirmed undo still belongs to its apply: the sealed
 	 * review or the reviewed decisions of an inline one, and the apply's own manifest. It does
 	 * not recheck the live entries: the worker checks each one again immediately before it
-	 * touches it, and keeps an entry that changed since the review instead of failing.
+	 * touches it, and keeps an entry that changed since the review instead of failing. An
+	 * inline undo that an earlier version queued without the decisions is refused.
 	 *
 	 * @param Job $job Undo.
 	 * @return bool False: the next step has been durably recorded.
-	 * @throws JobConflict If the sealed review does not belong to the approved undo.
+	 * @throws JobConflict If the sealed review does not belong to the approved undo, or the undo has no reviewed decisions.
 	 */
 	private function prepare_undo( Job $job ): bool {
 		$this->require_writes( self::operator( $job ) );
@@ -605,7 +606,7 @@ final readonly class FileChanges implements StepProvider {
 		$rows     = null === $forward ? $this->load( $original ) : [];
 		$review   = is_string( $job->data['plan_job'] ?? null ) ? $this->plans->approved( $job ) : null;
 		$total    = $this->journal->attempted( $original );
-		$reviewed = null === $review ? self::reviewed( $job, $total ) : null;
+		$reviewed = null === $review ? self::reviewed( $job, $total ) : [];
 		$done     = $job->progress['done'] ?? 0;
 		if ( ! is_int( $done ) || $done < 0 || $done > $total || ( null !== $review && $review->header()['entries'] !== $total ) ) {
 			throw new StorageFailed( 'The undo cursor is invalid.' );
@@ -626,8 +627,7 @@ final readonly class FileChanges implements StepProvider {
 			if ( null === $row ) {
 				throw new StorageFailed( 'The file change manifest is incomplete.' );
 			}
-			// An undo confirmed before reviewed decisions were kept reverts what it still can.
-			[ $action, $reason ] = null === $review ? $reviewed[ $done ] ?? [ null, '' ] : self::reviewed_row( $review->row( $done ), $row );
+			[ $action, $reason ] = null === $review ? $reviewed[ $done ] : self::reviewed_row( $review->row( $done ), $row );
 			$source              = Bytes::base64url_decode( $row['path'] );
 			$path                = self::target( $row );
 			if ( 'keep' === $action ) {
@@ -1032,16 +1032,19 @@ final readonly class FileChanges implements StepProvider {
 	}
 
 	/**
-	 * The decisions of a confirmed inline undo review, in the order of the undo.
+	 * The decisions of a confirmed inline undo review, in the order of the undo. An undo that
+	 * an earlier version queued has none, and its confirmation does not say which entries the
+	 * administrator saw as kept: it is refused and reviewed again.
 	 *
 	 * @param Job $job Undo.
 	 * @param int $total Attempted entries of its apply.
-	 * @return list<array{0:string,1:string}>|null Action and reason of each entry, or null for an undo confirmed before they were kept.
+	 * @return list<array{0:string,1:string}> Action and reason of each entry.
+	 * @throws JobConflict If the undo was confirmed before the decisions were kept.
 	 * @throws StorageFailed If the stored review does not cover the attempted entries.
 	 */
-	private static function reviewed( Job $job, int $total ): ?array {
+	private static function reviewed( Job $job, int $total ): array {
 		if ( ! array_key_exists( 'reviewed', $job->data ) ) {
-			return null;
+			JobConflict::raise( 'This undo was confirmed before the decision of each entry was kept.', [ 'code' => 'undo_review_required' ] );
 		}
 		$stored = $job->data['reviewed'];
 		if ( ! is_array( $stored ) || ! array_is_list( $stored ) || count( $stored ) !== $total ) {

@@ -950,20 +950,36 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'edited', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
-	public function test_an_undo_confirmed_before_reviewed_decisions_were_kept_reverts_what_it_can(): void {
-		$job    = $this->run_job( $this->start() );
+	public function test_an_undo_confirmed_before_reviewed_decisions_were_kept_is_reviewed_again(): void {
+		$job  = $this->run_job( $this->start() );
+		$new  = $this->live . '/b-new/new.txt';
+		$mode = fileperms( $new ) & 0777;
+		unlink( $new );
 		$review = $this->changes->preview_undo( $job->id );
-		$undo   = $this->changes->start_undo( $job->id, $review['digest'] );
-		self::assertCount( 3, $undo->data['reviewed'] );
-		// As an earlier version queued it.
-		unset( $undo->data['reviewed'] );
-		$this->jobs->save( $undo );
-		file_put_contents( $this->live . '/a-existing', 'edited before the worker came' );
-		$done = $this->run_job( $undo );
-		self::assertSame( 2, $done->result['removed'] );
-		self::assertSame( 1, $done->result['kept'] );
-		self::assertSame( 0, $done->result['changed_after_review'] );
-		self::assertSame( 'edited before the worker came', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertSame( 'keep', array_column( $review['entries'], 'action', 'path' )[ $new ] );
+		// Queued as an earlier version queued it, without the decisions; one of them also
+		// after the worker of that version began to revert.
+		foreach ( [ 'preflight', 'undoing' ] as $step ) {
+			$undo = $this->changes->start_undo( $job->id, $review['digest'] );
+			self::assertCount( 3, $undo->data['reviewed'] );
+			if ( 'undoing' === $step ) {
+				$this->runner->tick( 0.0 ); // Preflight.
+				$undo = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+				self::assertSame( 'undoing', $undo->step );
+			}
+			unset( $undo->data['reviewed'] );
+			$this->jobs->save( $undo );
+			// Before the worker comes, the same bytes are uploaded again.
+			file_put_contents( $new, 'created' );
+			chmod( $new, $mode );
+			$failed = $this->run_job( $undo, JobState::Failed );
+			self::assertSame( 'undo_review_required', $failed->error?->code, $step );
+			self::assertSame( $step, $this->failed_step( $failed ) );
+			self::assertSame( 'created', file_get_contents( $new ) );
+			self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+			self::assertSame( [ $job->id, 'applied' ], [ $this->changes->undoable()[0]['job'], $this->changes->undoable()[0]['state'] ] );
+			unlink( $new );
+		}
 	}
 
 	public function test_undo_after_a_created_directory_was_removed_restores_the_replaced_file(): void {

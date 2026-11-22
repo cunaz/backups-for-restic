@@ -84,6 +84,10 @@ final class Messages {
 				'message' => __( 'Nothing of this apply can be undone now.', 'backups-for-restic' ),
 				'hint'    => __( 'Every entry it changed is already undone, or was changed after the apply and is kept. The undo preview names each entry with its reason. If such an entry is put back as the apply left it, for example by undoing a later apply, preview the undo again within its recovery window.', 'backups-for-restic' ),
 			],
+			'undo_review_required'           => [
+				'message' => __( 'This undo was confirmed in an earlier version of the plugin, which did not keep the decision for each entry.', 'backups-for-restic' ),
+				'hint'    => __( 'Preview the undo again and confirm the new preview within the recovery window. It shows entry by entry what is still reverted and what is kept.', 'backups-for-restic' ),
+			],
 			'protected_path_invalid'         => [
 				'message' => __( 'A WordPress location that file apply protects is not an absolute path without "." or ".." segments.', 'backups-for-restic' ),
 				'hint'    => __( 'Check WP_CONTENT_DIR, WPMU_PLUGIN_DIR and BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php, then open the preview again. The staged files remain available for download.', 'backups-for-restic' ),

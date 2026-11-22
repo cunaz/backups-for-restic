@@ -211,8 +211,10 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   immediately before it touches it and keeps one that changed since the review, counted in
   `changed_after_review`, instead of failing the job. Its preflight therefore no longer
   rechecks every live entry before maintenance; it checks that the confirmed review belongs
-  to the apply and its manifest. An undo queued by an earlier version, without stored
-  decisions, reverts what it can and keeps the rest.
+  to the apply and its manifest. An inline undo queued by an earlier version has no stored
+  decisions, so nothing says which entries the administrator saw as kept: it is refused
+  with `undo_review_required`, before maintenance or, if that version's worker had begun,
+  before its next entry, and the undo is reviewed again.
 - Kept entries stay undoable within the 24-hour window, which does not change. A kept
   entry's journal record and retained copy are left as they are, and only an undo that kept
   no entry writes the `reverted` marker that ends the window early. Otherwise the apply
