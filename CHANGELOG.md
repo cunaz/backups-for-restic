@@ -267,6 +267,13 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- A live database exchange waits, for at most a minute, until requests that started before maintenance have ended: the site's database account must have had no other connection to the site database for a second, so a request that reconnected in between is waited for as well. Such a request could otherwise write a post or an order into one database generation and its metadata into the other. Connections that stay open, such as persistent database connections or long-running WP-CLI processes, make the exchange try again later. The exchange now needs MySQL 8.0.22 or later with the Performance Schema enabled and listing every connection; the review reports a server that leaves connections out.
+- After a database migration or a failover to another server, a database restore that kept private tables no longer stops backups and all other jobs. Only another database restore waits. The new `wp backups-for-restic database-discard` command and REST action list those tables for removal on the old server and forget them without dropping anything. Uninstall no longer fails on such a restore, and all-tables backups no longer fail because of it.
+- A database undo whose reply was lost is recorded by a later tick or by the heartbeat, which then expires the replaced tables. Before, the heartbeat stopped at that undo for good.
+- `OPTIMIZE TABLE` and other table rebuilds after a database exchange no longer cost the undo of a rebuilt live table, and a rebuilt witness no longer stops expiry and uninstall. A rebuilt retained table is kept and listed on the job instead of being left behind unnoticed.
+- One database restore whose cleanup keeps failing no longer stops older ones from expiring.
+- The database review reports disabled InnoDB table locks, statement-based binary logging and a Galera node before the import starts, instead of failing after it.
+- A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent, and the job log names its size, the limit it needs and the server's limit. It was reported as a busy database and retried.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a

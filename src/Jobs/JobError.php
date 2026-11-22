@@ -41,7 +41,7 @@ defined( 'ABSPATH' ) || exit;
 final readonly class JobError {
 
 	/** Context codes that replace the code derived from the exception class. */
-	private const array CONTEXT_CODES = [ 'decompression_limit', 'no_snapshots', 'retention_external', 'job_unreadable', 'staging_unverified', 'file_plan_too_large', 'file_space', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_busy', 'database_admin_collision', 'database_wordpress_version', 'database_review_required', 'database_exchange_changed', 'database_exchange_failed', 'database_exchange_cleanup', 'file_writes_refused', 'maintenance_opcache', 'protected_path_invalid' ];
+	private const array CONTEXT_CODES = [ 'decompression_limit', 'no_snapshots', 'retention_external', 'job_unreadable', 'staging_unverified', 'file_plan_too_large', 'file_space', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_busy', 'database_admin_collision', 'database_wordpress_version', 'database_review_required', 'database_exchange_changed', 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_binding_missing', 'database_binding_verified', 'database_exchange_rebuilt', 'database_restore_packet', 'protected_path_invalid', 'file_writes_refused', 'maintenance_opcache' ];
 
 	/**
 	 * Creates the error.
@@ -90,7 +90,7 @@ final readonly class JobError {
 		if ( in_array( $context, self::CONTEXT_CODES, true ) ) {
 			$code = $context;
 		}
-		$retryable = in_array( $code, [ 'repository_unreachable', 'repository_locked', 'database_restore_busy' ], true );
+		$retryable = in_array( $code, [ 'repository_unreachable', 'repository_locked', 'database_restore_busy', 'database_exchange_sessions' ], true );
 		$message   = $error instanceof PluginException ? $error->getMessage() : 'Unexpected ' . $error::class . ' at ' . basename( $error->getFile() ) . ':' . $error->getLine();
 		return new self( $code, $message, $retryable );
 	}

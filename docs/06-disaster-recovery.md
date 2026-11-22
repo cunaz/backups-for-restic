@@ -285,13 +285,20 @@ Open the successful database rehearsal under **Backups > Restores** and review t
 database table plan. It distinguishes replacement, creation and tables kept on the
 destination. On a compatible host the initiating WordPress administrator confirms the
 current site address and password. The job imports verified data into private tables
-first. WordPress enters maintenance during the final write-locked exchange. The current
-home and site URLs, active plugins, roles, confirming administrator and sessions, backup
-configuration and cron schedule carry across.
+first. WordPress enters maintenance during the final write-locked exchange. Before it
+takes the locks, the job waits for up to a minute until requests that started before
+maintenance have ended: the site's database account must have had no other connection to
+the site database for a second, so a request that reconnected in between is waited for as
+well. Persistent database connections, long-running WP-CLI processes or another
+application using the same database account keep it waiting; it then leaves maintenance
+and tries again later, at most five times. The current home and site URLs,
+active plugins, roles, confirming administrator and sessions, backup configuration and
+cron schedule carry across.
 
-The automatic exchange supports writable MySQL 8.0.13 or later, InnoDB tables, a
-matching prefix and WordPress schema version, and a standard single-site connection
-with a local object cache. MariaDB supports the rehearsal and the manual recovery
+The automatic exchange supports writable MySQL 8.0.22 or later with the Performance
+Schema enabled and enough of its thread instances to list every connection, InnoDB tables with InnoDB table locks, binary logging in the row or mixed
+format where it is on, no Galera cluster, a matching prefix and WordPress schema version,
+and a standard single-site connection with a local object cache. MariaDB supports the rehearsal and the manual recovery
 procedure above. Missing source trigger information, views, foreign keys, triggers,
 CHECK constraints, incompatible accounts or unsupported database permissions can also
 require that procedure. The MySQL account needs direct access to the affected schema
@@ -309,6 +316,23 @@ New posts, users and ordinary settings created in the intervening live generatio
 remain in private database tables for a further 24 hours. Export any required newer
 data before the undo job's reported retention deadline. The plugin's heartbeat expires
 those private copies. Uninstall also removes them.
+
+**Table maintenance during the window.** `OPTIMIZE TABLE`, `ALTER TABLE … FORCE` and
+`TRUNCATE TABLE` give a table a new internal identity. An undo still works after live
+tables were rebuilt; the review binds to the tables it finds. If a retained copy of the
+original generation was rebuilt, the undo review refuses with a note about a rebuilt
+table, and expiry keeps that table and names it on the apply job. Check it and drop it by
+hand when you no longer need it.
+
+**After the database moved to another server.** A migration, a failover to a replica or a
+restore of the database server's data directory gives the server a new identity. A database
+restore that still keeps private tables then reports on its job that they are on another
+server. Backups go on. Another database restore waits until you decide. Run
+`wp backups-for-restic database-discard <apply-job-id>`: the command lists the database,
+the old server's UUID and the table names, and forgets the binding after you confirm. It
+drops nothing, and the names are not shown again afterwards, so note them first. Drop the
+tables by hand only on the server and in the database where you can verify them. Deleting the plugin forgets such a binding as well, without dropping
+anything; the leftover tables have names that begin with `_bfr_r_` or `bfr_r_`.
 
 **Selective recovery by a database administrator.** Use the original database apply job
 ID to open its private `jobs/<apply-job-id>/job.json`. The following command prints the

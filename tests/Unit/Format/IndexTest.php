@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Format;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\BlobType;
@@ -306,6 +307,12 @@ final class IndexTest extends TestCase {
 		self::assertSame( $pieces, iterator_to_array( $copy->export(), false ), 'The copy keeps the bucket positions.' );
 	}
 
+	/**
+	 * The two indexes of 70,000 blobs and the lists that compare them take about 58 MiB. In a
+	 * process of its own the test does not depend on how much of the 128 MiB limit the tests
+	 * before it have left in one piece.
+	 */
+	#[RunInSeparateProcess]
 	public function test_a_large_index_is_exported_in_pieces_of_about_a_megabyte_and_comes_back_complete(): void {
 		$index = new IndexSet();
 		for ( $pack = 0; $pack < 70; $pack++ ) {
