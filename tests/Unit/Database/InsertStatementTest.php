@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Database\Restore\InsertStatement;
 use BackupsForRestic\Database\Restore\SqlLexer;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 
 final class InsertStatementTest extends TestCase {
@@ -92,5 +93,20 @@ final class InsertStatementTest extends TestCase {
 	public function test_an_oversized_statement_is_refused_before_tokenizing(): void {
 		$this->expectException( FormatException::class );
 		InsertStatement::parse( str_repeat( ' ', SqlLexer::MAX_BYTES + 1 ), 'wp_posts', 'shadow' );
+	}
+
+	public function test_a_batch_that_the_shadow_name_makes_too_large_for_the_packet_limit_is_refused(): void {
+		$line   = "INSERT INTO `wp_postmeta` (`v`) VALUES ('" . str_repeat( 'x', 1000 ) . "');";
+		$batch  = InsertStatement::parse( $line, 'wp_postmeta', '_bfr_r_0123456789abcdef0123456789abcdef_t12' );
+		$length = strlen( $batch->sql );
+		self::assertGreaterThan( strlen( $line ), $length );
+		$batch->fits( $length + InsertStatement::PACKET_MARGIN );
+		try {
+			$batch->fits( $length + InsertStatement::PACKET_MARGIN - 1 );
+			self::fail( 'A batch beyond the packet limit was accepted.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet', $refused->context()['code'] ?? null );
+			self::assertSame( 'A row batch of ' . $length . ' bytes exceeds the database server\'s max_allowed_packet of ' . ( $length + 63 ) . ' bytes.', $refused->getMessage() );
+		}
 	}
 }

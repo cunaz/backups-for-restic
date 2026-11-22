@@ -44,8 +44,11 @@ defined( 'ABSPATH' ) || exit;
  */
 final readonly class DatabaseChanges implements StepProvider {
 
-	/** Client errors after which a session is gone and its last statement's outcome unknown. */
-	private const array LOST = [ 2006, 2013, 2055 ];
+	/**
+	 * Errors after which a session is gone and its last statement's outcome unknown: the
+	 * client's lost connection, and the server closing it for a packet that is too large.
+	 */
+	private const array LOST = [ 1153, 2006, 2013, 2055 ];
 
 	/**
 	 * Checked source and live review builder.
@@ -420,6 +423,9 @@ final readonly class DatabaseChanges implements StepProvider {
 					if ( in_array( $code, self::LOST, true ) ) {
 						$this->interrupted[ $job->id ] = true;
 						$this->renew();
+					}
+					if ( 1153 === $code ) {
+						DatabaseFailed::raise( 'A statement of the snapshot is larger than the database server\'s max_allowed_packet.', [ 'code' => 'database_restore_packet' ] );
 					}
 					if ( in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) ) {
 						DatabaseFailed::raise( 'The database restore is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] );

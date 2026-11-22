@@ -74,9 +74,10 @@ final readonly class TableImporter {
 			function () use ( $maximum_units, $maximum_seconds ): array {
 				$ledger   = new Ledger( $this->connection, $this->tables, $this->manifest, $this->directory );
 				$state    = $ledger->read();
+				$packet   = $this->packet();
 				$deadline = microtime( true ) + $maximum_seconds;
 				for ( $unit = 0; $unit < $maximum_units && 'done' !== $state['phase']; ++$unit ) {
-					$this->unit( $ledger, $state );
+					$this->unit( $ledger, $state, $packet );
 					$state = $ledger->read();
 					if ( microtime( true ) >= $deadline ) {
 						break;
@@ -95,14 +96,29 @@ final readonly class TableImporter {
 	}
 
 	/**
+	 * Reads the session's packet limit, which the server fixes when the session starts.
+	 *
+	 * @return int Bytes.
+	 * @throws DatabaseFailed If the server reports no usable limit.
+	 */
+	private function packet(): int {
+		$value = $this->connection->rows( 'SELECT @@SESSION.max_allowed_packet AS packet' )[0]['packet'] ?? '';
+		if ( 1 !== preg_match( '/\A[1-9][0-9]{0,12}\z/', $value ) ) {
+			throw new DatabaseFailed( 'The database server reported no usable max_allowed_packet.' );
+		}
+		return (int) $value;
+	}
+
+	/**
 	 * Prepares one owned table or commits one row batch/completion record.
 	 *
 	 * @param Ledger $ledger Authoritative progress in the target database.
 	 * @param Cursor $state Committed cursor, under the advisory lock.
+	 * @param int    $packet The session's max_allowed_packet.
 	 * @throws DatabaseFailed If an owned table, inserted batch or cursor cannot be verified.
 	 * @throws \Throwable If a source, ownership check or database write fails.
 	 */
-	private function unit( Ledger $ledger, array $state ): void {
+	private function unit( Ledger $ledger, array $state, int $packet ): void {
 		$shadow = $this->tables->shadow( $state['table'] );
 		$file   = new TableFile( $this->directory, $this->manifest, $state['table'], $shadow, $this->tables->owner );
 		try {
@@ -123,6 +139,7 @@ final readonly class TableImporter {
 				throw new DatabaseFailed( 'The database shadow or its staged source changed since the last batch.' );
 			}
 			$batch = $file->batch( $state['offset'], $state['rows'] );
+			$batch?->fits( $packet );
 			$this->connection->execute( 'START TRANSACTION' );
 			if ( null === $batch ) {
 				$ledger->complete( $state, $file );

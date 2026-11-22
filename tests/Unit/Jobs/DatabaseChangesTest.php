@@ -365,4 +365,32 @@ final class DatabaseChangesTest extends TestCase {
 		}
 		self::assertArrayNotHasKey( 'database_reconcile_until', $job->data );
 	}
+
+	public function test_a_packet_the_server_refused_is_reported_as_such_and_ends_the_session(): void {
+		$job       = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ], JobState::Running );
+		$job->step = 'importing_database';
+		$server    = new class() implements Connection {
+			public int $asked = 0;
+
+			public function rows( string $sql ): array {
+				++$this->asked;
+				throw new DatabaseFailed( 'Got a packet bigger than max_allowed_packet bytes.', [ 'code' => 1153 ] );
+			}
+
+			public function execute( string $sql ): int {
+				++$this->asked;
+				throw new DatabaseFailed( 'Got a packet bigger than max_allowed_packet bytes.', [ 'code' => 1153 ] );
+			}
+		};
+		$changes   = $this->changes( $server );
+		try {
+			$changes->step( JobType::DatabaseApply, 'importing_database' )->advance( $job, $this->jobs->log( $job ), microtime( true ) + 5 );
+			self::fail( 'The refused packet was not reported.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet', $refused->context()['code'] ?? null );
+		}
+		$asked = $server->asked;
+		self::assertFalse( $changes->step( JobType::DatabaseApply, 'cleaning_up' )->advance( $job, $this->jobs->log( $job ), microtime( true ) + 5 ), 'The server closed that session.' );
+		self::assertSame( $asked, $server->asked );
+	}
 }

@@ -841,6 +841,42 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( [ $retained ], array_values( array_filter( $this->private_tables(), static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $applied->data['database_owner']['token'] ) ) ) );
 	}
 
+	public function test_a_batch_beyond_max_allowed_packet_is_refused_before_it_is_sent(): void {
+		$this->db->execute( 'CREATE TABLE wp_big (id INT PRIMARY KEY, v LONGTEXT) ENGINE=InnoDB' );
+		$this->db->execute( "INSERT INTO wp_big VALUES (1, REPEAT('x', 1100000))" );
+		$directory = $this->directory . '/big';
+		mkdir( $directory );
+		foreach ( ( new DatabaseDump( $this->db, $directory . '/state', 'wp_', [], 1767225600 ) )->files() as $file ) {
+			$source = ( $file->source )( null );
+			$fp     = fopen( $directory . '/' . $file->name, 'wb' );
+			for ( $bytes = $source->read( 65536 ); '' !== $bytes; $bytes = $source->read( 65536 ) ) {
+				fwrite( $fp, $bytes );
+			}
+			fclose( $fp );
+		}
+		$manifest = Manifest::parse( (string) file_get_contents( $directory . '/manifest.json' ), 'wp_' );
+		$original = $this->admin->rows( 'SELECT @@GLOBAL.max_allowed_packet AS packet' )[0]['packet'];
+		self::assertMatchesRegularExpression( '/\A[0-9]+\z/', (string) $original );
+		$this->admin->execute( 'SET GLOBAL max_allowed_packet=1048576' );
+		try {
+			$small = MysqliConnection::connect( $this->database ); // The limit applies to sessions opened after the change.
+			self::assertNotNull( $small );
+			$session  = new Direct( $small->mysqli );
+			$importer = new TableImporter( $session, $manifest, $directory, bin2hex( random_bytes( 16 ) ) );
+			try {
+				for ( $i = 0; $i < 100; ++$i ) {
+					$importer->tick( 16 );
+				}
+				self::fail( 'The oversized batch was sent.' );
+			} catch ( DatabaseFailed $refused ) {
+				self::assertSame( 'database_restore_packet', $refused->context()['code'] ?? null, $refused->getMessage() );
+			}
+			self::assertSame( [ [ 'ok' => '1' ] ], $session->rows( 'SELECT 1 AS ok' ), 'The session is intact: the batch was never sent.' );
+		} finally {
+			$this->admin->execute( 'SET GLOBAL max_allowed_packet=' . $original );
+		}
+	}
+
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
 		$this->mysql_only();
 		$site     = $this->directory . '/site';

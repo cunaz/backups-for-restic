@@ -140,6 +140,10 @@ final class Messages {
 				'message' => __( 'The database rehearsal could not finish.', 'backups-for-restic' ),
 				'hint'    => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
 			],
+			'database_restore_packet' => [
+				'message' => __( 'A row batch of the snapshot is larger than the database server accepts in one statement.', 'backups-for-restic' ),
+				'hint'    => __( 'Ask the host to raise max_allowed_packet; the job log names the size that is needed. You can also import the staged SQL files with a client whose packet limit is large enough.', 'backups-for-restic' ),
+			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
 				'hint'    => __( 'The job retries automatically using its saved database progress and operation witness.', 'backups-for-restic' ),

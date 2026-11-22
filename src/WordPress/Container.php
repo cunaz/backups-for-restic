@@ -707,7 +707,7 @@ final class Container {
 	 */
 	private static function closed( \mysqli $handle ): bool {
 		try {
-			return in_array( $handle->errno, [ 2006, 2013, 2055 ], true );
+			return in_array( $handle->errno, [ 1153, 2006, 2013, 2055 ], true );
 		} catch ( \Error ) {
 			return true;
 		}
