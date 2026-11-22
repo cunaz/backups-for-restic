@@ -201,6 +201,29 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_discarding_a_database_binding_counts_a_wrong_password_like_every_confirmation(): void {
+		$output = TestSite::php(
+			'
+			$reported = 0;
+			add_action( "wp_login_failed", static function () use ( &$reported ) {
+				++$reported;
+			} );
+			wp_set_current_user( 1 );
+			$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/database-changes/" . $arguments[0] . "/discard" );
+			$request->set_header( "content-type", "application/json" );
+			$request->set_body( wp_json_encode( [ "user_password" => "wrong-password-test-only" ] ) );
+			$response = rest_do_request( $request );
+			$state    = get_option( "backups_for_restic_state" );
+			$failures = ( $state["password_confirmation"] ?? [] )["user_1"]["failures"] ?? null;
+			unset( $state["password_confirmation"]["user_1"] );
+			update_option( "backups_for_restic_state", $state, false );
+			echo "\n", wp_json_encode( [ $response->get_status(), $response->get_data()["code"] ?? null, $failures, $reported ] );
+			',
+			[ self::JOB ]
+		);
+		self::assertSame( [ 403, 'backups_for_restic_wrong_user_password', 1, 1 ], json_decode( TestSite::last_line( $output ), true ), $output );
+	}
+
 	public function test_wrong_passwords_are_counted_per_user_slowed_down_and_reported_to_login_limiters(): void {
 		$output  = TestSite::php(
 			'

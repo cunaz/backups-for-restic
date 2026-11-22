@@ -769,18 +769,18 @@ final class RestRoutes {
 	/**
 	 * Forgets a database restore binding whose private tables are on another database
 	 * server or in another database. The current user confirms with their WordPress
-	 * password in the JSON body. Nothing is dropped; the answer names the tables that a
-	 * database administrator removes by hand where they are.
+	 * password in the JSON body, through the check that counts wrong passwords for every
+	 * such route (password_refusal()). Nothing is dropped; the answer names the tables that
+	 * a database administrator removes by hand where they are.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error The discarded binding, or a refusal.
 	 */
 	public function discard_database( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$id   = Decoded::string( $request->get_url_params()['id'] ?? null );
-		$body = $request->get_json_params();
-		$user = wp_get_current_user();
-		if ( ! is_string( $body['user_password'] ?? null ) || ! wp_check_password( $body['user_password'], $user->user_pass, $user->ID ) ) {
-			return $this->error( 'wrong_user_password', 403 );
+		$id      = Decoded::string( $request->get_url_params()['id'] ?? null );
+		$refusal = $this->password_refusal( $request );
+		if ( null !== $refusal ) {
+			return $refusal;
 		}
 		$lock = $this->container->runner_lock();
 		if ( ! $lock->acquire() ) {
