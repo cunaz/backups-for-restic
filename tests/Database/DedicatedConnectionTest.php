@@ -5,6 +5,8 @@ namespace BackupsForRestic\Tests\Database;
 
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
+use BackupsForRestic\Database\Dump\TableSource;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Tests\Support\FixedRandom;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\WordPress\WpdbConnection;
@@ -58,9 +60,10 @@ final class DedicatedConnectionTest extends TestCase {
 					'results' => 'utf8mb4',
 					'zone'    => '+00:00',
 					'mode'    => 'NO_AUTO_VALUE_ON_ZERO',
+					'wait'    => (string) TableSource::LOCK_WAIT_SECONDS,
 				],
 			],
-			$dedicated->rows( 'SELECT DATABASE() AS db, @@SESSION.character_set_results AS results, @@SESSION.time_zone AS zone, @@SESSION.sql_mode AS mode' )
+			$dedicated->rows( 'SELECT DATABASE() AS db, @@SESSION.character_set_results AS results, @@SESSION.time_zone AS zone, @@SESSION.sql_mode AS mode, @@SESSION.lock_wait_timeout AS wait' )
 		);
 		self::assertNotSame( $site->rows( 'SELECT CONNECTION_ID() AS id' ), $dedicated->rows( 'SELECT CONNECTION_ID() AS id' ), 'It is a connection of its own.' );
 		self::assertSame( [ [ 'holder' => null ] ], $site->rows( 'SELECT IS_USED_LOCK(' . $lock . ') AS holder' ), 'The lock that identified the server is released.' );
@@ -97,6 +100,40 @@ final class DedicatedConnectionTest extends TestCase {
 			self::markTestSkipped( 'The server did not encrypt the connection.' );
 		}
 		self::assertNull( WpdbConnection::dedicated( $this->wpdb( $site, self::$database ), new SystemRandom(), '+00:00' ), 'Without MYSQL_CLIENT_FLAGS the dump connection would not be encrypted.' );
+	}
+
+	public function test_a_table_that_another_connection_locks_ends_the_transaction_after_a_bounded_wait(): void {
+		self::$admin?->execute( 'CREATE TABLE IF NOT EXISTS `' . self::$database . '`.locked (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		$mysqli = $this->site( self::$database )->mysqli;
+		// Without a bound of the dump's own the session would wait this long.
+		$mysqli->query( 'SET SESSION lock_wait_timeout = 30' );
+		$dedicated = new DedicatedConnection( $mysqli, '+00:00', 1 );
+		$holder    = $this->site( self::$database );
+		$holder->execute( 'LOCK TABLES locked WRITE' );
+		$started = microtime( true );
+		try {
+			$dedicated->begin( 'locked' );
+			self::fail( 'The table is locked.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 1205, $error->context()['errno'] ?? null );
+			self::assertTrue( TableSource::waited( $error ) );
+		} finally {
+			$holder->execute( 'UNLOCK TABLES' );
+		}
+		self::assertLessThan( 10, microtime( true ) - $started );
+		self::assertFalse( $dedicated->in_snapshot(), 'The transaction ended with the failed wait.' );
+		$dedicated->begin( 'locked' );
+		self::assertTrue( $dedicated->in_snapshot() );
+		$dedicated->close();
+	}
+
+	public function test_a_failed_query_of_the_site_connection_carries_the_server_error_number(): void {
+		try {
+			( new WpdbConnection( $this->wpdb( $this->site( self::$database ), self::$database ) ) )->rows( 'SELECT * FROM missing_table' );
+			self::fail( 'The table does not exist.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 1146, $error->context()['errno'] ?? null );
+		}
 	}
 
 	/** @return iterable<string, array{string}> */

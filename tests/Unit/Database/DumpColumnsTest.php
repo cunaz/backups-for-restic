@@ -339,6 +339,34 @@ final class DumpColumnsTest extends TestCase {
 		self::assertSame( 500, $batch->rows );
 	}
 
+	/** @return iterable<string, array{int, ?string}> */
+	public static function page_failures(): iterable {
+		yield 'a lock that another connection holds' => [ 1205, 'database_dump_locked' ];
+		yield 'any other failure' => [ 1146, null ];
+	}
+
+	#[DataProvider( 'page_failures' )]
+	public function test_a_page_that_waited_too_long_for_a_lock_names_its_table_for_a_later_try( int $errno, ?string $code ): void {
+		$db     = new class( $errno ) implements Connection {
+			public function __construct( private readonly int $errno ) {
+			}
+
+			public function rows( string $sql ): array {
+				DatabaseFailed::raise( 'A query of the database dump failed.', [ 'errno' => $this->errno ] );
+			}
+		};
+		$table  = new Table( 'wp_rows', 'CREATE TABLE `wp_rows` (`id` int)', [ 'id' => SqlFormatter::NUMERIC ], 'PRIMARY', [ new KeyColumn( 'id', KeyColumn::INTEGER ) ] );
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		try {
+			$source->read( 65536 );
+			self::fail( 'The page cannot be read.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( $code, $error->context()['code'] ?? null );
+			self::assertSame( null === $code ? null : 'wp_rows', $error->context()['table'] ?? null );
+			self::assertSame( $errno, ( null === $code ? $error : $error->getPrevious() )?->context()['errno'] ?? null, 'The server\'s error stays with the failure.' );
+		}
+	}
+
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {
 		$db     = new class() implements Connection {
 			public function rows( string $sql ): array {

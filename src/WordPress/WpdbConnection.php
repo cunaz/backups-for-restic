@@ -43,10 +43,17 @@ final class WpdbConnection implements Connection {
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- The dump builders quote identifiers, validate numeric seek keys and hex-encode string literals before passing their SQL to this adapter.
 		$result = $this->wpdb->get_results( $sql, ARRAY_A );
 		$error  = $this->wpdb->last_error;
+		$errno  = '' === $error ? 0 : self::errno( $this->wpdb );
 		$this->wpdb->suppress_errors( $suppressed );
 		$this->wpdb->flush();
 		if ( '' !== $error || ! is_array( $result ) ) {
-			DatabaseFailed::raise( 'A database query failed.', [ 'error' => $error ] );
+			DatabaseFailed::raise(
+				'A database query failed.',
+				[
+					'error' => $error,
+					'errno' => $errno,
+				]
+			);
 		}
 
 		$rows = [];
@@ -116,6 +123,19 @@ final class WpdbConnection implements Connection {
 		}
 		$dedicated->close();
 		return null;
+	}
+
+	/**
+	 * The server's error number of the last query, where $wpdb connects with mysqli: the dump
+	 * tells a lock wait timeout from other failures by it, as the text of the error can be in
+	 * any language.
+	 *
+	 * @param \wpdb $wpdb Database object.
+	 * @return int Error number, or 0 if unknown.
+	 */
+	private static function errno( \wpdb $wpdb ): int {
+		$handle = $wpdb->__get( 'dbh' );
+		return $handle instanceof \mysqli ? $handle->errno : 0;
 	}
 
 	/**

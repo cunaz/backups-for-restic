@@ -419,3 +419,8 @@ All notable changes are documented here. The format follows
   of its own, and the database manifest records each table's largest statement. A row too
   large for the PHP memory limit stops the backup with its own message, and the log of the
   job names the table of a failed database dump.
+- A table that another connection keeps locked, for example with `LOCK TABLES` or during
+  a long `ALTER TABLE`, no longer holds a backup step for as long as the server lets a
+  query wait for a lock, a year on MySQL and a day on MariaDB by default. The backup waits
+  five seconds and then tries again later, with growing pauses; a table that stays locked
+  stops the backup at the sixth try with its own message, which names the table.

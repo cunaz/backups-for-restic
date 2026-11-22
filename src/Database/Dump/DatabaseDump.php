@@ -111,7 +111,8 @@ final class DatabaseDump {
 
 	/**
 	 * Opens one table's file at a cursor. On a connection of the dump's own, its transaction
-	 * starts before the definition is read, so that definition and rows belong together.
+	 * starts before the definition is read, so that definition and rows belong together. A
+	 * table that another connection keeps locked stops the tick with database_dump_locked.
 	 *
 	 * @param string      $time_zone Time zone of the dump's reads.
 	 * @param string      $name     Table name.
@@ -119,15 +120,20 @@ final class DatabaseDump {
 	 * @param string      $preamble Session settings.
 	 * @param string|null $cursor   Cursor, or null to start.
 	 * @return TableSource Source.
-	 * @throws DatabaseFailed If the table cannot be described.
+	 * @throws DatabaseFailed If the table cannot be described or stays locked.
 	 */
 	private function table( string $time_zone, string $name, string $file, string $preamble, ?string $cursor ): TableSource {
-		$reader = $this->reader( $time_zone );
-		if ( $reader instanceof DedicatedConnection ) {
-			$reader->begin( $name );
-		}
+		$reader  = $this->reader( $time_zone );
 		$catalog = new Catalog( $reader );
-		return new TableSource( $reader, $catalog->table( $name ), $preamble, $cursor, fn ( array $result ) => $this->record( $file, $name, $result ), static fn (): Table => $catalog->table( $name ) );
+		try {
+			if ( $reader instanceof DedicatedConnection ) {
+				$reader->begin( $name );
+			}
+			$table = $catalog->table( $name );
+		} catch ( DatabaseFailed $error ) {
+			TableSource::rethrow( $error, $name );
+		}
+		return new TableSource( $reader, $table, $preamble, $cursor, fn ( array $result ) => $this->record( $file, $name, $result ), static fn (): Table => $catalog->table( $name ) );
 	}
 
 	/**

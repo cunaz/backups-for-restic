@@ -11,8 +11,8 @@ use PHPUnit\Framework\TestCase;
 
 final class DumpSessionTest extends TestCase {
 
-	private const string SAVE    = 'SET @bfr_dump_client = @@SESSION.character_set_client, @bfr_dump_results = @@SESSION.character_set_results, @bfr_dump_collation = @@SESSION.collation_connection, @bfr_dump_time_zone = @@SESSION.time_zone, @bfr_dump_sort_length = @@SESSION.max_sort_length, @bfr_dump_select_limit = @@SESSION.sql_select_limit, SESSION character_set_client = utf8mb4, character_set_results = utf8mb4, character_set_connection = utf8mb4';
-	private const string RESTORE = 'SET SESSION character_set_client = @bfr_dump_client, character_set_results = @bfr_dump_results, collation_connection = @bfr_dump_collation, time_zone = @bfr_dump_time_zone, max_sort_length = @bfr_dump_sort_length, sql_select_limit = @bfr_dump_select_limit, @bfr_dump_client = NULL, @bfr_dump_results = NULL, @bfr_dump_collation = NULL, @bfr_dump_time_zone = NULL, @bfr_dump_sort_length = NULL, @bfr_dump_select_limit = NULL';
+	private const string SAVE    = 'SET @bfr_dump_client = @@SESSION.character_set_client, @bfr_dump_results = @@SESSION.character_set_results, @bfr_dump_collation = @@SESSION.collation_connection, @bfr_dump_time_zone = @@SESSION.time_zone, @bfr_dump_sort_length = @@SESSION.max_sort_length, @bfr_dump_select_limit = @@SESSION.sql_select_limit, @bfr_dump_lock_wait = @@SESSION.lock_wait_timeout, SESSION character_set_client = utf8mb4, character_set_results = utf8mb4, character_set_connection = utf8mb4';
+	private const string RESTORE = 'SET SESSION character_set_client = @bfr_dump_client, character_set_results = @bfr_dump_results, collation_connection = @bfr_dump_collation, time_zone = @bfr_dump_time_zone, max_sort_length = @bfr_dump_sort_length, sql_select_limit = @bfr_dump_select_limit, lock_wait_timeout = @bfr_dump_lock_wait, @bfr_dump_client = NULL, @bfr_dump_results = NULL, @bfr_dump_collation = NULL, @bfr_dump_time_zone = NULL, @bfr_dump_sort_length = NULL, @bfr_dump_select_limit = NULL, @bfr_dump_lock_wait = NULL';
 
 	public function test_every_query_runs_between_the_dump_settings_and_the_site_settings(): void {
 		$site       = $this->site();
@@ -24,14 +24,14 @@ final class DumpSessionTest extends TestCase {
 		$probe = array_slice( $site->statements, 0, 3 );
 		self::assertMatchesRegularExpression( '/\ASET @bfr_dump_probe = 0x[0-9a-f]+\z/', $probe[0] );
 		self::assertSame( [ 'SELECT HEX(@bfr_dump_probe) AS probe', 'SET @bfr_dump_probe = NULL' ], array_slice( $probe, 1 ) );
-		$query = [ self::SAVE . ', time_zone = 0x2b30303a3030, max_sort_length = 8388608, sql_select_limit = 18446744073709551615', 'SELECT 1 AS a', self::RESTORE ];
+		$query = [ self::SAVE . ', time_zone = 0x2b30303a3030, max_sort_length = 8388608, sql_select_limit = 18446744073709551615, lock_wait_timeout = 5', 'SELECT 1 AS a', self::RESTORE ];
 		self::assertSame( [ ...$query, ...$query ], array_slice( $site->statements, 3 ), 'The probe runs once; every query is wrapped.' );
 	}
 
 	public function test_a_dump_that_keeps_the_session_time_zone_does_not_set_one(): void {
 		$site = $this->site();
 		( new SharedConnection( $site, null ) )->rows( 'SELECT 1 AS a' );
-		self::assertSame( [ self::SAVE . ', max_sort_length = 8388608, sql_select_limit = 18446744073709551615', 'SELECT 1 AS a', self::RESTORE ], array_slice( $site->statements, 3 ) );
+		self::assertSame( [ self::SAVE . ', max_sort_length = 8388608, sql_select_limit = 18446744073709551615, lock_wait_timeout = 5', 'SELECT 1 AS a', self::RESTORE ], array_slice( $site->statements, 3 ) );
 	}
 
 	public function test_a_failed_query_still_restores_the_site_settings_and_reports_its_own_error(): void {

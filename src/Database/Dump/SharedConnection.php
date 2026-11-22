@@ -15,7 +15,8 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Runs each query of the dump with utf8mb4 as the character set of the connection and of
- * its results, the time zone +00:00, the largest sort length and no row limit, on a connection that
+ * its results, the time zone +00:00, the largest sort length, no row limit and a short wait
+ * for locks (TableSource::LOCK_WAIT_SECONDS), on a connection that
  * WordPress and other plugins use in the same request (ADR 0021). Rows and definitions are
  * read the same whatever DB_CHARSET or the session's time zone is.
  *
@@ -36,6 +37,7 @@ final class SharedConnection implements Connection {
 		'time_zone'             => '@bfr_dump_time_zone',
 		'max_sort_length'       => '@bfr_dump_sort_length',
 		'sql_select_limit'      => '@bfr_dump_select_limit',
+		'lock_wait_timeout'     => '@bfr_dump_lock_wait',
 	];
 
 	/**
@@ -92,7 +94,7 @@ final class SharedConnection implements Connection {
 			$saves[] = $user . ' = @@SESSION.' . $variable;
 		}
 		$zone = null === $this->time_zone ? '' : ', time_zone = ' . self::literal( $this->time_zone );
-		return 'SET ' . implode( ', ', $saves ) . ', SESSION character_set_client = utf8mb4, character_set_results = utf8mb4, character_set_connection = utf8mb4' . $zone . ', max_sort_length = 8388608, sql_select_limit = 18446744073709551615';
+		return 'SET ' . implode( ', ', $saves ) . ', SESSION character_set_client = utf8mb4, character_set_results = utf8mb4, character_set_connection = utf8mb4' . $zone . ', max_sort_length = 8388608, sql_select_limit = 18446744073709551615, lock_wait_timeout = ' . TableSource::LOCK_WAIT_SECONDS;
 	}
 
 	/**

@@ -16,7 +16,7 @@ defined( 'ABSPATH' ) || exit;
 /**
  * The dump's own session on the site's database server (ADR 0021). Because nothing else
  * uses it, the dump's settings are made once (utf8mb4, +00:00, the dump's SQL mode, the
- * largest sort length and no row limit), and the pages of a table can be read inside a read-only transaction:
+ * largest sort length, no row limit and a short wait for locks), and the pages of a table can be read inside a read-only transaction:
  * InnoDB then serves every page of one tick from one consistent snapshot. The site's own
  * connection never sees a transaction or a changed setting of the dump.
  *
@@ -24,6 +24,8 @@ defined( 'ABSPATH' ) || exit;
  * table before its definition is read. That statement takes the table's metadata lock for the
  * rest of the transaction, so no ALTER can change the definition while the tick reads the
  * table. A DDL statement on that table waits until end(), at most until the end of the tick.
+ * Where another connection holds a lock that keeps the read from starting, begin() gives up
+ * after TableSource::LOCK_WAIT_SECONDS and ends its transaction (DatabaseDump).
  *
  * A table without a key is read with one unbuffered statement (stream()). Closing such a
  * read before its end would make the client read the rest of the table first, so abandon()
@@ -57,9 +59,10 @@ final class DedicatedConnection implements Connection {
 	 *
 	 * @param \mysqli     $mysqli    Connected handle of the dump's own.
 	 * @param string|null $time_zone Time zone for the dump's reads, or null to keep the session's; see DatabaseDump.
+	 * @param int         $lock_wait Seconds that a read waits for a lock that another connection holds.
 	 * @throws DatabaseFailed If a setting is refused.
 	 */
-	public function __construct( private readonly \mysqli $mysqli, ?string $time_zone ) {
+	public function __construct( private readonly \mysqli $mysqli, ?string $time_zone, int $lock_wait = TableSource::LOCK_WAIT_SECONDS ) {
 		try {
 			if ( true !== $this->attempt( fn (): bool => $this->mysqli->set_charset( 'utf8mb4' ) ) ) {
 				throw new DatabaseFailed( 'The character set of the dump connection could not be set.' );
@@ -67,7 +70,9 @@ final class DedicatedConnection implements Connection {
 			$zone = null === $time_zone ? '' : ', time_zone = 0x' . bin2hex( $time_zone );
 			// A new session inherits sql_select_limit from the server's settings, and the limit
 			// cuts SELECT and, on MySQL 8, SHOW short without an error.
-			$this->rows( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', sql_quote_show_create = 1, max_sort_length = 8388608, sql_select_limit = 18446744073709551615" . $zone );
+			// lock_wait_timeout is a year on MySQL and a day on MariaDB unless the server's
+			// settings say otherwise: a tick would wait that long for a locked table.
+			$this->rows( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', sql_quote_show_create = 1, max_sort_length = 8388608, sql_select_limit = 18446744073709551615, lock_wait_timeout = " . max( 1, $lock_wait ) . $zone );
 			$this->rows( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' );
 		} catch ( DatabaseFailed $error ) {
 			$this->close();
@@ -103,7 +108,9 @@ final class DedicatedConnection implements Connection {
 
 	/**
 	 * Starts a read-only transaction for one table and takes the table's metadata lock, before
-	 * the table's definition and rows are read.
+	 * the table's definition and rows are read. If the lock cannot be taken, for example
+	 * because another connection holds the table with LOCK TABLES ... WRITE for longer than
+	 * the session waits, the transaction ends again.
 	 *
 	 * @param string $table Table name.
 	 * @throws DatabaseFailed If the transaction cannot be started or the table cannot be read.
@@ -112,7 +119,17 @@ final class DedicatedConnection implements Connection {
 		$this->end();
 		$this->rows( 'START TRANSACTION READ ONLY' );
 		$this->transaction = true;
-		$this->rows( 'SELECT 1 FROM ' . SqlFormatter::identifier( $table ) . ' LIMIT 0' );
+		try {
+			$this->rows( 'SELECT 1 FROM ' . SqlFormatter::identifier( $table ) . ' LIMIT 0' );
+		} catch ( DatabaseFailed $error ) {
+			try {
+				$this->end();
+			} catch ( DatabaseFailed ) {
+				// The server rolls the transaction back when the connection closes.
+				$this->close();
+			}
+			throw $error;
+		}
 	}
 
 	/**

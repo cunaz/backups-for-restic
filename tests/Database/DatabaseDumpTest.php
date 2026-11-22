@@ -9,11 +9,15 @@ use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Database\Dump\TableSource;
+use BackupsForRestic\Engine\Backup\VirtualFile;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Support\ResumableByteSource;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
+use BackupsForRestic\WordPress\WpdbConnection;
+
+require_once dirname( __DIR__ ) . '/Support/WordPress/wpdb.php';
 
 /**
  * The dump format against a real MySQL or MariaDB server: what the plugin writes imports with
@@ -647,6 +651,43 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( [ [ 'n' => '5' ] ], $target->rows( 'SELECT COUNT(*) AS n FROM lim_keyed' ) );
 		self::assertSame( $triggers, $manifest['trigger_tables'], 'The grants were read in full.' );
 		self::assertSame( [ [ 'l' => '2' ] ], $db->rows( 'SELECT @@SESSION.sql_select_limit AS l' ), 'The site connection keeps its limit.' );
+	}
+
+	#[DataProvider( 'connections' )]
+	public function test_a_table_that_another_connection_keeps_locked_stops_the_tick_for_a_later_try( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS lock_rows' );
+		$db->execute( 'CREATE TABLE lock_rows (id INT NOT NULL PRIMARY KEY, body VARCHAR(20)) ENGINE=InnoDB' );
+		$db->execute( "INSERT INTO lock_rows VALUES (1, 'a'), (2, 'b')" );
+		// Without a bound of the dump's own a session would wait this long for the lock.
+		$db->execute( 'SET SESSION lock_wait_timeout = 30' );
+		$open = static function ( ?string $time_zone ): DedicatedConnection {
+			$mysqli = self::database( self::$source )->mysqli;
+			$mysqli->query( 'SET SESSION lock_wait_timeout = 30' );
+			return new DedicatedConnection( $mysqli, $time_zone, 1 );
+		};
+		// The site's connection as WordPress gives it to the dump.
+		$site   = $dedicated ? $db : new WpdbConnection( new \wpdb( $db->mysqli, 'localhost', 'unused', 'unused', self::$source ) );
+		$files  = ( new DatabaseDump( $site, $this->directory . '/lock.json', 'lock_', [], 1767323100, $dedicated ? $open : null ) )->files();
+		$table  = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-lock_rows.sql' === $file->name ) )[0];
+		$holder = self::database( self::$source );
+		$holder->execute( 'LOCK TABLES lock_rows WRITE' );
+		$started = microtime( true );
+		try {
+			$this->read( $table->source, PHP_INT_MAX );
+			self::fail( 'The table is locked.' );
+		} catch ( DatabaseFailed $error ) {
+			$job_error = JobError::from_throwable( $error );
+			self::assertSame( 'database_dump_locked', $job_error->code );
+			self::assertTrue( $job_error->retryable, 'The job tries again later.' );
+			self::assertSame( 'lock_rows', $error->context()['table'] ?? null );
+		} finally {
+			$holder->execute( 'UNLOCK TABLES' );
+		}
+		self::assertLessThan( 20, microtime( true ) - $started, 'The dump waits as long as it allows, not as the session would.' );
+		self::assertSame( [ [ 'wait' => '30' ] ], $db->rows( 'SELECT @@SESSION.lock_wait_timeout AS wait' ), 'The site connection keeps its own wait.' );
+
+		self::assertStringContainsString( "INSERT INTO `lock_rows` (`id`,`body`) VALUES (1,'a'),(2,'b');", $this->read( $table->source, PHP_INT_MAX ), 'The next try reads the table.' );
 	}
 
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {

@@ -299,9 +299,10 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 - `detecting` is the append-only probe of forget and prune jobs
   ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
   by the heartbeat after a successful backup, not a step of the backup job.
-- An error with a retryable code (`repository_unreachable`, `repository_locked`) does not
-  fail the job at once: the runner waits 30 s, then twice as long after each further failure
-  in a row, and fails the job at the sixth.
+- An error with a retryable code (`repository_unreachable`, `repository_locked`,
+  `database_restore_busy`, `database_dump_locked`) does not fail the job at once: the runner
+  waits 30 s, then twice as long after each further failure in a row, and fails the job at
+  the sixth.
 - A **restore job** ([ADR 0037](adr/0037-restore-job.md)) carries its request in the job
   document from its creation: `data.snapshot`, the full ID, and `data.paths`, the selected
   snapshot paths (`Jobs\Restore\RestoreRequest`; an invalid request creates no job).
@@ -671,7 +672,9 @@ between two ticks can appear twice, and an import then stops with a duplicate ke
 manifest records for each table which key ordered its pages, whether all rows come from one
 read view, how often it started over and its largest statement. A table whose definition
 changes during its dump starts over, at most three times, then the backup stops with
-`database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)).
+`database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)). Every read waits at
+most five seconds for a lock that another connection holds on a table; then the tick stops
+with the retryable `database_dump_locked`, and the job continues the table later.
 
 Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
 rows, cursor and content transcript commit in one transaction. The report compares
@@ -1357,13 +1360,15 @@ translated message and a hint. The codes:
 | `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change; or a secret that was just stored does not read back unchanged (`EncryptedOptionStore::set()`) |
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
 | `database_dump_failed` | a query of the dump failed |
+| `database_dump_locked` | another connection kept a table locked for longer than the dump waits, five seconds; retryable ([ADR 0021](adr/0021-database-streaming.md)) |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
 | `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |
 
-Only `repository_unreachable` and `repository_locked` are retryable (§4.4). A cancelled job
+Only `repository_unreachable`, `repository_locked`, `database_restore_busy` and
+`database_dump_locked` are retryable (§4.4). A cancelled job
 ends in the state `cancelled` without an error code, and there is no `timeout` code: a tick
 that runs out of time simply continues in the next one. Codes for restore
 (`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.

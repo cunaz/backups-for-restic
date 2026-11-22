@@ -76,6 +76,16 @@ final class TableSource implements ResumableByteSource {
 	public const int MAX_RESTARTS = 3;
 
 	/**
+	 * How long a read of the dump waits for a lock that another connection holds on a table,
+	 * for example with LOCK TABLES ... WRITE or during the last phase of an ALTER TABLE. The
+	 * dump then stops with database_dump_locked, and the job tries again later.
+	 */
+	public const int LOCK_WAIT_SECONDS = 5;
+
+	/** The server's error for a lock that was not granted in time, the same on MySQL and MariaDB. */
+	private const int LOCK_WAIT_TIMEOUT = 1205;
+
+	/**
 	 * Produced but not yet read output, in the pieces it was produced in: a large statement is
 	 * never copied into one string, and reading does not copy what is left.
 	 *
@@ -478,8 +488,8 @@ final class TableSource implements ResumableByteSource {
 				}
 			} catch ( DatabaseFailed $error ) {
 				// A column that was dropped or changed makes a page fail: the table starts over.
-				if ( ! $this->definition_changed() ) {
-					throw $error;
+				if ( self::waited( $error ) || ! $this->definition_changed() ) {
+					self::rethrow( $error, $this->table->name );
 				}
 				$this->changed = true;
 				$this->stop();
@@ -505,6 +515,39 @@ final class TableSource implements ResumableByteSource {
 				'largest'  => $this->largest,
 			]
 		);
+	}
+
+	/**
+	 * Whether a query failed because a lock that another connection holds was not granted
+	 * within LOCK_WAIT_SECONDS.
+	 *
+	 * @param DatabaseFailed $error Failure of a query.
+	 * @return bool True for a lock wait timeout.
+	 */
+	public static function waited( DatabaseFailed $error ): bool {
+		return self::LOCK_WAIT_TIMEOUT === ( $error->context()['errno'] ?? null );
+	}
+
+	/**
+	 * Reports the failure of a query of a table: a lock wait timeout as database_dump_locked,
+	 * which names the table and which the job tries again later; anything else as it is.
+	 *
+	 * @param DatabaseFailed $error Failure of a query.
+	 * @param string         $table Table name.
+	 * @throws DatabaseFailed Always.
+	 */
+	public static function rethrow( DatabaseFailed $error, string $table ): never {
+		if ( self::waited( $error ) ) {
+			DatabaseFailed::raise(
+				'A database table stayed locked by another connection for longer than the dump waits.',
+				[
+					'table' => $table,
+					'code'  => 'database_dump_locked',
+				],
+				$error
+			);
+		}
+		throw $error;
 	}
 
 	/**

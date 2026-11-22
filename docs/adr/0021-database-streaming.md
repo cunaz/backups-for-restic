@@ -83,6 +83,16 @@ and makes an interrupted dump start from zero.
   earlier parts), at most three times; then the backup stops with
   `database_dump_unstable`, which names the table. Through `$wpdb` nothing holds the
   definition during a tick, so it is read again before a stop and before the trailer.
+- **Locked tables.** Every read of the dump waits at most five seconds for a lock that
+  another connection holds (`lock_wait_timeout`, which is a year on MySQL and a day on
+  MariaDB unless the server's settings say otherwise), for example a table held with
+  `LOCK TABLES ... WRITE` or by the last phase of an `ALTER TABLE`. On the dump's own
+  connection the transaction of a table whose lock was not granted ends at once. The tick
+  then stops with `database_dump_locked`, which names the table, and the job tries again
+  as after any retryable error: 30 seconds later, then twice as long after each further
+  failure in a row. The work of the tick since its last checkpoint is done again, and the
+  table continues from its cursor. A table that stays locked fails the job at the sixth
+  failure in a row, about a quarter of an hour after the first.
 - **Large rows.** A row too large to share a statement is written as one of its own,
   whatever its size, as long as PHP can hold it; the plugin's importer reads statements up
   to 16 MiB (ADR 0035), the command-line client as large as `max_allowed_packet` allows.
