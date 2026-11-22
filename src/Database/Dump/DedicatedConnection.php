@@ -181,11 +181,13 @@ final class DedicatedConnection implements Connection {
 
 	/**
 	 * Stops a stream before its end by closing the connection, which also ends a transaction.
+	 * The connection closes before the result is let go: freeing an unbuffered result on an
+	 * open connection makes the client read and discard every row that is left.
 	 */
 	public function abandon(): void {
 		if ( null !== $this->stream ) {
-			$this->stream = null;
 			$this->close();
+			$this->stream = null;
 		}
 	}
 

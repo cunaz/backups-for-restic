@@ -122,6 +122,20 @@ final class DedicatedConnectionTest extends TestCase {
 		$dedicated->close();
 	}
 
+	public function test_abandoning_a_read_closes_the_connection_without_fetching_the_rest_of_the_table(): void {
+		self::$admin?->execute( 'CREATE TABLE IF NOT EXISTS `' . self::$database . '`.streamed (a INT) ENGINE=InnoDB' );
+		self::$admin?->execute( 'INSERT INTO `' . self::$database . '`.streamed VALUES (' . implode( '),(', range( 1, 5000 ) ) . ')' );
+		$dedicated = new DedicatedConnection( $this->site( self::$database )->mysqli, '+00:00' );
+		$dedicated->stream( 'SELECT a FROM streamed' );
+		self::assertNotNull( $dedicated->next() );
+
+		$skipped = mysqli_get_client_stats()['rows_skipped_normal'] ?? null;
+		$dedicated->abandon();
+
+		self::assertTrue( $dedicated->closed() );
+		self::assertSame( $skipped, mysqli_get_client_stats()['rows_skipped_normal'] ?? null, 'The client read none of the rows that were left.' );
+	}
+
 	private function site( string $database ): MysqliConnection {
 		$site = MysqliConnection::connect( $database );
 		self::assertNotNull( $site );
