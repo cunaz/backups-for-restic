@@ -179,7 +179,9 @@ final readonly class DatabaseGeneration {
 	/**
 	 * Records an undo that committed although its request lost the reply, from the attempt
 	 * that the undo saved on the owner before its RENAME. The undo job, if it still exists,
-	 * shows the recovered outcome as well. Without that attempt nothing is recorded.
+	 * shows the recovered outcome as well. Without that attempt nothing is recorded. The
+	 * owner gives up the attempt only after the worker was saved, and a worker that already
+	 * shows the outcome is left as it is, so a failed save repeats the whole recovery once.
 	 *
 	 * @param JobStore $jobs Directory-local store.
 	 * @param Job      $owner Original apply.
@@ -190,17 +192,18 @@ final readonly class DatabaseGeneration {
 		if ( ! is_int( $at ) || $at < 1 ) {
 			return;
 		}
-		$owner->data['database_generation'] = 'undone';
-		$owner->data['retained_until']      = $at + self::WINDOW;
-		unset( $owner->data['database_undo_attempt'] );
-		$jobs->save( $owner );
+		$until  = $at + self::WINDOW;
 		$worker = is_string( $attempt['job'] ?? null ) ? $jobs->get( $attempt['job'] ) : null;
-		if ( null !== $worker && JobType::DatabaseUndo === $worker->type && $worker->state->is_terminal() ) {
+		if ( null !== $worker && JobType::DatabaseUndo === $worker->type && $worker->state->is_terminal() && ( 'undone' !== ( $worker->result['database_generation'] ?? null ) || $until !== ( $worker->result['retained_until'] ?? null ) ) ) {
 			$worker->result['database_generation'] = 'undone';
-			$worker->result['retained_until']      = $at + self::WINDOW;
+			$worker->result['retained_until']      = $until;
 			$worker->warn( 'The database undo had committed although its request lost the reply; the heartbeat recorded it.' );
 			$jobs->save( $worker );
 		}
+		$owner->data['database_generation'] = 'undone';
+		$owner->data['retained_until']      = $until;
+		unset( $owner->data['database_undo_attempt'] );
+		$jobs->save( $owner );
 	}
 
 	/**

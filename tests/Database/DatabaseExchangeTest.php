@@ -31,8 +31,10 @@ use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /** Every live table in this suite belongs to one randomly named disposable database. */
@@ -796,6 +798,60 @@ final class DatabaseExchangeTest extends TestCase {
 		}
 		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $apply->id )?->data ?? [ 'database_owner' => true ] );
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	/** @return iterable<string, array{string}> */
+	public static function unwritable(): iterable {
+		yield 'the undo job' => [ 'undo' ];
+		yield 'the apply job' => [ 'apply' ];
+	}
+
+	/**
+	 * The heartbeat records a lost undo on both jobs even when it cannot write one of them
+	 * the first time; the next heartbeat repeats the recovery and warns once.
+	 *
+	 * @param 'undo'|'apply' $locked Job whose directory is read-only during the first heartbeat.
+	 */
+	#[DataProvider( 'unwritable' )]
+	public function test_the_recovery_of_a_lost_undo_survives_a_failed_save( string $locked ): void {
+		$this->mysql_only();
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Directory permissions do not bind root.' );
+		}
+		[ 'services' => $services, 'wire' => $wire, 'apply' => $apply, 'undo' => $undo ] = $this->lost_undo_reply();
+		$wire['down'] = true;
+		++$wire['request'];
+		$services['runner']->tick( 0.08 );
+		$services['clock']->seconds += 601;
+		$ended                       = self::advance( $services['runner'], $undo );
+		self::assertSame( JobState::Cancelled, $ended->state );
+		$wire['down'] = false;
+		++$wire['request'];
+		$services['clock']->seconds = $apply->result['retained_until'] + 1;
+		$directory                  = $services['jobs']->directory( 'undo' === $locked ? $ended : $apply );
+		chmod( $directory, 0500 );
+		try {
+			$services['changes']->expire( false, microtime( true ) + 10 );
+			self::fail( 'The heartbeat saved a job into a read-only directory.' );
+		} catch ( StorageFailed ) {
+			$owner = $services['jobs']->get( $apply->id );
+			self::assertNotNull( $owner );
+			self::assertSame( 'applied', $owner->data['database_generation'], 'The owner keeps the attempt until it is recorded.' );
+			self::assertArrayHasKey( 'database_undo_attempt', $owner->data );
+		} finally {
+			chmod( $directory, 0700 );
+		}
+		self::assertTrue( $services['changes']->expire( false, microtime( true ) + 10 ) );
+		$owner  = $services['jobs']->get( $apply->id );
+		$worker = $services['jobs']->get( $undo->id );
+		self::assertNotNull( $owner );
+		self::assertNotNull( $worker );
+		self::assertSame( 'undone', $owner->data['database_generation'] );
+		self::assertArrayNotHasKey( 'database_undo_attempt', $owner->data );
+		self::assertSame( $ended->data['database_swapping_at'] + DatabaseGeneration::WINDOW, $owner->data['retained_until'] );
+		self::assertSame( 'undone', $worker->result['database_generation'] ?? null );
+		self::assertSame( $owner->data['retained_until'], $worker->result['retained_until'] ?? null );
+		self::assertCount( 1, array_filter( $worker->warnings, static fn ( string $warning ): bool => str_contains( $warning, 'the heartbeat recorded it' ) ) );
 	}
 
 	/** Rebuilds a table as OPTIMIZE TABLE does for InnoDB, which assigns it a new TABLE_ID. */
