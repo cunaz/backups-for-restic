@@ -63,8 +63,11 @@ The site records each delivery. Store the file with the other offline recovery m
 2. Choose **Build a ZIP for download** if you want one archive. Its size is about the
    total size of the staged files. Select **Restore to staging** to start the job.
 3. Follow progress under **Backups → Restores**. Download a file by its absolute path
-   in the snapshot, or download the ZIP you requested. The restore report lists skipped
-   entries such as symbolic links.
+   in the snapshot, or download the ZIP you requested. Both ask for your WordPress
+   password, because a restored `wp-config.php` and database dump together unlock the
+   stored passwords; each such download is recorded under **Settings**. After several
+   wrong passwords the next attempt waits, up to an hour. The restore report lists skipped
+   entries such as symbolic links and needs no password.
 4. To put the staged files back, expand **Restore files to the live site** and choose
    **Preview live file changes**. Read the actions and live paths. A site administrator
    who can update WordPress core can acknowledge the preview, type the site's address and

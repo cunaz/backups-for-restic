@@ -35,23 +35,26 @@ final class BrowserProbeTest extends TestCase {
 		TempDir::remove( $this->directory );
 	}
 
+	/** The known file that a browser requests beside the probe file, as this site serves it. */
+	private const string CONTROL = "/* Backups admin page. */\n";
+
 	private function probe(): BrowserProbe {
 		return new BrowserProbe( new PrivateDirectory( $this->directory . '/private' ), new SiteState( $this->options ), new SystemRandom(), $this->clock );
 	}
 
 	/**
-	 * Begins a probe as the page of one browser tab does.
+	 * Begins a probe as the page of one browser tab does, with the known file beside it.
 	 */
 	private function begin(): string {
-		$this->begun = $this->probe()->begin();
+		$this->begun = $this->probe()->begin( '', hash( 'sha256', self::CONTROL ) );
 		return $this->begun;
 	}
 
 	/**
-	 * Reports on the probe that was begun last.
+	 * Reports on the probe that was begun last; the browser got the known file back.
 	 */
 	private function finish( int $status, string $body ): ?bool {
-		return $this->probe()->finish( $this->begun, $status, $body );
+		return $this->probe()->finish( $this->begun, $status, $body, 200, self::CONTROL );
 	}
 
 	private function file( string $name ): string {
@@ -71,12 +74,31 @@ final class BrowserProbeTest extends TestCase {
 		self::assertFileDoesNotExist( $this->file( $name ), 'The probe file is gone once it was reported on.' );
 	}
 
-	public function test_a_report_without_the_content_means_protected(): void {
+	public function test_a_refusal_with_the_known_file_beside_it_means_protected(): void {
 		foreach ( [ [ 403, 'Forbidden' ], [ 404, '' ], [ 410, '' ] ] as [ $status, $body ] ) {
 			$this->begin();
 			self::assertFalse( $this->finish( $status, $body ), (string) $status );
 			self::assertFalse( $this->probe()->result() );
 		}
+	}
+
+	public function test_a_refusal_without_the_known_file_of_this_site_says_nothing(): void {
+		$this->begin();
+		self::assertFalse( $this->finish( 403, 'Forbidden' ) );
+		// A firewall, a CDN challenge or another site refuses the probe and answers the known
+		// file with a refusal, a page of its own, or a stylesheet that is not this site's.
+		foreach ( [ [ 403, 'Forbidden' ], [ 200, '<html>Checking your browser</html>' ], [ 200, self::CONTROL . ' ' ], [ 304, '' ], [ 0, '' ] ] as [ $status, $body ] ) {
+			$this->begun = $this->probe()->begin( '', hash( 'sha256', self::CONTROL ) );
+			self::assertNull( $this->probe()->finish( $this->begun, 403, 'Forbidden', $status, $body ), $status . ' ' . $body );
+			self::assertNull( $this->probe()->result(), 'An unconfirmed refusal also ends the result before it.' );
+		}
+
+		// Without a known file at the probe's origin nothing can confirm a refusal.
+		$this->begun = $this->probe()->begin( '/elsewhere/' );
+		self::assertNull( $this->probe()->finish( $this->begun, 404, '', 200, self::CONTROL ) );
+		self::assertNull( BrowserProbe::classify( 403, '', 'token', false ) );
+		self::assertFalse( BrowserProbe::classify( 403, '', 'token', true ) );
+		self::assertTrue( BrowserProbe::classify( 403, 'token', 'token', false ), 'The content needs no confirmation.' );
 	}
 
 	public function test_an_inconclusive_http_response_cannot_authorize_staging(): void {
@@ -88,12 +110,32 @@ final class BrowserProbeTest extends TestCase {
 	}
 
 	public function test_a_denial_only_counts_for_the_tested_location_and_lifetime(): void {
-		$this->begun = $this->probe()->begin( '/one/' );
+		$this->begun = $this->probe()->begin( '/one/', hash( 'sha256', self::CONTROL ) );
 		self::assertFalse( $this->finish( 403, '' ) );
 		self::assertNull( $this->probe()->result( '/two/' ) );
 		self::assertFalse( $this->probe()->result( '/one/' ) );
 		$this->clock->advance( BrowserProbe::RESULT_SECONDS );
 		self::assertNull( $this->probe()->result( '/one/' ) );
+	}
+
+	public function test_a_refusal_recorded_before_the_known_file_was_required_says_nothing(): void {
+		$state = new SiteState( $this->options );
+		$this->begin();
+		self::assertFalse( $this->finish( 403, '' ) );
+		self::assertTrue( $state->get( 'exposure_browser' )['result']['confirmed'] );
+		// As an earlier version stored it: location, verdict and time only.
+		$entry = $state->get( 'exposure_browser' );
+		unset( $entry['result']['confirmed'] );
+		$state->set( 'exposure_browser', $entry );
+		self::assertNull( $this->probe()->result(), 'An unconfirmed refusal must not permit staging.' );
+		$entry['result']['confirmed'] = false;
+		$state->set( 'exposure_browser', $entry );
+		self::assertNull( $this->probe()->result() );
+		// A record that the directory was served needs no confirmation to count.
+		$entry['result']['exposed'] = true;
+		unset( $entry['result']['confirmed'] );
+		$state->set( 'exposure_browser', $entry );
+		self::assertTrue( $this->probe()->result() );
 	}
 
 	public function test_the_content_under_any_status_means_that_the_file_was_read(): void {

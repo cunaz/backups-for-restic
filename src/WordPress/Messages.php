@@ -122,7 +122,7 @@ final class Messages {
 			],
 			'staging_unverified'             => [
 				'message' => __( 'The restore stopped because the privacy of its staging directory could not be verified.', 'backups-for-restic' ),
-				'hint'    => __( 'Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
+				'hint'    => __( 'Restored files are staged only outside the web root, or where the web server verifiably refuses the directory: the same check has to get the plugin\'s own stylesheet back, so that a refusal from a firewall, a CDN or another site does not count. Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
 			],
 			'environment'                    => [
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
@@ -321,7 +321,7 @@ final class Messages {
 			'private_directory/outside_web_root'         => self::pair( __( 'The working directory is outside the web root', 'backups-for-restic' ), '' ),
 			'private_directory/unverified'               => self::pair(
 				__( 'The protection of the working directory could not be verified', 'backups-for-restic' ),
-				__( 'The site could not request its own address. Consider a directory outside the web root via BACKUPS_FOR_RESTIC_PRIVATE_DIR.', 'backups-for-restic' )
+				__( 'The site could not request its own address, or a refusal it got could not be confirmed: the same check did not get the plugin\'s own stylesheet back, so a firewall, a CDN or another site may have answered. Restores are refused until protection is verified. Consider a directory outside the web root via BACKUPS_FOR_RESTIC_PRIVATE_DIR.', 'backups-for-restic' )
 			),
 			'private_directory/protected_inside_web_root' => self::pair(
 				__( 'The working directory is protected', 'backups-for-restic' ),
@@ -489,6 +489,25 @@ final class Messages {
 			'cancelled' => __( 'Cancelled', 'backups-for-restic' ),
 			default     => $state,
 		};
+	}
+
+	/**
+	 * Message and hint for a WordPress password that is not checked yet, because too many
+	 * wrong ones came before it (Storage\ConfirmationThrottle).
+	 *
+	 * @param int $seconds Seconds until the password is checked again.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function password_throttled( int $seconds ): array {
+		$minutes = max( 1, (int) ceil( $seconds / 60 ) );
+		return [
+			'message' => __( 'Too many wrong WordPress passwords were entered for this account.', 'backups-for-restic' ),
+			'hint'    => sprintf(
+				/* translators: %d: number of minutes. */
+				_n( 'The password is checked again in %d minute. If you did not enter them, change your WordPress password, log out everywhere else and revoke application passwords you do not know in your profile.', 'The password is checked again in %d minutes. If you did not enter them, change your WordPress password, log out everywhere else and revoke application passwords you do not know in your profile.', $minutes, 'backups-for-restic' ),
+				$minutes
+			),
+		];
 	}
 
 	/**
