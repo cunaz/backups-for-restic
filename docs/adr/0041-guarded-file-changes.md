@@ -202,7 +202,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
 - The confirmed review binds the exact set of entries. Its digest covers every entry with
   its action and reason. An inline undo stores the reviewed decisions with its job, a
   background one reads them from the sealed review, whose header now also carries the
-  totals by action; an undo review sealed before has none and is reviewed again. The worker
+  totals by action; an undo review sealed before has none and is reviewed again. A
+  background review shows a created directory for removal only if every entry in it is a
+  removal in the same review: a row that it reviews again, after a tick whose document a
+  stopped worker did not write or from a checkpoint of an earlier version, which starts
+  over with the refused count cleared, withdraws the removal that it claimed before. The worker
   reverts only entries that the review showed for a revert. It checks each one again
   immediately before it touches it and keeps one that changed since the review, counted in
   `changed_after_review`, instead of failing the job. Its preflight therefore no longer

@@ -137,7 +137,8 @@ final class DiskFilePlan {
 
 	/**
 	 * Looks up an earlier directory or removal claim. A caller that depends on a claim
-	 * before mutation also verifies the corresponding authenticated row.
+	 * before mutation also verifies the corresponding authenticated row; an undo review
+	 * keeps its removal claims current with release() instead.
 	 *
 	 * @param string $kind Registry namespace.
 	 * @param string $name Raw name.
@@ -148,6 +149,24 @@ final class DiskFilePlan {
 		$bucket = substr( $key, 0, 3 );
 		$this->load_bucket( $bucket );
 		return $this->buckets[ $bucket ][ $key ] ?? null;
+	}
+
+	/**
+	 * Withdraws the claim that a row made, for a row that is reviewed again with another
+	 * decision. A claim of another ordinal stays.
+	 *
+	 * @param string $kind Registry namespace.
+	 * @param string $name Raw name.
+	 * @param int    $ordinal Presentation index of the row reviewed again.
+	 */
+	public function release( string $kind, string $name, int $ordinal ): void {
+		$key    = hash( 'sha256', $kind . "\0" . $name );
+		$bucket = substr( $key, 0, 3 );
+		$this->load_bucket( $bucket );
+		if ( $ordinal === ( $this->buckets[ $bucket ][ $key ] ?? null ) ) {
+			unset( $this->buckets[ $bucket ][ $key ] );
+			$this->changed[ $bucket ] = true;
+		}
 	}
 
 	/**

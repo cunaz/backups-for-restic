@@ -220,9 +220,11 @@ final class PlanBuild {
 	public function undo( DiskFilePlan $forward, int $attempted, string $workspace, string $scope, float $deadline, DirectorySpellings $spellings ): bool {
 		$done = $this->counts['rows'] ?? 0;
 		if ( array_sum( $this->actions ) !== $done ) {
-			// A checkpoint from before the totals counted kept entries as changes: review again.
+			// A checkpoint from before the totals counted kept entries as changes, or refused
+			// them: review again. Each row reviewed again replaces its claim of a removal.
 			$done                 = 0;
 			$this->changes        = 0;
+			$this->refused        = 0;
 			$this->actions        = [];
 			$this->pending        = [];
 			$this->counts['rows'] = 0;
@@ -242,7 +244,7 @@ final class PlanBuild {
 				return false;
 			}
 			if ( 'remove' === $decision['action'] && 'mkdir' === $row['action'] ) {
-				$covered = self::children_removable( $this->disk, $target, $deadline, $this->pending, false );
+				$covered = self::children_removable( $this->disk, $target, $deadline, $this->pending );
 				if ( null === $covered ) {
 					return false;
 				}
@@ -256,6 +258,10 @@ final class PlanBuild {
 			}
 			if ( 'remove' === $decision['action'] ) {
 				$this->disk->claim( 'remove', $target, $done );
+			} else {
+				// The row may be reviewed again after a checkpoint that a stopped tick did not
+				// record, or after a reset: a removal that it claimed then no longer stands.
+				$this->disk->release( 'remove', $target, $done );
 			}
 			$row['action'] = $decision['action'];
 			$row['reason'] = $decision['reason'];
@@ -271,18 +277,19 @@ final class PlanBuild {
 	}
 
 	/**
-	 * Checks immediate children against their reviewed removals across bounded ticks.
-	 * At apply time each name must refer back to its authenticated undo manifest row.
+	 * Checks immediate children against their reviewed removals across bounded ticks. A child
+	 * counts only while its row's claim of a removal stands: the review withdraws the claim of
+	 * a row that it reviews again with another decision, and children are reviewed before
+	 * their directory.
 	 *
 	 * @param DiskFilePlan        $disk Current undo preview.
 	 * @param string              $target Created live directory.
 	 * @param float               $deadline Worker deadline.
 	 * @param array<string,mixed> $cursor Persisted position in the same directory.
-	 * @param bool                $sealed Whether authenticated undo rows are available.
 	 * @return bool|null Whether all children are covered, or null to yield.
 	 * @throws StorageFailed If the directory cannot be enumerated consistently.
 	 */
-	public static function children_removable( DiskFilePlan $disk, string $target, float $deadline, array &$cursor, bool $sealed ): ?bool {
+	public static function children_removable( DiskFilePlan $disk, string $target, float $deadline, array &$cursor ): ?bool {
 		$identity = ApplyManifest::identity( $target );
 		$offset   = $cursor['offset'] ?? 0;
 		if ( ! is_int( $offset ) || $offset < 0 || $identity !== ( $cursor['identity'] ?? $identity ) || realpath( $target ) !== $target || ! is_dir( $target ) ) {
@@ -314,16 +321,8 @@ final class PlanBuild {
 		}
 		while ( $entries->valid() ) {
 			if ( ! $entries->isDot() ) {
-				$path  = $target . '/' . $entries->getFilename();
-				$index = $disk->lookup( 'remove', $path );
-				if ( null === $index ) {
+				if ( null === $disk->lookup( 'remove', $target . '/' . $entries->getFilename() ) ) {
 					return false;
-				}
-				if ( $sealed ) {
-					$row = $disk->row( $index );
-					if ( 'remove' !== $row['action'] || Bytes::base64url_encode( $path ) !== $row['destination'] ) {
-						return false;
-					}
 				}
 			}
 			$last = $entries->getFilename();

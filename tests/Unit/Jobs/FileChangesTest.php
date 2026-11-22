@@ -27,6 +27,7 @@ use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /** Drives the ordinary runner with real source, destination and journal files. */
@@ -1461,13 +1462,18 @@ final class FileChangesTest extends TestCase {
 		$cursor = $saved?->data['plan_cursor'];
 		self::assertIsArray( $cursor );
 		self::assertSame( 1, $cursor['counts']['rows'] );
-		// As an earlier version left it: kept entries counted as changes, and no totals.
+		// As an earlier version left it: kept entries counted as changes, a changed entry
+		// refused, and no totals.
 		unset( $cursor['actions'] );
 		$cursor['changes']          = 1;
+		$cursor['refused']          = 1;
 		$saved->data['plan_cursor'] = $cursor;
 		$this->jobs->save( $saved );
 		$done = $this->run_job( $review );
-		self::assertSame( [ 1, 2, 0, 3 ], [ $done->result['restore'], $done->result['remove'], $done->result['keep'], $done->result['changes'] ] );
+		self::assertSame( [ 1, 2, 0, 3, 0 ], [ $done->result['restore'], $done->result['remove'], $done->result['keep'], $done->result['changes'], $done->result['refused'] ] );
+		$page = $this->changes->request_preview( $apply->id, true, false, $done->id );
+		self::assertIsArray( $page );
+		self::assertTrue( $page['applicable'] );
 		// A checkpoint whose totals are not counts stops the review.
 		$broken = $this->changes->request_preview( $apply->id, true, false );
 		self::assertInstanceOf( Job::class, $broken );
@@ -1478,6 +1484,70 @@ final class FileChangesTest extends TestCase {
 		$this->jobs->save( $saved );
 		$failed = $this->run_job( $broken, JobState::Failed );
 		self::assertSame( 'The background file preview checkpoint is invalid.', $failed->error?->message );
+	}
+
+	/**
+	 * A review tick stopped after it flushed its first row and the row's claim, before its
+	 * document; and a checkpoint of an earlier version, which is reviewed from the start.
+	 *
+	 * @return array<string, array{bool}>
+	 */
+	public static function reviewed_again(): array {
+		return [
+			'lost document'    => [ true ],
+			'reset checkpoint' => [ false ],
+		];
+	}
+
+	#[DataProvider( 'reviewed_again' )]
+	public function test_a_row_reviewed_again_withdraws_the_removal_that_it_claimed_before( bool $lost_document ): void {
+		$new    = $this->live . '/b-new/new.txt';
+		$plan   = $this->run_job( $this->queue_large_preview() );
+		$apply  = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$before = $this->jobs->get( $review->id );
+		self::assertNotNull( $before );
+		$this->runner->tick( 0.0 ); // The created file, reviewed for removal.
+		$saved = $this->jobs->get( $review->id );
+		self::assertNotNull( $saved );
+		self::assertSame( 1, $saved->data['plan_cursor']['counts']['rows'] );
+		if ( $lost_document ) {
+			$this->jobs->save( $before );
+		} else {
+			unset( $saved->data['plan_cursor']['actions'] );
+			$this->jobs->save( $saved );
+		}
+		// The file is edited before the review goes on: it is kept, and so is its directory.
+		file_put_contents( $new, 'edited' );
+		$done = $this->run_job( $review );
+		$page = $this->changes->request_preview( $apply->id, true, false, $done->id );
+		self::assertIsArray( $page );
+		$rows = array_column( $page['entries'], null, 'path' );
+		self::assertSame( [ 'keep', 'changed_since_apply' ], [ $rows[ $new ]['action'], $rows[ $new ]['reason'] ] );
+		self::assertSame( [ 'keep', 'new_children' ], [ $rows[ $this->live . '/b-new' ]['action'], $rows[ $this->live . '/b-new' ]['reason'] ] );
+		self::assertSame(
+			[
+				'restore' => 1,
+				'remove'  => 0,
+				'keep'    => 2,
+			],
+			$page['totals']
+		);
+		// Nothing changed after the review: the undo keeps what the review showed as kept.
+		$undo = $this->run_job( $this->changes->start_undo( $apply->id, $page['digest'], '', $done->id ) );
+		self::assertSame(
+			[
+				'restored'             => 1,
+				'removed'              => 0,
+				'unchanged'            => 0,
+				'kept'                 => 2,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			self::outcomes( $undo )
+		);
 	}
 
 	public function test_a_background_undo_review_keeps_entries_that_the_site_now_maps_elsewhere(): void {

@@ -10,7 +10,7 @@ use BackupsForRestic\Support\Bytes;
 use BackupsForRestic\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
 
-/** The sealed totals of an undo review and the paged list of the entries an undo kept. */
+/** The claims and sealed totals of an undo review and the paged list of the entries an undo kept. */
 final class DiskFilePlanTest extends TestCase {
 
 	private string $directory;
@@ -25,6 +25,26 @@ final class DiskFilePlanTest extends TestCase {
 
 	private static function row( int $number ): array {
 		return ApplyManifest::row( Bytes::base64url_encode( '/site/file-' . $number ), '/site/file-' . $number, 'keep', 'changed_since_apply' );
+	}
+
+	public function test_a_claim_is_withdrawn_only_for_the_row_that_made_it(): void {
+		$plan = new DiskFilePlan( $this->directory );
+		self::assertSame( 3, $plan->claim( 'remove', '/site/new.txt', 3 ) );
+		self::assertSame( 3, $plan->claim( 'remove', '/site/new.txt', 5 ) );
+		// Another row, another kind or another name leaves the claim.
+		$plan->release( 'remove', '/site/new.txt', 5 );
+		$plan->release( 'mkdir', '/site/new.txt', 3 );
+		$plan->release( 'remove', '/site/other.txt', 3 );
+		self::assertSame( 3, $plan->lookup( 'remove', '/site/new.txt' ) );
+		$plan->release( 'remove', '/site/new.txt', 3 );
+		self::assertNull( $plan->lookup( 'remove', '/site/new.txt' ) );
+		$plan->flush();
+		// The withdrawal is in the registry on disk, and the name can be claimed again.
+		$again = new DiskFilePlan( $this->directory );
+		self::assertNull( $again->lookup( 'remove', '/site/new.txt' ) );
+		self::assertSame( 4, $again->claim( 'remove', '/site/new.txt', 4 ) );
+		$again->flush();
+		self::assertSame( 4, ( new DiskFilePlan( $this->directory ) )->lookup( 'remove', '/site/new.txt' ) );
 	}
 
 	public function test_an_undo_review_seals_its_totals_by_action(): void {
