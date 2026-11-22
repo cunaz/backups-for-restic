@@ -7,6 +7,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Jobs\EventLog;
@@ -187,6 +188,32 @@ final class RunnerTest extends TestCase {
 		self::assertSame( JobState::Failed, $failed?->state );
 		self::assertSame( 'wrong_password', $failed->error?->code );
 		self::assertFalse( $failed->error->retryable );
+	}
+
+	public function test_the_log_of_a_failure_names_the_table_a_database_error_is_about(): void {
+		$store                      = $this->store();
+		$this->script['backing_up'] = [
+			new DatabaseFailed(
+				'The definition of a database table kept changing while it was backed up.',
+				[
+					'table' => 'wp_postmeta',
+					'code'  => 'database_dump_unstable',
+				]
+			),
+		];
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+
+		$this->runner( $store )->tick( 10 );
+
+		$errors = array_values( array_filter( $store->log( $job )->read( 100 ), static fn ( array $event ): bool => 'error' === $event['level'] ) );
+		self::assertSame(
+			[
+				'code'  => 'database_dump_unstable',
+				'step'  => 'backing_up',
+				'table' => 'wp_postmeta',
+			],
+			$errors[0]['context'] ?? null
+		);
 	}
 
 	public function test_retryable_errors_back_off_and_then_fail(): void {
