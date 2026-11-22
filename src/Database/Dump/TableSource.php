@@ -46,8 +46,9 @@ defined( 'ABSPATH' ) || exit;
  * the definition the file started with. If the table's definition differs when a later tick
  * opens it, the CREATE already written no longer fits the rows to come, and the table starts
  * over (restarted()), at most MAX_RESTARTS times. Inside a snapshot the metadata lock keeps the
- * definition for the tick; outside one, the definition is read again before a stop and before
- * the trailer, and a change, or a page that fails because of one, stops the tick instead.
+ * definition for the tick; outside one, the definition is read again after every page, before
+ * the page is written, before a stop and before the trailer, and a change, or a page that
+ * fails because of one, stops the tick instead.
  */
 final class TableSource implements ResumableByteSource {
 
@@ -808,6 +809,13 @@ final class TableSource implements ResumableByteSource {
 		$this->viewed();
 		if ( [] === $rows ) {
 			$this->exhausted = true;
+			return;
+		}
+		// Outside a snapshot nothing holds the definition from one statement to the next: a
+		// page read under another one is not written, even if the change is undone later.
+		if ( $this->definition_changed() ) {
+			$this->changed = true;
+			$this->stop();
 			return;
 		}
 

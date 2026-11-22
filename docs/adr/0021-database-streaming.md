@@ -85,7 +85,12 @@ and makes an interrupted dump start from zero.
   finds another definition starts the table over (the engine drops the chunks of the
   earlier parts), at most three times; then the backup stops with
   `database_dump_unstable`, which names the table. Through `$wpdb` nothing holds the
-  definition during a tick, so it is read again before a stop and before the trailer.
+  definition during a tick, so it is read again after every page, before the page is
+  written, and before the trailer: a page read under another definition is not written,
+  even if the change is undone later, and the table starts over. The server holds a table's
+  definition for the length of each statement but not from one statement to the next, so
+  what remains is a change and its undoing that both complete between the dump's read of a
+  page and its read of the definition right after it.
 - **Locked tables.** Every read of the dump waits at most five seconds for a lock that
   another connection holds (`lock_wait_timeout`, which is a year on MySQL and a day on
   MariaDB unless the server's settings say otherwise), for example a table held with

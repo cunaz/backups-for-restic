@@ -95,6 +95,26 @@ final class DumpRestartTest extends TestCase {
 		self::assertTrue( $this->source( $this->table( 'first' ), $cursor )->restarted() );
 	}
 
+	public function test_outside_a_snapshot_a_page_read_under_another_definition_is_not_written_even_if_it_is_undone(): void {
+		$checks = 0;
+		$source = $this->source(
+			$this->table( 'first' ),
+			null,
+			function () use ( &$checks ): Table {
+				// Changed when the second page was read, and back again before the trailer.
+				return $this->table( 2 === ++$checks ? 'second' : 'first' );
+			}
+		);
+		$output = $this->read_all( $source );
+
+		self::assertStringContainsString( ',(500);', $output, 'The first page was read under the definition the file started with.' );
+		self::assertStringNotContainsString( '(501)', $output, 'The second page was not.' );
+		self::assertStringNotContainsString( '-- end table', $output );
+		$cursor = $source->cursor();
+		self::assertNotNull( $cursor );
+		self::assertTrue( $this->source( $this->table( 'first' ), $cursor )->restarted(), 'The next tick starts over.' );
+	}
+
 	public function test_outside_a_snapshot_a_page_that_fails_because_of_a_change_starts_the_table_over(): void {
 		$this->fail_pages = true;
 		$source           = $this->source( $this->table( 'first' ), null, fn (): Table => $this->table( 'second' ) );
