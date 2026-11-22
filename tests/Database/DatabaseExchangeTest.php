@@ -411,6 +411,28 @@ final class DatabaseExchangeTest extends TestCase {
 		return '`' . ( 'live' === $where ? $table : $plan->owned->retained( $number ) ) . '`';
 	}
 
+	/**
+	 * Ends a child process that a failed step left behind: it is killed while it still runs,
+	 * its pipes are closed and it is reaped, so a failing test blocks neither on it nor on
+	 * the database session it holds.
+	 *
+	 * @param resource|null       $process Child process, or null once it has been closed.
+	 * @param array<int,resource> $pipes Its pipes.
+	 */
+	private static function reap( mixed $process, array $pipes ): void {
+		if ( is_resource( $process ) && proc_get_status( $process )['running'] ) {
+			proc_terminate( $process, 9 );
+		}
+		foreach ( $pipes as $pipe ) {
+			if ( is_resource( $pipe ) ) {
+				fclose( $pipe );
+			}
+		}
+		if ( is_resource( $process ) ) {
+			proc_close( $process );
+		}
+	}
+
 	public function test_the_exchange_waits_for_a_request_that_started_before_maintenance(): void {
 		$this->mysql_only();
 		$services = $this->services();
@@ -418,17 +440,23 @@ final class DatabaseExchangeTest extends TestCase {
 		$started  = $this->directory . '/writer-started';
 		$process  = proc_open( [ PHP_BINARY, dirname( __DIR__ ) . '/Fixtures/Database/exchange-writer.php', $this->database, $services['site'] . '/.maintenance', $started, '1.0' ], [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
 		self::assertIsResource( $process );
-		fclose( $pipes[0] );
-		$deadline = microtime( true ) + 30;
-		while ( ! is_file( $started ) && proc_get_status( $process )['running'] && microtime( true ) < $deadline ) {
-			usleep( 10000 );
+		try {
+			fclose( $pipes[0] );
+			$deadline = microtime( true ) + 30;
+			while ( ! is_file( $started ) && proc_get_status( $process )['running'] && microtime( true ) < $deadline ) {
+				usleep( 10000 );
+			}
+			self::assertFileExists( $started );
+			$applied = self::advance( $services['runner'], $job );
+			$output  = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			$status  = proc_close( $process );
+			$process = null;
+		} finally {
+			self::reap( $process, $pipes );
 		}
-		self::assertFileExists( $started );
-		$applied = self::advance( $services['runner'], $job );
-		$output  = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
-		self::assertSame( 0, proc_close( $process ), $output );
+		self::assertSame( 0, $status, $output );
 		self::assertSame( 'written', $output );
 		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
 		// The post and its metadata stay together in the generation that was live when they began.
