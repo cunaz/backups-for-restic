@@ -813,7 +813,7 @@ a request left behind is removed once it is a minute old.
 | --- | --- |
 | **Single file** | Verify and stage the selected bytes, then stream them on a single-use authenticated download. Staged contents expire after the configured interval (24 hours by default). |
 | **Selected paths to staging** | same per file, directories recursively; staging is owner-only (`0600` files, `0700` directories) and gets the modification time only, the modes of the snapshot are in the report ([ADR 0036](adr/0036-selected-file-staging.md)) |
-| **Apply to live site** | Paginated review, confirmed scope and a maintenance window. Live destinations and file identities are checked again. Startup files and configuration require offline recovery. Replaced files are retained for undo. |
+| **Apply to live site** | Paginated review, confirmed scope and a maintenance window. Live destinations and file identities are checked again. Startup files and configuration require offline recovery. A snapshot's database spool is never applied, and a replacement must keep the live file's owner, group and mode. Replaced files are retained for undo. |
 | **Database** | Verify and import staged SQL into private shadow tables. A separately reviewed operation can atomically exchange and undo compatible MySQL generations. Other installations use the manual SQL procedure. |
 | **Full site (plugin works)** | files to staging → apply → database, guided |
 | **Full site (server lost)** | plain restic CLI procedure, or the wizard's "connect to existing repository" path on a fresh installation followed by the full-site flow |

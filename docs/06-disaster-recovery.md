@@ -76,10 +76,23 @@ The site records each delivery. Store the file with the other offline recovery m
    background preview is available for one hour while its source remains available. Review a fresh
    preview if the files changed. Use the recovery kit offline for WordPress core,
    configuration, must-use plugins and early-loaded drop-ins. The preview identifies
-   these startup paths.
+   these startup paths. It never applies the backup's private database dump. The database
+   is restored separately: a database rehearsal imports the dump into temporary tables and
+   checks it, and a separately confirmed exchange then makes it live on an eligible MySQL
+   server; on MariaDB and with incompatible schemas, import the SQL files by hand
+   (Scenario B). Where PHP can tell which user and groups it runs as, the preview refuses
+   to replace a file that belongs to another user than PHP, or whose group a file written
+   by PHP cannot have: have the owner changed to the PHP user, or the group to one PHP
+   belongs to, or restore that file offline. PHP cannot tell when its POSIX extension is
+   missing or the host has disabled one of its functions; the preview then does not check
+   owner and group, and the apply stops before it replaces such a file. Without the PHP
+   intl extension the preview also refuses a name that might match a protected path once
+   Unicode is normalized.
 5. The **Restores** tab lists available undo jobs and their expiry times. Choose
    **Preview undo**, review the actions, then confirm to return the affected files to
-   their previous state. Use **Delete staged files** to remove the private downloads
+   their previous state. If the preview refuses one entry, for example a file that was
+   edited after the apply, the undo as a whole is not offered; restore the affected files
+   offline as in step 4. Use **Delete staged files** to remove the private downloads
    when you are finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
