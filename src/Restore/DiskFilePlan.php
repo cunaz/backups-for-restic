@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  * A directory can therefore be found and checked without loading the entire plan.
  *
  * @phpstan-import-type Row from ApplyManifest
- * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,required_bytes:int|null,counts:array<string,int>,indexes:array<string,string>}
+ * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,required_bytes:int|null,actions:array<string,int>|null,counts:array<string,int>,indexes:array<string,string>}
  */
 final class DiskFilePlan {
 
@@ -78,9 +78,11 @@ final class DiskFilePlan {
 	 * Opens an existing canonical private directory.
 	 *
 	 * @param string $directory Per-plan directory.
+	 * @param bool   $durable Whether every flush reaches the disk before it returns, for records
+	 *                        that a durable job document counts, such as the entries an undo kept.
 	 * @throws StorageFailed If the directory has become an alias.
 	 */
-	public function __construct( private readonly string $directory ) {
+	public function __construct( private readonly string $directory, private readonly bool $durable = false ) {
 		if ( realpath( $directory ) !== $directory || ! is_dir( $directory ) ) {
 			throw new StorageFailed( 'The private file plan directory is unavailable.' );
 		}
@@ -197,18 +199,27 @@ final class DiskFilePlan {
 			if ( strlen( $body ) > self::PAGE_BYTES ) {
 				throw new StorageFailed( 'A private file plan page exceeds its storage limit.' );
 			}
-			Files::write_atomic( $this->directory . '/' . $file, $body );
+			if ( $this->durable ) {
+				Files::write_durable( $this->directory . '/' . $file, $body );
+			} else {
+				Files::write_atomic( $this->directory . '/' . $file, $body );
+			}
 			[ $stream, $page_number ] = explode( '-', $file, 2 );
-			$handle                   = fopen( $this->directory . '/' . $stream . '.idx', 'c+b' );
+			$index                    = $this->directory . '/' . $stream . '.idx';
+			$handle                   = fopen( $index, 'c+b' );
 			if ( false === $handle ) {
 				throw new StorageFailed( 'A private file plan index could not be opened.' );
 			}
 			try {
-				if ( 0 !== fseek( $handle, (int) $page_number * 64 ) || 64 !== fwrite( $handle, hash( 'sha256', $body ) ) || ! fflush( $handle ) ) {
+				if ( 0 !== fseek( $handle, (int) $page_number * 64 ) || 64 !== fwrite( $handle, hash( 'sha256', $body ) ) || ! fflush( $handle ) || ( $this->durable && ! fsync( $handle ) ) ) {
 					throw new StorageFailed( 'A private file plan index could not be written.' );
 				}
 			} finally {
 				fclose( $handle );
+			}
+			if ( $this->durable ) {
+				// A new index is named in the directory before a document counts its records.
+				Files::sync_directory( $this->directory );
 			}
 		}
 		$this->dirty = [];
@@ -235,18 +246,19 @@ final class DiskFilePlan {
 	/**
 	 * Authenticates all stream indexes and publishes the immutable plan summary.
 	 *
-	 * @param string            $subject Restore or apply job ID.
-	 * @param string            $restore Staged restore job.
-	 * @param bool              $undo Undo preview.
-	 * @param bool              $config Configuration option.
-	 * @param array<string,int> $counts Records per stream.
-	 * @param int               $changes Applicable mutations.
-	 * @param int               $refused Refused actions.
-	 * @param int|null          $required_bytes Estimated peak file data on the journal volume.
+	 * @param string                 $subject Restore or apply job ID.
+	 * @param string                 $restore Staged restore job.
+	 * @param bool                   $undo Undo preview.
+	 * @param bool                   $config Configuration option.
+	 * @param array<string,int>      $counts Records per stream.
+	 * @param int                    $changes Applicable mutations.
+	 * @param int                    $refused Refused actions.
+	 * @param int|null               $required_bytes Estimated peak file data on the journal volume.
+	 * @param array<string,int>|null $actions Rows by action, which an undo review shows as its totals.
 	 * @return string Digest to persist in the job document.
 	 * @throws StorageFailed If a stream is incomplete.
 	 */
-	public function seal( string $subject, string $restore, bool $undo, bool $config, array $counts, int $changes, int $refused, ?int $required_bytes = null ): string {
+	public function seal( string $subject, string $restore, bool $undo, bool $config, array $counts, int $changes, int $refused, ?int $required_bytes = null, ?array $actions = null ): string {
 		$this->flush();
 		$indexes = [];
 		ksort( $counts, SORT_STRING );
@@ -254,8 +266,20 @@ final class DiskFilePlan {
 			if ( 0 === $count ) {
 				continue;
 			}
-			$data = self::read( $this->directory . '/' . $name . '.idx', self::INDEX_BYTES );
-			if ( strlen( $data ) !== (int) ceil( $count / self::PAGE ) * 64 ) {
+			$index    = $this->directory . '/' . $name . '.idx';
+			$data     = self::read( $index, self::INDEX_BYTES );
+			$expected = (int) ceil( $count / self::PAGE ) * 64;
+			if ( strlen( $data ) > $expected ) {
+				// A worker stopped after it wrote the first record of a page and before it
+				// counted it leaves that page's slot behind; no counted record is on it.
+				$data = substr( $data, 0, $expected );
+				if ( $this->durable ) {
+					Files::write_durable( $index, $data );
+				} else {
+					Files::write_atomic( $index, $data );
+				}
+			}
+			if ( strlen( $data ) !== $expected ) {
 				throw new StorageFailed( 'A private file plan index is incomplete.' );
 			}
 			$indexes[ $name ] = hash( 'sha256', $data );
@@ -275,8 +299,16 @@ final class DiskFilePlan {
 		if ( null !== $required_bytes ) {
 			$header['required_bytes'] = $required_bytes;
 		}
+		if ( null !== $actions ) {
+			ksort( $actions, SORT_STRING );
+			$header['actions'] = $actions;
+		}
 		$body = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
-		Files::write_atomic( $this->directory . '/sealed.json', $body );
+		if ( $this->durable ) {
+			Files::write_durable( $this->directory . '/sealed.json', $body );
+		} else {
+			Files::write_atomic( $this->directory . '/sealed.json', $body );
+		}
 		return hash( 'sha256', $body );
 	}
 
@@ -313,8 +345,23 @@ final class DiskFilePlan {
 		if ( null !== $required && ( ! is_int( $required ) || $required < 0 ) ) {
 			throw new StorageFailed( 'The sealed plan contains an invalid file-space estimate.' );
 		}
+		// A plan sealed before the totals by action existed has none.
+		$actions = null;
+		if ( isset( $value['actions'] ) ) {
+			if ( ! is_array( $value['actions'] ) ) {
+				throw new StorageFailed( 'The sealed plan contains invalid totals.' );
+			}
+			$actions = [];
+			foreach ( $value['actions'] as $action => $count ) {
+				if ( ! is_string( $action ) || ! is_int( $count ) || $count < 0 || $count > self::MAX_ENTRIES ) {
+					throw new StorageFailed( 'The sealed plan contains invalid totals.' );
+				}
+				$actions[ $action ] = $count;
+			}
+		}
 		$this->header = [
 			'required_bytes' => $required,
+			'actions'        => $actions,
 			'version'        => 1,
 			'subject'        => $value['subject'],
 			'restore'        => $value['restore'],

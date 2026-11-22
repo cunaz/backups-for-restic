@@ -60,6 +60,13 @@ final class PlanBuild {
 	public int $refused = 0;
 
 	/**
+	 * Rows of an undo review by action: restore, remove and keep.
+	 *
+	 * @var array<string,int>
+	 */
+	public array $actions = [];
+
+	/**
 	 * Conservative data allocation, or null for a plan started by an older version.
 	 *
 	 * @var int|null
@@ -89,16 +96,13 @@ final class PlanBuild {
 		$changes = $data['changes'] ?? 0;
 		$refused = $data['refused'] ?? 0;
 		$pending = $data['pending'] ?? [];
-		if ( ! is_array( $counts ) || ! is_int( $offset ) || $offset < 0 || ! is_int( $changes ) || ! is_int( $refused ) || ! is_array( $pending ) ) {
+		$actions = $data['actions'] ?? [];
+		if ( ! is_array( $counts ) || ! is_int( $offset ) || $offset < 0 || ! is_int( $changes ) || ! is_int( $refused ) || ! is_array( $pending ) || ! is_array( $actions ) ) {
 			throw new StorageFailed( 'The background file preview checkpoint is invalid.' );
 		}
-		foreach ( $counts as $name => $count ) {
-			if ( ! is_string( $name ) || ! is_int( $count ) || $count < 0 || $count > DiskFilePlan::MAX_ENTRIES ) {
-				throw new StorageFailed( 'The background file preview count is invalid.' );
-			}
-			$this->counts[ $name ] = $count;
-		}
-		$required = $data['required_bytes'] ?? ( 0 === $offset ? 0 : null );
+		$this->counts  = self::tally( $counts );
+		$this->actions = self::tally( $actions );
+		$required      = $data['required_bytes'] ?? ( 0 === $offset ? 0 : null );
 		if ( null !== $required && ( ! is_int( $required ) || $required < 0 ) ) {
 			throw new StorageFailed( 'The background file preview allocation total is invalid.' );
 		}
@@ -111,6 +115,24 @@ final class PlanBuild {
 				$this->pending[ $key ] = $value;
 			}
 		}
+	}
+
+	/**
+	 * Reads stored counts by name.
+	 *
+	 * @param array<mixed> $map Decoded counts.
+	 * @return array<string,int> Counts.
+	 * @throws StorageFailed If a count is invalid.
+	 */
+	private static function tally( array $map ): array {
+		$counts = [];
+		foreach ( $map as $name => $count ) {
+			if ( ! is_string( $name ) || ! is_int( $count ) || $count < 0 || $count > DiskFilePlan::MAX_ENTRIES ) {
+				throw new StorageFailed( 'The background file preview count is invalid.' );
+			}
+			$counts[ $name ] = $count;
+		}
+		return $counts;
 	}
 
 	/**
@@ -181,8 +203,11 @@ final class PlanBuild {
 	}
 
 	/**
-	 * Verifies the next attempted entries in reverse order. Every completed file action
-	 * is bound to its original source, target, journal and this independent preview job.
+	 * Reviews the next attempted entries in reverse order. Every entry gets its own decision
+	 * and reason: an entry that changed since the apply is kept, and the others are still
+	 * reverted. A created directory is removed only if each current child is a removal
+	 * earlier in this review. Every completed file decision is bound to its original source,
+	 * target, journal and this independent preview job.
 	 *
 	 * @param DiskFilePlan       $forward Confirmed apply manifest.
 	 * @param int                $attempted Number of attempted forward operations.
@@ -194,6 +219,14 @@ final class PlanBuild {
 	 */
 	public function undo( DiskFilePlan $forward, int $attempted, string $workspace, string $scope, float $deadline, DirectorySpellings $spellings ): bool {
 		$done = $this->counts['rows'] ?? 0;
+		if ( array_sum( $this->actions ) !== $done ) {
+			// A checkpoint from before the totals counted kept entries as changes: review again.
+			$done                 = 0;
+			$this->changes        = 0;
+			$this->actions        = [];
+			$this->pending        = [];
+			$this->counts['rows'] = 0;
+		}
 		while ( $done < $attempted ) {
 			$item   = $forward->mutation( $attempted - $done - 1 );
 			$row    = $item['row'];
@@ -201,31 +234,35 @@ final class PlanBuild {
 			$target = Bytes::base64url_decode( $row['destination'] ?? '' );
 			$change = new FileChange( $this->plan, $this->files, $workspace . '/item-' . $item['index'], $source, $scope );
 			try {
-				$action = $this->plan->destination( $source ) === $target ? $change->undo_action( $target, $row['action'], $deadline, $spellings ) : 'refuse';
+				$decision = $this->plan->destination( $source ) === $target ? $change->undo_review( $target, $row['action'], $deadline, $spellings ) : [
+					'action' => 'keep',
+					'reason' => 'destination_changed',
+				];
 			} catch ( FileWorkPending ) {
 				return false;
 			}
-			if ( 'remove' === $action ) {
-				if ( 'mkdir' === $row['action'] ) {
-					$covered = self::children_removable( $this->disk, $target, $deadline, $this->pending, false );
-					if ( null === $covered ) {
-						return false;
-					}
-					$this->pending = [];
-					if ( ! $covered ) {
-						$action = 'refuse';
-					}
+			if ( 'remove' === $decision['action'] && 'mkdir' === $row['action'] ) {
+				$covered = self::children_removable( $this->disk, $target, $deadline, $this->pending, false );
+				if ( null === $covered ) {
+					return false;
 				}
-				if ( 'remove' === $action ) {
-					$this->disk->claim( 'remove', $target, $done );
+				$this->pending = [];
+				if ( ! $covered ) {
+					$decision = [
+						'action' => 'keep',
+						'reason' => 'new_children',
+					];
 				}
 			}
-			$row['action'] = $action;
-			$row['reason'] = 'refuse' === $action ? 'changed_since_apply' : 'undo_journal';
+			if ( 'remove' === $decision['action'] ) {
+				$this->disk->claim( 'remove', $target, $done );
+			}
+			$row['action'] = $decision['action'];
+			$row['reason'] = $decision['reason'];
 			$this->disk->put( 'rows', $done, $row );
-			$this->refused       += 'refuse' === $action ? 1 : 0;
-			$this->changes       += in_array( $action, [ 'restore', 'remove', 'keep' ], true ) ? 1 : 0;
-			$this->counts['rows'] = ++$done;
+			$this->changes                       += 'keep' === $decision['action'] ? 0 : 1;
+			$this->actions[ $decision['action'] ] = ( $this->actions[ $decision['action'] ] ?? 0 ) + 1;
+			$this->counts['rows']                 = ++$done;
 			if ( microtime( true ) >= $deadline ) {
 				return $done === $attempted;
 			}
@@ -322,6 +359,7 @@ final class PlanBuild {
 			'refused'        => $this->refused,
 			'pending'        => $this->pending,
 			'required_bytes' => $this->required_bytes,
+			'actions'        => $this->actions,
 		];
 	}
 

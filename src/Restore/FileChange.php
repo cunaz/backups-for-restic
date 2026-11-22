@@ -17,7 +17,8 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Source and preimage copies stay in a private directory on the destination filesystem.
  * A durable intent precedes publication. On retry, the recorded inode identifies a rename
- * that completed before its caller could checkpoint. An undo refuses an edited live file.
+ * that completed before its caller could checkpoint. An undo reverts an entry only while it
+ * still is what the apply left there and keeps it, with its journal, otherwise.
  * The caller serializes writers and pins staging and the item directory until undo expires.
  *
  * Every journal record is synchronised to disk before the live change it authorises, and a
@@ -26,9 +27,19 @@ defined( 'ABSPATH' ) || exit;
  * leaves a state that the retry or the undo recognises, as a killed process does.
  *
  * @phpstan-type Identity array{dev: int, ino: int}
- * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string}
+ * @phpstan-type Installed array{size: int, mode: int, uid: int, gid: int}
+ * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, stat: Installed|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string}
+ * @phpstan-type Decision array{action: string, reason: string, live: string|null}
+ * @phpstan-type Outcome array{outcome: string, reason: string}
  */
 final readonly class FileChange {
+
+	/**
+	 * Reasons of an undo decision that leave nothing to revert: the apply published nothing
+	 * here, an undo already reverted the entry, or what the apply created is gone. An undo
+	 * review made before entries could be kept gave such entries the reason undo_journal.
+	 */
+	private const array SETTLED = [ 'not_applied', 'already_undone', 'removed_since_apply' ];
 
 	/**
 	 * Checks reviewed file contents within the active worker budget.
@@ -155,6 +166,7 @@ final readonly class FileChange {
 				'previous'  => null === $previous ? null : self::identity( $previous ),
 				'candidate' => null,
 				'installed' => null,
+				'stat'      => null,
 				'backup'    => null,
 				'mode'      => null === $previous ? ( ( ( $mode ?? 0600 ) & 0755 ) | ( 'mkdir' === $action ? 0700 : 0400 ) ) : ( $previous['mode'] & 0777 ),
 				'uid'       => $previous['uid'] ?? null,
@@ -198,9 +210,17 @@ final readonly class FileChange {
 			self::set_attributes( $next, $record, false );
 			// The candidate's bytes and attributes are on disk before publication is authorised.
 			$this->sync_file( $next );
-			$record['candidate'] = self::identity( self::regular( $next ) );
+			$prepared            = self::regular( $next );
+			$record['candidate'] = self::identity( $prepared );
 			$record['installed'] = self::metadata( $next );
-			$record['phase']     = 'ready';
+			// What an undo compares a live file with another inode against.
+			$record['stat']  = [
+				'size' => $prepared['size'],
+				'mode' => $prepared['mode'],
+				'uid'  => $prepared['uid'],
+				'gid'  => $prepared['gid'],
+			];
+			$record['phase'] = 'ready';
 			$this->save( $record );
 		}
 
@@ -246,152 +266,347 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Determines what can currently be reversed. Only a file installed by this entry is a
-	 * removal candidate. A missing intent means that no live write was attempted.
+	 * Whether a kept entry's reason leaves nothing to revert, so that the entry already is as
+	 * before the apply. Every other reason keeps a change of the apply, or of someone after it,
+	 * in place, and the entry stays undoable.
+	 *
+	 * @param string $reason Reason of a keep decision.
+	 * @return bool Whether nothing is left to revert.
+	 */
+	public static function settled( string $reason ): bool {
+		return in_array( $reason, self::SETTLED, true ) || 'undo_journal' === $reason;
+	}
+
+	/**
+	 * Decides what an undo can do with this entry now, and why. An entry is reverted only while
+	 * it still is what the apply left there: the inode that the apply published with the
+	 * attributes it recorded, or a regular file with another inode whose content, size, mode,
+	 * owner and group are those that the apply installed, as after the undo of a later apply
+	 * put its copy back. Every other entry is kept, with the reason, and its journal stays for
+	 * a later undo. A missing intent means that no live write was attempted.
 	 *
 	 * Absence is decided before the parent: a created file or directory that is gone, also
-	 * below a directory that was removed since, leaves nothing to reverse, and a replaced file
-	 * that is gone is a conflict. A parent that is no longer the recorded canonical directory
-	 * refuses the entry instead of failing the whole review.
+	 * below a directory that was removed since, leaves nothing to revert, and a replaced file
+	 * that is gone is kept. A parent that is no longer the recorded canonical directory keeps
+	 * the entry. Whether a created directory holds entries that the undo keeps is for the
+	 * caller to decide, which knows the other entries.
 	 *
 	 * @param string                  $path Reviewed path.
 	 * @param string                  $action Reviewed forward action.
 	 * @param float|null              $deadline Deadline of a background preview.
 	 * @param DirectorySpellings|null $review Optional name index for a read-only undo preview.
-	 * @return string restore, remove, keep or refuse.
+	 * @return array{action: string, reason: string} restore, remove or keep, and why.
 	 * @throws FileWorkPending If the current file verification requires another tick.
 	 */
-	public function undo_action( string $path, string $action, ?float $deadline = null, ?DirectorySpellings $review = null ): string {
+	public function undo_review( string $path, string $action, ?float $deadline = null, ?DirectorySpellings $review = null ): array {
 		if ( null !== $deadline ) {
 			$this->proofs->deadline = $deadline;
 		}
-		$record = $this->read( $path, $action );
-		if ( null === $record || 'undone' === $record['phase'] || 'copy' === $record['phase'] ) {
-			return 'keep';
-		}
-		if ( ! self::exists( $path ) ) {
-			return 'replace' === $action ? 'refuse' : 'keep';
-		}
-		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
-			return 'refuse';
-		}
-		if ( 'mkdir' === $action ) {
-			if ( null === $record['candidate'] || self::at( $this->item_directory . '/directory', $record['candidate'] ) ) {
-				// Nothing was created, or the prepared directory is still private.
-				return 'keep';
-			}
-			return self::at( $path, $record['candidate'] ) && self::metadata( $path ) === $record['installed'] && 'keep' === $this->live_action( $path, $review ) ? 'remove' : 'refuse';
-		}
-		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) && $this->matches( $path, $record['original'] ) ) {
-			return 'keep';
-		}
-		if ( 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ! self::at( $path, $record['candidate'] ) ) {
-			// The replacement is still private; there is nothing of ours at the destination.
-			return 'keep';
-		}
-		if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] ) {
-			return 'refuse';
-		}
-		$unfinished_link = self::private_link( $action, $record, $this->item_directory . '/candidate' );
-		if ( ! $unfinished_link && 'replace' !== $this->live_action( $path, $review ) ) {
-			return 'refuse';
-		}
-		if ( ! $this->matches( $path, $record['source'], $unfinished_link ? 2 : 1 ) ) {
-			return 'refuse';
-		}
-		if ( 'create' === $action ) {
-			return 'remove';
-		}
-		return $this->retained_original( $this->item_directory . '/original', $record ) ? 'restore' : 'refuse';
+		$decision = $this->decide( $path, $action, $this->read( $path, $action ), $review );
+		return [
+			'action' => $decision['action'],
+			'reason' => $decision['reason'],
+		];
 	}
 
 	/**
-	 * Reverses one reviewed change, retaining the original when the live file was edited.
+	 * The action of undo_review().
 	 *
-	 * @param string $path Reviewed path.
-	 * @param string $action Original action.
-	 * @param float  $deadline Unix deadline of the tick.
-	 * @return bool Whether this item finished.
-	 * @throws StorageFailed If undo would affect unrelated data.
-	 */
-	public function undo( string $path, string $action, float $deadline ): bool {
-		$this->proofs->deadline = $deadline;
-		try {
-			return $this->undo_entry( $path, $action, $deadline );
-		} catch ( FileWorkPending ) {
-			return false;
-		}
-	}
-
-	/**
-	 * Reverses one reviewed change, retaining the original when the live file was edited.
-	 *
-	 * @param string $path Reviewed path.
-	 * @param string $action Original action.
-	 * @param float  $deadline Unix deadline of the tick.
-	 * @return bool Whether this item finished.
-	 * @throws StorageFailed If undo would affect unrelated data.
+	 * @param string                  $path Reviewed path.
+	 * @param string                  $action Reviewed forward action.
+	 * @param float|null              $deadline Deadline of a background preview.
+	 * @param DirectorySpellings|null $review Optional name index for a read-only undo preview.
+	 * @return string restore, remove or keep.
 	 * @throws FileWorkPending If the current file verification requires another tick.
 	 */
-	private function undo_entry( string $path, string $action, float $deadline ): bool {
-		if ( microtime( true ) >= $deadline ) {
-			return false;
+	public function undo_action( string $path, string $action, ?float $deadline = null, ?DirectorySpellings $review = null ): string {
+		return $this->undo_review( $path, $action, $deadline, $review )['action'];
+	}
+
+	/**
+	 * Reverts one entry if it still is what the apply left there, and otherwise keeps it with
+	 * its journal for a later undo. A confirmed undo names the reviewed action: an entry
+	 * reviewed for a revert that changed since is kept, never reverted in another way.
+	 *
+	 * @param string      $path Reviewed path.
+	 * @param string      $action Original action.
+	 * @param float       $deadline Unix deadline of the tick.
+	 * @param string|null $reviewed restore or remove as confirmed, or null for what is revertible now.
+	 * @return Outcome|null restored, removed, unchanged (nothing to revert) or kept with the
+	 *                      reason, or null when the entry needs another tick.
+	 * @throws StorageFailed If the journal is damaged or the filesystem refuses a checked change.
+	 */
+	public function undo( string $path, string $action, float $deadline, ?string $reviewed = null ): ?array {
+		$this->proofs->deadline = $deadline;
+		try {
+			return $this->undo_entry( $path, $action, $reviewed );
+		} catch ( FileWorkPending ) {
+			return null;
 		}
+	}
+
+	/**
+	 * Reverts one entry, checking again around the rename or unlink that the verified inode,
+	 * with its size and change times, is the one that is replaced or removed.
+	 *
+	 * As an apply does, every tick advances at least one entry, also one that begins after
+	 * the tick's deadline; the verification of a large file still yields after a block.
+	 *
+	 * @param string      $path Reviewed path.
+	 * @param string      $action Original action.
+	 * @param string|null $reviewed Confirmed undo action.
+	 * @return Outcome Outcome.
+	 * @throws StorageFailed If the journal is damaged or the filesystem refuses a checked change.
+	 * @throws FileWorkPending If the current file verification requires another tick.
+	 */
+	private function undo_entry( string $path, string $action, ?string $reviewed ): array {
 		$record = $this->read( $path, $action );
-		if ( null === $record || 'undone' === $record['phase'] ) {
-			return true;
+		$next   = $this->item_directory . '/candidate';
+		if ( null !== $record && self::private_link( $action, $record, $next ) && self::at( $path, $record['candidate'] ) ) {
+			// An interrupted create still holds its private name; release it before deciding.
+			$this->remove_file( $next );
 		}
-		$decision = $this->undo_decision( $path, $action, $record );
-		if ( 'refuse' === $decision ) {
-			throw new StorageFailed( 'Undo found a later change to this live entry and left it alone.' );
+		$decision = $this->decide( $path, $action, $record, null );
+		if ( 'keep' === $decision['action'] ) {
+			if ( null === $record || ! self::settled( $decision['reason'] ) ) {
+				// The entry stays as it is, and so does its journal.
+				return self::outcome( null === $record ? 'unchanged' : 'kept', $decision['reason'] );
+			}
+			if ( 'undone' !== $record['phase'] ) {
+				$this->settle( $path, $action, $record );
+			}
+			// An entry reviewed for a revert that is now settled was reverted by this undo
+			// before an interruption, or removed by someone else: either way it is as before.
+			$past = match ( 'not_applied' === $decision['reason'] ? null : $reviewed ) {
+				'restore' => 'restored',
+				'remove'  => 'removed',
+				default   => 'unchanged',
+			};
+			return self::outcome( $past, $decision['reason'] );
 		}
-		if ( 'restore' === $decision ) {
-			$old = $this->item_directory . '/original';
+		if ( null === $record || ( null !== $reviewed && $reviewed !== $decision['action'] ) ) {
+			return self::outcome( 'kept', 'changed_since_apply' );
+		}
+		$old = $this->item_directory . '/original';
+		if ( 'restore' === $decision['action'] ) {
 			self::set_attributes( $old, $record, true );
 			// The restored permissions and time are on disk before the rename is authorised.
 			$this->sync_file( $old );
 			$record['phase'] = 'restore';
 			$this->save( $record );
-			$this->require_parent( $path, $record );
-			if ( ! self::at( $path, $record['candidate'] ) || self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $record['source'] ) ) {
-				throw new StorageFailed( 'The live file changed during undo.' );
-			}
-			$this->require_action( $path, 'replace' );
-			$this->publish( $old, $path );
-		} elseif ( 'remove' === $decision ) {
-			$this->require_parent( $path, $record );
-			$this->require_action( $path, 'mkdir' === $action ? 'keep' : 'replace' );
-			if ( 'mkdir' === $action ) {
-				$this->remove_directory( $path );
-			} else {
-				$this->remove_file( $path );
-			}
 		}
-		// Also after a retry: the reversal is on disk before the record that completes it. A
-		// directory that no longer exists has nothing to synchronise.
+		$changed = $this->recheck_live( $path, $action, $record, $decision );
+		if ( null !== $changed ) {
+			return self::outcome( 'kept', $changed );
+		}
+		if ( 'restore' === $decision['action'] ) {
+			$this->publish( $old, $path );
+		} elseif ( 'mkdir' === $action ) {
+			$this->remove_directory( $path );
+		} else {
+			$this->remove_file( $path );
+		}
+		$this->settle( $path, $action, $record );
+		return self::outcome( 'restore' === $decision['action'] ? 'restored' : 'removed', $decision['reason'] );
+	}
+
+	/**
+	 * Records a reverted entry, or one with nothing left to revert, as undone. Also after a
+	 * retry, the reversal is on disk before the record that completes it. A directory that no
+	 * longer exists has nothing to synchronise.
+	 *
+	 * @param string $path Reviewed path.
+	 * @param string $action Forward action.
+	 * @param Record $record Intent.
+	 */
+	private function settle( string $path, string $action, array $record ): void {
 		$this->sync_directory( dirname( $path ) );
 		if ( 'mkdir' !== $action && 'copy' !== $record['phase'] ) {
 			self::invalidate( $path );
 		}
 		$record['phase'] = 'undone';
 		$this->save( $record );
-		return true;
 	}
 
 	/**
-	 * Releases an interrupted create's remaining private link before rechecking the policy.
+	 * Checks the entry again immediately before its rename or unlink: the folder, the site
+	 * policy, the content, and last the verified identity of the live file, which covers its
+	 * inode, size and change times.
 	 *
-	 * @param string $path Reviewed path.
-	 * @param string $action Forward action.
-	 * @param Record $record Intent.
-	 * @return string Current undo decision.
+	 * @param string   $path Reviewed path.
+	 * @param string   $action Forward action.
+	 * @param Record   $record Intent.
+	 * @param Decision $decision Decision whose live identity was verified.
+	 * @return string|null Reason to keep the entry, or null to revert it.
+	 * @throws FileWorkPending If the current file verification requires another tick.
 	 */
-	private function undo_decision( string $path, string $action, array $record ): string {
-		$next = $this->item_directory . '/candidate';
-		if ( self::private_link( $action, $record, $next ) && self::at( $path, $record['candidate'] ) ) {
-			$this->remove_file( $next );
+	private function recheck_live( string $path, string $action, array $record, array $decision ): ?string {
+		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
+			return 'parent_changed';
 		}
-		return $this->undo_action( $path, $action );
+		$policy = $this->live_policy( $path );
+		if ( ( 'mkdir' === $action ? 'keep' : 'replace' ) !== $policy['action'] ) {
+			return $policy['reason'];
+		}
+		if ( 'mkdir' === $action ) {
+			if ( ! $this->installed( $path, $record ) ) {
+				return 'changed_since_apply';
+			}
+			return [ '.', '..' ] === scandir( $path ) ? null : 'new_children';
+		}
+		$stat = self::file( $path );
+		if ( ( ! $this->installed( $path, $record ) && ! self::copy_of( $stat, $record ) ) || ! $this->holds( $path, $record['source'], 1 ) ) {
+			return 'changed_since_apply';
+		}
+		return self::live_identity( $path ) === $decision['live'] ? null : 'changed_since_apply';
+	}
+
+	/**
+	 * Decides what an undo can do now. See undo_review().
+	 *
+	 * @param string                  $path Reviewed path.
+	 * @param string                  $action Forward action.
+	 * @param Record|null             $record Intent.
+	 * @param DirectorySpellings|null $review Optional name index for a read-only undo preview.
+	 * @return Decision Decision, with the identity of the verified live file of a revert.
+	 * @throws FileWorkPending If the current file verification requires another tick.
+	 */
+	private function decide( string $path, string $action, ?array $record, ?DirectorySpellings $review ): array {
+		if ( null === $record || 'copy' === $record['phase'] ) {
+			return self::decision( 'keep', 'not_applied' );
+		}
+		if ( 'undone' === $record['phase'] ) {
+			return self::decision( 'keep', 'already_undone' );
+		}
+		$private = 'mkdir' === $action
+			? null === $record['candidate'] || self::at( $this->item_directory . '/directory', $record['candidate'] )
+			: 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ! self::at( $path, $record['candidate'] );
+		if ( $private ) {
+			// Nothing was published: the prepared entry is still private.
+			return self::decision( 'keep', 'not_applied' );
+		}
+		if ( ! self::exists( $path ) ) {
+			return self::decision( 'keep', 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' );
+		}
+		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
+			return self::decision( 'keep', 'parent_changed' );
+		}
+		if ( 'mkdir' === $action ) {
+			if ( ! $this->installed( $path, $record ) ) {
+				return self::decision( 'keep', 'changed_since_apply' );
+			}
+			$policy = $this->live_policy( $path, $review );
+			return 'keep' === $policy['action'] ? self::decision( 'remove', 'undo_journal' ) : self::decision( 'keep', $policy['reason'] );
+		}
+		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) && $this->holds( $path, $record['original'], 1 ) ) {
+			// An interrupted undo of this entry has put the original back already.
+			return self::decision( 'keep', 'already_undone' );
+		}
+		$stat = self::file( $path );
+		$same = $this->installed( $path, $record );
+		// Another inode counts only with the content and attributes that the apply installed,
+		// and a different size needs no hashing to tell.
+		if ( null === $stat || ( ! $same && ! self::copy_of( $stat, $record ) ) || ( null !== $record['stat'] && $record['stat']['size'] !== $stat['size'] ) ) {
+			return self::decision( 'keep', 'changed_since_apply' );
+		}
+		$linked = $same && self::private_link( $action, $record, $this->item_directory . '/candidate' );
+		if ( ! $linked ) {
+			$policy = $this->live_policy( $path, $review );
+			if ( 'replace' !== $policy['action'] ) {
+				return self::decision( 'keep', $policy['reason'] );
+			}
+		}
+		$live = self::live_identity( $path );
+		if ( null === $live || ! $this->holds( $path, $record['source'], $linked ? 2 : 1 ) || self::live_identity( $path ) !== $live ) {
+			return self::decision( 'keep', 'changed_since_apply' );
+		}
+		$reason = $same ? 'undo_journal' : 'installed_content';
+		if ( 'create' === $action ) {
+			return self::decision( 'remove', $reason, $live );
+		}
+		return $this->retained_original( $this->item_directory . '/original', $record ) ? self::decision( 'restore', $reason, $live ) : self::decision( 'keep', 'original_unavailable' );
+	}
+
+	/**
+	 * Whether the entry is the inode that the apply published, with the attributes it recorded.
+	 *
+	 * @param string $path Live entry.
+	 * @param Record $record Intent.
+	 * @return bool Whether the published inode is in place unchanged.
+	 */
+	private function installed( string $path, array $record ): bool {
+		if ( ! self::at( $path, $record['candidate'] ) ) {
+			return false;
+		}
+		try {
+			return self::metadata( $path ) === $record['installed'];
+		} catch ( StorageFailed ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Whether a regular file with one link has the size, type, permissions, owner and group
+	 * that the apply's candidate had. An entry recorded before these were kept has none.
+	 *
+	 * @param array<int|string,int>|null $stat Live regular file.
+	 * @param Record                     $record Intent.
+	 * @return bool Whether the attributes match those installed.
+	 */
+	private static function copy_of( ?array $stat, array $record ): bool {
+		$installed = $record['stat'];
+		return null !== $stat && null !== $installed && 1 === $stat['nlink'] && $installed['size'] === $stat['size'] && $installed['mode'] === $stat['mode'] && $installed['uid'] === $stat['uid'] && $installed['gid'] === $stat['gid'];
+	}
+
+	/**
+	 * Verifies content without failing on a live file that changes or is no longer regular:
+	 * what cannot be established counts as a change.
+	 *
+	 * @param string      $path Canonical path.
+	 * @param string|null $hash Expected digest.
+	 * @param int         $links Expected link count.
+	 * @return bool Whether the content matches.
+	 * @throws FileWorkPending If the current file verification requires another tick.
+	 */
+	private function holds( string $path, ?string $hash, int $links ): bool {
+		if ( null === $hash || null === self::file( $path ) ) {
+			return false;
+		}
+		try {
+			return $this->proofs->matches( $path, $hash, $links );
+		} catch ( StorageFailed ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Builds a decision.
+	 *
+	 * @param string      $action restore, remove or keep.
+	 * @param string      $reason Reason code.
+	 * @param string|null $live Identity of the verified live file of a revert.
+	 * @return Decision Decision.
+	 */
+	private static function decision( string $action, string $reason, ?string $live = null ): array {
+		return [
+			'action' => $action,
+			'reason' => $reason,
+			'live'   => $live,
+		];
+	}
+
+	/**
+	 * Builds the outcome of a worker's undo of one entry.
+	 *
+	 * @param string $outcome restored, removed, unchanged or kept.
+	 * @param string $reason Reason code.
+	 * @return Outcome Outcome.
+	 */
+	private static function outcome( string $outcome, string $reason ): array {
+		return [
+			'outcome' => $outcome,
+			'reason'  => $reason,
+		];
 	}
 
 	/**
@@ -528,9 +743,30 @@ final readonly class FileChange {
 	 * @return string Current disposition.
 	 */
 	private function live_action( string $path, ?DirectorySpellings $review = null ): string {
+		return $this->live_policy( $path, $review )['action'];
+	}
+
+	/**
+	 * The current disposition of the live target with its reason. A source that the site now
+	 * maps to another destination gives destination_changed.
+	 *
+	 * @param string                  $path Live path.
+	 * @param DirectorySpellings|null $review Optional name index for a read-only undo preview.
+	 * @return array{action: string, reason: string} Current disposition.
+	 */
+	private function live_policy( string $path, ?DirectorySpellings $review = null ): array {
 		$source = $this->source_path ?? $path;
 		$entry  = $this->plan->inspect( $this->files, $source, $review );
-		return ( $entry['destination'] ?? ( null === $this->source_path ? $path : null ) ) === $path ? $entry['action'] : 'refuse';
+		if ( ( $entry['destination'] ?? ( null === $this->source_path ? $path : null ) ) !== $path ) {
+			return [
+				'action' => 'refuse',
+				'reason' => 'destination_changed',
+			];
+		}
+		return [
+			'action' => $entry['action'],
+			'reason' => $entry['reason'],
+		];
 	}
 
 	/**
@@ -570,11 +806,8 @@ final readonly class FileChange {
 	 * @return bool Whether the approved preimage is still intact.
 	 */
 	private function retained_original( string $path, array $record ): bool {
-		if ( ! self::at( $path, $record['backup'] ) ) {
-			return false;
-		}
-		$before = ApplyManifest::identity( $path );
-		return $this->matches( $path, $record['original'] ) && self::at( $path, $record['backup'] ) && ApplyManifest::identity( $path ) === $before;
+		$before = self::at( $path, $record['backup'] ) ? self::live_identity( $path ) : null;
+		return null !== $before && $this->holds( $path, $record['original'], 1 ) && self::at( $path, $record['backup'] ) && self::live_identity( $path ) === $before;
 	}
 
 	/**
@@ -713,6 +946,36 @@ final readonly class FileChange {
 			throw new StorageFailed( 'A file change requires a canonical regular file.' );
 		}
 		return $stat;
+	}
+
+	/**
+	 * Reads a canonical regular file without failing when it is gone or of another type.
+	 *
+	 * @param string $path Path to inspect.
+	 * @return array<int|string,int>|null File metadata, or null.
+	 */
+	private static function file( string $path ): ?array {
+		clearstatcache( true );
+		$stat = self::exists( $path ) && realpath( $path ) === $path ? lstat( $path ) : false;
+		return false === $stat || 0100000 !== ( $stat['mode'] & 0170000 ) ? null : $stat;
+	}
+
+	/**
+	 * The full identity of a live file, which includes its inode, size and change times, or
+	 * null when it is gone.
+	 *
+	 * @param string $path Live file.
+	 * @return string|null Identity.
+	 */
+	private static function live_identity( string $path ): ?string {
+		if ( null === self::file( $path ) ) {
+			return null;
+		}
+		try {
+			return ApplyManifest::identity( $path );
+		} catch ( StorageFailed ) {
+			return null;
+		}
 	}
 
 	/**
@@ -947,6 +1210,17 @@ final readonly class FileChange {
 		if ( null === $data['parent'] ) {
 			throw new StorageFailed( 'The file change journal has no parent identity.' );
 		}
+		// Entries recorded before the installed attributes were kept have none.
+		$stat = $data['stat'] ?? null;
+		if ( null !== $stat && ( ! is_array( $stat ) || ! is_int( $stat['size'] ?? null ) || $stat['size'] < 0 || ! is_int( $stat['mode'] ?? null ) || ! is_int( $stat['uid'] ?? null ) || ! is_int( $stat['gid'] ?? null ) ) ) {
+			throw new StorageFailed( 'The file change journal has invalid installed attributes.' );
+		}
+		$data['stat'] = null === $stat ? null : [
+			'size' => $stat['size'],
+			'mode' => $stat['mode'],
+			'uid'  => $stat['uid'],
+			'gid'  => $stat['gid'],
+		];
 		/**
 		 * The record shape and all scalar fields have been checked above.
 		 *
