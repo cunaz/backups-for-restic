@@ -152,6 +152,35 @@ final class CliTest extends TestCase {
 		self::assertFileDoesNotExist( TestSite::root() . '/.maintenance' );
 	}
 
+	public function test_every_tick_of_one_process_reads_the_confirming_administrator_again(): void {
+		$login = 'bfr-confirming-' . bin2hex( random_bytes( 4 ) );
+		TestSite::user( $login, 'administrator' );
+		try {
+			// The policy that FileChanges applies before every tick, asked twice in one process
+			// as by tick --until-idle. Between the two, another request takes the role away:
+			// it writes the database, not this process's object cache.
+			[ $status, $output ] = TestSite::wp(
+				[
+					'eval',
+					sprintf(
+						'$changes = ( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) )->file_changes();
+						$allowed = ( new ReflectionProperty( $changes, "allowed" ) )->getValue( $changes );
+						$user    = get_user_by( "login", %s );
+						$first   = $allowed( $user->ID );
+						global $wpdb;
+						$wpdb->update( $wpdb->usermeta, [ "meta_value" => serialize( [ "editor" => true ] ) ], [ "user_id" => $user->ID, "meta_key" => $wpdb->get_blog_prefix() . "capabilities" ] );
+						echo wp_json_encode( [ $first, $allowed( $user->ID ) ] );',
+						var_export( $login, true )
+					),
+				]
+			);
+			self::assertSame( 0, $status, $output );
+			self::assertSame( '[true,false]', TestSite::last_line( $output ), 'The second tick sees the role that the database holds now.' );
+		} finally {
+			TestSite::wp( [ 'user', 'delete', $login, '--yes' ] );
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
 		$before            = TestSite::state( 'recovery_kit' );

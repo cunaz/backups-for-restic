@@ -218,7 +218,8 @@ All notable changes are documented here. The format follows
   form body, and no admitted request can store the shortened list of active plugins that
   it starts with. Every tick of a file apply or undo checks again that the administrator
   who confirmed it still has the backup capability and `update_core`
-  (`file_writes_refused`).
+  (`file_writes_refused`). The check reads the account from the database, so a role taken
+  away also stops a running `wp backups-for-restic tick --until-idle`.
 
 ### Fixed
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
