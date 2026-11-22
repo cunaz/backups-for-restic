@@ -340,8 +340,11 @@ Every route that asks for the WordPress password asks through one check
   the server's error number, never its text. Before it connects, the adapter reads the TLS
   cipher of the site's connection. Where that connection is encrypted and the client flags do
   not ask for TLS (`MYSQLI_CLIENT_SSL`), for example because a database drop-in sets up the
-  encryption itself, or where the site's session shows no cipher at all, it opens no second
-  connection, so that the account never authenticates in the clear. A connection that it did
+  encryption itself, or where the cipher cannot be read because the status query returns no
+  row, it opens no second connection, so that the account does not authenticate in the clear
+  beside an encrypted site. An empty cipher means that the site's own connection is not
+  encrypted: the second connection is then opened and is not encrypted either, as the site's
+  is not. A connection that it did
   open is used only after it is shown to reach the same server and database as the site's
   and to be encrypted if the site's connection is; otherwise it is closed. Either way the dump
   then reads through `$wpdb`. With `MYSQLI_CLIENT_SSL` in the flags, the dump's connection
