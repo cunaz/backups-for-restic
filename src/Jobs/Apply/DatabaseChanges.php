@@ -12,6 +12,7 @@ namespace BackupsForRestic\Jobs\Apply;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\ExchangePlan;
+use BackupsForRestic\Database\Restore\SessionDrain;
 use BackupsForRestic\Database\Restore\TableExchange;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Database\Restore\WordPressState;
@@ -44,11 +45,25 @@ defined( 'ABSPATH' ) || exit;
 final readonly class DatabaseChanges implements StepProvider {
 
 	/**
+	 * Errors after which a session is gone and its last statement's outcome unknown: the
+	 * client's lost connection, and the server closing it for a packet that is too large.
+	 */
+	private const array LOST = [ 1153, 2006, 2013, 2055 ];
+
+	/**
 	 * Checked source and live review builder.
 	 *
 	 * @var DatabaseReview
 	 */
 	private DatabaseReview $reviews;
+
+	/**
+	 * Jobs whose database session was lost in this request, by job ID. Their cleanup waits
+	 * for a later tick, which works on a new session.
+	 *
+	 * @var \ArrayObject<string,true>
+	 */
+	private \ArrayObject $interrupted;
 
 	/**
 	 * Builds a worker on the checked target and directory-local stores.
@@ -63,6 +78,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param \Closure(int):list<string> $policy Current site, cache and initiating user eligibility.
 	 * @param FileMaintenance            $maintenance Scoped WordPress maintenance marker.
 	 * @param \Closure():void            $refresh Clear WordPress caches and reschedule heartbeat.
+	 * @param SessionDrain               $drain Wait for requests from before maintenance.
 	 */
 	public function __construct(
 		private JobStore $jobs,
@@ -74,9 +90,17 @@ final readonly class DatabaseChanges implements StepProvider {
 		private \Closure $connection,
 		private \Closure $policy,
 		private FileMaintenance $maintenance,
-		private \Closure $refresh
+		private \Closure $refresh,
+		private SessionDrain $drain = new SessionDrain()
 	) {
-		$this->reviews = new DatabaseReview( $jobs, $staging, $hours, $prefix );
+		/**
+		 * No session was lost yet in this request.
+		 *
+		 * @var \ArrayObject<string,true> $interrupted
+		 */
+		$interrupted       = new \ArrayObject();
+		$this->reviews     = new DatabaseReview( $jobs, $staging, $hours, $prefix );
+		$this->interrupted = $interrupted;
 	}
 
 	/**
@@ -87,7 +111,40 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @return Preview Review.
 	 */
 	public function preview( string $restore, int $user ): array {
-		return $this->reviews->read( ( $this->connection )(), $restore, $user, ( $this->policy )( $user ), false )['preview'];
+		$connection = ( $this->connection )();
+		return $this->reviews->read( $connection, $restore, $user, $this->blockers( $connection, $user ), false )['preview'];
+	}
+
+	/**
+	 * Site blockers of a new database apply. A binding whose private tables are on another
+	 * server or database waits for the administrator's decision first.
+	 *
+	 * @param Connection $connection Current SQL session.
+	 * @param int        $user Confirming user.
+	 * @return list<string> Blocker codes.
+	 */
+	private function blockers( Connection $connection, int $user ): array {
+		$blockers = ( $this->policy )( $user );
+		foreach ( $this->jobs->database_owners() as $owner ) {
+			if ( ! $owner->state->is_terminal() ) {
+				continue;
+			}
+			if ( isset( $owner->data['database_foreign'] ) ) {
+				$blockers[] = 'database_exchange_foreign';
+				continue;
+			}
+			try {
+				DatabaseGeneration::load( $connection, $owner );
+			} catch ( DatabaseFailed $error ) {
+				if ( 'database_exchange_foreign' === ( $error->context()['code'] ?? null ) ) {
+					$blockers[] = 'database_exchange_foreign';
+				}
+			} catch ( FormatException ) {
+				// The heartbeat reports a damaged ownership record on its own job.
+				continue;
+			}
+		}
+		return array_values( array_unique( $blockers ) );
 	}
 
 	/**
@@ -177,12 +234,98 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
+	 * Describes a binding whose private tables the connected server positively identifies
+	 * as another server's or another database's. Read-only; nothing is asked of the
+	 * database beyond its identity.
+	 *
+	 * @param string $apply Owning database apply.
+	 * @return array{job:string,database:string,server:string,tables:list<string>} Where the tables are and their names.
+	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 */
+	public function foreign_binding( string $apply ): array {
+		return $this->foreign_owner( $apply )[1];
+	}
+
+	/**
+	 * Forgets a binding whose private tables are on another server or in another database,
+	 * after the administrator confirmed it. Nothing is dropped anywhere: the result names the
+	 * tables to remove by hand where they are. The caller holds the runner lock; staging's
+	 * guard keeps an undo of this binding from being queued at the same time.
+	 *
+	 * @param string $apply Owning database apply.
+	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.
+	 * @param string $via Where it was confirmed: rest or wp-cli.
+	 * @return array{job:string,database:string,server:string,tables:list<string>} The discarded binding.
+	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 */
+	public function discard( string $apply, int $user, string $via ): array {
+		return $this->staging->guard(
+			function () use ( $apply, $user, $via ): array {
+				$active = $this->jobs->active();
+				if ( JobType::DatabaseUndo === $active?->type && $apply === ( $active->data['apply'] ?? null ) ) {
+					JobConflict::raise( 'An undo of this database restore is still queued or running.', [ 'code' => 'job_conflict' ] );
+				}
+				[ $owner, $binding ] = $this->foreign_owner( $apply );
+				DatabaseGeneration::forget( $owner );
+				$owner->data['database_discarded'] = [
+					'at'   => $this->clock->now()[0],
+					'user' => $user,
+					'via'  => $via,
+				] + $binding;
+				$owner->warn( sprintf( 'The binding to %1$d private table names in the database %2$s on the server %3$s was discarded. Nothing was dropped; remove the tables that exist there by hand.', count( $binding['tables'] ), $binding['database'], $binding['server'] ) );
+				$this->jobs->save( $owner );
+				$this->jobs->log( $owner )->write(
+					'warning',
+					'Database restore binding discarded.',
+					[
+						'user' => $user,
+						'via'  => $via,
+						'code' => 'database_exchange_foreign',
+					]
+				);
+				return $binding;
+			}
+		);
+	}
+
+	/**
+	 * Finds a finished apply whose binding the connected server positively disowns.
+	 *
+	 * @param string $apply Owning database apply.
+	 * @return array{Job,array{job:string,database:string,server:string,tables:list<string>}} The job and its binding.
+	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 */
+	private function foreign_owner( string $apply ): array {
+		$owner = $this->jobs->get( $apply );
+		if ( null === $owner || JobType::DatabaseApply !== $owner->type || ! isset( $owner->data['database_owner'] ) ) {
+			JobConflict::raise( 'This job holds no database restore binding.', [ 'code' => 'database_binding_missing' ] );
+		}
+		if ( ! $owner->state->is_terminal() ) {
+			JobConflict::raise( 'The database restore that holds this binding is still running.', [ 'code' => 'job_conflict' ] );
+		}
+		$connection = ( $this->connection )();
+		try {
+			DatabaseGeneration::load( $connection, $owner );
+		} catch ( DatabaseFailed $error ) {
+			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+				throw $error;
+			}
+			return [ $owner, DatabaseGeneration::names( $connection, $owner ) ];
+		}
+		JobConflict::raise( 'This binding belongs to the connected database. The heartbeat removes its private tables when they expire.', [ 'code' => 'database_binding_verified' ] );
+	}
+
+	/**
 	 * Revalidates the current objects and opening of the undo window.
+	 *
+	 * The confirmation covers the identities observed now. After a rebuild of a live table
+	 * or of the witness these differ from the recorded ones; the undo job keeps the change.
 	 *
 	 * @param Job  $owner Owning apply.
 	 * @param int  $user Initiating administrator.
 	 * @param bool $pinned A queued undo pins the original window.
-	 * @return array{preview:Preview,authority:string} Undo review and private binding.
+	 * @return array{preview:Preview,authority:string,rebound:array{after:array<int,string>,witness:string|null}} Undo review and private binding.
 	 * @throws JobConflict If the recovery window expired.
 	 */
 	private function undo_review( Job $owner, int $user, bool $pinned ): array {
@@ -190,7 +333,8 @@ final readonly class DatabaseChanges implements StepProvider {
 			JobConflict::raise( 'This database undo window is no longer available.', [ 'code' => 'database_exchange_changed' ] );
 		}
 		$connection = ( $this->connection )();
-		$plan       = DatabaseGeneration::load( $connection, $owner )->exchange();
+		$recorded   = DatabaseGeneration::load( $connection, $owner )->exchange();
+		$plan       = $recorded;
 		$entries    = [];
 		foreach ( $plan->document['pairs'] as $pair ) {
 			$entries[] = [
@@ -206,16 +350,51 @@ final readonly class DatabaseChanges implements StepProvider {
 		if ( [] === $blockers ) {
 			try {
 				$authority = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
-				( new TableExchange( $connection ) )->review_undo( $plan, $user );
+				$plan      = ( new TableExchange( $connection ) )->review_undo( $recorded, $user );
 			} catch ( DatabaseFailed | FormatException $error ) {
 				$code       = $error->context()['code'] ?? null;
 				$blockers[] = is_string( $code ) ? $code : 'database_exchange_changed';
 			}
 		}
+		$after = [];
+		foreach ( $plan->document['pairs'] as $number => $pair ) {
+			if ( $pair['after'] !== $recorded->document['pairs'][ $number ]['after'] ) {
+				$after[ $number ] = $pair['after'];
+			}
+		}
 		return [
 			'preview'   => DatabaseReview::summary( self::field( $owner, 'restore' ), $user, $entries, $blockers, [], [ 'undo', $owner->id, $owner->data['retained_until'], $plan->document, $authority ] ),
 			'authority' => $authority,
+			'rebound'   => [
+				'after'   => $after,
+				'witness' => $plan->document['witness'] !== $recorded->document['witness'] ? $plan->document['witness'] : null,
+			],
 		];
+	}
+
+	/**
+	 * Applies the identities that the administrator confirmed for an undo to the recorded
+	 * plan. Only identities of the applied generation and of the witness can change.
+	 *
+	 * @param Job          $undo Database undo.
+	 * @param ExchangePlan $plan Recorded plan of the owning apply.
+	 * @return ExchangePlan The plan to exchange.
+	 * @throws FormatException If the confirmed identities are unreadable.
+	 */
+	private static function confirmed_plan( Job $undo, ExchangePlan $plan ): ExchangePlan {
+		$rebound = $undo->data['rebound'] ?? null;
+		$witness = is_array( $rebound ) ? ( $rebound['witness'] ?? null ) : null;
+		if ( ! is_array( $rebound ) || ! is_array( $rebound['after'] ?? null ) || ( null !== $witness && ! is_string( $witness ) ) ) {
+			throw new FormatException( 'The confirmed database undo lost its table identities.' );
+		}
+		$after = [];
+		foreach ( $rebound['after'] as $number => $id ) {
+			if ( ! is_int( $number ) || ! is_string( $id ) ) {
+				throw new FormatException( 'The confirmed database undo has an invalid table identity.' );
+			}
+			$after[ $number ] = $id;
+		}
+		return $plan->rebind( $after, $witness );
 	}
 
 	/**
@@ -234,13 +413,20 @@ final readonly class DatabaseChanges implements StepProvider {
 						'preflight'          => $this->preflight( $job ),
 						'importing_database' => $this->import( $job, $deadline ),
 						'preparing_database' => $this->prepare( $job, $deadline ),
-						'swapping_database'  => $this->swap( $job ),
+						'swapping_database'  => $this->swap( $job, $deadline ),
 						'recording'          => true,
 						'cleaning_up'        => $this->cleanup( $job, $deadline ),
 						default              => throw new InvalidArgument( 'Unknown database change step.' ),
 					};
 				} catch ( DatabaseFailed | FormatException $error ) {
 					$code = $error->context()['code'] ?? null;
+					if ( in_array( $code, self::LOST, true ) ) {
+						$this->interrupted[ $job->id ] = true;
+						$this->renew();
+					}
+					if ( 1153 === $code ) {
+						DatabaseFailed::raise( 'A statement of the snapshot is larger than the database server\'s max_allowed_packet.', [ 'code' => 'database_restore_packet' ] );
+					}
 					if ( in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) ) {
 						DatabaseFailed::raise( 'The database restore is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] );
 					}
@@ -251,6 +437,19 @@ final readonly class DatabaseChanges implements StepProvider {
 				}
 			}
 		);
+	}
+
+	/**
+	 * Asks for a session again after a lost one, so that WordPress can go on in this
+	 * request. The cleanup still waits for a later tick before it reads the outcome.
+	 */
+	private function renew(): void {
+		try {
+			( $this->connection )();
+		} catch ( PluginException ) {
+			// The next tick tries again with the connection WordPress has then.
+			return;
+		}
 	}
 
 	/**
@@ -267,9 +466,11 @@ final readonly class DatabaseChanges implements StepProvider {
 			$review = $this->undo_review( $this->original( self::field( $job, 'apply' ) ), $user, true );
 			self::confirmed( $review['preview'], $digest );
 			$job->data['authority'] = $review['authority'];
+			$job->data['rebound']   = $review['rebound'];
 			return true;
 		}
-		$review = $this->reviews->read( ( $this->connection )(), self::field( $job, 'restore' ), $user, ( $this->policy )( $user ), true );
+		$connection = ( $this->connection )();
+		$review     = $this->reviews->read( $connection, self::field( $job, 'restore' ), $user, $this->blockers( $connection, $user ), true );
 		self::confirmed( $review['preview'], $digest );
 		if ( ! isset( $job->data['database_owner'] ) ) {
 			$job->data['database_owner'] = [
@@ -368,31 +569,54 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Checks the worker's current authorization, publishes maintenance and performs the
-	 * one live RENAME. Retry a committed operation by refreshing caches and recording its
-	 * witness. A lost SQL reply triggers the same reconciliation in cleanup.
+	 * Checks the worker's current authorization, publishes maintenance, waits for requests
+	 * that started before it and performs the one live RENAME. Retry a committed operation
+	 * by refreshing caches and recording its witness. A lost SQL reply triggers the same
+	 * reconciliation in cleanup.
 	 *
-	 * @param Job $job Active apply or undo.
+	 * @param Job   $job Active apply or undo.
+	 * @param float $deadline End of this tick.
 	 * @return bool Whether the swap has finished.
 	 * @throws JobConflict If the user or host no longer permits the operation.
 	 */
-	private function swap( Job $job ): bool {
+	private function swap( Job $job, float $deadline ): bool {
 		$undo       = JobType::DatabaseUndo === $job->type;
 		$owner      = $undo ? $this->original( self::field( $job, 'apply' ) ) : $job;
 		$connection = ( $this->connection )();
 		$plan       = DatabaseGeneration::load( $connection, $owner )->exchange();
+		$plan       = $undo ? self::confirmed_plan( $job, $plan ) : $plan;
 		$exchange   = new TableExchange( $connection );
 		$user       = self::user( $job );
 		$state      = $undo ? 'undone' : 'applied';
 		$directory  = $this->jobs->directory( $job );
+		$committed  = $exchange->status( $plan ) === $state;
+		if ( ! $committed && $deadline - microtime( true ) < $this->drain->budget() && true !== ( $job->data['database_swap_deferred'] ?? false ) ) {
+			// Maintenance starts with a fresh tick, unless every tick is this short.
+			$job->data['database_swap_deferred'] = true;
+			return false;
+		}
+		unset( $job->data['database_swap_deferred'] );
 		$this->maintenance->enter( $job->id, $directory, '' );
+		$entered = microtime( true );
 		try {
-			if ( $exchange->status( $plan ) !== $state ) {
+			if ( ! $committed ) {
 				if ( $plan->document['prefix'] !== $this->prefix || [] !== ( $this->policy )( $user ) ) {
 					JobConflict::raise( 'The destination or confirming administrator no longer permits this exchange.', [ 'code' => 'database_exchange_changed' ] );
 				}
 				$job->data['database_swapping_at'] = $this->clock->now()[0];
 				$this->jobs->save( $job );
+				if ( $undo ) {
+					// The heartbeat can then recognise a committed undo after a lost reply, and
+					// every later step works with the identities that the undo moves.
+					$owner->data['exchange_plan']         = $plan->document;
+					$owner->data['database_undo_attempt'] = [
+						'job' => $job->id,
+						'at'  => $job->data['database_swapping_at'],
+					];
+					$this->jobs->save( $owner );
+				}
+				// Only a few statements separate the quiet interval from the table locks.
+				$this->drain->wait( $connection, $plan->document['database'], $entered, $deadline );
 				$exchange->run( $plan, $user, $undo, self::field( $job, 'authority' ) );
 			}
 			DatabaseGeneration::record( $owner, $job, $state );
@@ -407,25 +631,76 @@ final readonly class DatabaseChanges implements StepProvider {
 	/**
 	 * Reconciles an unknown RENAME outcome before cancellation or error cleanup. A committed
 	 * exchange is recorded as completed, including its original 24-hour retention window.
+	 * After a lost session the reconciliation waits for a later tick and a new session, and
+	 * while the old session still holds its locks, for at most ten minutes. The heartbeat
+	 * reconciles from the durable records after that.
 	 *
 	 * @param Job   $job Current worker.
 	 * @param float $deadline End of tick.
 	 * @return bool Whether cleanup is complete.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 * @throws JobConflict If a lock stays held beyond the bound.
 	 */
 	private function cleanup( Job $job, float $deadline ): bool {
 		$this->maintenance->release( $job->id, $this->jobs->directory( $job ) );
+		if ( $this->interrupted->offsetExists( $job->id ) ) {
+			$this->interrupted->offsetUnset( $job->id );
+			return false;
+		}
+		try {
+			return $this->reconcile( $job, $deadline );
+		} catch ( DatabaseFailed | JobConflict $error ) {
+			$code = $error->context()['code'] ?? null;
+			if ( ! in_array( $code, [ ...self::LOST, 1205, 1213, 'database_restore_busy' ], true ) ) {
+				throw $error;
+			}
+			$now   = $this->clock->now()[0];
+			$until = $job->data['database_reconcile_until'] ?? null;
+			if ( ! is_int( $until ) ) {
+				$until                                 = $now + 600;
+				$job->data['database_reconcile_until'] = $until;
+			}
+			if ( $now >= $until ) {
+				throw $error;
+			}
+			return false;
+		}
+	}
+
+	/**
+	 * Records a committed exchange of this job, or removes an unfinished import.
+	 *
+	 * @param Job   $job Current worker.
+	 * @param float $deadline End of tick.
+	 * @return bool Whether cleanup is complete.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 * @throws JobConflict If the owning apply is gone or another session holds its tables.
+	 */
+	private function reconcile( Job $job, float $deadline ): bool {
 		$undo  = JobType::DatabaseUndo === $job->type;
 		$owner = $undo ? $this->original( self::field( $job, 'apply' ) ) : $job;
 		if ( ! isset( $owner->data['database_owner'] ) ) {
 			return true;
 		}
 		$connection = ( $this->connection )();
-		$generation = DatabaseGeneration::load( $connection, $owner );
+		try {
+			$generation = DatabaseGeneration::load( $connection, $owner );
+		} catch ( DatabaseFailed $error ) {
+			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+				throw $error;
+			}
+			// Nothing on this server belongs to the binding, so nothing is removed or recorded
+			// here. A retained window stays as it is; an unfinished import awaits a decision.
+			if ( ! isset( $owner->data['retained_until'] ) ) {
+				$this->unverified( $owner );
+			}
+			return true;
+		}
 		if ( null !== $generation->plan && isset( $job->data['database_swapping_at'] ) && ! isset( $owner->data['database_cleanup_generation'] ) ) {
 			$state = $undo ? 'undone' : 'applied';
 			if ( ( new TableExchange( $connection ) )->status( $generation->plan ) === $state ) {
 				if ( ( $job->result['database_generation'] ?? null ) !== $state || null !== $job->outcome ) {
-					$this->swap( $job );
+					$this->swap( $job, $deadline );
 					$job->outcome = JobState::Succeeded;
 					$job->error   = null;
 				}
@@ -437,16 +712,19 @@ final readonly class DatabaseChanges implements StepProvider {
 
 	/**
 	 * Expires database generations under the directory-specific runner lock. Staging's
-	 * short guard serializes undo creation and the durable start of expiry.
+	 * short guard serializes undo creation and the durable start of expiry. A generation
+	 * whose cleanup fails is reported on its job, and the older ones are still expired.
 	 *
 	 * @param bool  $uninstall Remove owned generations, including active ones.
 	 * @param float $deadline End of request.
 	 * @return bool Whether all cleanup due in this directory has completed.
+	 * @throws PluginException The first cleanup failure, after every other due generation had its turn.
 	 */
 	public function expire( bool $uninstall, float $deadline ): bool {
 		return $this->staging->guard(
 			function () use ( $uninstall, $deadline ): bool {
-				$active = $this->jobs->active();
+				$active  = $this->jobs->active();
+				$failure = null;
 				foreach ( $this->jobs->database_owners() as $job ) {
 					if ( ! $uninstall && ( ! $job->state->is_terminal() || ( JobType::DatabaseUndo === $active?->type && ( $active->data['apply'] ?? null ) === $job->id ) ) ) {
 						continue;
@@ -455,30 +733,69 @@ final readonly class DatabaseChanges implements StepProvider {
 					if ( ! $uninstall && is_int( $job->data['retained_until'] ?? null ) && $job->data['retained_until'] > $now && ! isset( $job->data['database_cleanup_generation'] ) ) {
 						continue;
 					}
-					do {
-						try {
+					try {
+						do {
 							$done = DatabaseGeneration::clean( ( $this->connection )(), $this->jobs, $job, $deadline, $now, $uninstall );
+							unset( $job->data['database_foreign'] );
 							if ( $done ) {
 								unset( $job->result['database_cleanup_pending'] );
 							}
-						} catch ( PluginException $error ) {
-							if ( true !== ( $job->result['database_cleanup_pending'] ?? false ) ) {
-								$job->result['database_cleanup_pending'] = true;
-								$job->warn( 'Database generation cleanup is overdue. Restore the original database connection and permissions so that the heartbeat can finish.' );
-								$this->jobs->save( $job );
-								$this->jobs->log( $job )->write( 'warning', 'Database generation cleanup was deferred.', [ 'code' => 'database_exchange_cleanup' ] );
-							}
-							throw $error;
+							$this->jobs->save( $job );
+						} while ( ! $done && microtime( true ) < $deadline );
+					} catch ( DatabaseFailed $error ) {
+						if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+							$this->deferred( $job );
+							$failure ??= $error;
+						} elseif ( $uninstall ) {
+							// The tables are not on this server: uninstall must neither drop nor wait for them.
+							DatabaseGeneration::forget( $job );
+							$this->jobs->save( $job );
+						} else {
+							$this->unverified( $job );
 						}
-						$this->jobs->save( $job );
-						if ( microtime( true ) >= $deadline ) {
-							return false;
-						}
-					} while ( ! $done );
+					} catch ( PluginException $error ) {
+						$this->deferred( $job );
+						$failure ??= $error;
+					}
+					if ( microtime( true ) >= $deadline ) {
+						return null === $failure ? false : throw $failure;
+					}
 				}
-				return true;
+				return null === $failure ? true : throw $failure;
 			}
 		);
+	}
+
+	/**
+	 * Reports once on the owning job that its cleanup failed and the heartbeat retries.
+	 * One stuck generation must not keep older ones from expiring.
+	 *
+	 * @param Job $job Owning apply.
+	 */
+	private function deferred( Job $job ): void {
+		if ( true !== ( $job->result['database_cleanup_pending'] ?? false ) ) {
+			$job->result['database_cleanup_pending'] = true;
+			$job->warn( 'Database generation cleanup is overdue. Restore the original database connection and permissions so that the heartbeat can finish.' );
+			$this->jobs->save( $job );
+			$this->jobs->log( $job )->write( 'warning', 'Database generation cleanup was deferred.', [ 'code' => 'database_exchange_cleanup' ] );
+		}
+	}
+
+	/**
+	 * Records once that the connected server positively is not the one holding the owning
+	 * job's private tables. Other jobs go on; only a new database apply waits for the
+	 * administrator to remove those tables there and discard the binding.
+	 *
+	 * @param Job $owner Owning apply.
+	 */
+	private function unverified( Job $owner ): void {
+		if ( isset( $owner->data['database_foreign'] ) ) {
+			return;
+		}
+		$owner->data['database_foreign'] = $this->clock->now()[0];
+		$owner->warn( sprintf( 'The private tables of this database restore are on another database server or in another database. Run "wp backups-for-restic database-discard %s" to see the database, the server UUID and the table names; confirming forgets the binding and drops nothing. Drop the tables by hand only where you can verify them.', $owner->id ) );
+		$this->jobs->save( $owner );
+		$this->jobs->log( $owner )->write( 'warning', 'The database restore binding belongs to another server or database.', [ 'code' => 'database_exchange_foreign' ] );
 	}
 
 	/**

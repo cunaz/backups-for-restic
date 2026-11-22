@@ -89,17 +89,8 @@ final readonly class DatabasePreview {
 		try {
 			$progress = $importer->tick( 16, max( 0.001, min( 20.0, $deadline - microtime( true ) ) ) );
 		} catch ( DatabaseFailed $error ) {
-			$code = $error->context()['code'] ?? null;
-			if ( in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) ) {
-				DatabaseFailed::raise( 'The database rehearsal is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] );
-			}
-			if ( in_array( $code, [ 1115, 1253, 1273 ], true ) ) {
-				DatabaseFailed::raise( 'The destination database cannot use a character set or collation required by the snapshot.', [ 'code' => 'database_restore_collation' ] );
-			}
-			if ( in_array( $code, [ 1044, 1142, 1143, 1227 ], true ) ) {
-				DatabaseFailed::raise( 'The database account lacks a permission needed to rehearse the snapshot.', [ 'code' => 'database_restore_privilege' ] );
-			}
-			DatabaseFailed::raise( $error->getMessage(), [ 'code' => 'database_restore_failed' ] );
+			$failure = self::classified( $error );
+			throw $failure;
 		} catch ( FormatException $error ) {
 			DatabaseFailed::raise( $error->getMessage(), [ 'code' => 'database_restore_format' ] );
 		}
@@ -124,6 +115,26 @@ final readonly class DatabasePreview {
 		$job->result['database_rows']          = $report['rows'];
 		$job->result['database_report']        = $services->staging_name( $job ) . '/' . self::REPORT;
 		return true;
+	}
+
+	/**
+	 * Gives a failed rehearsal statement the code the administrator can act on. A batch
+	 * beyond the server's packet limit is refused before it is sent; a server that closes
+	 * the session for one anyway reports 1153.
+	 *
+	 * @param DatabaseFailed $error Failure of the import.
+	 * @return DatabaseFailed Failure with a job error code.
+	 */
+	public static function classified( DatabaseFailed $error ): DatabaseFailed {
+		$code = $error->context()['code'] ?? null;
+		return match ( true ) {
+			'database_restore_packet' === $code => $error,
+			1153 === $code => new DatabaseFailed( 'A statement of the snapshot is larger than the database server\'s max_allowed_packet.', [ 'code' => 'database_restore_packet' ] ),
+			in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) => new DatabaseFailed( 'The database rehearsal is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] ),
+			in_array( $code, [ 1115, 1253, 1273 ], true ) => new DatabaseFailed( 'The destination database cannot use a character set or collation required by the snapshot.', [ 'code' => 'database_restore_collation' ] ),
+			in_array( $code, [ 1044, 1142, 1143, 1227 ], true ) => new DatabaseFailed( 'The database account lacks a permission needed to rehearse the snapshot.', [ 'code' => 'database_restore_privilege' ] ),
+			default => new DatabaseFailed( $error->getMessage(), [ 'code' => 'database_restore_failed' ] ),
+		};
 	}
 
 	/**

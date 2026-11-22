@@ -156,9 +156,13 @@ final class Messages {
 				'message' => __( 'The database rehearsal could not finish.', 'backups-for-restic' ),
 				'hint'    => __( 'See the job log for the database operation that stopped. You can stage and download the SQL files separately.', 'backups-for-restic' ),
 			],
+			'database_restore_packet' => [
+				'message' => __( 'A row batch of the snapshot is larger than the database server accepts in one statement.', 'backups-for-restic' ),
+				'hint'    => __( 'Ask the host to raise max_allowed_packet on the database server. When the plugin refused a row batch before sending it, the job log names the limit that batch needs. For an import by hand, stage the snapshot’s database directory again with the rehearsal switched off and download the SQL files or request a ZIP; the importing client and the database server both need a packet limit large enough for the largest statement.', 'backups-for-restic' ),
+			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
-				'hint'    => __( 'The job retries automatically using its saved database progress and operation witness.', 'backups-for-restic' ),
+				'hint'    => __( 'The job tried again several times from its saved database progress and operation witness, then stopped. When the database server answers and no other client holds long locks on the site tables, start the rehearsal or the database change again.', 'backups-for-restic' ),
 			],
 			'database_admin_collision' => [
 				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
@@ -183,6 +187,30 @@ final class Messages {
 			'database_exchange_cleanup' => [
 				'message' => __( 'The database restore could not finish its cleanup.', 'backups-for-restic' ),
 				'hint'    => __( 'Keep the private job directory, reconnect the original database with its restore permissions, and allow the next heartbeat to retry.', 'backups-for-restic' ),
+			],
+			'database_exchange_sessions' => [
+				'message' => __( 'Other connections to the site database did not end during maintenance in several attempts, so the table exchange did not start and the job stopped.', 'backups-for-restic' ),
+				'hint'    => __( 'Persistent database connections, long-running WP-CLI processes or another application using the same database account keep connections open. Stop them, then review and confirm the database change again.', 'backups-for-restic' ),
+			],
+			'performance_schema' => [
+				'message' => __( 'The database server does not list every connection, so the table exchange cannot tell whether earlier requests have ended.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled and enough Performance Schema thread instances for every connection (performance_schema_max_thread_instances), and a database account with the PROCESS privilege. Otherwise use the manual SQL restore procedure.', 'backups-for-restic' ),
+			],
+			'database_exchange_foreign' => [
+				'message' => __( 'A database restore keeps private tables on another database server or in another database.', 'backups-for-restic' ),
+				'hint'    => __( 'Backups go on. Before another database restore, run "wp backups-for-restic database-discard" with the ID of that restore job: it shows the database, the server UUID and the table names, and confirming forgets the binding without dropping anything. Drop those tables by hand only where you can verify them.', 'backups-for-restic' ),
+			],
+			'database_binding_missing' => [
+				'message' => __( 'No finished database restore holds a binding with this job ID.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the job ID in the job history.', 'backups-for-restic' ),
+			],
+			'database_binding_verified' => [
+				'message' => __( 'The private tables of this database restore are in the connected database, so its binding is not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The heartbeat removes them when their recovery window ends.', 'backups-for-restic' ),
+			],
+			'database_exchange_rebuilt' => [
+				'message' => __( 'A private table kept for the database undo was rebuilt and has a new physical identity.', 'backups-for-restic' ),
+				'hint'    => __( 'OPTIMIZE TABLE, ALTER TABLE … FORCE and TRUNCATE TABLE renumber a table, so the undo cannot prove that it is the original generation. Restore from a snapshot instead; the job lists the tables to check and drop by hand.', 'backups-for-restic' ),
 			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),

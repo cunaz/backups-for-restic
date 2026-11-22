@@ -467,6 +467,49 @@ final class CliCommand {
 	}
 
 	/**
+	 * Forgets a database restore binding whose private tables are on another database server
+	 * or in another database. Nothing is dropped: the command lists the tables that a
+	 * database administrator removes by hand where they are.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <apply-job>
+	 * : ID of the database apply job that holds the binding.
+	 *
+	 * [--yes]
+	 * : Discard the binding without a prompt.
+	 *
+	 * @subcommand database-discard
+	 * @param list<string>         $args Apply job.
+	 * @param array<string,string> $assoc_args Confirmation options.
+	 */
+	public function database_discard( array $args, array $assoc_args ): void {
+		$id      = $args[0] ?? '';
+		$service = $this->container->database_changes();
+		try {
+			$binding = $service->foreign_binding( $id );
+			/* translators: 1: database name, 2: MySQL server UUID. */
+			\WP_CLI::line( sprintf( __( 'Private tables of this restore may remain in the database %1$s on the server %2$s:', 'backups-for-restic' ), $binding['database'], $binding['server'] ) );
+			foreach ( $binding['tables'] as $table ) {
+				\WP_CLI::line( $table );
+			}
+			\WP_CLI::confirm( __( 'Forget this binding? The plugin drops none of these tables; remove those that exist there by hand.', 'backups-for-restic' ), $assoc_args );
+			$lock = $this->container->runner_lock();
+			if ( ! $lock->acquire() ) {
+				\WP_CLI::error( __( 'Another request is working on the jobs. Try again in a moment.', 'backups-for-restic' ) );
+			}
+			try {
+				$service->discard( $id, get_current_user_id(), 'wp-cli' );
+			} finally {
+				$lock->release();
+			}
+		} catch ( PluginException $error ) {
+			\WP_CLI::error( $error->getMessage() );
+		}
+		\WP_CLI::success( __( 'The database restore binding was discarded.', 'backups-for-restic' ) );
+	}
+
+	/**
 	 * Shows or changes settings.
 	 *
 	 * ## OPTIONS

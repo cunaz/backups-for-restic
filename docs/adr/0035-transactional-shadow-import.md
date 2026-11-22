@@ -32,6 +32,13 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
   The dump writer uses the same 16 MiB statement limit (semicolon included, LF excluded).
   It refuses an oversized encoded row with a database error before recording a completed
   dump; it never silently omits that row. Older oversized dumps require an external client.
+  Each import tick reads the session's `max_allowed_packet` and refuses a batch that would
+  not fit before sending it, with `database_restore_packet`; the generated shadow name can
+  make a batch longer than its line in the dump. A server that receives a larger packet
+  closes the session ([Packet Too Large](https://dev.mysql.com/doc/refman/8.4/en/packet-too-large.html)),
+  which a client cannot tell from a lost connection. On MySQL 8.4.11 a statement of
+  `max_allowed_packet - 1` bytes was refused and one of `max_allowed_packet - 2` accepted;
+  the check keeps a margin of 64 bytes.
   A table with only generated columns uses a constant SELECT projection and one empty
   INSERT tuple per row. The importer accepts these tuples only with the CREATE's matching
   empty insertable-column list.

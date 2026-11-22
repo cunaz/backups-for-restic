@@ -18,7 +18,8 @@ defined( 'ABSPATH' ) || exit;
  * The one check of every route that asks for the WordPress password of the current user
  * again (docs/03-security-and-threat-model.md §5.5): the recovery kit, creating and
  * connecting a repository after the setup, applying and undoing file and database changes,
- * and the download of restored files. Wrong passwords are counted per user and slow down
+ * discarding the binding of a database restore, and the download of restored files. Wrong
+ * passwords are counted per user and slow down
  * the next attempts (Storage\ConfirmationThrottle). Each one also fires core's
  * wp_login_failed action with the arguments core's login uses, so that login limiters and
  * fail2ban rules count it as they count a failed login. A two-factor plugin does not take
