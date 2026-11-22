@@ -49,6 +49,12 @@ enum JobType: string {
 	case DatabaseUndo = 'database_undo';
 
 	/**
+	 * The phases of a restore's step restoring that come after its last file is staged:
+	 * the optional database rehearsal and archive (ADR 0037, ADR 0038).
+	 */
+	public const array STAGED_PHASES = [ 'complete', 'database_import', 'database_cleanup', 'archiving' ];
+
+	/**
 	 * Steps of the regular path, in order.
 	 *
 	 * @return list<string> Step names.
@@ -128,12 +134,6 @@ enum JobType: string {
 		$index = array_search( $step, $all, true );
 		return false === $index ? null : ( $all[ $index + 1 ] ?? null );
 	}
-
-	/**
-	 * The phases of a restore's step restoring that come after its last file is staged:
-	 * the optional database rehearsal and archive (ADR 0037, ADR 0038).
-	 */
-	public const array STAGED_PHASES = [ 'complete', 'database_import', 'database_cleanup', 'archiving' ];
 
 	/**
 	 * Whether a request to cancel still stops the job before a step. It does before the
