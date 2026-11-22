@@ -27,7 +27,7 @@ defined( 'ABSPATH' ) || exit;
  * leaves a state that the retry or the undo recognises, as a killed process does.
  *
  * @phpstan-type Identity array{dev: int, ino: int}
- * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, size: int|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string}
+ * @phpstan-type Record array{path: string, action: string, source: string|null, original: string|null, parent: Identity, previous: Identity|null, candidate: Identity|null, installed: string|null, size: int|null, backup: Identity|null, mode: int, gid: int|null, uid: int|null, mtime: int|null, phase: string, undo: string|null}
  * @phpstan-type Decision array{action: string, reason: string, live: string|null}
  * @phpstan-type Outcome array{outcome: string, reason: string}
  */
@@ -54,13 +54,14 @@ final readonly class FileChange {
 	 * @param string                                $files Canonical staging files directory.
 	 * @param string                                $item_directory Unique private directory for this manifest row.
 	 * @param string|null                           $source_path Original snapshot path when the live target is mapped.
-	 * @param string                                $scope Current job for independent verification checkpoints.
+	 * @param string                                $scope Current job, for independent verification checkpoints, and the
+	 *                                                     undo that a restore or removal record names.
 	 * @param (\Closure(string, string): void)|null $observer Optional observer, called after each journal record
 	 *                                                         (with its phase), synchronisation and live operation
 	 *                                                         (with its path), in order. Tests use it to stop a
 	 *                                                         worker at each crash point.
 	 */
-	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null, string $scope = 'legacy', private ?\Closure $observer = null ) {
+	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null, private string $scope = 'legacy', private ?\Closure $observer = null ) {
 		$this->proofs = new FileVerification( $item_directory, $scope );
 	}
 
@@ -172,6 +173,7 @@ final readonly class FileChange {
 				'gid'       => $previous['gid'] ?? null,
 				'mtime'     => $previous['mtime'] ?? null,
 				'phase'     => 'copy',
+				'undo'      => null,
 			];
 			$this->save( $record );
 		}
@@ -322,6 +324,11 @@ final readonly class FileChange {
 	 * its journal for a later undo. A confirmed undo names the reviewed action: an entry
 	 * reviewed for a revert that changed since is kept, never reverted in another way.
 	 *
+	 * The record that precedes the rename or unlink names this undo by its scope. A retry of
+	 * the same undo that finds the entry reverted under that record counts it as restored or
+	 * removed; an entry that someone else removed, or that another undo reverted, counts as
+	 * unchanged.
+	 *
 	 * @param string      $path Reviewed path.
 	 * @param string      $action Original action.
 	 * @param float       $deadline Unix deadline of the tick.
@@ -366,17 +373,14 @@ final readonly class FileChange {
 				// The entry stays as it is, and so does its journal.
 				return self::outcome( null === $record ? 'unchanged' : 'kept', $decision['reason'] );
 			}
+			// Only a revert under this undo's own record is its own: a retry after the rename or
+			// unlink, or after the record that completed the entry, before the job counted it.
+			// What someone else removed, or an earlier undo reverted, is unchanged.
+			$own = 'already_undone' === $decision['reason'] && $this->scope === $record['undo'];
 			if ( 'undone' !== $record['phase'] ) {
 				$this->settle( $path, $action, $record );
 			}
-			// An entry reviewed for a revert that is now settled was reverted by this undo
-			// before an interruption, or removed by someone else: either way it is as before.
-			$past = match ( 'not_applied' === $decision['reason'] ? null : $reviewed ) {
-				'restore' => 'restored',
-				'remove'  => 'removed',
-				default   => 'unchanged',
-			};
-			return self::outcome( $past, $decision['reason'] );
+			return self::outcome( $own ? ( 'replace' === $action ? 'restored' : 'removed' ) : 'unchanged', $decision['reason'] );
 		}
 		if ( null === $record || ( null !== $reviewed && $reviewed !== $decision['action'] ) ) {
 			return self::outcome( 'kept', 'changed_since_apply' );
@@ -386,11 +390,19 @@ final readonly class FileChange {
 			self::set_attributes( $old, $record, true );
 			// The restored permissions and time are on disk before the rename is authorised.
 			$this->sync_file( $old );
-			$record['phase'] = 'restore';
-			$this->save( $record );
 		}
+		// The intent names this undo and is on disk before the rename or unlink.
+		$record['phase'] = $decision['action'];
+		$record['undo']  = $this->scope;
+		$this->save( $record );
 		$changed = $this->recheck_live( $path, $action, $record, $decision );
 		if ( null !== $changed ) {
+			if ( 'remove' === $record['phase'] ) {
+				// Nothing was removed: a later removal by someone else must not count as this undo's.
+				$record['phase'] = 'done';
+				$record['undo']  = null;
+				$this->save( $record );
+			}
 			return self::outcome( 'kept', $changed );
 		}
 		if ( 'restore' === $decision['action'] ) {
@@ -477,7 +489,8 @@ final readonly class FileChange {
 			return self::decision( 'keep', 'not_applied' );
 		}
 		if ( ! self::exists( $path ) ) {
-			return self::decision( 'keep', 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' );
+			// After the record of a removal, the undo that wrote it may have removed the entry.
+			return self::decision( 'keep', 'remove' === $record['phase'] ? 'already_undone' : ( 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' ) );
 		}
 		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
 			return self::decision( 'keep', 'parent_changed' );
@@ -1199,7 +1212,7 @@ final readonly class FileChange {
 		$text = $stat['size'] <= 4096 ? file_get_contents( $file ) : false;
 		$data = false === $text ? null : json_decode( $text, true );
 		if ( ! is_array( $data ) || hash( 'sha256', $path . "\0" . ( $this->source_path ?? $path ) ) !== ( $data['path'] ?? null ) || $action !== ( $data['action'] ?? null )
-			|| ! in_array( $data['phase'] ?? '', [ 'copy', 'ready', 'done', 'restore', 'undone' ], true )
+			|| ! in_array( $data['phase'] ?? '', [ 'copy', 'ready', 'done', 'restore', 'remove', 'undone' ], true )
 			|| ! is_int( $data['mode'] ?? null ) || $data['mode'] < 0 || $data['mode'] > 0777 ) {
 			throw new StorageFailed( 'The file change journal is damaged or belongs to another entry.' );
 		}
@@ -1225,6 +1238,11 @@ final readonly class FileChange {
 		$data['size'] ??= null;
 		if ( null !== $data['size'] && ( ! is_int( $data['size'] ) || $data['size'] < 0 ) ) {
 			throw new StorageFailed( 'The file change journal has an invalid installed size.' );
+		}
+		// Records written before an undo named itself name none.
+		$data['undo'] ??= null;
+		if ( null !== $data['undo'] && ( ! is_string( $data['undo'] ) || 1 !== preg_match( '/\A[\x21-\x7e]{1,128}\z/', $data['undo'] ) ) ) {
+			throw new StorageFailed( 'The file change journal names an invalid undo.' );
 		}
 		/**
 		 * The record shape and all scalar fields have been checked above.

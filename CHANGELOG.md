@@ -465,8 +465,9 @@ All notable changes are documented here. The format follows
   the apply with the same bytes is kept. Kept entries stay undoable until the recovery
   window ends, and the apply is listed as partly undone. The undo checks every entry again
   just before it changes it and keeps, rather than fails on, one that changed after the
-  review. Its result counts the entries by outcome and lists the kept ones with their
-  reasons, also in `wp backups-for-restic undo`. An undo with nothing left to revert is
+  review. Its result counts the entries by outcome, only what the undo itself reverted,
+  also after a restart, and lists the kept ones with their reasons, also in
+  `wp backups-for-restic undo`. An undo with nothing left to revert is
   refused with its own message. An undo step now advances at least one entry when it starts
   late, as an apply step does.
 - While a live file change holds the site in maintenance, WP-CLI commands other than the

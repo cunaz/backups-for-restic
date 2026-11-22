@@ -78,7 +78,9 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 0640, fileperms( $this->path ) & 0777 );
 		self::assertSame( 'restore', $this->change->undo_action( $this->path, 'replace' ) );
 		self::assertSame( self::outcome( 'restored', 'undo_journal' ), $this->change->undo( $this->path, 'replace', INF ) );
-		self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $this->change->undo( $this->path, 'replace', INF ) );
+		// A later undo finds nothing left to revert.
+		$later = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, 'later-undo' );
+		self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $later->undo( $this->path, 'replace', INF ) );
 		self::assertSame( $old, file_get_contents( $this->path ) );
 		self::assertSame( 0640, fileperms( $this->path ) & 0777 );
 		self::assertSame( 1710000000, filemtime( $this->path ) );
@@ -197,10 +199,17 @@ final class FileChangeTest extends TestCase {
 		self::assertTrue( $apply() );
 		self::assertSame( self::outcome( 'restored', 'undo_journal' ), $this->change->undo( $this->path, 'replace', INF, 'restore' ) );
 		// The original is back, but the last record still precedes the rename: the retry of
-		// the confirmed restore completes it instead of reporting a change.
+		// the same undo completes it and counts its own restore, also without the confirmed
+		// action, instead of reporting a change; another undo counts nothing.
+		$record = json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertSame( 'legacy', $record['undo'] );
 		$record['phase'] = 'restore';
-		file_put_contents( $file, json_encode( $record ) );
-		self::assertSame( self::outcome( 'restored', 'already_undone' ), $this->change->undo( $this->path, 'replace', INF, 'restore' ) );
+		foreach ( [ [ 'later-undo', 'unchanged' ], [ 'legacy', 'restored' ] ] as [ $scope, $outcome ] ) {
+			file_put_contents( $file, json_encode( $record ) );
+			$retry = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, $scope );
+			self::assertSame( self::outcome( $outcome, 'already_undone' ), $retry->undo( $this->path, 'replace', INF ), $scope );
+			self::assertSame( 'undone', json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR )['phase'] );
+		}
 		self::assertSame( 'old', file_get_contents( $this->path ) );
 	}
 
@@ -312,9 +321,12 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( self::outcome( 'restored', 'undo_journal' ), $change->undo( $this->path, 'replace', INF ) );
 		self::assertSame( [ 'sync ' . $copy, 'journal restore', 'rename ' . $this->path, 'sync ' . $this->site, 'journal undone' ], $steps );
 		self::assertSame( 'old', file_get_contents( $this->path ) );
-		// An entry that is undone already is neither touched nor recorded again.
+		// An entry that is undone already is neither touched nor recorded again, by a later
+		// undo or by a retry of this one.
 		$steps = [];
-		self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $change->undo( $this->path, 'replace', INF ) );
+		$later = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, 'later-undo', $record );
+		self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $later->undo( $this->path, 'replace', INF ) );
+		self::assertSame( self::outcome( 'restored', 'already_undone' ), $change->undo( $this->path, 'replace', INF ) );
 		self::assertSame( [], $steps );
 
 		$created = $this->site . '/created.php';
@@ -337,7 +349,108 @@ final class FileChangeTest extends TestCase {
 		);
 		$steps = [];
 		self::assertSame( self::outcome( 'removed', 'undo_journal' ), $change->undo( $created, 'create', INF ) );
-		self::assertSame( [ 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
+		self::assertSame( [ 'journal remove', 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
+	}
+
+	public function test_a_retry_counts_only_a_removal_that_its_own_record_names(): void {
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$number  = 0;
+		$applied = function ( string $action ) use ( $plan, &$number ): array {
+			++$number;
+			$path    = $this->site . '/entry-' . $number;
+			$journal = $this->root . '/journal-' . $number;
+			if ( 'mkdir' === $action ) {
+				mkdir( $this->staging . $path, 0700 );
+			} else {
+				file_put_contents( $this->staging . $path, 'created' );
+			}
+			self::assertTrue( ( new FileChange( $plan, $this->staging, $journal ) )->apply( $path, $action, 'mkdir' === $action ? null : hash( 'sha256', 'created' ), null, INF ) );
+			$worker = fn ( string $scope, ?\Closure $observer = null ): FileChange => new FileChange( $plan, $this->staging, $journal, null, $scope, $observer );
+			// The phase of the entry's record and the undo it names.
+			$record = static function () use ( $journal ): array {
+				$data = json_decode( (string) file_get_contents( $journal . '/entry.json' ), true, flags: JSON_THROW_ON_ERROR );
+				return [ $data['phase'], $data['undo'] ];
+			};
+			return [ $path, $worker, $record ];
+		};
+		$kill    = static function ( string $operation, string $subject ): \Closure {
+			return static function ( string $done, string $on ) use ( $operation, $subject ): void {
+				if ( $done === $operation && $on === $subject ) {
+					throw new \DomainException( 'The worker was killed.' );
+				}
+			};
+		};
+		$removal = [
+			'create' => 'unlink',
+			'mkdir'  => 'rmdir',
+		];
+		foreach ( $removal as $action => $removed ) {
+			// Stopped after the unlink or rmdir, or after the record that completes the entry,
+			// before the job counted it: the retry of the same undo counts its own removal.
+			foreach ( [ $removed, 'journal' ] as $operation ) {
+				[ $path, $worker, $record ] = $applied( $action );
+				try {
+					$worker( 'undo', $kill( $operation, 'journal' === $operation ? 'undone' : $path ) )->undo( $path, $action, INF, 'remove' );
+					self::fail( 'The worker must stop after ' . $operation . '.' );
+				} catch ( \DomainException ) {
+					self::assertFalse( file_exists( $path ) );
+				}
+				self::assertSame( self::outcome( 'removed', 'already_undone' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action . ' ' . $operation );
+				self::assertSame( [ 'undone', 'undo' ], $record() );
+				// Another undo did not remove it.
+				self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $worker( 'later-undo' )->undo( $path, $action, INF, 'remove' ) );
+			}
+			// Stopped between its record and the removal: the entry is as the apply left it.
+			[ $path, $worker, $record ] = $applied( $action );
+			try {
+				$worker( 'undo', $kill( 'journal', 'remove' ) )->undo( $path, $action, INF, 'remove' );
+				self::fail( 'The worker must stop after its record.' );
+			} catch ( \DomainException ) {
+				self::assertTrue( file_exists( $path ) );
+			}
+			self::assertSame( [ 'remove', 'undo' ], $record() );
+			self::assertSame( self::outcome( 'removed', 'undo_journal' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			self::assertFalse( file_exists( $path ) );
+			// Removed by someone else after the review: nothing for the undo to count.
+			[ $path, $worker ] = $applied( $action );
+			'mkdir' === $action ? rmdir( $path ) : unlink( $path );
+			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			// Changed between the record and the removal: kept, and the record no longer names a
+			// removal, so that a removal by someone else later is not counted as the undo's own.
+			[ $path, $worker, $record ] = $applied( $action );
+			$edit                       = static function ( string $done, string $on ) use ( $path, $action ): void {
+				if ( 'journal' === $done && 'remove' === $on ) {
+					file_put_contents( 'mkdir' === $action ? $path . '/upload.jpg' : $path, 'edited' );
+				}
+			};
+			self::assertSame( self::outcome( 'kept', 'mkdir' === $action ? 'new_children' : 'changed_since_apply' ), $worker( 'undo', $edit )->undo( $path, $action, INF, 'remove' ), $action );
+			self::assertSame( [ 'done', null ], $record() );
+			TempDir::remove( $path );
+			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+		}
+	}
+
+	public function test_a_damaged_name_of_an_undo_is_refused(): void {
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF ) );
+		$file   = $this->journal . '/entry.json';
+		$record = json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertNull( $record['undo'] );
+		foreach ( [ '', 'two words', str_repeat( 'u', 129 ), 7, [ 'undo' ] ] as $number => $undo ) {
+			$record['undo'] = $undo;
+			file_put_contents( $file, json_encode( $record, JSON_THROW_ON_ERROR ) );
+			try {
+				$this->change->undo_review( $this->path, 'create' );
+				self::fail( 'Damaged name ' . $number . ' must not be read.' );
+			} catch ( StorageFailed $refused ) {
+				self::assertStringContainsString( 'invalid undo', $refused->getMessage() );
+			}
+		}
+		// A record written before an undo named itself names none.
+		unset( $record['undo'] );
+		file_put_contents( $file, json_encode( $record, JSON_THROW_ON_ERROR ) );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+		self::assertFileExists( $this->path );
 	}
 
 	public function test_undo_removes_a_created_file_whose_private_name_survived_a_power_loss(): void {

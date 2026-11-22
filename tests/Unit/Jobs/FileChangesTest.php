@@ -657,6 +657,35 @@ final class FileChangesTest extends TestCase {
 		self::assertFileDoesNotExist( $this->live . '/b-new/new.txt' );
 	}
 
+	public function test_an_entry_that_someone_else_removed_after_the_review_is_not_counted_as_removed(): void {
+		$job    = $this->run_job( $this->start() );
+		$review = $this->changes->preview_undo( $job->id );
+		self::assertSame(
+			[
+				'restore' => 1,
+				'remove'  => 2,
+				'keep'    => 0,
+			],
+			$review['totals']
+		);
+		$undo = $this->changes->start_undo( $job->id, $review['digest'] );
+		unlink( $this->live . '/b-new/new.txt' );
+		$done = $this->run_job( $undo );
+		// The undo restored the replaced file and removed the directory; the file was gone already.
+		self::assertSame(
+			[
+				'restored'             => 1,
+				'removed'              => 1,
+				'unchanged'            => 1,
+				'kept'                 => 0,
+				'changed_after_review' => 0,
+				'apply_state'          => 'undone',
+			],
+			self::outcomes( $done )
+		);
+		self::assertSame( 2, $done->result['files_changed'] );
+	}
+
 	public function test_an_undo_interrupted_between_its_entries_resumes_without_counting_twice(): void {
 		$job = $this->run_job( $this->start() );
 		file_put_contents( $this->live . '/a-existing', 'edited after the apply' );
@@ -682,11 +711,12 @@ final class FileChangesTest extends TestCase {
 			$document->data['undo_counts'] = $outcomes;
 			$this->jobs->save( $document );
 		};
-		// A worker killed after it removed the directory, before its record and the document.
+		// A worker killed after it removed the directory, before the record that completes it
+		// and the document: the last record is the removal that names this undo.
 		$entry  = $this->jobs->directory( $job ) . '/undo/item-1/entry.json';
 		$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
-		self::assertSame( 'undone', $record['phase'] );
-		$record['phase'] = 'done';
+		self::assertSame( [ 'undone', $undo->id ], [ $record['phase'], $record['undo'] ] );
+		$record['phase'] = 'remove';
 		file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
 		$rewind( 1, $counts( 1, 0 ) );
 		$this->runner->tick( 0.0 ); // The directory again: gone, and removed by this undo.
