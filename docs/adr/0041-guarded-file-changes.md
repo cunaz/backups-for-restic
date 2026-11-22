@@ -19,7 +19,11 @@ Every mutation records its intent, original inode, prepared replacement and prio
 
 The review shows estimated additional file-data bytes and the free bytes reported for the private journal volume. Each created file uses one private candidate. A replacement also retains a dense copy of the old live bytes. The calculation rounds each copy to the filesystem's reported block size where available and takes no credit for superseded inodes, whose blocks can remain shared, open or snapshotted. Undo moves the retained preimage back into place or removes a created entry, so it needs no additional file payload. The worker rechecks the total before its first live change, then the remaining estimate before each copy or resumed copy. Known insufficient space blocks the operation. Hosts can lack a free-space probe, and quotas, filesystem metadata, compression and concurrent allocations can affect actual writes. A partial apply retains its journal for undo.
 
-A job-owned WordPress maintenance file remains in place between mutation requests. A secret unique to that job admits the administrator's progress and cancellation requests to normal WordPress authentication. During the lease, cron releases only this plugin's events, and the controller boots without ordinary plugins and theme code. The marker and its private copy share an inode. Cleanup verifies the inode and independent content proof before removing it. Core's ten-minute maintenance expiry also restores ordinary plugin loading and cron after an extended driver outage. WP-CLI can recover a site whose restored extension prevents normal boot using `wp --skip-plugins=<affected-plugin> --skip-themes backups-for-restic undo <apply-job-id>`.
+A job-owned WordPress maintenance file remains in place between mutation requests. The job's first tick renders it in a normal boot. Later ticks boot under the marker and check the private copy against the content proof recorded then; they do not render it again. The marker and its private copy share an inode. It is readable by every user, like core's own marker, because PHP processes of other system users read it too. It holds no secret: the grant is a hash. Cleanup verifies the inode and independent content proof before removing it. The marker is invalidated in OPcache after it is linked or renewed and before it is removed, because every job uses the same name. Where the process has an opcode cache and OPcache refuses, as `opcache.restrict_api` does outside its path, a server without timestamp checks could keep running an earlier marker, core's among them, so the job stops before its next live change (`maintenance_opcache`). With timestamp checks OPcache notices the new marker within `opcache.revalidate_freq` seconds: the tick that published it waits that long plus one second, at most five, and a longer interval stops the job as well. Core's ten-minute maintenance expiry also restores ordinary plugin loading and cron after an extended driver outage.
+
+The marker admits workers: `wp-cron.php` and the plugin's own WP-CLI command. The command is recognised by its first word on the command line, read with WP-CLI's own rules: a leading alias and every `--name` or `--name=value` parameter, such as `--path`, `--url`, `--user`, `--skip-plugins`, `--skip-themes` and `--allow-root`, are skipped. Every other WP-CLI command boots as during core's own maintenance, which WP-CLI ignores, so it runs with the site's plugins and options. A secret unique to the job admits the administrator's progress and cancellation requests to normal WordPress authentication. A `rest_route` in a form body is refused, because WordPress would route the request by it. An admitted request boots without ordinary plugins and theme code. It releases only this plugin's cron events, also when it runs cron itself under `ALTERNATE_WP_CRON`. It cannot store the substituted plugin list: `update_option()` keeps the stored `active_plugins`, so `activate_plugin()`, `deactivate_plugins()` and the REST plugins endpoint change nothing there. WP-CLI can recover a site whose restored extension prevents normal boot using `wp --skip-plugins=<affected-plugin> --skip-themes backups-for-restic undo <apply-job-id>`.
+
+The job records the uploads root that the review used and plans every tick with it. Every tick checks again that WordPress permits file modifications and, for a job confirmed in the browser, that the confirming administrator still has the backup capability and `update_core`. It reads the account from the database, not from the object cache of a process that runs many ticks, such as `tick --until-idle`. A job started on the command line has no WordPress account, so only the host policy applies to it.
 
 ## Operational limits
 
@@ -72,3 +76,67 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   created, because the undo review asks the same question.
 - A protected location that resolves to the filesystem root makes the plan unavailable
   (`protected_path_invalid`), as an invalid spelling does.
+- The undo review decides on absence first. A created file or directory that is gone, also
+  below a directory that was removed since, is kept; a replaced file that is gone, or whose
+  parent is no longer the recorded directory, is refused. Before, a removed parent made the
+  review fail, so that none of the apply's entries could be undone.
+- Every record of an entry's journal, the `attempted` count, the confirmed manifest and the
+  `reverted` marker are written durably (`Storage\Files::write_durable()`): the temporary file
+  is synchronised before its rename and the directory after it. The retained original is
+  synchronised before the record that names it, the candidate with its attributes before the
+  `ready` record, the restored original's attributes before the `restore` record, and the live
+  directory after a publication or removal and before the record that completes it, also on
+  a retry. Where PHP cannot open a directory or the file system cannot synchronise one, the
+  rename keeps the order that the file system gives it. A created file whose completed
+  record survived a power loss, while the unlink of its private name before it did not, is
+  undone like an interrupted link.
+- A new directory is prepared in the entry's private item directory with the permissions that
+  `mkdir()` in place gave: the reviewed mode narrowed by the umask and, below a set-group-ID
+  parent, that group and the bit where the worker may set the group. Its inode is recorded in
+  the `ready` record before it is renamed into place. A retry after a kill at any step finds
+  the inode either still private or published and completes the entry; undo keeps a
+  directory that is still private and removes only the published one.
+- The worker's rechecks in one request share an index of the names in the folders of both
+  chains (`Restore\LiveSpellings`). Each recheck still reads the identity of every folder on
+  the chains and checks the entry itself; a folder is listed again when its identity
+  changes. A listing is kept indefinitely only if it began a quarter of a second after the
+  second of the folder's last change, because Linux can stamp a change with the previous
+  second just after PHP's clock has passed it. A folder of up to 2,048 names is listed again
+  after each of the worker's own changes, as every recheck listed it before. A wider folder
+  learns the worker's own changes and is trusted only until the second of its last change
+  and the quarter second have passed. A wide folder that already looks settled right after
+  one of the worker's own changes, because its change time did not move with it, is listed
+  again at the next recheck. The index keeps at most 524,288 names as salted 64-bit codes,
+  about 20 MiB; a folder that alone holds more is listed for every recheck, as before. Each
+  publication and removal is preceded by a recheck.
+- Residual risks. Between the last check and the rename or unlink, a process of the same user
+  that maintenance mode does not stop, such as an SFTP client or a deploy script, can still
+  change the live entry, and that change is lost without a copy. Keeping the displaced inode
+  through a hard link was not adopted, because a replacement would then need hard links,
+  which a create already needs but a replacement does not. A directory rename can likewise
+  replace an empty directory that such a process creates at the same name in that moment. In
+  a folder of more than 2,048 names, a second spelling of a name that another process
+  creates in the same second as one of the worker's own changes can stay hidden from the
+  rechecks for up to about one and a quarter seconds; on a case-insensitive file system the
+  publication itself meets it, and a case-sensitive one keeps both names. On a network file
+  system whose clients cache directory attributes, a change made on another host can leave
+  a folder's identity unchanged for as long as that cache holds it.
+- Measured with PHP 8.3.37 on tmpfs: 500 new files beside 20,000 others took 27.2 seconds of
+  rechecks before and 0.44 seconds with seven folder listings after.
+- Every job document is written durably as well (`JobStore::save()`), and a new job directory
+  is synchronised in `jobs/` before its first document is written. Without that, a power loss
+  could bring back an older `job.json`, for example one without the manifest hash and the
+  `applying` step that the apply records before its first live change, while the journal on
+  disk shows a partial apply, and undo could no longer read it. Every save is durable, not
+  only the saves that precede a live change: an empty document makes its job unreadable in
+  any case, and the saves that precede a live change or a table exchange are spread over
+  several job types. A backup, restore or maintenance tick saves its document twice; an
+  apply or undo tick saves it once for each finished entry and twice more.
+- Each changed entry now waits for about eleven synchronisations, a replaced file for fourteen,
+  and each reversed entry for three to six, plus two for the job document. On the ext4 disk of
+  the measurement machine a durable job document took about 6 ms against 0.14 ms for an
+  atomic one, and a created file spent about 29 ms in its own synchronisations. At 10 ms per
+  synchronisation, as on slow or network storage, the document adds about 40 ms to a backup
+  tick and 20 ms to each applied entry, and the maintenance window of a large apply grows
+  accordingly.
+Ticks under the marker boot without the theme and ordinary plugins. Filters that these ticks consult take effect only from `wp-config.php` or a must-use plugin: `file_mod_allowed`, `backups_for_restic_capability`, filters that grant the confirming administrator a capability, and `backups_for_restic_private_dir` or `upload_dir` where they move the private directory. A restriction in a regular plugin or the theme applies at confirmation and in preflight. A capability that only such code grants stops the job at its first tick under the marker, before that tick changes a file. A change to a role's own definition reaches a process that runs many ticks only when it starts again. OPcache caches the marker per web server, and a command-line tick checks only its own cache, which says nothing about the web server's. With timestamp checks disabled, a web server that compiled an earlier marker runs it until one of its own ticks invalidates the name. A job driven only from the command line can then leave the browser's progress requests on the maintenance page, or, if the earlier marker was core's own with its long-passed time, let requests boot normally while files change.

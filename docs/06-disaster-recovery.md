@@ -90,10 +90,12 @@ The site records each delivery. Store the file with the other offline recovery m
    Unicode is normalized.
 5. The **Restores** tab lists available undo jobs and their expiry times. Choose
    **Preview undo**, review the actions, then confirm to return the affected files to
-   their previous state. If the preview refuses one entry, for example a file that was
-   edited after the apply, the undo as a whole is not offered; restore the affected files
-   offline as in step 4. Use **Delete staged files** to remove the private downloads
-   when you are finished.
+   their previous state. Files and directories that the apply created and that were
+   deleted since, such as a removed plugin, are kept as they are; a replaced file that was
+   deleted since blocks the undo. If the preview refuses one entry, for example a file that
+   was edited after the apply, the undo as a whole is not offered; restore the affected
+   files offline as in step 4. Use **Delete staged files** to remove the private
+   downloads when you are finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.
@@ -114,6 +116,12 @@ wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JO
 If the database or a worker goes away during a confirmed operation, restore service and
 resume the same job with `wp backups-for-restic tick --until-idle`. Its journal records
 completed changes and checks their identities during recovery.
+
+While a file job keeps the site in maintenance, the commands of Backups for restic load
+only this plugin and no theme. Other WP-CLI commands, such as `wp plugin` or
+`wp cron event run`, load the site's plugins as during a WordPress update. A restored
+plugin that stops WordPress from starting stops them as well; skip it with
+`--skip-plugins`.
 
 ## Scenario B — the server is gone
 

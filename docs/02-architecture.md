@@ -359,9 +359,12 @@ virtual file with its cursor); and `database.json` with the dump's table list an
 tables. Forget, prune and check jobs keep the checkpoint of their engine run in
 `maintenance/state.json`; the key derivation keeps its state and table in
 `<private>/kdf/<id>/`. Every write is atomic or append-only, so a killed tick loses at most
-the work since its last checkpoint. Memory per tick is bounded by the directory listings on
-the walk, one page of rows and one pack buffer per blob type, plus the merged index, which
-grows with the number of blobs in the repository (§2, principle 3).
+the work since its last checkpoint. `job.json` and the journal of a live file apply are also
+synchronised to disk before what follows relies on them, so that a power loss cannot bring
+back an older document or record ([ADR 0041](adr/0041-guarded-file-changes.md)). Memory per
+tick is bounded by the directory listings on the walk, one page of rows and one pack buffer
+per blob type, plus the merged index, which grows with the number of blobs in the
+repository (§2, principle 3).
 
 Backup working files are created with mode `0600`; every write must finish and close before
 the checkpoint can refer to its bytes. Resume refuses a failed truncation of an uncommitted
@@ -813,7 +816,7 @@ a request left behind is removed once it is a minute old.
 | --- | --- |
 | **Single file** | Verify and stage the selected bytes, then stream them on a single-use authenticated download. Staged contents expire after the configured interval (24 hours by default). |
 | **Selected paths to staging** | same per file, directories recursively; staging is owner-only (`0600` files, `0700` directories) and gets the modification time only, the modes of the snapshot are in the report ([ADR 0036](adr/0036-selected-file-staging.md)) |
-| **Apply to live site** | Paginated review, confirmed scope and a maintenance window. Live destinations and file identities are checked again. Startup files and configuration require offline recovery. A snapshot's database spool is never applied, and a replacement must keep the live file's owner, group and mode. Replaced files are retained for undo. |
+| **Apply to live site** | Paginated review, confirmed scope and a maintenance window. Live destinations and file identities are checked again. Startup files and configuration require offline recovery. A snapshot's database spool is never applied, and a replacement must keep the live file's owner, group and mode. Replaced files are retained for undo. The undo journal and its copies reach the disk before each live change ([ADR 0041](adr/0041-guarded-file-changes.md)). |
 | **Database** | Verify and import staged SQL into private shadow tables. A separately reviewed operation can atomically exchange and undo compatible MySQL generations. Other installations use the manual SQL procedure. |
 | **Full site (plugin works)** | files to staging → apply → database, guided |
 | **Full site (server lost)** | plain restic CLI procedure, or the wizard's "connect to existing repository" path on a fresh installation followed by the full-site flow |
@@ -831,7 +834,7 @@ a request left behind is removed once it is a minute old.
 ├── cache/<repo-id>/trees/<tree-id>.bin    tree blobs for browsing, encrypted with the master key
 ├── kdf/<job-id>/                          scrypt table and checkpoint, 0600, deleted when the job ends
 ├── jobs/create.lock                       flock target while a job is created, and while the setup changes the server or a password (§4.4)
-├── jobs/<job-id>/                         job.json (atomic), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
+├── jobs/<job-id>/                         job.json (atomic and synchronised), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
 ├── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
@@ -1128,7 +1131,8 @@ usual. Once it succeeds, send the same preview request with its `plan_job` ID an
 `plan_job` ID and digest. Completed previews expire after one hour.
 
 Live file apply and undo also require `update_core` and permission to modify files under the
-site's `wp_is_file_mod_allowed()` policy. Preview reports list actions and their reasons.
+site's `wp_is_file_mod_allowed()` policy. Every tick of the job checks both again for the
+confirming user. Preview reports list actions and their reasons.
 Confirmation uses the preview digest, a review token bound to the authenticated session,
 source job, site URL and configuration choice, explicit acknowledgment, the site's exact
 home URL and the account's WordPress password. Send those fields in a JSON POST body.
@@ -1136,7 +1140,8 @@ The initiating response returns a short-lived `control_token` and sets it in an 
 SameSite=Strict cookie. HTTPS adds Secure. During the job's maintenance window the
 initiating client can poll or cancel the job using the cookie or the
 `X-Backups-For-Restic-Control` header. The normal WordPress capability and nonce checks
-also apply.
+also apply. Such a request cannot name a `rest_route` in a form body. It boots, like the
+job's workers, with only this plugin and without the theme.
 
 Live database apply and undo require the configured backup capability plus
 `manage_options`, `edit_users`, `promote_users` and `update_core`. The worker checks the
@@ -1273,6 +1278,9 @@ reviews and confirms reversal of live file changes. `database-discard <apply-job
 lists the private tables of a database apply whose binding belongs to another database
 server or database, and forgets that binding after confirmation without dropping anything. The recovery guide includes the
 `--skip-plugins` procedure for a site whose active plugin prevents normal startup.
+While a file job holds WordPress maintenance, the plugin's own commands boot like its
+workers, with only this plugin and without the theme. Every other WP-CLI command runs with
+the site's plugins, as during core's maintenance ([ADR 0041](adr/0041-guarded-file-changes.md)).
 Use the admin page to initiate live changes, configure a repository or review retention.
 `recovery-kit` exports credentials on an interactive terminal after setup. The explicit
 `--force` option permits a pipe or file. Every delivery is audited.
