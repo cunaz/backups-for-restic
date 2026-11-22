@@ -24,6 +24,7 @@ use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Database\Restore\MysqliConnection as Direct;
+use BackupsForRestic\Database\Restore\SessionDrain;
 use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\TableExchange;
 use BackupsForRestic\Database\Restore\TableImporter;
@@ -307,8 +308,13 @@ final class DatabaseExchangeTest extends TestCase {
 		}
 	}
 
-	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
-		$this->mysql_only();
+	/**
+	 * Stages this suite's dump as a successful rehearsal and builds the database job services
+	 * of one site around it. The default drain keeps its grace period short for the tests.
+	 *
+	 * @return array{changes:DatabaseChanges,runner:Runner,jobs:JobStore,staging:Staging,clock:FrozenClock,source:Job,files:string,site:string}
+	 */
+	private function services( ?SessionDrain $drain = null, ?\Closure $refresh = null, ?\Closure $connection = null ): array {
 		$clock   = new FrozenClock();
 		$random  = new SystemRandom();
 		$jobs    = new JobStore( $this->directory . '/jobs', new Redactor(), $random );
@@ -336,8 +342,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$source->state       = JobState::Succeeded;
 		$source->finished_at = $clock->seconds;
 		$jobs->save( $source );
-		$site    = $this->directory . '/site';
-		$flushes = 0;
+		$site = $this->directory . '/site';
 		mkdir( $site );
 		$changes = new DatabaseChanges(
 			$jobs,
@@ -346,15 +351,146 @@ final class DatabaseExchangeTest extends TestCase {
 			$random,
 			1,
 			'wp_',
-			fn (): Direct => $this->direct,
+			$connection ?? fn (): Direct => $this->direct,
 			static fn ( int $id ): array => 1 === $id ? [] : [ 'database_account' ],
 			new FileMaintenance( $site ),
-			static function () use ( &$flushes, $site ): void {
+			$refresh ?? static function (): void {},
+			$drain ?? new SessionDrain( 0.05, 10.0, 5.0, 0.02 )
+		);
+		return [
+			'changes' => $changes,
+			'runner'  => new Runner( $jobs, new RunnerLock( $this->directory . '/runner.lock' ), $changes, $clock, $random ),
+			'jobs'    => $jobs,
+			'staging' => $staging,
+			'clock'   => $clock,
+			'source'  => $source,
+			'files'   => $files,
+			'site'    => $site,
+		];
+	}
+
+	/**
+	 * Ticks a database job until it ends or, with a step, until that step is next.
+	 *
+	 * @param \Closure(Job):bool|null $until Stop condition before the end.
+	 */
+	private static function advance( Runner $runner, Job $queued, ?\Closure $until = null ): Job {
+		for ( $i = 0; $i < 400; ++$i ) {
+			$job = $runner->tick( 0.08 )->job;
+			self::assertNotNull( $job );
+			self::assertSame( $queued->id, $job->id );
+			if ( $job->state->is_terminal() || ( null !== $until && $until( $job ) ) ) {
+				return $job;
+			}
+		}
+		self::fail( 'The database job did not reach the expected state.' );
+	}
+
+	/**
+	 * Queues the reviewed apply of this suite's rehearsal and runs it up to the exchange.
+	 *
+	 * @param array{changes:DatabaseChanges,runner:Runner,source:Job} $services Job services.
+	 */
+	private static function before_swap( array $services ): Job {
+		$preview = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertTrue( $preview['applicable'], implode( ',', $preview['blockers'] ) );
+		$queued = $services['changes']->start_apply( $services['source']->id, 1, $preview['digest'] );
+		return self::advance( $services['runner'], $queued, static fn ( Job $job ): bool => 'swapping_database' === $job->step );
+	}
+
+	/**
+	 * Reads the physical table that holds a logical table in the given generation.
+	 *
+	 * @param 'live'|'retained' $where Live site name or private retained name.
+	 */
+	private function holder( Job $owner, string $table, string $where ): string {
+		$plan   = DatabaseGeneration::load( $this->direct, $owner )->exchange();
+		$number = array_search( $table, array_column( $plan->document['pairs'], 'name' ), true );
+		self::assertIsInt( $number );
+		return '`' . ( 'live' === $where ? $table : $plan->owned->retained( $number ) ) . '`';
+	}
+
+	public function test_the_exchange_waits_for_a_request_that_started_before_maintenance(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$job      = self::before_swap( $services );
+		$started  = $this->directory . '/writer-started';
+		$process  = proc_open( [ PHP_BINARY, dirname( __DIR__ ) . '/Fixtures/Database/exchange-writer.php', $this->database, $services['site'] . '/.maintenance', $started, '1.0' ], [ [ 'pipe', 'r' ], [ 'pipe', 'w' ], [ 'pipe', 'w' ] ], $pipes );
+		self::assertIsResource( $process );
+		fclose( $pipes[0] );
+		$deadline = microtime( true ) + 30;
+		while ( ! is_file( $started ) && proc_get_status( $process )['running'] && microtime( true ) < $deadline ) {
+			usleep( 10000 );
+		}
+		self::assertFileExists( $started );
+		$applied = self::advance( $services['runner'], $job );
+		$output  = stream_get_contents( $pipes[1] ) . stream_get_contents( $pipes[2] );
+		fclose( $pipes[1] );
+		fclose( $pipes[2] );
+		self::assertSame( 0, proc_close( $process ), $output );
+		self::assertSame( 'written', $output );
+		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
+		// The post and its metadata stay together in the generation that was live when they began.
+		self::assertSame( [], $this->db->rows( 'SELECT id FROM wp_posts WHERE id=9001' ) );
+		self::assertSame( [], $this->db->rows( "SELECT umeta_id FROM wp_usermeta WHERE meta_key='in_flight_post'" ) );
+		self::assertSame( 'in-flight-post', $this->db->rows( 'SELECT title FROM ' . $this->holder( $applied, 'wp_posts', 'retained' ) . ' WHERE id=9001' )[0]['title'] );
+		self::assertSame( '9001', $this->db->rows( 'SELECT meta_value FROM ' . $this->holder( $applied, 'wp_usermeta', 'retained' ) . " WHERE meta_key='in_flight_post'" )[0]['meta_value'] );
+	}
+
+	public function test_a_session_that_outlasts_the_wait_stops_the_exchange_with_its_own_code(): void {
+		$this->mysql_only();
+		$services = $this->services( new SessionDrain( 0.05, 0.3, 0.3, 0.02 ) );
+		$job      = self::before_swap( $services );
+		$open     = MysqliConnection::connect( $this->database ); // For example a long WP-CLI process.
+		self::assertNotNull( $open );
+		$job = self::advance( $services['runner'], $job, static fn ( Job $job ): bool => $job->consecutive_failures > 0 );
+		self::assertSame( JobState::Running, $job->state );
+		self::assertSame( 'swapping_database', $job->step );
+		self::assertGreaterThan( $services['clock']->seconds, $job->not_before );
+		$codes = array_column( array_column( $services['jobs']->log( $job )->read( 20 ), 'context' ), 'code' );
+		self::assertContains( 'database_exchange_sessions', $codes );
+		self::assertFileDoesNotExist( $services['site'] . '/.maintenance' );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( DatabaseGeneration::load( $this->direct, $job )->exchange() ) );
+		// The retry after the back-off succeeds once the session has ended.
+		$open->mysqli->close();
+		$services['clock']->seconds = $job->not_before + 1;
+		$applied                    = self::advance( $services['runner'], $job );
+		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	public function test_the_session_list_names_other_sessions_of_the_account_in_the_site_database(): void {
+		$this->mysql_only();
+		$catalog  = new SwapCatalog( $this->direct );
+		$database = $catalog->facts()['database'];
+		self::assertSame( [], $catalog->sessions( $database ) );
+		$peer      = MysqliConnection::connect( $this->database );
+		$elsewhere = MysqliConnection::connect();
+		self::assertNotNull( $peer );
+		self::assertNotNull( $elsewhere );
+		$id = $peer->rows( 'SELECT CONNECTION_ID() AS id' )[0]['id'];
+		self::assertSame( [ $id ], $catalog->sessions( $database ), 'Only a session in the site database of the same account is listed.' );
+		self::assertNotContains( 'performance_schema', $catalog->inspect( [ 'wp_posts' ] )['blockers'] );
+		$peer->mysqli->close();
+		$deadline = microtime( true ) + 1;
+		while ( [] !== $catalog->sessions( $database ) && microtime( true ) < $deadline ) {
+			usleep( 10000 );
+		}
+		self::assertSame( [], $catalog->sessions( $database ) );
+	}
+
+	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
+		$this->mysql_only();
+		$site     = $this->directory . '/site';
+		$flushes  = 0;
+		$services = $this->services(
+			refresh: static function () use ( &$flushes, $site ): void {
 				self::assertFileExists( $site . '/.maintenance' );
 				++$flushes;
 			}
 		);
-		$runner  = new Runner( $jobs, new RunnerLock( $this->directory . '/runner.lock' ), $changes, $clock, $random );
+		[ 'changes' => $changes, 'runner' => $runner, 'jobs' => $jobs, 'staging' => $staging, 'clock' => $clock, 'source' => $source, 'files' => $files ] = $services;
 		$finish  = static function ( Job $queued ) use ( $runner, $site ): Job {
 			for ( $i = 0; $i < 100; ++$i ) {
 				$job = $runner->tick( 0.08 )->job;
@@ -433,6 +569,11 @@ final class DatabaseExchangeTest extends TestCase {
 			$missing      = ( new SwapCatalog( $this->direct ) )->inspect( $names );
 			self::assertSame( [ 'PROCESS' ], $missing['missing_privileges'] );
 			self::assertSame( [ 'dictionary_privilege' ], $missing['blockers'] );
+			// The Performance Schema lists an account's own sessions without PROCESS.
+			$peer    = $connect();
+			$catalog = new SwapCatalog( $this->direct );
+			self::assertSame( [ $peer->rows( 'SELECT CONNECTION_ID() AS id' )[0]['id'] ], $catalog->sessions( $this->database ) );
+			unset( $peer );
 
 			// Rehearsal completes even without access to the native InnoDB dictionary.
 			$this->importer = new TableImporter( $this->direct, $this->manifest, $this->directory, bin2hex( random_bytes( 16 ) ) );

@@ -32,6 +32,12 @@ final readonly class SwapCatalog {
 	/** Direct database-wide permissions needed to see triggers and exchange site tables. */
 	public const array PRIVILEGES = [ 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'LOCK TABLES', 'TRIGGER' ];
 
+	/** At most this many other sessions of the site's account can be waited for. */
+	public const int MAX_SESSIONS = 4096;
+
+	/** Blockers of a live exchange that do not concern dropping an expired private table. */
+	public const array EXCHANGE_ONLY = [ 'performance_schema' ];
+
 	/**
 	 * Creates the catalog for this destination.
 	 *
@@ -99,6 +105,8 @@ final readonly class SwapCatalog {
 		}
 		if ( $facts['mariadb'] ) {
 			$issues[] = 'write_locked_rename';
+		} elseif ( null === $this->account( $facts['database'] ) ) {
+			$issues[] = 'performance_schema';
 		}
 		if ( [] !== $missing ) {
 			$issues[] = 'database_privileges';
@@ -190,6 +198,60 @@ final readonly class SwapCatalog {
 		}
 		ksort( $ids, SORT_STRING );
 		return $ids;
+	}
+
+	/**
+	 * Lists the other sessions of this session's account whose default database is the
+	 * site's. WordPress selects that database right after connecting, so every request that
+	 * started before maintenance and still runs is listed. MySQL 8.4 warns about the
+	 * deprecated INFORMATION_SCHEMA.PROCESSLIST, also behind SHOW PROCESSLIST, and this port
+	 * refuses warnings. The Performance Schema table lists an account's own sessions even
+	 * without PROCESS, and nothing at all while the Performance Schema is disabled.
+	 *
+	 * @param string $database Site database.
+	 * @return list<string> Connection IDs in ascending order, without this session.
+	 * @throws DatabaseFailed If the sessions cannot be listed, with the code performance_schema.
+	 */
+	public function sessions( string $database ): array {
+		$account = $this->account( $database );
+		if ( null === $account ) {
+			DatabaseFailed::raise( 'The Performance Schema does not list the sessions of the site database account.', [ 'code' => 'performance_schema' ] );
+		}
+		$rows = $this->connection->rows( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( $account ) . ' AND DB=' . Session::literal( $database ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT ' . ( self::MAX_SESSIONS + 1 ) );
+		if ( count( $rows ) > self::MAX_SESSIONS ) {
+			DatabaseFailed::raise( 'Too many other sessions use the site database account.', [ 'code' => 'database_exchange_sessions' ] );
+		}
+		$ids = [];
+		foreach ( $rows as $row ) {
+			$id = $row['ID'] ?? '';
+			if ( 1 !== preg_match( '/\A[1-9][0-9]{0,19}\z/', $id ) ) {
+				throw new DatabaseFailed( 'The database session list is unreadable.' );
+			}
+			$ids[] = $id;
+		}
+		return $ids;
+	}
+
+	/**
+	 * Finds this session in the Performance Schema. Its database must be listed as well,
+	 * or a filter on the site's database would wait for nothing.
+	 *
+	 * @param string $database Site database.
+	 * @return string|null Account user name, or null if the sessions are not visible.
+	 * @throws DatabaseFailed If an unexpected server error prevents the lookup.
+	 */
+	private function account( string $database ): ?string {
+		try {
+			$own = $this->connection->rows( 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()' );
+		} catch ( DatabaseFailed $error ) {
+			// MySQL before 8.0.22 has no such table; a server can also deny access to it.
+			if ( ! in_array( $error->context()['code'] ?? null, [ 1044, 1142, 1146 ], true ) ) {
+				throw $error;
+			}
+			return null;
+		}
+		$account = $own[0]['account'] ?? '';
+		return 1 === count( $own ) && '' !== $account && $database === ( $own[0]['current_database'] ?? null ) ? $account : null;
 	}
 
 	/**

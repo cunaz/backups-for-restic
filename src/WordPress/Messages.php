@@ -168,6 +168,14 @@ final class Messages {
 				'message' => __( 'The database restore could not finish its cleanup.', 'backups-for-restic' ),
 				'hint'    => __( 'Keep the private job directory, reconnect the original database with its restore permissions, and allow the next heartbeat to retry.', 'backups-for-restic' ),
 			],
+			'database_exchange_sessions' => [
+				'message' => __( 'Other connections to the site database did not end during maintenance, so the table exchange did not start.', 'backups-for-restic' ),
+				'hint'    => __( 'The job tries again automatically. Persistent database connections, long-running WP-CLI processes or another application using the same database account keep connections open; stop them before the next attempt.', 'backups-for-restic' ),
+			],
+			'performance_schema' => [
+				'message' => __( 'The database server does not list the connections of the site database account.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled. Otherwise use the manual SQL restore procedure.', 'backups-for-restic' ),
+			],
 			'database_dump_failed'           => [
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job contains the database error.', 'backups-for-restic' ),

@@ -12,6 +12,7 @@ namespace BackupsForRestic\Jobs\Apply;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\ExchangePlan;
+use BackupsForRestic\Database\Restore\SessionDrain;
 use BackupsForRestic\Database\Restore\TableExchange;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Database\Restore\WordPressState;
@@ -63,6 +64,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param \Closure(int):list<string> $policy Current site, cache and initiating user eligibility.
 	 * @param FileMaintenance            $maintenance Scoped WordPress maintenance marker.
 	 * @param \Closure():void            $refresh Clear WordPress caches and reschedule heartbeat.
+	 * @param SessionDrain               $drain Wait for requests from before maintenance.
 	 */
 	public function __construct(
 		private JobStore $jobs,
@@ -74,7 +76,8 @@ final readonly class DatabaseChanges implements StepProvider {
 		private \Closure $connection,
 		private \Closure $policy,
 		private FileMaintenance $maintenance,
-		private \Closure $refresh
+		private \Closure $refresh,
+		private SessionDrain $drain = new SessionDrain()
 	) {
 		$this->reviews = new DatabaseReview( $jobs, $staging, $hours, $prefix );
 	}
@@ -234,7 +237,7 @@ final readonly class DatabaseChanges implements StepProvider {
 						'preflight'          => $this->preflight( $job ),
 						'importing_database' => $this->import( $job, $deadline ),
 						'preparing_database' => $this->prepare( $job, $deadline ),
-						'swapping_database'  => $this->swap( $job ),
+						'swapping_database'  => $this->swap( $job, $deadline ),
 						'recording'          => true,
 						'cleaning_up'        => $this->cleanup( $job, $deadline ),
 						default              => throw new InvalidArgument( 'Unknown database change step.' ),
@@ -368,15 +371,17 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Checks the worker's current authorization, publishes maintenance and performs the
-	 * one live RENAME. Retry a committed operation by refreshing caches and recording its
-	 * witness. A lost SQL reply triggers the same reconciliation in cleanup.
+	 * Checks the worker's current authorization, publishes maintenance, waits for requests
+	 * that started before it and performs the one live RENAME. Retry a committed operation
+	 * by refreshing caches and recording its witness. A lost SQL reply triggers the same
+	 * reconciliation in cleanup.
 	 *
-	 * @param Job $job Active apply or undo.
+	 * @param Job   $job Active apply or undo.
+	 * @param float $deadline End of this tick.
 	 * @return bool Whether the swap has finished.
 	 * @throws JobConflict If the user or host no longer permits the operation.
 	 */
-	private function swap( Job $job ): bool {
+	private function swap( Job $job, float $deadline ): bool {
 		$undo       = JobType::DatabaseUndo === $job->type;
 		$owner      = $undo ? $this->original( self::field( $job, 'apply' ) ) : $job;
 		$connection = ( $this->connection )();
@@ -385,12 +390,21 @@ final readonly class DatabaseChanges implements StepProvider {
 		$user       = self::user( $job );
 		$state      = $undo ? 'undone' : 'applied';
 		$directory  = $this->jobs->directory( $job );
+		$committed  = $exchange->status( $plan ) === $state;
+		if ( ! $committed && $deadline - microtime( true ) < $this->drain->budget() && true !== ( $job->data['database_swap_deferred'] ?? false ) ) {
+			// Maintenance starts with a fresh tick, unless every tick is this short.
+			$job->data['database_swap_deferred'] = true;
+			return false;
+		}
+		unset( $job->data['database_swap_deferred'] );
 		$this->maintenance->enter( $job->id, $directory, '' );
+		$entered = microtime( true );
 		try {
-			if ( $exchange->status( $plan ) !== $state ) {
+			if ( ! $committed ) {
 				if ( $plan->document['prefix'] !== $this->prefix || [] !== ( $this->policy )( $user ) ) {
 					JobConflict::raise( 'The destination or confirming administrator no longer permits this exchange.', [ 'code' => 'database_exchange_changed' ] );
 				}
+				$this->drain->wait( $connection, $plan->document['database'], $entered, $deadline );
 				$job->data['database_swapping_at'] = $this->clock->now()[0];
 				$this->jobs->save( $job );
 				$exchange->run( $plan, $user, $undo, self::field( $job, 'authority' ) );
@@ -425,7 +439,7 @@ final readonly class DatabaseChanges implements StepProvider {
 			$state = $undo ? 'undone' : 'applied';
 			if ( ( new TableExchange( $connection ) )->status( $generation->plan ) === $state ) {
 				if ( ( $job->result['database_generation'] ?? null ) !== $state || null !== $job->outcome ) {
-					$this->swap( $job );
+					$this->swap( $job, $deadline );
 					$job->outcome = JobState::Succeeded;
 					$job->error   = null;
 				}

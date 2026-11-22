@@ -308,7 +308,7 @@ final readonly class TableExchange {
 				if ( ( $this->catalog->identities( $facts, [ $name ] )[ $name ] ?? null ) !== $id ) {
 					return;
 				}
-				if ( [] !== $this->catalog->inspect( [ $name ] )['blockers'] ) {
+				if ( [] !== array_diff( $this->catalog->inspect( [ $name ] )['blockers'], SwapCatalog::EXCHANGE_ONLY ) ) {
 					throw new DatabaseFailed( 'A retained database table has dependencies or could not be verified for expiry.' );
 				}
 				$this->catalog->definition( $name );
