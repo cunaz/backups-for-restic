@@ -82,7 +82,7 @@ final class Messages {
 			],
 			'undo_nothing_to_revert'         => [
 				'message' => __( 'Nothing of this apply can be undone now.', 'backups-for-restic' ),
-				'hint'    => __( 'Every entry it changed is already undone, or was changed after the apply and is kept. The undo preview names each entry with its reason. If such an entry is put back as the apply left it, for example by undoing a later apply, preview the undo again within its recovery window.', 'backups-for-restic' ),
+				'hint'    => __( 'Every entry it changed is already undone or is kept, for example because it changed after the apply or the site no longer permits the change. The undo preview names each entry with its reason. If such an entry is put back as the apply left it, for example by undoing a later apply, preview the undo again within its recovery window.', 'backups-for-restic' ),
 			],
 			'undo_review_required'           => [
 				'message' => __( 'This undo was confirmed in an earlier version of the plugin, which did not keep the decision for each entry.', 'backups-for-restic' ),

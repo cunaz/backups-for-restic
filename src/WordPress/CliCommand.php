@@ -678,6 +678,13 @@ final class CliCommand {
 	 */
 	private function report( string $id ): void {
 		$job = $this->container->jobs()->get( $id );
+		if ( null !== $job && JobType::Undo === $job->type && JobState::Succeeded !== $job->state && is_int( $job->result['kept'] ?? null ) ) {
+			// A stopped undo still says what it did before it stopped, and what it kept.
+			$summary = $this->undo_counts( $job );
+			$stopped = JobState::Cancelled === $job->state ? __( 'The undo was cancelled.', 'backups-for-restic' ) : Messages::job_error( $job->error->code ?? 'internal' )['message'];
+			/* translators: 1: why the undo stopped, 2: counts of what it did before. */
+			\WP_CLI::error( sprintf( __( '%1$s Before it stopped, it did this: %2$s', 'backups-for-restic' ), $stopped, $summary ) );
+		}
 		if ( null === $job || null !== $job->error ) {
 			\WP_CLI::error( Messages::job_error( $job?->error->code ?? 'internal' )['message'] );
 		}
@@ -709,6 +716,24 @@ final class CliCommand {
 	 * @param Job $job Finished undo.
 	 */
 	private function report_undo( Job $job ): void {
+		$summary = $this->undo_counts( $job );
+		if ( 'undone' === ( $job->result['apply_state'] ?? null ) ) {
+			/* translators: %s: counts of what the undo did. */
+			\WP_CLI::success( sprintf( __( 'The apply is fully undone: %s', 'backups-for-restic' ), $summary ) );
+			return;
+		}
+		/* translators: %s: counts of what the undo did. */
+		\WP_CLI::success( sprintf( __( 'The apply is partly undone: %s The kept entries are listed above with their reasons. They stay undoable until its recovery window ends.', 'backups-for-restic' ), $summary ) );
+	}
+
+	/**
+	 * Prints every entry that an ended undo kept with its reason, and the number kept for each
+	 * reason.
+	 *
+	 * @param Job $job Ended undo.
+	 * @return string Counts of what the undo did.
+	 */
+	private function undo_counts( Job $job ): string {
 		$result = $job->result;
 		$counts = [];
 		$offset = 0;
@@ -725,14 +750,7 @@ final class CliCommand {
 			\WP_CLI::warning( sprintf( _n( 'Kept %1$d entry: %2$s.', 'Kept %1$d entries: %2$s.', $count, 'backups-for-restic' ), $count, Messages::undo_reason( $reason ) ) );
 		}
 		/* translators: 1: restored files, 2: removed entries, 3: kept entries, 4: entries that had nothing to undo. */
-		$summary = sprintf( __( '%1$d restored, %2$d removed, %3$d kept, %4$d unchanged.', 'backups-for-restic' ), (int) ( $result['restored'] ?? 0 ), (int) ( $result['removed'] ?? 0 ), (int) ( $result['kept'] ?? 0 ), (int) ( $result['unchanged'] ?? 0 ) );
-		if ( 'undone' === ( $result['apply_state'] ?? null ) ) {
-			/* translators: %s: counts of what the undo did. */
-			\WP_CLI::success( sprintf( __( 'The apply is fully undone: %s', 'backups-for-restic' ), $summary ) );
-			return;
-		}
-		/* translators: %s: counts of what the undo did. */
-		\WP_CLI::success( sprintf( __( 'The apply is partly undone: %s Entries that changed after the apply were kept. They stay undoable until its recovery window ends.', 'backups-for-restic' ), $summary ) );
+		return sprintf( __( '%1$d restored, %2$d removed, %3$d kept, %4$d unchanged.', 'backups-for-restic' ), (int) ( $result['restored'] ?? 0 ), (int) ( $result['removed'] ?? 0 ), (int) ( $result['kept'] ?? 0 ), (int) ( $result['unchanged'] ?? 0 ) );
 	}
 
 	/**

@@ -210,6 +210,13 @@
 
 	function jobOutcome( job ) {
 		const result = job.result || {};
+		if ( 'undo' === job.type && 'succeeded' !== job.state && 'number' === typeof result.kept ) {
+			// A stopped undo still says what it did before it stopped, and what it kept.
+			return el( 'div', {}, [
+				'failed' === job.state && job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : notice( 'info', job.state_label ),
+				undoOutcome( job ),
+			] );
+		}
 		if ( 'failed' === job.state && job.error ) {
 			return notice( 'error', job.error.message + ' ' + job.error.hint );
 		}
@@ -277,9 +284,9 @@
 	}
 
 	/**
-	 * What a finished undo did, with the entries it kept and why, page by page.
+	 * What an ended undo did, with the entries it kept and why, page by page.
 	 *
-	 * @param {Object} job Finished undo job.
+	 * @param {Object} job Ended undo job.
 	 * @return {Element} Outcome.
 	 */
 	function undoOutcome( job ) {
@@ -293,15 +300,22 @@
 				replace( kept, [ notice( 'error', errorText( error ) ) ] );
 			} );
 		}
-		const summary = 'undone' === result.apply_state
-			? notice( 'success', sprintf(
+		let summary = notice( 'warning', sprintf(
+			/* translators: 1: restored files, 2: removed files and folders, 3: kept entries. */
+			__( 'The apply is partly undone: %1$d restored, %2$d removed, %3$d kept. The list gives the reason for each kept entry. Kept entries stay undoable until the recovery window ends.', 'backups-for-restic' ), result.restored || 0, result.removed || 0, result.kept || 0,
+		) );
+		if ( 'undone' === result.apply_state ) {
+			summary = notice( 'success', sprintf(
 				/* translators: 1: restored files, 2: removed files and folders. */
 				__( 'The apply is fully undone: %1$d restored, %2$d removed.', 'backups-for-restic' ), result.restored || 0, result.removed || 0,
-			) )
-			: notice( 'warning', sprintf(
-				/* translators: 1: restored files, 2: removed files and folders, 3: kept entries. */
-				__( 'The apply is partly undone: %1$d restored, %2$d removed, %3$d kept because they changed after the apply. Kept entries stay undoable until the recovery window ends.', 'backups-for-restic' ), result.restored || 0, result.removed || 0, result.kept || 0,
 			) );
+		} else if ( 'applied' === result.apply_state ) {
+			// An undo that stopped before it reverted an entry.
+			summary = notice( 'info', sprintf(
+				/* translators: %d: kept entries. */
+				_n( 'Nothing of the apply is undone yet: %d entry was kept. The list gives the reason.', 'Nothing of the apply is undone yet: %d entries were kept. The list gives the reason for each.', result.kept || 0, 'backups-for-restic' ), result.kept || 0,
+			) );
+		}
 		return el( 'div', {}, [
 			summary,
 			result.changed_after_review ? el( 'p', {}, [ sprintf(
@@ -327,7 +341,7 @@
 		}
 		return notice( 'warning', sprintf(
 			/* translators: %d: entries that the last undo kept. */
-			_n( 'Partly undone: the last undo kept %d entry because it changed after the apply. Preview the undo again to see whether it can be reverted now.', 'Partly undone: the last undo kept %d entries because they changed after the apply. Preview the undo again to see whether they can be reverted now.', job.kept, 'backups-for-restic' ), job.kept,
+			_n( 'Partly undone: the last undo kept %d entry. Preview the undo again to see why, and whether it can be reverted now.', 'Partly undone: the last undo kept %d entries. Preview the undo again to see why, and whether they can be reverted now.', job.kept, 'backups-for-restic' ), job.kept,
 		) );
 	}
 
@@ -1495,7 +1509,7 @@
 				status.textContent = false === plan.enough_space ? __( 'File preview ready. The destination needs more disk space.', 'backups-for-restic' ) : __( 'File preview ready.', 'backups-for-restic' );
 				let refusal = __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' );
 				if ( totals && 0 === totals.restore + totals.remove ) {
-					refusal = __( 'Nothing of this apply can be undone now: every entry is already undone, or changed after the apply and is kept. The list gives the reason for each entry.', 'backups-for-restic' );
+					refusal = __( 'Nothing of this apply can be undone now: every entry is already undone or is kept. The list gives the reason for each entry.', 'backups-for-restic' );
 				}
 				let controls;
 				if ( false === plan.enough_space ) {
