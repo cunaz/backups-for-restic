@@ -877,6 +877,34 @@ final class DatabaseExchangeTest extends TestCase {
 		}
 	}
 
+	public function test_settings_that_break_the_exchange_are_preflight_blockers_named_after_them(): void {
+		$this->mysql_only();
+		$catalog  = new SwapCatalog( $this->direct );
+		$settings = [ 'innodb_table_locks', 'binlog_format', 'wsrep_on' ];
+		self::assertSame( [], array_values( array_intersect( $catalog->inspect( [ 'wp_posts' ] )['blockers'], $settings ) ) );
+		$this->db->execute( 'SET SESSION innodb_table_locks=0' );
+		self::assertContains( 'innodb_table_locks', $catalog->inspect( [ 'wp_posts' ] )['blockers'] );
+		$this->db->execute( 'SET SESSION innodb_table_locks=1' );
+		$plan   = $this->prepared();
+		$binary = 'ON' === ( $this->db->rows( "SHOW VARIABLES LIKE 'log_bin'" )[0]['Value'] ?? 'OFF' );
+		// A privileged session may choose statement-based logging, as the account of this suite can.
+		$this->db->execute( "SET SESSION binlog_format='STATEMENT'" );
+		$blockers = $catalog->inspect( [ 'wp_posts' ] )['blockers'];
+		if ( ! $binary ) {
+			self::assertNotContains( 'binlog_format', $blockers );
+			return;
+		}
+		self::assertContains( 'binlog_format', $blockers );
+		try {
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false );
+			self::fail( 'The exchange ran under statement-based logging.' );
+		} catch ( DatabaseFailed ) {
+			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
+			self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		}
+		$this->db->execute( "SET SESSION binlog_format='ROW'" );
+	}
+
 	public function test_durable_jobs_keep_the_recovery_window_through_pruning_and_expire_only_private_generations(): void {
 		$this->mysql_only();
 		$site     = $this->directory . '/site';

@@ -36,7 +36,7 @@ final readonly class SwapCatalog {
 	public const int MAX_SESSIONS = 4096;
 
 	/** Blockers of a live exchange that do not concern dropping an expired private table. */
-	public const array EXCHANGE_ONLY = [ 'performance_schema' ];
+	public const array EXCHANGE_ONLY = [ 'performance_schema', 'innodb_table_locks', 'binlog_format', 'wsrep_on' ];
 
 	/**
 	 * Creates the catalog for this destination.
@@ -105,8 +105,11 @@ final readonly class SwapCatalog {
 		}
 		if ( $facts['mariadb'] ) {
 			$issues[] = 'write_locked_rename';
-		} elseif ( null === $this->account( $facts['database'] ) ) {
-			$issues[] = 'performance_schema';
+		} else {
+			if ( null === $this->account( $facts['database'] ) ) {
+				$issues[] = 'performance_schema';
+			}
+			array_push( $issues, ...$this->settings() );
 		}
 		if ( [] !== $missing ) {
 			$issues[] = 'database_privileges';
@@ -198,6 +201,32 @@ final readonly class SwapCatalog {
 		}
 		ksort( $ids, SORT_STRING );
 		return $ids;
+	}
+
+	/**
+	 * Names the settings of this session under which the exchange would fail only after the
+	 * full import, or would not hold its locks on every node. MySQL 8.4 warns when
+	 * binlog_format is read as a variable, so the values come from SHOW SESSION VARIABLES.
+	 *
+	 * @return list<string> Blocker codes, each named after its setting.
+	 */
+	public function settings(): array {
+		$values = array_column( $this->connection->rows( "SHOW SESSION VARIABLES WHERE Variable_name IN ('binlog_format','innodb_table_locks','log_bin','sql_log_bin','wsrep_on')" ), 'Value', 'Variable_name' );
+		$issues = [];
+		if ( 'ON' !== ( $values['innodb_table_locks'] ?? null ) ) {
+			// LOCK TABLES then takes no InnoDB table locks, and WriteBarrier refuses to start.
+			$issues[] = 'innodb_table_locks';
+		}
+		if ( 'ON' === ( $values['log_bin'] ?? null ) && 'ON' === ( $values['sql_log_bin'] ?? null ) && 'STATEMENT' === strtoupper( $values['binlog_format'] ?? '' ) ) {
+			// The protected copy's INSERT ... SELECT is unsafe for statement-based logging and
+			// returns note 1592, which this port refuses like any warning.
+			$issues[] = 'binlog_format';
+		}
+		if ( 'ON' === ( $values['wsrep_on'] ?? null ) ) {
+			// A Galera node takes LOCK TABLES for itself only.
+			$issues[] = 'wsrep_on';
+		}
+		return $issues;
 	}
 
 	/**
