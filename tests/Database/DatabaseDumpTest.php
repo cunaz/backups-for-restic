@@ -904,6 +904,38 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( 1200, $tables['zf_rows']['rows'] ?? null );
 	}
 
+	public function test_through_a_drop_in_that_reads_tables_elsewhere_the_dump_reads_nothing_of_them(): void {
+		$primary = self::database( self::$source );
+		$replica = self::database( self::$source );
+		// A drop-in that sends statements naming a table to a second connection.
+		$site  = new class( $primary, $replica ) implements Connection {
+			/** @var list<string> */
+			public array $routed = [];
+
+			public function __construct( private readonly MysqliConnection $primary, private readonly MysqliConnection $replica ) {
+			}
+
+			public function rows( string $sql ): array {
+				if ( str_contains( $sql, ' FROM `' ) ) {
+					$this->routed[] = $sql;
+					return $this->replica->rows( $sql );
+				}
+				return $this->primary->rows( $sql );
+			}
+		};
+		$files = ( new DatabaseDump( $site, $this->directory . '/routed.json', 'bfr_', [], 1767323100 ) )->files();
+		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-bfr_posts.sql' === $file->name ) )[0];
+		try {
+			$this->read( $table->source, PHP_INT_MAX );
+			self::fail( 'The table would be read without the dump settings.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_session', JobError::from_throwable( $error )->code );
+			self::assertSame( 'bfr_posts', $error->context()['table'] ?? null );
+		}
+		self::assertCount( 1, $site->routed, 'Only the read-back reached the second connection.' );
+		self::assertStringContainsString( 'bfr_dump_one', $site->routed[0] );
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().

@@ -23,9 +23,17 @@ defined( 'ABSPATH' ) || exit;
  * One statement saves the site's settings in user variables and makes the dump's; another
  * restores them right after the query, also when it failed, so that no other code ever runs
  * under the dump's settings. A connection that was replaced in between has no saved values,
- * so restoring them fails instead of going unnoticed. Before the first query, a value is set
- * and read back: a database drop-in that sends statements to different connections fails
- * there, before rows could be read under settings that are not the dump's.
+ * so restoring them fails instead of going unnoticed.
+ *
+ * Two read-backs show that the statements reach the session that has the dump's settings.
+ * Before the first query, a value is set and read back by statements without a table: a
+ * database drop-in that sends consecutive statements to different connections fails there.
+ * Before the first read of each table, prove() reads that value back, with the dump's
+ * settings, through a statement that names the table: a drop-in that sends a table's
+ * statements to another connection than the others, for example to a replica, fails there,
+ * before its definition or rows are read. Both fail with database_dump_session. Not shown is
+ * a drop-in that sends one statement of a table elsewhere than the one before it, or the
+ * definitions of views, which are read without such a statement.
  */
 final class SharedConnection implements Connection {
 
@@ -46,6 +54,13 @@ final class SharedConnection implements Connection {
 	 * @var bool
 	 */
 	private bool $probed = false;
+
+	/**
+	 * Tables whose statements were shown to reach the session with the dump's settings.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $proven = [];
 
 	/**
 	 * Wraps the site's connection.
@@ -121,12 +136,59 @@ final class SharedConnection implements Connection {
 	private function probe(): void {
 		$token = self::literal( 'bfr-' . getmypid() . '-' . hrtime( true ) );
 		$this->connection->rows( 'SET @bfr_dump_probe = ' . $token );
-		$seen = $this->connection->rows( 'SELECT HEX(@bfr_dump_probe) AS probe' )[0]['probe'] ?? null;
+		// An explicit limit, so that no sql_select_limit of the session applies.
+		$seen = $this->connection->rows( 'SELECT HEX(@bfr_dump_probe) AS probe LIMIT 1' )[0]['probe'] ?? null;
 		$this->connection->rows( 'SET @bfr_dump_probe = NULL' );
 		if ( '0x' . strtolower( (string) $seen ) !== $token ) {
 			DatabaseFailed::raise( 'The database connection does not keep the session settings of the dump between statements.', [ 'code' => 'database_dump_session' ] );
 		}
 		$this->probed = true;
+	}
+
+	/**
+	 * Shows, before the first read of a table, that a statement that names the table reaches
+	 * the session with the dump's settings: within those settings it reads back a value that a
+	 * statement without a table set, and the settings themselves.
+	 *
+	 * @param string $table Table name.
+	 * @throws DatabaseFailed If the statement reaches another session or one without the dump's settings.
+	 */
+	public function prove( string $table ): void {
+		if ( isset( $this->proven[ $table ] ) ) {
+			return;
+		}
+		if ( ! $this->probed ) {
+			$this->probe();
+		}
+		$token = self::literal( 'bfr-' . getmypid() . '-' . hrtime( true ) );
+		$this->connection->rows( 'SET @bfr_dump_probe = ' . $token );
+		try {
+			// One row whatever the table holds, and none of its rows read.
+			$seen = $this->rows( 'SELECT HEX(@bfr_dump_probe) AS probe, @@SESSION.character_set_results AS results, @@SESSION.time_zone AS zone, @@SESSION.max_sort_length AS sort_length, @@SESSION.sql_select_limit AS select_limit, @@SESSION.lock_wait_timeout AS lock_wait FROM ' . SqlFormatter::identifier( $table ) . ' RIGHT JOIN (SELECT 1) AS bfr_dump_one ON FALSE LIMIT 1' )[0] ?? [];
+		} finally {
+			$this->connection->rows( 'SET @bfr_dump_probe = NULL' );
+		}
+		$expected = [
+			'probe'        => $token,
+			'results'      => 'utf8mb4',
+			'zone'         => $this->time_zone ?? ( $seen['zone'] ?? null ),
+			'sort_length'  => '8388608',
+			'select_limit' => '18446744073709551615',
+			'lock_wait'    => (string) TableSource::LOCK_WAIT_SECONDS,
+		];
+		$actual   = [ 'probe' => '0x' . strtolower( $seen['probe'] ?? '' ) ] + array_intersect_key( $seen, $expected );
+		ksort( $expected );
+		ksort( $actual );
+		if ( $expected !== $actual ) {
+			DatabaseFailed::raise(
+				'The database connection reads a table on a session without the session settings of the dump.',
+				[
+					'table' => $table,
+					'code'  => 'database_dump_session',
+				]
+			);
+		}
+		$this->proven[ $table ] = true;
 	}
 
 	/**

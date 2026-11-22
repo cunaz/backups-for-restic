@@ -173,14 +173,30 @@ final class DumpStateTest extends TestCase {
 
 			private string $probe = '';
 
+			private string $zone = 'SYSTEM';
+
 			public function rows( string $sql ): array {
 				$this->statements[] = $sql;
 				if ( 1 === preg_match( '/\ASET @bfr_dump_probe = 0x([0-9a-f]+)\z/', $sql, $match ) ) {
 					$this->probe = strtoupper( $match[1] );
 					return [];
 				}
+				if ( 1 === preg_match( '/ time_zone = 0x([0-9a-f]+)/', $sql, $match ) ) {
+					$this->zone = (string) hex2bin( $match[1] );
+				}
 				return match ( true ) {
-					'SELECT HEX(@bfr_dump_probe) AS probe' === $sql => [ [ 'probe' => $this->probe ] ],
+					'SELECT HEX(@bfr_dump_probe) AS probe LIMIT 1' === $sql => [ [ 'probe' => $this->probe ] ],
+					// One session: the read-back through a table sees the dump's settings.
+					str_starts_with( $sql, 'SELECT HEX(@bfr_dump_probe) AS probe, ' ) => [
+						[
+							'probe'        => $this->probe,
+							'results'      => 'utf8mb4',
+							'zone'         => $this->zone,
+							'sort_length'  => '8388608',
+							'select_limit' => '18446744073709551615',
+							'lock_wait'    => '5',
+						],
+					],
 					str_starts_with( $sql, 'SELECT @@SESSION.sql_quote_show_create' ) => [
 						[
 							'quote_names' => '1',

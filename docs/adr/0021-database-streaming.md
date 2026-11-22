@@ -62,8 +62,16 @@ and makes an interrupted dump start from zero.
   drop-in with settings of its own, the dump reads through `$wpdb`: every query then runs
   between one statement that saves the site's session settings in user variables and sets
   the dump's, and one that restores them, also after a failed query; a replaced connection
-  has no saved values and fails the restore, and a drop-in that sends statements to
-  different connections is refused with `database_dump_session`.
+  has no saved values and fails the restore. Two read-backs check that the statements reach
+  the session with the dump's settings, and a drop-in that fails either is refused with
+  `database_dump_session`. Before the first query, a value set by one statement without a
+  table is read back by the next: consecutive statements reach one connection. Before the
+  first read of each table, a statement that names the table reads that value back with the
+  dump's settings: the table's statements reach the same session as the settings, as a
+  drop-in that sends the reads of a table to a replica would not. Neither shows where a
+  drop-in sends a single later statement, if it chooses per statement rather than per table,
+  nor are view definitions checked this way, because a statement that names a view fails
+  when a table the view uses is gone.
 - **Tables without a usable key.** On the dump's own connection such a table is read with
   one unbuffered statement, which is consistent by itself. When a tick ends before the
   statement does, the connection is closed rather than read to the end, and the next tick

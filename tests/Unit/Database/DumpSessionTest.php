@@ -23,7 +23,7 @@ final class DumpSessionTest extends TestCase {
 
 		$probe = array_slice( $site->statements, 0, 3 );
 		self::assertMatchesRegularExpression( '/\ASET @bfr_dump_probe = 0x[0-9a-f]+\z/', $probe[0] );
-		self::assertSame( [ 'SELECT HEX(@bfr_dump_probe) AS probe', 'SET @bfr_dump_probe = NULL' ], array_slice( $probe, 1 ) );
+		self::assertSame( [ 'SELECT HEX(@bfr_dump_probe) AS probe LIMIT 1', 'SET @bfr_dump_probe = NULL' ], array_slice( $probe, 1 ) );
 		$query = [ self::SAVE . ', time_zone = 0x2b30303a3030, max_sort_length = 8388608, sql_select_limit = 18446744073709551615, lock_wait_timeout = 5', 'SELECT 1 AS a', self::RESTORE ];
 		self::assertSame( [ ...$query, ...$query ], array_slice( $site->statements, 3 ), 'The probe runs once; every query is wrapped.' );
 	}
@@ -73,6 +73,86 @@ final class DumpSessionTest extends TestCase {
 	 * A site connection that records statements, keeps the probe value unless it forgets
 	 * user variables, and fails where it is told to.
 	 */
+	public function test_a_table_is_shown_once_to_reach_the_session_with_the_dump_settings(): void {
+		$site       = $this->sessions( false );
+		$connection = new SharedConnection( $site );
+		$connection->prove( 'wp_rows' );
+		$count = count( $site->statements );
+		$connection->prove( 'wp_rows' );
+
+		self::assertSame( $count, count( $site->statements ), 'Once per table.' );
+		$probe = array_values( array_filter( $site->statements, static fn ( string $sql ): bool => str_contains( $sql, ' FROM `wp_rows`' ) ) );
+		self::assertSame( [ 'SELECT HEX(@bfr_dump_probe) AS probe, @@SESSION.character_set_results AS results, @@SESSION.time_zone AS zone, @@SESSION.max_sort_length AS sort_length, @@SESSION.sql_select_limit AS select_limit, @@SESSION.lock_wait_timeout AS lock_wait FROM `wp_rows` RIGHT JOIN (SELECT 1) AS bfr_dump_one ON FALSE LIMIT 1' ], $probe );
+	}
+
+	public function test_a_table_whose_statements_reach_another_session_is_refused_before_it_is_read(): void {
+		// A drop-in that sends statements naming a table to a replica: the statements without a
+		// table, the dump's settings among them, reach the primary.
+		$site = $this->sessions( true );
+		try {
+			( new SharedConnection( $site ) )->prove( 'wp_rows' );
+			self::fail( 'The table is read on a session without the dump settings.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_session', JobError::from_throwable( $error )->code );
+			self::assertSame( 'wp_rows', $error->context()['table'] ?? null );
+		}
+		self::assertSame( [], array_filter( $site->statements, static fn ( string $sql ): bool => str_contains( $sql, 'FROM `wp_rows`' ) && ! str_contains( $sql, 'bfr_dump_one' ) ), 'Nothing of the table was read.' );
+	}
+
+	/**
+	 * Sessions that keep the user variables and the dump settings they were given; with $route,
+	 * statements that name a table reach a second session.
+	 */
+	private function sessions( bool $route ): Connection {
+		return new class( $route ) implements Connection {
+
+			/** @var list<string> */
+			public array $statements = [];
+
+			/** @var array<string, array{probe: string, dump: bool}> */
+			private array $sessions = [
+				'primary' => [
+					'probe' => '',
+					'dump'  => false,
+				],
+				'replica' => [
+					'probe' => '',
+					'dump'  => false,
+				],
+			];
+
+			public function __construct( private readonly bool $route ) {
+			}
+
+			public function rows( string $sql ): array {
+				$this->statements[] = $sql;
+				$name               = $this->route && str_contains( $sql, ' FROM `' ) ? 'replica' : 'primary';
+				if ( 1 === preg_match( '/\ASET @bfr_dump_probe = (0x[0-9a-f]+|NULL)\z/', $sql, $match ) ) {
+					$this->sessions[ $name ]['probe'] = 'NULL' === $match[1] ? '' : strtoupper( substr( $match[1], 2 ) );
+					return [];
+				}
+				if ( str_starts_with( $sql, 'SET @bfr_dump_client' ) || str_starts_with( $sql, 'SET SESSION character_set_client = @' ) ) {
+					$this->sessions[ $name ]['dump'] = str_starts_with( $sql, 'SET @bfr_dump_client' );
+					return [];
+				}
+				if ( ! str_starts_with( $sql, 'SELECT HEX(@bfr_dump_probe) AS probe' ) ) {
+					return [];
+				}
+				$session = $this->sessions[ $name ];
+				return [
+					[
+						'probe'        => '' === $session['probe'] ? null : $session['probe'],
+						'results'      => $session['dump'] ? 'utf8mb4' : 'latin1',
+						'zone'         => $session['dump'] ? '+00:00' : 'SYSTEM',
+						'sort_length'  => $session['dump'] ? '8388608' : '1024',
+						'select_limit' => '18446744073709551615',
+						'lock_wait'    => $session['dump'] ? '5' : '31536000',
+					],
+				];
+			}
+		};
+	}
+
 	private function site( string $failing = '', bool $restore_fails = false, bool $forgets = false ): Connection {
 		return new class( $failing, $restore_fails, $forgets ) implements Connection {
 
@@ -90,7 +170,7 @@ final class DumpSessionTest extends TestCase {
 					$this->probe = $this->forgets ? '' : strtoupper( $match[1] );
 					return [];
 				}
-				if ( 'SELECT HEX(@bfr_dump_probe) AS probe' === $sql ) {
+				if ( 'SELECT HEX(@bfr_dump_probe) AS probe LIMIT 1' === $sql ) {
 					return [ [ 'probe' => '' === $this->probe ? null : $this->probe ] ];
 				}
 				if ( $sql === $this->failing ) {

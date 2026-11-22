@@ -134,6 +134,8 @@ final class DatabaseDump {
 		try {
 			if ( $reader instanceof DedicatedConnection ) {
 				$reader->begin( $name );
+			} elseif ( $reader instanceof SharedConnection ) {
+				$reader->prove( $name );
 			}
 			$table = $catalog->table( $name );
 		} catch ( DatabaseFailed $error ) {
