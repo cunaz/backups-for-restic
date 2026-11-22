@@ -483,8 +483,11 @@ All notable changes are documented here. The format follows
   snapshot, on a database connection of its own that it opens with the site's settings and
   checks before it uses it. A transient that is renewed while a table is read is no longer
   in the backup twice. Where no such connection can be opened, the backup reads through the
-  site's connection as before. A table without a key is read with one statement, or marked
-  in the database manifest and named in a warning of the job when it could not be.
+  site's connection as before, with its own settings around every query. A database drop-in
+  that sends those queries, or the reads of a table, to another connection than the settings
+  stops the backup with its own message instead of writing values in another time zone or
+  character set. A table without a key is read with one statement, or marked in the
+  database manifest and named in a warning of the job when it could not be.
 - A table whose structure changes while it is backed up, for example by a plugin update, is
   backed up again from its beginning instead of producing a file that cannot be imported.
   A table that keeps changing stops the backup with its own message.
