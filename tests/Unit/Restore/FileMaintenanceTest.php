@@ -337,6 +337,25 @@ final class FileMaintenanceTest extends TestCase {
 		}
 	}
 
+	public function test_marker_is_readable_like_cores_own_marker(): void {
+		$root = TempDir::create( 'maintenance' );
+		try {
+			$dir = $this->enter( $root );
+			clearstatcache( true );
+			self::assertSame( 0644, fileperms( $root . '/.maintenance' ) & 0777 );
+			self::assertSame( fileinode( $dir . '/maintenance.php' ), fileinode( $root . '/.maintenance' ) );
+			self::assertSame( 0700, fileperms( $dir ) & 0777 );
+			self::assertSame( 0600, fileperms( $dir . '/maintenance.sha256' ) & 0777 );
+			// A later tick restores the mode before it renews the lease.
+			chmod( $dir . '/maintenance.php', 0600 );
+			( new FileMaintenance( $root ) )->enter( self::ID, $dir, '' );
+			clearstatcache( true );
+			self::assertSame( 0644, fileperms( $root . '/.maintenance' ) & 0777 );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
 	public function test_unrelated_updater_can_replace_marker_in_place_without_losing_it_at_cleanup(): void {
 		$root = TempDir::create( 'maintenance' );
 		try {

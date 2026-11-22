@@ -18,6 +18,9 @@ defined( 'ABSPATH' ) || exit;
 /** Publishes its marker exclusively and leaves another updater's marker untouched. */
 final readonly class FileMaintenance {
 
+	/** Readable by every PHP process of the site, as core's own marker is. */
+	private const int MODE = 0644;
+
 	/** Largest marker the job publishes and later removes. */
 	private const int MAX_BYTES = 8192;
 
@@ -70,6 +73,13 @@ final readonly class FileMaintenance {
 		$ours     = is_file( $temp ) && ! is_link( $temp ) ? lstat( $temp ) : false;
 		if ( ! is_string( $expected ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $expected ) || false === $ours || 0100000 !== ( $ours['mode'] & 0170000 ) || $ours['size'] >= self::MAX_BYTES || ! hash_equals( $expected, (string) hash_file( 'sha256', $temp ) ) ) {
 			throw new StorageFailed( 'The private maintenance marker is unavailable.' );
+		}
+		// Core reads the marker in every request, also in PHP processes of other system
+		// users, and writes its own marker readable for all of them. This one holds no
+		// secret: the grant is a hash. It is the same inode as the private copy, which the
+		// owner-only job directory keeps out of reach.
+		if ( self::MODE !== ( $ours['mode'] & 0777 ) && ! chmod( $temp, self::MODE ) ) {
+			throw new StorageFailed( 'The maintenance marker could not be made readable.' );
 		}
 		if ( ! file_exists( $marker ) && ! is_link( $marker ) && ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) ) {
 			throw new StorageFailed( 'Maintenance requires writable WordPress and private storage on the same filesystem.' );
