@@ -34,18 +34,42 @@ reported() {
 
 mkdir -p "$tmp/package/src" "$tmp/assets"
 echo ' * Version:           1.2.3' >"$tmp/package/backups-for-restic.php"
-echo 'Stable tag: 1.2.3' >"$tmp/package/readme.txt"
+printf 'Stable tag: 1.2.3\n\n== Changelog ==\n\n= 1.2.3 =\n\n* Fixture release.\n' >"$tmp/package/readme.txt"
+printf '# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-11-20\n\n### Fixed\n- Fixture release.\n' >"$tmp/package/CHANGELOG.md"
 echo "public const string VERSION = '1.2.3';" >"$tmp/package/src/Plugin.php"
 echo 'fixture listing asset' >"$tmp/assets/fixture.txt"
 echo 'removed in the next release' >"$tmp/package/obsolete.txt"
 setversion() {
   local before=$1 after=$2
-  sed -i "s/$before/$after/g" "$tmp/package/backups-for-restic.php" "$tmp/package/readme.txt" "$tmp/package/src/Plugin.php"
+  sed -i "s/$before/$after/g" "$tmp/package/backups-for-restic.php" "$tmp/package/readme.txt" "$tmp/package/src/Plugin.php" "$tmp/package/CHANGELOG.md"
 }
+prepare() { python3 "$root/bin/prepare-wordpress-org.py" "$@"; }
+
+# Versions and changelogs, checked before the owner is asked to approve a deployment.
+checked="$(prepare --check-only 1.2.3 "$tmp/package")"
+[[ "$checked" == *'identifies release 1.2.3'* ]]
+refuses 'backups-for-restic.php must identify release 1.2.4' prepare --check-only 1.2.4 "$tmp/package"
+refuses 'a stable x.y.z version is required' prepare --check-only 1.2.3-rc.1 "$tmp/package"
+refuses '--check-only takes only the version and the package' prepare --check-only 1.2.3 "$tmp/package" "$tmp/assets"
+cp -R "$tmp/package" "$tmp/variant"
+sed -i 's/^Stable tag: 1.2.3/Stable tag: 1.2.3-rc.1/' "$tmp/variant/readme.txt"
+refuses 'readme.txt must identify release 1.2.3' prepare --check-only 1.2.3 "$tmp/variant"
+rm -rf "$tmp/variant" && cp -R "$tmp/package" "$tmp/variant"
+sed -i 's/^## \[1.2.3\] - 2026-11-20/## [1.2.2] - 2026-11-19/' "$tmp/variant/CHANGELOG.md"
+refuses 'CHANGELOG.md must describe release 1.2.3 in its newest entry' prepare --check-only 1.2.3 "$tmp/variant"
+rm -rf "$tmp/variant" && cp -R "$tmp/package" "$tmp/variant"
+sed -i 's/^## \[Unreleased\]$/## [Unreleased]\n\n### Added\n- Not released yet./' "$tmp/variant/CHANGELOG.md"
+refuses 'CHANGELOG.md still lists unreleased changes; move them to 1.2.3' prepare --check-only 1.2.3 "$tmp/variant"
+rm -rf "$tmp/variant" && cp -R "$tmp/package" "$tmp/variant"
+sed -i 's/^= 1.2.3 =$/= Unreleased =/' "$tmp/variant/readme.txt"
+refuses 'The changelog of readme.txt must start with release 1.2.3' prepare --check-only 1.2.3 "$tmp/variant"
+rm -rf "$tmp/variant"
+echo 'Version, Stable tag, Plugin::VERSION, both changelogs and release-candidate versions checked.'
+
 svnadmin create "$tmp/repo"
 repo="file://$tmp/repo"
 svn mkdir "$repo/trunk" "$repo/tags" "$repo/assets" -m "WordPress.org layout" --quiet
-run() { python3 "$root/bin/prepare-wordpress-org.py" "$1" "$tmp/package" "$tmp/assets" "$repo" "$tmp/$2"; }
+run() { prepare "$1" "$tmp/package" "$tmp/assets" "$repo" "$tmp/$2"; }
 run 1.2.3 first
 svn commit -q -m "Fixture release 1.2.3" "$tmp/first"
 svn export -q "$repo/tags/1.2.3" "$tmp/actual"
@@ -68,6 +92,7 @@ svn export -q "$repo/tags/1.2.4" "$tmp/second"
 diff -qr "$tmp/package" "$tmp/second"
 setversion '1.2.4' '1.2.2'
 refuses 'A newer release already exists in SVN' run 1.2.2 older
+refuses 'a stable x.y.z version is required' run 1.2.5-rc.1 candidate
 echo 'SVN initial release, retry, immutable conflict, upgrade, deletion, downgrade and exact exported bytes verified.'
 
 mkdir "$tmp/git" "$tmp/keys"

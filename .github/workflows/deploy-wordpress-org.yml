@@ -1,7 +1,8 @@
 name: Deploy a signed stable release to WordPress.org
 on:
   push:
-    tags: ['v*']
+    # Stable releases only; a release candidate such as v0.3.0-rc.1 starts nothing.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
     inputs:
       tag:
@@ -61,8 +62,13 @@ jobs:
             fi
           done
       - id: package
+        name: Build the package of the signed commit and check its versions
+        env:
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           bin/build-package.sh --zip
+          python3 bin/prepare-wordpress-org.py --check-only "${TAG#v}" build/backups-for-restic
           echo "sha256=$(sha256sum build/backups-for-restic.zip | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/check-package
 
