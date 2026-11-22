@@ -175,12 +175,14 @@ final class ApplyPlan {
 	}
 
 	/**
-	 * Number of folders that the writer's rechecks listed in this request, for diagnostics.
+	 * Number of folder listings that the writer's rechecks made in this request, for
+	 * diagnostics.
 	 *
+	 * @param string|null $directory One folder, or null for all.
 	 * @return int Folder listings.
 	 */
-	public function listings(): int {
-		return null === $this->writer ? 0 : $this->writer->listings();
+	public function listings( ?string $directory = null ): int {
+		return null === $this->writer ? 0 : $this->writer->listings( $directory );
 	}
 
 	/**

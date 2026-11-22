@@ -16,6 +16,7 @@ use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\FileSpace;
+use BackupsForRestic\Restore\LiveSpellings;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Support\Redactor;
@@ -38,6 +39,13 @@ final class FileChangesTest extends TestCase {
 	private Runner $runner;
 	private bool $allowed = true;
 	private ?int $free    = PHP_INT_MAX;
+
+	/**
+	 * Every plan that the job service asked for, in order.
+	 *
+	 * @var list<ApplyPlan>
+	 */
+	private array $plans = [];
 
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'apply-job' );
@@ -68,8 +76,10 @@ final class FileChangesTest extends TestCase {
 			function ( bool $config, string $id ): ApplyPlan {
 				$restore = $this->jobs->get( $id );
 				self::assertNotNull( $restore );
-				$layout = SiteLayout::from_job( $restore, $this->live, $this->uploads );
-				return new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
+				$layout        = SiteLayout::from_job( $restore, $this->live, $this->uploads );
+				$plan          = new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
+				$this->plans[] = $plan;
+				return $plan;
 			},
 			new FileMaintenance( $this->live ),
 			fn (): bool => $this->allowed,
@@ -513,6 +523,40 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
 		self::assertDirectoryDoesNotExist( dirname( $this->files ) );
+	}
+
+	public function test_a_large_apply_into_one_wide_folder_lists_it_about_once_per_tick_and_second(): void {
+		$media = $this->live . '/media';
+		mkdir( $media );
+		mkdir( $this->files . $media, 0700 );
+		for ( $i = 0; $i < 2500; ++$i ) {
+			touch( $media . '/existing-' . $i );
+		}
+		for ( $i = 0; $i < 150; ++$i ) {
+			file_put_contents( $this->files . $media . '/new-' . $i, 'new ' . $i );
+		}
+		$this->write_report( $this->live . '/skipped-link' );
+		$review = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		// A review takes the administrator longer than this; the staged tree has settled.
+		$ready = time() + 1 + LiveSpellings::CLOCK_MARGIN;
+		while ( microtime( true ) < $ready ) {
+			usleep( 10000 );
+		}
+		$this->plans = [];
+		$started     = time();
+		$apply       = $this->run_job( $this->changes->start_apply( $this->restore, false, $review->result['digest'], '', $review->id ) );
+		$seconds     = time() - $started + 1;
+		self::assertSame( 153, $apply->result['files_changed'] );
+		self::assertSame( 'new 149', file_get_contents( $media . '/new-149' ) );
+		$wide   = array_sum( array_map( static fn ( ApplyPlan $plan ): int => $plan->listings( $media ), $this->plans ) );
+		$staged = array_sum( array_map( fn ( ApplyPlan $plan ): int => $plan->listings( $this->files . $media ), $this->plans ) );
+		// Every recheck of the 150 new files used to list both folders, about 750 times each.
+		self::assertGreaterThan( 0, $wide );
+		self::assertLessThanOrEqual( count( $this->plans ) + 2 * $seconds, $wide );
+		self::assertGreaterThan( 0, $staged );
+		self::assertLessThanOrEqual( count( $this->plans ), $staged );
 	}
 
 	public function test_legacy_sealed_plan_without_an_estimate_restarts_interrupted_preflight_before_mutating(): void {

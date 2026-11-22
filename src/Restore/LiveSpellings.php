@@ -68,11 +68,11 @@ final class LiveSpellings {
 	private int $held = 0;
 
 	/**
-	 * Folder listings performed.
+	 * Folder listings performed, by folder.
 	 *
-	 * @var int
+	 * @var array<string, int>
 	 */
-	private int $listings = 0;
+	private array $listings = [];
 
 	/**
 	 * Seed of the name codes, new for every request.
@@ -164,10 +164,11 @@ final class LiveSpellings {
 	/**
 	 * Number of folder listings so far, for diagnostics and tests.
 	 *
+	 * @param string|null $directory One folder, or null for all.
 	 * @return int Listings.
 	 */
-	public function listings(): int {
-		return $this->listings;
+	public function listings( ?string $directory = null ): int {
+		return null === $directory ? array_sum( $this->listings ) : $this->listings[ $directory ] ?? 0;
 	}
 
 	/**
@@ -184,7 +185,8 @@ final class LiveSpellings {
 		if ( false === $handle ) {
 			return false;
 		}
-		++$this->listings;
+		$this->listings[ $directory ] = ( $this->listings[ $directory ] ?? 0 ) + 1;
+
 		$key   = ApplyPlan::fold( $name );
 		$valid = true;
 		$names = [];
