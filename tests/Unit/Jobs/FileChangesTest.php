@@ -658,6 +658,38 @@ final class FileChangesTest extends TestCase {
 		self::assertFileDoesNotExist( $this->live . '/b-new/new.txt' );
 	}
 
+	public function test_an_entry_reviewed_as_kept_stays_kept_when_it_becomes_revertible_before_the_worker(): void {
+		$job  = $this->run_job( $this->start() );
+		$file = $this->live . '/a-existing';
+		clearstatcache();
+		$installed = (int) filemtime( $file );
+		file_put_contents( $file, 'edited' );
+		touch( $file, $installed + 60 );
+		$review = $this->changes->preview_undo( $job->id );
+		self::assertSame( [ 'keep', 'changed_since_apply' ], [ array_column( $review['entries'], 'action', 'path' )[ $file ], array_column( $review['entries'], 'reason', 'path' )[ $file ] ] );
+		$undo = $this->changes->start_undo( $job->id, $review['digest'] );
+		// The edit is taken back before the worker comes, with the installed bytes and time:
+		// the file is as the apply left it, but the administrator confirmed an undo that keeps it.
+		file_put_contents( $file, 'replacement' );
+		touch( $file, $installed );
+		$done = $this->run_job( $undo );
+		self::assertSame( 'replacement', file_get_contents( $file ) );
+		self::assertSame(
+			[
+				'restored'             => 0,
+				'removed'              => 2,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			self::outcomes( $done )
+		);
+		self::assertSame( [ $file => 'changed_since_apply' ], $this->kept( $done ) );
+		// A later undo reverts it.
+		self::assertSame( 'restore', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
+	}
+
 	public function test_an_entry_that_someone_else_removed_after_the_review_is_not_counted_as_removed(): void {
 		$job    = $this->run_job( $this->start() );
 		$review = $this->changes->preview_undo( $job->id );
@@ -790,6 +822,8 @@ final class FileChangesTest extends TestCase {
 
 	public function test_kept_entries_are_listed_only_for_an_undo_that_has_ended_and_wrote_them(): void {
 		$job = $this->run_job( $this->start() );
+		clearstatcache();
+		$installed = (int) filemtime( $this->live . '/a-existing' );
 		file_put_contents( $this->live . '/a-existing', 'edited' );
 		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
 		foreach ( [ '20260101T000000Z-000000', $job->id, $undo->id ] as $id ) {
@@ -824,8 +858,9 @@ final class FileChangesTest extends TestCase {
 			}
 			$this->jobs->save( $done );
 		}
-		// Put the installed bytes back, and the next undo reverts the entry and keeps nothing.
+		// Put the installed bytes and time back, and the next undo reverts the entry and keeps nothing.
 		file_put_contents( $this->live . '/a-existing', 'replacement' );
+		touch( $this->live . '/a-existing', $installed );
 		$again = $this->undo( $job );
 		self::assertSame( 1, $again->result['restored'] );
 		$empty = $this->changes->kept_page( $again->id, 0 );
@@ -927,12 +962,17 @@ final class FileChangesTest extends TestCase {
 	public function test_a_review_that_finds_nothing_left_to_revert_records_the_apply_as_undone(): void {
 		$job = $this->run_job( $this->start() );
 		$new = $this->live . '/b-new/new.txt';
+		clearstatcache();
+		$installed = (int) filemtime( $new );
 		file_put_contents( $new, 'edited' );
+		touch( $new, $installed + 60 );
 		$first = $this->undo( $job );
 		self::assertSame( 2, $first->result['kept'] );
-		// The edit is taken back by hand, and a second undo is stopped after it removed both
-		// entries, before it came to the replaced file, which the first undo restored.
+		// The edit is taken back with the installed bytes and time, and a second undo is
+		// stopped after it removed both entries, before it came to the replaced file, which
+		// the first undo restored.
 		file_put_contents( $new, 'created' );
+		touch( $new, $installed );
 		$review = $this->changes->preview_undo( $job->id );
 		$undo   = $this->changes->start_undo( $job->id, $review['digest'] );
 		$this->runner->tick( 0.0 ); // Preflight.
