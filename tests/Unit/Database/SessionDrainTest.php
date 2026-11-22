@@ -203,9 +203,11 @@ final class SessionDrainTest extends TestCase {
 	}
 
 	public function test_an_incomplete_list_at_the_bound_is_reported_even_after_a_quiet_moment(): void {
-		$counts = [ [ '3', '3' ], ...array_fill( 0, 30, [ '4', '3' ] ) ];
+		// The first listing is complete before and after it is read.
+		$counts = [ [ '3', '3' ], [ '3', '3' ], ...array_fill( 0, 30, [ '4', '3' ] ) ];
 		$server = $this->server( [ [] ], null, $counts );
 		self::assertSame( 'performance_schema', $this->wait( $this->drain( 0.0, 0.5, 0.0, 0.25, 1.0 ), $server, 1000.0, 2000.0 ) );
+		self::assertSame( [ 1000.0 ], $server->listed, 'Only the first listing was complete enough to be read.' );
 	}
 
 	public function test_by_default_the_account_must_stay_quiet_for_a_second_after_a_two_second_grace(): void {
@@ -233,13 +235,24 @@ final class SessionDrainTest extends TestCase {
 	public function test_completeness_tolerates_two_spoiled_readings_but_not_three(): void {
 		$server = $this->server( [ [ '7' ] ], null, [ [ '4', '3' ], [ '4', '3' ], [ '4', '4' ] ] );
 		self::assertSame( [ '7' ], ( new SwapCatalog( $server ) )->sessions( 'site' ) );
-		self::assertSame( 3, count( array_keys( $server->queries, self::COUNTS, true ) ) );
+		self::assertSame( 4, count( array_keys( $server->queries, self::COUNTS, true ) ), 'Three readings before the sessions are read, one after.' );
 		$server = $this->server( [ [ '7' ] ], null, [ [ '4', '3' ], [ '4', '3' ], [ '4', '3' ], [ '4', '4' ] ] );
 		self::assertNull( ( new SwapCatalog( $server ) )->sessions( 'site' ) );
 		self::assertSame( 3, count( array_keys( $server->queries, self::COUNTS, true ) ) );
 		self::assertSame( [], $server->listed );
 		$catalog = new SwapCatalog( $this->server( [ [ '7' ] ], null, [ [ '4', '5' ] ] ) );
 		self::assertSame( [ '7' ], $catalog->sessions( 'site' ), 'Listed threads that are no connection do not make the list incomplete.' );
+	}
+
+	public function test_a_session_that_connects_unlisted_while_the_sessions_are_read_spoils_the_listing(): void {
+		// Complete before the account's sessions are read, and one connection short afterwards.
+		$server = $this->server( [ [] ], null, [ [ '3', '3' ], [ '4', '3' ], [ '4', '3' ], [ '4', '3' ] ] );
+		self::assertNull( ( new SwapCatalog( $server ) )->sessions( 'site' ), 'An empty list read beside an unlisted connection is no empty list.' );
+		self::assertCount( 1, $server->listed );
+		self::assertSame( 4, count( array_keys( $server->queries, self::COUNTS, true ) ) );
+		// One spoiled reading afterwards is tolerated, as before the read.
+		$server = $this->server( [ [ '7' ] ], null, [ [ '3', '3' ], [ '4', '3' ], [ '4', '4' ] ] );
+		self::assertSame( [ '7' ], ( new SwapCatalog( $server ) )->sessions( 'site' ) );
 	}
 
 	/** @return iterable<string, array{string,string}> */
@@ -325,7 +338,11 @@ final class SessionDrainTest extends TestCase {
 		$server  = $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS ) ) ] );
 		$catalog = new SwapCatalog( $server );
 		self::assertCount( SwapCatalog::MAX_SESSIONS, $catalog->sessions( 'site' ) ?? [] );
-		self::assertSame( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( 'wp' ) . ' AND DB=' . Session::literal( 'site' ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT 4097', end( $server->queries ) );
+		self::assertSame(
+			[ 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( 'wp' ) . ' AND DB=' . Session::literal( 'site' ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT 4097', self::COUNTS ],
+			array_slice( $server->queries, -2 ),
+			'The list is read between two checks of its completeness.'
+		);
 		$catalog = new SwapCatalog( $this->server( [ array_map( 'strval', range( 1, SwapCatalog::MAX_SESSIONS + 1 ) ) ] ) );
 		try {
 			$catalog->sessions( 'site' );

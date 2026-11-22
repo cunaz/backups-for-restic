@@ -243,7 +243,8 @@ final readonly class SwapCatalog {
 	 *
 	 * @param string $database Site database.
 	 * @return list<string>|null Connection IDs in ascending order, without this session, or
-	 *                           null while the list cannot be shown to be complete.
+	 *                           null while the list cannot be shown to be complete, before
+	 *                           and after it was read.
 	 * @throws DatabaseFailed If the sessions cannot be listed, with the code performance_schema.
 	 */
 	public function sessions( string $database ): ?array {
@@ -255,6 +256,11 @@ final readonly class SwapCatalog {
 			return null;
 		}
 		$rows = $this->connection->rows( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( $account ) . ' AND DB=' . Session::literal( $database ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT ' . ( self::MAX_SESSIONS + 1 ) );
+		// A session that connected without a thread instance after the check above is missing
+		// from these rows. It is still connected now, so the check finds it afterwards.
+		if ( ! $this->complete() ) {
+			return null;
+		}
 		if ( count( $rows ) > self::MAX_SESSIONS ) {
 			DatabaseFailed::raise( 'Too many other sessions use the site database account.', [ 'code' => 'database_exchange_sessions' ] );
 		}
@@ -289,7 +295,9 @@ final readonly class SwapCatalog {
 	 * other session too, and FLUSH STATUS reset Performance_schema_thread_instances_lost, so
 	 * that counter proves nothing. A connection that opens or closes between the two counts
 	 * can spoil one reading, so three are taken. Needs PROCESS to count other accounts.
+	 * Every call asks the server again, so two calls can answer differently.
 	 *
+	 * @phpstan-impure
 	 * @return bool Whether at least as many sessions are listed as are connected.
 	 * @throws DatabaseFailed If the server reports unreadable counts.
 	 */

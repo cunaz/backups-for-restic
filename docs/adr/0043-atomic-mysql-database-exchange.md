@@ -141,10 +141,13 @@ each listed session saw the other two listed ones and nothing of the remaining t
 did not see their own rows either. With the limit at 8, none of six sessions was listed.
 Neither `setup_actors` nor `setup_threads` hid a session; they change only what is
 instrumented. `Performance_schema_thread_instances_lost` cannot prove completeness, because
-`FLUSH STATUS` resets it to zero. So every listing first compares `Threads_connected` from
+`FLUSH STATUS` resets it to zero. So every listing compares `Threads_connected` from
 `performance_schema.global_status` with the number of listed sessions that are not daemon
 threads, and uses the list only when at least as many are listed as are connected; three
-readings allow for a connection that opens or closes between the two counts. Counting the
+readings allow for a connection that opens or closes between the two counts. The comparison
+runs before the account's sessions are read and again afterwards: a session that connected
+without a thread instance in between is missing from the list, is still connected, and so
+shows in the second comparison. Counting the
 sessions of other accounts needs PROCESS, which the exchange already needs for the InnoDB
 dictionary; without it the preflight reports `dictionary_privilege`. A list that cannot be
 shown complete never counts as empty: the preflight reports `performance_schema`, and a wait
