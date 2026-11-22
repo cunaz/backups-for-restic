@@ -144,6 +144,18 @@ final class RestoreStagingTest extends TestCase {
 		return [ (int) curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ), $headers, hash_final( $digest ) ];
 	}
 
+	/**
+	 * The latest grants of restored content, as the Settings tab shows them.
+	 *
+	 * @return list<array<mixed>> Newest first.
+	 */
+	private static function grants(): array {
+		[ $status, $settings, $raw ] = TestSite::api( 'GET', '/settings' );
+		self::assertSame( 200, $status, $raw );
+		self::assertIsArray( $settings['downloads'] ?? null, $raw );
+		return array_values( $settings['downloads'] );
+	}
+
 	#[Depends( 'test_the_site_has_a_snapshot_to_restore_from' )]
 	public function test_single_use_downloads_serve_only_the_issued_staged_content( string $snapshot ): void {
 		$job    = self::restore( $snapshot, true );
@@ -152,6 +164,14 @@ final class RestoreStagingTest extends TestCase {
 		$file   = self::fixture() . '/file-0.bin';
 		$staged = TestSite::private_dir() . '/restores/' . $id;
 		self::assertTrue( self::listed( $id )[0]['archive'] ?? false );
+		self::assertSame(
+			[
+				'id'    => 1,
+				'login' => 'admin',
+			],
+			$job['user'] ?? null,
+			'The job records who staged the files.'
+		);
 		$before             = hash_file( 'sha256', $file );
 		[ $exit, $preview ] = TestSite::wp( [ 'backups-for-restic', 'apply-plan', $id ] );
 		self::assertSame( 0, $exit, $preview );
@@ -162,22 +182,72 @@ final class RestoreStagingTest extends TestCase {
 		self::assertStringContainsString( $protected ? '"reason":"protected"' : '"reason":"identical_contents"', $preview );
 		self::assertSame( $before, hash_file( 'sha256', $file ) );
 		foreach ( [ [ 'file', $file, $staged . '/files' . $file ], [ 'archive', '', $staged . '/selection.zip' ], [ 'report', '', $staged . '/entries.jsonl' ] ] as [ $kind, $path, $expected ] ) {
-			[ $issued, $form ] = TestSite::api(
-				'POST',
-				$route,
-				[
-					'kind' => $kind,
-					'path' => $path,
-				]
-			);
+			$request = [
+				'kind' => $kind,
+				'path' => $path,
+			];
+			$content = 'report' !== $kind;
+			$granted = self::grants();
+			if ( $content ) {
+				// A restored file or archive needs the WordPress password; the application
+				// password that authenticates the request is not enough.
+				foreach ( [ [], [ 'user_password' => 'not the password' ], [ 'user_password' => TestSite::$repository_password ] ] as $proof ) {
+					[ $status, $refused, $raw ] = TestSite::api( 'POST', $route, $request + $proof );
+					self::assertSame( 403, $status, $raw );
+					self::assertSame( 'backups_for_restic_wrong_user_password', $refused['code'] ?? null, $raw );
+					self::assertArrayNotHasKey( 'fields', $refused, $raw );
+				}
+				self::assertSame( $granted, self::grants(), 'A refused request is not recorded.' );
+				$request['user_password'] = TestSite::ADMIN_PASSWORD;
+			}
+			$asked             = time();
+			[ $issued, $form ] = TestSite::api( 'POST', $route, $request );
 			self::assertSame( 200, $issued );
+			$grants = self::grants();
+			if ( $content ) {
+				self::assertSame(
+					[
+						'login' => 'admin',
+						'job'   => $id,
+						'kind'  => $kind,
+						'path'  => $path,
+					],
+					array_intersect_key( $grants[0] ?? [], array_flip( [ 'login', 'job', 'kind', 'path' ] ) ),
+					'Who asked for which restored content.'
+				);
+				self::assertGreaterThanOrEqual( $asked, $grants[0]['at'] ?? 0 );
+				self::assertSame( array_slice( $granted, 0, 4 ), array_slice( $grants, 1 ) );
+			} else {
+				self::assertSame( $granted, $grants, 'Reports are metadata and need neither password nor record.' );
+			}
 			[ $status, $headers, $digest ] = $this->redeem( $form );
 			self::assertSame( 200, $status );
 			self::assertStringContainsString( 'Content-Disposition: attachment;', $headers );
 			self::assertSame( hash_file( 'sha256', $expected ), $digest );
 			self::assertSame( 403, $this->redeem( $form )[0] );
 		}
-		[ $issued, $form ] = TestSite::api( 'POST', $route, [ 'kind' => 'archive' ] );
+		// Nothing is recorded for a file that the restore does not hold.
+		$granted            = self::grants();
+		[ $status, , $raw ] = TestSite::api(
+			'POST',
+			$route,
+			[
+				'kind'          => 'file',
+				'path'          => self::fixture() . '/not-staged.bin',
+				'user_password' => TestSite::ADMIN_PASSWORD,
+			]
+		);
+		self::assertSame( 404, $status, $raw );
+		self::assertSame( $granted, self::grants() );
+
+		[ $issued, $form ] = TestSite::api(
+			'POST',
+			$route,
+			[
+				'kind'          => 'archive',
+				'user_password' => TestSite::ADMIN_PASSWORD,
+			]
+		);
 		self::assertSame( 200, $issued );
 		self::assertSame( 200, TestSite::api( 'DELETE', '/restores/' . $id )[0] );
 		self::assertSame( 404, $this->redeem( $form )[0], 'A token cannot serve removed staging.' );

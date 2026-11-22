@@ -350,6 +350,8 @@ final class RestRoutes {
 			} catch ( InvalidArgument $refused ) {
 				return $this->error( Decoded::string( $refused->context()['code'] ?? 'invalid_paths' ), 400 );
 			}
+			// Staging needs the capability alone (docs/03 §8); the job view shows who asked for it.
+			$data['user'] = get_current_user_id();
 		}
 		$refusal = $type->refusal( $this->container->settings() );
 		if ( null !== $refusal ) {
@@ -569,13 +571,25 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Issues the form fields for one download to an authorized administrator.
+	 * Issues the form fields for one download to an authorized administrator. A restored file
+	 * or archive can hold wp-config.php and the database dump, which together decrypt the
+	 * stored secrets, so its grant needs the WordPress password as the recovery kit does and
+	 * is recorded (docs/03-security-and-threat-model.md §5.5). The reports hold names, counts
+	 * and table metadata, which the page fetches by itself for its previews; they need the
+	 * capability alone.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @return \WP_REST_Response|\WP_Error One-time form, or a missing download.
+	 * @return \WP_REST_Response|\WP_Error One-time form, a refused confirmation, or a missing download.
 	 */
 	public function download( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$form = ( new Downloads( $this->container ) )->issue( Decoded::string( $request->get_url_params()['id'] ?? null ), self::text( $request, 'kind' ), self::text( $request, 'path' ) );
+		$kind = self::text( $request, 'kind' );
+		if ( ! Downloads::is_metadata( $kind ) ) {
+			$refusal = $this->password_refusal( $request );
+			if ( null !== $refusal ) {
+				return $refusal;
+			}
+		}
+		$form = ( new Downloads( $this->container ) )->issue( Decoded::string( $request->get_url_params()['id'] ?? null ), $kind, self::text( $request, 'path' ) );
 		return null === $form ? $this->error( 'download_not_found', 404 ) : $this->respond( $form, 200, true );
 	}
 
@@ -951,6 +965,7 @@ final class RestRoutes {
 				'private_dir' => $this->container->private_dir()->path,
 				'cache_bytes' => $this->container->cache()->size(),
 				'kit_views'   => $this->kit_views(),
+				'downloads'   => $this->download_grants(),
 			]
 		);
 	}
@@ -1311,6 +1326,26 @@ final class RestRoutes {
 	}
 
 	/**
+	 * The latest grants to download restored files and archives, for the Settings tab next to
+	 * the deliveries of the recovery kit.
+	 *
+	 * @return list<array{at: int, login: string, job: string, kind: string, path: string}> Newest first.
+	 */
+	private function download_grants(): array {
+		$grants = [];
+		foreach ( Decoded::arrays( $this->container->state()->get( Downloads::AUDIT )['grants'] ?? null ) as $grant ) {
+			$grants[] = [
+				'at'    => Decoded::int( $grant['at'] ?? null ),
+				'login' => Decoded::string( $grant['login'] ?? null ),
+				'job'   => Decoded::string( $grant['job'] ?? null ),
+				'kind'  => Decoded::string( $grant['kind'] ?? null ),
+				'path'  => Decoded::string( $grant['path'] ?? null ),
+			];
+		}
+		return array_slice( $grants, 0, 5 );
+	}
+
+	/**
 	 * The error for a recovery kit that cannot be complete, or for another failure on the way
 	 * to it.
 	 *
@@ -1521,6 +1556,26 @@ final class RestRoutes {
 			'result'           => $job->result,
 			'warnings'         => $job->warnings,
 			'error'            => $error,
+			'user'             => self::job_user( $job ),
+		];
+	}
+
+	/**
+	 * Who started a job that records it: a restore, or a database change that its
+	 * administrator confirmed.
+	 *
+	 * @param Job $job Job.
+	 * @return array{id: int, login: string}|null User ID and login, '' for a deleted account; null if the job records none.
+	 */
+	private static function job_user( Job $job ): ?array {
+		$id = $job->data['user'] ?? null;
+		if ( ! is_int( $id ) || $id < 1 ) {
+			return null;
+		}
+		$user = get_userdata( $id );
+		return [
+			'id'    => $id,
+			'login' => $user instanceof \WP_User ? $user->user_login : '',
 		];
 	}
 

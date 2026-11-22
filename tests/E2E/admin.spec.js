@@ -286,13 +286,26 @@ test( 'a selected snapshot file can be staged and downloaded', async ( { page } 
 	await expect( staged ).toBeVisible( { timeout: 4 * 60 * 1000 } );
 	await expect( staged.getByLabel( 'Absolute file path in the snapshot' ) ).toHaveValue( siteRoot() + '/license.txt' );
 
+	// A restored file or ZIP needs the WordPress password for every download; the report does not.
+	const password = staged.getByLabel( 'WordPress password for downloads' );
+	await staged.getByRole( 'button', { name: 'Download file', exact: true } ).click();
+	await expect( staged ).toContainText( 'Your WordPress password was not correct.' );
+	await password.fill( 'not the password' );
+	await staged.getByRole( 'button', { name: 'Download file', exact: true } ).click();
+	await expect( staged ).toContainText( 'Your WordPress password was not correct.' );
+	await expect( password ).toHaveValue( '' );
+	await expect( password ).toBeFocused();
 	const downloads = {};
 	for ( const name of [ 'Download file', 'Download ZIP', 'Download restore report' ] ) {
+		if ( 'Download restore report' !== name ) {
+			await password.fill( ADMIN.password );
+		}
 		const pending = page.waitForEvent( 'download' );
 		await staged.getByRole( 'button', { name, exact: true } ).click();
 		const downloaded = await pending;
 		expect( await downloaded.failure() ).toBeNull();
 		downloads[ name ] = fs.readFileSync( await downloaded.path() );
+		await expect( password ).toHaveValue( '' );
 	}
 	expect( downloads[ 'Download file' ] ).toEqual( fs.readFileSync( siteRoot() + '/license.txt' ) );
 	expect( downloads[ 'Download ZIP' ].subarray( 0, 4 ).toString( 'hex' ) ).toBe( '504b0304' );
@@ -394,9 +407,11 @@ test( 'settings are saved, refused when invalid, and the recovery kit needs the 
 	await page.getByRole( 'button', { name: 'Show recovery kit' } ).click();
 	await expect( page.locator( '.bfr-kit textarea' ) ).toHaveValue( /RESTIC_PASSWORD='[A-Za-z0-9_-]{32}'/ );
 
-	// That it was shown is on record.
+	// That it was shown is on record, and so are the downloads of restored files.
 	await page.reload();
 	await expect( page.locator( '.bfr-kit-views' ) ).toContainText( /The recovery kit was last shown on .+ to admin\./ );
+	await expect( page.locator( '.bfr-download-grants' ) ).toContainText( /: admin asked for the ZIP of restore \d{8}T\d{6}Z-[0-9a-f]{6}\./ );
+	await expect( page.locator( '.bfr-download-grants' ) ).toContainText( /: admin asked for \/.*\/license\.txt from restore / );
 } );
 
 test( 'the passwords and the CA certificate can be entered again in the settings', async ( { page } ) => {
