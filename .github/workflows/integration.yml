@@ -132,6 +132,9 @@ jobs:
       # failOnSkipped does not count.
       - name: No integration test skipped
         run: php bin/check-skipped-tests.php "$RUNNER_TEMP/integration.xml" tests/Skips/integration.txt
+      # Notices, warnings and deprecations reach only the logs, never a response.
+      - name: The plugin's code left nothing in the PHP and WordPress logs
+        run: bin/test-site.sh check-logs
       - name: How the server's workers ended
         if: always()
         # Signals and exits other than the clean ones, from strace (BFR_SITE_TRACE).
@@ -273,6 +276,8 @@ jobs:
       - run: npx playwright install chromium
       - name: Browser tests
         run: npm run test:e2e
+      - name: The plugin's code left nothing in the PHP and WordPress logs
+        run: bin/test-site.sh check-logs
       - name: Collect logs
         if: failure()
         run: |
