@@ -892,14 +892,28 @@ final class TableSource implements ResumableByteSource {
 	}
 
 	/**
-	 * The bytes that the server sends for the selected values of a row.
+	 * The bytes that the reader receives for the selected values of a row: text converted to
+	 * utf8mb4, binary and spatial values byte for byte, numbers as their digits.
 	 *
 	 * @return string SQL expression.
 	 */
 	private function size(): string {
-		$sizes = [];
-		foreach ( array_keys( $this->table->columns ) as $name ) {
-			$sizes[] = 'IFNULL(OCTET_LENGTH(' . SqlFormatter::identifier( (string) $name ) . '), 0)';
+		$converted = array_flip( $this->table->converted );
+		$sizes     = [];
+		foreach ( $this->table->columns as $name => $kind ) {
+			$column = SqlFormatter::identifier( (string) $name );
+			$value  = match ( true ) {
+				isset( $converted[ (string) $name ] ) => 'CONVERT(' . $column . ' USING utf8mb4)',
+				SqlFormatter::FLOAT === $kind        => $column . ' + 0e0',
+				SqlFormatter::BIT === $kind          => $column . ' + 0',
+				default                              => $column,
+			};
+			$sizes[] = 'IFNULL(OCTET_LENGTH(' . $value . '), 0)';
+		}
+		foreach ( $this->table->order as $column ) {
+			if ( $column->computed() ) {
+				$sizes[] = 'IFNULL(OCTET_LENGTH(' . $column->value() . '), 0)';
+			}
 		}
 		return [] === $sizes ? '0' : implode( ' + ', $sizes );
 	}

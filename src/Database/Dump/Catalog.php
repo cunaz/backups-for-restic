@@ -85,9 +85,10 @@ final class Catalog {
 		if ( ! isset( $create[0]['Create Table'] ) ) {
 			DatabaseFailed::raise( 'The table structure cannot be read.', [ 'table' => $name ] );
 		}
-		$columns = [];
-		$usable  = [];
-		$wide    = false;
+		$columns   = [];
+		$usable    = [];
+		$unbounded = [];
+		$converted = [];
 		foreach ( $this->connection->rows( 'SHOW FULL COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
 			// Their values are not read, so they cannot order pages either.
@@ -98,7 +99,15 @@ final class Catalog {
 			$field             = (string) $column['Field'];
 			$type              = (string) $column['Type'];
 			$columns[ $field ] = SqlFormatter::kind( $type );
-			$wide              = $wide || 1 === preg_match( '/\A(?:tinytext|text|mediumtext|longtext|tinyblob|blob|mediumblob|longblob|json|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection|geomcollection|vector)\b/i', $type );
+			if ( 1 === preg_match( '/\A(?:tinytext|text|mediumtext|longtext|tinyblob|blob|mediumblob|longblob|json|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection|geomcollection|vector)\b/i', $type ) ) {
+				$unbounded[] = $field;
+			}
+			// The dump reads utf8mb4: text in another character set arrives converted, and
+			// latin1 "é" or "€" takes two or three bytes there instead of one.
+			$charset = is_string( $column['Collation'] ?? null ) ? strtolower( (string) strtok( $column['Collation'], '_' ) ) : '';
+			if ( '' !== $charset && ! in_array( $charset, [ 'utf8mb4', 'utf8mb3', 'utf8', 'ascii', 'binary' ], true ) ) {
+				$converted[] = $field;
+			}
 			if ( 'NO' === ( $column['Null'] ?? null ) ) {
 				$usable[ $field ] = KeyColumn::of( $field, $type, $column['Collation'] ?? null );
 			}
@@ -116,7 +125,7 @@ final class Catalog {
 		foreach ( $order as $column ) {
 			$parts[] = $column->name . "\t" . $column->kind . "\t" . $column->collation;
 		}
-		return new Table( $name, SqlFormatter::one_line( $raw ), $columns, $key, $order, $engine, hash( 'sha256', implode( "\n", $parts ) ), $wide );
+		return new Table( $name, SqlFormatter::one_line( $raw ), $columns, $key, $order, $engine, hash( 'sha256', implode( "\n", $parts ) ), [] !== $unbounded, $unbounded, $converted );
 	}
 
 	/**

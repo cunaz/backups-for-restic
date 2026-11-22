@@ -609,6 +609,30 @@ final class DatabaseDumpTest extends TestCase {
 	}
 
 	#[DataProvider( 'connections' )]
+	public function test_a_latin1_row_is_sized_as_the_utf8mb4_it_arrives_in( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS conv_rows' );
+		$db->execute( 'CREATE TABLE conv_rows (id INT NOT NULL PRIMARY KEY, body LONGTEXT CHARACTER SET latin1) ENGINE=InnoDB' );
+		// 5 MiB of latin1 "é" arrive as 10 MiB of UTF-8, and take 20 MiB as SQL.
+		$db->execute( 'INSERT INTO conv_rows VALUES (1, REPEAT(0xE9, 5242880))' );
+		$files = ( new DatabaseDump( $db, $this->directory . '/conv.json', 'conv_', [], 1767323100, $dedicated ? self::dedicated() : null ) )->files();
+		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-conv_rows.sql' === $file->name ) )[0];
+		$limit = (string) ini_get( 'memory_limit' );
+		$seen  = (int) ( mysqli_get_client_stats()['bytes_received'] ?? 0 );
+		// Room for the stored 5 MiB with their SQL, not for what arrives.
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 40 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The test lowers the limit for one read and restores it.
+		try {
+			$this->read( $table->source, PHP_INT_MAX );
+			self::fail( 'The row does not fit.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'database_dump_row_memory', JobError::from_throwable( $error )->code );
+		} finally {
+			ini_set( 'memory_limit', $limit ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+		}
+		self::assertLessThan( 1048576, (int) ( mysqli_get_client_stats()['bytes_received'] ?? 0 ) - $seen, 'The row was refused before it was fetched.' );
+	}
+
+	#[DataProvider( 'connections' )]
 	public function test_timestamps_of_both_halves_of_the_year_import_unchanged_under_a_daylight_saving_zone( bool $dedicated ): void {
 		$db   = self::database( self::$source );
 		$zone = self::daylight_saving_zone( $db );
