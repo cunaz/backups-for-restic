@@ -284,18 +284,25 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   the entries that the slot authenticates; any other mismatch is refused.
 - The result counts what this undo did, and a retry counts a revert as its own only from a
   record of this undo that proves it. The record that completes an entry names the undo job
-  that reverted it, and so does the `restore` record before a restore's rename; the
-  retained inode back at the live path shows that the rename happened, because only that
-  rename puts it there. A retry of the same undo that finds the entry reverted under such a
-  record counts it as restored or removed, also when the document did not count it before
-  the worker stopped. A removal has no record before its unlink or `rmdir()`: a record
-  written there would say the same after a stop before the removal, when someone else may
-  remove the entry, as after one between the removal and the completing record. A retry
-  that finds the entry gone without the completing record therefore counts it as
-  `unchanged`, as it counts an entry that someone else removed after the review or that an
-  earlier undo reverted; the first case undercounts a removal that it did make. Before, the
-  worker counted an entry that it found reverted by the action the review had shown, so a
-  file that someone deleted between the review and the worker counted as removed.
+  that reverted it, and so does the `restore` record before a restore's rename; the retained
+  inode back at the live path shows that the rename happened, because only that rename puts
+  it there. A retry of the same undo that finds the entry reverted under such a record
+  counts it as restored or removed, also when the document did not count it before the
+  worker stopped. A cancelled or failed undo does not retry the entry: its cleanup reads the
+  record of the entry at the cursor, the only one that the worker can have reverted without
+  the document counting it, by the same rule, completes a `restore` record that the retained
+  inode proves, and counts the revert before the result is recorded, without a change to the
+  live site; an entry whose record cannot be read is logged and not counted. Before, such a
+  revert was missing from the result, and an apply whose only revert it was stayed listed as
+  applied with its original already back. A removal has no record before its unlink or
+  `rmdir()`: a record written there would say the same after a stop before the removal, when
+  someone else may remove the entry, as after one between the removal and the completing
+  record. A retry that finds the entry gone without the completing record therefore counts
+  it as `unchanged`, as it counts an entry that someone else removed after the review or
+  that an earlier undo reverted; the first case undercounts a removal that it did make.
+  Before, the worker counted an entry that it found reverted by the action the review had
+  shown, so a file that someone deleted between the review and the worker counted as
+  removed.
 - An undo tick advances at least one entry, also one that begins after its deadline, as an
   apply tick does; the verification of a large file still yields after a block. Before, a
   tick that began late made no progress, and with a budget of zero none at all.

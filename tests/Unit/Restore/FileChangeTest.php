@@ -690,6 +690,74 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'old', file_get_contents( $this->journal . '/original' ) );
 	}
 
+	public function test_the_entry_at_a_stopped_undos_cursor_counts_only_from_a_record_that_proves_it(): void {
+		$plan   = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$kill   = static function ( string $operation, string $subject ): \Closure {
+			return static function ( string $done, string $on ) use ( $operation, $subject ): void {
+				if ( $done === $operation && $on === $subject ) {
+					throw new \DomainException( 'The worker was killed.' );
+				}
+			};
+		};
+		$worker = fn ( string $journal, string $scope = 'undo', ?\Closure $observer = null ): FileChange => new FileChange( $plan, $this->staging, $journal, null, $scope, $observer );
+		$phase  = static fn ( string $journal ): string => json_decode( (string) file_get_contents( $journal . '/entry.json' ), true, flags: JSON_THROW_ON_ERROR )['phase'];
+		$stop   = static function ( FileChange $change, string $path, string $action ): void {
+			try {
+				$change->undo( $path, $action, INF, 'create' === $action ? 'remove' : 'restore' );
+			} catch ( \DomainException $stopped ) {
+				// Stopped where the observer was told to stop it.
+				self::assertSame( 'The worker was killed.', $stopped->getMessage() );
+				return;
+			}
+			self::fail( 'The worker must stop.' );
+		};
+		file_put_contents( $this->path, 'old' );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), INF ) );
+		// Stopped after the record that precedes the rename: nothing was restored, nothing is
+		// counted, and the live file and the record stay as they are.
+		$stop( $worker( $this->journal, 'undo', $kill( 'journal', 'restore' ) ), $this->path, 'replace' );
+		self::assertNull( $worker( $this->journal )->reverted( $this->path, 'replace' ) );
+		self::assertSame( [ 'new', 'restore' ], [ file_get_contents( $this->path ), $phase( $this->journal ) ] );
+		// Stopped after the rename, before the record that completes it: the retained inode at
+		// the live path proves a restore of this undo, not of another one, and the record is
+		// completed after the folder, as a retry completes it.
+		$stop( $worker( $this->journal, 'undo', $kill( 'rename', $this->path ) ), $this->path, 'replace' );
+		self::assertNull( $worker( $this->journal, 'later-undo' )->reverted( $this->path, 'replace' ) );
+		self::assertSame( [ 'old', 'restore' ], [ file_get_contents( $this->path ), $phase( $this->journal ) ] );
+		$seen = [];
+		$note = static function ( string $operation, string $subject ) use ( &$seen ): void {
+			$seen[] = $operation . ' ' . $subject;
+		};
+		self::assertSame( 'restored', $worker( $this->journal, 'undo', $note )->reverted( $this->path, 'replace' ) );
+		self::assertSame( [ 'sync ' . $this->site, 'journal undone' ], $seen );
+		// The completed record names this undo, which a repeated cleanup counts again, and no
+		// other undo.
+		self::assertSame( 'restored', $worker( $this->journal )->reverted( $this->path, 'replace' ) );
+		self::assertNull( $worker( $this->journal, 'later-undo' )->reverted( $this->path, 'replace' ) );
+		self::assertSame( 'old', file_get_contents( $this->path ) );
+		// A removal counts from the record that completes it, and not from an unlink alone,
+		// which nothing tells apart from someone else's.
+		$removals = [
+			'journal' => 'removed',
+			'unlink'  => null,
+		];
+		foreach ( $removals as $after => $counted ) {
+			$path    = $this->site . '/created-' . $after;
+			$journal = $this->root . '/journal-' . $after;
+			file_put_contents( $this->staging . $path, 'created' );
+			self::assertTrue( $worker( $journal, 'legacy' )->apply( $path, 'create', hash( 'sha256', 'created' ), null, INF ) );
+			$stop( $worker( $journal, 'undo', $kill( $after, 'journal' === $after ? 'undone' : $path ) ), $path, 'create' );
+			self::assertFileDoesNotExist( $path );
+			self::assertSame( $counted, $worker( $journal )->reverted( $path, 'create' ), $after );
+			self::assertSame( null === $counted ? 'done' : 'undone', $phase( $journal ), $after );
+		}
+		// A record that cannot be read stops the count instead of being taken for no record.
+		file_put_contents( $this->journal . '/entry.json', '{' );
+		$this->expectException( StorageFailed::class );
+		$worker( $this->journal )->reverted( $this->path, 'replace' );
+	}
+
 	public function test_a_damaged_name_of_an_undo_is_refused(): void {
 		file_put_contents( $this->staging . $this->path, 'new' );
 		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF ) );

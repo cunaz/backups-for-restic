@@ -1057,6 +1057,92 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 	}
 
+	/**
+	 * Where a worker stops in the restore of the last entry that an undo reverts.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function stops_of_a_restore(): array {
+		return [
+			'after the record that completes it' => [ 'undone' ],
+			'after its rename'                   => [ 'restore' ],
+			'before its rename'                  => [ 'before' ],
+			'with a record that cannot be read'  => [ 'damaged' ],
+		];
+	}
+
+	#[DataProvider( 'stops_of_a_restore' )]
+	public function test_a_cancelled_undo_counts_the_restore_at_its_cursor_when_a_record_proves_it( string $stop ): void {
+		$job = $this->run_job( $this->start() );
+		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The edited file is kept.
+		$this->runner->tick( 0.0 ); // And the folder that holds it.
+		$saved  = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		$entry  = $this->jobs->directory( $job ) . '/undo/item-0/entry.json';
+		$record = static fn (): array => json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
+		if ( 'damaged' === $stop ) {
+			file_put_contents( $entry, '{' );
+		} elseif ( 'before' === $stop ) {
+			// The record that names this undo is on disk, its rename is not.
+			$intent          = $record();
+			$intent['phase'] = 'restore';
+			$intent['undo']  = $undo->id;
+			file_put_contents( $entry, json_encode( $intent, JSON_THROW_ON_ERROR ) );
+		} else {
+			$this->runner->tick( 0.0 ); // The replaced file is restored and counted.
+			self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+			self::assertSame( [ 'undone', $undo->id ], [ $record()['phase'], $record()['undo'] ] );
+			// The worker was stopped before the document counted the restore: the step, the
+			// cursor and the counts as the document last on disk had them.
+			$document                      = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+			$document->step                = 'undoing';
+			$document->progress['done']    = $saved->progress['done'];
+			$document->data['undo_counts'] = $saved->data['undo_counts'];
+			$this->jobs->save( $document );
+			if ( 'restore' === $stop ) {
+				// And before the record that completes it.
+				$intent          = $record();
+				$intent['phase'] = 'restore';
+				file_put_contents( $entry, json_encode( $intent, JSON_THROW_ON_ERROR ) );
+			}
+		}
+		$this->runner->cancel( $undo->id );
+		$cancelled = $this->run_job( $undo, JobState::Cancelled );
+		$restored  = in_array( $stop, [ 'undone', 'restore' ], true );
+		self::assertSame(
+			[
+				'restored'             => $restored ? 1 : 0,
+				'removed'              => 0,
+				'unchanged'            => 0,
+				'kept'                 => 2,
+				'changed_after_review' => 0,
+				'apply_state'          => $restored ? 'partly_undone' : 'applied',
+			],
+			self::outcomes( $cancelled )
+		);
+		self::assertSame( $restored ? 3 : 2, $cancelled->progress['done'] );
+		self::assertSame( $restored ? 'partly_undone' : null, $this->jobs->get( $job->id )?->result['undo_state'] ?? null );
+		// Nothing on the live site changed since the stop; a proven restore's record is completed,
+		// and one that cannot be read is reported and leaves the entry uncounted.
+		self::assertSame( $restored ? 'original' : 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+		$warnings = array_values( array_filter( $this->jobs->log( $cancelled )->read(), static fn ( array $line ): bool => 'warning' === $line['level'] ) );
+		if ( 'damaged' === $stop ) {
+			self::assertSame( [ 'The entry at which the undo stopped could not be checked; it is not counted.', 'environment' ], [ $warnings[0]['message'] ?? null, $warnings[0]['context']['code'] ?? null ] );
+		} else {
+			self::assertSame( [], $warnings );
+			self::assertSame( [ $restored ? 'undone' : 'restore', $undo->id ], [ $record()['phase'], $record()['undo'] ] );
+		}
+		self::assertSame(
+			[
+				$this->live . '/b-new/new.txt' => 'changed_since_apply',
+				$this->live . '/b-new'         => 'new_children',
+			],
+			$this->kept( $cancelled )
+		);
+	}
+
 	public function test_a_review_that_finds_nothing_left_to_revert_records_the_apply_as_undone(): void {
 		$job = $this->run_job( $this->start() );
 		$new = $this->live . '/b-new/new.txt';

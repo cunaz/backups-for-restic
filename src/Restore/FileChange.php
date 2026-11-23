@@ -352,6 +352,33 @@ final readonly class FileChange {
 	}
 
 	/**
+	 * What this undo did to the entry at its cursor when it stopped before the job counted it,
+	 * read from the entry's record by the rule of a retry, without a change to the live site:
+	 * restored or removed when the record that completes the entry names this undo, and
+	 * restored when the record that precedes a restore's rename names it while the retained
+	 * inode is at the live path, which only that rename puts there. Such a record is then
+	 * completed as a retry completes it, after the folder. Anything else proves no revert of
+	 * this undo, also a removal whose completing record the stop prevented.
+	 *
+	 * @param string $path Reviewed path.
+	 * @param string $action Original action.
+	 * @return 'restored'|'removed'|null The outcome, or null when no record of this undo proves a revert.
+	 * @throws StorageFailed If the journal is damaged or its record cannot be completed.
+	 */
+	public function reverted( string $path, string $action ): ?string {
+		$record = $this->read( $path, $action );
+		if ( null === $record || $this->scope !== $record['undo'] ) {
+			return null;
+		}
+		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) ) {
+			$this->settle( $path, $action, $record );
+		} elseif ( 'undone' !== $record['phase'] ) {
+			return null;
+		}
+		return 'replace' === $action ? 'restored' : 'removed';
+	}
+
+	/**
 	 * Reverts one entry, checking again as late as possible before the rename or unlink that
 	 * the live file is still the verified inode with its size and change times. The rename or
 	 * unlink itself acts on the name: a replacement in between is not seen (ADR 0041).

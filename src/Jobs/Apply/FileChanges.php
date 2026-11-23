@@ -16,6 +16,7 @@ use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Step;
@@ -740,13 +741,7 @@ final readonly class FileChanges implements StepProvider {
 		$kept   = null;
 		$this->enter_maintenance( $job );
 		do {
-			$i      = $total - 1 - $done;
-			$record = $forward?->mutation( $i );
-			$index  = $record['index'] ?? $i;
-			$row    = $record['row'] ?? $rows[ $i ] ?? null;
-			if ( null === $row ) {
-				throw new StorageFailed( 'The file change manifest is incomplete.' );
-			}
+			[ $index, $row ]     = self::entry( $forward, $rows, $total - 1 - $done );
 			[ $action, $reason ] = null === $review ? $reviewed[ $done ] : self::reviewed_row( $review->row( $done ), $row );
 			$source              = Bytes::base64url_decode( $row['path'] );
 			$path                = self::target( $row );
@@ -780,6 +775,24 @@ final readonly class FileChanges implements StepProvider {
 			$this->jobs->save( $job );
 		} while ( $done < $total && microtime( true ) < $deadline && ! $this->jobs->cancel_requested( $job ) );
 		return $done === $total;
+	}
+
+	/**
+	 * The forward row of an undo's entry, with the number of its journal item.
+	 *
+	 * @param DiskFilePlan|null $forward Sealed plan of an apply reviewed in the background.
+	 * @param list<Row>         $rows Manifest of an apply reviewed inline.
+	 * @param int               $i Position of the entry in the apply.
+	 * @return array{0:int,1:Row} Item number and row.
+	 * @throws StorageFailed If the manifest does not hold the entry.
+	 */
+	private static function entry( ?DiskFilePlan $forward, array $rows, int $i ): array {
+		$record = $forward?->mutation( $i );
+		$row    = $record['row'] ?? $rows[ $i ] ?? null;
+		if ( null === $row ) {
+			throw new StorageFailed( 'The file change manifest is incomplete.' );
+		}
+		return [ $record['index'] ?? $i, $row ];
 	}
 
 	/**
@@ -913,7 +926,8 @@ final readonly class FileChanges implements StepProvider {
 
 	/**
 	 * A partial apply keeps all its journals. An interrupted maintenance marker is cleared. A
-	 * stopped undo records what it did before it stopped.
+	 * stopped undo records what it did before it stopped, with the entry at its cursor when a
+	 * record proves that the worker reverted it before the job document counted it.
 	 *
 	 * @param Job   $job Current job.
 	 * @param float $deadline Worker cleanup deadline.
@@ -930,13 +944,69 @@ final readonly class FileChanges implements StepProvider {
 		if ( ! $this->staging->remove_verification( $job, $deadline ) ) {
 			return false;
 		}
-		if ( [] === $job->result && JobType::Undo === $job->type && isset( $job->data['undo_counts'] ) ) {
-			$apply = $this->jobs->get( ApplyJournal::field( $job, 'apply' ) );
+		if ( [] === $job->result && JobType::Undo === $job->type ) {
+			$this->reconcile( $job );
+			$apply = isset( $job->data['undo_counts'] ) ? $this->jobs->get( ApplyJournal::field( $job, 'apply' ) ) : null;
 			if ( null !== $apply ) {
 				$this->conclude( $job, $apply, false );
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Counts the entry at a stopped undo's cursor when a record of this undo proves that the
+	 * worker reverted it before the job document counted it (FileChange::reverted()). The
+	 * cleanup of a cancelled or failed undo does not resume the step that reverts, so a
+	 * revert that the worker finished in its last moment would otherwise be missing from the
+	 * result and from the state of the apply. Only that one entry can be reverted and not
+	 * counted: the document counts each entry before the worker turns to the next. Nothing
+	 * on the live site is changed, an entry that no record proves stays uncounted, and one
+	 * whose record cannot be read is logged and left uncounted.
+	 *
+	 * @param Job $job Stopped undo; its counts and cursor are updated in place.
+	 */
+	private function reconcile( Job $job ): void {
+		$total = $job->progress['total'] ?? null;
+		$done  = $job->progress['done'] ?? 0;
+		if ( ! is_int( $total ) || ! is_int( $done ) || $done < 0 || $done >= $total ) {
+			// The undo did not reach its entries, or counted every one of them.
+			return;
+		}
+		try {
+			$outcome = $this->reverted_at( $job, $total, $total - 1 - $done );
+			$counts  = self::counts( $job );
+		} catch ( PluginException $exception ) {
+			$this->jobs->log( $job )->write( 'warning', 'The entry at which the undo stopped could not be checked; it is not counted.', [ 'code' => JobError::from_throwable( $exception )->code ] );
+			return;
+		}
+		if ( null !== $outcome ) {
+			++$counts[ $outcome ];
+			$job->data['undo_counts'] = $counts;
+			$job->progress['done']    = $done + 1;
+		}
+	}
+
+	/**
+	 * What a stopped undo did to one entry of its apply, by FileChange::reverted().
+	 *
+	 * @param Job $job Stopped undo.
+	 * @param int $total Attempted entries of its apply, by the undo's document.
+	 * @param int $i Position of the entry in the apply.
+	 * @return 'restored'|'removed'|null Outcome, or null when no record of this undo proves a revert.
+	 * @throws StorageFailed If the journal, the manifest or the cursor cannot be read.
+	 */
+	private function reverted_at( Job $job, int $total, int $i ): ?string {
+		$original = $this->journal->original( ApplyJournal::field( $job, 'apply' ), true );
+		if ( $this->journal->attempted( $original ) !== $total ) {
+			throw new StorageFailed( 'The undo cursor is invalid.' );
+		}
+		$forward         = is_string( $original->data['plan_job'] ?? null ) ? $this->plans->approved( $original ) : null;
+		[ $index, $row ] = self::entry( $forward, null === $forward ? $this->load( $original ) : [], $i );
+		$restore         = ApplyJournal::field( $original, 'restore' );
+		$plan            = ( $this->planner )( true === ( $original->data['include_config'] ?? null ), $restore, self::uploads( $job ) );
+		$change          = new FileChange( $plan, $this->journal->files( $restore, true ), $this->journal->workspace( $original ) . '/item-' . $index, Bytes::base64url_decode( $row['path'] ), $job->id );
+		return $change->reverted( self::target( $row ), $row['action'] );
 	}
 
 	/**
