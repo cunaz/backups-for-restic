@@ -254,8 +254,9 @@ final class ApplyPlan {
 	}
 
 	/**
-	 * Whether the site maps a snapshot path to a live path now. A mapping that the site's
-	 * layout refuses, because it would be ambiguous, maps the path to no live path.
+	 * Whether the site maps a snapshot path to a live path now. A path that the site's layout
+	 * refuses to map, because the mapping would be ambiguous or the path is not a valid
+	 * snapshot path, maps to no live path; those are the only refusals of destination().
 	 *
 	 * @param string $path Absolute snapshot path.
 	 * @param string $target Live path.
@@ -264,7 +265,7 @@ final class ApplyPlan {
 	public function maps( string $path, string $target ): bool {
 		try {
 			return $this->destination( $path ) === $target;
-		} catch ( FormatException | InvalidArgument ) {
+		} catch ( InvalidArgument ) {
 			return false;
 		}
 	}
