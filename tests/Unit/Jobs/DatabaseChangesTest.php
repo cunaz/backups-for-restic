@@ -9,6 +9,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
+use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
@@ -87,7 +88,8 @@ final class DatabaseChangesTest extends TestCase {
 			static fn (): Connection => $server,
 			static fn ( int $user ): array => [],
 			new FileMaintenance( $site ),
-			static function (): void {}
+			static function (): void {},
+			new ExchangeSite( 'backups-for-restic/backups-for-restic.php', static fn (): array => [ 'manage_options' ], static fn ( string $plugin ): bool => true )
 		);
 	}
 

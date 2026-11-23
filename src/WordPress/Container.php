@@ -47,6 +47,7 @@ use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\JobSteps;
 use BackupsForRestic\Jobs\Apply\FileChanges;
 use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceSteps;
@@ -447,13 +448,44 @@ final class Container {
 				return $blockers;
 			},
 			$this->file_maintenance(),
-			static function (): void {
-				if ( ! wp_cache_flush() ) {
-					throw new DatabaseFailed( 'The WordPress object cache could not be refreshed after the exchange.' );
-				}
-				Cron::ensure_heartbeat();
-			}
+			self::after_exchange( ... ),
+			new ExchangeSite(
+				$this->listed_plugin(),
+				static fn (): array => [ RestRoutes::capability(), ...RestRoutes::DATABASE_CAPABILITIES ],
+				// The test that wp_get_active_and_valid_plugins() applies to each entry.
+				static fn ( string $plugin ): bool => 0 === validate_file( $plugin ) && str_ends_with( $plugin, '.php' ) && file_exists( WP_PLUGIN_DIR . '/' . $plugin )
+			)
 		);
+	}
+
+	/**
+	 * This plugin's path in the list of active plugins, as activate_plugin() stores it. WordPress
+	 * loads a plugin of that list only from the plugins directory; a copy loaded otherwise, for
+	 * example as a must-use plugin, has no path there and none is added for it.
+	 *
+	 * @return string|null Path below the plugins directory, or null.
+	 */
+	private function listed_plugin(): ?string {
+		$plugin = plugin_basename( $this->plugin_file );
+		$file   = realpath( WP_PLUGIN_DIR . '/' . $plugin );
+		return 0 === validate_file( $plugin ) && false !== $file && realpath( $this->plugin_file ) === $file ? $plugin : null;
+	}
+
+	/**
+	 * Brings this request up to date after a database exchange replaced the tables under it:
+	 * cached options and accounts are dropped and the roles read again, so that the rest of the
+	 * request and a WP-CLI process that runs further ticks see the generation that is now live.
+	 * That generation keeps its own scheduled events; the heartbeat is scheduled if they lack
+	 * it, as those of a backup made before this plugin was installed do.
+	 *
+	 * @throws DatabaseFailed If the object cache cannot be flushed.
+	 */
+	public static function after_exchange(): void {
+		if ( ! wp_cache_flush() ) {
+			throw new DatabaseFailed( 'The WordPress object cache could not be refreshed after the exchange.' );
+		}
+		wp_roles()->for_site();
+		Cron::ensure_heartbeat();
 	}
 
 	/**

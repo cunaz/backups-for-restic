@@ -1,6 +1,7 @@
 <?php
 /**
- * Everything that parses data from the repository server.
+ * Everything that parses data from the repository server, and the values of a WordPress
+ * database that a database exchange reads.
  *
  * @package BackupsForRestic\Tests
  */
@@ -20,6 +21,9 @@ use BackupsForRestic\Crypto\MasterKey;
 use BackupsForRestic\Database\Restore\CreateStatement;
 use BackupsForRestic\Database\Restore\InsertStatement;
 use BackupsForRestic\Database\Restore\Manifest as DumpManifest;
+use BackupsForRestic\Database\Restore\PluginList;
+use BackupsForRestic\Database\Restore\RoleMap;
+use BackupsForRestic\Database\Restore\SerializedValue;
 use BackupsForRestic\Engine\Forget\Duration;
 use BackupsForRestic\Engine\Restore\Selection;
 use BackupsForRestic\Engine\Snapshot\Manifest;
@@ -39,6 +43,7 @@ use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Rfc3339;
 use BackupsForRestic\Tests\Support\Vectors;
 use BackupsForRestic\Tests\Support\WholeIndexDecoder;
+use BackupsForRestic\Tests\Support\WordPressRoles;
 
 /**
  * The fuzz targets: one per parser that reads server data. Seeds come from a repository that
@@ -290,6 +295,52 @@ final class Targets {
 				false,
 				static function ( string $input ): void {
 					Id::from_hex( $input );
+				}
+			),
+			// A database exchange reads these from a backup or from tables that other code writes.
+			'wordpress-value'    => static fn (): Target => new Target(
+				[
+					serialize( WordPressRoles::defaults() ),
+					serialize(
+						[
+							0 => 'a/a.php',
+							3 => 'é.php',
+						]
+					),
+					serialize(
+						[
+							'administrator' => true,
+							'x'             => '0',
+							5               => null,
+						]
+					),
+				],
+				false,
+				static function ( string $input ): void {
+					$value = SerializedValue::decode( $input, 3 );
+					// Whatever is read, PHP reads the same: the exchange writes and WordPress reads it.
+					if ( unserialize( $input, [ 'allowed_classes' => false ] ) !== $value ) {
+						throw new \LogicException( 'The reader disagrees with unserialize().' );
+					}
+				}
+			),
+			'wordpress-roles'    => static fn (): Target => new Target(
+				[ serialize( WordPressRoles::defaults() ), serialize( WordPressRoles::with( 'subscriber', [ 'manage_options' ] ) ) ],
+				false,
+				static function ( string $input ): void {
+					$roles = RoleMap::parse( $input );
+					$roles->changes( RoleMap::parse( serialize( WordPressRoles::defaults() ) ) );
+					$roles->missing( [ 'administrator' => true ], WordPressRoles::DATABASE );
+				}
+			),
+			'wordpress-plugins'  => static fn (): Target => new Target(
+				[ serialize( [ 'akismet/akismet.php', 'backups-for-restic/backups-for-restic.php' ] ), serialize( [ 2 => 'hello.php' ] ) ],
+				false,
+				static function ( string $input ): void {
+					$list = PluginList::parse( $input )->with( 'backups-for-restic/backups-for-restic.php' );
+					if ( PluginList::parse( $list->stored() )->entries !== $list->entries ) {
+						throw new \LogicException( 'A stored list of active plugins does not read back.' );
+					}
 				}
 			),
 		];
