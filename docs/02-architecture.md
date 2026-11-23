@@ -1137,12 +1137,12 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /snapshots/{id}` | one snapshot by its full ID: the fields of the list, `paths`, `tree`, and `manifest` with the site's manifest (`path`, `token`, `data`) or null. `manifest_state` is `found`, `none`, or `unreadable` for a manifest that cannot be located or is not valid |
 | `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
 | `GET /restores` | what finished restores staged, newest first (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)): for each `job`, `snapshot`, `finished`, `expires`, `files`, `bytes`, `staging` and `report`, the last two as names relative to the private directory. Snapshot, counts and `finished` come from the job document and are null once it was pruned. Also `expiry_hours`, the setting, and `removing`, the number of directories that are due or being deleted. Staging that expired and the directory of a restore that has not ended are not listed |
-| `DELETE /restores/{id}` | removes the staging directory of one job, whatever became of the job. It leaves the list at once; `removed.complete` is false when deleting takes longer than ten seconds, and the heartbeat finishes it. The answer carries the list as `GET /restores` gives it. 400 `invalid_job_id` for a name that is no job ID, 404 `restore_not_found` if nothing is staged for the job, 409 `restore_active` while the job is a restore that has not ended (an active job of another type has no staging and answers 404), 409 `job_unreadable` if its document cannot be read |
+| `DELETE /restores/{id}` | removes the staging directory of one job, whatever became of the job. It leaves the list at once; `removed.complete` is false when deleting takes longer than ten seconds, and the heartbeat finishes it. The answer carries the list as `GET /restores` gives it. 400 `invalid_job_id` for a name that is no job ID, 404 `restore_not_found` if nothing is staged for the job, 409 `restore_active` while the job is a restore that has not ended (an active job of another type has no staging and answers 404), 409 `restore_in_use` while a file preview, apply, undo or database apply that uses the staging has not ended, 409 `restore_kept_for_undo` while the undo of an apply needs it, until the end of the apply's recovery window, which the message names and the error data carries as `until` (Unix time), 409 `job_unreadable` if its document cannot be read |
 | `POST /restores/{id}/download` | Issues a single-use browser POST form for a file, ZIP, restore report or database rehearsal report. The browser submits the grant to WordPress for streaming. A file (`kind: file` with `path`) or the ZIP (`archive`) is restored site content, possibly `wp-config.php` and the database dump: its grant needs the WordPress password of the current user as `user_password` in the JSON body (403 `wrong_user_password`, 429 `user_password_throttled`), and it is recorded before the token is issued. The two reports (`report`, `database_report`) hold names, counts and table metadata and need the capability alone. Every other kind counts as content. 404 `download_not_found` for what the restore does not hold |
 | `POST /restores/{id}/database/plan`, `POST /restores/{id}/database/apply` | Review a rehearsed database exchange and confirm the exact table generations. |
 | `GET /database-changes`, `POST /database-changes/{id}/undo-plan`, `POST /database-changes/{id}/undo` | Discover retained database generations, review an undo and queue it. |
 | `POST /database-changes/{id}/discard` | Forgets the binding of a database apply whose private tables are on another database server or in another database, with the WordPress password as `user_password` in the JSON body (403 `wrong_user_password`). Nothing is dropped; the answer names the database, the server UUID and the private table names to remove there. 409 `database_binding_verified` if the connected database holds the tables, `database_binding_missing` if the job holds no binding, `job_conflict` while it or an undo of it runs ([ADR 0043](adr/0043-atomic-mysql-database-exchange.md)). |
-| `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. The optional JSON boolean `include_config` includes configuration in the detailed review. Startup files, including wp-config.php, require offline recovery. |
+| `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. The optional JSON boolean `include_config` includes configuration in the detailed review. Startup files, including wp-config.php, require offline recovery. A review has `actions`, its entries by action (`create`, `replace`, `mkdir`, `keep`, `skip`, `refuse`), on every page of a background review; null for one sealed by an earlier version. |
 | `GET /undo`, `POST /undo/{id}/plan`, `POST /undo/{id}` | List reversible apply jobs, review the original files to recover, then queue the reviewed undo. |
 | `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size, the latest five deliveries of the recovery kit (`kit_views`) and the latest five grants of restored content (`downloads`: time, login, job, kind and the path in Go's quoting) |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
@@ -1184,7 +1184,16 @@ Both file preview routes may return HTTP 202 with a `file_plan` job. Poll that j
 usual. Once it succeeds, send the same preview request with its `plan_job` ID and
 `offset: 0`. Each response contains at most 100 entries, `total`, `offset` and
 `next_offset`; a null next offset indicates the final page. Confirm with the same
-`plan_job` ID and digest. Completed previews expire after one hour.
+`plan_job` ID and digest. Completed previews expire after one hour; a page of one that
+expired or is gone is refused with 409 `file_preview_expired`. Every review answer, of
+files and of tables, has `reviewed_at`, the server's time of the review: a job that its
+confirmation starts is created then or later, and the admin page looks for it by its type
+and that time when the answer to the confirmation is lost or is not JSON. Other refusals
+of the file routes: 409 `live_plan_changed` when a file changed after the review, 409
+`undo_unavailable` for an apply past its recovery window or undone completely, 400
+`file_staging_gone` when the staged files expired or were deleted, and 500
+`live_plan_failed` when a file changed while it was read or a private record of the
+restore or apply could not be read or written.
 
 Live file apply and undo also require `update_core` and permission to modify files under the
 site's `wp_is_file_mod_allowed()` policy. Every tick of the job checks both again for the
@@ -1237,7 +1246,15 @@ text is exact, and its type. Opening another snapshot empties it. The restore co
 tab says what it loads inside the page's live region. A locked repository
 (`repository_locked`) gets a sentence of its own and a button to try again, every other
 error the message and hint of the route. Names, tags, link targets and manifest fields come
-from the repository and enter the page as text nodes only.
+from the repository and enter the page as text nodes only, each in a `<bdi>` element that
+keeps its writing direction apart from the text around it. One that holds a character that
+Go's `strconv.IsPrint()` does not print, such as a control character, a zero-width
+character or a right-to-left override, is shown in double quotes with Go's escapes, as
+`ls` prints it (`printable()` in the script, `SnapshotBrowser::printable()` on the command
+line); the file review shows the paths that the server quoted the same way. Table names and
+database server versions of the database reviews are shown the same way. A selection of the
+entire snapshot holds every entry: the browser shows each one as selected, and nothing in
+it can be added.
 
 The three snapshot routes read through `Restore\SnapshotBrowser`, which turns what
 `Engine\Snapshot\Reader` returns into response data
@@ -1286,7 +1303,9 @@ a job does, so an index that does not fit is refused with `index_too_large`
   JSON carries only UTF-8. `name` is therefore a text to show: the stored name if it is
   valid UTF-8 (`exact` is true), otherwise the name with U+FFFD in place of every byte
   that belongs to no valid sequence (`exact` is false). The same holds for `path` and for
-  the `target` of a link. `token` names the entry's path byte for byte: `b64:` followed by
+  the `target` of a link. `exact` says no more than that: a valid name can still hold
+  control, invisible and right-to-left characters that make it look like another one, and
+  a client shows it escaped (see the Snapshots tab above). `token` names the entry's path byte for byte: `b64:` followed by
   the base64url form, without padding, of the absolute path's bytes. The `path` parameter
   takes either an absolute path starting with `/`, which reaches every entry whose path is
   valid UTF-8, or a token, which reaches every entry. A client walks a snapshot by sending
@@ -1419,18 +1438,41 @@ translated message and a hint. The codes:
 | `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
+| `file_changed_after_review` | a file preview, apply or undo found that a live or staged file, or the site's file policy, changed after the review: before the apply's first change or between two of its changes |
+| `file_staging_gone`, `file_preview_expired`, `undo_unavailable` | the staged files of a review expired or were deleted; a preview older than an hour or gone; an apply past its recovery window or undone completely |
+| `maintenance_busy`, `maintenance_failed`, `maintenance_stuck` | another update holds WordPress's maintenance mode, so the file job did not start; the job's marker could not be published or kept; the site could not leave maintenance mode |
+| `file_preview_failed`, `file_apply_failed`, `file_undo_failed` | what else ends a file preview, apply or undo: a plugin exception without a code of its own, such as a damaged private record or a file operation that the file system refused. The codes that the exception classes give (`job_conflict`, `environment`, `configuration` and the repository codes) name failures of backups and of the repository, which these jobs do not have; their log has the technical message |
 | `internal` | anything else |
 
+`JobError::from_throwable()` takes the type of the job that the exception ended: for a
+file preview, apply or undo it gives the job's own code where the exception carries none
+in its context (`JobError::FILE_JOB_CODES`). Whether a code is retried still follows the
+exception, so this changes no retry. A failed or cancelled apply records
+`entries_completed` and `entries_attempted`, which the admin page shows with the error.
+
 Only `repository_unreachable`, `repository_locked`, `database_restore_busy`,
-`database_exchange_sessions` and `database_dump_locked` are retryable (§4.4). A cancelled job
+`database_exchange_sessions` and `database_dump_locked` are retryable (§4.4): a job tries
+again at most five times, 30 seconds after the first failure and twice as long after each
+further one, not in a cleanup step and not once it is asked to stop. Its error is recorded
+only when it stops, so the hints of these codes say that the job has stopped and does not
+try again by itself; a request, such as a read of snapshots or a connection test, has the
+hints of `Messages::snapshot_error()`, which say to try again. A cancelled job
 ends in the state `cancelled` without an error code, and there is no `timeout` code: a tick
 that runs out of time simply continues in the next one. Codes for restore
 (`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.
 
 The REST API has codes of its own for requests it refuses: `not_found` (unknown job),
 `not_editable` (a setting that `PUT /settings` does not accept), `invalid_job_type`,
-`invalid_job_id`, `restore_not_found` and `restore_active` (`DELETE /restores/{id}` with a
-name that is no job ID, for a job without staging, and for a restore that has not ended),
+`invalid_job_id`, `restore_not_found`, `restore_active`, `restore_in_use` and
+`restore_kept_for_undo` (`DELETE /restores/{id}` with a name that is no job ID, for a job
+without staging, for a restore that has not ended, for a staging that a file job at work
+uses, and for one that the undo of an apply needs until its recovery window ends, a time
+that the answer names), `live_plan_unavailable`, `live_plan_conflict`, `live_plan_changed`
+and `live_plan_failed` (a file preview or confirmation that cannot be made: for this source,
+in the current state, after a change since the review, or because a private record could
+not be read or written; the file routes also pass on `file_space`, `file_writes_refused`,
+`undo_nothing_to_revert`, `undo_unavailable`, `file_preview_expired`, `job_unreadable`,
+`protected_path_invalid` and `file_staging_gone`),
 `invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password` (the recovery
 kit, a live change or a download of restored content was asked for without the right
 WordPress password), `user_password_throttled` (HTTP 429: too many wrong WordPress passwords
