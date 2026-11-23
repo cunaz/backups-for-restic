@@ -257,13 +257,19 @@ check_logs() {
 	# The plugin is installed as a copy under wp-content/plugins (BFR_TEST_PLUGIN_DIR) or linked
 	# to this checkout, whose files PHP names by their real path.
 	local paths=(/wp-content/plugins/backups-for-restic/ "$ROOT/src/" "$ROOT/backups-for-restic.php" "$ROOT/uninstall.php")
-	local log entries total=0
+	local log entries status total=0
 	for log in "$TOOLS/php-errors.log" "$SITE/wp-content/debug.log"; do
 		if [ ! -f "$log" ]; then
 			echo "No $log."
 			continue
 		fi
-		entries="$(grep -c -F "${paths[@]/#/-e}" "$log" || true)"
+		# grep exits with 1 when no line matches and with 2 when it cannot read the log.
+		status=0
+		entries="$(grep -c -F "${paths[@]/#/-e}" "$log")" || status=$?
+		if [ "$status" -gt 1 ]; then
+			echo "$log could not be read (grep exited with $status), so it was not checked." >&2
+			exit 1
+		fi
 		echo "Lines of $log that name a file of the plugin: $entries"
 		if [ "$entries" -gt 0 ]; then
 			grep -n -F "${paths[@]/#/-e}" "$log" | head -n 50 >&2
