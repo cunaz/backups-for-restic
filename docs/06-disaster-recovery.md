@@ -225,10 +225,14 @@ plugin that stops WordPress from starting stops them as well; skip it with
       ADD UNIQUE KEY <name> (…)`. A key that the server refuses to add names a group that
       is still to be decided.
    4. Export the reconciled table with the dump tool of the client you import with:
-      `mysqldump <scratch> <table>` for `mysql`, `mariadb-dump <scratch> <table>` for
-      `mariadb`. A recent `mariadb-dump` begins its file with a line that `mysql` refuses.
-      Save the export as `reconciled/010-<table>.sql` beside the original files, which you
-      keep unchanged; it ends with `-- Dump completed` instead of the trailer line.
+      `mysqldump --set-gtid-purged=OFF <scratch> <table>` for `mysql`,
+      `mariadb-dump <scratch> <table>` for `mariadb`. Where the scratch server uses GTIDs,
+      `mysqldump` otherwise also writes `SET @@SESSION.SQL_LOG_BIN` and `GTID_PURGED`, which
+      an account limited to the recovery database may not run; `mariadb-dump` writes such
+      statements only when asked to, with `--gtid`, `--master-data` or `--dump-slave`. A
+      recent `mariadb-dump` begins its file with a line that `mysql` refuses. Save the export
+      as `reconciled/010-<table>.sql` beside the original files, which you keep unchanged; it
+      ends with `-- Dump completed` instead of the trailer line.
    5. Import all files again, in name order, into an empty database, with the export in
       place of the original file, as the script of Scenario D does: it checks the trailer
       of every original table file and the last line of every export. Check that the client
