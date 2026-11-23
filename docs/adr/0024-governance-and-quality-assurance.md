@@ -97,9 +97,10 @@ can operate.
   ruleset and no branch protection, and the `wordpress-org` environment did not exist, so
   GitHub would have created it without the owner's approval on the first release. The release
   workflow now refuses to deploy until GitHub enforces what this decision relies on: a ruleset
-  on `main` with pull requests, status checks and no force push, a ruleset that keeps release
-  tags from being moved or deleted, and the environment with the owner as required reviewer,
-  without administrator bypass and for `v*` tags only. It also requires, for the release
+  on `main` with pull requests, the status checks of `.github/required-checks.txt` and no force
+  push, a ruleset that keeps release tags from being moved or deleted, and the environment
+  with the owner as its only reviewer, self-review allowed, without administrator bypass and
+  for `v*` tags only. It also requires, for the release
   commit, every run of the test workflows to have succeeded, including the acceptance-size
   integration run, the hosted live smoke, two minutes of fuzzing per parser and CodeQL. The
   owner's settings are listed in the [development guide](../04-development-and-quality.md)

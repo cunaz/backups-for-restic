@@ -13,6 +13,9 @@ GITHUB_TOKEN come from the runner. Two settings cannot be read with that token, 
 lists of the rulesets and WordPress.org's release confirmation, so the owner checks them by
 hand (docs/04 §7.1).
 
+The checks that the ruleset of main must require are listed in .github/required-checks.txt
+(docs/04 §6), which the document and this script share.
+
 --responses FILE answers each request from a JSON object that maps "path?query" to
 {"status": ..., "body": ...}, for tests/Release/test_release_gates.py.
 """
@@ -35,6 +38,7 @@ ACCEPTANCE_SUFFIX = "(acceptance size)"
 FUZZ_JOB = re.compile(r"^Fuzz parsers \(([0-9]+) s per target\)$")
 FUZZ_SECONDS = 120
 MAIN = "main"
+REQUIRED_CHECKS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "required-checks.txt")
 
 
 class Unreadable(Exception):
@@ -115,6 +119,18 @@ class Report:
 
 # Protections ------------------------------------------------------------------------------
 
+def required_checks(path=REQUIRED_CHECKS):
+    """The checks of .github/required-checks.txt: one per line, # starts a comment line."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            names = [line.strip() for line in handle if line.strip() and not line.lstrip().startswith("#")]
+    except OSError as error:
+        raise Unreadable(f"the list of required checks cannot be read: {error}") from error
+    if not names:
+        raise Unreadable(f"{path} names no check")
+    return names
+
+
 def main_branch_rules(api):
     rules = api.get(f"rules/branches/{MAIN}")
     types = {rule.get("type") for rule in rules}
@@ -130,10 +146,16 @@ def main_branch_rules(api):
     ):
         if rule not in types:
             problems.append(f"no active ruleset {wording} on {MAIN}")
+    required = required_checks()
+    contexts = {c.get("context", "") for r in checks for c in r["parameters"]["required_status_checks"]}
     if not checks:
-        problems.append(f"no active ruleset requires status checks on {MAIN}")
-    contexts = sorted({c.get("context", "") for r in checks for c in r["parameters"]["required_status_checks"]})
-    return problems, f"pull request, {len(contexts)} required checks, no force push, no deletion"
+        problems.append(f"no active ruleset requires status checks on {MAIN}; it must require the {len(required)} checks of .github/required-checks.txt")
+    else:
+        problems.extend(
+            f"no active ruleset requires the check '{name}' on {MAIN} (.github/required-checks.txt)"
+            for name in required if name not in contexts
+        )
+    return problems, f"pull request, the {len(required)} checks of .github/required-checks.txt, no force push, no deletion"
 
 
 def applies(conditions, ref):
@@ -170,12 +192,27 @@ def environment(api, tag):
         return [f"the environment {ENVIRONMENT} does not exist; create it before the first tag, or GitHub creates it without protection"], ""
     owner = api.repository.split("/")[0]
     problems = []
-    reviewers = [
-        reviewer for rule in env.get("protection_rules", []) if rule.get("type") == "required_reviewers"
-        for reviewer in rule.get("reviewers", [])
-    ]
-    if not any(r.get("type") == "User" and (r.get("reviewer") or {}).get("login") == owner for r in reviewers):
+    rules = [rule for rule in env.get("protection_rules", []) if rule.get("type") == "required_reviewers"]
+    reviewers = [reviewer for rule in rules for reviewer in rule.get("reviewers", [])]
+
+    def is_owner(entry):
+        return entry.get("type") == "User" and (entry.get("reviewer") or {}).get("login") == owner
+
+    def named(entry):
+        reviewer = entry.get("reviewer") or {}
+        if entry.get("type") == "User":
+            return str(reviewer.get("login") or "a user")
+        return f"the team {reviewer.get('slug') or reviewer.get('name') or '?'}"
+
+    if not any(is_owner(r) for r in reviewers):
         problems.append(f"{ENVIRONMENT} does not require a review by {owner}")
+    # GitHub needs the approval of one listed reviewer, so another one could approve alone.
+    others = sorted({named(r) for r in reviewers if not is_owner(r)})
+    if others:
+        problems.append(f"{ENVIRONMENT} lets {', '.join(others)} approve a deployment instead of {owner}, who must be its only reviewer")
+    # The owner pushes the release tag, so with self-review prevented nobody could approve.
+    if any(rule.get("prevent_self_review") is not False for rule in rules):
+        problems.append(f"{ENVIRONMENT} prevents self-review, or GitHub did not say that it does not: {owner} pushes the release tag and could not approve its deployment")
     # Not in GitHub's published schema, but returned by the API. A missing value fails.
     if env.get("can_admins_bypass") is not False:
         problems.append(f"{ENVIRONMENT} lets administrators bypass its protection rules, or GitHub did not say that it does not")
@@ -189,7 +226,7 @@ def environment(api, tag):
         problems.append(f"{ENVIRONMENT} must allow only tags matching v* (it allows: {', '.join(p.get('type', '?') + ' ' + p.get('name', '?') for p in listed) or 'nothing'})")
     elif not any(fnmatch.fnmatchcase(tag, p["name"]) for p in listed):
         problems.append(f"{ENVIRONMENT} does not allow the tag {tag}")
-    return problems, f"review by {owner}, no administrator bypass, tags {', '.join(p['name'] for p in listed)} only"
+    return problems, f"review by {owner} alone, self-review allowed, no administrator bypass, tags {', '.join(p['name'] for p in listed)} only"
 
 
 # Evidence ---------------------------------------------------------------------------------

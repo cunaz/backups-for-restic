@@ -8,13 +8,15 @@ then checks that the gate fails for that reason and names it. Run: python3 tests
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 import urllib.parse
 
-SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "bin", "check-release-gates.py")
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+SCRIPT = os.path.join(ROOT, "bin", "check-release-gates.py")
 REPO = "example/plugin"
 OWNER = "example"
 TAG = "v1.2.3"
@@ -54,13 +56,20 @@ def jobs(*names, conclusion="success"):
     return ok({"total_count": len(names), "jobs": [{"name": name, "status": "completed", "conclusion": conclusion} for name in names]})
 
 
+def required_checks():
+    with open(os.path.join(ROOT, ".github", "required-checks.txt"), encoding="utf-8") as handle:
+        return [line.strip() for line in handle if line.strip() and not line.lstrip().startswith("#")]
+
+
 def protections():
     return {
         key("rules/branches/main"): ok([
             {"type": "deletion", "ruleset_id": 1},
             {"type": "non_fast_forward", "ruleset_id": 1},
             {"type": "pull_request", "ruleset_id": 1, "parameters": {"required_approving_review_count": 0}},
-            {"type": "required_status_checks", "ruleset_id": 1, "parameters": {"required_status_checks": [{"context": "Unit tests (PHP 8.3)"}]}},
+            {"type": "required_status_checks", "ruleset_id": 1, "parameters": {"required_status_checks": [
+                {"context": name, "integration_id": 15368} for name in required_checks()
+            ]}},
         ]),
         key("rulesets", includes_parents="true", per_page="100", targets="tag"): ok([{"id": 2, "target": "tag", "enforcement": "active"}]),
         key("rulesets/2"): ok({
@@ -94,6 +103,39 @@ def evidence():
         runs_key("codeql.yml"): runs(run(18, "workflow_dispatch")),
         key("code-scanning/alerts", per_page="100", ref="refs/heads/main", state="open"): ok([]),
     }
+
+
+def matrix(definition):
+    """The combinations of a job's matrix, with include and exclude as GitHub applies them."""
+    if not definition:
+        return [{}]
+    keys = [k for k in definition if k not in ("include", "exclude")]
+    combinations = [{}]
+    for name in keys:
+        combinations = [dict(c, **{name: value}) for c in combinations for value in definition[name]]
+    original = [dict(c) for c in combinations] if keys else []
+    combinations = combinations if keys else []
+    for entry in definition.get("include", []):
+        fits = [i for i, c in enumerate(original) if all(c[k] == v for k, v in entry.items() if k in c)]
+        for i in fits:
+            combinations[i].update(entry)
+        if not fits:
+            combinations.append(dict(entry))
+    return [c for c in combinations if not any(all(c.get(k) == v for k, v in e.items()) for e in definition.get("exclude", []))]
+
+
+def job_name(template, combination):
+    """A job's name on a pull request: ${{ }} with matrix values, && and ||, as GitHub evaluates them."""
+    def evaluate(match):
+        expression = match.group(1).replace("&&", " and ").replace("||", " or ")
+        expression = re.sub(r"\bmatrix\.(\w+)", lambda m: repr(combination.get(m.group(1))), expression)
+        expression = expression.replace("github.event_name", "'pull_request'")
+        expression = re.sub(r"\binputs\.\w+", "None", expression)
+        value = eval(expression, {"__builtins__": {}}, {})  # noqa: S307 - expressions of our own workflows
+        if value is None or value is False:
+            return ""
+        return "true" if value is True else str(value)
+    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", evaluate, str(template))
 
 
 class ReleaseGates(unittest.TestCase):
@@ -148,7 +190,36 @@ class ReleaseGates(unittest.TestCase):
         responses = protections()
         rules = responses[key("rules/branches/main")]["body"]
         rules[3]["parameters"]["required_status_checks"] = []
-        self.refused(self.protections(responses), "no active ruleset requires status checks on main")
+        self.refused(self.protections(responses), "no active ruleset requires status checks on main; it must require the 29 checks of .github/required-checks.txt")
+
+    def test_every_listed_check_must_be_required(self):
+        responses = protections()
+        checks = responses[key("rules/branches/main")]["body"][3]["parameters"]["required_status_checks"]
+        checks[:] = [c for c in checks if c["context"] not in ("Mutation testing (file restore)", "Admin page in a browser")]
+        checks.append({"context": "Something else"})
+        status, output = self.protections(responses)
+        self.refused(
+            (status, output),
+            "no active ruleset requires the check 'Mutation testing (file restore)' on main (.github/required-checks.txt)",
+            "no active ruleset requires the check 'Admin page in a browser' on main",
+            "2 release requirements are not met.",
+        )
+
+    def test_every_listed_check_is_a_job_of_a_pull_request(self):
+        try:
+            import yaml  # noqa: PLC0415 - only this test reads the workflows
+        except ImportError:
+            self.fail("PyYAML is needed to read the workflows (apt install python3-yaml)")
+        names = set()
+        for workflow in ("ci.yml", "integration.yml"):
+            with open(os.path.join(ROOT, ".github", "workflows", workflow), encoding="utf-8") as handle:
+                jobs = yaml.safe_load(handle)["jobs"]
+            for job_id, job in jobs.items():
+                for combination in matrix(job.get("strategy", {}).get("matrix")):
+                    names.add(job_name(job.get("name", job_id), combination))
+        listed = required_checks()
+        self.assertEqual(len(listed), len(set(listed)), "a check is listed twice")
+        self.assertEqual([], [name for name in listed if name not in names], "listed, but no job of a pull request has this name")
 
     def test_a_tag_ruleset_in_evaluate_mode_or_with_an_exclusion_does_not_count(self):
         responses = protections()
@@ -165,6 +236,25 @@ class ReleaseGates(unittest.TestCase):
         status, output = self.protections(responses)
         self.refused((status, output), "stops refs/tags/v1.2.3 from being moved")
         self.assertNotIn("from being deleted", output)
+
+    def test_the_owner_must_be_the_only_reviewer(self):
+        responses = protections()
+        rules = responses[key("environments/wordpress-org")]["body"]["protection_rules"]
+        rules[0]["reviewers"].append({"type": "User", "reviewer": {"login": "someone-else"}})
+        rules[0]["reviewers"].append({"type": "Team", "reviewer": {"slug": "maintainers", "name": "Maintainers"}})
+        status, output = self.protections(responses)
+        self.refused((status, output), "wordpress-org lets someone-else, the team maintainers approve a deployment instead of example, who must be its only reviewer")
+        self.assertNotIn("does not require a review by example", output)
+
+    def test_self_review_must_be_allowed(self):
+        for value in (True, None):
+            responses = protections()
+            rule = responses[key("environments/wordpress-org")]["body"]["protection_rules"][0]
+            if value is None:
+                del rule["prevent_self_review"]
+            else:
+                rule["prevent_self_review"] = value
+            self.refused(self.protections(responses), "wordpress-org prevents self-review, or GitHub did not say that it does not: example pushes the release tag and could not approve its deployment")
 
     def test_the_environment_needs_the_owner_as_reviewer(self):
         responses = protections()

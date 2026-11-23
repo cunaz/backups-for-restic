@@ -716,12 +716,16 @@ are switched on is a setting of the repository that no file here records. The qu
 read-only repository access. CodeQL publishes its analysis to code scanning. The release
 workflow uses its protected environment for SVN and a separate write token for release notes.
 
-Checks that must be green before a merge: lint, ESLint, analyse, unit, database and mutation
-testing (core and the four restore gates), Plugin Check, the translation template and the
-sign-off check, and the WordPress compatibility, memory and browser jobs of `integration.yml`;
-conformance when `Crypto`, `Format`, `Backend` or `Engine` are touched. GitHub enforces this
-only through the ruleset on `main` of §7.1: until the owner has created it, these checks are
-advice, and the release workflow refuses to deploy. Conformance cannot be a required check,
+Checks that must be green before a merge are listed in `.github/required-checks.txt`, as
+GitHub names the jobs of a pull request: coding standards, ESLint, static analysis, Plugin
+Check, the translation template, the sign-off check, the unit tests, the database suite on
+MySQL and MariaDB, mutation testing (core and the four restore gates), and the WordPress
+compatibility, memory and browser jobs of `integration.yml`; conformance when `Crypto`,
+`Format`, `Backend` or `Engine` are touched. The ruleset on `main` of §7.1 requires that list,
+and the release gate names every check of it that the ruleset does not require;
+`tests/Release/test_release_gates.py` checks that every line names a job of `ci.yml` or
+`integration.yml`. GitHub enforces this only through that ruleset: until the owner has created
+it, these checks are advice, and the release workflow refuses to deploy. Conformance cannot be a required check,
 because its path filter leaves a pull request without its result; the release gate requires it
 for the release commit instead, as it does the database mutation gate, which runs only on some
 pull requests. A `readme.txt` that names another version than the plugin header fails Plugin
@@ -760,10 +764,11 @@ with the copies of the scripts on `main`:
    reads GnuPG's status itself and requires `GOODSIG`: Git 2.56 on the runner accepts a
    signature whose key has expired since, which Git 2.53 refused.
 2. **The protections** (`bin/check-release-gates.py protections`): an active ruleset on
-   `main` that requires pull requests and status checks and blocks force pushes and deletion;
-   an active tag ruleset that keeps the release tag from being moved or deleted; and the
-   `wordpress-org` environment with the owner as required reviewer, without administrator
-   bypass, deploying only tags that match `v*`. The job's own token reads these: rulesets
+   `main` that requires pull requests and every check of `.github/required-checks.txt` and
+   blocks force pushes and deletion; an active tag ruleset that keeps the release tag from
+   being moved or deleted; and the `wordpress-org` environment with the owner as its only
+   required reviewer, self-review allowed, without administrator bypass, deploying only tags
+   that match `v*`. The job's own token reads these: rulesets
    through the repository's metadata, the environment and its deployment policies with
    `actions: read`. GitHub answers 404 for an environment that does not exist, and creates
    it without protection on its first use; the check fails then too.
@@ -824,15 +829,17 @@ the repository, not files, so a pull request cannot make them.
    default branch; enforcement *Active*; bypass list empty. Rules: *Restrict deletions*,
    *Block force pushes*, *Require a pull request before merging* (no approval required: the
    owner is the only maintainer, and the pull request is the record), and *Require status
-   checks to pass* with the jobs listed in §6, as GitHub names them (for example "Unit tests
-   (PHP 8.3)"). Merge through GitHub (the merge button or `gh pr merge`), because a merge
-   pushed from a local clone is refused.
+   checks to pass* with every check listed in `.github/required-checks.txt` (§6). Merge
+   through GitHub (the merge button or `gh pr merge`), because a merge pushed from a local
+   clone is refused.
 2. **Ruleset for release tags** (New tag ruleset): include the pattern `v*`; enforcement
    *Active*; bypass list empty. Rules: *Restrict updates* and *Restrict deletions*. A
    published release tag can then neither be moved nor deleted, not even by the owner, without
    first changing the ruleset.
 3. **Environment `wordpress-org`** (Settings → Environments), before the first tag: required
-   reviewer the owner, *Prevent self-review* off (the owner approves the releases they tag);
+   reviewer the owner and nobody else, because GitHub needs the approval of one listed reviewer
+   and another one could approve alone; *Prevent self-review* off, because the owner approves
+   the releases they tag;
    *Allow administrators to bypass configured protection rules* off; deployment branches and
    tags: *Selected branches and tags*, one rule of type *Tag* with the pattern `v*` and no
    branch rule. Store the WordPress.org user name and a dedicated SVN password (generated in
