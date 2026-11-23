@@ -46,6 +46,13 @@ final class RestRoutes {
 
 	public const string REST_NAMESPACE = 'backups-for-restic/v1';
 
+	/**
+	 * What a live database apply or undo needs besides the backup capability. The approving
+	 * administrator needs them now and, under the roles of the generation that becomes live,
+	 * afterwards (ADR 0043, decision 5).
+	 */
+	public const array DATABASE_CAPABILITIES = [ 'manage_options', 'edit_users', 'promote_users', 'update_core' ];
+
 	/** Seconds a request may spend on deleting a staging directory; the heartbeat finishes the rest. */
 	private const float REMOVAL_SECONDS = 10.0;
 
@@ -653,7 +660,12 @@ final class RestRoutes {
 		if ( $user_id < 1 ) {
 			return false;
 		}
-		return user_can( $user_id, self::capability() ) && user_can( $user_id, 'manage_options' ) && user_can( $user_id, 'edit_users' ) && user_can( $user_id, 'promote_users' ) && user_can( $user_id, 'update_core' );
+		foreach ( [ self::capability(), ...self::DATABASE_CAPABILITIES ] as $capability ) {
+			if ( ! user_can( $user_id, $capability ) ) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**

@@ -15,16 +15,26 @@ use BackupsForRestic\Exception\DatabaseFailed;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Copies table rows inside SQL. No option, session token, password hash or serialized
- * value enters PHP or a job document. The caller holds the write barrier throughout
+ * Copies table rows inside SQL. No session token or password hash enters PHP or a job
+ * document. Three serialized values are read into PHP, bounded and by SerializedValue, never
+ * by unserialize(): a generation's role map and list of active plugins, and the approving
+ * administrator's own roles and capabilities. The caller holds the write barrier throughout
  * validation, the copy and RENAME, and always copies into its verified private targets.
  */
 final readonly class WordPressState {
 
 	public const array TABLES = [ 'options', 'users', 'usermeta' ];
 
-	/** Values from the running installation that affect reachability, credentials or jobs. */
-	public const array OPTIONS = [ 'home', 'siteurl', 'active_plugins', 'cron', 'db_version', '_transient_doing_cron', '_transient_timeout_doing_cron' ];
+	/**
+	 * Options of the running installation that the other generation receives: the site address,
+	 * the WordPress database version that both generations already share, and the lock of a
+	 * WP-Cron request, which may be the one that runs the exchange. Roles, active plugins and
+	 * scheduled events stay those of the generation that becomes live (ADR 0043, decision 5).
+	 */
+	public const array OPTIONS = [ 'home', 'siteurl', 'db_version', '_transient_doing_cron', '_transient_timeout_doing_cron' ];
+
+	/** Prefixes of this plugin's own options and transients, which the other generation receives. */
+	public const array PLUGIN_OPTIONS = [ 'backups_for_restic_', '_transient_backups_for_restic_', '_transient_timeout_backups_for_restic_' ];
 
 	private const array COLUMNS = [
 		'options'  => [ 'option_id', 'option_name', 'option_value', 'autoload' ],
@@ -41,9 +51,10 @@ final readonly class WordPressState {
 	}
 
 	/**
-	 * Binds the approving credential and its database-backed authority without reading any
-	 * password hash or serialized permission value into PHP. Recheck this under the write
-	 * barrier in case another request changed the user after WordPress checked user_can().
+	 * Binds the approving credential, its database-backed authority and the live list of
+	 * active plugins, which the review compared with the other generation, without reading any
+	 * password hash or serialized value into PHP. Recheck this under the write barrier in case
+	 * another request changed the user or the site after WordPress checked user_can().
 	 *
 	 * @param string $prefix Validated target prefix.
 	 * @param int    $admin Confirmed administrator.
@@ -60,10 +71,12 @@ final readonly class WordPressState {
 		$user    = $this->connection->rows( 'SELECT SHA2(JSON_ARRAY(user_login,user_pass,user_email),256) AS f FROM ' . $users . ' WHERE ID=' . $admin )[0]['f'] ?? null;
 		$roles   = $this->connection->rows( 'SELECT SHA2(option_value,256) AS f FROM ' . $options . ' WHERE option_name=' . Session::literal( $prefix . 'user_roles' ) )[0]['f'] ?? null;
 		$caps    = $this->connection->rows( 'SELECT SHA2(meta_value,256) AS f FROM ' . $meta . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . ' ORDER BY umeta_id LIMIT 2' );
+		$plugins = $this->connection->rows( 'SELECT SHA2(option_value,256) AS f FROM ' . $options . ' WHERE option_name=' . Session::literal( 'active_plugins' ) )[0]['f'] ?? '';
 		if ( ! is_string( $user ) || ! is_string( $roles ) || 1 !== count( $caps ) || ! is_string( $caps[0]['f'] ?? null ) ) {
 			DatabaseFailed::raise( 'The approving administrator has an ambiguous local identity or capabilities.', [ 'code' => 'database_admin_collision' ] );
 		}
-		return hash( 'sha256', $user . $roles . $caps[0]['f'] );
+		// Versioned: an authority from before the live plugin list was bound never matches.
+		return hash( 'sha256', 'backups-for-restic-authority/2:' . $user . $roles . $caps[0]['f'] . $plugins );
 	}
 
 	/**
@@ -151,22 +164,98 @@ final readonly class WordPressState {
 	}
 
 	/**
+	 * Reads one option of a generation's options table.
+	 *
+	 * @param string $table Live or verified private options table.
+	 * @param string $name Option name.
+	 * @param int    $limit Longest value read, in bytes.
+	 * @return string|null Stored value, or null if the table holds no such option, more than one or a longer value.
+	 */
+	public function option( string $table, string $name, int $limit ): ?string {
+		$rows = $this->connection->rows( 'SELECT IF(LENGTH(option_value)<=' . $limit . ',option_value,NULL) AS stored_value FROM ' . SqlFormatter::identifier( $table ) . ' WHERE option_name=' . Session::literal( $name ) . ' LIMIT 2' );
+		return 1 === count( $rows ) ? $rows[0]['stored_value'] : null;
+	}
+
+	/**
+	 * Reads the approving administrator's own roles and capabilities from the live user meta,
+	 * which the exchange keeps.
+	 *
+	 * @param string $prefix Current WordPress table prefix.
+	 * @param int    $admin Confirmed WordPress user ID.
+	 * @return string|null Stored value, or null if absent, ambiguous or longer than RoleMap reads.
+	 */
+	public function capabilities( string $prefix, int $admin ): ?string {
+		$rows = $this->connection->rows( 'SELECT IF(LENGTH(meta_value)<=' . RoleMap::MAX_OWN_BYTES . ',meta_value,NULL) AS stored_value FROM ' . SqlFormatter::identifier( $prefix . 'usermeta' ) . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . ' LIMIT 2' );
+		return 1 === count( $rows ) ? $rows[0]['stored_value'] : null;
+	}
+
+	/**
+	 * The capabilities that the approving administrator would lack once a generation is live:
+	 * their own roles and capabilities, which the exchange keeps, under that generation's roles.
+	 *
+	 * @param string       $prefix Current WordPress table prefix.
+	 * @param string       $options Options table of the generation that becomes live.
+	 * @param int          $admin Confirmed WordPress user ID.
+	 * @param list<string> $required Capabilities that a database restore needs.
+	 * @return list<string> Missing capabilities.
+	 * @throws DatabaseFailed With the code database_roles_invalid or database_admin_capabilities if a stored value is not one that WordPress writes.
+	 */
+	public function missing( string $prefix, string $options, int $admin, array $required ): array {
+		$roles = RoleMap::parse( $this->option( $options, $prefix . 'user_roles', RoleMap::MAX_BYTES ) );
+		return $roles->missing( RoleMap::own( $this->capabilities( $prefix, $admin ) ), $required );
+	}
+
+	/**
+	 * Adds this plugin at the end of the list of active plugins in a private options table, if
+	 * the list lacks it, and commits. The caller holds a write lock on that one private table and
+	 * has verified its identity; the live tables stay unlocked.
+	 *
+	 * @param string $table Verified private options table.
+	 * @param string $plugin This plugin's path, one that PluginList::entry() accepts.
+	 * @return bool Whether the entry was added.
+	 * @throws DatabaseFailed With the code database_plugins_invalid if the list is not one that WordPress writes; without one if the write fails.
+	 */
+	public function activate( string $table, string $plugin ): bool {
+		$list = PluginList::parse( $this->option( $table, 'active_plugins', PluginList::MAX_BYTES ) );
+		if ( $list->has( $plugin ) ) {
+			return false;
+		}
+		$changed = $this->connection->execute( 'UPDATE ' . SqlFormatter::identifier( $table ) . ' SET option_value=' . Session::literal( $list->with( $plugin )->stored() ) . ' WHERE option_name=' . Session::literal( 'active_plugins' ) );
+		if ( 1 !== $changed ) {
+			throw new DatabaseFailed( 'This plugin could not be added to the active plugins of the private generation.' );
+		}
+		$this->connection->execute( 'COMMIT' );
+		return true;
+	}
+
+	/**
 	 * Refreshes state inside the caller's transaction. Copy named fields verbatim, allocate
-	 * fresh option/meta row IDs, and preserve the administrator's primary user ID.
+	 * fresh option/meta row IDs, and preserve the administrator's primary user ID. The roles,
+	 * the active plugins and the scheduled events of the generation that becomes live stay.
+	 * Under its roles the approving administrator must keep every capability that a database
+	 * restore needs, and its list of active plugins must hold this plugin.
 	 *
 	 * @param string               $prefix Current WordPress table prefix.
 	 * @param array<string,string> $targets Logical names mapped to private destination tables.
 	 * @param int                  $admin Confirmed WordPress user ID.
-	 * @throws DatabaseFailed If a required source row is missing or the whole copy fails.
+	 * @param Continuity           $continuity Capabilities the administrator keeps and this plugin's path.
+	 * @throws DatabaseFailed If a required source row is missing, the generation would leave the administrator or this plugin without what they need, or the whole copy fails.
 	 */
-	public function copy( string $prefix, array $targets, int $admin ): void {
+	public function copy( string $prefix, array $targets, int $admin, Continuity $continuity ): void {
 		$this->check( $prefix, $targets, $admin );
-		$names   = array_map( Session::literal( ... ), [ ...self::OPTIONS, $prefix . 'user_roles' ] );
+		$target = $targets[ $prefix . 'options' ];
+		if ( [] !== $this->missing( $prefix, $target, $admin, $continuity->capabilities ) ) {
+			DatabaseFailed::raise( 'Under the roles of the generation that the exchange brings live, the approving administrator would lack a capability that a database restore needs.', [ 'code' => 'database_admin_capabilities' ] );
+		}
+		if ( null !== $continuity->plugin && ! PluginList::parse( $this->option( $target, 'active_plugins', PluginList::MAX_BYTES ) )->has( $continuity->plugin ) ) {
+			DatabaseFailed::raise( 'The active plugins of the generation that the exchange brings live lack this plugin.', [ 'code' => 'database_plugins_invalid' ] );
+		}
+		$names   = array_map( Session::literal( ... ), self::OPTIONS );
 		$options = 'option_name IN (' . implode( ',', $names ) . ')';
-		foreach ( [ 'backups_for_restic_', '_transient_backups_for_restic_', '_transient_timeout_backups_for_restic_' ] as $namespace ) {
+		foreach ( self::PLUGIN_OPTIONS as $namespace ) {
 			$options .= ' OR CAST(LEFT(option_name,' . strlen( $namespace ) . ') AS BINARY)=' . Session::literal( $namespace );
 		}
-		$this->replace( $prefix . 'options', $targets[ $prefix . 'options' ], [ 'option_name', 'option_value', 'autoload' ], $options );
+		$this->replace( $prefix . 'options', $target, [ 'option_name', 'option_value', 'autoload' ], $options );
 		$this->replace( $prefix . 'users', $targets[ $prefix . 'users' ], self::COLUMNS['users'], 'ID=' . $admin );
 		$this->replace( $prefix . 'usermeta', $targets[ $prefix . 'usermeta' ], [ 'user_id', 'meta_key', 'meta_value' ], 'user_id=' . $admin );
 	}

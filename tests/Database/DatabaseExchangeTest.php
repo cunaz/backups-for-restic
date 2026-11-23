@@ -5,14 +5,17 @@ namespace BackupsForRestic\Tests\Database;
 
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Database\Restore\Continuity;
 use BackupsForRestic\Database\Restore\ExchangePlan;
 use BackupsForRestic\Database\Restore\Ledger;
 use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\RehearsalReport;
+use BackupsForRestic\Database\Restore\RoleMap;
 use BackupsForRestic\Database\Restore\WordPressState;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
+use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
@@ -34,11 +37,21 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TempDir;
+use BackupsForRestic\Tests\Support\WordPressRoles;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /** Every live table in this suite belongs to one randomly named disposable database. */
 final class DatabaseExchangeTest extends TestCase {
+
+	/** This plugin's path in the list of active plugins. */
+	private const string OWN = 'backups-for-restic/backups-for-restic.php';
+
+	/** The only plugin that the backup's list holds: the backup lacks this plugin. */
+	private const string SNAPSHOT_PLUGIN = 'snapshot-plugin/snapshot-plugin.php';
+
+	/** A plugin activated on the site after the backup. */
+	private const string LATER_PLUGIN = 'activated-later/activated-later.php';
 
 	private MysqliConnection $admin;
 	private MysqliConnection $db;
@@ -66,9 +79,23 @@ final class DatabaseExchangeTest extends TestCase {
 		$db->execute( 'CREATE TABLE wp_usermeta (umeta_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,user_id BIGINT UNSIGNED NOT NULL,meta_key VARCHAR(255),meta_value LONGTEXT,KEY user_id (user_id)) ENGINE=InnoDB' );
 		$db->execute( 'CREATE TABLE wp_posts (id INT PRIMARY KEY,title TEXT) ENGINE=InnoDB COMMENT=\'posts comment\'' );
 		$db->execute( 'CREATE TABLE wp_snapshot_only (id INT PRIMARY KEY) ENGINE=InnoDB' );
-		$db->execute( "INSERT INTO wp_options (option_name,option_value) VALUES ('home','snapshot-home'),('siteurl','snapshot-url'),('cron','snapshot-cron'),('active_plugins','snapshot-plugins'),('db_version','12345'),('wp_user_roles','snapshot-roles'),('backups_for_restic_settings','snapshot-settings'),('front_page','snapshot-page')" );
+		$options = [
+			'home'                                => 'snapshot-home',
+			'siteurl'                             => 'snapshot-url',
+			'cron'                                => self::events( 'snapshot_event' ),
+			'active_plugins'                      => serialize( [ self::SNAPSHOT_PLUGIN ] ),
+			'db_version'                          => '12345',
+			'wp_user_roles'                       => serialize( WordPressRoles::defaults() ),
+			'_transient_doing_cron'               => 'snapshot-lock',
+			'backups_for_restic_settings'         => 'snapshot-settings',
+			'_transient_backups_for_restic_probe' => 'snapshot-probe',
+			'front_page'                          => 'snapshot-page',
+		];
+		foreach ( $options as $name => $value ) {
+			$db->execute( 'INSERT INTO wp_options (option_name,option_value) VALUES (' . self::text( $name ) . ',' . self::text( $value ) . ')' );
+		}
 		$db->execute( "INSERT INTO wp_users (ID,user_login,user_pass,user_email) VALUES (1,'admin','snapshot-pass','admin@example.com'),(2,'editor','editor-pass','editor@example.com')" );
-		$db->execute( "INSERT INTO wp_usermeta (user_id,meta_key,meta_value) VALUES (1,'wp_capabilities','snapshot-caps'),(1,'session_tokens','snapshot-sessions'),(2,'wp_capabilities','editor')" );
+		$db->execute( 'INSERT INTO wp_usermeta (user_id,meta_key,meta_value) VALUES (1,' . self::text( 'wp_capabilities' ) . ',' . self::text( serialize( [ 'administrator' => true ] ) ) . "),(1,'session_tokens','snapshot-sessions'),(2," . self::text( 'wp_capabilities' ) . ',' . self::text( serialize( [ 'subscriber' => true ] ) ) . ')' );
 		$db->execute( "INSERT INTO wp_posts VALUES (1,'snapshot-post')" );
 		$dump = new DatabaseDump( $db, $this->directory . '/state', 'wp_', [], 1767225600 );
 		foreach ( $dump->files() as $file ) {
@@ -84,9 +111,19 @@ final class DatabaseExchangeTest extends TestCase {
 		$this->manifest = Manifest::parse( (string) file_get_contents( $this->directory . '/manifest.json' ), 'wp_' );
 		$db->execute( 'DROP TABLE wp_snapshot_only' );
 		$db->execute( 'CREATE TABLE wp_live_only (id INT) ENGINE=InnoDB' );
-		$db->execute( "UPDATE wp_options SET option_value=REPLACE(option_value,'snapshot','live')" );
+		// The site since the backup, as in the finding: the subscriber role gained two
+		// capabilities, a plugin was activated, and the events and addresses moved on.
+		$this->option( 'home', 'live-home' );
+		$this->option( 'siteurl', 'live-url' );
+		$this->option( 'cron', self::events( 'live_event', 'backups_for_restic_heartbeat' ) );
+		$this->option( 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN ] ) );
+		$this->option( 'wp_user_roles', serialize( WordPressRoles::with( 'subscriber', [ 'manage_options', 'edit_users' ] ) ) );
+		$this->option( '_transient_doing_cron', 'live-lock' );
+		$this->option( 'backups_for_restic_settings', 'live-settings' );
+		$this->option( '_transient_backups_for_restic_probe', 'live-probe' );
+		$this->option( 'front_page', 'live-page' );
 		$db->execute( "UPDATE wp_users SET user_pass='live-pass' WHERE ID=1" );
-		$db->execute( "UPDATE wp_usermeta SET meta_value=REPLACE(meta_value,'snapshot','live') WHERE user_id=1" );
+		$db->execute( "UPDATE wp_usermeta SET meta_value='live-sessions' WHERE user_id=1 AND meta_key='session_tokens'" );
 		$db->execute( "UPDATE wp_posts SET title='live-post'" );
 		$this->importer = new TableImporter( $this->direct, $this->manifest, $this->directory, bin2hex( random_bytes( 16 ) ) );
 		for ( $i = 0; $i < 100; ++$i ) {
@@ -104,6 +141,52 @@ final class DatabaseExchangeTest extends TestCase {
 		if ( '' !== $this->directory ) {
 			TempDir::remove( $this->directory );
 		}
+	}
+
+	/** A string as an SQL literal, independent of the session's escaping mode. */
+	private static function text( string $value ): string {
+		return '' === $value ? "''" : '0x' . bin2hex( $value );
+	}
+
+	/** Sets one option of the live site. */
+	private function option( string $name, string $value ): void {
+		$this->db->execute( 'UPDATE wp_options SET option_value=' . self::text( $value ) . ' WHERE option_name=' . self::text( $name ) );
+		self::assertSame( 1, $this->db->mysqli->affected_rows, $name );
+	}
+
+	/**
+	 * Options of a table, by name.
+	 *
+	 * @return array<string,string>
+	 */
+	private function options( string $table = 'wp_options' ): array {
+		return array_column( $this->db->rows( 'SELECT option_name,option_value FROM `' . $table . '`' ), 'option_value', 'option_name' );
+	}
+
+	/**
+	 * WP-Cron's event list with one recurring event per hook, as _set_cron_array() stores it.
+	 *
+	 * @param string ...$hooks Hook names.
+	 */
+	private static function events( string ...$hooks ): string {
+		$events = [];
+		foreach ( $hooks as $number => $hook ) {
+			$events[ 1767225600 + $number ] = [
+				$hook => [
+					md5( serialize( [] ) ) => [
+						'schedule' => 'hourly',
+						'args'     => [],
+						'interval' => 3600,
+					],
+				],
+			];
+		}
+		return serialize( $events + [ 'version' => 2 ] );
+	}
+
+	/** The capabilities that a database restore needs, and this plugin's path when it matters. */
+	private static function continuity( ?string $plugin = null ): Continuity {
+		return Continuity::of( [ 'manage_options', ...WordPressRoles::DATABASE ], $plugin );
 	}
 
 	private function plan(): ExchangePlan {
@@ -137,34 +220,48 @@ final class DatabaseExchangeTest extends TestCase {
 			$this->plan();
 			return;
 		}
+		$live   = $this->options();
 		$plan   = $this->prepared();
 		$worker = new TableExchange( $this->direct );
 		self::assertSame( 'prepared', $worker->status( $plan ) );
-		$worker->run( $plan, 1, false );
-		$worker->run( $plan, 1, false );
+		$worker->run( $plan, 1, false, self::continuity() );
+		$worker->run( $plan, 1, false, self::continuity() );
 		self::assertSame( 'applied', $worker->status( $plan ) );
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 		self::assertSame( 'live-pass', $this->db->rows( 'SELECT user_pass FROM wp_users WHERE ID=1' )[0]['user_pass'] );
-		$opts = array_column( $this->db->rows( 'SELECT option_name,option_value FROM wp_options' ), 'option_value', 'option_name' );
-		self::assertSame( 'live-settings', $opts['backups_for_restic_settings'] );
-		self::assertSame( 'live-cron', $opts['cron'] );
-		self::assertSame( 'live-home', $opts['home'] );
-		self::assertSame( 'live-url', $opts['siteurl'] );
-		self::assertSame( 'live-roles', $opts['wp_user_roles'] );
+		self::assertSame( 'live-sessions', $this->db->rows( "SELECT meta_value FROM wp_usermeta WHERE user_id=1 AND meta_key='session_tokens'" )[0]['meta_value'] );
+		$opts = $this->options();
+		// Kept from the running site: addresses, database version, WP-Cron's lock, this plugin's options and transients.
+		foreach ( [ 'home', 'siteurl', 'db_version', '_transient_doing_cron', 'backups_for_restic_settings', '_transient_backups_for_restic_probe' ] as $kept ) {
+			self::assertSame( $live[ $kept ], $opts[ $kept ], $kept );
+		}
+		// From the backup: roles, active plugins, scheduled events and everything else.
+		self::assertSame( serialize( WordPressRoles::defaults() ), $opts['wp_user_roles'] );
+		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN ] ), $opts['active_plugins'] );
+		self::assertSame( self::events( 'snapshot_event' ), $opts['cron'] );
 		self::assertSame( 'snapshot-page', $opts['front_page'] );
 		$this->db->execute( "INSERT INTO wp_posts VALUES (2,'after-apply')" );
 		$this->db->execute( "UPDATE wp_users SET user_pass='after-pass' WHERE ID=1" );
 		$this->db->execute( "INSERT INTO wp_users (ID,user_login) VALUES (3,'after-user')" );
 		$this->db->execute( "UPDATE wp_usermeta SET meta_value='after-sessions' WHERE user_id=1 AND meta_key='session_tokens'" );
 		$this->db->execute( "UPDATE wp_options SET option_value='after-settings' WHERE option_name='backups_for_restic_settings'" );
+		// Changed in the restored generation while it was live: none of it comes back with the undo.
+		$this->option( 'wp_user_roles', serialize( WordPressRoles::with( 'author', [ 'promote_users' ] ) ) );
+		$this->option( 'active_plugins', serialize( [ self::SNAPSHOT_PLUGIN, 'after-apply/after-apply.php' ] ) );
+		$this->option( 'cron', self::events( 'after_apply_event' ) );
 		$this->db->execute( 'INSERT INTO wp_snapshot_only VALUES (123)' );
-		$worker->run( $plan, 1, true );
-		$worker->run( $plan, 1, true );
+		$worker->run( $plan, 1, true, self::continuity() );
+		$worker->run( $plan, 1, true, self::continuity() );
 		self::assertSame( 'undone', $worker->status( $plan ) );
 		self::assertSame( [ [ 'title' => 'live-post' ] ], $this->db->rows( 'SELECT title FROM wp_posts' ) );
 		self::assertSame( 'after-pass', $this->db->rows( 'SELECT user_pass FROM wp_users WHERE ID=1' )[0]['user_pass'] );
 		self::assertSame( 'after-sessions', $this->db->rows( "SELECT meta_value FROM wp_usermeta WHERE user_id=1 AND meta_key='session_tokens'" )[0]['meta_value'] );
-		self::assertSame( 'after-settings', $this->db->rows( "SELECT option_value FROM wp_options WHERE option_name='backups_for_restic_settings'" )[0]['option_value'] );
+		$undone = $this->options();
+		self::assertSame( 'after-settings', $undone['backups_for_restic_settings'] );
+		// The generation that comes back has its own roles, active plugins and scheduled events.
+		foreach ( [ 'wp_user_roles', 'active_plugins', 'cron', 'front_page' ] as $own ) {
+			self::assertSame( $live[ $own ], $undone[ $own ], $own );
+		}
 		foreach ( $plan->document['pairs'] as $number => $pair ) {
 			$retained = '`' . $plan->owned->shadow( $number ) . '`';
 			if ( 'wp_posts' === $pair['name'] ) {
@@ -173,6 +270,8 @@ final class DatabaseExchangeTest extends TestCase {
 				self::assertSame( 'after-user', $this->db->rows( 'SELECT user_login FROM ' . $retained . ' WHERE ID=3' )[0]['user_login'] );
 			} elseif ( 'wp_snapshot_only' === $pair['name'] ) {
 				self::assertSame( '123', $this->db->rows( 'SELECT id FROM ' . $retained )[0]['id'] );
+			} elseif ( 'wp_options' === $pair['name'] ) {
+				self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN, 'after-apply/after-apply.php' ] ), $this->options( trim( $retained, '`' ) )['active_plugins'] );
 			}
 		}
 	}
@@ -192,7 +291,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$this->db->execute( 'CREATE TABLE wp_posts LIKE outside_original' );
 		$this->db->execute( "INSERT INTO wp_posts VALUES (1,'replacement-table')" );
 		try {
-			( new TableExchange( $this->direct ) )->run( $plan, 1, false );
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false, self::continuity() );
 			self::fail( 'A same-named replacement was exchanged.' );
 		} catch ( DatabaseFailed ) {
 			self::assertSame( 'replacement-table', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
@@ -253,7 +352,7 @@ final class DatabaseExchangeTest extends TestCase {
 				unlink( $marker );
 				self::assertSame( 'after' === $point ? ( $undo ? 'undone' : 'applied' ) : ( $undo ? 'applied' : 'prepared' ), $worker->status( $plan ) );
 			}
-			$worker->run( $plan, 1, $undo );
+			$worker->run( $plan, 1, $undo, self::continuity() );
 		}
 	}
 
@@ -271,7 +370,7 @@ final class DatabaseExchangeTest extends TestCase {
 				}
 			}
 		);
-		( new TableExchange( $probe ) )->run( $plan, 1, false );
+		( new TableExchange( $probe ) )->run( $plan, 1, false, self::continuity() );
 		self::assertTrue( $queued );
 		self::assertTrue( $writer->mysqli->reap_async_query() );
 		self::assertSame( 'arrived-during-exchange', $this->db->rows( 'SELECT title FROM wp_posts WHERE id=123' )[0]['title'] );
@@ -281,7 +380,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$this->mysql_only();
 		$plan   = $this->prepared();
 		$worker = new TableExchange( $this->direct );
-		$worker->run( $plan, 1, false );
+		$worker->run( $plan, 1, false, self::continuity() );
 		$number = array_search( 'wp_posts', array_column( $plan->document['pairs'], 'name' ), true );
 		self::assertIsInt( $number );
 		$foreign = $plan->owned->retained( $number );
@@ -303,7 +402,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$auth = ( new WordPressState( $this->direct ) )->authority( 'wp_', 1 );
 		$this->db->execute( "UPDATE wp_usermeta SET meta_value='revoked' WHERE user_id=1 AND meta_key='wp_capabilities'" );
 		try {
-			( new TableExchange( $this->direct ) )->run( $plan, 1, false, $auth );
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false, self::continuity(), $auth );
 			self::fail( 'The exchange accepted revoked authority.' );
 		} catch ( DatabaseFailed $failure ) {
 			self::assertSame( 'database_exchange_changed', $failure->context()['code'] ?? null );
@@ -359,6 +458,7 @@ final class DatabaseExchangeTest extends TestCase {
 			static fn ( int $id ): array => 1 === $id ? [] : [ 'database_account' ],
 			new FileMaintenance( $site ),
 			$refresh ?? static function (): void {},
+			new ExchangeSite( self::OWN, static fn (): array => [ 'manage_options', ...WordPressRoles::DATABASE ], static fn ( string $plugin ): bool => self::LATER_PLUGIN === $plugin ),
 			$drain ?? new SessionDrain( 0.05, 10.0, 5.0, 0.02, 0.1 )
 		);
 		return [
@@ -1023,7 +1123,7 @@ final class DatabaseExchangeTest extends TestCase {
 		}
 		self::assertContains( 'binlog_format', $blockers );
 		try {
-			( new TableExchange( $this->direct ) )->run( $plan, 1, false );
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false, self::continuity() );
 			self::fail( 'The exchange ran under statement-based logging.' );
 		} catch ( DatabaseFailed ) {
 			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
@@ -1036,7 +1136,7 @@ final class DatabaseExchangeTest extends TestCase {
 		$this->mysql_only();
 		$plan     = $this->prepared();
 		$exchange = new TableExchange( $this->direct );
-		$exchange->run( $plan, 1, false );
+		$exchange->run( $plan, 1, false, self::continuity() );
 		$private = $this->private_tables();
 		self::assertNotSame( [], $private );
 		// Every DROP of a private table runs under the write barrier of the exchange.
@@ -1191,7 +1291,7 @@ final class DatabaseExchangeTest extends TestCase {
 			$this->admin->execute( 'REVOKE TRIGGER ON `' . $scope . '`.* FROM ' . $account );
 			$worker = new TableExchange( $connect() );
 			try {
-				$worker->run( $plan, 1, false );
+				$worker->run( $plan, 1, false, self::continuity() );
 				self::fail( 'The apply accepted a grant revoked after confirmation.' );
 			} catch ( DatabaseFailed ) {
 				self::assertSame( 'prepared', $worker->status( $plan ) );
@@ -1199,10 +1299,10 @@ final class DatabaseExchangeTest extends TestCase {
 			}
 			$this->admin->execute( 'GRANT TRIGGER ON `' . $scope . '`.* TO ' . $account );
 			$worker = new TableExchange( $connect() );
-			$worker->run( $plan, 1, false );
+			$worker->run( $plan, 1, false, self::continuity() );
 			self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 			$worker->review_undo( $plan, 1 );
-			$worker->run( $plan, 1, true );
+			$worker->run( $plan, 1, true, self::continuity() );
 			self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 			$end = count( $plan->document['pairs'] ) + 1;
 			self::assertSame( $end, $worker->clean( $plan, 'undone', 0, microtime( true ) + 15 ) );
@@ -1224,11 +1324,367 @@ final class DatabaseExchangeTest extends TestCase {
 		$this->db->execute( 'CREATE VIEW reporting_posts AS SELECT title FROM wp_posts' );
 		self::assertContains( 'live_views', ( new SwapCatalog( $this->direct ) )->inspect( [ 'wp_posts' ] )['blockers'] );
 		try {
-			( new TableExchange( $this->direct ) )->run( $plan, 1, false );
+			( new TableExchange( $this->direct ) )->run( $plan, 1, false, self::continuity() );
 			self::fail( 'The exchange ignored a dependent destination view.' );
 		} catch ( DatabaseFailed ) {
 			self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM reporting_posts' )[0]['title'] );
 			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
+		}
+	}
+
+	/**
+	 * The private options table of a generation: the import that an apply brings live, or for
+	 * 'retained' the earlier generation that an undo brings back.
+	 *
+	 * @param 'shadow'|'retained' $which Generation.
+	 */
+	private static function private_options( ExchangePlan $plan, string $which = 'shadow' ): string {
+		$number = array_search( 'wp_options', array_column( $plan->document['pairs'], 'name' ), true );
+		self::assertIsInt( $number );
+		return 'shadow' === $which ? $plan->owned->shadow( $number ) : $plan->owned->retained( $number );
+	}
+
+	/** Sets one option in a private table of the exchange. */
+	private function private_option( string $table, string $name, string $value ): void {
+		$this->db->execute( 'UPDATE `' . $table . '` SET option_value=' . self::text( $value ) . ' WHERE option_name=' . self::text( $name ) );
+		self::assertSame( 1, $this->db->mysqli->affected_rows, $name );
+	}
+
+	/**
+	 * What an account may do under the live roles, as WordPress computes it from the stored values.
+	 *
+	 * @param list<string> $capabilities Capabilities to check.
+	 * @return list<string> Those it lacks.
+	 */
+	private function lacks( int $user, array $capabilities ): array {
+		$own = $this->db->rows( "SELECT meta_value FROM wp_usermeta WHERE user_id=$user AND meta_key='wp_capabilities'" )[0]['meta_value'] ?? null;
+		return RoleMap::parse( $this->options()['wp_user_roles'] )->missing( RoleMap::own( $own ), $capabilities );
+	}
+
+	public function test_the_finding_a_restore_brings_back_the_backups_roles_plugins_and_events_and_its_undo_the_sites(): void {
+		$this->mysql_only();
+		$live     = $this->options();
+		$events   = [];
+		$services = $this->services(
+			refresh: function () use ( &$events ): void {
+				// Called after the exchange, in maintenance: WordPress reads the event list that is now live.
+				$events[] = $this->options()['cron'];
+			}
+		);
+		// After the backup, the subscriber role gained manage_options and edit_users and a plugin was activated.
+		self::assertSame( [], $this->lacks( 2, [ 'manage_options', 'edit_users' ] ) );
+		$review = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertTrue( $review['applicable'], implode( ',', $review['blockers'] ) );
+		self::assertSame( [ 'site_address', 'database_version', 'cron_lock', 'plugin_data', 'administrator' ], $review['kept'] );
+		self::assertSame( [ 'roles', 'active_plugins', 'scheduled_events' ], $review['restored'] );
+		self::assertSame(
+			[
+				'entry' => self::OWN,
+				'added' => true,
+			],
+			$review['plugin']
+		);
+		self::assertSame(
+			[
+				[
+					'plugin' => self::LATER_PLUGIN,
+					'file'   => true,
+				],
+			],
+			$review['plugins']['deactivated']['entries']
+		);
+		self::assertSame(
+			[
+				[
+					'plugin' => self::SNAPSHOT_PLUGIN,
+					'file'   => false,
+				],
+			],
+			$review['plugins']['activated']['entries']
+		);
+		self::assertSame( [ 'subscriber' ], array_column( $review['roles']['entries'], 'role' ) );
+		self::assertSame( [ 'edit_users', 'manage_options' ], $review['roles']['entries'][0]['removed']['entries'] );
+		self::assertSame( [], $review['missing_capabilities'] );
+		$applied = self::advance( $services['runner'], $services['changes']->start_apply( $services['source']->id, 1, $review['digest'] ) );
+		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
+		$restored = $this->options();
+		// Every restored account has the backup's roles: the subscriber's injected capabilities are gone.
+		self::assertSame( serialize( WordPressRoles::defaults() ), $restored['wp_user_roles'] );
+		self::assertSame( [ 'manage_options', 'edit_users' ], $this->lacks( 2, [ 'manage_options', 'edit_users' ] ) );
+		self::assertSame( [], $this->lacks( 1, [ 'manage_options', ...WordPressRoles::DATABASE ] ) );
+		// The plugin activated after the backup is inactive; this plugin was added to the backup's list.
+		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN, self::OWN ] ), $restored['active_plugins'] );
+		// The backup's events are live, without the heartbeat, when WordPress refreshes after the exchange.
+		self::assertSame( self::events( 'snapshot_event' ), $restored['cron'] );
+		self::assertSame( [ self::events( 'snapshot_event' ) ], $events );
+		foreach ( [ 'home', 'siteurl', 'db_version', '_transient_doing_cron', 'backups_for_restic_settings', '_transient_backups_for_restic_probe' ] as $kept ) {
+			self::assertSame( $live[ $kept ], $restored[ $kept ], $kept );
+		}
+		self::assertSame( 'snapshot-page', $restored['front_page'] );
+		self::assertSame( 'live-sessions', $this->db->rows( "SELECT meta_value FROM wp_usermeta WHERE user_id=1 AND meta_key='session_tokens'" )[0]['meta_value'] );
+
+		// The undo shows and brings back the earlier generation's own roles, plugins and events.
+		$services['clock']->seconds += 10;
+		$undo                        = $services['changes']->preview_undo( $applied->id, 1 );
+		self::assertTrue( $undo['applicable'], implode( ',', $undo['blockers'] ) );
+		self::assertSame( $review['kept'], $undo['kept'] );
+		self::assertFalse( $undo['plugin']['added'] );
+		self::assertSame( [ self::SNAPSHOT_PLUGIN ], array_column( $undo['plugins']['deactivated']['entries'], 'plugin' ) );
+		self::assertSame( [ self::LATER_PLUGIN ], array_column( $undo['plugins']['activated']['entries'], 'plugin' ) );
+		self::assertSame( [ 'edit_users', 'manage_options' ], $undo['roles']['entries'][0]['added']['entries'] );
+		$undone = self::advance( $services['runner'], $services['changes']->start_undo( $applied->id, 1, $undo['digest'] ) );
+		self::assertSame( JobState::Succeeded, $undone->state, $undone->error?->message ?? '' );
+		$back = $this->options();
+		foreach ( [ 'wp_user_roles', 'active_plugins', 'cron', 'front_page', 'home', 'backups_for_restic_settings' ] as $name ) {
+			self::assertSame( $live[ $name ], $back[ $name ], $name );
+		}
+		self::assertSame( [ self::events( 'snapshot_event' ), self::events( 'live_event', 'backups_for_restic_heartbeat' ) ], $events );
+	}
+
+	public function test_this_plugin_is_added_once_on_the_private_target_and_never_after_the_exchange(): void {
+		$this->mysql_only();
+		$plan   = $this->prepared();
+		$worker = new TableExchange( $this->direct );
+		$shadow = self::private_options( $plan );
+		// The exchange refuses a generation that would leave this plugin inactive.
+		try {
+			$worker->run( $plan, 1, false, self::continuity( self::OWN ) );
+			self::fail( 'The exchange brought live a list of active plugins without this plugin.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_plugins_invalid', $refused->context()['code'] ?? null );
+			self::assertSame( 'prepared', $worker->status( $plan ) );
+		}
+		self::assertTrue( $worker->activate( $plan, false, self::OWN ) );
+		self::assertFalse( $worker->activate( $plan, false, self::OWN ) );
+		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN, self::OWN ] ), $this->options( $shadow )['active_plugins'] );
+		// A list that has this plugin already stays as the backup stored it.
+		$listed = serialize(
+			[
+				2 => self::OWN,
+				5 => self::SNAPSHOT_PLUGIN,
+			]
+		);
+		$this->private_option( $shadow, 'active_plugins', $listed );
+		self::assertFalse( $worker->activate( $plan, false, self::OWN ) );
+		self::assertSame( $listed, $this->options( $shadow )['active_plugins'] );
+		self::assertSame( serialize( [ self::OWN, self::LATER_PLUGIN ] ), $this->options()['active_plugins'], 'The live list is not touched before the exchange.' );
+		$worker->run( $plan, 1, false, self::continuity( self::OWN ) );
+		self::assertSame( $listed, $this->options()['active_plugins'] );
+		// Once the generation is live, nothing is written to it from here.
+		$this->option( 'active_plugins', serialize( [ self::SNAPSHOT_PLUGIN ] ) );
+		self::assertFalse( $worker->activate( $plan, false, self::OWN ) );
+		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN ] ), $this->options()['active_plugins'] );
+		// The undo adds it to the earlier generation, which has it already.
+		self::assertFalse( $worker->activate( $plan, true, self::OWN ) );
+		$retained = self::private_options( $plan, 'retained' );
+		$this->private_option( $retained, 'active_plugins', serialize( [ self::LATER_PLUGIN ] ) );
+		self::assertTrue( $worker->activate( $plan, true, self::OWN ) );
+		self::assertSame( serialize( [ self::LATER_PLUGIN, self::OWN ] ), $this->options( $retained )['active_plugins'] );
+		$worker->run( $plan, 1, true, self::continuity( self::OWN ) );
+		self::assertSame( serialize( [ self::LATER_PLUGIN, self::OWN ] ), $this->options()['active_plugins'] );
+	}
+
+	public function test_this_plugin_is_never_written_into_a_replaced_private_table(): void {
+		$this->mysql_only();
+		$plan   = $this->prepared();
+		$shadow = self::private_options( $plan );
+		$this->db->execute( 'RENAME TABLE `' . $shadow . '` TO moved_shadow' );
+		$this->db->execute( 'CREATE TABLE `' . $shadow . '` LIKE moved_shadow' );
+		$this->db->execute( 'INSERT INTO `' . $shadow . '` SELECT * FROM moved_shadow' );
+		try {
+			( new TableExchange( $this->direct ) )->activate( $plan, false, self::OWN );
+			self::fail( 'This plugin was written into a table that replaced the private one.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertStringContainsString( 'replaced', $refused->getMessage() );
+		}
+		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN ] ), $this->options( $shadow )['active_plugins'] );
+		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN ] ), $this->options( 'moved_shadow' )['active_plugins'] );
+	}
+
+	public function test_an_administrator_whom_the_other_roles_leave_without_a_capability_is_refused_at_review_and_exchange(): void {
+		$this->mysql_only();
+		// The approving account has a role that only the running site defines.
+		$this->option(
+			'wp_user_roles',
+			serialize(
+				WordPressRoles::with( 'subscriber', [ 'manage_options', 'edit_users' ] ) + [
+					'site_owner' => [
+						'name'         => 'Site owner',
+						'capabilities' => array_fill_keys( [ 'read', 'manage_options', ...WordPressRoles::DATABASE ], true ),
+					],
+				]
+			)
+		);
+		$this->db->execute( 'UPDATE wp_usermeta SET meta_value=' . self::text( serialize( [ 'site_owner' => true ] ) ) . " WHERE user_id=1 AND meta_key='wp_capabilities'" );
+		$services = $this->services();
+		$review   = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertFalse( $review['applicable'] );
+		self::assertContains( 'database_admin_capabilities', $review['blockers'] );
+		self::assertSame( [ 'manage_options', 'edit_users', 'promote_users', 'update_core' ], $review['missing_capabilities'] );
+		self::assertSame( [ 'site_owner', 'subscriber' ], array_column( $review['roles']['entries'], 'role' ) );
+		self::assertSame( 'removed', $review['roles']['entries'][0]['change'] );
+		try {
+			$services['changes']->start_apply( $services['source']->id, 1, $review['digest'] );
+			self::fail( 'A review with a capability blocker was confirmed.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'database_exchange_changed', $refused->context()['code'] ?? null );
+		}
+	}
+
+	public function test_a_generation_that_would_leave_the_administrator_without_a_capability_is_refused_before_the_exchange(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$job      = self::before_swap( $services );
+		// The import that would become live: its administrator role lost two capabilities.
+		$plan  = DatabaseGeneration::load( $this->direct, $job )->exchange();
+		$roles = WordPressRoles::defaults();
+		unset( $roles['administrator']['capabilities']['update_core'], $roles['administrator']['capabilities']['promote_users'] );
+		$this->private_option( self::private_options( $plan ), 'wp_user_roles', serialize( $roles ) );
+		$failed = self::advance( $services['runner'], $job );
+		self::assertSame( JobState::Failed, $failed->state );
+		self::assertSame( 'database_admin_capabilities', $failed->error?->code );
+		self::assertFileDoesNotExist( $services['site'] . '/.maintenance' );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		self::assertSame( serialize( WordPressRoles::with( 'subscriber', [ 'manage_options', 'edit_users' ] ) ), $this->options()['wp_user_roles'] );
+	}
+
+	public function test_an_undo_that_would_leave_the_administrator_without_a_capability_is_refused(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
+		// While the restored generation is live, the administrator moves to a role that only it defines.
+		$this->option(
+			'wp_user_roles',
+			serialize(
+				WordPressRoles::defaults() + [
+					'restorer' => [
+						'name'         => 'Restorer',
+						'capabilities' => array_fill_keys( [ 'read', 'manage_options', ...WordPressRoles::DATABASE ], true ),
+					],
+				]
+			)
+		);
+		$this->db->execute( 'UPDATE wp_usermeta SET meta_value=' . self::text( serialize( [ 'restorer' => true ] ) ) . " WHERE user_id=1 AND meta_key='wp_capabilities'" );
+		$services['clock']->seconds += 10;
+		$undo                        = $services['changes']->preview_undo( $applied->id, 1 );
+		self::assertFalse( $undo['applicable'] );
+		self::assertSame( [ 'database_admin_capabilities' ], $undo['blockers'] );
+		self::assertSame( [ 'manage_options', 'edit_users', 'promote_users', 'update_core' ], $undo['missing_capabilities'] );
+		// Under the earlier generation's roles the same account as administrator may undo.
+		$this->db->execute( 'UPDATE wp_usermeta SET meta_value=' . self::text( serialize( [ 'administrator' => true ] ) ) . " WHERE user_id=1 AND meta_key='wp_capabilities'" );
+		self::assertTrue( $services['changes']->preview_undo( $applied->id, 1 )['applicable'] );
+	}
+
+	public function test_roles_and_plugin_lists_that_wordpress_does_not_write_are_refused_with_their_codes(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$cases    = [
+			'wp_user_roles'  => [ 'O:8:"stdClass":0:{}', 'database_roles_invalid' ],
+			'active_plugins' => [ serialize( [ 'hello' => 'hello.php' ] ), 'database_plugins_invalid' ],
+		];
+		foreach ( $cases as $name => [ $value, $code ] ) {
+			$before = $this->options()[ $name ];
+			$this->option( $name, $value );
+			$review = $services['changes']->preview( $services['source']->id, 1 );
+			self::assertFalse( $review['applicable'], $name );
+			self::assertContains( $code, $review['blockers'], $name );
+			$this->option( $name, $before );
+		}
+		self::assertTrue( $services['changes']->preview( $services['source']->id, 1 )['applicable'] );
+		// In the generation that the exchange brings live, at the exchange.
+		$plan   = $this->prepared();
+		$worker = new TableExchange( $this->direct );
+		$shadow = self::private_options( $plan );
+		$this->private_option( $shadow, 'active_plugins', 'a:1:{i:0;s:9:"hello.php";' );
+		try {
+			$worker->activate( $plan, false, self::OWN );
+			self::fail( 'A broken list of active plugins was extended.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_plugins_invalid', $refused->context()['code'] ?? null );
+		}
+		$this->private_option( $shadow, 'wp_user_roles', serialize( [ 'administrator' => [ 'name' => 'Administrator' ] ] ) );
+		try {
+			$worker->run( $plan, 1, false, self::continuity() );
+			self::fail( 'A role map that WordPress does not write was brought live.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_roles_invalid', $refused->context()['code'] ?? null );
+			self::assertSame( 'prepared', $worker->status( $plan ) );
+			self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		}
+	}
+
+	public function test_a_backups_role_map_that_wordpress_does_not_write_is_refused_at_the_review(): void {
+		$this->mysql_only();
+		// The rehearsal reads the snapshot's values from its import.
+		$number = array_search( 'wp_options', array_column( $this->manifest->tables, 'name' ), true );
+		self::assertIsInt( $number );
+		$shadow = $this->importer->tables->shadow( $number );
+		$this->private_option(
+			$shadow,
+			'wp_user_roles',
+			serialize(
+				[
+					'administrator' => [
+						'name'         => 'Administrator',
+						'capabilities' => [ 'manage_options' => new \stdClass() ],
+					],
+				]
+			)
+		);
+		$this->private_option( $shadow, 'active_plugins', serialize( [ self::SNAPSHOT_PLUGIN, self::SNAPSHOT_PLUGIN ] ) );
+		$services = $this->services();
+		$review   = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertFalse( $review['applicable'] );
+		self::assertContains( 'database_roles_invalid', $review['blockers'] );
+		self::assertContains( 'database_plugins_invalid', $review['blockers'] );
+		self::assertSame( [], $review['roles']['entries'] );
+		self::assertSame( [], $review['plugins']['activated']['entries'] );
+	}
+
+	public function test_a_review_from_before_the_comparison_or_with_changed_facts_cannot_be_confirmed(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$review   = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertTrue( $review['applicable'] );
+		// A plugin activated after the review changes what the review compared.
+		$this->option( 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN, 'another/another.php' ] ) );
+		self::assertNotSame( $review['digest'], $services['changes']->preview( $services['source']->id, 1 )['digest'] );
+		try {
+			$services['changes']->start_apply( $services['source']->id, 1, $review['digest'] );
+			self::fail( 'A review whose facts changed was confirmed.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'database_exchange_changed', $refused->context()['code'] ?? null );
+		}
+		// The same after the confirmation: the exchange binds the live list of active plugins.
+		$job = self::before_swap( $services );
+		$this->option( 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN ] ) );
+		$failed = self::advance( $services['runner'], $job );
+		self::assertSame( 'database_exchange_changed', $failed->error?->code );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		// A job confirmed before the review compared roles and plugins holds no capabilities.
+		$services['clock']->seconds += 10;
+		$job                         = self::before_swap( $services );
+		unset( $job->data['capabilities'] );
+		$services['jobs']->save( $job );
+		$failed = self::advance( $services['runner'], $job );
+		self::assertSame( 'database_exchange_changed', $failed->error?->code );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		// A rehearsal from before the comparison has no stored roles and plugins in its report.
+		$report = $services['files'] . '/../../../database-preview.json';
+		$bytes  = (string) file_get_contents( $report );
+		$data   = json_decode( $bytes, true, flags: JSON_THROW_ON_ERROR );
+		unset( $data['wordpress_state'] );
+		$bytes = json_encode( $data, JSON_THROW_ON_ERROR );
+		file_put_contents( $report, $bytes );
+		$source                                   = $services['jobs']->get( $services['source']->id );
+		$source->result['database_report_sha256'] = hash( 'sha256', $bytes );
+		$services['jobs']->save( $source );
+		try {
+			$services['changes']->preview( $services['source']->id, 1 );
+			self::fail( 'A rehearsal without the stored roles and plugins was reviewed.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'database_review_required', $refused->context()['code'] ?? null );
 		}
 	}
 }

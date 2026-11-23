@@ -12,10 +12,15 @@ namespace BackupsForRestic\Database\Restore;
 use BackupsForRestic\Database\Dump\SqlFormatter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Support\Bytes;
 
 defined( 'ABSPATH' ) || exit;
 
-/** Reads the completed ledger and catalogs. It never scans live data or returns row values. */
+/**
+ * Reads the completed ledger and catalogs. It never scans live data. Of the snapshot's rows it
+ * returns two option values only, the role map and the list of active plugins, which the review
+ * of a live exchange compares with the running site (ADR 0043, decision 5).
+ */
 final readonly class RehearsalReport {
 
 	/**
@@ -32,7 +37,7 @@ final readonly class RehearsalReport {
 	 *
 	 * @param Manifest    $manifest Validated dump.
 	 * @param OwnedTables $owned Completed rehearsal's private objects.
-	 * @return array{tables:list<array<string,int|string|null>>,views_not_imported:list<string>,snapshot_server:string,destination_server:string,findings:list<array{code:string,table:string}>,rows:int,content_digest:string|null,swap_preflight:array{blockers:list<string>,missing_privileges:list<string>,required_database_privileges:list<string>,required_global_privileges:list<string>}}
+	 * @return array{tables:list<array<string,int|string|null>>,views_not_imported:list<string>,snapshot_server:string,destination_server:string,findings:list<array{code:string,table:string}>,rows:int,content_digest:string|null,swap_preflight:array{blockers:list<string>,missing_privileges:list<string>,required_database_privileges:list<string>,required_global_privileges:list<string>},wordpress_state:array{user_roles:string|null,active_plugins:string|null}}
 	 * @throws FormatException If the live inventory exceeds the same table limit as the dump.
 	 * @throws DatabaseFailed If the completed ledger and imported shadows do not match the inventory.
 	 */
@@ -157,6 +162,7 @@ final readonly class RehearsalReport {
 				}
 				$inspection = ( new SwapCatalog( $this->connection ) )->inspect( array_column( $manifest->tables, 'name' ) );
 				return [
+					'wordpress_state'    => $this->wordpress_state( $manifest, $owned ),
 					'content_digest'     => Ledger::content_digest( $this->connection, $owned, $manifest ),
 					'swap_preflight'     => [
 						'blockers'                     => array_values( array_unique( [ ...$inspection['blockers'], ...array_column( $findings, 'code' ) ] ) ),
@@ -173,5 +179,36 @@ final readonly class RehearsalReport {
 				];
 			}
 		);
+	}
+
+	/**
+	 * The snapshot's role map and list of active plugins as they are stored, base64-encoded,
+	 * or null where the snapshot's options table lacks the option, holds it more than once,
+	 * holds a longer value than the review reads, or lacks the standard columns.
+	 *
+	 * @param Manifest    $manifest Validated dump.
+	 * @param OwnedTables $owned Completed rehearsal's private objects.
+	 * @return array{user_roles:string|null,active_plugins:string|null} Stored values.
+	 */
+	private function wordpress_state( Manifest $manifest, OwnedTables $owned ): array {
+		$number = array_search( $manifest->prefix . 'options', array_column( $manifest->tables, 'name' ), true );
+		$values = [
+			'user_roles'     => null,
+			'active_plugins' => null,
+		];
+		if ( ! is_int( $number ) ) {
+			return $values;
+		}
+		$table   = $owned->shadow( $number );
+		$columns = array_column( $this->connection->rows( 'SHOW COLUMNS FROM ' . SqlFormatter::identifier( $table ) ), 'Field' );
+		if ( ! in_array( 'option_name', $columns, true ) || ! in_array( 'option_value', $columns, true ) ) {
+			return $values;
+		}
+		$state  = new WordPressState( $this->connection );
+		$values = [
+			'user_roles'     => $state->option( $table, $manifest->prefix . 'user_roles', RoleMap::MAX_BYTES ),
+			'active_plugins' => $state->option( $table, 'active_plugins', PluginList::MAX_BYTES ),
+		];
+		return array_map( static fn ( ?string $value ): ?string => null === $value ? null : Bytes::base64_encode( $value ), $values );
 	}
 }

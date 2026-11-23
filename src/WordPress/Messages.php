@@ -172,6 +172,18 @@ final class Messages {
 				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
 				'hint'    => __( 'Check the administrator’s ID, login, email and local role assignments in both installations. Resolve the conflict before starting a new rehearsal.', 'backups-for-restic' ),
 			],
+			'database_admin_capabilities' => [
+				'message' => __( 'With the roles of the database that the restore would bring live, your account would lack a capability that a database restore needs.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore keeps your account with its own roles and capabilities, but the roles themselves come from that database. Under them your account needs the backup capability, manage_options, edit_users, promote_users and update_core, so that you can still manage the site and finish or undo the restore. Confirm with an administrator account whose role has these capabilities in that database, or restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			],
+			'database_roles_invalid' => [
+				'message' => __( 'The user roles of one of the two databases are not stored the way WordPress stores them.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore takes the roles from the database that it brings live and has to read them to check your account. Restore the database by hand with the staged SQL files, and check the option with the user roles there.', 'backups-for-restic' ),
+			],
+			'database_plugins_invalid' => [
+				'message' => __( 'The list of active plugins of one of the two databases is not stored the way WordPress stores it, or lacks Backups for restic.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore takes the active plugins from the database that it brings live and adds Backups for restic to them. Restore the database by hand with the staged SQL files, and check the option active_plugins there.', 'backups-for-restic' ),
+			],
 			'database_wordpress_version' => [
 				'message' => __( 'The snapshot and destination use different WordPress database versions.', 'backups-for-restic' ),
 				'hint'    => __( 'Use a destination with a matching WordPress schema, or import the staged SQL into a separate database and run the WordPress upgrade there.', 'backups-for-restic' ),

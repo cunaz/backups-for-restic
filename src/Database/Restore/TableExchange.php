@@ -119,13 +119,14 @@ final readonly class TableExchange {
 	 * @param ExchangePlan $plan Persisted plan.
 	 * @param int          $admin Confirming current WordPress user.
 	 * @param bool         $undo Reverse an applied exchange.
+	 * @param Continuity   $continuity What the generation that becomes live must leave the administrator and this plugin.
 	 * @param string|null  $authority Reviewed administrative credential and role binding.
 	 * @throws DatabaseFailed If any occupied source, schema, dependency or witness changed.
 	 */
-	public function run( ExchangePlan $plan, int $admin, bool $undo, ?string $authority = null ): void {
+	public function run( ExchangePlan $plan, int $admin, bool $undo, Continuity $continuity, ?string $authority = null ): void {
 		$plan->owned->locked(
 			null,
-			function () use ( $plan, $admin, $undo, $authority ): void {
+			function () use ( $plan, $admin, $undo, $continuity, $authority ): void {
 				$facts  = $this->destination( $plan );
 				$from   = $undo ? 'applied' : 'prepared';
 				$to     = $undo ? 'undone' : 'applied';
@@ -139,13 +140,13 @@ final readonly class TableExchange {
 				$expected = $plan->positions( $from );
 				$this->barrier->hold(
 					array_keys( $expected ),
-					function () use ( $plan, $admin, $undo, $facts, $from, $to, $authority ): void {
+					function () use ( $plan, $admin, $undo, $continuity, $facts, $from, $to, $authority ): void {
 						[ $targets, $rename ] = $this->moves( $plan, $facts, $from, $undo );
 						$state                = new WordPressState( $this->connection );
 						if ( null !== $authority && ! hash_equals( $authority, $state->authority( $plan->document['prefix'], $admin ) ) ) {
-							DatabaseFailed::raise( 'The confirming administrator changed after the database review.', [ 'code' => 'database_exchange_changed' ] );
+							DatabaseFailed::raise( 'The confirming administrator, their permissions or the live roles or active plugins changed after the database review.', [ 'code' => 'database_exchange_changed' ] );
 						}
-						$state->copy( $plan->document['prefix'], $targets, $admin );
+						$state->copy( $plan->document['prefix'], $targets, $admin, $continuity );
 						$this->connection->execute( 'COMMIT' );
 						$rename[] = self::move( $plan->owned->marker( $from ), $plan->owned->marker( $to ) );
 						$this->connection->execute( 'RENAME TABLE ' . implode( ',', $rename ) );
@@ -159,26 +160,75 @@ final readonly class TableExchange {
 	}
 
 	/**
+	 * Adds this plugin to the list of active plugins of the generation that the exchange will
+	 * bring live, in that generation's private options table: the imported table for an apply,
+	 * the retained one for an undo. It runs before the exchange takes its write barrier over
+	 * the live tables. A write lock on the private table alone keeps a replacement out between
+	 * its identity check and the write. Once the exchange has moved, nothing is written.
+	 *
+	 * @param ExchangePlan $plan Persisted plan, for an undo with its confirmed identities.
+	 * @param bool         $undo Whether the retained generation comes back.
+	 * @param string       $plugin This plugin's path in active_plugins.
+	 * @return bool Whether the entry was added.
+	 * @throws DatabaseFailed If the private options table was replaced, or with the code database_plugins_invalid if its list is not one that WordPress writes.
+	 */
+	public function activate( ExchangePlan $plan, bool $undo, string $plugin ): bool {
+		return $plan->owned->locked(
+			null,
+			function () use ( $plan, $undo, $plugin ): bool {
+				$facts = $this->destination( $plan );
+				if ( $this->witness( $plan, $facts ) !== ( $undo ? 'applied' : 'prepared' ) ) {
+					return false;
+				}
+				$number = array_search( $plan->document['prefix'] . 'options', array_column( $plan->document['pairs'], 'name' ), true );
+				if ( ! is_int( $number ) ) {
+					throw new DatabaseFailed( 'The database exchange has no WordPress options table.' );
+				}
+				$table = $undo ? $plan->owned->retained( $number ) : $plan->owned->shadow( $number );
+				$id    = $undo ? $plan->document['pairs'][ $number ]['before'] : $plan->document['pairs'][ $number ]['after'];
+				return $this->barrier->hold(
+					[ $table ],
+					function () use ( $facts, $table, $id, $plugin ): bool {
+						if ( null === $id || ( $this->catalog->identities( $facts, [ $table ] )[ $table ] ?? null ) !== $id ) {
+							throw new DatabaseFailed( 'The private options table of the database exchange was replaced.' );
+						}
+						return ( new WordPressState( $this->connection ) )->activate( $table, $plugin );
+					}
+				);
+			}
+		);
+	}
+
+	/**
 	 * Reads the same object and WordPress account bindings used at commit. A fresh check
 	 * under write locks remains necessary because this preview does not lock live tables.
 	 * The undo binds to the tables that hold the applied generation's names now: a rebuild
 	 * of a live table renumbers it without replacing it, and the administrator confirms
 	 * the identities observed here. The retained generation must still be the recorded one.
+	 * Its stored roles and list of active plugins are what the undo brings back.
 	 *
 	 * @param ExchangePlan $plan Stored owning apply.
 	 * @param int          $admin Proposed undo administrator.
-	 * @return ExchangePlan The plan with the observed identities, for the confirmation.
+	 * @return array{ExchangePlan,array{roles:string|null,plugins:string|null}} The plan with the observed identities, for the confirmation, and the retained generation's stored role map and list of active plugins.
 	 * @throws DatabaseFailed With the code database_exchange_rebuilt if a retained table was rebuilt.
 	 */
-	public function review_undo( ExchangePlan $plan, int $admin ): ExchangePlan {
+	public function review_undo( ExchangePlan $plan, int $admin ): array {
 		return $plan->owned->locked(
 			null,
-			function () use ( $plan, $admin ): ExchangePlan {
+			function () use ( $plan, $admin ): array {
 				$facts       = $this->destination( $plan );
 				$current     = $this->observed( $this->rebuilt_witness( $plan, $facts ) ?? $plan, $facts );
 				[ $targets ] = $this->moves( $current, $facts, 'applied', true );
-				( new WordPressState( $this->connection ) )->check( $plan->document['prefix'], $targets, $admin );
-				return $current;
+				$prefix      = $plan->document['prefix'];
+				$state       = new WordPressState( $this->connection );
+				$state->check( $prefix, $targets, $admin );
+				return [
+					$current,
+					[
+						'roles'   => $state->option( $targets[ $prefix . 'options' ], $prefix . 'user_roles', RoleMap::MAX_BYTES ),
+						'plugins' => $state->option( $targets[ $prefix . 'options' ], 'active_plugins', PluginList::MAX_BYTES ),
+					],
+				];
 			}
 		);
 	}

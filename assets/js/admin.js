@@ -1594,6 +1594,9 @@
 		return {
 			write_locked_rename: __( 'MariaDB requires a manual live database restore on this server. Recover the SQL dump from the staging ZIP or recovery kit and import it into a separate database.', 'backups-for-restic' ),
 			database_admin_collision: __( 'The snapshot has a different user with the same ID, login or email as the confirming administrator.', 'backups-for-restic' ),
+			database_admin_capabilities: __( 'Under the roles of the database that this change brings live, your account would lack a capability that a database restore needs. The change keeps your account with its own roles and capabilities, but the roles themselves come from that database. Confirm with an administrator account whose role there has the backup capability, manage_options, edit_users, promote_users and update_core, or restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_roles_invalid: __( 'The user roles of one of the two databases are not stored the way WordPress stores them, so they cannot be compared or checked. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_plugins_invalid: __( 'The list of active plugins of one of the two databases is not stored the way WordPress stores it, so it cannot be compared. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			database_wordpress_version: __( 'The source and destination WordPress database schema versions differ.', 'backups-for-restic' ),
 			database_exchange_changed: __( 'The destination table generations or administrator no longer match this review.', 'backups-for-restic' ),
 			snapshot_check: __( 'The snapshot contains a CHECK constraint that needs manual handling.', 'backups-for-restic' ),
@@ -1710,6 +1713,95 @@
 	}
 
 	/**
+	 * What a reviewed database change keeps from the running site, what it takes from the
+	 * database that it brings live, and how the two databases differ in roles and active
+	 * plugins. Every name comes from a database and is shown as text.
+	 *
+	 * @param {Object}  plan Reviewed change.
+	 * @param {boolean} undo Whether the earlier database comes back.
+	 * @return {Array<Element>} Parts of the review.
+	 */
+	function databaseState( plan, undo ) {
+		const kept = {
+			site_address: __( 'The site address (home and siteurl).', 'backups-for-restic' ),
+			database_version: __( 'The WordPress database version (db_version), which both databases already share.', 'backups-for-restic' ),
+			cron_lock: __( 'The lock of a WP-Cron run in progress (the doing_cron transient).', 'backups-for-restic' ),
+			plugin_data: __( 'The settings, state and transients of Backups for restic.', 'backups-for-restic' ),
+			administrator: __( 'Your user account with all of its user metadata, including your active sessions.', 'backups-for-restic' ),
+		};
+		const restored = {
+			roles: __( 'The user roles and their capabilities, for every account.', 'backups-for-restic' ),
+			active_plugins: __( 'The list of active plugins.', 'backups-for-restic' ),
+			scheduled_events: __( 'The scheduled events (WP-Cron).', 'backups-for-restic' ),
+		};
+		const changes = {
+			added: __( 'Exists only afterwards', 'backups-for-restic' ),
+			removed: __( 'Exists only now', 'backups-for-restic' ),
+			changed: __( 'Capabilities change', 'backups-for-restic' ),
+		};
+		function texts( codes, labels ) {
+			return el( 'ul', { className: 'bfr-paths' }, ( codes || [] ).map( ( code ) => el( 'li', {}, [ labels[ code ] || code ] ) ) );
+		}
+		function rest( count ) {
+			/* translators: %d: number of further entries of a list that the review does not show. */
+			return sprintf( _n( 'And %d more.', 'And %d more.', count, 'backups-for-restic' ), count );
+		}
+		function more( listing ) {
+			return listing.more ? el( 'p', {}, [ rest( listing.more ) ] ) : null;
+		}
+		function names( listing ) {
+			const shown = textList( listing.entries );
+			return listing.more ? el( 'div', {}, [ shown, rest( listing.more ) ] ) : shown;
+		}
+		function plugins( listing, text ) {
+			if ( ! listing.entries.length ) {
+				return null;
+			}
+			return el( 'div', {}, [
+				el( 'p', {}, [ text ] ),
+				el( 'table', { className: 'widefat striped bfr-database-plugins' }, [
+					el( 'thead', {}, [ el( 'tr', {}, [ el( 'th', { scope: 'col' }, [ __( 'Plugin', 'backups-for-restic' ) ] ), el( 'th', { scope: 'col' }, [ __( 'File on this site', 'backups-for-restic' ) ] ) ] ) ] ),
+					el( 'tbody', {}, listing.entries.map( ( entry ) => el( 'tr', {}, [
+						el( 'td', {}, [ el( 'code', {}, [ entry.plugin ] ) ] ),
+						el( 'td', {}, [ entry.file ? __( 'Yes', 'backups-for-restic' ) : __( 'No: WordPress skips this plugin', 'backups-for-restic' ) ] ),
+					] ) ) ),
+				] ),
+				more( listing ),
+			] );
+		}
+		const roles = plan.roles.entries.length ? el( 'div', {}, [
+			el( 'p', {}, [ undo ? __( 'Roles whose capabilities differ in the earlier database, for every account that has them:', 'backups-for-restic' ) : __( 'Roles whose capabilities differ in the backup, for every account that has them:', 'backups-for-restic' ) ] ),
+			el( 'table', { className: 'widefat striped bfr-database-roles' }, [
+				el( 'thead', {}, [ el( 'tr', {}, [ __( 'Role', 'backups-for-restic' ), __( 'Change', 'backups-for-restic' ), __( 'Capabilities afterwards only', 'backups-for-restic' ), __( 'Capabilities now only', 'backups-for-restic' ) ].map( ( label ) => el( 'th', { scope: 'col' }, [ label ] ) ) ) ] ),
+				el( 'tbody', {}, plan.roles.entries.map( ( role ) => el( 'tr', {}, [
+					el( 'td', {}, [ el( 'code', {}, [ role.role ] ) ] ),
+					el( 'td', {}, [ changes[ role.change ] || role.change ] ),
+					el( 'td', {}, [ names( role.added ) ] ),
+					el( 'td', {}, [ names( role.removed ) ] ),
+				] ) ) ),
+			] ),
+			more( plan.roles ),
+		] ) : null;
+		let added = null;
+		if ( plan.plugin.added ) {
+			added = el( 'p', {}, [ undo
+				? __( 'Backups for restic is not in the earlier database’s list of active plugins. The undo adds it there, so that the plugin stays active.', 'backups-for-restic' )
+				: __( 'Backups for restic is not in the backup’s list of active plugins. The restore adds it there, so that the plugin stays active and can finish, report and undo the restore.', 'backups-for-restic' ) ] );
+		}
+		return [
+			el( 'p', {}, [ __( 'The exchange keeps only this from the running site:', 'backups-for-restic' ) ] ),
+			texts( plan.kept, kept ),
+			el( 'p', {}, [ undo ? __( 'Everything else comes back with the earlier database, among it:', 'backups-for-restic' ) : __( 'Everything else comes from the backup, among it:', 'backups-for-restic' ) ] ),
+			texts( plan.restored, restored ),
+			added,
+			plugins( plan.plugins.deactivated, __( 'Active now and inactive afterwards. WordPress does not run their deactivation routines.', 'backups-for-restic' ) ),
+			plugins( plan.plugins.activated, __( 'Inactive now and active afterwards. WordPress does not run their activation routines and skips a plugin whose file is missing.', 'backups-for-restic' ) ),
+			roles,
+			plan.missing_capabilities.length ? detailTable( 'bfr-database-capabilities', [ [ __( 'Capabilities your account would lack afterwards', 'backups-for-restic' ), textList( plan.missing_capabilities ) ] ] ) : null,
+		];
+	}
+
+	/**
 	 * Displays the database generations and compatibility checks that the service reviewed.
 	 *
 	 * @param {string}  id   Restore or original database apply.
@@ -1733,7 +1825,7 @@
 					replace: __( 'Replace live table', 'backups-for-restic' ), create: __( 'Create live table', 'backups-for-restic' ),
 					keep: __( 'Keep live table', 'backups-for-restic' ), remove_from_live: __( 'Remove table from the live database', 'backups-for-restic' ),
 				};
-				const canApply = plan.applicable && plan.write_allowed && plan.preserve_admin && plan.preserve_address && ! plan.blockers.length;
+				const canApply = plan.applicable && plan.write_allowed && ! plan.blockers.length;
 				const confirmation = canApply ? reviewConfirmation( plan, {
 					submitLabel: undo ? __( 'Undo database restore', 'backups-for-restic' ) : __( 'Apply database restore', 'backups-for-restic' ),
 					path: base + ( undo ? '/undo' : '/database/apply' ), data: {}, busy,
@@ -1745,7 +1837,7 @@
 				const table = databaseTables( 'bfr-database-changes', [ __( 'Table', 'backups-for-restic' ), __( 'Action', 'backups-for-restic' ) ], plan.entries,
 					( entry ) => [ el( 'code', {}, [ entry.table ] ), actions[ entry.action ] || entry.action ] );
 				replace( body, [
-					plan.preserve_admin && plan.preserve_address ? el( 'p', {}, [ __( 'The exchange keeps this site address, your administrator account and its active sessions, and the backup configuration.', 'backups-for-restic' ) ] ) : null,
+					...databaseState( plan, undo ),
 					plan.entries.length ? table : null,
 					...plan.blockers.map( ( code ) => notice( 'warning', labels[ code ] || code ) ),
 					plan.missing_privileges.length ? detailTable( 'bfr-database-privileges', [ [ __( 'Missing database privileges', 'backups-for-restic' ), plan.missing_privileges.join( ', ' ) ] ] ) : null,

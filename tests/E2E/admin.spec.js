@@ -619,6 +619,11 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		expect( review.headers()[ 'cache-control' ] ).toContain( 'no-store' );
 		await expect( db.getByRole( 'status' ).filter( { hasText: 'Database preview ready.' } ) ).toBeVisible();
 		await expect( db ).toContainText( 'wp_posts' );
+		// What the exchange keeps from this site, and that roles, plugins and events come from the backup.
+		await expect( db ).toContainText( 'The exchange keeps only this from the running site:' );
+		await expect( db ).toContainText( 'Your user account with all of its user metadata, including your active sessions.' );
+		await expect( db ).toContainText( 'Everything else comes from the backup, among it:' );
+		await expect( db ).toContainText( 'The user roles and their capabilities, for every account.' );
 		const applyDatabase = db.getByRole( 'button', { name: 'Apply database restore', exact: true } );
 		if ( '1' === process.env.BFR_E2E_EXPECT_DATABASE_SWAP ) {
 			await expect( applyDatabase ).toBeVisible();
@@ -647,6 +652,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 			expect( await publicPost( request, target.url, 'bfr-migration-destination' ) ).toEqual( [] );
 			const undo = destination.locator( 'section.bfr-card' ).filter( { has: destination.getByRole( 'button', { name: 'Preview database undo' } ) } );
 			await undo.getByRole( 'button', { name: 'Preview database undo' } ).click();
+			await expect( undo ).toContainText( 'Everything else comes back with the earlier database, among it:' );
 			await exchange( undo, undo.getByRole( 'button', { name: 'Undo database restore', exact: true } ), 'Database restore undone.' );
 			expect( await publicPost( request, target.url, 'bfr-migration-destination' ) ).toEqual( [ 'bfr-migration-destination' ] );
 			expect( await publicPost( request, target.url, 'bfr-migration-source' ) ).toEqual( [] );

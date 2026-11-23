@@ -175,8 +175,13 @@ final class RestoreJobTest extends TestCase {
 		self::assertSame( 403, curl_getinfo( $handle, CURLINFO_RESPONSE_CODE ) );
 	}
 
+	/**
+	 * Rehearses the database of the backup.
+	 *
+	 * @return string ID of the restore job, whose staging the review reads.
+	 */
 	#[Depends( 'test_a_backup_for_the_restore' )]
-	public function test_a_database_preview_verifies_the_dump_and_removes_its_private_tables( string $snapshot ): void {
+	public function test_a_database_preview_verifies_the_dump_and_removes_its_private_tables( string $snapshot ): string {
 		TestSite::idle( 600 );
 		$db = MysqliConnection::connect( MysqliConnection::environment( 'BFR_DB_NAME', 'bfr_site' ) );
 		self::assertNotNull( $db );
@@ -201,6 +206,114 @@ final class RestoreJobTest extends TestCase {
 		self::assertContains( 'wp_options', array_column( $report['tables'], 'name' ) );
 		self::assertSame( [], $db->rows( "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_COMMENT LIKE 'backups-for-restic-restore/1:%'" ) );
 		self::assertSame( $before, $db->rows( 'SELECT ID, post_title FROM wp_posts ORDER BY ID' ) );
+		// The report holds the backup's role map and active plugins for the review, as stored.
+		$roles = TestSite::php( 'echo serialize( get_option( "wp_user_roles" ) );' );
+		self::assertSame( TestSite::last_line( $roles ), base64_decode( (string) $report['wordpress_state']['user_roles'], true ) );
+		self::assertContains( 'backups-for-restic/backups-for-restic.php', unserialize( (string) base64_decode( (string) $report['wordpress_state']['active_plugins'], true ) ) );
+		return (string) $started['job']['id'];
+	}
+
+	/**
+	 * The review of the rehearsed database says what the exchange keeps from the site and how
+	 * the backup differs from it, here as in the finding: a capability added to the subscriber
+	 * role and a plugin activated after the backup. Nothing is applied.
+	 *
+	 * @param string $restore Restore job with the rehearsal.
+	 */
+	#[Depends( 'test_a_database_preview_verifies_the_dump_and_removes_its_private_tables' )]
+	public function test_the_database_review_shows_the_roles_and_plugins_that_the_backup_brings_back( string $restore ): void {
+		$directory = TestSite::root() . '/wp-content/plugins/bfr-activated-later';
+		$later     = 'bfr-activated-later/bfr-activated-later.php';
+		mkdir( $directory );
+		file_put_contents( $directory . '/bfr-activated-later.php', "<?php\n/**\n * Plugin Name: Activated after the backup\n */\n" );
+		$change = '
+			require_once ABSPATH . "wp-admin/includes/plugin.php";
+			if ( "1" === $arguments[1] ) {
+				$activated = activate_plugin( $arguments[0] );
+				if ( is_wp_error( $activated ) ) {
+					fwrite( STDERR, $activated->get_error_message() );
+					exit( 1 );
+				}
+				get_role( "subscriber" )->add_cap( "manage_options" );
+				get_role( "subscriber" )->add_cap( "edit_users" );
+			} else {
+				deactivate_plugins( $arguments[0], true );
+				get_role( "subscriber" )->remove_cap( "manage_options" );
+				get_role( "subscriber" )->remove_cap( "edit_users" );
+			}
+		';
+		try {
+			TestSite::php( $change, [ $later, '1' ] );
+			[ $status, $review, $raw ] = TestSite::api( 'POST', '/restores/' . $restore . '/database/plan' );
+			self::assertSame( 200, $status, $raw );
+			self::assertArrayNotHasKey( 'preserve_admin', $review );
+			self::assertSame( [ 'site_address', 'database_version', 'cron_lock', 'plugin_data', 'administrator' ], $review['kept'] );
+			self::assertSame( [ 'roles', 'active_plugins', 'scheduled_events' ], $review['restored'] );
+			self::assertSame(
+				[
+					'entry' => 'backups-for-restic/backups-for-restic.php',
+					'added' => false,
+				],
+				$review['plugin']
+			);
+			self::assertContains(
+				[
+					'plugin' => $later,
+					'file'   => true,
+				],
+				$review['plugins']['deactivated']['entries']
+			);
+			$subscriber = array_values( array_filter( $review['roles']['entries'], static fn ( array $role ): bool => 'subscriber' === $role['role'] ) );
+			self::assertCount( 1, $subscriber, $raw );
+			self::assertSame( 'changed', $subscriber[0]['change'] );
+			self::assertSame( [ 'edit_users', 'manage_options' ], $subscriber[0]['removed']['entries'] );
+			self::assertSame( [], $review['missing_capabilities'] );
+			self::assertNotContains( 'database_admin_capabilities', $review['blockers'] );
+			self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] );
+		} finally {
+			TestSite::php( $change, [ $later, '0' ] );
+			unlink( $directory . '/bfr-activated-later.php' );
+			rmdir( $directory );
+		}
+	}
+
+	/**
+	 * After an exchange the generation that is live keeps its own scheduled events. WordPress
+	 * reads them from the database again, and the heartbeat is scheduled if they lack it, as the
+	 * events of a backup made before this plugin was installed do. The same holds for roles.
+	 */
+	public function test_after_an_exchange_wordpress_reads_the_live_events_and_roles_and_schedules_the_heartbeat(): void {
+		$printed = TestSite::php(
+			'
+			global $wpdb;
+			$read   = static fn ( string $name ) => $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", $name ) );
+			$write  = static fn ( string $name, string $value ) => $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value=%s WHERE option_name=%s", $value, $name ) );
+			$hook   = \BackupsForRestic\WordPress\Cron::HEARTBEAT;
+			$events = (string) $read( "cron" );
+			$roles  = (string) $read( $wpdb->prefix . "user_roles" );
+			$before = false !== wp_next_scheduled( $hook ) && wp_roles()->is_role( "administrator" );
+			// RENAME TABLE replaces the tables under WordPress, whose cache keeps the old values:
+			// the events of a backup without this plugin, and roles with one more role.
+			$write( "cron", serialize( [ time() + 3600 => [ "bfr_backup_event" => [ md5( serialize( [] ) ) => [ "schedule" => false, "args" => [] ] ] ], "version" => 2 ] ) );
+			$write( $wpdb->prefix . "user_roles", serialize( get_option( $wpdb->prefix . "user_roles" ) + [ "bfr_restored" => [ "name" => "Restored", "capabilities" => [ "read" => true ] ] ] ) );
+			$cached = false !== wp_next_scheduled( $hook ) && ! wp_roles()->is_role( "bfr_restored" );
+			\BackupsForRestic\WordPress\Container::after_exchange();
+			$hooks = [];
+			foreach ( (array) maybe_unserialize( (string) $read( "cron" ) ) as $at ) {
+				$hooks = array_merge( $hooks, is_array( $at ) ? array_keys( $at ) : [] );
+			}
+			$after = [ wp_roles()->is_role( "bfr_restored" ), false !== wp_next_scheduled( $hook ) ];
+			$write( "cron", $events );
+			$write( $wpdb->prefix . "user_roles", $roles );
+			wp_cache_flush();
+			echo json_encode( [ "before" => $before, "cached" => $cached, "after" => $after, "stored" => $hooks ] );
+			'
+		);
+		$result  = json_decode( TestSite::last_line( $printed ), true, flags: JSON_THROW_ON_ERROR );
+		self::assertTrue( $result['before'], $printed );
+		self::assertTrue( $result['cached'], 'Until the refresh, the request still has the replaced values.' );
+		self::assertSame( [ true, true ], $result['after'] );
+		self::assertEqualsCanonicalizing( [ 'bfr_backup_event', 'backups_for_restic_heartbeat' ], $result['stored'] );
 	}
 
 	#[Depends( 'test_a_backup_for_the_restore' )]
