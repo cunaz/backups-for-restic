@@ -244,6 +244,24 @@ final class DiskFilePlanTest extends TestCase {
 		}
 	}
 
+	public function test_a_flush_of_records_on_two_pages_keeps_the_version_that_the_document_counts(): void {
+		$kept = new DiskFilePlan( $this->directory, true );
+		for ( $number = 0; $number < 99; ++$number ) {
+			$kept->put( 'rows', $number, self::row( $number ) );
+			$kept->flush();
+		}
+		// Two records in one flush, the second on the next page, while the document counts 99.
+		$kept->put( 'rows', 99, self::row( 99 ) );
+		$kept->put( 'rows', 100, self::row( 100 ) );
+		$kept->flush();
+		self::assertFileExists( $this->directory . '/rows-0.99' );
+		foreach ( [ 99, 101 ] as $count ) {
+			$sealed = new DiskFilePlan( $this->directory, true );
+			self::assertSame( $count, $sealed->open( ( new DiskFilePlan( $this->directory, true ) )->seal( 'apply', 'restore', true, false, [ 'rows' => $count ], 0, 0, null, [ 'keep' => $count ] ) )['entries'] );
+			self::assertSame( self::row( $count - 1 ), $sealed->row( $count - 1 ) );
+		}
+	}
+
 	public function test_a_counted_version_that_does_not_hold_its_records_is_refused(): void {
 		$kept = new DiskFilePlan( $this->directory, true );
 		$kept->put( 'rows', 0, self::row( 0 ) );

@@ -78,11 +78,12 @@ final class DiskFilePlan {
 	private array $pages = [];
 
 	/**
-	 * Records on the counted version of each modified page of a durable plan, by file name.
+	 * The records of each stream that the caller's document counts, which a durable plan
+	 * takes from the first record put after a flush.
 	 *
 	 * @var array<string,int>
 	 */
-	private array $bases = [];
+	private array $counted = [];
 
 	/**
 	 * Verified sealed manifest.
@@ -122,6 +123,9 @@ final class DiskFilePlan {
 		self::require_stream( $stream, $index );
 		$file = $stream . '-' . intdiv( $index, self::PAGE );
 		$slot = $index % self::PAGE;
+		if ( $this->durable ) {
+			$this->counted[ $stream ] ??= $index;
+		}
 		if ( ! isset( $this->dirty[ $file ] ) ) {
 			if ( count( $this->dirty ) >= 6 ) {
 				$this->flush_pages();
@@ -150,8 +154,7 @@ final class DiskFilePlan {
 		if ( ! $this->durable ) {
 			return is_file( $this->directory . '/' . $file ) ? self::decode_page( self::read( $this->directory . '/' . $file, self::PAGE_BYTES ) ) : [];
 		}
-		$this->bases[ $file ] = $slot;
-		$version              = $this->directory . '/' . $file . '.' . $slot;
+		$version = $this->directory . '/' . $file . '.' . $slot;
 		if ( 0 === $slot || ! is_file( $version ) ) {
 			return [];
 		}
@@ -251,6 +254,7 @@ final class DiskFilePlan {
 	public function flush(): void {
 		$this->flush_pages();
 		$this->flush_buckets();
+		$this->counted = [];
 	}
 
 	/**
@@ -268,7 +272,6 @@ final class DiskFilePlan {
 			[ $stream, $page_number ] = explode( '-', $file, 2 );
 			if ( $this->durable ) {
 				Files::write_durable( $this->directory . '/' . $file . '.' . count( $page ), $body, $this->observer );
-				$this->remove_obsolete( $stream, (int) $page_number, $this->bases[ $file ] ?? 0 );
 				continue;
 			}
 			Files::write_atomic( $this->directory . '/' . $file, $body );
@@ -286,25 +289,27 @@ final class DiskFilePlan {
 				fclose( $handle );
 			}
 		}
+		foreach ( $this->counted as $stream => $count ) {
+			$this->remove_obsolete( $stream, $count );
+		}
 		$this->dirty = [];
-		$this->bases = [];
 	}
 
 	/**
-	 * Removes the version of a durable plan's page that the counted one replaced: the one
-	 * with a record less on the same page, or the last but one of the page before when the
-	 * count begins a page. Versions above the counted one may be written again; one that a
-	 * stop leaves behind is never read.
+	 * Removes the version that the counted one replaced in a durable plan's stream: the one
+	 * with a record less on the page of the last counted record, which is the page before
+	 * when the count fills a page. A version above the counted one may be written again;
+	 * one that a stop or a flush of several records leaves behind is never read.
 	 *
 	 * @param string $stream Stream name.
-	 * @param int    $page Page that was written.
-	 * @param int    $base Records on its counted version.
+	 * @param int    $count Records that the caller's document counts.
 	 */
-	private function remove_obsolete( string $stream, int $page, int $base ): void {
-		if ( $base >= 2 ) {
-			$file = $this->directory . '/' . $stream . '-' . $page . '.' . ( $base - 1 );
-		} elseif ( 0 === $base && $page > 0 ) {
-			$file = $this->directory . '/' . $stream . '-' . ( $page - 1 ) . '.' . ( self::PAGE - 1 );
+	private function remove_obsolete( string $stream, int $count ): void {
+		$slot = $count % self::PAGE;
+		if ( $slot >= 2 ) {
+			$file = $this->directory . '/' . $stream . '-' . intdiv( $count, self::PAGE ) . '.' . ( $slot - 1 );
+		} elseif ( 0 === $slot && $count >= self::PAGE ) {
+			$file = $this->directory . '/' . $stream . '-' . ( intdiv( $count, self::PAGE ) - 1 ) . '.' . ( self::PAGE - 1 );
 		} else {
 			return;
 		}
