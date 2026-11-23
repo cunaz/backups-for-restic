@@ -28,9 +28,18 @@ runs:
         if [ "$EVENT_NAME" = 'pull_request' ]; then
           if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null || ! git diff --name-only --no-renames -z 'HEAD^1' HEAD > "$RUNNER_TEMP/changed-files"; then
             echo 'The files of the pull request could not be listed: running in full.'
-          elif ! tr '\0' '\n' < "$RUNNER_TEMP/changed-files" | grep -Eq "$WATCHED"; then
-            run=false
-            echo "::notice::Mutation testing skipped: this pull request changes none of the files the run depends on ($LABEL). A push to main always runs it."
+          else
+            # grep exits with 1 when no file matches and with 2 on an error, such as an invalid
+            # pattern; only "no match" may skip the run. -z reads the NUL-separated list without
+            # a pipe, whose first command could die of SIGPIPE under pipefail after a match.
+            status=0
+            grep -Eqz "$WATCHED" "$RUNNER_TEMP/changed-files" || status=$?
+            if [ "$status" -eq 1 ]; then
+              run=false
+              echo "::notice::Mutation testing skipped: this pull request changes none of the files the run depends on ($LABEL). A push to main always runs it."
+            elif [ "$status" -ne 0 ]; then
+              echo "::warning::The files of the pull request could not be matched against the watched paths (grep exited with $status): running in full."
+            fi
           fi
         fi
         echo "run=$run" >> "$GITHUB_OUTPUT"
