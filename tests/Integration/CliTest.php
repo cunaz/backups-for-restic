@@ -519,7 +519,7 @@ final class CliTest extends TestCase {
 	}
 
 	public function test_undo_reports_what_an_undo_kept_also_when_it_stopped(): void {
-		$undos  = [ '20261121T110000Z-0b0c01', '20261121T110000Z-0b0c02', '20261121T110000Z-0b0c03' ];
+		$undos  = [ '20261121T110000Z-0b0c01', '20261121T110000Z-0b0c02', '20261121T110000Z-0b0c03', '20261121T110000Z-0b0c04' ];
 		$kept   = [ [ TestSite::root() . '/wp-content/uploads/bfr-kept.txt', 'changed_since_apply' ] ];
 		$result = [
 			'restore'              => '20261120T000000Z-0a0b02',
@@ -559,6 +559,12 @@ final class CliTest extends TestCase {
 			self::assertSame( 1, $status, $output );
 			self::assertStringContainsString( '"reason":"changed_since_apply"', $output );
 			self::assertStringContainsString( 'Error: The site no longer allows these file changes, or the administrator who confirmed them may no longer make them. Before it stopped, it did this: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
+			// An undo that could not seal the list of what it kept says so, and still what it did.
+			TestSite::ended_undo( $undos[3], 'succeeded', $result, [] );
+			[ $status, $output ] = $report( $undos[3] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( "Warning: The list of the entries that this undo kept is not available; the job's log says why.", $output );
+			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
 		} finally {
 			foreach ( $undos as $undo ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $undo );

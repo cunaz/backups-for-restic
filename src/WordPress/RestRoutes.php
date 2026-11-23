@@ -694,8 +694,8 @@ final class RestRoutes {
 		}
 		try {
 			return $this->respond( $this->container->file_changes()->kept_page( Decoded::string( $request->get_url_params()['id'] ?? null ), (int) $offset ) );
-		} catch ( JobConflict ) {
-			return $this->error( 'not_found', 404 );
+		} catch ( JobConflict $conflict ) {
+			return 'kept_list_unavailable' === ( $conflict->context()['code'] ?? null ) ? $this->error( 'kept_list_unavailable', 409 ) : $this->error( 'not_found', 404 );
 		} catch ( InvalidArgument ) {
 			return $this->error( 'invalid_plan_page', 400 );
 		}
@@ -1686,6 +1686,10 @@ final class RestRoutes {
 			'not_found'                     => [
 				'message' => __( 'The job does not exist.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'kept_list_unavailable'         => [
+				'message' => __( 'The list of the entries that this undo kept is not available.', 'backups-for-restic' ),
+				'hint'    => __( 'The undo recorded what it did, but the list of its kept entries could not be sealed; the job\'s log says why. A new undo preview of the apply names every entry with its reason.', 'backups-for-restic' ),
 			],
 			'not_editable'                  => [
 				'message' => __( 'This setting cannot be changed here.', 'backups-for-restic' ),

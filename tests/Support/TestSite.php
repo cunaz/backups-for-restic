@@ -545,7 +545,8 @@ final class TestSite {
 	/**
 	 * Writes the document of a file undo that has ended, with its sealed list of kept entries,
 	 * as the worker leaves them. Its apply and restore need not exist: the list is read from
-	 * the undo alone.
+	 * the undo alone. No kept entries with a result that counts some is an undo whose list could
+	 * not be sealed.
 	 *
 	 * @param string                    $id     Job ID.
 	 * @param string                    $state  succeeded, failed or cancelled.
@@ -566,11 +567,13 @@ final class TestSite {
 			if ( [] !== $spec["kept"] ) {
 				$directory = $jobs->directory( $undo ) . "/kept";
 				BackupsForRestic\Jobs\Apply\ApplyJournal::directory( $directory );
-				$list = new BackupsForRestic\Restore\DiskFilePlan( $directory, true );
-				foreach ( $spec["kept"] as $index => [ $path, $reason ] ) {
-					$list->put( "rows", $index, BackupsForRestic\Restore\ApplyManifest::row( BackupsForRestic\Support\Bytes::base64url_encode( $path ), $path, "keep", $reason ) );
+				$list   = new BackupsForRestic\Restore\KeptList( $directory );
+				$digest = null;
+				foreach ( $spec["kept"] as $count => [ $path, $reason ] ) {
+					$digest = $list->append( $count, $digest, BackupsForRestic\Restore\ApplyManifest::row( BackupsForRestic\Support\Bytes::base64url_encode( $path ), $path, "keep", $reason ) );
 				}
-				$undo->data["kept_digest"] = $list->seal( $apply, $undo->data["restore"], true, false, [ "rows" => count( $spec["kept"] ) ], 0, 0, null, [ "keep" => count( $spec["kept"] ) ] );
+				$undo->data["kept_page"]   = $digest;
+				$undo->data["kept_digest"] = $list->seal( $apply, $undo->data["restore"], count( $spec["kept"] ), $digest );
 			}
 			$undo->state       = BackupsForRestic\Jobs\JobState::from( $arguments[1] );
 			$undo->finished_at = time();

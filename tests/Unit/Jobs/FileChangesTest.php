@@ -831,12 +831,17 @@ final class FileChangesTest extends TestCase {
 			'kept'                 => $kept,
 			'changed_after_review' => 0,
 		];
-		$rewind = function ( int $done, array $outcomes ) use ( $saved ): void {
+		$rewind = function ( int $done, array $outcomes, ?string $page = null ) use ( $saved ): void {
 			$document = $saved();
-			// The step and the cursor as the document last on disk had them.
+			// The step, the cursor and the counts, with the kept page that the counts name, as
+			// the document last on disk had them.
 			$document->step                = 'undoing';
 			$document->progress['done']    = $done;
 			$document->data['undo_counts'] = $outcomes;
+			unset( $document->data['kept_page'] );
+			if ( null !== $page ) {
+				$document->data['kept_page'] = $page;
+			}
 			$this->jobs->save( $document );
 		};
 		// A worker killed after the record that completes the directory, before the document:
@@ -865,7 +870,7 @@ final class FileChangesTest extends TestCase {
 		$this->runner->tick( 0.0 ); // The edited file again, at the same place in the list.
 		self::assertSame( $counts( 1, 1, 1 ), $saved()->data['undo_counts'] );
 		// And one killed after the document counted the last entry, before the next step.
-		$rewind( 3, $counts( 1, 1, 1 ) );
+		$rewind( 3, $counts( 1, 1, 1 ), $saved()->data['kept_page'] );
 		$done = $this->run_job( $undo );
 		self::assertSame(
 			[
@@ -1296,6 +1301,72 @@ final class FileChangesTest extends TestCase {
 		self::assertGreaterThan( 20, $retried );
 	}
 
+	public function test_a_stopped_undo_lists_the_entries_its_document_counted_across_a_page_boundary(): void {
+		// More replaced files than a page of the list holds, each edited between the review and
+		// the worker: the undo keeps them all, and its list gets the slot of its first page.
+		$replaced = [];
+		foreach ( range( 1, DiskFilePlan::PAGE + 2 ) as $number ) {
+			$path = sprintf( '%s/replaced-%03d', $this->live, $number );
+			file_put_contents( $path, 'original' );
+			file_put_contents( $this->files . $path, 'replacement' );
+			$replaced[] = $path;
+		}
+		$this->write_report( $this->live . '/skipped-link' );
+		$job  = $this->run_job( $this->start() );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		foreach ( $replaced as $path ) {
+			file_put_contents( $path, 'edited after the review' );
+		}
+		$directory        = $this->jobs->directory( $undo );
+		$stops            = [];
+		$this->job_writes = function ( string $operation, string $path ) use ( &$stops, $directory ): void {
+			$stops[] = [ $operation . ' ' . basename( $path ), $this->snapshot( $directory ) ];
+		};
+		$kept             = $this->kept( $this->run_job( $undo ) );
+		$this->job_writes = null;
+		self::assertCount( DiskFilePlan::PAGE + 2, $kept );
+		self::assertContains( 'rename rows.idx', array_column( $stops, 0 ) );
+		$manifest = json_decode( (string) file_get_contents( $this->jobs->directory( $job ) . '/undo/manifest.json' ), true, flags: JSON_THROW_ON_ERROR );
+		$checked  = 0;
+		$retried  = 0;
+		foreach ( $stops as [ $stop, $snapshot ] ) {
+			// Around the end of the first page: the stops while the document counts 98 to 101.
+			$counted = json_decode( (string) file_get_contents( $snapshot . '/job.json' ), true, flags: JSON_THROW_ON_ERROR )['data']['undo_counts']['kept'] ?? 0;
+			if ( $counted < DiskFilePlan::PAGE - 2 || $counted > DiskFilePlan::PAGE + 1 ) {
+				continue;
+			}
+			$document = $this->ended_after( $undo, $snapshot, $stop, $kept );
+			++$checked;
+			$done = $document->progress['done'] ?? 0;
+			if ( 'undoing' !== $document->step || $document->state->is_terminal() || $done >= count( $manifest ) ) {
+				continue;
+			}
+			$path = Bytes::base64url_decode( $manifest[ count( $manifest ) - 1 - $done ]['destination'] );
+			if ( ! in_array( $path, $replaced, true ) ) {
+				continue;
+			}
+			// The worker comes back after the file at its cursor was deleted, keeps that entry for
+			// another reason, and is stopped again at any write.
+			$this->stopped( $undo, $snapshot );
+			if ( is_file( $path ) ) {
+				unlink( $path );
+			}
+			$again            = [];
+			$this->job_writes = function ( string $operation, string $written ) use ( &$again, $directory ): void {
+				$again[] = [ $operation . ' ' . basename( $written ), $this->snapshot( $directory ) ];
+			};
+			$this->runner->tick( 0.0 );
+			$this->job_writes = null;
+			$counts           = array_slice( $kept, 0, $document->data['undo_counts']['kept'] ?? 0, true ) + [ $path => 'deleted_since_apply' ];
+			foreach ( $again as [ $second, $retry ] ) {
+				$this->ended_after( $undo, $retry, $stop . ', then ' . $second, $counts );
+				++$retried;
+			}
+		}
+		self::assertGreaterThan( 20, $checked );
+		self::assertGreaterThan( 100, $retried );
+	}
+
 	/**
 	 * Puts back what a stop left in an undo's directory, lets the undo end, cancelled unless
 	 * only its recording was left, and compares its list of kept entries with the entries
@@ -1371,6 +1442,69 @@ final class FileChangesTest extends TestCase {
 			} else {
 				link( $item->getPathname(), $target );
 			}
+		}
+	}
+
+	/**
+	 * Whether an undo whose list cannot be sealed finishes or is cancelled.
+	 *
+	 * @return array<string, array{0: bool}>
+	 */
+	public static function finished_and_cancelled(): array {
+		return [
+			'finished'  => [ true ],
+			'cancelled' => [ false ],
+		];
+	}
+
+	#[DataProvider( 'finished_and_cancelled' )]
+	public function test_an_undo_whose_kept_list_cannot_be_sealed_records_what_it_did_without_the_list( bool $finished ): void {
+		$job = $this->run_job( $this->start() );
+		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The edited file is kept.
+		$this->runner->tick( 0.0 ); // And the folder that holds it.
+		if ( $finished ) {
+			$this->runner->tick( 0.0 ); // The replaced file is restored; recording is next.
+		}
+		$document = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		self::assertSame( [ $finished ? 'recording' : 'undoing', 2 ], [ $document->step, $document->data['undo_counts']['kept'] ] );
+		// The counted page is written again before the seal, with valid entries, as many as before.
+		$page              = $this->jobs->directory( $undo ) . '/kept/rows-0.2';
+		$rows              = json_decode( (string) file_get_contents( $page ), true, flags: JSON_THROW_ON_ERROR );
+		$rows[0]['reason'] = 'protected';
+		file_put_contents( $page, (string) json_encode( $rows, JSON_UNESCAPED_SLASHES ) );
+		if ( ! $finished ) {
+			$this->runner->cancel( $undo->id );
+		}
+		$ended = $this->run_job( $undo, $finished ? JobState::Succeeded : JobState::Cancelled );
+		// What the undo did is recorded, in its result and in its apply, without the list.
+		self::assertSame(
+			[
+				'restored'             => $finished ? 1 : 0,
+				'removed'              => 0,
+				'unchanged'            => 0,
+				'kept'                 => 2,
+				'changed_after_review' => 0,
+				'apply_state'          => $finished ? 'partly_undone' : 'applied',
+			],
+			self::outcomes( $ended )
+		);
+		self::assertArrayNotHasKey( 'kept_digest', $ended->data );
+		$apply = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
+		self::assertSame( $finished ? [ 'partly_undone', 2 ] : [ null, null ], [ $apply->result['undo_state'] ?? null, $apply->result['undo_kept'] ?? null ] );
+		$warnings = array_values( array_filter( $this->jobs->log( $ended )->read(), static fn ( array $line ): bool => 'warning' === $line['level'] ) );
+		self::assertSame(
+			[ 'The list of kept entries cannot be sealed; the undo is recorded without it.', 'environment', 'A page of the kept entries changed after it was written.' ],
+			[ $warnings[0]['message'] ?? null, $warnings[0]['context']['code'] ?? null, $warnings[0]['context']['reason'] ?? null ]
+		);
+		// The list is said to be unavailable, not shown as an empty one.
+		try {
+			$this->changes->kept_page( $undo->id, 0 );
+			self::fail( 'A list that could not be sealed must not be read as empty.' );
+		} catch ( JobConflict $unavailable ) {
+			self::assertSame( 'kept_list_unavailable', $unavailable->context()['code'] ?? null );
 		}
 	}
 

@@ -732,13 +732,22 @@ final class CliCommand {
 	 *
 	 * @param Job $job Ended undo.
 	 * @return string Counts of what the undo did.
+	 * @throws JobConflict If the job is no ended undo.
 	 */
 	private function undo_counts( Job $job ): string {
 		$result = $job->result;
 		$counts = [];
 		$offset = 0;
 		do {
-			$page = $this->container->file_changes()->kept_page( $job->id, $offset );
+			try {
+				$page = $this->container->file_changes()->kept_page( $job->id, $offset );
+			} catch ( JobConflict $conflict ) {
+				if ( 'kept_list_unavailable' !== ( $conflict->context()['code'] ?? null ) ) {
+					throw $conflict;
+				}
+				\WP_CLI::warning( __( 'The list of the entries that this undo kept is not available; the job\'s log says why. A new undo preview of the apply names every entry with its reason.', 'backups-for-restic' ) );
+				break;
+			}
 			foreach ( $page['entries'] as $entry ) {
 				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
 				$counts[ $entry['reason'] ] = ( $counts[ $entry['reason'] ] ?? 0 ) + 1;

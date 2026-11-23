@@ -20,15 +20,10 @@ defined( 'ABSPATH' ) || exit;
  * the sealed summary, which authenticates every index, which authenticates each page.
  * A directory can therefore be found and checked without loading the entire plan.
  *
- * A durable plan holds records that a job document counts as they are written, such as the
- * entries an undo kept, and is sealed with the counts of that document, also after a stop.
- * At every moment the files on disk authenticate at least the records that the document
- * counts. Each flush writes a page as a new version, named by the number of records on it
- * (`rows-0.3`), and on disk before the caller saves the document that counts them. The caller
- * puts records at the counted position and beyond, so no write replaces a version that a
- * count names: a retry writes the uncounted version again, the next record a version with
- * one more, and only versions below the counted one are removed. The index of a durable plan
- * is computed when it is sealed, from the versions that the counts name (summary version 2).
+ * A plan writes its summary as version 1. It also reads the list of the entries that an undo
+ * kept, which KeptList writes as version 2: there each page is a version named by the number
+ * of records on it, and the summary's counts name the version that each page has. Reading a
+ * page checks it against its slot of the index, as for a plan of version 1.
  *
  * @phpstan-import-type Row from ApplyManifest
  * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,required_bytes:int|null,actions:array<string,int>|null,counts:array<string,int>,indexes:array<string,string>}
@@ -78,14 +73,6 @@ final class DiskFilePlan {
 	private array $pages = [];
 
 	/**
-	 * The records of each stream that the caller's document counts, which a durable plan
-	 * takes from the first record put after a flush.
-	 *
-	 * @var array<string,int>
-	 */
-	private array $counted = [];
-
-	/**
 	 * Verified sealed manifest.
 	 *
 	 * @var Header|null
@@ -95,15 +82,10 @@ final class DiskFilePlan {
 	/**
 	 * Opens an existing canonical private directory.
 	 *
-	 * @param string                                $directory Per-plan directory.
-	 * @param bool                                  $durable Whether every flush reaches the disk before it returns, for
-	 *                                                       records that a durable job document counts, such as the
-	 *                                                       entries an undo kept, in versioned pages.
-	 * @param (\Closure(string, string): void)|null $observer Optional observer of each synchronisation, rename and removal
-	 *                                                        of a durable plan, with the path, in order.
+	 * @param string $directory Per-plan directory.
 	 * @throws StorageFailed If the directory has become an alias.
 	 */
-	public function __construct( private readonly string $directory, private readonly bool $durable = false, private readonly ?\Closure $observer = null ) {
+	public function __construct( private readonly string $directory ) {
 		if ( realpath( $directory ) !== $directory || ! is_dir( $directory ) ) {
 			throw new StorageFailed( 'The private file plan directory is unavailable.' );
 		}
@@ -111,8 +93,7 @@ final class DiskFilePlan {
 
 	/**
 	 * Stores a record at its checkpointed ordinal. Replaying an interrupted batch
-	 * truncates any uncommitted tail of that page. A durable plan's first record after a
-	 * flush is put at the counted position, and its page starts from the counted version.
+	 * truncates any uncommitted tail of that page.
 	 *
 	 * @param string              $stream Internal stream name.
 	 * @param int                 $index Record ordinal.
@@ -122,16 +103,13 @@ final class DiskFilePlan {
 	public function put( string $stream, int $index, array $record ): void {
 		self::require_stream( $stream, $index );
 		$file = $stream . '-' . intdiv( $index, self::PAGE );
-		$slot = $index % self::PAGE;
-		if ( $this->durable ) {
-			$this->counted[ $stream ] ??= $index;
-		}
 		if ( ! isset( $this->dirty[ $file ] ) ) {
 			if ( count( $this->dirty ) >= 6 ) {
 				$this->flush_pages();
 			}
-			$this->dirty[ $file ] = $this->load_page( $file, $slot );
+			$this->dirty[ $file ] = is_file( $this->directory . '/' . $file ) ? self::decode_page( self::read( $this->directory . '/' . $file, self::PAGE_BYTES ) ) : [];
 		}
+		$slot = $index % self::PAGE;
 		if ( count( $this->dirty[ $file ] ) < $slot ) {
 			throw new StorageFailed( 'A paged file plan has a missing record.' );
 		}
@@ -139,30 +117,6 @@ final class DiskFilePlan {
 			$this->dirty[ $file ] = array_slice( $this->dirty[ $file ], 0, $slot );
 		}
 		$this->dirty[ $file ][] = $record;
-	}
-
-	/**
-	 * The records that a page starts from before a record is put on it: what the page file
-	 * holds, or for a durable plan the version with the records before the given slot.
-	 *
-	 * @param string $file Page name.
-	 * @param int    $slot Position of the record on the page.
-	 * @return list<array<string,mixed>> Records.
-	 * @throws StorageFailed If the page or its version is damaged.
-	 */
-	private function load_page( string $file, int $slot ): array {
-		if ( ! $this->durable ) {
-			return is_file( $this->directory . '/' . $file ) ? self::decode_page( self::read( $this->directory . '/' . $file, self::PAGE_BYTES ) ) : [];
-		}
-		$version = $this->directory . '/' . $file . '.' . $slot;
-		if ( 0 === $slot || ! is_file( $version ) ) {
-			return [];
-		}
-		$records = self::decode_page( self::read( $version, self::PAGE_BYTES ) );
-		if ( count( $records ) !== $slot ) {
-			throw new StorageFailed( 'A page version of a durable file plan does not hold the records that its name counts.' );
-		}
-		return $records;
 	}
 
 	/**
@@ -254,12 +208,10 @@ final class DiskFilePlan {
 	public function flush(): void {
 		$this->flush_pages();
 		$this->flush_buckets();
-		$this->counted = [];
 	}
 
 	/**
-	 * Writes modified pages: in place with their fixed-width authentication slots, or for a
-	 * durable plan as new versions.
+	 * Writes modified pages and their fixed-width authentication slots.
 	 *
 	 * @throws StorageFailed If a data page or its digest cannot be saved.
 	 */
@@ -269,54 +221,21 @@ final class DiskFilePlan {
 			if ( strlen( $body ) > self::PAGE_BYTES ) {
 				throw new StorageFailed( 'A private file plan page exceeds its storage limit.' );
 			}
-			[ $stream, $page_number ] = explode( '-', $file, 2 );
-			if ( $this->durable ) {
-				Files::write_durable( $this->directory . '/' . $file . '.' . count( $page ), $body, $this->observer );
-				continue;
-			}
 			Files::write_atomic( $this->directory . '/' . $file, $body );
-			$index  = $this->directory . '/' . $stream . '.idx';
-			$offset = (int) $page_number * 64;
-			$handle = fopen( $index, 'c+b' );
+			[ $stream, $page_number ] = explode( '-', $file, 2 );
+			$handle                   = fopen( $this->directory . '/' . $stream . '.idx', 'c+b' );
 			if ( false === $handle ) {
 				throw new StorageFailed( 'A private file plan index could not be opened.' );
 			}
 			try {
-				if ( 0 !== fseek( $handle, $offset ) || 64 !== fwrite( $handle, hash( 'sha256', $body ) ) || ! fflush( $handle ) ) {
+				if ( 0 !== fseek( $handle, (int) $page_number * 64 ) || 64 !== fwrite( $handle, hash( 'sha256', $body ) ) || ! fflush( $handle ) ) {
 					throw new StorageFailed( 'A private file plan index could not be written.' );
 				}
 			} finally {
 				fclose( $handle );
 			}
 		}
-		foreach ( $this->counted as $stream => $count ) {
-			$this->remove_obsolete( $stream, $count );
-		}
 		$this->dirty = [];
-	}
-
-	/**
-	 * Removes the version that the counted one replaced in a durable plan's stream: the one
-	 * with a record less on the page of the last counted record, which is the page before
-	 * when the count fills a page. A version above the counted one may be written again;
-	 * one that a stop or a flush of several records leaves behind is never read.
-	 *
-	 * @param string $stream Stream name.
-	 * @param int    $count Records that the caller's document counts.
-	 */
-	private function remove_obsolete( string $stream, int $count ): void {
-		$slot = $count % self::PAGE;
-		if ( $slot >= 2 ) {
-			$file = $this->directory . '/' . $stream . '-' . intdiv( $count, self::PAGE ) . '.' . ( $slot - 1 );
-		} elseif ( 0 === $slot && $count >= self::PAGE ) {
-			$file = $this->directory . '/' . $stream . '-' . ( intdiv( $count, self::PAGE ) - 1 ) . '.' . ( self::PAGE - 1 );
-		} else {
-			return;
-		}
-		clearstatcache( true, $file );
-		if ( is_file( $file ) && unlink( $file ) && null !== $this->observer ) {
-			( $this->observer )( 'unlink', $file );
-		}
 	}
 
 	/**
@@ -360,20 +279,14 @@ final class DiskFilePlan {
 			if ( 0 === $count ) {
 				continue;
 			}
-			self::require_stream( $name, $count - 1 );
-			if ( $this->durable ) {
-				$data = $this->counted_index( $name, $count );
-				Files::write_durable( $this->directory . '/' . $name . '.idx', $data, $this->observer );
-			} else {
-				$data = self::read( $this->directory . '/' . $name . '.idx', self::INDEX_BYTES );
-				if ( strlen( $data ) !== (int) ceil( $count / self::PAGE ) * 64 ) {
-					throw new StorageFailed( 'A private file plan index is incomplete.' );
-				}
+			$data = self::read( $this->directory . '/' . $name . '.idx', self::INDEX_BYTES );
+			if ( strlen( $data ) !== (int) ceil( $count / self::PAGE ) * 64 ) {
+				throw new StorageFailed( 'A private file plan index is incomplete.' );
 			}
 			$indexes[ $name ] = hash( 'sha256', $data );
 		}
 		$header = [
-			'version' => $this->durable ? 2 : 1,
+			'version' => 1,
 			'subject' => $subject,
 			'restore' => $restore,
 			'undo'    => $undo,
@@ -392,45 +305,8 @@ final class DiskFilePlan {
 			$header['actions'] = $actions;
 		}
 		$body = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
-		if ( $this->durable ) {
-			Files::write_durable( $this->directory . '/sealed.json', $body, $this->observer );
-		} else {
-			Files::write_atomic( $this->directory . '/sealed.json', $body );
-		}
+		Files::write_atomic( $this->directory . '/sealed.json', $body );
 		return hash( 'sha256', $body );
-	}
-
-	/**
-	 * The index of a durable plan's stream: the digests of the page versions that its count
-	 * names, each of which must hold the records that its name counts.
-	 *
-	 * @param string $stream Stream name.
-	 * @param int    $count Counted records.
-	 * @return string Packed digests.
-	 * @throws StorageFailed If a counted version is missing or damaged.
-	 */
-	private function counted_index( string $stream, int $count ): string {
-		$index = '';
-		for ( $page = 0; $page * self::PAGE < $count; ++$page ) {
-			$body = self::read( $this->directory . '/' . self::version( $stream, $page, $count ), self::PAGE_BYTES );
-			if ( count( self::decode_page( $body ) ) !== min( self::PAGE, $count - $page * self::PAGE ) ) {
-				throw new StorageFailed( 'A page version of a durable file plan does not hold the records that its name counts.' );
-			}
-			$index .= hash( 'sha256', $body );
-		}
-		return $index;
-	}
-
-	/**
-	 * The name of the page version that a count names in a durable plan.
-	 *
-	 * @param string $stream Stream name.
-	 * @param int    $page Page.
-	 * @param int    $count Counted records of the stream.
-	 * @return string File name.
-	 */
-	private static function version( string $stream, int $page, int $count ): string {
-		return $stream . '-' . $page . '.' . min( self::PAGE, $count - $page * self::PAGE );
 	}
 
 	/**
@@ -587,7 +463,7 @@ final class DiskFilePlan {
 			$this->indexes[ $stream ] = $text;
 		}
 		$page = intdiv( $index, self::PAGE );
-		$name = 2 === $header['version'] ? self::version( $stream, $page, $count ) : $stream . '-' . $page;
+		$name = 2 === $header['version'] ? self::page_version( $stream, $page, min( self::PAGE, $count - $page * self::PAGE ) ) : $stream . '-' . $page;
 		if ( ! isset( $this->pages[ $name ] ) ) {
 			$body = self::read( $this->directory . '/' . $name, self::PAGE_BYTES );
 			if ( ! hash_equals( substr( $this->indexes[ $stream ], $page * 64, 64 ), hash( 'sha256', $body ) ) ) {
@@ -599,6 +475,19 @@ final class DiskFilePlan {
 			$this->pages[ $name ] = self::decode_page( $body );
 		}
 		return $this->pages[ $name ][ $index % self::PAGE ] ?? throw new StorageFailed( 'A sealed file plan row is missing.' );
+	}
+
+	/**
+	 * The file of a page's version that holds the given number of records, in a list of summary
+	 * version 2.
+	 *
+	 * @param string $stream Stream name.
+	 * @param int    $page Page.
+	 * @param int    $records Records on the version.
+	 * @return string File name.
+	 */
+	public static function page_version( string $stream, int $page, int $records ): string {
+		return $stream . '-' . $page . '.' . $records;
 	}
 
 	/**

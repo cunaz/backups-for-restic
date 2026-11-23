@@ -339,7 +339,25 @@ final class AccessTest extends TestCase {
 			[ [ TestSite::root() . '/wp-content/uploads/bfr-kept.txt', 'protected' ] ]
 		);
 		TestSite::undoable_apply( $apply, [ [ TestSite::root() . '/bfr-mapped.txt', TestSite::root() . '/bfr-elsewhere.txt', 'create' ] ] );
+		// An undo that kept an entry and could not seal the list of it.
+		$unsealed = '20261121T120000Z-0c0d02';
+		TestSite::ended_undo(
+			$unsealed,
+			'succeeded',
+			[
+				'restored'             => 1,
+				'removed'              => 0,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			[]
+		);
 		try {
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $unsealed . '/kept-entries' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_kept_list_unavailable', $error['code'] ?? null, $raw );
 			[ $status, $page, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries' );
 			self::assertSame( 200, $status, $raw );
 			self::assertSame( [ 1, 0, null, $undo ], [ $page['total'], $page['offset'], $page['next_offset'], $page['plan_job'] ] );
@@ -360,7 +378,7 @@ final class AccessTest extends TestCase {
 				self::assertSame( 'backups_for_restic_not_found', $error['code'] ?? null, $raw );
 			}
 		} finally {
-			foreach ( [ $undo, $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+			foreach ( [ $undo, $unsealed, $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
 			}
 			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );

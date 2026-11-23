@@ -467,7 +467,9 @@ All notable changes are documented here. The format follows
   just before it changes it and keeps, rather than fails on, one that changed after the
   review. Its result counts the entries by outcome, only what the undo itself reverted,
   and lists the kept ones with their reasons, also in `wp backups-for-restic undo` and for
-  an undo that was cancelled or failed. A review that finds nothing left to revert records
+  an undo that was cancelled or failed; a list that cannot be sealed, for example because a
+  page of it changed on disk, is reported as unavailable while the counts are still
+  recorded. A review that finds nothing left to revert records
   the apply as undone. An undo that could only keep changed entries is refused with its own
   message, and so is an undo confirmed before this version, which is reviewed again
   (`undo_review_required`). An undo step now advances at least one entry when it starts

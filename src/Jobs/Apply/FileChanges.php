@@ -30,6 +30,7 @@ use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\FileSpace;
 use BackupsForRestic\Restore\FileVerification;
 use BackupsForRestic\Restore\FileWorkPending;
+use BackupsForRestic\Restore\KeptList;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Storage\Files;
 use BackupsForRestic\Support\Bytes;
@@ -400,9 +401,10 @@ final readonly class FileChanges implements StepProvider {
 	 * @param string $undo_job Undo job.
 	 * @param int    $offset First kept entry.
 	 * @return KeptPage Page.
-	 * @throws JobConflict If the job is not an undo that has ended.
+	 * @throws JobConflict If the job is not an undo that has ended, or kept entries whose list it
+	 *                     could not seal (`kept_list_unavailable`).
 	 * @throws InvalidArgument If the page is outside the list.
-	 * @throws StorageFailed If the sealed list does not belong to this undo.
+	 * @throws StorageFailed If the sealed list does not belong to this undo, or a page of it changed.
 	 */
 	public function kept_page( string $undo_job, int $offset ): array {
 		$job = $this->jobs->get( $undo_job );
@@ -410,10 +412,15 @@ final readonly class FileChanges implements StepProvider {
 			throw new JobConflict( 'Kept entries are listed only for an undo that has ended.' );
 		}
 		$digest = $job->data['kept_digest'] ?? null;
-		$total  = 0;
-		$disk   = null;
+		$kept   = $job->result['kept'] ?? 0;
+		if ( ! is_string( $digest ) && is_int( $kept ) && $kept > 0 ) {
+			// The undo recorded its counts, but could not seal the list (conclude()).
+			JobConflict::raise( 'The list of the entries that this undo kept is not available; its log says why.', [ 'code' => 'kept_list_unavailable' ] );
+		}
+		$total = 0;
+		$disk  = null;
 		if ( is_string( $digest ) ) {
-			$disk   = $this->kept( $job );
+			$disk   = new DiskFilePlan( $this->jobs->directory( $job ) . '/kept' );
 			$header = $disk->open( $digest );
 			$total  = $header['entries'];
 			$expect = [ ApplyJournal::field( $job, 'apply' ), ApplyJournal::field( $job, 'restore' ), true, false, 0, 0, [ 'keep' => $total ] ];
@@ -767,8 +774,8 @@ final readonly class FileChanges implements StepProvider {
 				// A revert, or an entry that had nothing left to revert, changed since the review.
 				$counts['changed_after_review'] += 'keep' !== $action || FileChange::settled( $reason ) ? 1 : 0;
 				$kept                          ??= $this->kept( $job, true );
-				$kept->put( 'rows', $counts['kept'] - 1, ApplyManifest::row( $row['path'], $path, 'keep', $outcome['reason'] ) );
-				$kept->flush();
+				// The document names the version of the last page that holds what it counts.
+				$job->data['kept_page'] = $kept->append( $counts['kept'] - 1, self::kept_named( $job ), ApplyManifest::row( $row['path'], $path, 'keep', $outcome['reason'] ) );
 			}
 			$job->data['undo_counts'] = $counts;
 			$job->progress['done']    = ++$done;
@@ -885,7 +892,10 @@ final readonly class FileChanges implements StepProvider {
 	 * when a finished undo kept no entry, partly undone with the number of kept entries when
 	 * it kept some, and partly undone without a number when it stopped after a revert. Only
 	 * a fully undone apply is marked reverted, which ends its undo window early; kept entries
-	 * keep their journal and saved copies for a later undo within the window.
+	 * keep their journal and saved copies for a later undo within the window. A list of kept
+	 * entries that cannot be sealed, for example because a counted page changed on disk, is
+	 * left out: the counts and the state of the apply are recorded without it, the log says
+	 * why, and kept_page() says that the list is unavailable.
 	 *
 	 * @param Job  $job Undo.
 	 * @param Job  $apply Its apply.
@@ -894,8 +904,22 @@ final readonly class FileChanges implements StepProvider {
 	private function conclude( Job $job, Job $apply, bool $finished ): void {
 		$counts  = self::counts( $job );
 		$changed = $counts['restored'] + $counts['removed'];
+		$restore = ApplyJournal::field( $apply, 'restore' );
 		if ( $counts['kept'] > 0 ) {
-			$job->data['kept_digest'] = $this->kept( $job )->seal( $apply->id, ApplyJournal::field( $apply, 'restore' ), true, false, [ 'rows' => $counts['kept'] ], 0, 0, null, [ 'keep' => $counts['kept'] ] );
+			try {
+				$job->data['kept_digest'] = $this->kept( $job )->seal( $apply->id, $restore, $counts['kept'], (string) self::kept_named( $job ) );
+			} catch ( PluginException $failure ) {
+				// A list that cannot be sealed does not keep the undo from recording what it did.
+				unset( $job->data['kept_digest'] );
+				$this->jobs->log( $job )->write(
+					'warning',
+					'The list of kept entries cannot be sealed; the undo is recorded without it.',
+					[
+						'code'   => JobError::from_throwable( $failure )->code,
+						'reason' => $failure->getMessage(),
+					]
+				);
+			}
 		}
 		$state = null;
 		if ( $finished ) {
@@ -1321,20 +1345,33 @@ final readonly class FileChanges implements StepProvider {
 	}
 
 	/**
-	 * The paged list of the entries that an undo kept, written durably in versioned pages:
-	 * the files on disk authenticate at least the entries that the undo's document counts,
-	 * so that the list is sealed with those counts after any stop (DiskFilePlan).
+	 * The paged list of the entries that an undo kept, which the undo writes entry by entry and
+	 * seals with what its job document counts (KeptList). The document stores the count and
+	 * the digest of the last page's counted version (`kept_page`).
 	 *
 	 * @param Job  $job Undo.
 	 * @param bool $create Create its directory.
-	 * @return DiskFilePlan Store.
+	 * @return KeptList List.
 	 */
-	private function kept( Job $job, bool $create = false ): DiskFilePlan {
+	private function kept( Job $job, bool $create = false ): KeptList {
 		$directory = $this->jobs->directory( $job ) . '/kept';
 		if ( $create ) {
 			ApplyJournal::directory( $directory );
 		}
-		return new DiskFilePlan( $directory, true, $this->jobs->observer() );
+		return new KeptList( $directory, $this->jobs->observer() );
+	}
+
+	/**
+	 * The digest of the counted version of the last page of the kept list, as the undo's job
+	 * document names it; null while the document counts no kept entry, and for an undo that
+	 * an earlier version began, which KeptList refuses to continue.
+	 *
+	 * @param Job $job Undo.
+	 * @return string|null Digest.
+	 */
+	private static function kept_named( Job $job ): ?string {
+		$digest = $job->data['kept_page'] ?? null;
+		return is_string( $digest ) ? $digest : null;
 	}
 
 	/**
