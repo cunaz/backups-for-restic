@@ -338,43 +338,83 @@ becomes live. The three reasons why they were copied are kept as follows.
   the exchange checks it again under the write barrier, where it already rechecks the
   administrator's identity. Nothing grants a capability or changes a role to make it pass.
   The review stores the capabilities it checked in the job, and the exchange checks those.
+  A record of the account's own capabilities that is missing, stored more than once, longer
+  than 64 KiB or not in the form WordPress writes is refused as such
+  (`database_admin_capabilities_unreadable`), not as missing capabilities; WordPress itself
+  uses the first of several records. Apply and undo reviews read the record the same way and
+  in the same order, so they answer the same for the same account.
 
 The role map, the list of active plugins and the account's own capabilities come from a
 backup or from tables that other code can write. `Database\Restore\SerializedValue` reads
 them without `unserialize()`: only arrays with integer or string keys, strings, integers,
-booleans and null, exactly as `serialize()` writes them, at most 65,536 elements, nested no
-deeper than the value needs, no data after the value. Objects, references, floats and
-anything else are refused, as are a role map larger than 512 KiB, a list of active plugins
-larger than 256 KiB, an account's capabilities larger than 64 KiB, and names that are empty,
-longer than 1,024 bytes, not UTF-8 or contain control characters. A role needs exactly a
-display name and a map of capabilities; a list of active plugins has integer keys and
-distinct paths. Refusals have their own codes: `database_roles_invalid` and
-`database_plugins_invalid`. The rehearsal report records the snapshot's role map and list of
-active plugins as stored (base64, `wordpress_state`); a rehearsal from before has no such
-record and its review is refused with `database_review_required`.
+booleans and null as `serialize()` writes them, nested no deeper than the value needs, no
+data after the value. A key written as a string of decimal digits becomes an integer key, as
+it does with `unserialize()`. Objects, references, floats and anything else are refused, as
+are names that are empty, longer than 1,024 bytes, not UTF-8 or contain control characters.
+A role needs exactly a display name and a map of capabilities; a list of active plugins has
+integer keys and distinct paths. Such values are refused with `database_roles_invalid` and
+`database_plugins_invalid`.
+
+The reads are bounded: a role map at 1 MiB, a list of active plugins at 256 KiB, an account's
+capabilities at 64 KiB. A longer value is not transferred from the database; its length is,
+and it is refused with a code that names the bound: `database_roles_too_large`,
+`database_plugins_too_large`, and for the account's record the code above. The role map's
+bound was 512 KiB at first. The checks under the write barrier grow with it: on MySQL 8.4.11
+a whole exchange took 70 to 73 ms with WordPress's own roles (3 KiB), 92 to 106 ms with a
+512 KiB role map and 118 to 123 ms with a 1 MiB one (52,824 capabilities in one role, three
+runs each); with shorter names, about 80,000 capabilities in 1 MiB, one run took 155 ms. That
+stays far below the three seconds that each statement under the barrier may wait for a lock,
+so the bound is 1 MiB, enough for role maps that `add_role()` and `add_cap()` wrote for sites
+with dozens of custom roles. The parser's element bound, 262,144, lies above anything that a
+value within these bounds can hold, so it never stands in for them. The rehearsal report
+records the snapshot's role map and list of active plugins as stored (base64,
+`wordpress_state`), or the length of one beyond its bound; its own bound is 3 MiB. A
+rehearsal from before has no such record and its review is refused with
+`database_review_required`.
+
+The running site's role map and list of active plugins are read for the comparison only: the
+exchange discards both, so their form protects nothing. If one of them cannot be read, the
+review does not refuse. It says so (`readable: false`), compares against nothing and lists
+every role, or every plugin, of the generation that becomes live, and the digest covers that.
+At first such a value refused the review with `database_roles_invalid` or
+`database_plugins_invalid`, so that whoever could write the option in a form WordPress reads
+but the reader refuses could switch off the restore of a clean backup (finding 1 of the
+review of pull request 59). The values of the generation that becomes live and the account's
+own record still have to be readable. For an undo the generation that is live now plays the
+part of the running site: its values are only compared, and those of the earlier generation
+have to be readable. A restore whose running site's role map or list cannot be read therefore
+cannot be undone through the plugin: the undo would bring that value back and cannot check
+it. The review of the restore says so; the earlier tables stay retained for the window
+(decision 6).
 
 The review answers what the exchange keeps (`kept`) and takes from the other generation
 (`restored`), whether it adds this plugin's path (`plugin`), the plugins active now and not
 afterwards and the other way round, each with whether WordPress would find its file on the
-site (`plugins`), the roles whose granted capabilities differ, with the capabilities granted
-only afterwards and only now (`roles`), and the capabilities the administrator would lack
-(`missing_capabilities`). Each list shows at most 50 entries and counts the rest. Every
-name is untrusted text: the page shows it as text. The digest (now version 2) covers all of
-it and the capabilities checked, so a review from before or with other facts cannot be
-confirmed (`database_exchange_changed`). The authority that the exchange compares under its
-write barrier (now versioned) covers the live list of active plugins as well as the live role
-map: a plugin activated between the review and the exchange stops the job with
-`database_exchange_changed`, and so does a job confirmed before this change, which has no
-checked capabilities stored. Whether a plugin's file exists is read at the review only.
+site (`plugins`), the roles that differ (`roles`) and the capabilities the administrator would
+lack (`missing_capabilities`). A role differs if only one generation has it, or if it grants
+or denies other capabilities: for each role the review lists the capabilities granted only
+afterwards and only now, and the denials stored only afterwards and only now. A stored denial
+matters for an account with several roles, where a later role's `false` takes away what an
+earlier one grants. Each list shows at most 50 entries and counts the rest. Every name is
+untrusted text: the page shows it as text. The digest (now version 2) covers all of it and the
+capabilities checked, so a review from before or with other facts cannot be confirmed
+(`database_exchange_changed`). The authority that the exchange compares under its write barrier
+(now versioned) covers the live list of active plugins as well as the live role map, each by
+its fingerprint or its absence: a plugin activated between the review and the exchange stops
+the job with `database_exchange_changed`, and so does a job confirmed before this change, which
+has no checked capabilities stored. Whether a plugin's file exists is read at the review only.
 
 An undo uses the same protocol in the other direction. The earlier generation comes back
 with its own roles, active plugins and scheduled events, as they were when the apply took it
 out of service; this plugin's path is appended to its list if it lacks it, for example after
 the plugin moved to another directory; the administrator's own capabilities, kept from the
 running site, must still give the five capabilities under its roles. The undo's review shows
-the same facts with the earlier generation in place of the backup.
+the same facts with the earlier generation in place of the backup. Its refusals advise what
+an undo allows: a role on the running site that the earlier generation also has, or a
+database administrator's recovery of the retained tables before the window ends; not the
+staged SQL files, which hold the backup that is live already.
 
-Two consequences are accepted and shown in the review rather than prevented:
+Three consequences are accepted and shown in the review rather than prevented:
 
 - A plugin that is active in the backup but whose file is missing on the site is not loaded:
   `wp_get_active_and_valid_plugins()` skips it, and the Plugins screen removes it from the
@@ -385,12 +425,20 @@ Two consequences are accepted and shown in the review rather than prevented:
   Its scheduled events leave with the running site's cron array; what it keeps outside the
   restored tables stays. Likewise, a plugin that the backup activates runs without its
   activation routine, with the options and tables it had when the backup was made.
+- A plugin that the backup activates can change what an account may do afterwards, which the
+  review cannot compute from the restored data: it can filter capabilities, filter
+  `backups_for_restic_capability`, which names the capability that this plugin's pages and
+  routes require, or filter `file_mod_allowed`, which takes `update_core` away. The check of
+  the administrator uses the capability that the running site requires, and the roles and
+  record as stored. The review's note on plugins that start says this, and that deactivating
+  such a plugin on the Plugins screen undoes its effect. WP-CLI offers no database undo.
 
 What remains: a WP-Cron request that runs the exchange goes on with the events that were due
 when it started and come after this plugin's tick in its list. WordPress reschedules each of
 them in the cron array that is now live before it runs it, so such an event of the running
 site can reach the restored array. In a request that the maintenance gate admitted, only this
-plugin's events are due.
+plugin's events are due. A backup whose list names another copy of this plugin in another
+directory starts that copy next to this one; the review lists it as a plugin that starts.
 
 ## Evidence
 
@@ -407,7 +455,14 @@ plugin lists that WordPress does not write, a fact changed after the review, and
 rehearsal from before the amendment. Unit tests check the reader against `unserialize()`
 with mutated input, the role evaluation against WordPress's order rules, and the review's
 bounds and digest; a real WordPress shows the review of a rehearsal and the heartbeat after a
-cron array without it. The job tests
+cron array without it. After the review of pull request 59 they also cover: a running site's
+role map or list of active plugins that the reader refuses or that is absent, which no longer
+blocks the restore, in both directions, with the undo of such a restore refused; a record of
+the administrator's capabilities stored twice or not at all, named alike by apply and undo
+reviews; stored denials that differ; role maps and lists beyond their bounds at the review
+and under the barrier; the undo's own texts; and the version prefix of the authority. The
+reviewer compared the evaluation with WordPress 7.1.5's `WP_Roles` and `WP_User` on 20,000
+random role maps and the reader with `unserialize()` on 60,000 values without a difference. The job tests
 exercise the normal filesystem store, timeout, confirmation digest, staging pin, history
 pruning and recovery windows. A local real WordPress 7.1.4, PHP 8.4 and MySQL 8.4.11
 restore also verified authentication state, addresses, active plugins and the heartbeat.

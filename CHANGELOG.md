@@ -202,11 +202,16 @@ All notable changes are documented here. The format follows
   that stops does so without its deactivation routine, and WordPress skips a plugin of the
   backup whose file is missing. If the backup's roles would leave your account without the
   backup capability, `manage_options`, `edit_users`, `promote_users` or `update_core`, the
-  review and the exchange refuse with `database_admin_capabilities`; stored roles or plugin
-  lists that WordPress does not write are refused with `database_roles_invalid` and
-  `database_plugins_invalid`. Rehearse a staged database again before you review it, and
-  review and confirm again a database change that was confirmed before this version: it
-  stops with `database_exchange_changed`.
+  review and the exchange refuse with `database_admin_capabilities`, and an unreadable record
+  of your account's own capabilities with `database_admin_capabilities_unreadable`. The
+  backup's roles (up to 1 MiB) and list of active plugins (up to 256 KiB) are refused if
+  WordPress did not write them that way (`database_roles_invalid`,
+  `database_plugins_invalid`) or if they are larger (`database_roles_too_large`,
+  `database_plugins_too_large`); the running site's are only compared, and the review says
+  so where they cannot be read. The review also shows stored denials that differ. An undo's
+  refusals point to a role on the running site and to the retained tables. Rehearse a staged
+  database again before you review it, and review and confirm again a database change that
+  was confirmed before this version: it stops with `database_exchange_changed`.
 - Compressed repository objects have their zstd frame sizes, windows and cumulative output checked before allocation. Verified pack data must also match its expected size and SHA-256.
 - Uninstall checks all plugin-owned recovery records before deleting local data, including records in the default working directory after a change of configuration.
 - The plugin reads no more of a server's answer than a repository file of that kind can

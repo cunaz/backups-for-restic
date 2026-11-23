@@ -323,7 +323,9 @@ snapshot**. The same action is available under **Backups → Restores**.
    roles and capabilities but takes the roles themselves from the backup. If the backup's
    roles would not give them to you, for example because your role was created after the
    backup, the review refuses and names the capabilities. Confirm with an administrator
-   account whose role has them in the backup, or restore by hand.
+   account whose role has them in the backup, or restore by hand. The limits of what the
+   review reads are listed under "Applying a rehearsed database on a running installation"
+   below.
 
 ## Scenario C — a single file or folder
 
@@ -407,6 +409,35 @@ that is active now and not in the backup stops without its deactivation routine,
 WordPress skips a plugin of the backup whose file is missing on this site; the review lists
 both. Install the plugins that you need before the restore.
 
+**What the review reads, and its limits.** The review reads the backup's user roles (at most
+1 MiB), its list of active plugins (at most 256 KiB) and your account's own record of roles
+and capabilities on this site (at most 64 KiB). A larger value, or one that is not stored the
+way WordPress stores it, refuses the exchange with a message that names it: use the manual
+SQL import of Scenario D for such a backup, or repair your account's record, which WordPress
+reads from the first of several entries, and review again. The roles and the list of active
+plugins of the running site are only compared, because the exchange replaces them. If they
+cannot be read, the review says so and lists all of the backup's roles or plugins instead; the
+restore can go ahead, but its undo would bring those values back and could not check them,
+so it would be refused: only a database administrator could then bring back the earlier
+tables before the undo window ends. The review lists, for every role that differs, the
+capabilities it grants and the denials it stores only afterwards or only now; a denial takes
+away from an account with several roles what another of its roles grants.
+
+**Three things the review cannot show.**
+- A plugin that the backup starts can change what an account may do once it runs: it can
+  filter capabilities, change the capability that the pages of Backups for restic require
+  (the filter `backups_for_restic_capability`) or forbid file changes, which takes
+  `update_core` away. The review checks your account with the capability that this site
+  requires now and the roles as stored, without filters. If your account lacks access after
+  the restore, deactivate that plugin on the Plugins screen.
+- A WP-Cron request that ran the exchange goes on with the events that were due when it
+  started. WordPress moves each of them to its next time in the event list that is now live,
+  so such an event of the earlier site can appear in the restored list. Events of a plugin
+  that is no longer active run without effect.
+- A backup whose list of active plugins names another copy of Backups for restic in another
+  directory starts that copy next to this one. The review lists it as a plugin that starts;
+  delete the other copy's directory first if it is still on the site.
+
 The automatic exchange supports writable MySQL 8.0.22 or later with the Performance
 Schema enabled and enough of its thread instances to list every connection, InnoDB tables with InnoDB table locks, binary logging in the row or mixed
 format where it is on, no Galera cluster, a matching prefix and WordPress schema version,
@@ -425,7 +456,10 @@ administrator to perform a manual import where these grants are unavailable.
 Within it, review and confirm the undo on the Restores screen. Undo brings the original
 generation live, with its own roles, active plugins and scheduled events, and copies across
 the same state from the running site as the apply. Its review compares the two generations
-in the same way.
+in the same way. If the undo is refused because your account would lack a capability under
+the earlier roles, give your account on this site a role that the earlier database also has,
+for example Administrator, and review again; the staged SQL files hold the backup, which is
+live already, not the earlier database.
 New posts, users and ordinary settings created in the intervening live generation then
 remain in private database tables for a further 24 hours. Export any required newer
 data before the undo job's reported retention deadline. The plugin's heartbeat expires
