@@ -278,8 +278,8 @@ jobs:
         id: changes
         uses: ./.github/actions/mutation-scope
         with:
-          watched: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets|Database)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
-          label: src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, src/Database, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, .github/workflows/ci.yml
+          watched: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets|Database)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|bin/mutation-gate\.sh|\.github/workflows/ci\.yml)$)'
+          label: src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, src/Database, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, bin/mutation-gate.sh, .github/workflows/ci.yml
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         if: steps.changes.outputs.run == 'true'
         with:
@@ -336,8 +336,8 @@ jobs:
         id: changes
         uses: ./.github/actions/mutation-scope
         with:
-          watched: '^(src/|tests/|(infection-(planner|restore|apply|zip)\.json5\.dist|composer\.json|composer\.lock|bin/install-test-tools\.sh|\.github/workflows/ci\.yml)$)'
-          label: src/, tests/, infection-planner.json5.dist, infection-restore.json5.dist, infection-apply.json5.dist, infection-zip.json5.dist, composer.json, composer.lock, bin/install-test-tools.sh, .github/workflows/ci.yml
+          watched: '^(src/|tests/|(infection-(planner|restore|apply|zip)\.json5\.dist|composer\.json|composer\.lock|bin/install-test-tools\.sh|bin/mutation-gate\.sh|\.github/workflows/ci\.yml)$)'
+          label: src/, tests/, infection-planner.json5.dist, infection-restore.json5.dist, infection-apply.json5.dist, infection-zip.json5.dist, composer.json, composer.lock, bin/install-test-tools.sh, bin/mutation-gate.sh, .github/workflows/ci.yml
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         if: steps.changes.outputs.run == 'true'
         with:

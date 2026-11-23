@@ -20,6 +20,7 @@ on:
       - 'composer.json'
       - 'composer.lock'
       - 'bin/install-test-tools.sh'
+      - 'bin/mutation-gate.sh'
       - '.github/workflows/database-mutation.yml'
   workflow_dispatch:
 
