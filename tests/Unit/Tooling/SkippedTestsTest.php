@@ -99,4 +99,18 @@ final class SkippedTestsTest extends TestCase {
 		self::assertSame( [ self::CLASS_NAME . '::test_case with data set #0' ], $run['skipped'] );
 		self::assertSame( $run['skipped'], $run['tests'] );
 	}
+
+	public function test_a_numbered_data_set_can_be_expected_and_comments_need_a_space_after_the_hash(): void {
+		$junit = self::junit(
+			[
+				'test_case with data set #0' => true,
+				'test_case with data set #1' => false,
+			]
+		);
+		$list  = "# Data sets that PHPUnit numbers.\n"
+			. self::CLASS_NAME . "::test_case with data set #0 # the first one only\n"
+			. '#' . self::CLASS_NAME . "::test_case with data set #1\n";
+		self::assertSame( [ self::CLASS_NAME . '::test_case with data set #0' ], SkippedTests::expected( $list ) );
+		self::assertSame( [], SkippedTests::differences( $junit, $list ) );
+	}
 }

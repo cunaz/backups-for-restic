@@ -29,8 +29,8 @@ final class SkippedTests {
 	 * What differs between the skips of a run and the expected ones.
 	 *
 	 * @param string $junit    JUnit XML as PHPUnit writes it with --log-junit.
-	 * @param string $expected One test per line as Class::method, as the log names it; text after
-	 *                         # is a comment.
+	 * @param string $expected One test per line as Class::method, as the log names it. A line
+	 *                         that starts with # is a comment, and so is text after " # ".
 	 * @return list<string> One line per difference; empty when the skips are the expected ones.
 	 * @throws RuntimeException When the log cannot be read.
 	 */
@@ -122,7 +122,10 @@ final class SkippedTests {
 		$tests = [];
 		$lines = preg_split( '/\R/', $content );
 		foreach ( false === $lines ? [] : $lines as $line ) {
-			$line = trim( explode( '#', $line, 2 )[0] );
+			// A # that follows whitespace and is followed by whitespace or the end starts a
+			// comment, and so does one at the start of a line; PHPUnit names numbered data sets
+			// "with data set #0", and that # stays.
+			$line = trim( (string) preg_replace( '/(?:^\s*#.*|\s#(?:\s.*)?)$/', '', $line ) );
 			if ( '' !== $line ) {
 				$tests[] = $line;
 			}

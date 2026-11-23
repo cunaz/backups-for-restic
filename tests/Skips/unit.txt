@@ -1,7 +1,8 @@
 # Unit tests that skip without the zstd extension (ci.yml, "Unit tests (PHP x.y)").
 # bin/check-skipped-tests.php compares this list with the JUnit log of the job: a skip that is
 # not listed fails it, and so does a listed test that ran or is gone. One test per line as the
-# log names it; text after # is a comment. Change the list only together with the test.
+# log names it, "with data set #0" included; a line that starts with # is a comment, and so is
+# text after " # ". Change the list only together with the test.
 
 # The native decompression of format 2 needs ext-zstd.
 BackupsForRestic\Tests\Unit\Format\CompressionTest::test_streamed_and_concatenated_frames_include_every_byte
