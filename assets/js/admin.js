@@ -1571,7 +1571,8 @@
 	/**
 	 * Looks for the job that a confirmation started, when its answer did not arrive: the
 	 * active job, or the newest job in the list, of the type the confirmation starts and
-	 * created no earlier than the review that it confirmed.
+	 * created no earlier than the review that it confirmed. The list is searched also when
+	 * the status cannot be read.
 	 *
 	 * @param {string} type  Job type: apply, undo, database_apply or database_undo.
 	 * @param {number} since Server time of the review, from its answer.
@@ -1579,9 +1580,9 @@
 	 */
 	function startedJob( type, since ) {
 		const started = ( job ) => job && type === job.type && job.created_at >= since;
-		return api( '/status' ).then( function ( status ) {
-			if ( started( status.active_job ) ) {
-				return status.active_job;
+		return api( '/status' ).then( ( status ) => status.active_job, () => null ).then( function ( active ) {
+			if ( started( active ) ) {
+				return active;
 			}
 			return api( '/jobs' ).then( ( response ) => response.jobs.find( started ) || null );
 		} );
@@ -1978,7 +1979,7 @@
 				[ __( 'Source database server', 'backups-for-restic' ), null === report.snapshot_server || undefined === report.snapshot_server ? null : untrusted( report.snapshot_server ) ],
 				[ __( 'Destination database server', 'backups-for-restic' ), null === report.destination_server || undefined === report.destination_server ? null : untrusted( report.destination_server ) ],
 				[ __( 'Verified source rows', 'backups-for-restic' ), report.rows ],
-				[ __( 'Views excluded from rehearsal', 'backups-for-restic' ), ( report.views_not_imported || [] ).length ? untrusted( report.views_not_imported.map( printable ).join( ', ' ) ) : null ],
+				[ __( 'Views excluded from rehearsal', 'backups-for-restic' ), ( report.views_not_imported || [] ).length ? el( 'span', {}, report.views_not_imported.flatMap( ( name, index ) => index ? [ ', ', untrusted( name ) ] : [ untrusted( name ) ] ) ) : null ],
 				[ __( 'Missing database privileges', 'backups-for-restic' ), ( preflight.missing_privileges || [] ).join( ', ' ) || null ],
 			] ),
 			issues.length ? notice( 'warning', issues.join( ' ' ) ) : null,

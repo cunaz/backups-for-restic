@@ -838,14 +838,15 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Detects a replaced parent even if the canonical path matches.
+	 * Detects a replaced parent even if the canonical path matches. A parent that is gone, or
+	 * that a link or a file replaced, is a change after the review as well.
 	 *
 	 * @param string $path Live entry.
 	 * @param Record $record Persisted intent.
-	 * @throws StorageFailed If the checked filesystem operation cannot complete.
+	 * @throws StorageFailed With the code file_changed_after_review if the parent is not the recorded folder.
 	 */
 	private function require_parent( string $path, array $record ): void {
-		if ( self::directory_identity( dirname( $path ) ) !== $record['parent'] ) {
+		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
 			StorageFailed::raise( 'The parent of the reviewed file changed.', [ 'code' => 'file_changed_after_review' ] );
 		}
 	}

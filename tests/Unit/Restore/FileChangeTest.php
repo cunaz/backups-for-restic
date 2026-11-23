@@ -287,6 +287,34 @@ final class FileChangeTest extends TestCase {
 		}
 	}
 
+	public function test_a_parent_folder_that_is_gone_or_replaced_after_the_review_stops_the_change_with_the_same_code(): void {
+		$old = str_repeat( 'o', ChunkDigest::BLOCK + 1 );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		file_put_contents( $this->path, $old );
+		// The worker records its intent, with the folder that holds the file, and yields.
+		self::assertFalse( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', $old ), 0.0 ) );
+		self::assertFileExists( $this->journal . '/entry.json' );
+		// The folder is moved aside and a link to it takes its name: the path still leads to the file.
+		rename( $this->site, $this->root . '/moved' );
+		symlink( $this->root . '/moved', $this->site );
+		try {
+			$this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', $old ), INF );
+			self::fail( 'A file below a replaced folder must not be replaced.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertSame( 'The parent of the reviewed file changed.', $refused->getMessage() );
+			self::assertSame( 'file_changed_after_review', $refused->context()['code'] ?? null );
+		}
+		self::assertSame( $old, file_get_contents( $this->root . '/moved/selected.php' ) );
+		// The folder is gone altogether.
+		unlink( $this->site );
+		try {
+			$this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', $old ), INF );
+			self::fail( 'A file whose folder is gone must not be replaced.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertSame( 'file_changed_after_review', $refused->context()['code'] ?? null );
+		}
+	}
+
 	public function test_a_live_file_that_changed_after_the_review_stops_its_replacement_with_a_code_of_its_own(): void {
 		$old = str_repeat( 'o', ChunkDigest::BLOCK + 1 );
 		file_put_contents( $this->staging . $this->path, 'new' );

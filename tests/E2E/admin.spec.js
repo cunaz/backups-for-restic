@@ -403,11 +403,14 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 		await expect( staged ).toContainText( 'The request may still have been accepted' );
 		expect( fs.readFileSync( file, 'utf8' ) ).toBe( revision );
 		// The server accepts the confirmation, and a proxy answers with an error page of its own:
-		// the page finds the job that the confirmation started and follows it.
+		// the page finds the job that the confirmation started and follows it. The status, which
+		// it asks first, cannot be read either, so it finds the job in the list of jobs.
 		let started = null;
+		const isStatus = ( requestURL ) => /\/backups-for-restic\/v1\/status(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
 		await page.route( isApply, async ( route ) => {
 			const response = await route.fetch();
 			started = ( await response.json() ).job.id;
+			await page.route( isStatus, ( status ) => status.abort( 'connectionreset' ), { times: 1 } );
 			await route.fulfill( { status: 504, contentType: 'text/html', body: '<html><body>Gateway Timeout</body></html>' } );
 		}, { times: 1 } );
 		await confirm( staged, apply, url, ADMIN.password );
