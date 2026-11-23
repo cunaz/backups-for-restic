@@ -62,7 +62,8 @@ final class DirectorySpellingsTest extends TestCase {
 		self::assertFalse( $resumed->unique( $this->folder, 'photo-120' ) );
 	}
 
-	public function test_an_undo_review_answers_a_folder_that_cannot_be_indexed_where_a_preview_fails(): void {
+	/** A folder of 180 names whose index an undo review has begun. */
+	private function begun_index(): void {
 		for ( $i = 0; $i < 180; ++$i ) {
 			touch( $this->folder . '/photo-' . $i );
 		}
@@ -73,22 +74,29 @@ final class DirectorySpellingsTest extends TestCase {
 		} catch ( FileWorkPending ) {
 			self::assertTrue( ( new DirectorySpellings( $this->workspace, INF ) )->known( $this->folder ) );
 		}
+	}
+
+	public function test_an_undo_review_answers_a_folder_that_cannot_be_read_where_a_preview_fails(): void {
+		$this->begun_index();
 		// The folder can no longer be read once its index has begun: an undo review answers that
 		// another spelling may be there, so that the entry is kept, and a preview fails.
 		chmod( $this->folder, 0311 );
-		$this->stable();
 		try {
-			self::assertFalse( ( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'photo-1' ) );
-			try {
-				( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' );
-				self::fail( 'A preview must not take a folder that it cannot read as indexed.' );
-			} catch ( StorageFailed $failed ) {
-				self::assertSame( 'A directory could not be read while its names were being reviewed.', $failed->getMessage() );
+			if ( is_readable( $this->folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory read permissions.' );
 			}
+			$this->stable();
+			self::assertFalse( ( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'photo-1' ) );
+			$this->expectException( StorageFailed::class );
+			$this->expectExceptionMessage( 'A directory could not be read while its names were being reviewed.' );
+			( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' );
 		} finally {
 			chmod( $this->folder, 0700 );
 		}
-		// So does a folder that is gone.
+	}
+
+	public function test_an_undo_review_answers_a_folder_that_is_gone_where_a_preview_fails(): void {
+		$this->begun_index();
 		TempDir::remove( $this->folder );
 		self::assertFalse( ( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'photo-1' ) );
 		$this->expectException( StorageFailed::class );

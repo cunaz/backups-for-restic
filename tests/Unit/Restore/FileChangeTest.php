@@ -285,7 +285,13 @@ final class FileChangeTest extends TestCase {
 		}
 	}
 
-	public function test_a_folder_that_gains_a_name_after_its_last_check_is_kept_and_the_undo_goes_on(): void {
+	/**
+	 * A folder that the apply created, a worker that changes something right after its last
+	 * check, and the phase of the folder's record.
+	 *
+	 * @return array{0: string, 1: \Closure(\Closure): FileChange, 2: \Closure(): string}
+	 */
+	private function created_folder(): array {
 		$folder = $this->site . '/uploads';
 		mkdir( $this->staging . $folder, 0700 );
 		self::assertTrue( $this->change->apply( $folder, 'mkdir', null, null, INF ) );
@@ -303,6 +309,11 @@ final class FileChangeTest extends TestCase {
 			}
 		);
 		$phase  = fn (): string => json_decode( (string) file_get_contents( $this->journal . '/entry.json' ), true, flags: JSON_THROW_ON_ERROR )['phase'];
+		return [ $folder, $worker, $phase ];
+	}
+
+	public function test_a_folder_that_gains_a_name_after_its_last_check_is_kept_and_the_undo_goes_on(): void {
+		[ $folder, $worker, $phase ] = $this->created_folder();
 		// A file arrives in the folder after its last check and before its removal: the folder
 		// is kept with its reason, as at the check, and the undo goes on with the next entry.
 		$upload = static function () use ( $folder ): void {
@@ -311,40 +322,64 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( self::outcome( 'kept', 'new_children' ), $worker( $upload )->undo( $folder, 'mkdir', INF, 'remove' ) );
 		self::assertSame( 'photo', file_get_contents( $folder . '/photo.jpg' ) );
 		self::assertSame( 'done', $phase() );
-		unlink( $folder . '/photo.jpg' );
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			return;
-		}
-		// A removal refused for another reason, with no name in the folder, still stops the undo,
-		// and so does one with a name that cannot be read.
-		$refusals = [
-			'site not writable'   => function (): void {
-				chmod( $this->site, 0500 );
-			},
-			'folder not readable' => static function () use ( $folder ): void {
-				file_put_contents( $folder . '/hidden', 'hidden' );
-				chmod( $folder, 0300 );
-			},
-		];
-		foreach ( $refusals as $case => $gap ) {
-			try {
-				$worker( $gap )->undo( $folder, 'mkdir', INF, 'remove' );
-				self::fail( 'The removal must stop the undo: ' . $case );
-			} catch ( StorageFailed $refused ) {
-				self::assertStringContainsString( 'cannot be removed', $refused->getMessage(), $case );
-			} finally {
-				chmod( $this->site, 0700 );
-				chmod( $folder, 0700 );
+	}
+
+	public function test_a_removal_that_the_parent_refuses_after_the_last_check_stops_the_undo(): void {
+		[ $folder, $worker, $phase ] = $this->created_folder();
+		chmod( $this->site, 0500 );
+		try {
+			if ( is_writable( $this->site ) ) {
+				self::markTestSkipped( 'This user bypasses directory write permissions.' );
 			}
-			self::assertDirectoryExists( $folder );
-			self::assertSame( 'done', $phase() );
+		} finally {
+			chmod( $this->site, 0700 );
 		}
+		// The parent stops letting the worker change its names after the last check: rmdir()
+		// refuses, the folder holds no name, and the undo stops rather than keeping it.
+		$readonly = function (): void {
+			chmod( $this->site, 0500 );
+		};
+		try {
+			$worker( $readonly )->undo( $folder, 'mkdir', INF, 'remove' );
+			self::fail( 'The removal must stop the undo.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'cannot be removed', $refused->getMessage() );
+		} finally {
+			chmod( $this->site, 0700 );
+		}
+		self::assertDirectoryExists( $folder );
+		self::assertSame( 'done', $phase() );
+	}
+
+	public function test_a_removal_refused_with_a_name_that_cannot_be_read_stops_the_undo(): void {
+		[ $folder, $worker, $phase ] = $this->created_folder();
+		chmod( $folder, 0300 );
+		try {
+			if ( is_readable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory read permissions.' );
+			}
+		} finally {
+			chmod( $folder, 0700 );
+		}
+		// A name arrives after the last check in a folder that the worker can no longer read:
+		// rmdir() refuses, the name cannot be told, and the undo stops rather than guessing.
+		$hidden = static function () use ( $folder ): void {
+			file_put_contents( $folder . '/hidden', 'hidden' );
+			chmod( $folder, 0300 );
+		};
+		try {
+			$worker( $hidden )->undo( $folder, 'mkdir', INF, 'remove' );
+			self::fail( 'The removal must stop the undo.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertStringContainsString( 'cannot be removed', $refused->getMessage() );
+		} finally {
+			chmod( $folder, 0700 );
+		}
+		self::assertFileExists( $folder . '/hidden' );
+		self::assertSame( 'done', $phase() );
 	}
 
 	public function test_an_entry_that_cannot_be_looked_up_is_not_taken_for_a_missing_one(): void {
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			self::markTestSkipped( 'Root searches every folder.' );
-		}
 		$folder = $this->site . '/folder';
 		$file   = $folder . '/created.txt';
 		mkdir( $folder );
@@ -359,6 +394,11 @@ final class FileChangeTest extends TestCase {
 			// file_exists() and lstat() answer false below it, also for a file that is there.
 			chmod( $directory, 0600 );
 			try {
+				$names = array_values( array_diff( (array) scandir( $directory ), [ '.', '..' ] ) );
+				self::assertNotSame( [], $names );
+				if ( file_exists( $directory . '/' . $names[0] ) ) {
+					self::markTestSkipped( 'This user bypasses directory search permissions.' );
+				}
 				$check();
 			} finally {
 				chmod( $directory, 0700 );
@@ -373,11 +413,6 @@ final class FileChangeTest extends TestCase {
 		);
 		self::assertSame( 'created', file_get_contents( $file ) );
 		self::assertSame( 'remove', $this->change->undo_action( $file, 'create' ) );
-		// Missing from a folder that can be searched, or below one that is itself missing, the file is gone.
-		unlink( $file );
-		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
-		rmdir( $folder );
-		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
 		// A journal record that cannot be looked up is not a missing one either.
 		$unsearchable(
 			$this->journal,
@@ -393,16 +428,17 @@ final class FileChangeTest extends TestCase {
 		// A create stopped after its link, before it released its private name: published, though
 		// the private name remains. Below a folder that cannot be searched, that is not told apart
 		// from an entry that was never published, and the entry is kept.
-		mkdir( $folder );
+		$linked_file = $folder . '/linked.txt';
+		file_put_contents( $this->staging . $linked_file, 'linked' );
 		$journal = $this->root . '/journal-linked';
 		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
-		$stop    = static function ( string $done, string $on ) use ( $file ): void {
-			if ( 'link' === $done && $file === $on ) {
+		$stop    = static function ( string $done, string $on ) use ( $linked_file ): void {
+			if ( 'link' === $done && $linked_file === $on ) {
 				throw new \DomainException( 'The worker was killed.' );
 			}
 		};
 		try {
-			( new FileChange( $plan, $this->staging, $journal, null, 'apply', $stop ) )->apply( $file, 'create', hash( 'sha256', 'created' ), null, INF );
+			( new FileChange( $plan, $this->staging, $journal, null, 'apply', $stop ) )->apply( $linked_file, 'create', hash( 'sha256', 'linked' ), null, INF );
 			self::fail( 'The worker must stop after its link.' );
 		} catch ( \DomainException ) {
 			self::assertFileExists( $journal . '/candidate' );
@@ -410,11 +446,26 @@ final class FileChangeTest extends TestCase {
 		$linked = new FileChange( $plan, $this->staging, $journal );
 		$unsearchable(
 			$folder,
-			function () use ( $linked, $file, $kept ): void {
-				self::assertSame( $kept, $linked->undo_review( $file, 'create' ) );
+			function () use ( $linked, $linked_file, $kept ): void {
+				self::assertSame( $kept, $linked->undo_review( $linked_file, 'create' ) );
 			}
 		);
-		self::assertSame( 'remove', $linked->undo_action( $file, 'create' ) );
+		self::assertSame( 'remove', $linked->undo_action( $linked_file, 'create' ) );
+	}
+
+	public function test_an_entry_missing_from_a_folder_that_can_be_searched_is_removed_since_apply(): void {
+		$folder = $this->site . '/folder';
+		$file   = $folder . '/created.txt';
+		mkdir( $folder );
+		mkdir( $this->staging . $folder, 0700 );
+		file_put_contents( $this->staging . $file, 'created' );
+		self::assertTrue( $this->change->apply( $file, 'create', hash( 'sha256', 'created' ), null, INF ) );
+		// Missing from a folder that can be searched, or below one that is itself missing, the
+		// file is gone.
+		unlink( $file );
+		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
+		rmdir( $folder );
+		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
 	}
 
 	public function test_an_entry_below_a_folder_put_in_place_of_its_own_is_not_taken_for_a_missing_one(): void {
@@ -464,9 +515,6 @@ final class FileChangeTest extends TestCase {
 	}
 
 	public function test_a_revert_that_its_folder_would_refuse_is_kept_and_the_undo_goes_on(): void {
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			self::markTestSkipped( 'Root may change every folder.' );
-		}
 		$folder = $this->site . '/folder';
 		mkdir( $folder );
 		mkdir( $this->staging . $folder . '/made', 0700, true );
@@ -503,6 +551,9 @@ final class FileChangeTest extends TestCase {
 		// The folder becomes read-only: none of the reverts could be made in it.
 		chmod( $folder, 0500 );
 		try {
+			if ( is_writable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory write permissions.' );
+			}
 			foreach ( $entries as $name => [ $action ] ) {
 				$change = new FileChange( $plan, $this->staging, $this->root . '/journal-' . $name );
 				self::assertSame( $kept, $change->undo_review( $folder . '/' . $name, $action ), $name );

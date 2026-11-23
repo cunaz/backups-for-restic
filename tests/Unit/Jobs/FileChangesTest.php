@@ -736,9 +736,6 @@ final class FileChangesTest extends TestCase {
 	}
 
 	public function test_a_folder_whose_parent_would_refuse_its_removal_is_kept_and_the_undo_goes_on(): void {
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			self::markTestSkipped( 'Root may change every folder.' );
-		}
 		// A folder that the apply creates in one that the site has already.
 		mkdir( $this->live . '/sub' );
 		mkdir( $this->files . $this->live . '/sub/made', 0700, true );
@@ -748,6 +745,9 @@ final class FileChangesTest extends TestCase {
 		// That folder becomes read-only before the review.
 		chmod( $this->live . '/sub', 0500 );
 		try {
+			if ( is_writable( $this->live . '/sub' ) ) {
+				self::markTestSkipped( 'This user bypasses directory write permissions.' );
+			}
 			$review = $this->changes->preview_undo( $job->id );
 			self::assertSame( [ 'keep', 'unwritable_destination' ], [ array_column( $review['entries'], 'action', 'path' )[ $this->live . '/sub/made' ], array_column( $review['entries'], 'reason', 'path' )[ $this->live . '/sub/made' ] ] );
 			$done = $this->run_job( $this->changes->start_undo( $job->id, $review['digest'] ) );
@@ -1407,9 +1407,6 @@ final class FileChangesTest extends TestCase {
 	}
 
 	public function test_a_review_does_not_retire_an_apply_whose_file_cannot_be_looked_up(): void {
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			self::markTestSkipped( 'Root searches every folder.' );
-		}
 		// An apply of one file into a folder that the site has already.
 		$file = $this->live . '/sub/single.txt';
 		mkdir( $this->live . '/sub' );
@@ -1418,6 +1415,9 @@ final class FileChangesTest extends TestCase {
 		// The folder loses its search permission: the file looks missing, but it is there.
 		chmod( $this->live . '/sub', 0600 );
 		try {
+			if ( file_exists( $file ) ) {
+				self::markTestSkipped( 'This user bypasses directory search permissions.' );
+			}
 			$review = $this->changes->preview_undo( $job->id );
 		} finally {
 			chmod( $this->live . '/sub', 0700 );
@@ -1723,9 +1723,6 @@ final class FileChangesTest extends TestCase {
 
 	#[DataProvider( 'inline_and_background' )]
 	public function test_a_created_folder_that_the_worker_cannot_read_is_kept_and_the_undo_goes_on( bool $background ): void {
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			self::markTestSkipped( 'Root reads every folder.' );
-		}
 		if ( $background ) {
 			$restore                  = $this->jobs->get( $this->restore ) ?? self::fail( 'The restore is gone.' );
 			$restore->result['files'] = DiskFilePlan::PAGE + 1;
@@ -1741,19 +1738,22 @@ final class FileChangesTest extends TestCase {
 		// brought in line with the folder here.
 		$folder = $this->live . '/b-new';
 		chmod( $folder, 0311 );
-		clearstatcache();
-		$stat = lstat( $folder );
-		self::assertIsArray( $stat );
-		$entries = glob( $this->jobs->directory( $job ) . '/undo/item-*/entry.json' );
-		self::assertNotEmpty( $entries );
-		foreach ( $entries as $entry ) {
-			$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
-			if ( 'mkdir' === $record['action'] ) {
-				$record['installed'] = hash( 'sha256', implode( '|', [ $stat['mode'], $stat['uid'], $stat['gid'], 0 ] ) );
-				file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
-			}
-		}
 		try {
+			if ( is_readable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory read permissions.' );
+			}
+			clearstatcache();
+			$stat = lstat( $folder );
+			self::assertIsArray( $stat );
+			$entries = glob( $this->jobs->directory( $job ) . '/undo/item-*/entry.json' );
+			self::assertNotEmpty( $entries );
+			foreach ( $entries as $entry ) {
+				$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
+				if ( 'mkdir' === $record['action'] ) {
+					$record['installed'] = hash( 'sha256', implode( '|', [ $stat['mode'], $stat['uid'], $stat['gid'], 0 ] ) );
+					file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
+				}
+			}
 			$review   = $this->changes->request_preview( $job->id, true, false );
 			$plan_job = null;
 			if ( $review instanceof Job ) {
@@ -2012,9 +2012,6 @@ final class FileChangesTest extends TestCase {
 	}
 
 	public function test_a_background_undo_review_keeps_an_entry_whose_wide_folder_cannot_be_read_and_goes_on(): void {
-		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
-			self::markTestSkipped( 'Root reads every folder.' );
-		}
 		// A file that the apply adds to a live folder with more names than a review lists at once.
 		$wide = $this->live . '/wide';
 		mkdir( $wide );
@@ -2037,6 +2034,9 @@ final class FileChangesTest extends TestCase {
 		self::assertTrue( $indexed() );
 		chmod( $wide, 0311 );
 		try {
+			if ( is_readable( $wide ) ) {
+				self::markTestSkipped( 'This user bypasses directory read permissions.' );
+			}
 			$reviewed = $this->run_job( $review );
 			$page     = $this->changes->request_preview( $apply->id, true, false, $reviewed->id );
 			self::assertIsArray( $page );
