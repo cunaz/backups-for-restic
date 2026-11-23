@@ -200,15 +200,16 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( self::outcome( 'restored', 'undo_journal' ), $this->change->undo( $this->path, 'replace', INF, 'restore' ) );
 		// The original is back, but the last record still precedes the rename: the retry of
 		// the same undo completes it and counts its own restore, also without the confirmed
-		// action, instead of reporting a change; another undo counts nothing.
+		// action, instead of reporting a change; another undo counts nothing and leaves the
+		// record as it is.
 		$record = json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR );
 		self::assertSame( 'legacy', $record['undo'] );
 		$record['phase'] = 'restore';
-		foreach ( [ [ 'later-undo', 'unchanged' ], [ 'legacy', 'restored' ] ] as [ $scope, $outcome ] ) {
+		foreach ( [ [ 'later-undo', 'unchanged', 'restore' ], [ 'legacy', 'restored', 'undone' ] ] as [ $scope, $outcome, $phase ] ) {
 			file_put_contents( $file, json_encode( $record ) );
 			$retry = new FileChange( new ApplyPlan( [ $this->site ], [ $this->journal ] ), $this->staging, $this->journal, null, $scope );
 			self::assertSame( self::outcome( $outcome, 'already_undone' ), $retry->undo( $this->path, 'replace', INF ), $scope );
-			self::assertSame( 'undone', json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR )['phase'] );
+			self::assertSame( $phase, json_decode( (string) file_get_contents( $file ), true, flags: JSON_THROW_ON_ERROR )['phase'], $scope );
 		}
 		self::assertSame( 'old', file_get_contents( $this->path ) );
 	}
@@ -444,6 +445,24 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'remove', $this->change->undo_action( $file, 'create' ) );
 	}
 
+	public function test_an_entry_that_someone_else_removed_stays_undoable_when_it_comes_back(): void {
+		file_put_contents( $this->staging . $this->path, 'new' );
+		self::assertTrue( $this->change->apply( $this->path, 'create', hash( 'sha256', 'new' ), null, INF, 0644 ) );
+		clearstatcache();
+		$installed = (int) filemtime( $this->path );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+		// Removed by someone else before the worker came: nothing for this undo to revert, and
+		// nothing that it reverted, so its record stays as the apply left it.
+		unlink( $this->path );
+		self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $this->change->undo( $this->path, 'create', INF, 'remove' ) );
+		self::assertSame( 'done', json_decode( (string) file_get_contents( $this->journal . '/entry.json' ), true, flags: JSON_THROW_ON_ERROR )['phase'] );
+		// Back as the apply left it, the file is revertible again.
+		file_put_contents( $this->path, 'new' );
+		chmod( $this->path, 0644 );
+		touch( $this->path, $installed );
+		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
+	}
+
 	public function test_a_created_folder_that_gained_many_names_is_kept_without_listing_them(): void {
 		$folder = $this->site . '/uploads';
 		mkdir( $this->staging . $folder, 0700 );
@@ -588,8 +607,8 @@ final class FileChangeTest extends TestCase {
 			}
 			self::assertSame( [ 'done', null ], $record() );
 			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
-			self::assertSame( [ 'undone', null ], $record() );
-			self::assertSame( self::outcome( 'unchanged', 'already_undone' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
+			self::assertSame( [ 'done', null ], $record() );
+			self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $worker( 'undo' )->undo( $path, $action, INF, 'remove' ), $action );
 			// Stopped before the removal, and someone else removes the entry: the same record,
 			// and the same count. No record of this undo precedes a removal.
 			[ $path, $worker, $record ] = $applied( $action );
@@ -836,9 +855,10 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'restore', $replaced->undo_action( $this->path, 'replace' ) );
 		self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $created->undo( $code, 'create', INF ) );
 		self::assertSame( self::outcome( 'unchanged', 'removed_since_apply' ), $directory->undo( $plugin, 'mkdir', INF ) );
-		// Nothing was left to revert, and the journal says so for a later undo.
-		self::assertSame( 'undone', json_decode( (string) file_get_contents( $this->root . '/journal-created/entry.json' ), true, flags: JSON_THROW_ON_ERROR )['phase'] );
-		self::assertSame( 'already_undone', $created->undo_review( $code, 'create' )['reason'] );
+		// Nothing was left to revert, and the journal stays as it is for a later undo, which
+		// sees the entry again if it comes back.
+		self::assertSame( 'done', json_decode( (string) file_get_contents( $this->root . '/journal-created/entry.json' ), true, flags: JSON_THROW_ON_ERROR )['phase'] );
+		self::assertSame( 'removed_since_apply', $created->undo_review( $code, 'create' )['reason'] );
 		self::assertSame( self::outcome( 'restored', 'undo_journal' ), $replaced->undo( $this->path, 'replace', INF ) );
 		self::assertSame( 'old', file_get_contents( $this->path ) );
 		self::assertDirectoryDoesNotExist( $plugin );

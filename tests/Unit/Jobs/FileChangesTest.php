@@ -732,6 +732,30 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'remove', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
 	}
 
+	public function test_an_entry_that_someone_else_removed_is_offered_again_when_it_comes_back(): void {
+		// A file that the apply creates in a folder that exists already.
+		$file = $this->live . '/c-new.txt';
+		file_put_contents( $this->files . $file, 'created' );
+		$this->write_report( $this->live . '/skipped-link' );
+		$job = $this->run_job( $this->start() );
+		clearstatcache();
+		$installed = [ fileperms( $file ) & 0777, (int) filemtime( $file ) ];
+		// The replaced file is edited and stays kept, so that the apply stays open.
+		file_put_contents( $this->live . '/a-existing', 'edited' );
+		$review = $this->changes->preview_undo( $job->id );
+		self::assertSame( 'remove', array_column( $review['entries'], 'action', 'path' )[ $file ] );
+		$undo = $this->changes->start_undo( $job->id, $review['digest'] );
+		unlink( $file );
+		$done = $this->run_job( $undo );
+		self::assertSame( [ 2, 1, 1, 'partly_undone' ], [ $done->result['removed'], $done->result['unchanged'], $done->result['kept'], $done->result['apply_state'] ] );
+		// The file comes back as the apply left it: the next review offers its removal.
+		file_put_contents( $file, 'created' );
+		chmod( $file, $installed[0] );
+		touch( $file, $installed[1] );
+		$again = $this->changes->preview_undo( $job->id );
+		self::assertSame( [ 'remove', 'installed_content' ], [ array_column( $again['entries'], 'action', 'path' )[ $file ], array_column( $again['entries'], 'reason', 'path' )[ $file ] ] );
+	}
+
 	public function test_an_entry_that_someone_else_removed_after_the_review_is_not_counted_as_removed(): void {
 		$job    = $this->run_job( $this->start() );
 		$review = $this->changes->preview_undo( $job->id );
@@ -804,7 +828,7 @@ final class FileChangesTest extends TestCase {
 		$this->runner->tick( 0.0 );
 		self::assertSame( $counts( 1, 1, 0 ), $saved()->data['undo_counts'] );
 		$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
-		self::assertSame( [ 'undone', null ], [ $record['phase'], $record['undo'] ] );
+		self::assertSame( [ 'done', null ], [ $record['phase'], $record['undo'] ] );
 		$this->runner->tick( 0.0 ); // The edited file is kept and listed.
 		self::assertSame( $counts( 1, 1, 1 ), $saved()->data['undo_counts'] );
 		// A worker killed after it listed the kept entry, before the document counted it.

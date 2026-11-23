@@ -380,10 +380,12 @@ final readonly class FileChange {
 				return self::outcome( null === $record ? 'unchanged' : 'kept', $decision['reason'] );
 			}
 			// A retry of this undo, before the job counted the entry, finds it reverted under its
-			// own record. Anything else that it finds with nothing left to revert is unchanged.
+			// own record, and completes that record. Anything else that it finds with nothing left
+			// to revert is unchanged, and its journal stays as it is: an entry that someone else
+			// removed can come back as the apply left it, and a later undo must see it then.
 			$own = $this->scope === $record['undo'] && ( 'undone' === $record['phase'] || ( 'restore' === $record['phase'] && 'already_undone' === $decision['reason'] ) );
-			if ( 'undone' !== $record['phase'] ) {
-				$this->settle( $path, $action, $record, $own ? $this->scope : null );
+			if ( $own && 'undone' !== $record['phase'] ) {
+				$this->settle( $path, $action, $record );
 			}
 			return self::outcome( $own ? ( 'replace' === $action ? 'restored' : 'removed' ) : 'unchanged', $decision['reason'] );
 		}
@@ -416,27 +418,25 @@ final readonly class FileChange {
 		} else {
 			$this->remove_file( $path );
 		}
-		$this->settle( $path, $action, $record, $this->scope );
+		$this->settle( $path, $action, $record );
 		return self::outcome( 'restore' === $decision['action'] ? 'restored' : 'removed', $decision['reason'] );
 	}
 
 	/**
-	 * Records a reverted entry, or one with nothing left to revert, as undone. Also after a
-	 * retry, the reversal is on disk before the record that completes it. A directory that no
-	 * longer exists has nothing to synchronise.
+	 * Records an entry that this undo reverted as undone, under this undo's name. Also after a
+	 * retry, the reversal is on disk before the record that completes it.
 	 *
-	 * @param string      $path Reviewed path.
-	 * @param string      $action Forward action.
-	 * @param Record      $record Intent.
-	 * @param string|null $undo The undo whose revert this record completes, null for an entry that had nothing left to revert.
+	 * @param string $path Reviewed path.
+	 * @param string $action Forward action.
+	 * @param Record $record Intent.
 	 */
-	private function settle( string $path, string $action, array $record, ?string $undo ): void {
+	private function settle( string $path, string $action, array $record ): void {
 		$this->sync_directory( dirname( $path ) );
-		if ( 'mkdir' !== $action && 'copy' !== $record['phase'] ) {
+		if ( 'mkdir' !== $action ) {
 			self::invalidate( $path );
 		}
 		$record['phase'] = 'undone';
-		$record['undo']  = $undo;
+		$record['undo']  = $this->scope;
 		$this->save( $record );
 	}
 
