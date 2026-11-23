@@ -937,6 +937,34 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertStringContainsString( 'bfr_dump_one', $site->routed[0] );
 	}
 
+	public function test_set_and_bit_keys_of_64_bits_page_by_their_exact_value(): void {
+		$db      = self::database( self::$source );
+		$members = implode( ',', array_map( static fn ( int $bit ): string => "'m" . $bit . "'", range( 0, 63 ) ) );
+		$db->execute( 'DROP TABLE IF EXISTS mask_set, mask_bit' );
+		$db->execute( 'CREATE TABLE mask_set (k SET(' . $members . ') NOT NULL PRIMARY KEY, n INT NOT NULL) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE mask_bit (k BIT(64) NOT NULL PRIMARY KEY, n INT NOT NULL) ENGINE=InnoDB' );
+		// Rows that differ only in the lowest bits, with and without the highest of 64, and
+		// two pairs that differ only in the lowest bit above 2^53, where a DOUBLE has no room.
+		$masks = [ '9007199254740992', '9007199254740993', '18446744073709551614', '18446744073709551615' ];
+		for ( $low = 1; $low <= 600; ++$low ) {
+			$masks[] = (string) $low;
+			// 2^63 + $low, written out: PHP's integers end below 2^63.
+			$masks[] = '92233720368547' . ( 75808 + $low );
+		}
+		foreach ( [ 'mask_set', 'mask_bit' ] as $table ) {
+			$db->execute( 'INSERT INTO ' . $table . ' VALUES ' . implode( ',', array_map( static fn ( string $mask, int $n ): string => '(' . $mask . ', ' . $n . ')', $masks, array_keys( $masks ) ) ) );
+		}
+
+		$this->dump_and_import( $db, 'mask_' );
+
+		$target = self::database( self::$target );
+		foreach ( [ 'mask_set', 'mask_bit' ] as $table ) {
+			$query = 'SELECT CAST(k AS UNSIGNED) AS k, n FROM ' . $table . ' ORDER BY k';
+			self::assertSame( $db->rows( $query ), $target->rows( $query ), $table );
+			self::assertCount( count( $masks ), $target->rows( $query ), $table );
+		}
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().

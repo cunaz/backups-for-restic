@@ -24,8 +24,12 @@ defined( 'ABSPATH' ) || exit;
  *   ZEROFILL are dropped from the cursor, so that the number fits its kind's form;
  * - FLOAT and DOUBLE are read as `col + 0e0`, the exact double, because the server prints a
  *   FLOAT with fewer digits than it has;
- * - BIT, ENUM and SET are read as `col + 0` and compared with that number: ENUM and SET sort
- *   by their index and bits, not by their names, and a number compares the same way;
+ * - BIT and ENUM are read as `col + 0` and compared with that number: an ENUM sorts by its
+ *   index, not by its name, and a number compares the same way;
+ * - SET is read and compared as CAST(col AS UNSIGNED), the exact mask it sorts by: in
+ *   arithmetic and in a comparison with a number the server takes a SET as a signed DOUBLE,
+ *   which holds a mask above 2^53 not exactly and one from 2^63 on not even with its sign,
+ *   as a SET of 54 or more members can have;
  * - dates, times and MariaDB's UUID and INET types compare as a quoted literal of their text
  *   form, which the server converts to the column's type; TIMESTAMP values are UTC because
  *   the dump's session uses +00:00;
@@ -45,6 +49,7 @@ final readonly class KeyColumn {
 	public const string DECIMAL = 'decimal';
 	public const string FLOAT   = 'float';
 	public const string ORDINAL = 'ordinal';
+	public const string MASK    = 'mask';
 	public const string QUOTED  = 'quoted';
 	public const string STRING  = 'string';
 	public const string BINARY  = 'binary';
@@ -72,7 +77,8 @@ final readonly class KeyColumn {
 			self::INTEGER => '/\A(?:tinyint|smallint|mediumint|int|integer|bigint|year)\b/i',
 			self::DECIMAL => '/\A(?:decimal|numeric|dec|fixed)\b/i',
 			self::FLOAT   => '/\A(?:float|double|real)\b/i',
-			self::ORDINAL => '/\A(?:bit|enum|set)\b/i',
+			self::ORDINAL => '/\A(?:bit|enum)\b/i',
+			self::MASK    => '/\Aset\b/i',
 			self::QUOTED  => '/\A(?:date|datetime|timestamp|time|uuid|inet4|inet6)\b/i',
 			self::BINARY  => '/\A(?:binary|varbinary)\b/i',
 			self::STRING  => '/\A(?:char|varchar)\b/i',
@@ -98,6 +104,7 @@ final readonly class KeyColumn {
 		return match ( $this->kind ) {
 			self::FLOAT                => $column . ' + 0e0',
 			self::ORDINAL              => $column . ' + 0',
+			self::MASK                 => 'CAST(' . $column . ' AS UNSIGNED)',
 			self::STRING, self::BINARY => 'CAST(' . $column . ' AS BINARY)',
 			default                    => $column,
 		};
@@ -129,7 +136,7 @@ final readonly class KeyColumn {
 	 * @return bool True if value() is not the column itself.
 	 */
 	public function computed(): bool {
-		return in_array( $this->kind, [ self::FLOAT, self::ORDINAL, self::STRING, self::BINARY ], true );
+		return in_array( $this->kind, [ self::FLOAT, self::ORDINAL, self::MASK, self::STRING, self::BINARY ], true );
 	}
 
 	/**
@@ -146,6 +153,7 @@ final readonly class KeyColumn {
 			self::DECIMAL => '/\A-?[0-9]{1,65}(?:\.[0-9]{1,38})?\z/',
 			self::FLOAT   => '/\A-?(?:[0-9]{1,40}(?:\.[0-9]{0,40})?|\.[0-9]{1,40})(?:[eE][-+]?[0-9]{1,3})?\z/',
 			self::ORDINAL => '/\A[0-9]{1,20}\z/',
+			self::MASK    => '/\A[0-9]{1,20}\z/',
 			self::QUOTED  => '/\A(?=.)-?[0-9A-Za-z]{0,12}(?:[-:. ][0-9A-Za-z]{0,12}){0,16}\z/',
 			self::STRING  => '/\A(?:[0-9A-Fa-f]{2})*\z/',
 			self::BINARY  => '/\A(?:[0-9A-Fa-f]{2})*\z/',
@@ -178,7 +186,8 @@ final readonly class KeyColumn {
 		$terms = [];
 		$equal = [];
 		foreach ( $key as $position => $column ) {
-			$name    = SqlFormatter::identifier( $column->name );
+			// A SET compares exactly only as its mask; every other kind as the column itself.
+			$name    = self::MASK === $column->kind ? $column->value() : SqlFormatter::identifier( $column->name );
 			$literal = $column->literal( $values[ $position ] );
 			$terms[] = '(' . implode( ' AND ', [ ...$equal, $name . ' > ' . $literal ] ) . ')';
 			$equal[] = $name . ' = ' . $literal;

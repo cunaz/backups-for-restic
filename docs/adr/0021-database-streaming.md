@@ -35,7 +35,9 @@ and makes an interrupted dump start from zero.
   as `(a > x) OR (a = x AND b > y)`, the form for which the server reads index ranges. Each
   key value is read and written back so that the comparison orders exactly as `ORDER BY`
   (`KeyColumn`): numbers as the exact strings the server sends, `FLOAT` and `DOUBLE` as
-  `col + 0e0`, `ENUM`, `SET` and `BIT` as `col + 0` (they sort by index and bits), strings
+  `col + 0e0`, `ENUM` and `BIT` as `col + 0` (they sort by index and bits), `SET` as
+  `CAST(col AS UNSIGNED)`, read and compared, since the server takes a SET as a signed
+  `DOUBLE` in arithmetic and in a comparison with a number, strings
   as their stored bytes in their own character set and collation, binary strings byte by
   byte, dates and times as checked quoted text. The session's sort length is raised to its
   maximum, so that a sort compares whole key values. An insert or a delete before the cursor

@@ -28,7 +28,9 @@ final class DumpKeyTest extends TestCase {
 		yield 'float as its exact double' => [ 'float', '0.10000000149011612', null, '`k` + 0e0', '0.10000000149011612', '`k`' ];
 		yield 'double in exponent notation' => [ 'double', '1.0000000031710769e-30', null, '`k` + 0e0', '1.0000000031710769e-30', '`k`' ];
 		yield 'enum by its index' => [ "enum('zeta','alpha')", '2', null, '`k` + 0', '2', '`k`' ];
-		yield 'set by its bits' => [ "set('b','a')", '3', null, '`k` + 0', '3', '`k`' ];
+		yield 'set by its mask' => [ "set('b','a')", '3', null, 'CAST(`k` AS UNSIGNED)', '3', 'CAST(`k` AS UNSIGNED)' ];
+		yield 'set with the highest of 64 bits' => [ 'set(' . implode( ',', array_map( static fn ( int $bit ): string => "'m" . $bit . "'", range( 0, 63 ) ) ) . ')', '18446744073709551615', null, 'CAST(`k` AS UNSIGNED)', '18446744073709551615', 'CAST(`k` AS UNSIGNED)' ];
+		yield 'bit as an unsigned 64-bit number' => [ 'bit(64)', '18446744073709551615', null, '`k` + 0', '18446744073709551615', '`k`' ];
 		yield 'bit as a number' => [ 'bit(12)', '4095', null, '`k` + 0', '4095', '`k`' ];
 		yield 'datetime with fractions' => [ 'datetime(6)', '2026-11-20 12:34:56.000001', null, '`k`', "'2026-11-20 12:34:56.000001'", '`k`' ];
 		yield 'negative time' => [ 'time(3)', '-838:59:59.000', null, '`k`', "'-838:59:59.000'", '`k`' ];
