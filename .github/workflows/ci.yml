@@ -85,8 +85,12 @@ jobs:
         run: |
           if ! command -v svnadmin >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y subversion; fi
           tests/Release/test-wordpress-org.sh
+      # The test compares .github/required-checks.txt with the jobs of ci.yml and
+      # integration.yml, which it reads with PyYAML.
       - name: Release gates against recorded GitHub responses
-        run: python3 tests/Release/test_release_gates.py
+        run: |
+          if ! python3 -c 'import yaml' 2> /dev/null; then sudo apt-get update -qq && sudo apt-get install -y python3-yaml; fi
+          python3 tests/Release/test_release_gates.py
       - uses: ./.github/actions/check-package
 
   pot:

@@ -706,8 +706,8 @@ Dependabot proposes updates of the actions and of the Composer and npm lock file
 `package.json` names exact versions, so a new version of ESLint or of its WordPress plugin is a
 change by hand, like a new PHPStan, Composer, image, Plugin Check or restic. Not pinned: the
 runner image and the packages that jobs install with apt (Subversion, strace, gdb, Apache,
-nginx), the patch release of PHP that setup-php installs, the patch release of Node.js 22, the
-browser that Playwright downloads for its pinned version, and the CodeQL bundle that
+nginx, PyYAML), the patch release of PHP that setup-php installs, the patch release of Node.js
+22, the browser that Playwright downloads for its pinned version, and the CodeQL bundle that
 `github/codeql-action` selects. CI installs the npm packages with `npm ci --ignore-scripts`, so
 only what the lock file names is installed and no package runs a script while it is installed.
 
