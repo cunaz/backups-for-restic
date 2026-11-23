@@ -18,8 +18,9 @@
         "summary": ".tools/infection-planner/summary.log",
         "github": true
     },
-    // Floors at the scores measured on 2026-11-23 (87.45 % and 88.99 % covered, the same in
-    // CI), rounded down (docs/04 §5.6). They may only rise; 90 % is the goal.
+    // Floors at the scores measured on 2026-11-23 with main at e40ab18 (87.45 % and 88.99 %
+    // covered, the same in all four runs on this code, CI's included), rounded down
+    // (docs/04 §5.6). They may only rise; 90 % is the goal.
     // The 96.64 % and 98.36 % of 2026-11-22 were measured while the tests ran under
     // Infection's file wrapper, which reports an unreadable file or a link to a removed file
     // as missing: two tests failed and two cleanups warned whatever the mutation
