@@ -60,7 +60,9 @@ final class PlanBuild {
 	public int $refused = 0;
 
 	/**
-	 * Rows of an undo review by action: restore, remove and keep.
+	 * Rows by action: of an undo review restore, remove and keep; of an apply preview create,
+	 * replace, mkdir, keep, skip and refuse. An apply preview resumed from a checkpoint of a
+	 * version that did not count them counts fewer than its rows.
 	 *
 	 * @var array<string,int>
 	 */
@@ -507,8 +509,9 @@ final class PlanBuild {
 	private function append( array $row ): void {
 		$index = $this->counts['rows'] ?? 0;
 		$this->disk->put( 'rows', $index, $row );
-		$this->counts['rows'] = $index + 1;
-		$this->refused       += 'refuse' === $row['action'] ? 1 : 0;
+		$this->counts['rows']            = $index + 1;
+		$this->refused                  += 'refuse' === $row['action'] ? 1 : 0;
+		$this->actions[ $row['action'] ] = ( $this->actions[ $row['action'] ] ?? 0 ) + 1;
 		if ( ! ApplyManifest::mutates( $row ) || null === $row['destination'] ) {
 			return;
 		}

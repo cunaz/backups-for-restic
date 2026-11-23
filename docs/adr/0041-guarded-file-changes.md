@@ -363,4 +363,35 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
 - An undo tick advances at least one entry, also one that begins after its deadline, as an
   apply tick does; the verification of a large file still yields after a block. Before, a
   tick that began late made no progress, and with a budget of zero none at all.
+- What ends a preview, apply or undo is named for what it is (2026-11). A check that finds
+  a live or staged file, or the site's file policy, changed after the review raises
+  `file_changed_after_review`, before the apply's first change as between two of them;
+  staged files that are gone `file_staging_gone`; an apply past its window
+  `undo_unavailable`; a preview past its hour `file_preview_expired`; another update in
+  maintenance mode `maintenance_busy`; a marker that cannot be published or kept
+  `maintenance_failed`; a site that cannot leave maintenance mode `maintenance_stuck`.
+  Every other plugin exception that ends one of these jobs, such as a damaged private
+  record or a file operation that the file system refused, gives the job's own code
+  (`file_preview_failed`, `file_apply_failed`, `file_undo_failed`) and its message in the
+  log. Before, the codes of the exception classes reached the page: "Another backup job is
+  still running" for a file that changed, "This server cannot run the backup right now"
+  for a refused write, which sent the administrator to an Environment tab that was all
+  green. Retries do not change: they follow the exception's class or context code. A
+  failed or cancelled apply shows the changes it completed of those it attempted, and that
+  they can be undone.
+- Staged files that an undo needs are not deleted, and the refusal says so and until when:
+  `restore_kept_for_undo` with the end of the window of the latest apply of them, or
+  `restore_in_use` while a job that uses them runs. Before, both were "This restore is
+  still running".
+- A review shows its entries by action above the confirmation (`actions` of an apply
+  review, `totals` of an undo review): a background review is read one page of 100 at a
+  time, so the confirmation can come before the last page. An apply preview counts its
+  rows by action as it builds them and seals the counts in its header; one that a version
+  without them began seals none and shows none.
+- After a reload, the admin page follows a background preview of this tab only while it is
+  queued or running. A preview that it finished before is shown with the time it was
+  finished, a control that inspects the live site again, and the confirmation, which the
+  worker checks entry by entry against the live site in any case. A confirmation whose
+  answer is lost or is no JSON is looked for by its job's type and the time of the review
+  (`reviewed_at`), and followed if it started.
 Ticks under the marker boot without the theme and ordinary plugins. Filters that these ticks consult take effect only from `wp-config.php` or a must-use plugin: `file_mod_allowed`, `backups_for_restic_capability`, filters that grant the confirming administrator a capability, and `backups_for_restic_private_dir` or `upload_dir` where they move the private directory. A restriction in a regular plugin or the theme applies at confirmation and in preflight. A capability that only such code grants stops the job at its first tick under the marker, before that tick changes a file. A change to a role's own definition reaches a process that runs many ticks only when it starts again. OPcache caches the marker per web server, and a command-line tick checks only its own cache, which says nothing about the web server's. With timestamp checks disabled, a web server that compiled an earlier marker runs it until one of its own ticks invalidates the name. A job driven only from the command line can then leave the browser's progress requests on the maintenance page, or, if the earlier marker was core's own with its long-passed time, let requests boot normally while files change.

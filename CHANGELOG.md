@@ -267,6 +267,52 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- A file preview, apply or undo that stops says what stopped it, on the admin page, in the
+  job list, in the failure e-mail and in WP-CLI. Before, a file that changed after the
+  review was reported as "Another backup job is still running", and a refused or damaged
+  private file as "This server cannot run the backup right now", which sent the
+  administrator to an Environment tab that was all green. A file that changed after the
+  review now asks for a new preview (`file_changed_after_review`); staged files that are
+  gone, a preview past its hour, an apply past its recovery window and the maintenance mode
+  have codes and texts of their own, and anything else ends the job with the code of the
+  preview, apply or undo and the reason in its log. A failed or cancelled apply shows how
+  many changes it completed of those it attempted, and that they can be undone. The file
+  routes of the REST API answer an expired preview with `file_preview_expired`, an apply
+  past its window with `undo_unavailable` and a private record that cannot be read with
+  `live_plan_failed` instead of `live_plan_conflict` or `environment`.
+- Deleting staged files that the undo of an apply still needs says until when they are kept
+  and why (`restore_kept_for_undo`, with `until`); a staging that a running job uses says
+  so (`restore_in_use`). Both were "This restore is still running".
+- After a reload, the first preview of live file changes no longer shows a finished
+  background preview as if it were new: it is shown with the time it was finished, beside
+  a button that inspects the live site again and the confirmation. A preview that is still
+  queued or running is followed as before.
+- A confirmation whose answer is lost or is not JSON, as behind a proxy that timed out, is
+  no longer shown as refused while its job runs: the page looks for the job and follows
+  it, and otherwise says that the request may have been accepted and where to check.
+  Reviews carry `reviewed_at` for this.
+- Reading the lists of the Restores tab again, as when a followed job ends, keeps every
+  card whose entry did not change, with an open review, what was typed into it and an
+  answer that is still on its way. Before, every undo card was built anew.
+- Names, link targets, paths, host names, tags, manifest fields and table names from a
+  snapshot or a database are shown apart from the writing direction of the text around
+  them, and one that holds a control, zero-width or right-to-left character is shown
+  quoted with Go's escapes, as `wp backups-for-restic ls` prints it. A file named with a
+  right-to-left override no longer reads as another name. The documentation of `exact`
+  says that it means valid UTF-8 and nothing more.
+- "Select entire snapshot" shows every entry of the snapshot browser as selected; before,
+  the entries stayed unticked and could be added to the selection a second time.
+- A file preview shows its entries by action above the confirmation. A preview of more
+  than 100 entries is read one page at a time, so the confirmation could come long before
+  its last page.
+- Every reason of the file review and of the undo review has a text: `identical_contents`,
+  `different_filesystem`, `overlapping_destinations`, `parent_excluded` and
+  `staged_type_changed` were shown as codes, and so were the database review blockers
+  `database_exchange_foreign` and `database_exchange_rebuilt`. A unit test reads the codes
+  from the code that gives them and fails on one without a text.
+- The hints of a locked or unreachable repository no longer say that the plugin tries
+  again: the job that they belong to has stopped. A request, such as reading snapshots or
+  testing a server, says to try again.
 - A live database exchange waits, for at most a minute, until requests that started before maintenance have ended: the site's database account must have had no other connection to the site database for a second, so a request that reconnected in between is waited for as well. Such a request could otherwise write a post or an order into one database generation and its metadata into the other. Connections that stay open, such as persistent database connections or long-running WP-CLI processes, make the exchange try again later. The exchange now needs MySQL 8.0.22 or later with the Performance Schema enabled and listing every connection; the review reports a server that leaves connections out.
 - After a database migration or a failover to another server, a database restore that kept private tables no longer stops backups and all other jobs. Only another database restore waits. The new `wp backups-for-restic database-discard` command and REST action list those tables for removal on the old server and forget them without dropping anything. Uninstall no longer fails on such a restore, and all-tables backups no longer fail because of it.
 - A database undo whose reply was lost is recorded by a later tick or by the heartbeat, which then expires the replaced tables. Before, the heartbeat stopped at that undo for good.

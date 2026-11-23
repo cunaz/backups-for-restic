@@ -251,12 +251,21 @@ final class Staging {
 	 * @param string $id Job ID.
 	 * @param float  $deadline Deletion deadline.
 	 * @return bool|null Removal result.
-	 * @throws JobConflict If this staging belongs to an active change or its undo window.
+	 * @throws JobConflict If this staging belongs to an active change (`restore_in_use`) or to
+	 *                     the undo window of an apply (`restore_kept_for_undo`, with the time at
+	 *                     which the window ends as `until`).
 	 */
 	private function remove_one( string $id, float $deadline ): ?bool {
 		$this->require_root();
-		if ( isset( $this->jobs->pinned_restores( $this->clock->now()[0] )[ $id ] ) ) {
-			throw new JobConflict( 'A restore operation still needs this staging for apply or undo.' );
+		$pins = $this->jobs->restore_pins( $this->clock->now()[0] );
+		if ( array_key_exists( $id, $pins ) ) {
+			JobConflict::raise(
+				'A restore operation still needs this staging for apply or undo.',
+				null === $pins[ $id ] ? [ 'code' => 'restore_in_use' ] : [
+					'code'  => 'restore_kept_for_undo',
+					'until' => $pins[ $id ],
+				]
+			);
 		}
 		// The ID becomes part of a path: nothing but the form of a job ID gets that far.
 		if ( 1 !== preg_match( JobStore::ID_PATTERN, $id ) ) {

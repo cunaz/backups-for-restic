@@ -47,6 +47,14 @@ than one response should carry, and the reader returns a directory as a whole.
   itself stores in tree JSON. The name is taken from the token, so the escapes show the
   stored bytes. For a link target containing invalid UTF-8, the entry carries its stored
   bytes as Base64 in the optional `target_raw` field alongside the UTF-8 display text.
+- **What `exact` says (2026-11).** `exact` says only that the stored bytes are valid UTF-8,
+  so that `name` is the stored name byte for byte; it says nothing about how the name
+  looks. A valid name can hold control characters, zero-width characters and a
+  right-to-left override, so that `invoice\u202efdp.php` reads as "invoicephp.pdf". The
+  admin page therefore shows every name, link target, path and manifest field in the same
+  form as `ls`, in double quotes with Go's escapes where a character does not print, and
+  in a `<bdi>` element that keeps its writing direction apart from the text around it. It
+  sends back the token or, for an exact name, the text as it came, never the escaped form.
 - **One transient for both scopes.** The two snapshot lists are cached in the existing
   transient, each with the time it was read. Every place that deleted the transient
   before drops both lists without a change.
