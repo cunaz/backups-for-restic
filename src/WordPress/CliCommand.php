@@ -680,8 +680,8 @@ final class CliCommand {
 		$job = $this->container->jobs()->get( $id );
 		if ( null !== $job && JobType::Undo === $job->type && JobState::Succeeded !== $job->state && is_int( $job->result['kept'] ?? null ) ) {
 			// A stopped undo still says what it did before it stopped, and what it kept.
-			$summary = $this->undo_counts( $job );
-			$stopped = JobState::Cancelled === $job->state ? __( 'The undo was cancelled.', 'backups-for-restic' ) : Messages::job_error( $job->error->code ?? 'internal' )['message'];
+			[ $summary ] = $this->undo_counts( $job );
+			$stopped     = JobState::Cancelled === $job->state ? __( 'The undo was cancelled.', 'backups-for-restic' ) : Messages::job_error( $job->error->code ?? 'internal' )['message'];
 			/* translators: 1: why the undo stopped, 2: counts of what it did before. */
 			\WP_CLI::error( sprintf( __( '%1$s Before it stopped, it did this: %2$s', 'backups-for-restic' ), $stopped, $summary ) );
 		}
@@ -711,15 +711,21 @@ final class CliCommand {
 	}
 
 	/**
-	 * Prints what an undo did, and every entry it kept with its reason.
+	 * Prints what an undo did, and every entry it kept with its reason. It says that the kept
+	 * entries are listed only when the whole list was printed.
 	 *
 	 * @param Job $job Finished undo.
 	 */
 	private function report_undo( Job $job ): void {
-		$summary = $this->undo_counts( $job );
+		[ $summary, $listed ] = $this->undo_counts( $job );
 		if ( 'undone' === ( $job->result['apply_state'] ?? null ) ) {
 			/* translators: %s: counts of what the undo did. */
 			\WP_CLI::success( sprintf( __( 'The apply is fully undone: %s', 'backups-for-restic' ), $summary ) );
+			return;
+		}
+		if ( ! $listed ) {
+			/* translators: %s: counts of what the undo did. */
+			\WP_CLI::success( sprintf( __( 'The apply is partly undone: %s The kept entries stay undoable until its recovery window ends.', 'backups-for-restic' ), $summary ) );
 			return;
 		}
 		/* translators: %s: counts of what the undo did. */
@@ -728,16 +734,19 @@ final class CliCommand {
 
 	/**
 	 * Prints every entry that an ended undo kept with its reason, and the number kept for each
-	 * reason.
+	 * reason. The counts of what the undo did are the ones its result recorded, also where the
+	 * list is not available or cannot be read to its end; the numbers by reason are printed
+	 * only for a list that was read to its end.
 	 *
 	 * @param Job $job Ended undo.
-	 * @return string Counts of what the undo did.
+	 * @return array{0:string,1:bool} Counts of what the undo did, and whether every kept entry was printed.
 	 * @throws JobConflict If the job is no ended undo.
 	 */
-	private function undo_counts( Job $job ): string {
+	private function undo_counts( Job $job ): array {
 		$result = $job->result;
 		$counts = [];
 		$offset = 0;
+		$listed = true;
 		do {
 			try {
 				$page = $this->container->file_changes()->kept_page( $job->id, $offset );
@@ -745,7 +754,13 @@ final class CliCommand {
 				if ( 'kept_list_unavailable' !== ( $conflict->context()['code'] ?? null ) ) {
 					throw $conflict;
 				}
-				\WP_CLI::warning( __( 'The list of the entries that this undo kept is not available; the job\'s log says why. A new undo preview of the apply names every entry with its reason.', 'backups-for-restic' ) );
+				\WP_CLI::warning( __( 'The list of the entries that this undo kept is not available; the job\'s log says why. The counts are those that the undo recorded. While the recovery window of the apply lasts, a new undo preview shows what can be reverted now.', 'backups-for-restic' ) );
+				$listed = false;
+				break;
+			} catch ( StorageFailed ) {
+				// A sealed list whose summary or page is missing or changed: the undo did what its result says.
+				\WP_CLI::warning( __( 'The list of the entries that this undo kept cannot be read to its end: a part of it is missing or was changed. The counts are those that the undo recorded. While the recovery window of the apply lasts, a new undo preview shows what can be reverted now.', 'backups-for-restic' ) );
+				$listed = false;
 				break;
 			}
 			foreach ( $page['entries'] as $entry ) {
@@ -754,12 +769,12 @@ final class CliCommand {
 			}
 			$offset = $page['next_offset'];
 		} while ( null !== $offset );
-		foreach ( $counts as $reason => $count ) {
+		foreach ( $listed ? $counts : [] as $reason => $count ) {
 			/* translators: 1: number of kept entries, 2: why they were kept. */
 			\WP_CLI::warning( sprintf( _n( 'Kept %1$d entry: %2$s.', 'Kept %1$d entries: %2$s.', $count, 'backups-for-restic' ), $count, Messages::undo_reason( $reason ) ) );
 		}
 		/* translators: 1: restored files, 2: removed entries, 3: kept entries, 4: entries that had nothing to undo. */
-		return sprintf( __( '%1$d restored, %2$d removed, %3$d kept, %4$d unchanged.', 'backups-for-restic' ), (int) ( $result['restored'] ?? 0 ), (int) ( $result['removed'] ?? 0 ), (int) ( $result['kept'] ?? 0 ), (int) ( $result['unchanged'] ?? 0 ) );
+		return [ sprintf( __( '%1$d restored, %2$d removed, %3$d kept, %4$d unchanged.', 'backups-for-restic' ), (int) ( $result['restored'] ?? 0 ), (int) ( $result['removed'] ?? 0 ), (int) ( $result['kept'] ?? 0 ), (int) ( $result['unchanged'] ?? 0 ) ), $listed ];
 	}
 
 	/**

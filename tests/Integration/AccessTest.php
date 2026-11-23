@@ -377,6 +377,13 @@ final class AccessTest extends TestCase {
 				self::assertSame( 404, $status, $id . ': ' . $raw );
 				self::assertSame( 'backups_for_restic_not_found', $error['code'] ?? null, $raw );
 			}
+			// A sealed list whose page was changed since is unavailable too, not an entry that the undo never recorded.
+			$page = TestSite::private_dir() . '/jobs/' . $undo . '/kept/rows-0.1';
+			self::assertFileExists( $page );
+			file_put_contents( $page, str_replace( 'protected', 'changed_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_kept_list_unavailable', $error['code'] ?? null, $raw );
 		} finally {
 			foreach ( [ $undo, $unsealed, $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );

@@ -698,6 +698,9 @@ final class RestRoutes {
 			return 'kept_list_unavailable' === ( $conflict->context()['code'] ?? null ) ? $this->error( 'kept_list_unavailable', 409 ) : $this->error( 'not_found', 404 );
 		} catch ( InvalidArgument ) {
 			return $this->error( 'invalid_plan_page', 400 );
+		} catch ( StorageFailed ) {
+			// A sealed list whose summary or page is missing or changed. The undo's result stands.
+			return $this->error( 'kept_list_unavailable', 409 );
 		}
 	}
 
@@ -1689,7 +1692,7 @@ final class RestRoutes {
 			],
 			'kept_list_unavailable'         => [
 				'message' => __( 'The list of the entries that this undo kept is not available.', 'backups-for-restic' ),
-				'hint'    => __( 'The undo recorded what it did, but the list of its kept entries could not be sealed; the job\'s log says why. A new undo preview of the apply names every entry with its reason.', 'backups-for-restic' ),
+				'hint'    => __( 'The undo recorded what it did, and its result has the counts. The list of the entries it kept could not be sealed, or a part of it is missing or was changed since; if it could not be sealed, the job\'s log says why. Why that undo kept each entry is recorded nowhere else. While the recovery window of the apply lasts, a new undo preview shows what can be reverted now.', 'backups-for-restic' ),
 			],
 			'not_editable'                  => [
 				'message' => __( 'This setting cannot be changed here.', 'backups-for-restic' ),

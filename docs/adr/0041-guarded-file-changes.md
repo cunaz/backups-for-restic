@@ -185,7 +185,9 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   again: an entry that came back since the review, a check that does not finish within two
   seconds, such as one that verifies a large file, and anything it cannot read leave the
   apply eligible. An undo with nothing to revert that still keeps a changed entry is refused
-  (`undo_nothing_to_revert`). Before, a partial apply stopped by `file_space` could become
+  (`undo_nothing_to_revert`): WP-CLI says so after its review, and over REST such a review
+  is not applicable and gets no confirmation token, so the admin page shows its totals and
+  offers no undo. Before, a partial apply stopped by `file_space` could become
   impossible to undo through one upload into a folder that it created, and the journal with
   the only copies of the original files expired with its window.
 - What can be known about one entry keeps that entry with a reason, and the undo goes on
@@ -325,7 +327,12 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   be sealed, such as one whose counted page changed on disk, does not keep the undo from
   recording its counts and the state of its apply: the result has no list, the job's log
   says why, and `GET /jobs/{id}/kept-entries` answers 409 `kept_list_unavailable` and WP-CLI
-  says that the list is unavailable, instead of showing an empty list. Before, the seal read
+  says that the list is unavailable, instead of showing an empty list. A sealed list of which
+  a part is missing or was changed since is answered the same way, and WP-CLI still prints
+  the recorded counts and how the undo ended, without saying that the kept entries are
+  listed. Neither points to a new undo preview for the reasons: a preview decides every
+  entry as it is now, so it shows what can be reverted within the window, not why the
+  earlier undo kept an entry. Before, the seal read
   and hashed every counted page as it found it, so that a page changed on disk was sealed as
   if the undo had written it, a long list had to be read in one request, and a seal that
   failed left the undo without a result. Tests stop an undo with several kept entries, and

@@ -519,7 +519,7 @@ final class CliTest extends TestCase {
 	}
 
 	public function test_undo_reports_what_an_undo_kept_also_when_it_stopped(): void {
-		$undos  = [ '20261121T110000Z-0b0c01', '20261121T110000Z-0b0c02', '20261121T110000Z-0b0c03', '20261121T110000Z-0b0c04' ];
+		$undos  = [ '20261121T110000Z-0b0c01', '20261121T110000Z-0b0c02', '20261121T110000Z-0b0c03', '20261121T110000Z-0b0c04', '20261121T110000Z-0b0c05' ];
 		$kept   = [ [ TestSite::root() . '/wp-content/uploads/bfr-kept.txt', 'changed_since_apply' ] ];
 		$result = [
 			'restore'              => '20261120T000000Z-0a0b02',
@@ -564,7 +564,28 @@ final class CliTest extends TestCase {
 			[ $status, $output ] = $report( $undos[3] );
 			self::assertSame( 0, $status, $output );
 			self::assertStringContainsString( "Warning: The list of the entries that this undo kept is not available; the job's log says why.", $output );
-			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
+			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged. The kept entries stay undoable', $output );
+			self::assertStringNotContainsString( 'listed above', $output );
+			// A sealed list whose page was changed since cannot be read: the undo still says what it did, and how it ended.
+			TestSite::ended_undo( $undos[4], 'succeeded', $result, $kept );
+			$page = TestSite::private_dir() . '/jobs/' . $undos[4] . '/kept/rows-0.1';
+			self::assertFileExists( $page );
+			file_put_contents( $page, str_replace( 'changed_since_apply', 'deleted_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $output ] = $report( $undos[4] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Warning: The list of the entries that this undo kept cannot be read to its end: a part of it is missing or was changed.', $output );
+			self::assertStringNotContainsString( 'deleted_since_apply', $output );
+			self::assertStringNotContainsString( 'Warning: Kept', $output );
+			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged. The kept entries stay undoable', $output );
+			self::assertStringNotContainsString( 'listed above', $output );
+			// A stopped undo with such a list keeps its failure and its counts.
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $undos[4] );
+			TestSite::ended_undo( $undos[4], 'cancelled', $result, $kept );
+			file_put_contents( $page, str_replace( 'changed_since_apply', 'deleted_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $output ] = $report( $undos[4] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Warning: The list of the entries that this undo kept cannot be read to its end', $output );
+			self::assertStringContainsString( 'Error: The undo was cancelled. Before it stopped, it did this: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
 		} finally {
 			foreach ( $undos as $undo ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $undo );
