@@ -190,6 +190,21 @@ final class RunnerTest extends TestCase {
 		self::assertFalse( $failed->error->retryable );
 	}
 
+	public function test_a_file_job_that_a_plain_conflict_ends_says_so_and_not_that_another_job_runs(): void {
+		$store                     = $this->store();
+		$this->script['preflight'] = [ new JobConflict( 'A destination or staged file changed after confirmation.' ) ];
+		$job                       = $store->create( JobType::Apply, 'manual', $this->clock->seconds );
+
+		$this->runner( $store )->tick( 10 );
+
+		self::assertSame( [ 'preflight', 'cleaning_up' ], $this->calls );
+		$failed = $store->get( $job->id );
+		self::assertSame( JobState::Failed, $failed?->state );
+		self::assertSame( 'file_apply_failed', $failed->error?->code );
+		self::assertSame( 'A destination or staged file changed after confirmation.', $failed->error->message, 'The log keeps the technical message.' );
+		self::assertStringContainsString( '"code":"file_apply_failed"', (string) file_get_contents( $this->directory . '/jobs/' . $job->id . '/events.log' ) );
+	}
+
 	public function test_the_log_of_a_failure_names_the_table_a_database_error_is_about(): void {
 		$store                      = $this->store();
 		$this->script['backing_up'] = [

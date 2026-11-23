@@ -625,6 +625,13 @@ final class RestRoutes {
 		} catch ( InvalidArgument ) {
 			return $this->error( 'invalid_job_id', 400 );
 		} catch ( JobConflict $conflict ) {
+			$context = $conflict->context();
+			if ( 'restore_kept_for_undo' === ( $context['code'] ?? null ) && is_int( $context['until'] ?? null ) ) {
+				return $this->kept_for_undo( $context['until'] );
+			}
+			if ( 'restore_in_use' === ( $context['code'] ?? null ) ) {
+				return $this->error( 'restore_in_use', 409 );
+			}
 			return $this->error( 'job_unreadable' === JobError::from_throwable( $conflict )->code ? 'job_unreadable' : 'restore_active', 409 );
 		}
 		if ( null === $complete ) {
@@ -637,6 +644,28 @@ final class RestRoutes {
 					'complete' => $complete,
 				],
 			] + $this->staged()
+		);
+	}
+
+	/**
+	 * The refusal to delete staged files that the undo of an apply still needs, with the time
+	 * at which its recovery window ends, in the site's time zone and formats. The time is also
+	 * in the data as `until`, a Unix time.
+	 *
+	 * @param int $until Unix time at which the undo window ends.
+	 * @return \WP_Error Error.
+	 */
+	private function kept_for_undo( int $until ): \WP_Error {
+		$format = Decoded::string( get_option( 'date_format' ), 'Y-m-d' ) . ' ' . Decoded::string( get_option( 'time_format' ), 'H:i' );
+		return new \WP_Error(
+			'backups_for_restic_restore_kept_for_undo',
+			/* translators: %s: date and time when the recovery window of the apply ends. */
+			sprintf( __( 'These staged files are kept until %s, because the undo of a live file change needs them.', 'backups-for-restic' ), (string) wp_date( $format, $until ) ),
+			[
+				'status' => 409,
+				'hint'   => __( 'An apply that changed live files can be undone for 24 hours after it ended, and the undo needs these staged files to check each entry. Once the apply is undone completely, or those 24 hours have passed, the files can be deleted here; files whose own expiry has passed by then are removed automatically.', 'backups-for-restic' ),
+				'until'  => $until,
+			]
 		);
 	}
 
@@ -754,7 +783,7 @@ final class RestRoutes {
 			$service = $this->container->database_changes();
 			$plan    = $undo ? $service->preview_undo( $id, get_current_user_id() ) : $service->preview( $id, get_current_user_id() );
 		} catch ( InvalidArgument | JobConflict $refused ) {
-			return $this->plan_error( $refused, true );
+			return $this->plan_error( $refused );
 		}
 		return $this->reviewed_response( $plan, $id, $undo, false, true );
 	}
@@ -796,7 +825,7 @@ final class RestRoutes {
 			$service = $this->container->database_changes();
 			$job     = $undo ? $service->start_undo( $id, get_current_user_id(), $digest ) : $service->start_apply( $id, get_current_user_id(), $digest );
 		} catch ( InvalidArgument | JobConflict $refused ) {
-			return $this->plan_error( $refused, true );
+			return $this->plan_error( $refused );
 		}
 		Cron::chain( $this->container );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ], 201, true );
@@ -873,8 +902,8 @@ final class RestRoutes {
 		}
 		try {
 			$plan = $this->container->file_changes()->request_preview( $id, $undo, $include_config, $plan_job, $offset );
-		} catch ( InvalidArgument | JobConflict $refused ) {
-			return $this->plan_error( $refused );
+		} catch ( PluginException $refused ) {
+			return $this->file_error( $refused );
 		}
 		if ( $plan instanceof Job ) {
 			Cron::chain( $this->container );
@@ -897,6 +926,9 @@ final class RestRoutes {
 		$plan['site_url']      = home_url();
 		$plan['write_allowed'] = $database ? self::database_writes_allowed() : self::live_writes_allowed();
 		$plan['review_token']  = $plan['applicable'] && $plan['write_allowed'] ? wp_create_nonce( self::review_action( $undo, $id, $include_config, $plan['digest'], $plan['plan_job'] ?? null, $database ) ) : null;
+		// A job that a confirmation of this review starts is created at this time or later: the
+		// page looks for it by its type and this time when the answer to the confirmation is lost.
+		$plan['reviewed_at'] = time();
 		return $this->respond( $plan, 200, true );
 	}
 
@@ -939,8 +971,8 @@ final class RestRoutes {
 		try {
 			$service = $this->container->file_changes();
 			$job     = $undo ? $service->start_undo( $id, $digest, $hash, $plan_job, get_current_user_id() ) : $service->start_apply( $id, $include_config, $digest, $hash, $plan_job, get_current_user_id() );
-		} catch ( InvalidArgument | JobConflict $refused ) {
-			return $this->plan_error( $refused );
+		} catch ( PluginException $refused ) {
+			return $this->file_error( $refused );
 		}
 		Cron::chain( $this->container );
 		// Maintenance permits this job's control requests before WordPress performs its
@@ -1004,19 +1036,41 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Reports a refusal without returning filesystem details from an exception.
+	 * Reports a refused database review or confirmation without returning details from an
+	 * exception.
 	 *
 	 * @param InvalidArgument|JobConflict $refused Reason.
-	 * @param bool                        $database Whether the plan concerns a database exchange.
 	 * @return \WP_Error Error.
 	 */
-	private function plan_error( InvalidArgument|JobConflict $refused, bool $database = false ): \WP_Error {
+	private function plan_error( InvalidArgument|JobConflict $refused ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
-			$code = JobError::from_throwable( $refused )->code;
-			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert' ], true ) ? $code : 'live_plan_conflict', 409 );
+			return $this->error( JobError::from_throwable( $refused )->code, 409 );
 		}
+		return $this->error( 'database_review_required', 400 );
+	}
+
+	/**
+	 * Reports a refused or failed file preview or confirmation without returning filesystem
+	 * details from an exception. A file that changed after the review asks for a new preview;
+	 * a refusal with a code of its own keeps it; a private record of the restore or apply that
+	 * cannot be read or written is a failure of its own (`live_plan_failed`), not a backup that
+	 * this server cannot run.
+	 *
+	 * @param PluginException $refused Reason.
+	 * @return \WP_Error Error.
+	 */
+	private function file_error( PluginException $refused ): \WP_Error {
 		$code = JobError::from_throwable( $refused )->code;
-		return $this->error( $database ? 'database_review_required' : ( 'protected_path_invalid' === $code ? $code : 'live_plan_unavailable' ), 400 );
+		if ( 'file_changed_after_review' === $code ) {
+			return $this->error( 'live_plan_changed', 409 );
+		}
+		if ( $refused instanceof JobConflict ) {
+			return $this->error( in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'file_preview_expired', 'job_unreadable' ], true ) ? $code : 'live_plan_conflict', 409 );
+		}
+		if ( $refused instanceof InvalidArgument ) {
+			return $this->error( in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 );
+		}
+		return $this->error( 'live_plan_failed', 500 );
 	}
 
 	/**
@@ -1750,6 +1804,10 @@ final class RestRoutes {
 				'message' => __( 'Review a fresh preview of these file changes.', 'backups-for-restic' ),
 				'hint'    => '',
 			],
+			'live_plan_failed'              => [
+				'message' => __( 'The plugin could not finish this file preview or confirmation.', 'backups-for-restic' ),
+				'hint'    => __( 'A file may have changed while it was read, or a private record of this restore or apply could not be read or written. Open the preview again. If it fails again, check the working directory and the free disk space on the Environment tab.', 'backups-for-restic' ),
+			],
 			'live_confirmation'             => [
 				'message' => __( 'Review the listed changes, acknowledge them and type the exact site address.', 'backups-for-restic' ),
 				'hint'    => '',
@@ -1781,6 +1839,10 @@ final class RestRoutes {
 			'restore_active'                => [
 				'message' => __( 'This restore is still running.', 'backups-for-restic' ),
 				'hint'    => __( 'Wait for it to finish or cancel it. A cancelled restore keeps no files.', 'backups-for-restic' ),
+			],
+			'restore_in_use'                => [
+				'message' => __( 'A job that uses these staged files is still running.', 'backups-for-restic' ),
+				'hint'    => __( 'Wait for it to finish or cancel it, then delete the files.', 'backups-for-restic' ),
 			],
 			'invalid_paths'                 => [
 				'message' => __( 'The paths to restore are not valid.', 'backups-for-restic' ),

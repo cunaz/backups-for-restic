@@ -271,8 +271,10 @@ final class FileChangesTest extends TestCase {
 		try {
 			$this->staging->remove( $this->restore, PHP_FLOAT_MAX );
 			self::fail( 'Manual removal must refuse an active apply.' );
-		} catch ( JobConflict ) {
+		} catch ( JobConflict $refused ) {
 			self::assertDirectoryExists( $this->files );
+			// A job that uses the files, not a restore that is still running.
+			self::assertSame( [ 'code' => 'restore_in_use' ], $refused->context() );
 		}
 		$this->clock->advance( 3601 );
 		$this->jobs->prune( 1, $this->clock->seconds );
@@ -287,6 +289,21 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 0644, fileperms( $this->live . '/b-new/new.txt' ) & 0777 );
 		self::assertFileDoesNotExist( $this->live . '/wp-config.php' );
 		self::assertSame( $job->id, $this->changes->undoable()[0]['job'] );
+		try {
+			$this->staging->remove( $this->restore, PHP_FLOAT_MAX );
+			self::fail( 'Manual removal must refuse the files that the undo needs.' );
+		} catch ( JobConflict $refused ) {
+			self::assertDirectoryExists( $this->files );
+			// Until the recovery window of the apply ends, which the refusal names.
+			self::assertSame(
+				[
+					'code'  => 'restore_kept_for_undo',
+					'until' => $done->finished_at + 86400,
+				],
+				$refused->context()
+			);
+			self::assertSame( $done->finished_at + 86400, $this->changes->undoable()[0]['expires'] );
+		}
 		$this->undo( $job );
 		self::assertSame( [], $this->changes->undoable() );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
@@ -383,12 +400,16 @@ final class FileChangesTest extends TestCase {
 		try {
 			$this->changes->start_apply( $this->restore, false, $review['digest'] );
 			self::fail( 'A changed live file must invalidate the preview.' );
-		} catch ( JobConflict ) {
+		} catch ( JobConflict $stale ) {
 			self::assertNull( $this->jobs->active() );
+			self::assertSame( 'file_changed_after_review', $stale->context()['code'] ?? null );
 		}
 		$apply = $this->start();
 		file_put_contents( $this->files . $this->live . '/b-new/new.txt', 'different staged file' );
-		$this->run_job( $apply, JobState::Failed );
+		$failed = $this->run_job( $apply, JobState::Failed );
+		// Not "Another backup job is still running": the files changed after the review.
+		self::assertSame( 'file_changed_after_review', $failed->error?->code );
+		self::assertSame( [ 0, 0 ], [ $failed->result['entries_completed'], $failed->result['entries_attempted'] ] );
 		self::assertSame( 'administrator edit', file_get_contents( $this->live . '/a-existing' ) );
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 		self::assertSame( [], $this->changes->undoable() );
@@ -414,7 +435,10 @@ final class FileChangesTest extends TestCase {
 		$this->runner->tick( 0.0 );
 		rename( $this->live . '/b-new', $this->live . '/elsewhere' );
 		mkdir( $this->live . '/b-new', 0755 );
-		$this->run_job( $job, JobState::Failed );
+		$failed = $this->run_job( $job, JobState::Failed );
+		// Two of three changes are made; the page says so and that they can be undone.
+		self::assertSame( 'file_changed_after_review', $failed->error?->code );
+		self::assertSame( [ 2, 2 ], [ $failed->result['entries_completed'], $failed->result['entries_attempted'] ] );
 		self::assertFileDoesNotExist( $this->live . '/b-new/new.txt' );
 		$reasons = array_column( $this->changes->preview_undo( $job->id )['entries'], 'reason', 'path' );
 		self::assertSame( 'changed_since_apply', $reasons[ $this->live . '/b-new' ] );
@@ -1523,7 +1547,8 @@ final class FileChangesTest extends TestCase {
 		// The next kept entry is not built on a page that the document does not name: the undo
 		// stops, and records what it did without the list.
 		$failed = $this->run_job( $undo, JobState::Failed );
-		self::assertSame( [ 'environment', 'The job does not name the counted page of its kept entries.' ], [ $failed->error?->code, $failed->error?->message ] );
+		// The undo's own code, not "This server cannot run the backup right now"; the log has the message.
+		self::assertSame( [ 'file_undo_failed', 'The job does not name the counted page of its kept entries.' ], [ $failed->error?->code, $failed->error?->message ] );
 		self::assertSame( [ 0, 1, 'applied' ], [ $failed->result['restored'], $failed->result['kept'], $failed->result['apply_state'] ] );
 		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 		try {
@@ -1720,6 +1745,12 @@ final class FileChangesTest extends TestCase {
 		$job = $this->run_job( $this->start() );
 		$this->clock->advance( 86400 );
 		self::assertSame( [], $this->changes->undoable() );
+		try {
+			$this->changes->request_preview( $job->id, true, false );
+			self::fail( 'An apply past its recovery window was offered for undo.' );
+		} catch ( JobConflict $closed ) {
+			self::assertSame( 'undo_unavailable', $closed->context()['code'] ?? null );
+		}
 		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
 		self::assertDirectoryDoesNotExist( $this->jobs->directory( $job ) . '/undo' );
 		self::assertDirectoryDoesNotExist( $this->files );
@@ -2123,9 +2154,82 @@ final class FileChangesTest extends TestCase {
 		$plan  = $this->run_job( $this->queue_large_preview() );
 		$apply = $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id );
 		file_put_contents( $this->files . $this->live . '/b-new/new.txt', 'subsequent modification' );
-		$this->run_job( $apply, JobState::Failed );
+		$failed = $this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'file_changed_after_review', $failed->error?->code );
+		self::assertSame( [ 0, 0 ], [ $failed->result['entries_completed'], $failed->result['entries_attempted'] ] );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
+	}
+
+	public function test_a_live_file_created_after_a_background_review_stops_the_apply_with_its_own_code(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id );
+		// An update installs the directory that the reviewed plan creates.
+		mkdir( $this->live . '/b-new' );
+		file_put_contents( $this->live . '/b-new/new.txt', 'from an update' );
+		$failed = $this->run_job( $apply, JobState::Failed );
+		self::assertSame( 'file_changed_after_review', $failed->error?->code );
+		self::assertSame( 'from an update', file_get_contents( $this->live . '/b-new/new.txt' ) );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_an_apply_whose_staged_files_are_gone_says_so(): void {
+		$apply = $this->start();
+		TempDir::remove( dirname( $this->files ) );
+		$failed = $this->run_job( $apply, JobState::Failed );
+		// Before: "The backup is not configured completely".
+		self::assertSame( 'file_staging_gone', $failed->error?->code );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	public function test_previews_count_their_entries_by_action_above_the_confirmation(): void {
+		$inline = $this->changes->request_preview( $this->restore, false, false );
+		self::assertIsArray( $inline );
+		$counted = array_count_values( array_column( $inline['entries'], 'action' ) );
+		self::assertSame( [ 1, 1, 1, 2, 0 ], [ $counted['replace'], $counted['mkdir'], $counted['create'], $counted['skip'], $counted['refuse'] ?? 0 ] );
+		self::assertSame( [ 'create', 'replace', 'mkdir', 'keep', 'skip', 'refuse' ], array_keys( $inline['actions'] ?? [] ) );
+		foreach ( $inline['actions'] as $action => $count ) {
+			self::assertSame( $counted[ $action ] ?? 0, $count, $action );
+		}
+		// A background preview is read a page at a time: its totals cover every page.
+		$plan   = $this->run_job( $this->queue_large_preview() );
+		$page   = $this->changes->request_preview( $this->restore, false, false, $plan->id );
+		$rows   = [];
+		$totals = $page['actions'] ?? null;
+		do {
+			self::assertIsArray( $page );
+			self::assertSame( $totals, $page['actions'] ?? null, 'Every page has the same totals.' );
+			array_push( $rows, ...array_column( $page['entries'], 'action' ) );
+			$next = $page['next_offset'];
+			$page = null === $next ? null : $this->changes->request_preview( $this->restore, false, false, $plan->id, $next );
+		} while ( null !== $page );
+		self::assertGreaterThan( 100, count( $rows ) );
+		self::assertIsArray( $totals );
+		self::assertSame( 111 + ( $counted['keep'] ?? 0 ), $totals['keep'] );
+		$counted = array_count_values( $rows );
+		foreach ( $totals as $action => $count ) {
+			self::assertSame( $counted[ $action ] ?? 0, $count, $action );
+		}
+		// An undo review keeps its totals of its own.
+		self::assertArrayNotHasKey( 'actions', $this->changes->request_preview( $this->run_job( $this->start() )->id, true, false ) );
+	}
+
+	public function test_a_background_preview_begun_without_counts_by_action_shows_none(): void {
+		$plan = $this->queue_large_preview();
+		$this->runner->tick( 0.0 );
+		$this->runner->tick( 0.0 );
+		$saved = $this->jobs->get( $plan->id );
+		self::assertNotNull( $saved );
+		self::assertGreaterThan( 0, $saved->data['plan_cursor']['counts']['rows'] ?? 0 );
+		// An earlier version counted no actions of an apply preview in its checkpoint.
+		$saved->data['plan_cursor']['actions'] = [];
+		$this->jobs->save( $saved );
+		$done = $this->run_job( $plan );
+		$page = $this->changes->request_preview( $this->restore, false, false, $done->id );
+		self::assertIsArray( $page );
+		self::assertArrayHasKey( 'actions', $page );
+		self::assertNull( $page['actions'] );
+		self::assertTrue( $page['applicable'] );
 	}
 
 	public function test_file_plan_limit_fails_the_entire_job_instead_of_publishing_a_prefix(): void {
@@ -2151,7 +2255,10 @@ final class FileChangesTest extends TestCase {
 		$report = dirname( $this->files ) . '/entries.jsonl';
 		copy( $report, $report . '.next' );
 		rename( $report . '.next', $report );
-		$this->run_job( $plan, JobState::Failed );
+		$failed = $this->run_job( $plan, JobState::Failed );
+		// Not "Another backup job is still running": the preview failed, the log says why.
+		self::assertSame( 'file_preview_failed', $failed->error?->code );
+		self::assertSame( 'The staged report changed while its preview was being built.', $failed->error->message );
 		self::assertDirectoryDoesNotExist( dirname( $report ) . '/plans/' . $plan->id );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
 	}
@@ -2318,6 +2425,12 @@ final class FileChangesTest extends TestCase {
 			self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
 		}
 		$this->clock->advance( 3601 );
+		try {
+			$this->changes->request_preview( $this->restore, false, false, $plan->id );
+			self::fail( 'An expired preview was returned.' );
+		} catch ( JobConflict $expired ) {
+			self::assertSame( 'file_preview_expired', $expired->context()['code'] ?? null );
+		}
 		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
 		self::assertDirectoryDoesNotExist( $dir );
 		self::assertDirectoryExists( $this->files );
@@ -2343,7 +2456,8 @@ final class FileChangesTest extends TestCase {
 			$this->changes->start_undo( $apply->id, $page['digest'], '', $review->id );
 			self::fail( 'An undo review without totals must be reviewed again.' );
 		} catch ( JobConflict $stale ) {
-			self::assertSame( 'job_conflict', JobError::from_throwable( $stale )->code );
+			// A review to do again, not another job that is still running.
+			self::assertSame( 'file_changed_after_review', JobError::from_throwable( $stale )->code );
 		}
 		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 	}

@@ -409,11 +409,28 @@ final class JobStore {
 	 * @return array<string, true> Pinned restore IDs.
 	 */
 	public function pinned_restores( int $now ): array {
+		return array_map( static fn (): true => true, $this->restore_pins( $now ) );
+	}
+
+	/**
+	 * The restores of pinned_restores() with the reason each one is kept: null while a job
+	 * that uses its staging has not ended, otherwise the time at which the undo window of the
+	 * latest apply of it ends, 24 hours after that apply ended.
+	 *
+	 * @param int $now Current timestamp.
+	 * @return array<string, int|null> End of the undo window by restore ID, null for a staging in use.
+	 */
+	public function restore_pins( int $now ): array {
 		$pins = [];
 		foreach ( $this->file_changes() as $job ) {
 			$id = $job->data['restore'] ?? null;
-			if ( is_string( $id ) && ( ! $job->state->is_terminal() || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $this->directory . '/' . $job->id . '/undo/attempted' ) && ! is_file( $this->directory . '/' . $job->id . '/undo/reverted' ) ) ) ) {
-				$pins[ $id ] = true;
+			if ( ! is_string( $id ) ) {
+				continue;
+			}
+			if ( ! $job->state->is_terminal() ) {
+				$pins[ $id ] = null;
+			} elseif ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $this->directory . '/' . $job->id . '/undo/attempted' ) && ! is_file( $this->directory . '/' . $job->id . '/undo/reverted' ) && ( ! array_key_exists( $id, $pins ) || ( null !== $pins[ $id ] && $pins[ $id ] < $job->finished_at + 86400 ) ) ) {
+				$pins[ $id ] = $job->finished_at + 86400;
 			}
 		}
 		return $pins;

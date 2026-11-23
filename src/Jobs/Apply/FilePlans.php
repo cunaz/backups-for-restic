@@ -34,6 +34,7 @@ defined( 'ABSPATH' ) || exit;
  * Builds read-only reviews and checks their identity and expiry when a caller opens one.
  *
  * @phpstan-import-type Row from ApplyManifest
+ * @phpstan-type ApplyTotals array{create:int,replace:int,mkdir:int,keep:int,skip:int,refuse:int}
  */
 final readonly class FilePlans {
 
@@ -87,7 +88,7 @@ final readonly class FilePlans {
 		}
 		$handle = $this->staging->open_download( $restore, $this->hours, 'report', '' );
 		if ( null === $handle ) {
-			throw new InvalidArgument( 'The staged report is unavailable.' );
+			InvalidArgument::raise( 'The staged report is unavailable.', [ 'code' => 'file_staging_gone' ] );
 		}
 		try {
 			$count = 0;
@@ -112,13 +113,13 @@ final readonly class FilePlans {
 	 * @param bool   $config Configuration.
 	 * @param string $plan_job Preview job.
 	 * @param int    $offset First row.
-	 * @return array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:array{restore:int,remove:int,keep:int}|null} Public page; an undo page has the totals by action, null for a review sealed before they were counted, which cannot be confirmed.
+	 * @return array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:array{restore:int,remove:int,keep:int}|null,actions?:ApplyTotals|null} Public page; an undo page has the totals by action, null for a review sealed before they were counted, which cannot be confirmed; an apply page has its rows by action, null for a preview sealed without them.
 	 * @throws JobConflict If this preview expired or does not match the request.
 	 */
 	public function plan_page( string $id, string $restore, bool $undo, bool $config, string $plan_job, int $offset ): array {
 		$job = $this->jobs->get( $plan_job );
 		if ( null === $job || JobType::FilePlan !== $job->type || JobState::Succeeded !== $job->state || $job->finished_at + 3600 <= $this->clock->now()[0] || $id !== ( $job->data['subject'] ?? null ) || $undo !== ( $job->data['undo'] ?? null ) || $config !== ( $job->data['include_config'] ?? null ) || $restore !== ( $job->data['restore'] ?? null ) || ! is_string( $job->result['digest'] ?? null ) ) {
-			throw new JobConflict( 'This file preview is unavailable, expired or has a different scope.' );
+			JobConflict::raise( 'This file preview is unavailable, expired or has a different scope.', [ 'code' => 'file_preview_expired' ] );
 		}
 		$disk   = $this->disk( $restore, $plan_job, $undo );
 		$digest = $job->result['digest'];
@@ -147,8 +148,28 @@ final readonly class FilePlans {
 				'remove'  => $actions['remove'],
 				'keep'    => $actions['keep'],
 			] : null;
+		} else {
+			$page['actions'] = null === $header['actions'] ? null : self::action_totals( $header['actions'] );
 		}
 		return $page;
+	}
+
+	/**
+	 * The rows of an apply preview by action, every action named, for the review above its
+	 * confirmation: a large preview is read one page at a time.
+	 *
+	 * @param array<string,int> $counted Rows by action.
+	 * @return ApplyTotals Totals.
+	 */
+	public static function action_totals( array $counted ): array {
+		return [
+			'create'  => $counted['create'] ?? 0,
+			'replace' => $counted['replace'] ?? 0,
+			'mkdir'   => $counted['mkdir'] ?? 0,
+			'keep'    => $counted['keep'] ?? 0,
+			'skip'    => $counted['skip'] ?? 0,
+			'refuse'  => $counted['refuse'] ?? 0,
+		];
 	}
 
 
@@ -234,6 +255,7 @@ final readonly class FilePlans {
 	 * @param float $deadline Deadline.
 	 * @return bool Finished planning.
 	 * @throws InvalidArgument If the original report disappeared.
+	 * @throws JobConflict If the staged report changed while the preview was built.
 	 */
 	private function build_plan( Job $job, float $deadline ): bool {
 		$restore   = ApplyJournal::field( $job, 'restore' );
@@ -248,7 +270,7 @@ final readonly class FilePlans {
 		} else {
 			$report = $this->staging->open_download( $restore, $this->hours, 'report', '', true );
 			if ( null === $report ) {
-				throw new InvalidArgument( 'The original staging report is no longer available.' );
+				InvalidArgument::raise( 'The original staging report is no longer available.', [ 'code' => 'file_staging_gone' ] );
 			}
 			try {
 				$identity = self::report_identity( $report );
@@ -293,16 +315,19 @@ final readonly class FilePlans {
 	 * @return bool Published.
 	 */
 	private function seal_plan( Job $job ): bool {
-		$restore     = ApplyJournal::field( $job, 'restore' );
-		$disk        = $this->disk( $restore, $job->id, true );
-		$builder     = $this->builder( $job, $disk );
-		$undo        = true === ( $job->data['undo'] ?? null );
-		$actions     = [
+		$restore = ApplyJournal::field( $job, 'restore' );
+		$disk    = $this->disk( $restore, $job->id, true );
+		$builder = $this->builder( $job, $disk );
+		$undo    = true === ( $job->data['undo'] ?? null );
+		$actions = [
 			'restore' => $builder->actions['restore'] ?? 0,
 			'remove'  => $builder->actions['remove'] ?? 0,
 			'keep'    => $builder->actions['keep'] ?? 0,
 		];
-		$digest      = $disk->seal( ApplyJournal::field( $job, 'subject' ), $restore, $undo, true === ( $job->data['include_config'] ?? null ), $builder->counts, $builder->changes, $builder->refused, $builder->required_bytes, $undo ? $actions : null );
+		// An apply preview counts its rows by action for the review. One that a version without
+		// these counts began has fewer than its rows, and its review shows none.
+		$counted     = array_sum( $builder->actions ) === ( $builder->counts['rows'] ?? 0 ) ? $builder->actions : null;
+		$digest      = $disk->seal( ApplyJournal::field( $job, 'subject' ), $restore, $undo, true === ( $job->data['include_config'] ?? null ), $builder->counts, $builder->changes, $builder->refused, $builder->required_bytes, $undo ? $actions : $counted );
 		$job->result = [
 			'digest'  => $digest,
 			'entries' => $builder->counts['rows'] ?? 0,

@@ -6,10 +6,15 @@ namespace BackupsForRestic\Tests\Unit\Jobs;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\AppendOnlyRefused;
+use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Settings\Settings;
@@ -97,6 +102,81 @@ final class JobTypeAndErrorTest extends TestCase {
 	#[DataProvider( 'errors' )]
 	public function test_error_codes( \Throwable $error, string $code ): void {
 		self::assertSame( $code, JobError::from_throwable( $error )->code );
+	}
+
+	/**
+	 * One exception of every concrete class of the plugin, without a code in its context.
+	 *
+	 * @return list<PluginException>
+	 */
+	private static function every_exception(): array {
+		$found = [];
+		foreach ( (array) glob( dirname( __DIR__, 3 ) . '/src/Exception/*.php' ) as $file ) {
+			$class = 'BackupsForRestic\\Exception\\' . basename( $file, '.php' );
+			$type  = new \ReflectionClass( $class );
+			if ( $type->isSubclassOf( PluginException::class ) && ! $type->isAbstract() ) {
+				$found[] = $type->newInstance( 'Some failure.' );
+			}
+		}
+		self::assertGreaterThan( 20, count( $found ) );
+		return $found;
+	}
+
+	public function test_no_exception_without_a_code_ends_a_file_job_with_the_text_of_a_backup_failure(): void {
+		$expected = [
+			'file_plan' => 'file_preview_failed',
+			'apply'     => 'file_apply_failed',
+			'undo'      => 'file_undo_failed',
+		];
+		self::assertSame( $expected, JobError::FILE_JOB_CODES );
+		foreach ( [ JobType::FilePlan, JobType::Apply, JobType::Undo ] as $type ) {
+			foreach ( self::every_exception() as $error ) {
+				self::assertSame( $expected[ $type->value ], JobError::from_throwable( $error, $type )->code, $type->value . ': ' . $error::class );
+			}
+		}
+		// Before: "Another backup job is still running" and "This server cannot run the backup".
+		self::assertSame( 'job_conflict', JobError::from_throwable( new JobConflict( 'changed' ) )->code );
+		self::assertSame( 'environment', JobError::from_throwable( new StorageFailed( 'changed' ) )->code );
+		// The other jobs keep the codes of the classes.
+		foreach ( [ JobType::Backup, JobType::Restore, JobType::DatabaseApply ] as $type ) {
+			self::assertSame( 'job_conflict', JobError::from_throwable( new JobConflict( 'busy' ), $type )->code, $type->value );
+			self::assertSame( 'environment', JobError::from_throwable( new StorageFailed( 'full' ), $type )->code, $type->value );
+		}
+		// An error that is no exception of the plugin is a bug, in any job.
+		self::assertSame( 'internal', JobError::from_throwable( new \TypeError( 'bug' ), JobType::Apply )->code );
+	}
+
+	/**
+	 * @return iterable<string, array{PluginException, JobType, string}>
+	 */
+	public static function file_job_codes(): iterable {
+		yield 'a file changed after the review' => [ new JobConflict( 'A destination or staged file changed after confirmation.', [ 'code' => 'file_changed_after_review' ] ), JobType::Apply, 'file_changed_after_review' ];
+		yield 'a live file changed during the apply' => [ new StorageFailed( 'The live file no longer matches the reviewed original.', [ 'code' => 'file_changed_after_review' ] ), JobType::Apply, 'file_changed_after_review' ];
+		yield 'the staging is gone' => [ new InvalidArgument( 'This restore has no eligible staged files.', [ 'code' => 'file_staging_gone' ] ), JobType::FilePlan, 'file_staging_gone' ];
+		yield 'the undo window has ended' => [ new JobConflict( 'This apply has no available undo.', [ 'code' => 'undo_unavailable' ] ), JobType::FilePlan, 'undo_unavailable' ];
+		yield 'another updater holds the maintenance mode' => [ new StorageFailed( 'Another updater owns the maintenance marker.', [ 'code' => 'maintenance_busy' ] ), JobType::Apply, 'maintenance_busy' ];
+		yield 'the maintenance mode cannot be kept' => [ new StorageFailed( 'The active WordPress maintenance marker has changed.', [ 'code' => 'maintenance_failed' ] ), JobType::Undo, 'maintenance_failed' ];
+		yield 'the site stays in maintenance mode' => [ new StorageFailed( 'The site could not leave maintenance mode.', [ 'code' => 'maintenance_stuck' ] ), JobType::Undo, 'maintenance_stuck' ];
+		yield 'a preview that expired' => [ new JobConflict( 'This file preview is unavailable, expired or has a different scope.', [ 'code' => 'file_preview_expired' ] ), JobType::Apply, 'file_preview_expired' ];
+		yield 'the file modification policy' => [ new JobConflict( 'refused', [ 'code' => 'file_writes_refused' ] ), JobType::Undo, 'file_writes_refused' ];
+	}
+
+	#[DataProvider( 'file_job_codes' )]
+	public function test_a_code_in_the_context_names_what_ended_a_file_job( PluginException $error, JobType $type, string $code ): void {
+		$classified = JobError::from_throwable( $error, $type );
+		self::assertSame( $code, $classified->code );
+		self::assertFalse( $classified->retryable );
+		self::assertSame( $error->getMessage(), $classified->message );
+	}
+
+	public function test_the_code_of_a_file_job_does_not_change_whether_the_runner_tries_again(): void {
+		foreach ( [ new BackendException( 'timeout' ), new LockConflict( 'held' ) ] as $error ) {
+			$plain = JobError::from_throwable( $error );
+			$file  = JobError::from_throwable( $error, JobType::Apply );
+			self::assertTrue( $plain->retryable );
+			self::assertSame( $plain->retryable, $file->retryable, $error::class );
+			self::assertSame( 'file_apply_failed', $file->code );
+		}
 	}
 
 	public function test_sessions_that_outlast_maintenance_are_retried_but_a_hidden_session_list_is_not(): void {

@@ -500,7 +500,11 @@ on the site it writes encrypted trees and the index into the cache of the privat
 The retention preview of the snapshot list decides with the policy of the forget job and
 deletes nothing. The Snapshots tab of the admin page inserts every name, tag, link target
 and manifest field as a text node, shows a link only as text, and asks for a directory by
-the token the server issued. The paths ticked for a restore are kept in the page alone;
+the token the server issued. Each such text stands in an element that isolates its writing
+direction, and one with a control, zero-width or right-to-left character is shown in
+double quotes with Go's escapes, as the command line prints it, so that a name cannot pass
+for another one; the reviews of a restore show table names the same way. A valid name is
+`exact` all the same: the flag says that the text is the stored name, not how it looks. The paths ticked for a restore are kept in the page alone;
 what a restore accepts is checked on the server when one is started.
 
 ## 10. Backup integrity and ransomware resistance

@@ -61,7 +61,7 @@ final class Messages {
 			],
 			'repository_locked'              => [
 				'message' => __( 'Another program holds a lock on the repository.', 'backups-for-restic' ),
-				'hint'    => __( 'The plugin tries again automatically. If nothing else uses the repository, stale locks expire after 30 minutes.', 'backups-for-restic' ),
+				'hint'    => __( 'The job has stopped and does not try again by itself. If nothing else uses the repository, a stale lock expires 30 minutes after it was last refreshed; start the job again then.', 'backups-for-restic' ),
 			],
 			'repository_changed'             => [
 				'message' => __( 'Another program kept changing the repository while this job worked on it.', 'backups-for-restic' ),
@@ -94,6 +94,46 @@ final class Messages {
 			'undo_review_required'           => [
 				'message' => __( 'This undo was confirmed in an earlier version of the plugin, which did not keep the decision for each entry.', 'backups-for-restic' ),
 				'hint'    => __( 'Preview the undo again and confirm the new preview within the recovery window. It shows entry by entry what is still reverted and what is kept.', 'backups-for-restic' ),
+			],
+			'file_changed_after_review'      => [
+				'message' => __( 'Files or the site\'s settings changed after the review, so the apply stopped.', 'backups-for-restic' ),
+				'hint'    => __( 'Open a new preview and confirm it again. Any changes that the apply made before it stopped can be undone on the Restores tab.', 'backups-for-restic' ),
+			],
+			'file_apply_failed'              => [
+				'message' => __( 'The live file changes stopped before they were complete.', 'backups-for-restic' ),
+				'hint'    => __( 'The log of the job names the reason. Any changes that the apply made before it stopped can be undone on the Restores tab, and a new preview shows what is left to apply.', 'backups-for-restic' ),
+			],
+			'file_undo_failed'               => [
+				'message' => __( 'The undo of the live file changes stopped before it was complete.', 'backups-for-restic' ),
+				'hint'    => __( 'The log of the job names the reason. What the undo reverted stays reverted. Preview the undo again on the Restores tab while the recovery window lasts to revert the rest.', 'backups-for-restic' ),
+			],
+			'file_preview_failed'            => [
+				'message' => __( 'The file preview could not be completed.', 'backups-for-restic' ),
+				'hint'    => __( 'The log of the job names the reason, for example a file that changed while the preview read it. Nothing on the live site was changed. Open the preview again.', 'backups-for-restic' ),
+			],
+			'file_staging_gone'              => [
+				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),
+				'hint'    => __( 'They expired or were deleted. Restore the snapshot to staging again, then open a new preview.', 'backups-for-restic' ),
+			],
+			'file_preview_expired'           => [
+				'message' => __( 'This file preview is no longer available.', 'backups-for-restic' ),
+				'hint'    => __( 'A preview can be confirmed for one hour after it was finished. Open a new preview.', 'backups-for-restic' ),
+			],
+			'undo_unavailable'               => [
+				'message' => __( 'This apply can no longer be undone.', 'backups-for-restic' ),
+				'hint'    => __( 'An apply can be undone for 24 hours after it ended, and no longer once an undo reverted it completely. The Restores tab lists what can still be undone.', 'backups-for-restic' ),
+			],
+			'maintenance_busy'               => [
+				'message' => __( 'WordPress is in maintenance mode for another update, so the file changes did not start.', 'backups-for-restic' ),
+				'hint'    => __( 'Wait until that update has finished. If none is running, delete the file .maintenance in the WordPress directory. Then open a new preview and confirm it again.', 'backups-for-restic' ),
+			],
+			'maintenance_failed'             => [
+				'message' => __( 'The plugin could not keep the site in maintenance mode while it changes files, so the job stopped.', 'backups-for-restic' ),
+				'hint'    => __( 'The log of the job names the reason. The file .maintenance in the WordPress directory is a link to a file in the plugin\'s private directory, so both have to be writable and on the same file system. A new preview on the Restores tab shows what is left to do.', 'backups-for-restic' ),
+			],
+			'maintenance_stuck'              => [
+				'message' => __( 'The site could not leave maintenance mode.', 'backups-for-restic' ),
+				'hint'    => __( 'WordPress shows its maintenance page until the file .maintenance in the WordPress directory is deleted, or for at most ten minutes after the job\'s last step. Delete that file if no update is running.', 'backups-for-restic' ),
 			],
 			'protected_path_invalid'         => [
 				'message' => __( 'A WordPress location that file apply protects is not an absolute path without "." or ".." segments.', 'backups-for-restic' ),
@@ -129,7 +169,7 @@ final class Messages {
 			],
 			'repository_unreachable'         => [
 				'message' => __( 'The repository server could not be reached.', 'backups-for-restic' ),
-				'hint'    => __( 'The plugin tries again automatically. If this persists, check the URL and whether your host allows outgoing HTTPS.', 'backups-for-restic' ),
+				'hint'    => __( 'The job has stopped and does not try again by itself. Check the URL and whether your host allows outgoing HTTPS connections to the server and its port, then start the job again.', 'backups-for-restic' ),
 			],
 			'secrets_undecryptable'          => [
 				'message' => __( 'The stored passwords can no longer be decrypted.', 'backups-for-restic' ),
@@ -362,8 +402,10 @@ final class Messages {
 	}
 
 	/**
-	 * Message and hint for a code of a read of snapshots (Restore\SnapshotBrowser); every
-	 * other code is a job error.
+	 * Message and hint for a code of a request: of a read of snapshots (Restore\SnapshotBrowser),
+	 * and of every other REST answer that has no text of its own. A locked or unreachable
+	 * repository says what to do about the request, which nothing tries again; every other
+	 * code is a job error.
 	 *
 	 * @param string $code Error code.
 	 * @return array{message: string, hint: string} Texts.
@@ -389,6 +431,15 @@ final class Messages {
 			'snapshot_path_not_found' => [
 				'message' => __( 'The snapshot has no directory with this path.', 'backups-for-restic' ),
 				'hint'    => __( 'The path does not exist in this snapshot, or it is a file or a link. Links are not followed.', 'backups-for-restic' ),
+			],
+			// A request is not tried again, as a job is: these say what to do about this one.
+			'repository_locked'       => [
+				'message' => __( 'The repository is locked at the moment.', 'backups-for-restic' ),
+				'hint'    => __( 'Another program or a job of this site holds a lock on it, for example a cleanup. Try again when it has finished; a stale lock expires 30 minutes after it was last refreshed.', 'backups-for-restic' ),
+			],
+			'repository_unreachable'  => [
+				'message' => __( 'The repository server could not be reached.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the URL and whether your host allows outgoing HTTPS connections to the server and its port, then try again.', 'backups-for-restic' ),
 			],
 			default                   => self::job_error( $code ),
 		};

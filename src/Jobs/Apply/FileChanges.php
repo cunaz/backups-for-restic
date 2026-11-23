@@ -47,8 +47,9 @@ defined( 'ABSPATH' ) || exit;
  *
  * @phpstan-import-type Row from ApplyManifest
  * @phpstan-import-type Outcome from FileChange
+ * @phpstan-import-type ApplyTotals from FilePlans
  * @phpstan-type Totals array{restore:int,remove:int,keep:int}
- * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,totals?:Totals|null,undone?:true}
+ * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,totals?:Totals|null,actions?:ApplyTotals|null,undone?:true}
  * @phpstan-type Counts array{restored:int,removed:int,unchanged:int,kept:int,changed_after_review:int}
  * @phpstan-type KeptPage array{entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,total:int,offset:int,next_offset:int|null,plan_job:string,digest:string}
  */
@@ -131,7 +132,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @param bool        $config Include configuration.
 	 * @param string|null $plan_job Previously completed background job.
 	 * @param int         $offset First presentation ordinal.
-	 * @return Preview|array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:Totals|null,undone?:true}|Job Preview or queued job; an undo review that found nothing left to revert has undone, and its apply is recorded as undone.
+	 * @return Preview|array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:Totals|null,actions?:ApplyTotals|null,undone?:true}|Job Preview or queued job; an undo review that found nothing left to revert has undone, and its apply is recorded as undone. An apply preview has its rows by action.
 	 * @throws InvalidArgument If a requested page or option is invalid.
 	 */
 	public function request_preview( string $id, bool $undo, bool $config, ?string $plan_job = null, int $offset = 0 ): Job|array {
@@ -152,7 +153,8 @@ final readonly class FileChanges implements StepProvider {
 		}
 		if ( ! $undo && ! $this->plans->large( $restore ) ) {
 			try {
-				return $this->summary( $restore, $config, $this->rows( $restore, $config, false, FilePlans::INLINE_BYTES ) );
+				$rows = $this->rows( $restore, $config, false, FilePlans::INLINE_BYTES );
+				return $this->summary( $restore, $config, $rows ) + [ 'actions' => FilePlans::action_totals( array_count_values( array_column( $rows, 'action' ) ) ) ];
 			} catch ( InvalidArgument $exception ) {
 				if ( 'file_plan_large' !== ( $exception->context()['code'] ?? null ) ) {
 					throw $exception;
@@ -592,7 +594,7 @@ final readonly class FileChanges implements StepProvider {
 			if ( ApplyManifest::mutates( $row ) || 'identical_contents' === $row['reason'] ) {
 				$target = self::target( $row );
 				if ( $plan->destination( $source ) !== $target ) {
-					throw new JobConflict( 'The confirmed destination mapping changed before work began.' );
+					JobConflict::raise( 'The confirmed destination mapping changed before work began.', [ 'code' => 'file_changed_after_review' ] );
 				}
 				if ( 'identical_contents' === $row['reason'] ) {
 					$row['action'] = 'replace';
@@ -600,7 +602,7 @@ final readonly class FileChanges implements StepProvider {
 				try {
 					$this->recheck( $plan, $files, $source, $target, $row, $spellings );
 					if ( ( null !== $row['source'] && ! $proof->matches( $files . $source, $row['source'], 1 ) ) || ( null !== $row['original'] && ! $proof->matches( $target, $row['original'], 1 ) ) ) {
-						throw new JobConflict( 'A confirmed file changed before work began.' );
+						JobConflict::raise( 'A confirmed file changed before work began.', [ 'code' => 'file_changed_after_review' ] );
 					}
 				} catch ( FileWorkPending ) {
 					return false;
@@ -668,7 +670,7 @@ final readonly class FileChanges implements StepProvider {
 			$source = Bytes::base64url_decode( $row['path'] );
 			$path   = self::target( $row );
 			if ( $plan->destination( $source ) !== $path ) {
-				throw new JobConflict( 'The destination mapping changed after confirmation.' );
+				JobConflict::raise( 'The destination mapping changed after confirmation.', [ 'code' => 'file_changed_after_review' ] );
 			}
 			$dir    = $this->journal->workspace( $job );
 			$item   = $dir . '/item-' . $index;
@@ -677,12 +679,12 @@ final readonly class FileChanges implements StepProvider {
 			for ( $parent = dirname( $path ); $base !== $parent; $parent = dirname( $parent ) ) {
 				$owner_index = null === $disk ? ( $made[ $parent ] ?? null ) : $disk->lookup( 'mkdir', $parent );
 				if ( null === $owner_index || '/' === $parent ) {
-					throw new JobConflict( 'An unreviewed directory appeared above the destination.' );
+					JobConflict::raise( 'An unreviewed directory appeared above the destination.', [ 'code' => 'file_changed_after_review' ] );
 				}
 				$owner_row = null === $disk ? $rows[ $owner_index ] : $disk->row( $owner_index );
 				$owner     = new FileChange( $plan, $files, $dir . '/item-' . $owner_index, Bytes::base64url_decode( $owner_row['path'] ), $job->id );
 				if ( 'mkdir' !== $owner_row['action'] || self::target( $owner_row ) !== $parent || 'remove' !== $owner->undo_action( $parent, 'mkdir' ) ) {
-					throw new JobConflict( 'A parent directory created by this apply changed.' );
+					JobConflict::raise( 'A parent directory created by this apply changed.', [ 'code' => 'file_changed_after_review' ] );
 				}
 			}
 			if ( ! $change->started( $path, $row['action'] ) ) {
@@ -852,14 +854,14 @@ final readonly class FileChanges implements StepProvider {
 	private function recheck( ApplyPlan $plan, string $files, string $source, string $path, array $row, ?DirectorySpellings $review = null ): void {
 		$parent = Bytes::base64url_decode( explode( ':', $row['parent'], 2 )[0] );
 		if ( $plan->inspect( $files, $source, $review )['action'] !== $row['action'] || ApplyManifest::parent_identity( $parent . '/child' ) !== $row['parent'] ) {
-			throw new JobConflict( 'A destination or staged file changed after confirmation.' );
+			JobConflict::raise( 'A destination or staged file changed after confirmation.', [ 'code' => 'file_changed_after_review' ] );
 		}
 		$actual = ApplyManifest::identity( $files . $source );
 		if ( 'replace' === $row['action'] ) {
 			$actual .= '/' . ApplyManifest::identity( $path );
 		}
 		if ( $actual !== $row['identity'] ) {
-			throw new JobConflict( 'A destination or staged file changed after confirmation.' );
+			JobConflict::raise( 'A destination or staged file changed after confirmation.', [ 'code' => 'file_changed_after_review' ] );
 		}
 	}
 
@@ -1102,7 +1104,7 @@ final readonly class FileChanges implements StepProvider {
 		$files  = $this->journal->files( $restore, $retained );
 		$report = $this->staging->open_download( $restore, $this->hours, 'report', '', $retained );
 		if ( null === $report ) {
-			throw new InvalidArgument( 'The complete staging report is unavailable.' );
+			InvalidArgument::raise( 'The complete staging report is unavailable.', [ 'code' => 'file_staging_gone' ] );
 		}
 		try {
 			return ApplyManifest::build( ( $this->planner )( $config, $restore, $uploads ), $files, $report, $this->jobs->device(), $limit, FilePlans::INLINE_BYTES === $limit );
@@ -1398,7 +1400,7 @@ final readonly class FileChanges implements StepProvider {
 	private static function confirmed( array $preview, string $digest ): void {
 		FileSpace::require_space( $preview );
 		if ( ! $preview['applicable'] || ! hash_equals( $preview['digest'], $digest ) ) {
-			throw new JobConflict( 'The approved file plan is stale or contains no applicable changes.' );
+			JobConflict::raise( 'The approved file plan is stale or contains no applicable changes.', [ 'code' => 'file_changed_after_review' ] );
 		}
 	}
 

@@ -296,6 +296,90 @@ final class FileMaintenanceTest extends TestCase {
 		}
 	}
 
+	public function test_the_marker_of_another_update_ends_the_job_with_a_code_of_its_own(): void {
+		$root = TempDir::create( 'maintenance' );
+		try {
+			$dir = $root . '/jobs/' . self::ID;
+			mkdir( $dir, 0700, true );
+			$service = new FileMaintenance( $root );
+			// Another update is running: the job does not start.
+			file_put_contents( $root . '/.maintenance', '<?php $upgrading = time();' );
+			$refusal = null;
+			try {
+				$service->enter( self::ID, $dir, '' );
+			} catch ( StorageFailed $refused ) {
+				$refusal = $refused->context()['code'] ?? null;
+			}
+			self::assertSame( 'maintenance_busy', $refusal );
+			self::assertSame( '<?php $upgrading = time();', file_get_contents( $root . '/.maintenance' ) );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	public function test_a_marker_that_cannot_be_published_ends_the_job_with_a_code_of_its_own(): void {
+		$root = TempDir::create( 'maintenance' );
+		try {
+			$dir = $root . '/jobs/' . self::ID;
+			mkdir( $dir, 0700, true );
+			$service = new FileMaintenance( $root );
+			// The WordPress directory refuses the link. PHP warns about the refusal, which the
+			// job reports with its code.
+			chmod( $root, 0500 );
+			$refusal = null;
+			set_error_handler( static fn (): bool => true, E_WARNING );
+			try {
+				if ( is_writable( $root ) ) {
+					self::markTestSkipped( 'This user bypasses directory permissions.' );
+				}
+				$service->enter( self::ID, $dir, '' );
+			} catch ( StorageFailed $refused ) {
+				$refusal = $refused->context()['code'] ?? null;
+			} finally {
+				restore_error_handler();
+				chmod( $root, 0700 );
+			}
+			self::assertSame( 'maintenance_failed', $refusal );
+			self::assertFileDoesNotExist( $root . '/.maintenance' );
+		} finally {
+			chmod( $root, 0700 );
+			TempDir::remove( $root );
+		}
+	}
+
+	public function test_a_marker_that_cannot_be_removed_ends_the_job_with_a_code_of_its_own_and_can_be_released_later(): void {
+		$root = TempDir::create( 'maintenance' );
+		try {
+			$dir = $root . '/jobs/' . self::ID;
+			mkdir( $dir, 0700, true );
+			$service = new FileMaintenance( $root );
+			// The marker is published, and then cannot be removed: the site stays in maintenance.
+			$service->enter( self::ID, $dir, '' );
+			self::assertFileExists( $root . '/.maintenance' );
+			chmod( $root, 0500 );
+			$refusal = null;
+			set_error_handler( static fn (): bool => true, E_WARNING );
+			try {
+				if ( is_writable( $root ) ) {
+					self::markTestSkipped( 'This user bypasses directory permissions.' );
+				}
+				$service->release( self::ID, $dir );
+			} catch ( StorageFailed $refused ) {
+				$refusal = $refused->context()['code'] ?? null;
+			} finally {
+				restore_error_handler();
+				chmod( $root, 0700 );
+			}
+			self::assertSame( 'maintenance_stuck', $refusal );
+			self::assertFileExists( $root . '/.maintenance' );
+			$service->release( self::ID, $dir );
+			self::assertFileDoesNotExist( $root . '/.maintenance' );
+		} finally {
+			chmod( $root, 0700 );
+			TempDir::remove( $root );
+		}
+	}
+
 	public function test_later_ticks_keep_the_marker_that_the_first_tick_rendered(): void {
 		$root = TempDir::create( 'maintenance' );
 		try {

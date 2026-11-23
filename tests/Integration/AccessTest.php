@@ -392,6 +392,63 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_the_file_routes_say_what_keeps_or_stops_a_review_and_not_that_a_backup_cannot_run(): void {
+		$site    = TestSite::root();
+		$rows    = [ [ $site . '/bfr-mapped.txt', $site . '/bfr-mapped.txt', 'create' ] ];
+		$apply   = '20261123T120000Z-0e0f10';
+		$expired = '20261123T120000Z-0e0f20';
+		$damaged = '20261123T120000Z-0e0f30';
+		TestSite::undoable_apply( $apply, $rows );
+		TestSite::undoable_apply( $expired, $rows, 86401 );
+		TestSite::undoable_apply( $damaged, $rows );
+		// A manifest that does not match its hash any more.
+		file_put_contents( TestSite::private_dir() . '/jobs/' . $damaged . '/undo/manifest.json', '[]' );
+		try {
+			// The undo of an apply needs its staged files: they are kept, and the answer says until when.
+			$ended                    = (int) ( TestSite::job_document( $apply )['finished_at'] ?? 0 );
+			[ $status, $error, $raw ] = TestSite::api( 'DELETE', '/restores/' . substr( $apply, 0, -1 ) . '1' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_restore_kept_for_undo', $error['code'] ?? null, $raw );
+			self::assertSame( $ended + 86400, $error['data']['until'] ?? null, $raw );
+			self::assertStringContainsString( 'These staged files are kept until ', (string) ( $error['message'] ?? '' ) );
+			self::assertStringContainsString( 'undone completely', (string) ( $error['data']['hint'] ?? '' ) );
+			self::assertDirectoryExists( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1/files' );
+			// A review says when it was made: a confirmation whose answer is lost looks for its job from then on.
+			$before                    = time();
+			[ $status, $review, $raw ] = TestSite::api( 'POST', '/undo/' . $apply . '/plan', [] );
+			self::assertSame( 200, $status, $raw );
+			self::assertIsInt( $review['reviewed_at'] ?? null, $raw );
+			self::assertGreaterThanOrEqual( $before, $review['reviewed_at'] );
+			self::assertLessThanOrEqual( time(), $review['reviewed_at'] );
+			// An apply whose recovery window has ended, and a preview that is gone.
+			[ $status, $error, $raw ] = TestSite::api( 'POST', '/undo/' . $expired . '/plan', [] );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_undo_unavailable', $error['code'] ?? null, $raw );
+			[ $status, $error, $raw ] = TestSite::api(
+				'POST',
+				'/restores/' . substr( $apply, 0, -1 ) . '1/apply-plan',
+				[
+					'plan_job' => '20261123T120000Z-0e0f99',
+					'offset'   => 0,
+				]
+			);
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_file_preview_expired', $error['code'] ?? null, $raw );
+			// A private record that cannot be read: not "This server cannot run the backup right now".
+			[ $status, $error, $raw ] = TestSite::api( 'POST', '/undo/' . $damaged . '/plan', [] );
+			self::assertSame( 500, $status, $raw );
+			self::assertSame( 'backups_for_restic_live_plan_failed', $error['code'] ?? null, $raw );
+			self::assertStringNotContainsString( 'backup', strtolower( (string) ( $error['message'] ?? '' ) ) );
+		} finally {
+			foreach ( [ $apply, $expired, $damaged ] as $id ) {
+				$restore = substr( $id, 0, -1 ) . '1';
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $restore );
+				TempDir::remove( TestSite::private_dir() . '/restores/' . $restore );
+			}
+		}
+	}
+
 	public function test_invalid_preview_page_identifiers_are_rejected_before_planning(): void {
 		foreach ( [ [ 'offset' => -1 ], [ 'offset' => 1 ], [ 'plan_job' => 'invalid' ] ] as $body ) {
 			[ $status, $error, $raw ] = TestSite::api( 'POST', '/restores/' . self::JOB . '/apply-plan', $body );
