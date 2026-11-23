@@ -410,9 +410,10 @@ WordPress skips a plugin of the backup whose file is missing on this site; the r
 both. Install the plugins that you need before the restore.
 
 **What the review reads, and its limits.** The review reads the backup's user roles (at most
-1 MiB), its list of active plugins (at most 256 KiB) and your account's own record of roles
-and capabilities on this site (at most 64 KiB). A larger value, or one that is not stored the
-way WordPress stores it, refuses the exchange with a message that names it: use the manual
+1 MiB), its list of active plugins (at most 256 KiB, also with Backups for restic added to it)
+and your account's own record of roles and capabilities on this site (at most 64 KiB). A larger
+value, or one that is not stored the way WordPress stores it, refuses the exchange with a
+message that names it: use the manual
 SQL import of Scenario D for such a backup, or repair your account's record, which WordPress
 reads from the first of several entries, and review again. The roles and the list of active
 plugins of the running site are only compared, because the exchange replaces them. If they
@@ -420,8 +421,12 @@ cannot be read, the review says so and lists all of the backup's roles or plugin
 restore can go ahead, but its undo would bring those values back and could not check them,
 so it would be refused: only a database administrator could then bring back the earlier
 tables before the undo window ends. The review lists, for every role that differs, the
-capabilities it grants and the denials it stores only afterwards or only now; a denial takes
-away from an account with several roles what another of its roles grants.
+capabilities it grants and the denials it stores only afterwards or only now, each list under
+its own label. A denial takes the capability from an account that holds this role together
+with another role that grants it, unless that other role comes after it in the account's roles
+or the capability is granted to the account itself. If the capability that Backups for restic
+requires is configured differently between your confirmation and the exchange, the exchange
+stops before it changes anything; review and confirm again.
 
 **Three things the review cannot show.**
 - A plugin that the backup starts can change what an account may do once it runs: it can

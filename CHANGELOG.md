@@ -204,11 +204,13 @@ All notable changes are documented here. The format follows
   backup capability, `manage_options`, `edit_users`, `promote_users` or `update_core`, the
   review and the exchange refuse with `database_admin_capabilities`, and an unreadable record
   of your account's own capabilities with `database_admin_capabilities_unreadable`. The
-  backup's roles (up to 1 MiB) and list of active plugins (up to 256 KiB) are refused if
-  WordPress did not write them that way (`database_roles_invalid`,
-  `database_plugins_invalid`) or if they are larger (`database_roles_too_large`,
-  `database_plugins_too_large`); the running site's are only compared, and the review says
-  so where they cannot be read. The review also shows stored denials that differ. An undo's
+  backup's roles (up to 1 MiB) and list of active plugins (up to 256 KiB, also with
+  Backups for restic added) are refused if WordPress did not write them that way or the
+  backup lacks them (`database_roles_invalid`, `database_plugins_invalid`) or if they are
+  larger (`database_roles_too_large`, `database_plugins_too_large`); the running site's are
+  only compared, and the review says so where they cannot be read. The review also shows
+  stored denials that differ. A change of the backup capability after the review stops the
+  exchange before it writes anything (`database_exchange_changed`). An undo's
   refusals point to a role on the running site and to the retained tables. Rehearse a staged
   database again before you review it, and review and confirm again a database change that
   was confirmed before this version: it stops with `database_exchange_changed`.

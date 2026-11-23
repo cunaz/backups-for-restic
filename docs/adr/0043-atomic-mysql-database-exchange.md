@@ -317,7 +317,10 @@ becomes live. The three reasons why they were copied are kept as follows.
   the path is appended to it. That happens on the private target before the exchange takes
   its write barrier over the live tables, under a write lock on that one private table and
   after its identity check, and again on every attempt; a list that has the path is not
-  rewritten. Under the barrier the exchange checks that the list holds the path
+  rewritten. A list that the path would take beyond the bound below is not written either:
+  it could not be read back, so the review refuses it with `database_plugins_too_large`, and
+  so does the exchange before it writes (found in the automated review of pull request 59).
+  Under the barrier the exchange checks that the list holds the path
   (`database_plugins_invalid` otherwise). The path is the one that `activate_plugin()`
   stores, `plugin_basename()` of the main file, and only for a copy that WordPress loads from
   the plugins directory; a copy loaded otherwise, for example as a must-use plugin, adds
@@ -337,7 +340,11 @@ becomes live. The three reasons why they were copied are kept as follows.
   grants counts as missing. The review refuses otherwise (`database_admin_capabilities`), and
   the exchange checks it again under the write barrier, where it already rechecks the
   administrator's identity. Nothing grants a capability or changes a role to make it pass.
-  The review stores the capabilities it checked in the job, and the exchange checks those.
+  The review stores the capabilities it checked in the job, and the exchange checks those;
+  if the site requires other capabilities by the time of the exchange, because a filter of the
+  backup capability changed, the job stops with `database_exchange_changed` before the private
+  target or the live tables are written, and the review has to be repeated. An undo does the
+  same.
   A record of the account's own capabilities that is missing, stored more than once, longer
   than 64 KiB or not in the form WordPress writes is refused as such
   (`database_admin_capabilities_unreadable`), not as missing capabilities; WordPress itself
@@ -368,9 +375,12 @@ so the bound is 1 MiB, enough for role maps that `add_role()` and `add_cap()` wr
 with dozens of custom roles. The parser's element bound, 262,144, lies above anything that a
 value within these bounds can hold, so it never stands in for them. The rehearsal report
 records the snapshot's role map and list of active plugins as stored (base64,
-`wordpress_state`), or the length of one beyond its bound; its own bound is 3 MiB. A
-rehearsal from before has no such record and its review is refused with
-`database_review_required`.
+`wordpress_state`), or the length of one beyond its bound, or `null` where the snapshot has
+none; its own bound is 3 MiB. A rehearsal from before has no such record and its review is
+refused with `database_review_required`; a `null` is refused with the code of the value,
+`database_roles_invalid` or `database_plugins_invalid`, because a new rehearsal would find the
+same. A review of a site that lacks its live options, users or user meta table reads nothing
+from them: it answers the blocker `wordpress_tables` and compares nothing.
 
 The running site's role map and list of active plugins are read for the comparison only: the
 exchange discards both, so their form protects nothing. If one of them cannot be read, the
@@ -395,7 +405,9 @@ lack (`missing_capabilities`). A role differs if only one generation has it, or 
 or denies other capabilities: for each role the review lists the capabilities granted only
 afterwards and only now, and the denials stored only afterwards and only now. A stored denial
 matters for an account with several roles, where a later role's `false` takes away what an
-earlier one grants. Each list shows at most 50 entries and counts the rest. Every name is
+earlier one grants. The page shows these four lists of a role under their own labels, each
+only when it has entries, and says in one sentence what a denial does. Each list shows at most
+50 entries and counts the rest. Every name is
 untrusted text: the page shows it as text. The digest (now version 2) covers all of it and the
 capabilities checked, so a review from before or with other facts cannot be confirmed
 (`database_exchange_changed`). The authority that the exchange compares under its write barrier
