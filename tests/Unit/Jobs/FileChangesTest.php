@@ -2011,6 +2011,51 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( [ $this->live . '/b-new' => 'new_children' ], $this->kept( $done ) );
 	}
 
+	public function test_a_background_undo_review_keeps_an_entry_whose_wide_folder_cannot_be_read_and_goes_on(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root reads every folder.' );
+		}
+		// A file that the apply adds to a live folder with more names than a review lists at once.
+		$wide = $this->live . '/wide';
+		mkdir( $wide );
+		for ( $i = 0; $i < 2050; ++$i ) {
+			touch( $wide . '/upload-' . $i );
+		}
+		mkdir( $this->files . $wide, 0700 );
+		file_put_contents( $this->files . $wide . '/added.txt', 'added' );
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		self::assertSame( 'added', file_get_contents( $wide . '/added.txt' ) );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		// The review begins the index of the folder's names; then the folder can no longer be read.
+		$indexed = fn (): bool => ! in_array( glob( $this->jobs->directory( $review ) . '/verification/spell-*.head' ), [ false, [] ], true );
+		$tick    = 0;
+		while ( ! $indexed() && ++$tick < 40 ) {
+			$this->runner->tick( 0.0 );
+		}
+		self::assertTrue( $indexed() );
+		chmod( $wide, 0311 );
+		try {
+			$reviewed = $this->run_job( $review );
+			$page     = $this->changes->request_preview( $apply->id, true, false, $reviewed->id );
+			self::assertIsArray( $page );
+			$decisions = [];
+			foreach ( $page['entries'] as $entry ) {
+				$decisions[ (string) $entry['destination'] ] = [ $entry['action'], $entry['reason'] ];
+			}
+			self::assertSame( [ 'keep', 'ambiguous_destination' ], $decisions[ $wide . '/added.txt' ] );
+			self::assertSame( [ 'restore', 'undo_journal' ], $decisions[ $this->live . '/a-existing' ] );
+			$undo = $this->run_job( $this->changes->start_undo( $apply->id, $page['digest'], '', $reviewed->id ) );
+			self::assertSame( [ 1, 2, 1, 'partly_undone' ], [ $undo->result['restored'], $undo->result['removed'], $undo->result['kept'], $undo->result['apply_state'] ] );
+			self::assertSame( [ $wide . '/added.txt' => 'ambiguous_destination' ], $this->kept( $undo ) );
+			self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		} finally {
+			chmod( $wide, 0755 );
+		}
+		self::assertSame( 'added', file_get_contents( $wide . '/added.txt' ) );
+	}
+
 	public function test_a_large_copy_is_verified_across_ticks_by_the_background_review_and_the_undo(): void {
 		$large = str_repeat( 'L', 6 * ChunkDigest::BLOCK + 3 );
 		file_put_contents( $this->files . $this->live . '/a-existing', $large );

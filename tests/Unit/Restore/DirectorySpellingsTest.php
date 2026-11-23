@@ -62,6 +62,52 @@ final class DirectorySpellingsTest extends TestCase {
 		self::assertFalse( $resumed->unique( $this->folder, 'photo-120' ) );
 	}
 
+	public function test_an_undo_review_answers_a_folder_that_cannot_be_indexed_where_a_preview_fails(): void {
+		for ( $i = 0; $i < 180; ++$i ) {
+			touch( $this->folder . '/photo-' . $i );
+		}
+		$this->stable();
+		try {
+			( new DirectorySpellings( $this->workspace, 0, true ) )->unique( $this->folder, 'photo-1' );
+			self::fail( 'The bounded first slice scanned the entire directory.' );
+		} catch ( FileWorkPending ) {
+			self::assertTrue( ( new DirectorySpellings( $this->workspace, INF ) )->known( $this->folder ) );
+		}
+		// The folder can no longer be read once its index has begun: an undo review answers that
+		// another spelling may be there, so that the entry is kept, and a preview fails.
+		chmod( $this->folder, 0311 );
+		$this->stable();
+		try {
+			self::assertFalse( ( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'photo-1' ) );
+			try {
+				( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' );
+				self::fail( 'A preview must not take a folder that it cannot read as indexed.' );
+			} catch ( StorageFailed $failed ) {
+				self::assertSame( 'A directory could not be read while its names were being reviewed.', $failed->getMessage() );
+			}
+		} finally {
+			chmod( $this->folder, 0700 );
+		}
+		// So does a folder that is gone.
+		TempDir::remove( $this->folder );
+		self::assertFalse( ( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'photo-1' ) );
+		$this->expectException( StorageFailed::class );
+		$this->expectExceptionMessage( 'A directory disappeared while its names were being reviewed.' );
+		( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' );
+	}
+
+	public function test_a_damaged_index_fails_also_in_an_undo_review(): void {
+		touch( $this->folder . '/original' );
+		$this->stable();
+		self::assertTrue( ( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'original' ) );
+		$files = glob( $this->workspace . '/spell-*.names' );
+		self::assertCount( 1, $files );
+		file_put_contents( $files[0], '' );
+		$this->expectException( StorageFailed::class );
+		$this->expectExceptionMessage( 'The directory spelling cursor exceeds its stored records.' );
+		( new DirectorySpellings( $this->workspace, INF, true ) )->unique( $this->folder, 'original' );
+	}
+
 	public function test_an_incomplete_persisted_record_fails_closed(): void {
 		touch( $this->folder . '/original' );
 		$this->stable();

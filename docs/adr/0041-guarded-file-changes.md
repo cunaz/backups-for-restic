@@ -203,7 +203,13 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   reading cannot find its place again as `new_children`. Before, such a directory failed a
   background review with an internal error, and the inline review kept an unreadable one as
   `new_children`; the name checks of the site policy that cannot read a folder answer
-  without a PHP warning, which a debugging site could print into the review's reply.
+  without a PHP warning, which a debugging site could print into the review's reply. The
+  index of names that a background review keeps for a folder with more than 2,048 names
+  answers, in an undo review, a folder that is gone, cannot be read or changes while its
+  names are read with a spelling that may be there, so that the site policy keeps the entry
+  as `ambiguous_destination` (or `ambiguous_source`) and the review goes on; before, the
+  review failed, also for one upload into such a folder during its scan. A preview still
+  fails there, and a damaged index fails in both.
 - Whether an entry is still what the apply left there is decided by content and attributes,
   not by the inode alone. The inode that the apply published, with the attributes it
   recorded, counts as before while its content has the reviewed digest. A regular file with

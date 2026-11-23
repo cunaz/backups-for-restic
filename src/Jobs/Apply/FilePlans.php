@@ -239,8 +239,9 @@ final readonly class FilePlans {
 		$restore   = ApplyJournal::field( $job, 'restore' );
 		$disk      = $this->disk( $restore, $job->id, true );
 		$builder   = $this->builder( $job, $disk );
-		$spellings = new DirectorySpellings( $this->journal->verification( $job ), $deadline );
-		if ( true === ( $job->data['undo'] ?? false ) ) {
+		$undo      = true === ( $job->data['undo'] ?? false );
+		$spellings = new DirectorySpellings( $this->journal->verification( $job ), $deadline, $undo );
+		if ( $undo ) {
 			$original = $this->journal->original( ApplyJournal::field( $job, 'subject' ), true );
 			$forward  = $this->approved( $original );
 			$done     = $builder->undo( $forward, $this->journal->attempted( $original ), $this->journal->workspace( $original ), $job->id, $deadline, $spellings );
