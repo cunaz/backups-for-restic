@@ -437,8 +437,10 @@ stops before it changes anything; review and confirm again.
   the restore, deactivate that plugin on the Plugins screen.
 - A WP-Cron request that ran the exchange goes on with the events that were due when it
   started. WordPress moves each of them to its next time in the event list that is now live,
-  so such an event of the earlier site can appear in the restored list. Events of a plugin
-  that is no longer active run without effect.
+  so such an event of the earlier site can appear in the restored list. The plugins of the
+  earlier site are still loaded in that request, so a due event of a plugin that is no longer
+  active can still run there once, against the restored database. In later requests its
+  event finds no plugin that answers it.
 - A backup whose list of active plugins names another copy of Backups for restic in another
   directory starts that copy next to this one. The review lists it as a plugin that starts;
   delete the other copy's directory first if it is still on the site.

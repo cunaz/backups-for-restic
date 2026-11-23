@@ -448,8 +448,11 @@ Three consequences are accepted and shown in the review rather than prevented:
 What remains: a WP-Cron request that runs the exchange goes on with the events that were due
 when it started and come after this plugin's tick in its list. WordPress reschedules each of
 them in the cron array that is now live before it runs it, so such an event of the running
-site can reach the restored array. In a request that the maintenance gate admitted, only this
-plugin's events are due. A backup whose list names another copy of this plugin in another
+site can reach the restored array. The request still holds the code and the callbacks of the
+plugins that were active when it started, so a due event of a plugin that the exchange has
+stopped runs in it once more, against the restored database; later requests no longer load
+that plugin. In a request that the maintenance gate admitted, only this plugin's events are
+due. A backup whose list names another copy of this plugin in another
 directory starts that copy next to this one; the review lists it as a plugin that starts.
 
 ## Evidence
