@@ -15,8 +15,10 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\RabinChunker;
+use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexSet;
+use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Format\Pack\PackReader;
 
 defined( 'ABSPATH' ) || exit;
@@ -28,6 +30,19 @@ final class BlobBatch {
 
 	public const int MAX_BYTES = 16777216;
 	public const int MAX_BLOBS = 128;
+
+	/**
+	 * The largest stored length of a data blob: a chunk of at most 8 MiB, encrypted, and when
+	 * it is compressed, in a zstd frame no larger than libzstd's bound for 8 MiB. restic
+	 * compresses every data blob of a compressed repository, also one that does not compress;
+	 * a full chunk of such data is then stored in raw blocks, 202 bytes longer than itself.
+	 *
+	 * @param PackEntry $entry Index entry of a data blob.
+	 * @return int Bytes.
+	 */
+	public static function max_length( PackEntry $entry ): int {
+		return ( 0 === $entry->uncompressed_length ? RabinChunker::MAX_SIZE : Compression::bound( RabinChunker::MAX_SIZE ) ) + Cipher::OVERHEAD;
+	}
 
 	/**
 	 * Downloads one bounded group, yielding verified plaintext one blob at a time.
@@ -53,7 +68,7 @@ final class BlobBatch {
 				throw new FormatException( 'A selected file references a missing data blob.' );
 			}
 			$entry = $location->entry;
-			if ( $entry->length < Cipher::OVERHEAD || $entry->length > RabinChunker::MAX_SIZE + Cipher::OVERHEAD || $entry->uncompressed_length > RabinChunker::MAX_SIZE || $entry->offset < 0 || $entry->offset > PHP_INT_MAX - $entry->length ) {
+			if ( $entry->length < Cipher::OVERHEAD || $entry->length > self::max_length( $entry ) || $entry->uncompressed_length > RabinChunker::MAX_SIZE || $entry->offset < 0 || $entry->offset > PHP_INT_MAX - $entry->length ) {
 				throw new FormatException( 'A selected file has an invalid or oversized data blob.' );
 			}
 			if ( null === $pack ) {

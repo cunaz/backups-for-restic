@@ -14,6 +14,7 @@ use BackupsForRestic\Engine\Snapshot\Path;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
@@ -305,11 +306,12 @@ final class Staging {
 	 * Everything due is set aside first. That is one rename each, so it is done even when the
 	 * time is short, and nothing that expired stays on the list. The deletion then runs
 	 * until the deadline; what remains is continued by the next call. A directory that
-	 * cannot be removed does not keep the others from going.
+	 * cannot be removed does not keep the others from going, and neither do the preview data
+	 * or the undo workspace of a file job that cannot be removed.
 	 *
 	 * @param int   $hours    Hours a staging directory is kept after its job finished.
 	 * @param float $deadline Unix time at which the deletion stops.
-	 * @return array{removed: int, pending: int, failed: int} Directories deleted, left for a later call, and refused by the file system.
+	 * @return array{removed: int, pending: int, failed: int} Staging directories deleted and left for a later call, and removals refused by the file system: of staging directories, preview data and undo workspaces.
 	 * @throws StorageFailed If restores/ cannot be listed.
 	 */
 	public function remove_due( int $hours, float $deadline ): array {
@@ -372,6 +374,11 @@ final class Staging {
 	/**
 	 * Deletes due staging and expired undo workspaces under the lifecycle lock.
 	 *
+	 * The preview data and undo workspaces of file jobs come first, one job at a time. One that
+	 * the file system refuses to remove, or whose job cannot be saved afterwards, is counted as
+	 * failed and tried again by the next call; it never keeps the staging of other restores
+	 * from expiring.
+	 *
 	 * @param int   $hours Staging lifetime.
 	 * @param float $deadline Deletion deadline.
 	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
@@ -380,28 +387,36 @@ final class Staging {
 		$active       = $this->jobs->active();
 		$now          = $this->clock->now()[0];
 		$pinned_plans = $this->jobs->pinned_file_plans( $now );
+		$failed       = 0;
 		foreach ( $this->jobs->file_changes() as $job ) {
 			if ( $this->late( $deadline ) ) {
 				break;
 			}
-			if ( JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
-				if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
-					unset( $job->data['plan_retained'] );
-					$this->jobs->save( $job );
+			try {
+				if ( JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
+					if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
+						unset( $job->data['plan_retained'] );
+						$this->jobs->save( $job );
+					}
 				}
+			} catch ( PluginException ) {
+				++$failed;
 			}
 			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) || ( JobType::FilePlan === $active?->type && true === ( $active->data['undo'] ?? false ) && $job->id === ( $active->data['subject'] ?? null ) ) ) {
 				continue;
 			}
-			$undo = $this->jobs->directory( $job ) . '/undo';
-			if ( $job->finished_at + 86400 <= $this->clock->now()[0] || is_file( $undo . '/reverted' ) || ! is_file( $undo . '/attempted' ) ) {
-				$this->delete( $undo, $deadline );
+			try {
+				$undo = $this->jobs->directory( $job ) . '/undo';
+				if ( $job->finished_at + 86400 <= $this->clock->now()[0] || is_file( $undo . '/reverted' ) || ! is_file( $undo . '/attempted' ) ) {
+					$this->delete( $undo, $deadline );
+				}
+			} catch ( PluginException ) {
+				++$failed;
 			}
 		}
 		$survey  = $this->survey( $hours );
 		$removed = 0;
 		$pending = 0;
-		$failed  = 0;
 		$aside   = $survey['removing'];
 		foreach ( $survey['due'] as $id ) {
 			if ( in_array( self::REMOVING . $id, $aside, true ) ) {

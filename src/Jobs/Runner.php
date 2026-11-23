@@ -247,7 +247,7 @@ final class Runner {
 		while ( true ) {
 			// A request to cancel may have arrived while the last step ran.
 			$job->cancel_requested = $job->cancel_requested || $this->store->cancel_requested( $job );
-			if ( $job->cancel_requested && null === $job->outcome && $job->type->cancels_before( $job->step ) ) {
+			if ( $job->cancel_requested && null === $job->outcome && $job->type->cancels_before( $job->step, $job->progress['phase'] ?? null ) ) {
 				$job->outcome = JobState::Cancelled;
 				$job->step    = $job->type->cleanup_steps()[0];
 				$log->write( 'info', 'Cancelled; cleaning up.' );
@@ -274,7 +274,7 @@ final class Runner {
 					$job->outcome ??= JobState::Failed;
 					$job->error   ??= $error;
 					$done           = true;
-				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES && null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
+				} elseif ( $error->retryable && $job->consecutive_failures < self::MAX_CONSECUTIVE_FAILURES && null === $job->outcome && $job->type->cancels_before( $job->step, $job->progress['phase'] ?? null ) && $this->store->cancel_requested( $job ) ) {
 					// Asked to cancel while the step failed with what would be tried again: no
 					// retry is waited for, the cleanup starts now. After a deactivation no later
 					// tick would come to start it. An error that ends the job stays the outcome, also the
@@ -304,7 +304,7 @@ final class Runner {
 			if ( ! $done ) {
 				// A step that wants another tick, and a request to cancel that came while it ran:
 				// the cleanup starts in this tick. After a deactivation no other tick comes.
-				if ( null === $job->outcome && $job->type->cancels_before( $job->step ) && $this->store->cancel_requested( $job ) ) {
+				if ( null === $job->outcome && $job->type->cancels_before( $job->step, $job->progress['phase'] ?? null ) && $this->store->cancel_requested( $job ) ) {
 					continue;
 				}
 				return;

@@ -43,7 +43,11 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   `succeeded` leaves its staging directory. Half a tree looks like a whole one to whoever
   finds it later, and the report that would tell them apart is incomplete too. A cancel
   request that arrives after the last file is staged no longer cancels: the result is
-  recorded, as for the other job types.
+  recorded, as for the other job types. This holds while the step `restoring` rehearses the
+  database or builds the archive after the last file: the step itself answers the
+  request, discards an unfinished archive or stops the rehearsal and removes its tables,
+  and adds a warning (since 2026-11-21; the runner asks `JobType::cancels_before()` with
+  the job's phase). A deactivation of the plugin is such a request too.
 - **The lock is released on every path.** `releasing` aborts the run, which releases the
   repository lock even if a killed request left one behind that the checkpoint does not
   name. A run that completed has released its lock itself; if the second look for
@@ -57,7 +61,14 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
 - **A finished restore survives a failing cleanup.** When `cleaning_up` cannot remove
   working files or old jobs after the run completed, the job logs a warning and still
   succeeds. Failing it would leave a failed job that owns a complete staging directory
-  and the entry of the last restore.
+  and the entry of the last restore. Since 2026-11-21 this holds for every failure of
+  `releasing` and `cleaning_up` after a complete run, an Error of PHP included, such as a
+  function that the host disabled, and for opening the repository to look for a leftover
+  lock. It holds as well for a failure in the call that stages the last file, once the
+  run's checkpoint says that every file is staged and the directories it names are still
+  the ones the run bound: the release of the lock or the checkpoint written after it. The
+  job keeps the files and goes on with a warning (log code `restore_release_deferred`);
+  `releasing` asks for the lock again, and a lock that stays expires after 30 minutes.
 - **Restore jobs are not reported by e-mail.** An administrator starts a restore and
   watches it, as with an unlock; failure streaks and recovery notices are for unattended
   jobs.
@@ -71,8 +82,11 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
 - If the cleanup of a failed job cannot remove the staging directory, the job ends as
   failed with the directory partly there; the heartbeat removes a staging directory whose
   job did not succeed as a leftover (ADR 0040).
-- The engine reports too little free space as a format error, so the job shows the code
-  `repository_damaged` for it. A code of its own belongs to the engine and the error
-  table.
+- Too little free space, a failed file operation in the private directory and a selected
+  path that the snapshot lacks have codes of their own since 2026-11-21: `staging_space`,
+  `staging_write` and `restore_path_missing` ([ADR 0036](0036-selected-file-staging.md),
+  As built). Until then the engine reported the first two as format errors, which the job
+  showed as `repository_damaged`. Free space that the host does not report lets the
+  restore go on with a warning.
 - The WP-CLI command, the screens, the download and applying files to the live site are
   separate packages; this decision only fixes where they find the files and the report.

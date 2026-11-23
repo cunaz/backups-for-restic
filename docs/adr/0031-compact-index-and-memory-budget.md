@@ -97,9 +97,17 @@ ends the same way.
   positive advertised size. Cache piece lengths must first fit in the remaining file bytes,
   so a truncated cache is rebuilt instead of producing a persistent capacity refusal.
   Complete pieces receive the same input check before reading. This prevents the measured
-  failure while opening the next normal index file. An unusually large decoded pack or
-  compressed object still needs separate allocation/decompression bounds; the input check
-  does not establish those bounds.
+  failure while opening the next normal index file. An unusually large decoded pack still
+  needs a separate allocation bound; the input check does not establish it. A compressed
+  index file is checked once more before it is decoded. The decoder says what decoding
+  takes, which is twice the declared size for the frames restic writes. A file that does
+  not fit beside the memory in use is refused with `index_too_large`
+  (`MemoryBudget::check_index_decoding()`). The sealed file and its plaintext are let go
+  before decoding starts, so the decoder works beside one copy of the compressed bytes.
+  restic 0.14 to 0.16 write index files of 150,000 blobs. Under 128 MiB with WordPress
+  loaded (34 MiB), such a file loads with a peak of 84.9 MiB; from a baseline of 64 MiB the
+  budget refuses it ([ADR 0019](0019-repository-format-and-chunker.md) has the
+  measurements).
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.
 - Prune and check now examine and rewrite index files pack by pack. Per-file summaries are

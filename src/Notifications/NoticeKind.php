@@ -30,4 +30,7 @@ enum NoticeKind: string {
 
 	/** The server refused deletions; retention switched to external (ADR 0010). */
 	case RetentionExternal = 'retention_external';
+
+	/** A recorded time lay ahead of the clock: the server clock was set back after it had been ahead. */
+	case Clock = 'clock';
 }

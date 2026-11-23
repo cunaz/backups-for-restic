@@ -11,10 +11,10 @@ namespace BackupsForRestic\Jobs\Restore;
 
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Snapshot\Reader;
+use BackupsForRestic\Engine\Restore\Files as StagingFiles;
 use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\DatabaseFailed;
-use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\Id;
@@ -46,6 +46,21 @@ final class RestoreSteps implements StepProvider {
 
 	/** How often a run may take up its work again after its repository lock did not hold. */
 	public const int MAX_RESUMPTIONS = 3;
+
+	/**
+	 * The code of the warning of a run whose checkpoint says that every file is staged when
+	 * what follows in the same call fails, as the release of its repository lock: the step
+	 * releasing tries the lock again, and a lock that stays expires after 30 minutes.
+	 */
+	public const string RELEASE_DEFERRED = 'restore_release_deferred';
+
+	/**
+	 * Free space that building an archive leaves on the volume. The archive is a second copy
+	 * of every staged byte, and while it grows the site writes beside it: uploads, sessions,
+	 * the database where it shares the volume, and the documents of this job. 64 MiB is four
+	 * times the reserve that staging keeps for its report and checkpoints alone.
+	 */
+	private const int ARCHIVE_RESERVE = 67108864;
 
 	/**
 	 * Creates the steps.
@@ -138,20 +153,27 @@ final class RestoreSteps implements StepProvider {
 	 */
 	public function restore( Job $job, EventLog $log, float $deadline ): bool {
 		if ( 'database_import' === ( $job->progress['phase'] ?? null ) ) {
-			if ( $this->preview()->advance( $this->services, $job, $deadline ) ) {
-				$job->progress['phase'] = 'database_cleanup';
+			if ( ! $job->cancel_requested ) {
+				if ( $this->preview()->advance( $this->services, $job, $deadline ) ) {
+					$job->progress['phase'] = 'database_cleanup';
+				}
+				return false;
 			}
-			return false;
+			// Every file is staged, so a request to cancel ends only the rehearsal (ADR 0037).
+			// Its tables go as after a rehearsal that finished.
+			$job->warn( 'Cancelled after the files were staged: the database rehearsal stopped and has no report. The staged files are kept.' );
+			$log->write( 'info', 'Cancelled after the files were staged; the database rehearsal stops and its tables are removed.' );
+			$job->progress['phase'] = 'database_cleanup';
 		}
 		if ( 'database_cleanup' === ( $job->progress['phase'] ?? null ) ) {
 			if ( ! $this->preview()->clean( $job, $deadline ) ) {
 				return false;
 			}
 			$job->progress['phase'] = 'complete';
-			return $this->after_staging( $job );
+			return $this->after_staging( $job, $log );
 		}
 		if ( 'archiving' === ( $job->progress['phase'] ?? null ) ) {
-			return $this->archive( $job, $deadline );
+			return $this->archive( $job, $log, $deadline );
 		}
 		if ( 'complete' !== $this->advance( $job, $log, $deadline ) ) {
 			return false;
@@ -177,7 +199,7 @@ final class RestoreSteps implements StepProvider {
 			// Returning before DDL ensures the runner persists the cleanup identity first.
 			return false;
 		}
-		return $this->after_staging( $job );
+		return $this->after_staging( $job, $log );
 	}
 
 	/**
@@ -196,27 +218,59 @@ final class RestoreSteps implements StepProvider {
 	/**
 	 * Continues with archive creation or recording after staging and any database rehearsal.
 	 *
-	 * @param Job $job Restore job.
+	 * @param Job      $job Restore job.
+	 * @param EventLog $log Log.
 	 * @return bool Whether recording can begin.
 	 */
-	private function after_staging( Job $job ): bool {
+	private function after_staging( Job $job, EventLog $log ): bool {
 		if ( RestoreRequest::from_job( $job )->archive ) {
 			$job->progress['phase'] = 'archiving';
-			return false;
+			// A request to cancel that came during the rehearsal ends the archive before it begins.
+			return $job->cancel_requested && $this->archive( $job, $log, 0.0 );
 		}
 		return true;
 	}
 
 	/**
 	 * Builds the optional archive in the remaining restore ticks. Staged files stay usable
-	 * when a name cannot be archived or the second copy does not fit on disk.
+	 * when a name cannot be archived or the second copy does not fit on disk, and when a
+	 * request to cancel comes while it is built: every file is staged by then, so the
+	 * request ends only the archive (ADR 0037).
 	 *
-	 * @param Job   $job      Job with completed staging.
-	 * @param float $deadline End of this tick.
+	 * @param Job      $job      Job with completed staging.
+	 * @param EventLog $log      Log.
+	 * @param float    $deadline End of this tick.
 	 * @return bool Whether recording may begin.
 	 */
-	private function archive( Job $job, float $deadline ): bool {
+	private function archive( Job $job, EventLog $log, float $deadline ): bool {
 		$writer = new ZipWriter( $this->services->files_dir( $job ), $this->services->staging_dir( $job ) . '/' . RestoreServices::ARCHIVE );
+		if ( $job->cancel_requested ) {
+			$job->warn( 'Cancelled after the files were staged: the ZIP was not built. The staged files are kept and can be downloaded one by one.' );
+			$log->write( 'info', 'Cancelled after the files were staged; the ZIP is not built.' );
+			self::discard( $job, $writer );
+			$job->progress['phase'] = 'complete';
+			return true;
+		}
+		if ( 0 === $writer->progress()['bytes'] && ! $writer->is_complete() ) {
+			// Before the first byte: a second copy that does not fit would run the volume down
+			// to nothing before a write failed, and every other writer there with it.
+			$needed = $this->archive_space( $job );
+			$free   = $this->services->free_space( $this->services->staging_dir( $job ) );
+			if ( null !== $free && $free < $needed ) {
+				$job->warn( sprintf( 'ZIP unavailable. It needs about %d MiB of free disk space, and %d MiB are free. The staged files can be downloaded one by one.', (int) ceil( $needed / 1048576 ), (int) floor( $free / 1048576 ) ) );
+				$log->write(
+					'warning',
+					'The ZIP is not built: the disk has too little free space for a second copy.',
+					[
+						'needed' => $needed,
+						'free'   => $free,
+					]
+				);
+				self::discard( $job, $writer );
+				$job->progress['phase'] = 'complete';
+				return true;
+			}
+		}
 		try {
 			if ( ! $writer->advance( $deadline ) ) {
 				$job->progress['archive_bytes'] = $writer->progress()['bytes'];
@@ -225,14 +279,41 @@ final class RestoreSteps implements StepProvider {
 		} catch ( InvalidArgument | StorageFailed $error ) {
 			$name = $error->context()['name'] ?? '';
 			$job->warn( 'ZIP unavailable. ' . $error->getMessage() . ( is_string( $name ) && '' !== $name ? ' ' . $name : '' ) );
-			try {
-				$writer->discard();
-			} catch ( StorageFailed ) {
-				$job->warn( 'Archive working files will be removed when staging expires.' );
-			}
+			self::discard( $job, $writer );
 		}
 		$job->progress['phase'] = 'complete';
 		return true;
+	}
+
+	/**
+	 * The most that an archive of the staged files needs: every staged byte once more, the
+	 * headers of every entry and the reserve. A stored entry writes its name three times,
+	 * in its local header, in its record of the central directory and in the spool that
+	 * collects those records, with at most 228 bytes of fields besides. A line of the report
+	 * holds the same name and more than a hundred bytes of fields, so three times the report
+	 * covers the headers of every entry, also of those that a ZIP leaves out.
+	 *
+	 * @param Job $job Job with completed staging.
+	 * @return float Bytes.
+	 */
+	private function archive_space( Job $job ): float {
+		$report = $this->services->work_dir( $job ) . '/' . RestoreServices::REPORT;
+		$size   = is_file( $report ) ? filesize( $report ) : false;
+		return (float) Decoded::int( $job->progress['bytes'] ?? null ) + 3.0 * ( false === $size ? 0 : $size ) + self::ARCHIVE_RESERVE;
+	}
+
+	/**
+	 * Removes an unfinished archive and its working files.
+	 *
+	 * @param Job       $job    Job, which is told if they stay.
+	 * @param ZipWriter $writer Writer of the archive.
+	 */
+	private static function discard( Job $job, ZipWriter $writer ): void {
+		try {
+			$writer->discard();
+		} catch ( StorageFailed ) {
+			$job->warn( 'Archive working files will be removed when staging expires.' );
+		}
 	}
 
 	/**
@@ -252,7 +333,7 @@ final class RestoreSteps implements StepProvider {
 		// A tick that the host ended after the move finds the report in its place.
 		if ( is_file( $source ) && ! is_link( $source ) ) {
 			if ( ! rename( $source, $report ) ) {
-				StorageFailed::raise( 'The restore report could not be moved to the staging directory.' );
+				StorageFailed::raise( 'The restore report could not be moved to the staging directory.', [ 'code' => StagingFiles::WRITE_FAILED ] );
 			}
 			chmod( $report, 0600 );
 		} elseif ( ! is_file( $report ) ) {
@@ -282,13 +363,14 @@ final class RestoreSteps implements StepProvider {
 	 *
 	 * A run that completed released its lock itself. Looking for a leftover once more is a
 	 * precaution then, and its failure does not turn a finished restore into a failed one,
-	 * which would cost the staged files.
+	 * which would cost the staged files: whatever the failure is, also an Error of PHP such
+	 * as a function that a host disabled.
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool Always true.
-	 * @throws PluginException If the lock of an unfinished run cannot be released.
+	 * @throws \Throwable If the lock of an unfinished run cannot be released.
 	 */
 	public function release( Job $job, EventLog $log, float $deadline ): bool {
 		if ( isset( $job->data['database_binding'] ) && ! $this->preview()->clean( $job, $deadline ) ) {
@@ -300,14 +382,14 @@ final class RestoreSteps implements StepProvider {
 		if ( ! is_file( $work . '/' . RestoreServices::CHECKPOINT ) ) {
 			return true;
 		}
-		$repository = $services->access->open_cached();
-		if ( null === $repository ) {
-			// Without the key the lock cannot be named; it goes stale after 30 minutes.
-			return true;
-		}
 		try {
+			$repository = $services->access->open_cached();
+			if ( null === $repository ) {
+				// Without the key the lock cannot be named; it goes stale after 30 minutes.
+				return true;
+			}
 			RestoreRun::resume( $repository, $work, $services->clock )->abort();
-		} catch ( PluginException $failure ) {
+		} catch ( \Throwable $failure ) {
 			if ( null !== $job->outcome ) {
 				throw $failure;
 			}
@@ -322,16 +404,17 @@ final class RestoreSteps implements StepProvider {
 	 * Deletes the working files of the run, and after a failure or a cancellation the partial
 	 * staging directory as well. Runs on every path to the end.
 	 *
-	 * A restore that is complete stays succeeded when something here cannot be removed. A
-	 * failing cleanup step would end the job as failed while its whole tree and the entry of
-	 * the last restore stay, and a failed job must not own a staging directory (ADR 0037).
-	 * What is left lies in the directory of the job and goes when old jobs are pruned.
+	 * A restore that is complete stays succeeded when something here cannot be removed,
+	 * whatever the failure is. A failing cleanup step would end the job as failed while its
+	 * whole tree and the entry of the last restore stay, and a failed job must not own a
+	 * staging directory (ADR 0037): the heartbeat would remove it as a leftover. What is left
+	 * lies in the directory of the job and goes when old jobs are pruned.
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return bool Always true.
-	 * @throws PluginException If the cleanup after a failure or a cancellation fails.
+	 * @throws \Throwable If the cleanup after a failure or a cancellation fails.
 	 */
 	public function clean_up( Job $job, EventLog $log, float $deadline ): bool {
 		$services = $this->services;
@@ -346,7 +429,7 @@ final class RestoreSteps implements StepProvider {
 				},
 				fn () => $this->common->clean_up( $job, $log, $deadline )
 			);
-		} catch ( PluginException $failure ) {
+		} catch ( \Throwable $failure ) {
 			if ( $partial ) {
 				throw $failure;
 			}
@@ -364,25 +447,55 @@ final class RestoreSteps implements StepProvider {
 	 * job fails rather than go on for ever. A snapshot that the repository does not hold, never
 	 * held or was made to forget, does not come back: the job fails in the tick that finds out.
 	 *
+	 * A run whose checkpoint says that every file is staged is complete, whatever fails after
+	 * that in the same call, as the release of its repository lock or the checkpoint written
+	 * after it. Failing the job then would cost the staged files (ADR 0037): the job keeps
+	 * them and goes on with a warning (RELEASE_DEFERRED), the step releasing asks for the lock
+	 * again, and a lock that stays expires after 30 minutes. Before the checkpoint says so, or
+	 * when the directories it names are not the ones the run bound, an error ends the job.
+	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
 	 * @param float    $deadline Unix time.
 	 * @return string The phase of the run after the tick: plan, restore or complete.
 	 * @throws RepositoryChanged If the lock was lost too often or the snapshot is gone.
+	 * @throws \Throwable If the run failed before every file was staged.
 	 */
 	private function advance( Job $job, EventLog $log, float $deadline ): string {
-		$run = $this->run( $job, $log );
+		$run      = $this->run( $job, $log );
+		$progress = null;
 		try {
 			$run->advance( $deadline );
-		} catch ( RepositoryChanged $changed ) {
-			$resumptions = Decoded::int( $job->data['resumptions'] ?? 0 ) + 1;
-			if ( $resumptions > self::MAX_RESUMPTIONS || RestoreRun::SNAPSHOT_MISSING === ( $changed->context()['cause'] ?? null ) ) {
-				throw $changed;
+		} catch ( \Throwable $failure ) {
+			$progress = $this->completed( $job );
+			if ( null !== $progress ) {
+				$code = JobError::from_throwable( $failure )->code;
+				$job->warn( 'Every file is staged, but what followed the last one failed (' . $code . '), so the repository lock may still be held. The cleanup releases it; a lock that stays expires after 30 minutes.' );
+				$log->write(
+					'warning',
+					'The restore is complete; a failure after its last file leaves the release of its repository lock to the cleanup.',
+					[
+						'code'  => self::RELEASE_DEFERRED,
+						'cause' => $code,
+					]
+				);
+			} elseif ( ! $failure instanceof RepositoryChanged ) {
+				throw $failure;
+			} else {
+				$resumptions = Decoded::int( $job->data['resumptions'] ?? 0 ) + 1;
+				if ( $resumptions > self::MAX_RESUMPTIONS || RestoreRun::SNAPSHOT_MISSING === ( $failure->context()['cause'] ?? null ) ) {
+					throw $failure;
+				}
+				$job->data['resumptions'] = $resumptions;
+				$log->write( 'warning', 'The repository lock of the restore did not hold; the restore takes up its work again.', [ 'resumption' => $resumptions ] + $failure->context() );
 			}
-			$job->data['resumptions'] = $resumptions;
-			$log->write( 'warning', 'The repository lock of the restore did not hold; the restore takes up its work again.', [ 'resumption' => $resumptions ] + $changed->context() );
 		}
-		$progress      = $run->progress();
+		if ( $run->space_unknown() && true !== ( $job->data['space_unknown'] ?? null ) ) {
+			$job->data['space_unknown'] = true;
+			$job->warn( 'The free disk space is unknown because the host does not report it. The restore went on without checking it and stops if the disk is full.' );
+			$log->write( 'warning', 'The free disk space for the restore is unknown; the restore relies on its checked writes.' );
+		}
+		$progress    ??= $run->progress();
 		$job->progress = [
 			'phase'       => $progress['phase'],
 			'files'       => $progress['files'],
@@ -393,6 +506,35 @@ final class RestoreSteps implements StepProvider {
 			'percent'     => self::percent( $progress ),
 		];
 		return $progress['phase'];
+	}
+
+	/**
+	 * The progress of a run whose checkpoint says that every file is staged, read from that
+	 * checkpoint, while the working and the staging directory are still the ones the run
+	 * bound. The run counted every file and byte of the plan before it wrote the checkpoint.
+	 *
+	 * @param Job $job Job.
+	 * @return array{phase: string, files: int, bytes: int, total_files: int, total_bytes: int, skipped: int}|null Progress, or null if the run is not complete.
+	 */
+	private function completed( Job $job ): ?array {
+		try {
+			$state = StagingFiles::read( $this->services->work_dir( $job ) );
+			if ( 'complete' !== $state->phase ) {
+				return null;
+			}
+			StagingFiles::verify( $state->work );
+			StagingFiles::verify( $state->target );
+		} catch ( \Throwable ) {
+			return null;
+		}
+		return [
+			'phase'       => $state->phase,
+			'files'       => $state->files,
+			'bytes'       => $state->bytes,
+			'total_files' => $state->planned_files,
+			'total_bytes' => $state->planned_bytes,
+			'skipped'     => $state->skipped,
+		];
 	}
 
 	/**
@@ -424,19 +566,25 @@ final class RestoreSteps implements StepProvider {
 			$job->data['site_layout'] = $binding;
 		}
 		if ( $resume ) {
-			return RestoreRun::resume( $repository, $work, $services->clock, $services->throttle() );
+			return RestoreRun::resume( $repository, $work, $services->clock, $services->throttle(), $this->services->space, $services->index_cache( $repository ) );
 		}
 		// No checkpoint means no run: what a start that the host ended left behind holds no
 		// lock and no file, and would only keep the new start from finding its directory empty.
 		Files::remove_tree( $work );
 		$target = $this->services->files_dir( $job );
 		if ( ! is_dir( $target ) && ! mkdir( $target, 0700, true ) && ! is_dir( $target ) ) {
-			StorageFailed::raise( 'The staging directory could not be created in the private directory.', [ 'job' => $job->id ] );
+			StorageFailed::raise(
+				'The staging directory could not be created in the private directory.',
+				[
+					'job'  => $job->id,
+					'code' => StagingFiles::WRITE_FAILED,
+				]
+			);
 		}
 		chmod( $this->services->staging_dir( $job ), 0700 );
 		chmod( $target, 0700 );
 		$services->private_dir->protect( $this->services->staging_dir( $job ) );
-		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $paths, $services->identity, $services->clock, $services->throttle() );
+		$run = RestoreRun::start( $repository, Id::from_hex( $request->snapshot ), $target, $work, $paths, $services->identity, $services->clock, $services->throttle(), $this->services->space, $services->index_cache( $repository ) );
 		$log->write(
 			'info',
 			'Restore started.',

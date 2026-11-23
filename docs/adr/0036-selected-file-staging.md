@@ -71,6 +71,12 @@ collisions, useful progress, and recovery after a killed request.
   chunks retain restic's 8 MiB maximum; metadata is checked before a download, and a
   response must have exactly the requested length. A generator retains one downloaded
   group and yields plaintext one blob at a time.
+- A compressed chunk may be stored larger than its content, up to libzstd's bound for
+  8 MiB (`Compression::bound()`) and the 32 bytes of encryption (`BlobBatch::max_length()`).
+  restic compresses every data blob of a compressed repository, also data that does not
+  compress, and stores a full chunk of such data in raw zstd blocks, 202 bytes longer than
+  itself. Planning and reading refused that length until 2026-11; it occurs in about one
+  chunk in 1,800 of random data, so in about one conformance run in 200.
 
 ## Run state, reports and recovery
 `RestoreRun` checkpoint version 2 has `plan`, `restore`, `complete` and `aborted` phases.
@@ -129,6 +135,27 @@ for the current and minimum supported restic versions: names, types, times and c
 come from staging, modes from the report.
 Final-head CI remains the merge gate.
 
+## As built (2026-11)
+- Free space that the host does not report, or reports as no number, is unknown, not too
+  little: the run notes it in its checkpoint (`space_unknown`, absent from older
+  checkpoints) and goes on, and the restore job says so in a warning. Every write is
+  checked all the same. The default probe looks for `disk_free_space()` when the space is
+  checked: PHP treats a function in `disable_functions` as undefined, and taking it as a
+  callable in the constructor ended every restore on such a host. Free space known to be
+  too little raises `StorageFailed` with the code `staging_space`.
+- A file operation in the staging or working directory that the file system refuses (an
+  open, write, flush, close, truncation, `mkdir`, `chmod`, `touch`, rename or removal, or an
+  entry that cannot be inspected) raises `StorageFailed` with the code `staging_write`
+  (`Files::WRITE_FAILED`), not a format error: the job layer reported those as damage in
+  the repository. A selected path that the snapshot does not hold carries
+  `restore_path_missing`. An entry that changed or is not what the run left there, and data
+  from the repository that does not add up, stay format errors.
+- `start()` and `resume()` take the index cache of the jobs, as backup and check do. Only
+  the index files that the cache does not cover are downloaded, and the lease is compared
+  with the clock around every one of them (`IndexCache::load()` takes the callback that
+  `Repository::load_index()` takes). After a lock gap the run drops its index as before
+  and loads it through the cache, which is not used when an index file it covers is gone.
+
 ## Remaining release work
 This engine is not yet a WordPress restore feature. Jobs, the browser, downloads and expiry
 follow in phases 2.2–2.5. Full-job memory under 128 MiB remains a separate release gate;
@@ -136,13 +163,9 @@ bounded blob groups do not bound every decoded index/tree document or the decomp
 allocation before checking its output size. Windows name rules are unit-tested, not a
 claim of real Windows filesystem acceptance.
 
-Two known costs remain for the job package (phase 2.2) and later work:
+One known cost remains for later work; the other one of phase 2.2, the index loaded again
+in every tick, is gone since the restore job hands in the index cache (As built above):
 
-- The index is loaded again in every tick. It lives only in the PHP process, so every
-  resumed request lists and downloads all index files before its first step, and
-  `start()` and `resume()` take no index cache, unlike backup and check. A repository
-  whose index takes longer to fetch than a tick allows makes one traversal step per tick.
-  The restore job has to hand in the index cache.
 - One decoded tree is kept at a time. After the traversal returns from a child directory
   the parent's tree is downloaded, decrypted and decoded again, so a directory with N
   subdirectories is fetched N + 1 times in each of the two passes.

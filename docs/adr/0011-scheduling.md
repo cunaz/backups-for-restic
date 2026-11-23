@@ -99,3 +99,23 @@ loopback requests. The native engine needs many short slices of work (ticks) per
   a newer marker. The administrator notice distinguishes these cases from a refused
   first write. Future migrations still need to exclude requests running older code;
   initial recording provides no lock around an entire request.
+- Since 2026-11-21 a recorded time that lies more than an hour after the current time
+  counts as recorded by a clock that was wrong (`SchedulePolicy::ahead()`). The heartbeat
+  only ever raised a handled slot, so after a server clock was ahead, as on a virtual
+  machine restored with a wrong clock, and was set back, no scheduled job started until the
+  clock caught up, and the stale notice never came because the age of the last backup was
+  negative. Now the heartbeat puts a handled backup, prune or check slot that lies ahead
+  back to the current slot of its schedule. The current slot counts as handled, because a
+  job ran while the clock was ahead; the schedule goes on with its next slot. The notifier
+  counts the age of the backups from the moment it finds the time they would count from
+  ahead, until a newer backup or another repository replaces that record: the clock
+  coming within the hour of the wrong time does not end it, or the age would count from
+  the wrong time again. It reports the setting back once by e-mail (§14 of the
+  architecture). A handled slot needs no such memory: once it is put back, the wrong
+  value is gone. With a
+  clock that only moves forward nothing recorded lies ahead of it, so this never happens
+  in the normal case, daylight-saving changes included: they move no Unix time. The hour
+  keeps what a correction of the clock back by up to an hour leaves ahead (NTP, a leap
+  second, servers of one site that differ, a clock kept in local time that steps back the
+  hour of a daylight-saving change), so the slot it handled does not run a second time.
+  A correction back by more than an hour can run the most recent slot once more.

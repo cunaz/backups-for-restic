@@ -172,6 +172,18 @@ final class Messages {
 				'message' => __( 'The restore stopped because the privacy of its staging directory could not be verified.', 'backups-for-restic' ),
 				'hint'    => __( 'Restored files are staged only outside the web root, or where the web server verifiably refuses the directory: the same check has to get the plugin\'s own stylesheet back, so that a refusal from a firewall, a CDN or another site does not count. Check the working directory on the Environment tab, or configure BACKUPS_FOR_RESTIC_PRIVATE_DIR outside the web root.', 'backups-for-restic' ),
 			],
+			'staging_space'                  => [
+				'message' => __( 'There is too little free disk space for the files of this restore.', 'backups-for-restic' ),
+				'hint'    => __( 'A restore needs the size of the selected files, and a reserve, free where the working directory lies. Free disk space there, ask your host for a larger quota, or restore fewer files.', 'backups-for-restic' ),
+			],
+			'staging_write'                  => [
+				'message' => __( 'The restore could not write its files to the working directory.', 'backups-for-restic' ),
+				'hint'    => __( 'The disk may be full or the account over its quota, or PHP may not write there. Check the free disk space and the quota with your host and the working directory on the Environment tab, then start the restore again.', 'backups-for-restic' ),
+			],
+			'restore_path_missing'           => [
+				'message' => __( 'A selected file or directory does not exist in this snapshot.', 'backups-for-restic' ),
+				'hint'    => __( 'Open the snapshot again and select the paths from its listing.', 'backups-for-restic' ),
+			],
 			'environment'                    => [
 				'message' => __( 'This server cannot run the backup right now.', 'backups-for-restic' ),
 				'hint'    => __( 'The checks on the Environment tab show what is missing.', 'backups-for-restic' ),
