@@ -77,19 +77,22 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
 - A protected location that resolves to the filesystem root makes the plan unavailable
   (`protected_path_invalid`), as an invalid spelling does.
 - The undo review decides on absence first. A created file or directory that is gone, also
-  below a directory that was removed since, is kept; a replaced file that is gone, or whose
-  parent is no longer the recorded directory, is refused. Before, a removed parent made the
-  review fail, so that none of the apply's entries could be undone.
+  below a directory that was removed since, has nothing left to revert
+  (`removed_since_apply`); a replaced file that is gone is kept (`deleted_since_apply`), and
+  so is an entry whose parent is no longer the recorded directory (`parent_changed`).
+  Before, a removed parent made the review fail, so that none of the apply's entries could
+  be undone.
 - Every record of an entry's journal, the `attempted` count, the confirmed manifest and the
   `reverted` marker are written durably (`Storage\Files::write_durable()`): the temporary file
   is synchronised before its rename and the directory after it. The retained original is
   synchronised before the record that names it, the candidate with its attributes before the
-  `ready` record, the restored original's attributes before the `restore` record, and the live
-  directory after a publication or removal and before the record that completes it, also on
-  a retry. Where PHP cannot open a directory or the file system cannot synchronise one, the
-  rename keeps the order that the file system gives it. A created file whose completed
-  record survived a power loss, while the unlink of its private name before it did not, is
-  undone like an interrupted link.
+  `ready` record, the restored original's attributes before the `restore` record, and the
+  live directory after a publication or removal and before the record that completes it,
+  also on a retry. Where
+  PHP cannot open a directory or the file system cannot synchronise one, the rename keeps
+  the order that the file system gives it. A created file whose completed record survived a
+  power loss, while the unlink of its private name before it did not, is undone like an
+  interrupted link.
 - A new directory is prepared in the entry's private item directory with the permissions that
   `mkdir()` in place gave: the reviewed mode narrowed by the umask and, below a set-group-ID
   parent, that group and the bit where the worker may set the group. Its inode is recorded in
@@ -109,18 +112,28 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   again at the next recheck. The index keeps at most 524,288 names as salted 64-bit codes,
   about 20 MiB; a folder that alone holds more is listed for every recheck, as before. Each
   publication and removal is preceded by a recheck.
-- Residual risks. Between the last check and the rename or unlink, a process of the same user
-  that maintenance mode does not stop, such as an SFTP client or a deploy script, can still
-  change the live entry, and that change is lost without a copy. Keeping the displaced inode
-  through a hard link was not adopted, because a replacement would then need hard links,
-  which a create already needs but a replacement does not. A directory rename can likewise
-  replace an empty directory that such a process creates at the same name in that moment. In
-  a folder of more than 2,048 names, a second spelling of a name that another process
-  creates in the same second as one of the worker's own changes can stay hidden from the
-  rechecks for up to about one and a quarter seconds; on a case-insensitive file system the
-  publication itself meets it, and a case-sensitive one keeps both names. On a network file
-  system whose clients cache directory attributes, a change made on another host can leave
-  a folder's identity unchanged for as long as that cache holds it.
+- Residual risks. Between the last check and the rename or unlink, a process of the same
+  user that maintenance mode does not stop, such as an SFTP client or a deploy script, can
+  still change the live entry, and that change is lost without a copy. Keeping the displaced
+  inode through a hard link was not adopted, because a replacement would then need hard
+  links, which a create already needs but a replacement does not. For a removal, moving the
+  entry into the private item directory with a rename and checking the moved inode before it
+  is deleted would make the removal itself act on the verified inode, and put anything else
+  back with a no-clobber link; it costs a rename, a private unlink, one more synchronisation
+  and a journal state for an entry that a stopped worker left moved aside, and was not
+  adopted in this change. A restore cannot be made to act on the verified inode that way:
+  PHP has no atomic exchange of two names, and moving the live file aside first would leave
+  the name missing for the site until the original is in place. A directory rename can
+  likewise replace an empty directory that such a process creates at the same name in that
+  moment. In a folder of more than 2,048 names, a second spelling of a name that another
+  process creates in the same second as one of the worker's own changes can stay hidden from
+  the rechecks for up to about one and a quarter seconds; on a case-insensitive file system
+  the publication itself meets it, and a case-sensitive one keeps both names. On a network
+  file system whose clients cache directory attributes, a change made on another host can
+  leave a folder's identity unchanged for as long as that cache holds it. A directory that
+  someone removes and creates again can get the recorded inode number on a file system that
+  reuses them; with the recorded permissions, owner and group, and while it is empty, the
+  undo removes it as the one that the apply created.
 - Measured with PHP 8.3.37 on tmpfs: 500 new files beside 20,000 others took 27.2 seconds of
   rechecks before and 0.44 seconds with seven folder listings after.
 - Every job document is written durably as well (`JobStore::save()`), and a new job directory
@@ -139,4 +152,215 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   synchronisation, as on slow or network storage, the document adds about 40 ms to a backup
   tick and 20 ms to each applied entry, and the maintenance window of a large apply grows
   accordingly.
+- Undo decides entry by entry. An attempted entry that still is what the apply left there is
+  reverted: a replaced file gets its original back, a created file or directory is removed.
+  Every other entry is kept with a reason, and one kept entry no longer makes the whole undo
+  inapplicable: `changed_since_apply` (content, type, size, permissions, owner or group
+  differ, or cannot be established), `deleted_since_apply`, `parent_changed`, `new_children`
+  (a created directory holds an entry that the undo keeps, something added after the apply
+  or a kept entry of its own; its other entries are still removed), `destination_changed`
+  (the site now maps the snapshot path to another live path, or to none because its layout
+  would map it ambiguously), the reason of the site's file policy where it no longer permits
+  the change (for example `protected` or `unwritable_destination`; the latter also where the
+  folder that holds a created folder, or a created file whose private name remains, no
+  longer lets the worker change its names, which the policy does not ask about there), and
+  `original_unavailable` (the retained copy is damaged). An entry with nothing left to
+  revert is listed as kept with `not_applied`, `already_undone` or `removed_since_apply`; it
+  counts as `unchanged`, not as kept, and its journal record stays as it is: only an entry
+  that the undo reverted is recorded as undone, so that one that someone else removed and
+  that comes back as the apply left it is reverted by a later undo. An entry is missing only
+  where its name is missing from a canonical folder that the worker can search and that is
+  the entry's recorded parent, or below a folder whose name is missing in that sense: below
+  a folder without search permission, where `file_exists()` answers false for a file that is
+  there, the entry is kept as `changed_since_apply`; below a link or another folder put in
+  place of its own, where the folder that holds it may be elsewhere, as `parent_changed`;
+  and a journal record that cannot be looked up stops the undo instead of counting as an
+  entry that was never attempted. The review, inline and background, shows each entry's
+  action and reason and the totals by action. A review that finds every entry with nothing
+  left to revert, as after an undo that stopped after its last revert or once the kept
+  entries were removed, records the apply as undone and writes the `reverted` marker, while
+  no job is active, and says so (`undone`) instead of offering an undo that would be
+  refused; a background review counts these entries in its result and decides when its first
+  page is read. Before it writes the marker, it decides every entry against its live path
+  again: an entry that came back since the review, a check that does not finish within two
+  seconds, such as one that verifies a large file, and anything it cannot read leave the
+  apply eligible. An undo with nothing to revert that still keeps a changed entry is refused
+  (`undo_nothing_to_revert`): WP-CLI says so after its review, and over REST such a review
+  is not applicable and gets no confirmation token, so the admin page shows its totals and
+  offers no undo. Before, a partial apply stopped by `file_space` could become
+  impossible to undo through one upload into a folder that it created, and the journal with
+  the only copies of the original files expired with its window.
+- What can be known about one entry keeps that entry with a reason, and the undo goes on
+  with the next one; the reviews, inline and background, the worker's last check and the
+  cleanup of a stopped undo read an entry by the same rule. Only three things stop an undo:
+  a journal record that is damaged or cannot be looked up; a write of the plugin's own
+  records or private copies that fails, such as a journal record, the attributes of the
+  retained original, the list of kept entries or the job document; and a refusal of the file
+  system that no check could foresee, a rename or unlink refused after every check passed or
+  an `rmdir()` refused while the folder holds no name to read. A review stops as a whole
+  only for what concerns every entry: a site layout or protected location that is invalid,
+  or a staged tree, apply manifest or sealed plan that is gone or damaged. A created
+  directory that a review cannot read, or that is gone when its names are read, is kept as
+  `changed_since_apply`, as the worker's last check keeps it, and one whose interrupted
+  reading cannot find its place again as `new_children`. Before, such a directory failed a
+  background review with an internal error, and the inline review kept an unreadable one as
+  `new_children`; the name checks of the site policy that cannot read a folder answer
+  without a PHP warning, which a debugging site could print into the review's reply. The
+  index of names that a background review keeps for a folder with more than 2,048 names
+  answers, in an undo review, a folder that is gone, cannot be read or changes while its
+  names are read with a spelling that may be there, so that the site policy keeps the entry
+  as `ambiguous_destination` (or `ambiguous_source`) and the review goes on; before, the
+  review failed, also for one upload into such a folder during its scan. A preview still
+  fails there, and a damaged index fails in both.
+- Whether an entry is still what the apply left there is decided by content and attributes,
+  not by the inode alone. The inode that the apply published, with the attributes it
+  recorded, counts as before while its content has the reviewed digest. A regular file with
+  one link and another inode counts when its size, which the `ready` record keeps since
+  this version, and the attributes that the record already kept for the candidate (type,
+  permission bits, owner, group and modification time, the `installed` digest) are those of
+  the apply's candidate, and its content has the digest of the staged source. Stacked
+  applies compose this way: the undo of a later apply over the same file publishes its
+  retained copy as a new inode with the time that the earlier apply installed, and the
+  undo of the earlier apply then restores its own original; an undo of the later apply
+  that stopped before or after its rename and was resumed leaves the same state. The
+  modification time is compared because a file written after the apply has a later one,
+  also with the same bytes: a re-upload of the same image or a deploy of the same version
+  is kept, where it would otherwise be removed or overwritten with the saved original. The
+  apply installs a copy that it wrote itself, so the installed time is the time of the
+  apply, not the snapshot's time that the staged copy has. A file that a tool puts back
+  with exactly the installed time, permissions, owner, group and bytes is not told apart.
+  An entry recorded by an earlier version has no recorded size, so only its own inode
+  counts. A different size keeps the entry without reading it, so a file with another
+  inode costs at most the installed size to verify: in the digest format of its review, a
+  plain SHA-256 for an inline review, whose sources are at most 8 MiB, and the ordered
+  1 MiB block digest for a background review, which resumes across ticks.
+- The link count belongs to that state: the apply leaves one link, or two while the private
+  name of an interrupted create remains. A file with another count, the installed inode as
+  well as another one, is `changed_since_apply`, decided like the size before the site policy
+  is asked, which would refuse it as `type_conflict`. The answer therefore does not depend on
+  inode numbers. ext4 gives a file created after the installed one was freed the recorded
+  number, and a file written in the same second with the installed permissions, owner and
+  group then passes for the installed inode; it is reverted only with the installed link
+  count, size, attributes and content, as any other copy is, but its reason can be
+  `undo_journal`.
+- The worker reads the identity of the live file, which covers its device, inode, owner,
+  group, mode, size and both change times, before it verifies the content. It compares it
+  after the verification and once more as the last check before the rename or unlink, after
+  the folder and policy rechecks and, for a restore, after the record that precedes the
+  rename; a difference keeps the entry. Two gaps remain, and the checks do not close them.
+  The times have whole seconds: a write in place that keeps the size and falls in the same
+  second as a change the checks already saw leaves the identity as it was, after the content
+  was read; the apply has the same gap. And the rename or unlink acts on the name, not on the
+  verified inode: a process that replaces the file between the last check and that call,
+  with another inode and other times, has its file replaced or removed instead, as the
+  residual risks above describe; the same holds for an empty directory put in place of a
+  created one before its `rmdir()`. A created directory is removed only while it is empty,
+  which `rmdir()` itself enforces: a name that arrives in it after the last check keeps it
+  as `new_children`, as at the check, and the undo goes on with the next entry. Only a
+  refusal of `rmdir()` that leaves no name to read in the directory stops the undo.
+- The confirmed review binds the exact set of entries. Its digest covers every entry with
+  its action and reason. An inline undo stores the reviewed decisions with its job, a
+  background one reads them from the sealed review, whose header now also carries the
+  totals by action; an undo review sealed before has none and is reviewed again. A
+  background review shows a created directory for removal only if every entry in it is a
+  removal in the same review: a row that it reviews again, after a tick whose document a
+  stopped worker did not write or from a checkpoint of an earlier version, which starts
+  over with the refused count cleared, withdraws the removal that it claimed before. The
+  worker reverts only entries that the review showed for a revert. It checks each one again
+  immediately before it touches it and keeps one that changed since the review, counted in
+  `changed_after_review`, instead of failing the job. An entry that the review showed with
+  nothing left to revert is checked against its live path as well and counts as `unchanged`
+  only while that still holds; one that came back since is kept, not reverted, and counted
+  in `changed_after_review`, so that the undo does not end the window while that entry
+  could still be reverted. Its preflight therefore no longer
+  rechecks every live entry before maintenance; it checks that the confirmed review belongs
+  to the apply and its manifest. An inline undo queued by an earlier version has no stored
+  decisions, and a background one a sealed review without totals, so nothing says which
+  entries the administrator saw as kept: both are refused with `undo_review_required`,
+  before maintenance or, if that version's worker had begun, before its next entry, and the
+  undo is reviewed again.
+- Kept entries stay undoable within the 24-hour window, which does not change. A kept
+  entry's journal record and retained copy are left as they are, and only an undo that kept
+  no entry, or a review that finds nothing left to revert, writes the `reverted` marker
+  that ends the window early. Otherwise the apply stays listed for undo and pinned, and a
+  later undo of the same apply reviews every entry again, for example after a later apply
+  over the same files was undone; what an earlier undo reverted is `already_undone`. The
+  apply's document records `undo_state` (`undone` or `partly_undone`), `undo_kept` (the
+  number of entries the last finished undo kept, null after an undo that stopped after a
+  revert) and `undo_job`; the undo list shows this state.
+- An undo's result counts the entries by outcome, `restored`, `removed`, `unchanged`, `kept`
+  and `changed_after_review`, and names `apply_state`. The kept entries with their reasons
+  are written to a paged list in the undo job's directory, in pages of 100 that a sealed
+  summary authenticates as a background review's pages are, and served by
+  `GET /jobs/{id}/kept-entries`. WP-CLI `undo` prints the totals of its review, refuses an
+  undo with nothing to revert, and afterwards prints the kept entries and the counts, as the
+  admin page shows them, also for an undo that was cancelled or failed. Neither says that a
+  kept entry changed after the apply unless its reason is `changed_since_apply`. Each
+  outcome is on disk before the job document that counts it: a kept entry's page is written
+  durably, a revert's journal record is. A restarted tick repeats only the entry that the
+  document does not count yet, and a kept entry is written again at the same place in the
+  list. The job document is the one commit point, and it names what it counts: with the
+  number of kept entries it stores `kept_page_digest`, the digest of the version of the last
+  page that holds them, computed from the bytes when they were written (`KeptList`). The
+  list holds four invariants. I1: at every moment the files on disk hold at least the
+  entries that the document counts, and no write replaces a version that a count names; each
+  kept entry writes its page as a new version named by the number of entries on it
+  (`rows-0.3`), a retry writes the uncounted version again, also with another reason, the
+  next entry writes a version with one more, and only versions below the counted one are
+  removed. I2: the digest of a full page enters the index of page digests only once the
+  document counts that page, and it is the digest that the document held, not one read from
+  the file later; every slot is a digest that a saved document held. I3: sealing reads one
+  page, the last counted one, and the index, whatever the length of the list. I4: a counted
+  page that changed on disk after it was written is refused: the last page by the seal, and
+  by the next entry that builds on it, against the digest that the document names; every
+  other page when it is read, against its slot. The entry at position c, while the document
+  counts c entries with the digest d, is written in this order: when c begins a page p, the
+  index gets slot p-1 = d unless it holds it already, replaced as a whole on disk; the
+  page's version with the new entry is written on disk on top of the counted version, whose
+  digest must be d; the version below the counted one is removed; then the document is saved
+  with c+1 and the new digest. A stop between any two of these leaves either the earlier
+  document with an index slot that it names and an uncounted version, or the new document,
+  so that a cancelled or failed undo seals its list with the counted entries. The seal gives
+  the index the last page's digest as its last slot and writes the summary; a seal after a
+  stop of an earlier one writes the same summary. A kept entry costs one more synchronised
+  write, its page version, and the index one more on each page boundary. A list that cannot
+  be sealed, such as one whose counted page changed on disk, does not keep the undo from
+  recording its counts and the state of its apply: the result has no list, the job's log
+  says why, and `GET /jobs/{id}/kept-entries` answers 409 `kept_list_unavailable` and WP-CLI
+  says that the list is unavailable, instead of showing an empty list. A sealed list of which
+  a part is missing or was changed since is answered the same way, and WP-CLI still prints
+  the recorded counts and how the undo ended, without saying that the kept entries are
+  listed. Neither points to a new undo preview for the reasons: a preview decides every
+  entry as it is now, so it shows what can be reverted within the window, not why the
+  earlier undo kept an entry. Before, the seal read
+  and hashed every counted page as it found it, so that a page changed on disk was sealed as
+  if the undo had written it, a long list had to be read in one request, and a seal that
+  failed left the undo without a result. Tests stop an undo with several kept entries, and
+  one across the end of a page, at every synchronisation, rename and removal of the list and
+  of the document, and again at every one of a retry with another reason, and read the list
+  after each stop.
+- The result counts what this undo did, and a retry counts a revert as its own only from a
+  record of this undo that proves it. The record that completes an entry names the undo job
+  that reverted it, and so does the `restore` record before a restore's rename; the retained
+  inode back at the live path shows that the rename happened, because only that rename puts
+  it there. A retry of the same undo that finds the entry reverted under such a record
+  counts it as restored or removed, also when the document did not count it before the
+  worker stopped. A cancelled or failed undo does not retry the entry: its cleanup reads the
+  record of the entry at the cursor, the only one that the worker can have reverted without
+  the document counting it, by the same rule, completes a `restore` record that the retained
+  inode proves, and counts the revert before the result is recorded, without a change to the
+  live site; an entry whose record cannot be read is logged and not counted. Before, such a
+  revert was missing from the result, and an apply whose only revert it was stayed listed as
+  applied with its original already back. A removal has no record before its unlink or
+  `rmdir()`: a record written there would say the same after a stop before the removal, when
+  someone else may remove the entry, as after one between the removal and the completing
+  record. A retry that finds the entry gone without the completing record therefore counts
+  it as `unchanged`, as it counts an entry that someone else removed after the review or
+  that an earlier undo reverted; the first case undercounts a removal that it did make.
+  Before, the worker counted an entry that it found reverted by the action the review had
+  shown, so a file that someone deleted between the review and the worker counted as
+  removed.
+- An undo tick advances at least one entry, also one that begins after its deadline, as an
+  apply tick does; the verification of a large file still yields after a block. Before, a
+  tick that began late made no progress, and with a budget of zero none at all.
 Ticks under the marker boot without the theme and ordinary plugins. Filters that these ticks consult take effect only from `wp-config.php` or a must-use plugin: `file_mod_allowed`, `backups_for_restic_capability`, filters that grant the confirming administrator a capability, and `backups_for_restic_private_dir` or `upload_dir` where they move the private directory. A restriction in a regular plugin or the theme applies at confirmation and in preflight. A capability that only such code grants stops the job at its first tick under the marker, before that tick changes a file. A change to a role's own definition reaches a process that runs many ticks only when it starts again. OPcache caches the marker per web server, and a command-line tick checks only its own cache, which says nothing about the web server's. With timestamp checks disabled, a web server that compiled an earlier marker runs it until one of its own ticks invalidates the name. A job driven only from the command line can then leave the browser's progress requests on the maintenance page, or, if the earlier marker was core's own with its long-passed time, let requests boot normally while files change.

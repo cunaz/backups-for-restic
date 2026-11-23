@@ -80,6 +80,14 @@ final class Messages {
 				'message' => __( 'OPcache did not let the plugin clear its cached copy of the WordPress maintenance file.', 'backups-for-restic' ),
 				'hint'    => __( 'The PHP setting opcache.restrict_api leaves this site out. With opcache.validate_timestamps off, or with opcache.revalidate_freq above four seconds, the server could keep serving the site from an earlier maintenance file while files change. Add the WordPress directory to opcache.restrict_api, or turn timestamp checks on with a short interval, then start again. Changes already made can be undone on the Restores tab.', 'backups-for-restic' ),
 			],
+			'undo_nothing_to_revert'         => [
+				'message' => __( 'Nothing of this apply can be undone now.', 'backups-for-restic' ),
+				'hint'    => __( 'Every entry it changed is already undone or is kept, for example because it changed after the apply or the site no longer permits the change. The undo preview names each entry with its reason. If such an entry is put back as the apply left it, for example by undoing a later apply, preview the undo again within its recovery window.', 'backups-for-restic' ),
+			],
+			'undo_review_required'           => [
+				'message' => __( 'This undo was confirmed in an earlier version of the plugin, which did not keep the decision for each entry.', 'backups-for-restic' ),
+				'hint'    => __( 'Preview the undo again and confirm the new preview within the recovery window. It shows entry by entry what is still reverted and what is kept.', 'backups-for-restic' ),
+			],
 			'protected_path_invalid'         => [
 				'message' => __( 'A WordPress location that file apply protects is not an absolute path without "." or ".." segments.', 'backups-for-restic' ),
 				'hint'    => __( 'Check WP_CONTENT_DIR, WPMU_PLUGIN_DIR and BACKUPS_FOR_RESTIC_PRIVATE_DIR in wp-config.php, then open the preview again. The staged files remain available for download.', 'backups-for-restic' ),
@@ -248,6 +256,30 @@ final class Messages {
 				'message' => __( 'An unexpected error stopped the job.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job has the details. Please report it if it happens again.', 'backups-for-restic' ),
 			],
+		};
+	}
+
+	/**
+	 * Why an undo reverts or keeps an entry. A reason from the site's file policy, which an
+	 * entry can also be kept for, has the general text.
+	 *
+	 * @param string $code Reason code of an undo review or result.
+	 * @return string Text.
+	 */
+	public static function undo_reason( string $code ): string {
+		return match ( $code ) {
+			'undo_journal'         => __( 'still as the apply left it', 'backups-for-restic' ),
+			'installed_content'    => __( 'another copy with the content and attributes that the apply installed', 'backups-for-restic' ),
+			'not_applied'          => __( 'the apply did not change this entry', 'backups-for-restic' ),
+			'already_undone'       => __( 'already undone', 'backups-for-restic' ),
+			'removed_since_apply'  => __( 'removed after the apply', 'backups-for-restic' ),
+			'changed_since_apply'  => __( 'changed after the apply', 'backups-for-restic' ),
+			'deleted_since_apply'  => __( 'deleted after the apply', 'backups-for-restic' ),
+			'parent_changed'       => __( 'the folder that holds it was replaced or moved after the apply', 'backups-for-restic' ),
+			'new_children'         => __( 'the folder holds entries that the undo keeps', 'backups-for-restic' ),
+			'destination_changed'  => __( 'the site now maps the snapshot path to another live path', 'backups-for-restic' ),
+			'original_unavailable' => __( 'the saved original copy is damaged', 'backups-for-restic' ),
+			default                => __( 'the site\'s file policy does not permit this change now', 'backups-for-restic' ),
 		};
 	}
 
