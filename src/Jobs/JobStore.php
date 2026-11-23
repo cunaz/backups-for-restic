@@ -262,6 +262,17 @@ final class JobStore {
 	}
 
 	/**
+	 * The observer of this store's durable writes, for other records in a job's directory
+	 * that its document counts, such as the entries an undo kept, so that their writes are
+	 * observed in one order with the document's.
+	 *
+	 * @return (\Closure(string, string): void)|null Observer.
+	 */
+	public function observer(): ?\Closure {
+		return $this->observer;
+	}
+
+	/**
 	 * Records that an administrator asked to cancel a job, as a marker file in the job's
 	 * directory. Unlike a changed job document, the marker cannot overwrite what a running
 	 * tick saves, and no save of a tick can lose it; the runner reads it before every step.

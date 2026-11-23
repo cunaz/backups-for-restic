@@ -77,7 +77,7 @@ Yes. Every backup is a normal restic repository. The recovery kit lists the comm
 
 = Can I restore from the WordPress admin area? =
 
-Yes. In **Backups > Snapshots**, select the files or directories you need. Download them from private staging, or review the file changes and confirm your site address and password to apply them. You can review an undo for 24 hours. On a replacement WordPress installation, connect with the recovery kit and select **Restore from an existing snapshot** to stage content, map uploads to their new location and rehearse the database import. The database report shows whether the destination supports a confirmed live table exchange and undo. MariaDB users can import the verified SQL into a separate database using the recovery guide. The recovery kit also works on a separate computer with the restic CLI.
+Yes. In **Backups > Snapshots**, select the files or directories you need. Download them from private staging, or review the file changes and confirm your site address and password to apply them. You can review an undo for 24 hours: it reverts every file that is still as the apply left it and keeps the files changed since. On a replacement WordPress installation, connect with the recovery kit and select **Restore from an existing snapshot** to stage content, map uploads to their new location and rehearse the database import. The database report shows whether the destination supports a confirmed live table exchange and undo. MariaDB users can import the verified SQL into a separate database using the recovery guide. The recovery kit also works on a separate computer with the restic CLI.
 
 = Why does the plugin use direct filesystem access? =
 

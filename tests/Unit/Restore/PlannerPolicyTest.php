@@ -340,6 +340,57 @@ final class PlannerPolicyTest extends TestCase {
 		new ApplyPlan( [ $this->live ], [], [], true, $layout );
 	}
 
+	public function test_a_plan_maps_a_snapshot_path_only_to_the_live_path_that_its_layout_gives_it(): void {
+		// Without a layout every path is its own live path.
+		$plain = new ApplyPlan( [ $this->live ], [] );
+		self::assertTrue( $plain->maps( $this->live . '/file', $this->live . '/file' ) );
+		self::assertFalse( $plain->maps( $this->live . '/file', $this->live . '/other' ) );
+		// A fresh site maps the snapshot's content tree into the receiving one, and the snapshot's
+		// uploads into the receiving uploads tree, which lies in the receiving content tree.
+		$snapshot  = str_repeat( 'c', 64 );
+		$job       = new Job( '20270115T030000Z-abcdef', JobType::Restore, 'manual', 1800000000 );
+		$job->data = [
+			'fresh_install' => true,
+			'snapshot'      => $snapshot,
+			'site_layout'   => SiteLayout::bind(
+				$snapshot,
+				[
+					'database' => true,
+					'content'  => '/old/content',
+					'uploads'  => '/media/files',
+				],
+				'/old/private/spool/manifest.json'
+			),
+		];
+		$layout    = SiteLayout::from_job( $job, $this->live, $this->live . '/uploads' );
+		self::assertNotNull( $layout );
+		$plan = new ApplyPlan( [ $this->live ], [], [], false, $layout );
+		self::assertTrue( $plan->maps( '/old/content/themes/site', $this->live . '/themes/site' ) );
+		self::assertTrue( $plan->maps( '/media/files/2026/photo.jpg', $this->live . '/uploads/2026/photo.jpg' ) );
+		self::assertFalse( $plan->maps( '/old/content/themes/site', '/old/content/themes/site' ) );
+		self::assertFalse( $plan->maps( '/old/content/themes/site', $this->live . '/themes/other' ) );
+		// A path outside both trees maps to no live path.
+		self::assertNull( $plan->destination( '/old/private/archive' ) );
+		self::assertFalse( $plan->maps( '/old/private/archive', $this->live . '/private/archive' ) );
+		// The layout refuses a content path that would land in the receiving uploads tree, whose
+		// files come from the snapshot's uploads, and a path that is not a snapshot path. Both
+		// map to no live path, also not to the one that a projection of the path would give.
+		$refused = [
+			'/old/content/uploads/2026/photo.jpg' => [ $this->live . '/uploads/2026/photo.jpg', 'Two snapshot locations would map to the same live file.' ],
+			'/old/content/../content/themes/site' => [ $this->live . '/themes/site', 'The snapshot path contains an empty, dot or parent component.' ],
+			'old/content/themes/site'             => [ $this->live . '/themes/site', 'Use an absolute path inside the snapshot, at most 4096 bytes long.' ],
+		];
+		foreach ( $refused as $path => [ $target, $refusal ] ) {
+			try {
+				$plan->destination( $path );
+				self::fail( 'The layout must refuse ' . $path );
+			} catch ( InvalidArgument $error ) {
+				self::assertSame( $refusal, $error->getMessage() );
+			}
+			self::assertFalse( $plan->maps( $path, $target ), $path );
+		}
+	}
+
 	public function test_a_fresh_site_never_maps_a_spool_into_its_content(): void {
 		$snapshot  = str_repeat( 'b', 64 );
 		$job       = new Job( '20270115T030000Z-abcdef', JobType::Restore, 'manual', 1800000000 );

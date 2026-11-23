@@ -23,6 +23,11 @@ defined( 'ABSPATH' ) || exit;
  * the same bucket. Readers can check a spelling without retaining a wide folder in RAM.
  * Only a read-only worker uses these indexes. Live publication enumerates the filesystem.
  *
+ * A folder that disappears, cannot be read, or changes while its names are read cannot be
+ * indexed. A preview fails then. An undo review answers that another spelling may exist, so
+ * that the site policy keeps the entry with a reason and the review goes on with the next
+ * one (ADR 0041). A damaged index fails in both.
+ *
  * @phpstan-type Table array{identity:string,count:int,complete:bool,salt:string,heads:string,records:WorkFile}
  */
 final class DirectorySpellings {
@@ -32,6 +37,11 @@ final class DirectorySpellings {
 	private const int RECORD_BYTES = 68;
 	private const int MAX_NAMES    = 1000002; // Includes . and .. in the iterator.
 	private const int MAX_CHAIN    = 512;
+
+	/**
+	 * Context of a failure that is about the folder itself, not about its index.
+	 */
+	private const array UNSETTLED = [ 'directory' => 'unsettled' ];
 
 	/**
 	 * Up to four open private indexes for this worker.
@@ -45,9 +55,11 @@ final class DirectorySpellings {
 	 *
 	 * @param string $workspace Existing canonical private directory.
 	 * @param float  $deadline Worker deadline.
+	 * @param bool   $undo Whether an undo review reads the names, which answers a folder that cannot be
+	 *                     indexed instead of failing.
 	 * @throws StorageFailed If the workspace is not canonical.
 	 */
-	public function __construct( private readonly string $workspace, private readonly float $deadline ) {
+	public function __construct( private readonly string $workspace, private readonly float $deadline, private readonly bool $undo = false ) {
 		if ( ! is_dir( $workspace ) || realpath( $workspace ) !== $workspace ) {
 			throw new StorageFailed( 'The file preview name-index directory is unavailable.' );
 		}
@@ -68,21 +80,31 @@ final class DirectorySpellings {
 	 *
 	 * @param string $directory Existing canonical directory.
 	 * @param string $name Exact sought name.
-	 * @return bool Whether every existing name with this fold has the requested spelling.
+	 * @return bool Whether every existing name with this fold has the requested spelling; for an undo
+	 *              review false also when the folder cannot be indexed.
 	 * @throws FileWorkPending If further bounded work is required.
-	 * @throws StorageFailed If the index is damaged or the directory changes mid-scan.
+	 * @throws StorageFailed If the index is damaged, or outside an undo review if the folder disappears,
+	 *                       cannot be read or changes mid-scan.
 	 */
 	public function unique( string $directory, string $name ): bool {
-		$identity = hash( 'sha256', ApplyManifest::identity( $directory ), true );
-		if ( ! isset( $this->tables[ $directory ] ) || $this->tables[ $directory ]['identity'] !== $identity ) {
-			if ( count( $this->tables ) >= 4 ) {
-				array_shift( $this->tables );
+		try {
+			$identity = hash( 'sha256', self::identity( $directory ), true );
+			if ( ! isset( $this->tables[ $directory ] ) || $this->tables[ $directory ]['identity'] !== $identity ) {
+				if ( count( $this->tables ) >= 4 ) {
+					array_shift( $this->tables );
+				}
+				$this->tables[ $directory ] = $this->open( $directory, $identity );
 			}
-			$this->tables[ $directory ] = $this->open( $directory, $identity );
-		}
-		$table = &$this->tables[ $directory ];
-		if ( ! $table['complete'] ) {
-			$this->advance( $directory, $table );
+			$table = &$this->tables[ $directory ];
+			if ( ! $table['complete'] ) {
+				$this->advance( $directory, $table );
+			}
+		} catch ( StorageFailed $failure ) {
+			if ( $this->undo && self::UNSETTLED['directory'] === ( $failure->context()['directory'] ?? null ) ) {
+				// Another spelling may have been there: the entry is kept, and the review goes on.
+				return false;
+			}
+			throw $failure;
 		}
 		$folded = hash_hmac( 'sha256', ApplyPlan::fold( $name ), $table['salt'], true );
 		$exact  = hash( 'sha256', $name, true );
@@ -109,6 +131,21 @@ final class DirectorySpellings {
 			throw new StorageFailed( 'A directory spelling lookup exceeds its bounded search.' );
 		}
 		return true;
+	}
+
+	/**
+	 * The identity of a folder whose names are read.
+	 *
+	 * @param string $directory Folder.
+	 * @return string Identity.
+	 * @throws StorageFailed If the folder is gone.
+	 */
+	private static function identity( string $directory ): string {
+		try {
+			return ApplyManifest::identity( $directory );
+		} catch ( StorageFailed $gone ) {
+			StorageFailed::raise( 'A directory disappeared while its names were being reviewed.', self::UNSETTLED, $gone );
+		}
 	}
 
 	/**
@@ -175,9 +212,9 @@ final class DirectorySpellings {
 	 * @throws StorageFailed If the folder or bounded table is invalid.
 	 */
 	private function advance( string $directory, array &$table ): void {
-		$ctime = filectime( $directory );
+		$ctime = @filectime( $directory ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A folder that is gone is reported below.
 		if ( false === $ctime || $ctime > time() + 1 ) {
-			throw new StorageFailed( 'The directory change timestamp is unavailable or ahead of the worker clock.' );
+			StorageFailed::raise( 'The directory change timestamp is unavailable or ahead of the worker clock.', self::UNSETTLED );
 		}
 		if ( time() <= $ctime ) {
 			$delay = min( $this->deadline, $ctime + 1.0 ) - microtime( true );
@@ -188,15 +225,23 @@ final class DirectorySpellings {
 				throw new FileWorkPending();
 			}
 		}
-		$entries = new \DirectoryIterator( $directory );
+		try {
+			$entries = new \DirectoryIterator( $directory );
+		} catch ( \UnexpectedValueException $unreadable ) {
+			StorageFailed::raise( 'A directory could not be read while its names were being reviewed.', self::UNSETTLED, $unreadable );
+		}
 		if ( $table['count'] > 0 ) {
 			// Reopening an iterator must recover the same boundary on the host
 			// filesystem. Compare exact bytes through the previous committed record.
 			$last = $table['count'] - 1;
-			$entries->seek( $last );
+			try {
+				$entries->seek( $last );
+			} catch ( \OutOfBoundsException $shorter ) {
+				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', self::UNSETTLED, $shorter );
+			}
 			$table['records']->seek( $last * self::RECORD_BYTES + 32 );
 			if ( ! $entries->valid() || $table['records']->read( 32 ) !== hash( 'sha256', $entries->getFilename(), true ) ) {
-				throw new StorageFailed( 'A directory enumeration changed between file preview workers.' );
+				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', self::UNSETTLED );
 			}
 			$entries->next();
 		}
@@ -218,8 +263,8 @@ final class DirectorySpellings {
 				break;
 			}
 		}
-		if ( hash( 'sha256', ApplyManifest::identity( $directory ), true ) !== $table['identity'] ) {
-			throw new StorageFailed( 'A directory changed while its names were being reviewed.' );
+		if ( hash( 'sha256', self::identity( $directory ), true ) !== $table['identity'] ) {
+			StorageFailed::raise( 'A directory changed while its names were being reviewed.', self::UNSETTLED );
 		}
 		$table['complete'] = ! $entries->valid();
 		$table['records']->flush();

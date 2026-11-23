@@ -274,7 +274,7 @@ final class ApplyManifest {
 	 */
 	public static function identity( string $path ): string {
 		clearstatcache( true, $path );
-		$s = lstat( $path );
+		$s = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A missing entry is reported by the exception below.
 		if ( false === $s ) {
 			throw new StorageFailed( 'A file disappeared during apply preflight.' );
 		}

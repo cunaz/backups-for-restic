@@ -92,13 +92,25 @@ The site records each delivery. Store the file with the other offline recovery m
    intl extension the preview also refuses a name that might match a protected path once
    Unicode is normalized.
 5. The **Restores** tab lists available undo jobs and their expiry times. Choose
-   **Preview undo**, review the actions, then confirm to return the affected files to
-   their previous state. Files and directories that the apply created and that were
-   deleted since, such as a removed plugin, are kept as they are; a replaced file that was
-   deleted since blocks the undo. If the preview refuses one entry, for example a file that
-   was edited after the apply, the undo as a whole is not offered; restore the affected
-   files offline as in step 4. Use **Delete staged files** to remove the private
-   downloads when you are finished.
+   **Preview undo** and review the actions: the undo decides for every entry on its own.
+   An entry that is still as the apply left it is reverted: a replaced file gets its
+   original back, and a file or directory that the apply created is removed. An entry that
+   changed after the apply is kept, and the preview gives the reason: for example a file
+   that was edited or updated since, or deleted and uploaded again, also with the same
+   content, a replaced file that was deleted, or a directory the apply created into which
+   something was uploaded since (the other files the apply put there are still removed).
+   Files and directories that the apply created and that were deleted since, such as a
+   removed plugin, need nothing. The preview counts what it restores, removes and keeps;
+   confirm to revert the listed entries. The undo checks every entry again just before it
+   changes it and keeps one that changed after your review. Its result counts what it did
+   and lists every kept entry with its reason, also when the undo was cancelled or failed.
+   Kept entries stay undoable until the expiry time, and the apply stays listed as partly
+   undone: if a kept entry is put back as the apply left it, for example by undoing a later
+   apply over the same files, preview the undo again. When nothing is left to revert, the
+   preview says so and the apply is no longer listed; an undo that could only keep changed
+   entries is refused. Restore files that should not stay as they are offline as in
+   step 4. Use **Delete staged files** to remove the private downloads when you are
+   finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.
@@ -110,7 +122,8 @@ wp backups-for-restic restore 0123abcd /var/www/html/index.php --wait
 
 If a restored plugin prevents WordPress from starting, run WP-CLI from the destination.
 Use the affected plugin's slug and the ID of the file apply job. Keep Backups for restic
-loaded. The command presents the reviewed undo and asks for confirmation.
+loaded. The command presents the reviewed undo with its totals and asks for confirmation.
+Afterwards it lists the entries it kept, with their reasons.
 
 ```sh
 wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID

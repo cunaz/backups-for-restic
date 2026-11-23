@@ -407,7 +407,9 @@ final class CliCommand {
 	}
 
 	/**
-	 * Reviews and reverses the file changes of an apply job.
+	 * Reviews and reverses the file changes of an apply job. Each entry is reverted only if it
+	 * still is as the apply left it; an entry that changed since is kept and listed with its
+	 * reason, and stays undoable until the apply's recovery window ends.
 	 *
 	 * ## OPTIONS
 	 *
@@ -431,6 +433,11 @@ final class CliCommand {
 				$this->run_until_idle( $this->container->tick_budget() );
 				$preview = $service->request_preview( $id, true, false, $plan );
 			}
+			if ( ! $preview instanceof Job && true === ( $preview['undone'] ?? null ) && is_array( $preview['totals'] ?? null ) ) {
+				self::undo_totals( $preview['totals'] );
+				\WP_CLI::success( __( 'Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', 'backups-for-restic' ) );
+				return;
+			}
 			do {
 				if ( $preview instanceof Job ) {
 					\WP_CLI::error( __( 'The undo preview is still being prepared.', 'backups-for-restic' ) );
@@ -443,6 +450,14 @@ final class CliCommand {
 					$preview = $service->request_preview( $id, true, false, $plan, $next );
 				}
 			} while ( null !== $next );
+			$totals = $preview['totals'] ?? null;
+			if ( is_array( $totals ) ) {
+				self::undo_totals( $totals );
+				if ( 0 === $totals['restore'] + $totals['remove'] ) {
+					$texts = Messages::job_error( 'undo_nothing_to_revert' );
+					\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
+				}
+			}
 			if ( ! $preview['applicable'] ) {
 				\WP_CLI::error( __( 'The current live files cannot be safely reverted.', 'backups-for-restic' ) );
 			}
@@ -453,6 +468,16 @@ final class CliCommand {
 		} catch ( PluginException $error ) {
 			\WP_CLI::error( $error->getMessage() );
 		}
+	}
+
+	/**
+	 * Prints the totals of an undo review by action.
+	 *
+	 * @param array{restore:int,remove:int,keep:int} $totals Totals.
+	 */
+	private static function undo_totals( array $totals ): void {
+		/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
+		\WP_CLI::line( sprintf( __( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), $totals['restore'], $totals['remove'], $totals['keep'] ) );
 	}
 
 	/**
@@ -653,6 +678,13 @@ final class CliCommand {
 	 */
 	private function report( string $id ): void {
 		$job = $this->container->jobs()->get( $id );
+		if ( null !== $job && JobType::Undo === $job->type && JobState::Succeeded !== $job->state && is_int( $job->result['kept'] ?? null ) ) {
+			// A stopped undo still says what it did before it stopped, and what it kept.
+			[ $summary ] = $this->undo_counts( $job );
+			$stopped     = JobState::Cancelled === $job->state ? __( 'The undo was cancelled.', 'backups-for-restic' ) : Messages::job_error( $job->error->code ?? 'internal' )['message'];
+			/* translators: 1: why the undo stopped, 2: counts of what it did before. */
+			\WP_CLI::error( sprintf( __( '%1$s Before it stopped, it did this: %2$s', 'backups-for-restic' ), $stopped, $summary ) );
+		}
 		if ( null === $job || null !== $job->error ) {
 			\WP_CLI::error( Messages::job_error( $job?->error->code ?? 'internal' )['message'] );
 		}
@@ -672,10 +704,77 @@ final class CliCommand {
 			JobType::Check   => $this->report_check( $result ),
 			/* translators: %s: restore directory under the private directory. */
 			JobType::Restore => \WP_CLI::success( sprintf( __( 'Files staged in %s.', 'backups-for-restic' ), (string) $result['staging'] ) ),
-			JobType::Undo => \WP_CLI::success( __( 'The confirmed file changes were reverted.', 'backups-for-restic' ) ),
+			JobType::Undo => $this->report_undo( $job ),
 			/* translators: %s: snapshot ID. */
 			default         => \WP_CLI::success( sprintf( __( 'Backup finished: snapshot %s.', 'backups-for-restic' ), substr( (string) ( $result['snapshot'] ?? '' ), 0, 8 ) ) ),
 		};
+	}
+
+	/**
+	 * Prints what an undo did, and every entry it kept with its reason. It says that the kept
+	 * entries are listed only when the whole list was printed.
+	 *
+	 * @param Job $job Finished undo.
+	 */
+	private function report_undo( Job $job ): void {
+		[ $summary, $listed ] = $this->undo_counts( $job );
+		if ( 'undone' === ( $job->result['apply_state'] ?? null ) ) {
+			/* translators: %s: counts of what the undo did. */
+			\WP_CLI::success( sprintf( __( 'The apply is fully undone: %s', 'backups-for-restic' ), $summary ) );
+			return;
+		}
+		if ( ! $listed ) {
+			/* translators: %s: counts of what the undo did. */
+			\WP_CLI::success( sprintf( __( 'The apply is partly undone: %s The kept entries stay undoable until its recovery window ends.', 'backups-for-restic' ), $summary ) );
+			return;
+		}
+		/* translators: %s: counts of what the undo did. */
+		\WP_CLI::success( sprintf( __( 'The apply is partly undone: %s The kept entries are listed above with their reasons. They stay undoable until its recovery window ends.', 'backups-for-restic' ), $summary ) );
+	}
+
+	/**
+	 * Prints every entry that an ended undo kept with its reason, and the number kept for each
+	 * reason. The counts of what the undo did are the ones its result recorded, also where the
+	 * list is not available or cannot be read to its end; the numbers by reason are printed
+	 * only for a list that was read to its end.
+	 *
+	 * @param Job $job Ended undo.
+	 * @return array{0:string,1:bool} Counts of what the undo did, and whether every kept entry was printed.
+	 * @throws JobConflict If the job is no ended undo.
+	 */
+	private function undo_counts( Job $job ): array {
+		$result = $job->result;
+		$counts = [];
+		$offset = 0;
+		$listed = true;
+		do {
+			try {
+				$page = $this->container->file_changes()->kept_page( $job->id, $offset );
+			} catch ( JobConflict $conflict ) {
+				if ( 'kept_list_unavailable' !== ( $conflict->context()['code'] ?? null ) ) {
+					throw $conflict;
+				}
+				\WP_CLI::warning( __( 'The list of the entries that this undo kept is not available; the job\'s log says why. The counts are those that the undo recorded. While the recovery window of the apply lasts, a new undo preview shows what can be reverted now.', 'backups-for-restic' ) );
+				$listed = false;
+				break;
+			} catch ( StorageFailed ) {
+				// A sealed list whose summary or page is missing or changed: the undo did what its result says.
+				\WP_CLI::warning( __( 'The list of the entries that this undo kept cannot be read to its end: a part of it is missing or was changed. The counts are those that the undo recorded. While the recovery window of the apply lasts, a new undo preview shows what can be reverted now.', 'backups-for-restic' ) );
+				$listed = false;
+				break;
+			}
+			foreach ( $page['entries'] as $entry ) {
+				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
+				$counts[ $entry['reason'] ] = ( $counts[ $entry['reason'] ] ?? 0 ) + 1;
+			}
+			$offset = $page['next_offset'];
+		} while ( null !== $offset );
+		foreach ( $listed ? $counts : [] as $reason => $count ) {
+			/* translators: 1: number of kept entries, 2: why they were kept. */
+			\WP_CLI::warning( sprintf( _n( 'Kept %1$d entry: %2$s.', 'Kept %1$d entries: %2$s.', $count, 'backups-for-restic' ), $count, Messages::undo_reason( $reason ) ) );
+		}
+		/* translators: 1: restored files, 2: removed entries, 3: kept entries, 4: entries that had nothing to undo. */
+		return [ sprintf( __( '%1$d restored, %2$d removed, %3$d kept, %4$d unchanged.', 'backups-for-restic' ), (int) ( $result['restored'] ?? 0 ), (int) ( $result['removed'] ?? 0 ), (int) ( $result['kept'] ?? 0 ), (int) ( $result['unchanged'] ?? 0 ) ), $listed ];
 	}
 
 	/**

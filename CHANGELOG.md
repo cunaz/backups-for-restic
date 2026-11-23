@@ -454,6 +454,26 @@ All notable changes are documented here. The format follows
 - Applying many files into one large folder no longer lists the folder several times for
   every file while the site is in maintenance: 500 new files beside 20,000 others needed
   27 seconds of checks before and less than half a second now.
+- Undo of a file apply works entry by entry. It reverts every entry that is still as the
+  apply left it and keeps every entry that changed since, with the reason, instead of
+  refusing the whole undo for one changed entry. Before, one upload into a folder that a
+  partial apply had created, or an update of one replaced file, made the apply impossible
+  to undo, and after 24 hours the only copies of the original files expired with it. A
+  file with another inode counts as unchanged when its content, size, type, permissions,
+  owner, group and modification time are those the apply installed, so an apply can be
+  undone after a later apply over the same files was undone, while a file written after
+  the apply with the same bytes is kept. Kept entries stay undoable until the recovery
+  window ends, and the apply is listed as partly undone. The undo checks every entry again
+  just before it changes it and keeps, rather than fails on, one that changed after the
+  review. Its result counts the entries by outcome, only what the undo itself reverted,
+  and lists the kept ones with their reasons, also in `wp backups-for-restic undo` and for
+  an undo that was cancelled or failed; a list that cannot be sealed, for example because a
+  page of it changed on disk, is reported as unavailable while the counts are still
+  recorded. A review that finds nothing left to revert records
+  the apply as undone. An undo that could only keep changed entries is refused with its own
+  message, and so is an undo confirmed before this version, which is reviewed again
+  (`undo_review_required`). An undo step now advances at least one entry when it starts
+  late, as an apply step does.
 - While a live file change holds the site in maintenance, WP-CLI commands other than the
   plugin's own run with the site's plugins, as during a WordPress update. Before, every
   command started with this plugin alone: `wp plugin activate`, or deactivating this
