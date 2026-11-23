@@ -26,26 +26,54 @@ defined( 'ABSPATH' ) || exit;
  * The table list is fixed when the backup first lists the directory and kept in a state file
  * in the job's directory, together with the row and byte counts of finished tables, so the
  * dump stays consistent across ticks.
+ *
+ * The dump reads through a connection of its own where one can be opened and verified
+ * (DedicatedConnection): each table's part of a tick is then one read-only transaction, and
+ * InnoDB serves all of it from one snapshot. Otherwise it reads through the site's connection
+ * (SharedConnection), without snapshots. Either way every read runs with utf8mb4 results and
+ * the time zone +00:00, and the files say so: TIMESTAMP values are UTC, as with mysqldump
+ * --tz-utc, and text arrives in the one character set the manifest names. A dump that an
+ * earlier version started recorded the session's offset at its start instead; it reads in that
+ * offset until it is done, on either connection, so that all of its files agree with the one
+ * offset in its manifest.
  */
 final class DatabaseDump {
 
 	public const string DIRECTORY = 'database';
 
 	/**
+	 * The largest manifest that the plugin's restore reads (Restore\Manifest::MAX_BYTES); it
+	 * refuses a larger one before it reads any of it.
+	 */
+	public const int MANIFEST_BYTES = 2097152;
+
+	/** State files of earlier versions have no version and recorded the session's offset. */
+	private const int STATE_VERSION = 2;
+
+	/**
+	 * Connection with the dump's session settings, made on first use.
+	 *
+	 * @var Connection|null
+	 */
+	private ?Connection $reader = null;
+
+	/**
 	 * Prepares the dump.
 	 *
-	 * @param Connection   $connection Database.
-	 * @param string       $state_file JSON state file in the job's directory.
-	 * @param string       $prefix     Only tables with this prefix; empty for all.
-	 * @param list<string> $exclude    Tables to leave out.
-	 * @param int          $time       Unix time of the backup, used as file mtime.
+	 * @param Connection                                     $connection The site's connection.
+	 * @param string                                         $state_file JSON state file in the job's directory.
+	 * @param string                                         $prefix     Only tables with this prefix; empty for all.
+	 * @param list<string>                                   $exclude    Tables to leave out.
+	 * @param int                                            $time       Unix time of the backup, used as file mtime.
+	 * @param (\Closure(?string): ?DedicatedConnection)|null $dedicated Opens a connection of the dump's own with the given time zone, or returns null if it cannot; null to read through $connection only.
 	 */
 	public function __construct(
 		private readonly Connection $connection,
 		private readonly string $state_file,
 		private readonly string $prefix,
 		private readonly array $exclude,
-		private readonly int $time
+		private readonly int $time,
+		private readonly ?\Closure $dedicated = null
 	) {
 	}
 
@@ -56,10 +84,10 @@ final class DatabaseDump {
 	 * @throws DatabaseFailed If the tables cannot be listed.
 	 */
 	public function files(): array {
-		$state    = $this->state();
-		$preamble = $this->preamble( $state['time_zone'] );
-		$catalog  = new Catalog( $this->connection );
-		$files    = [];
+		$state     = $this->state();
+		$time_zone = $state['time_zone'];
+		$preamble  = $this->preamble( $time_zone );
+		$files     = [];
 
 		$header  = '-- ' . TableSource::FORMAT . "\n";
 		$header .= "-- Database dump written by the backup plugin. Import every .sql file of this directory in name order,\n";
@@ -68,31 +96,77 @@ final class DatabaseDump {
 
 		foreach ( $state['tables'] as $name ) {
 			$file    = ( new Table( $name, '', [], null, [] ) )->file();
-			$files[] = $this->file(
-				$file,
-				fn ( ?string $cursor ): ByteSource => new TableSource(
-					$this->connection,
-					$catalog->table( $name ),
-					$preamble,
-					$cursor,
-					fn ( int $rows, int $bytes ) => $this->record( $file, $name, $rows, $bytes )
-				)
-			);
+			$files[] = $this->file( $file, fn ( ?string $cursor ): ByteSource => $this->table( $time_zone, $name, $file, $preamble, $cursor ) );
 		}
 
 		$views   = $state['views'];
 		$files[] = $this->file(
 			'900-views.sql',
-			static function () use ( $catalog, $views, $preamble ): ByteSource {
-				$sql = '-- ' . TableSource::FORMAT . " views\n" . $preamble;
+			function () use ( $time_zone, $views, $preamble ): ByteSource {
+				$catalog = new Catalog( $this->reader( $time_zone ) );
+				$sql     = '-- ' . TableSource::FORMAT . " views\n" . $preamble;
 				foreach ( $views as $view ) {
 					$sql .= 'DROP VIEW IF EXISTS ' . SqlFormatter::identifier( $view ) . ";\n" . $catalog->view( $view ) . ";\n";
 				}
 				return new StringByteSource( $sql );
 			}
 		);
-		$files[] = $this->file( 'manifest.json', fn (): ByteSource => new StringByteSource( $this->manifest() ) );
+		$files[] = $this->file( 'manifest.json', fn (): ByteSource => $this->manifest() );
 		return $files;
+	}
+
+	/**
+	 * Opens one table's file at a cursor. On a connection of the dump's own, its transaction
+	 * starts before the definition is read, so that definition and rows belong together. A
+	 * table that another connection keeps locked stops the tick with database_dump_locked.
+	 *
+	 * @param string      $time_zone Time zone of the dump's reads.
+	 * @param string      $name     Table name.
+	 * @param string      $file     File name.
+	 * @param string      $preamble Session settings.
+	 * @param string|null $cursor   Cursor, or null to start.
+	 * @return TableSource Source.
+	 * @throws DatabaseFailed If the table cannot be described or stays locked.
+	 */
+	private function table( string $time_zone, string $name, string $file, string $preamble, ?string $cursor ): TableSource {
+		$reader  = $this->reader( $time_zone );
+		$catalog = new Catalog( $reader );
+		try {
+			if ( $reader instanceof DedicatedConnection ) {
+				$reader->begin( $name );
+			} elseif ( $reader instanceof SharedConnection ) {
+				$reader->prove( $name );
+			}
+			$table = $catalog->table( $name );
+		} catch ( DatabaseFailed $error ) {
+			if ( $reader instanceof DedicatedConnection ) {
+				// No source exists yet that would end the transaction of begin(), which holds
+				// the table's metadata lock: every DDL on the table would wait for the tick.
+				try {
+					$reader->end();
+				} catch ( DatabaseFailed ) {
+					$reader->close();
+				}
+			}
+			TableSource::rethrow( $error, $name );
+		}
+		return new TableSource( $reader, $table, $preamble, $cursor, fn ( array $result ) => $this->record( $file, $name, $result ), static fn (): Table => $catalog->table( $name ) );
+	}
+
+	/**
+	 * The connection with the dump's session settings: one of its own if it can be opened and
+	 * verified, otherwise the site's. A connection of its own that a table closed after an
+	 * unfinished read is replaced.
+	 *
+	 * @param string $time_zone Time zone of the dump's reads: +00:00, or the offset that a dump of an earlier version recorded.
+	 * @return Connection Reader.
+	 */
+	private function reader( string $time_zone ): Connection {
+		if ( null === $this->reader || ( $this->reader instanceof DedicatedConnection && $this->reader->closed() ) ) {
+			$dedicated    = null === $this->dedicated ? null : ( $this->dedicated )( $time_zone );
+			$this->reader = $dedicated instanceof DedicatedConnection ? $dedicated : new SharedConnection( $this->connection, $time_zone );
+		}
+		return $this->reader;
 	}
 
 	/**
@@ -110,61 +184,84 @@ final class DatabaseDump {
 	}
 
 	/**
-	 * The database manifest: format, server, and per file the table, rows and bytes.
+	 * The database manifest: format, server, and per file the table, rows and bytes, with how
+	 * the rows were read where the whole manifest stays within MANIFEST_BYTES.
 	 *
-	 * @return string JSON.
+	 * @return ByteSource JSON; with a warning for the job if even the table list is larger.
+	 * @throws DatabaseFailed If the state cannot be read.
 	 */
-	private function manifest(): string {
+	private function manifest(): ByteSource {
 		$state  = $this->state();
 		$tables = [];
 		foreach ( $state['tables'] as $name ) {
-			$file     = ( new Table( $name, '', [], null, [] ) )->file();
-			$result   = $state['results'][ $file ] ?? null;
-			$tables[] = [
+			$file   = ( new Table( $name, '', [], null, [] ) )->file();
+			$result = $state['results'][ $file ] ?? null;
+			$entry  = [
 				'name'  => $name,
 				'file'  => $file,
 				'rows'  => $result['rows'] ?? null,
 				'bytes' => $result['bytes'] ?? null,
 			];
+			// How the rows were read, for tables that this version dumped: the columns of the
+			// key that ordered the pages (empty without one), whether all rows come from one
+			// read view, so that an import can explain a duplicate key, how often the table
+			// started over because its definition changed, and its longest statement in bytes,
+			// with the semicolon and without the newline, to compare with max_allowed_packet.
+			if ( isset( $result['key'], $result['snapshot'], $result['restarts'], $result['largest'] ) ) {
+				$entry['key']               = $result['key'];
+				$entry['snapshot']          = $result['snapshot'];
+				$entry['restarts']          = $result['restarts'];
+				$entry['largest_statement'] = $result['largest'];
+			}
+			$tables[] = $entry;
 		}
-		return (string) json_encode(
-			[
-				'format'         => TableSource::FORMAT,
-				'created'        => Rfc3339::format( $this->time ),
-				'server'         => $state['server'],
-				'charset'        => 'utf8mb4',
-				'time_zone'      => $state['time_zone'],
-				'prefix'         => $this->prefix,
-				'tables'         => $tables,
-				'views'          => $state['views'],
-				'trigger_tables' => ( new Catalog( $this->connection ) )->trigger_tables( $state['tables'] ),
-			],
-			JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-		) . "\n";
+		$manifest = [
+			'format'         => TableSource::FORMAT,
+			'created'        => Rfc3339::format( $this->time ),
+			'server'         => $state['server'],
+			'charset'        => 'utf8mb4',
+			'time_zone'      => $state['time_zone'],
+			'prefix'         => $this->prefix,
+			'tables'         => $tables,
+			'views'          => $state['views'],
+			'trigger_tables' => ( new Catalog( $this->reader( $state['time_zone'] ) ) )->trigger_tables( $state['tables'] ),
+		];
+		// Within what the plugin's restore reads: without line breaks, then without how the
+		// rows were read. Sixteen key columns with names of 64 characters, which JSON can
+		// escape to six bytes each, take up to 6 KiB per table.
+		$flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+		$json  = (string) json_encode( $manifest, $flags | JSON_PRETTY_PRINT ) . "\n";
+		if ( strlen( $json ) > self::MANIFEST_BYTES ) {
+			$json = (string) json_encode( $manifest, $flags ) . "\n";
+		}
+		if ( strlen( $json ) > self::MANIFEST_BYTES ) {
+			$manifest['tables'] = array_map( static fn ( array $entry ): array => array_intersect_key( $entry, array_flip( [ 'name', 'file', 'rows', 'bytes' ] ) ), $tables );
+			$json               = (string) json_encode( $manifest, $flags ) . "\n";
+		}
+		if ( strlen( $json ) <= self::MANIFEST_BYTES ) {
+			return new StringByteSource( $json );
+		}
+		// Thousands of tables with long names: the files still import with the command-line client.
+		return new WarnedSource( $json, [ sprintf( 'The database manifest of this backup has %d bytes, more than the %d that the plugin\'s restore reads: its database can be restored with the command-line client only.', strlen( $json ), self::MANIFEST_BYTES ) ] );
 	}
 
 	/**
 	 * Records a finished table.
 	 *
-	 * @param string $file  File name.
-	 * @param string $name  Table name.
-	 * @param int    $rows  Rows.
-	 * @param int    $bytes Bytes of the file.
+	 * @param string                                                                                       $file   File name.
+	 * @param string                                                                                       $name   Table name.
+	 * @param array{rows: int, bytes: int, snapshot: bool, key: list<string>, restarts: int, largest: int} $result Counts and how the rows were read.
 	 */
-	private function record( string $file, string $name, int $rows, int $bytes ): void {
+	private function record( string $file, string $name, array $result ): void {
 		$state                     = $this->state();
-		$state['results'][ $file ] = [
-			'table' => $name,
-			'rows'  => $rows,
-			'bytes' => $bytes,
-		];
+		$state['results'][ $file ] = [ 'table' => $name ] + $result;
 		Files::write_atomic( $this->state_file, (string) json_encode( $state ) );
 	}
 
 	/**
 	 * Loads the state, listing tables and views on first use.
 	 *
-	 * @return array{tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int}>} State.
+	 * @return array{version: int, tables: list<string>, views: list<string>, time_zone: string, server: string, results: array<string, array{table: string, rows: int, bytes: int, snapshot?: bool, key?: list<string>, restarts?: int, largest?: int}>} State.
 	 * @throws DatabaseFailed If the tables cannot be listed.
 	 */
 	private function state(): array {
@@ -179,26 +276,50 @@ final class DatabaseDump {
 						'rows'  => is_int( $result['rows'] ?? null ) ? $result['rows'] : 0,
 						'bytes' => is_int( $result['bytes'] ?? null ) ? $result['bytes'] : 0,
 					];
+					$key              = $result['key'] ?? null;
+					if ( is_bool( $result['snapshot'] ?? null ) && is_array( $key ) && array_is_list( $key ) && $key === array_filter( $key, 'is_string' ) && is_int( $result['restarts'] ?? null ) && is_int( $result['largest'] ?? null ) ) {
+						$results[ $file ]['snapshot'] = $result['snapshot'];
+						$results[ $file ]['key']      = $key;
+						$results[ $file ]['restarts'] = $result['restarts'];
+						$results[ $file ]['largest']  = $result['largest'];
+					}
 				}
 			}
 			return [
+				'version'   => is_int( $stored['version'] ?? null ) ? $stored['version'] : 1,
 				'tables'    => array_values( array_filter( $stored['tables'], 'is_string' ) ),
 				'views'     => array_values( array_filter( is_array( $stored['views'] ?? null ) ? $stored['views'] : [], 'is_string' ) ),
-				'time_zone' => is_string( $stored['time_zone'] ?? null ) ? $stored['time_zone'] : '+00:00',
+				'time_zone' => self::offset( $stored['time_zone'] ?? '+00:00' ),
 				'server'    => is_string( $stored['server'] ?? null ) ? $stored['server'] : '',
 				'results'   => $results,
 			];
 		}
-		$catalog = new Catalog( $this->connection );
+		$catalog = new Catalog( $this->reader( '+00:00' ) );
 		$state   = [
+			'version'   => self::STATE_VERSION,
 			'tables'    => $catalog->table_names( $this->prefix, $this->exclude ),
 			'views'     => $catalog->view_names( $this->prefix ),
-			'time_zone' => $catalog->time_zone(),
+			// The reads run in UTC, so TIMESTAMP values import unchanged whatever the session's zone.
+			'time_zone' => '+00:00',
 			'server'    => $catalog->server_version(),
 			'results'   => [],
 		];
 		Files::write_atomic( $this->state_file, (string) json_encode( $state ) );
 		return $state;
+	}
+
+	/**
+	 * Checks a recorded time zone: the reads use it, and the importer accepts only a numeric offset.
+	 *
+	 * @param mixed $offset Recorded value.
+	 * @return string Offset such as +02:00.
+	 * @throws DatabaseFailed If the state file holds something else.
+	 */
+	private static function offset( mixed $offset ): string {
+		if ( ! is_string( $offset ) || 1 !== preg_match( '/\A[+-](?:0[0-9]|1[0-4]):[0-5][0-9]\z/', $offset ) ) {
+			throw new DatabaseFailed( 'The time zone recorded for the database dump is not a numeric offset.' );
+		}
+		return $offset;
 	}
 
 	/**

@@ -20,8 +20,13 @@ defined( 'ABSPATH' ) || exit;
  * the sealed summary, which authenticates every index, which authenticates each page.
  * A directory can therefore be found and checked without loading the entire plan.
  *
+ * A plan writes its summary as version 1. It also reads the list of the entries that an undo
+ * kept, which KeptList writes as version 2: there each page is a version named by the number
+ * of records on it, and the summary's counts name the version that each page has. Reading a
+ * page checks it against its slot of the index, as for a plan of version 1.
+ *
  * @phpstan-import-type Row from ApplyManifest
- * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,required_bytes:int|null,counts:array<string,int>,indexes:array<string,string>}
+ * @phpstan-type Header array{version:int,subject:string,restore:string,undo:bool,config:bool,entries:int,changes:int,refused:int,required_bytes:int|null,actions:array<string,int>|null,counts:array<string,int>,indexes:array<string,string>}
  */
 final class DiskFilePlan {
 
@@ -135,7 +140,8 @@ final class DiskFilePlan {
 
 	/**
 	 * Looks up an earlier directory or removal claim. A caller that depends on a claim
-	 * before mutation also verifies the corresponding authenticated row.
+	 * before mutation also verifies the corresponding authenticated row; an undo review
+	 * keeps its removal claims current with release() instead.
 	 *
 	 * @param string $kind Registry namespace.
 	 * @param string $name Raw name.
@@ -146,6 +152,24 @@ final class DiskFilePlan {
 		$bucket = substr( $key, 0, 3 );
 		$this->load_bucket( $bucket );
 		return $this->buckets[ $bucket ][ $key ] ?? null;
+	}
+
+	/**
+	 * Withdraws the claim that a row made, for a row that is reviewed again with another
+	 * decision. A claim of another ordinal stays.
+	 *
+	 * @param string $kind Registry namespace.
+	 * @param string $name Raw name.
+	 * @param int    $ordinal Presentation index of the row reviewed again.
+	 */
+	public function release( string $kind, string $name, int $ordinal ): void {
+		$key    = hash( 'sha256', $kind . "\0" . $name );
+		$bucket = substr( $key, 0, 3 );
+		$this->load_bucket( $bucket );
+		if ( $ordinal === ( $this->buckets[ $bucket ][ $key ] ?? null ) ) {
+			unset( $this->buckets[ $bucket ][ $key ] );
+			$this->changed[ $bucket ] = true;
+		}
 	}
 
 	/**
@@ -235,18 +259,19 @@ final class DiskFilePlan {
 	/**
 	 * Authenticates all stream indexes and publishes the immutable plan summary.
 	 *
-	 * @param string            $subject Restore or apply job ID.
-	 * @param string            $restore Staged restore job.
-	 * @param bool              $undo Undo preview.
-	 * @param bool              $config Configuration option.
-	 * @param array<string,int> $counts Records per stream.
-	 * @param int               $changes Applicable mutations.
-	 * @param int               $refused Refused actions.
-	 * @param int|null          $required_bytes Estimated peak file data on the journal volume.
+	 * @param string                 $subject Restore or apply job ID.
+	 * @param string                 $restore Staged restore job.
+	 * @param bool                   $undo Undo preview.
+	 * @param bool                   $config Configuration option.
+	 * @param array<string,int>      $counts Records per stream.
+	 * @param int                    $changes Applicable mutations.
+	 * @param int                    $refused Refused actions.
+	 * @param int|null               $required_bytes Estimated peak file data on the journal volume.
+	 * @param array<string,int>|null $actions Rows by action, which an undo review shows as its totals.
 	 * @return string Digest to persist in the job document.
 	 * @throws StorageFailed If a stream is incomplete.
 	 */
-	public function seal( string $subject, string $restore, bool $undo, bool $config, array $counts, int $changes, int $refused, ?int $required_bytes = null ): string {
+	public function seal( string $subject, string $restore, bool $undo, bool $config, array $counts, int $changes, int $refused, ?int $required_bytes = null, ?array $actions = null ): string {
 		$this->flush();
 		$indexes = [];
 		ksort( $counts, SORT_STRING );
@@ -275,6 +300,10 @@ final class DiskFilePlan {
 		if ( null !== $required_bytes ) {
 			$header['required_bytes'] = $required_bytes;
 		}
+		if ( null !== $actions ) {
+			ksort( $actions, SORT_STRING );
+			$header['actions'] = $actions;
+		}
 		$body = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
 		Files::write_atomic( $this->directory . '/sealed.json', $body );
 		return hash( 'sha256', $body );
@@ -290,7 +319,7 @@ final class DiskFilePlan {
 	public function open( string $digest ): array {
 		$text  = self::read( $this->directory . '/sealed.json', 131072 );
 		$value = json_decode( $text, true );
-		if ( ! hash_equals( $digest, hash( 'sha256', $text ) ) || ! is_array( $value ) || 1 !== ( $value['version'] ?? null ) || ! is_string( $value['subject'] ?? null ) || ! is_string( $value['restore'] ?? null ) || ! is_bool( $value['undo'] ?? null ) || ! is_bool( $value['config'] ?? null ) || ! is_int( $value['entries'] ?? null ) || ! is_int( $value['changes'] ?? null ) || ! is_int( $value['refused'] ?? null ) || ! is_array( $value['counts'] ?? null ) || ! is_array( $value['indexes'] ?? null ) ) {
+		if ( ! hash_equals( $digest, hash( 'sha256', $text ) ) || ! is_array( $value ) || ! in_array( $value['version'] ?? null, [ 1, 2 ], true ) || ! is_string( $value['subject'] ?? null ) || ! is_string( $value['restore'] ?? null ) || ! is_bool( $value['undo'] ?? null ) || ! is_bool( $value['config'] ?? null ) || ! is_int( $value['entries'] ?? null ) || ! is_int( $value['changes'] ?? null ) || ! is_int( $value['refused'] ?? null ) || ! is_array( $value['counts'] ?? null ) || ! is_array( $value['indexes'] ?? null ) ) {
 			throw new StorageFailed( 'The sealed private file plan cannot be verified.' );
 		}
 		$counts  = [];
@@ -313,9 +342,24 @@ final class DiskFilePlan {
 		if ( null !== $required && ( ! is_int( $required ) || $required < 0 ) ) {
 			throw new StorageFailed( 'The sealed plan contains an invalid file-space estimate.' );
 		}
+		// A plan sealed before the totals by action existed has none.
+		$actions = null;
+		if ( isset( $value['actions'] ) ) {
+			if ( ! is_array( $value['actions'] ) ) {
+				throw new StorageFailed( 'The sealed plan contains invalid totals.' );
+			}
+			$actions = [];
+			foreach ( $value['actions'] as $action => $count ) {
+				if ( ! is_string( $action ) || ! is_int( $count ) || $count < 0 || $count > self::MAX_ENTRIES ) {
+					throw new StorageFailed( 'The sealed plan contains invalid totals.' );
+				}
+				$actions[ $action ] = $count;
+			}
+		}
 		$this->header = [
 			'required_bytes' => $required,
-			'version'        => 1,
+			'actions'        => $actions,
+			'version'        => $value['version'],
 			'subject'        => $value['subject'],
 			'restore'        => $value['restore'],
 			'undo'           => $value['undo'],
@@ -405,8 +449,10 @@ final class DiskFilePlan {
 	 */
 	private function read_record( string $stream, int $index ): array {
 		self::require_stream( $stream, $index );
-		$expected = $this->header['indexes'][ $stream ] ?? null;
-		if ( null === $expected || $index >= ( $this->header['counts'][ $stream ] ?? 0 ) ) {
+		$header   = $this->header ?? throw new StorageFailed( 'A file plan record is outside the verified index.' );
+		$expected = $header['indexes'][ $stream ] ?? null;
+		$count    = $header['counts'][ $stream ] ?? 0;
+		if ( null === $expected || $index >= $count ) {
 			throw new StorageFailed( 'A file plan record is outside the verified index.' );
 		}
 		if ( ! isset( $this->indexes[ $stream ] ) ) {
@@ -417,7 +463,7 @@ final class DiskFilePlan {
 			$this->indexes[ $stream ] = $text;
 		}
 		$page = intdiv( $index, self::PAGE );
-		$name = $stream . '-' . $page;
+		$name = 2 === $header['version'] ? self::page_version( $stream, $page, min( self::PAGE, $count - $page * self::PAGE ) ) : $stream . '-' . $page;
 		if ( ! isset( $this->pages[ $name ] ) ) {
 			$body = self::read( $this->directory . '/' . $name, self::PAGE_BYTES );
 			if ( ! hash_equals( substr( $this->indexes[ $stream ], $page * 64, 64 ), hash( 'sha256', $body ) ) ) {
@@ -429,6 +475,19 @@ final class DiskFilePlan {
 			$this->pages[ $name ] = self::decode_page( $body );
 		}
 		return $this->pages[ $name ][ $index % self::PAGE ] ?? throw new StorageFailed( 'A sealed file plan row is missing.' );
+	}
+
+	/**
+	 * The file of a page's version that holds the given number of records, in a list of summary
+	 * version 2.
+	 *
+	 * @param string $stream Stream name.
+	 * @param int    $page Page.
+	 * @param int    $records Records on the version.
+	 * @return string File name.
+	 */
+	public static function page_version( string $stream, int $page, int $records ): string {
+		return $stream . '-' . $page . '.' . $records;
 	}
 
 	/**

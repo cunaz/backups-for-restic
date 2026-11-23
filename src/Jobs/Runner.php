@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Jobs;
 
 use BackupsForRestic\Crypto\RandomSource;
+use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Support\Clock;
 
 defined( 'ABSPATH' ) || exit;
@@ -258,13 +259,15 @@ final class Runner {
 				$job->not_before           = 0;
 			} catch ( \Throwable $exception ) {
 				$error = JobError::from_throwable( $exception );
+				// The table a database error is about, which its message cannot name.
+				$table = $exception instanceof PluginException ? $exception->context()['table'] ?? null : null;
 				$log->write(
 					'error',
 					$error->message,
 					[
 						'code' => $error->code,
 						'step' => $job->step,
-					]
+					] + ( is_string( $table ) ? [ 'table' => $table ] : [] )
 				);
 				if ( $job->type->is_cleanup( $job->step ) ) {
 					// A failing cleanup step must not keep the job alive; the next one still runs.

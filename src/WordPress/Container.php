@@ -23,6 +23,7 @@ use BackupsForRestic\Connection\RepositoryRecord;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Database\Dump\DatabaseDump;
+use BackupsForRestic\Database\Dump\DedicatedConnection;
 use BackupsForRestic\Database\Restore\MysqliConnection;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Jobs\Restore\DatabasePreview;
@@ -343,10 +344,11 @@ final class Container {
 	 *
 	 * @param bool        $include_config Explicitly include the live configuration file.
 	 * @param string|null $restore ID of the original restore with its verified layout binding.
+	 * @param string|null $uploads Uploads root a file job was confirmed with, null for this request's.
 	 * @throws InvalidArgument If the restore metadata required for file apply has expired.
 	 * @return ApplyPlan Read-only planner.
 	 */
-	public function apply_plan( bool $include_config = false, ?string $restore = null ): ApplyPlan {
+	public function apply_plan( bool $include_config = false, ?string $restore = null, ?string $uploads = null ): ApplyPlan {
 		$site   = $this->site();
 		$layout = null;
 		if ( null !== $restore ) {
@@ -354,7 +356,7 @@ final class Container {
 			if ( null === $job ) {
 				throw new InvalidArgument( 'The restore job metadata needed to verify live file destinations is unavailable.' );
 			}
-			$layout = SiteLayout::from_job( $job, $site->content_dir, $site->uploads_dir );
+			$layout = SiteLayout::from_job( $job, $site->content_dir, $uploads ?? $site->uploads_dir );
 		}
 		// Core, configuration and drop-ins execute before the worker can isolate active
 		// extensions. Their restoration requires a controller outside this installation.
@@ -371,12 +373,14 @@ final class Container {
 			$bootstrap[] = $site->content_dir . '/' . $name;
 		}
 		return new ApplyPlan(
-			[ $site->abspath, $site->content_dir, $site->uploads_dir ],
+			[ $site->abspath, $site->content_dir, $uploads ?? $site->uploads_dir ],
 			[ dirname( $this->plugin_file ), $this->private_dir()->path, $site->abspath . '/.maintenance' ],
 			[ $site->abspath . '/wp-config.php', dirname( $site->abspath ) . '/wp-config.php' ],
 			$include_config,
 			$layout,
-			$bootstrap
+			$bootstrap,
+			// The apply builds its copies in the private directory, whose group they can take.
+			ApplyPlan::process( $this->private_dir()->path )
 		);
 	}
 
@@ -393,7 +397,10 @@ final class Container {
 			$this->settings()->int( 'restore.staging_expiry_hours' ),
 			$this->apply_plan( ... ),
 			$this->file_maintenance(),
-			static fn (): bool => wp_is_file_mod_allowed( 'backups_for_restic_apply' )
+			// RestRoutes::live_writes_allowed() for the user who confirmed the job, on every tick.
+			static fn ( ?int $user ): bool => wp_is_file_mod_allowed( 'backups_for_restic_apply' ) && ( null === $user || RestRoutes::live_user_allowed( $user ) ),
+			null,
+			fn (): string => $this->site()->uploads_dir
 		);
 	}
 
@@ -627,7 +634,7 @@ final class Container {
 					array_push( $exclude, ...DatabaseGeneration::exclusions( $this->database_connection(), $owner ) );
 				}
 			}
-			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, $exclude, $job->created_at );
+			$dump     = new DatabaseDump( new WpdbConnection( $wpdb ), BackupServices::dump_state( $this->jobs(), $job ), $prefix, $exclude, $job->created_at, fn ( ?string $time_zone ): ?DedicatedConnection => WpdbConnection::dedicated( $wpdb, $this->random(), $time_zone ) );
 			$database = $dump->files( ... );
 		}
 		return ( new PlanFactory( $this->site(), $settings, $this->private_dir(), self::strings( $roots ), self::strings( $excludes ), $database, $job->id, $job->created_at ) )->plan();
@@ -676,17 +683,41 @@ final class Container {
 	}
 
 	/**
-	 * Obtains the single WordPress connection without its query retry machinery.
+	 * Obtains the single WordPress connection without its query retry machinery. After a
+	 * lost reply the restore port closes the session; the next caller then gets a new
+	 * WordPress connection, and nothing continues the old session's transaction or locks.
 	 *
 	 * @return MysqliConnection Current SQL session.
 	 * @throws DatabaseFailed If a drop-in does not expose a usable mysqli handle.
 	 */
 	private function database_connection(): MysqliConnection {
-		$handle = self::wpdb()->__get( 'dbh' );
+		$wpdb   = self::wpdb();
+		$handle = $wpdb->__get( 'dbh' );
+		if ( $handle instanceof \mysqli && self::closed( $handle ) ) {
+			if ( ! $wpdb->db_connect( false ) ) {
+				DatabaseFailed::raise( 'The database connection could not be opened again.', [ 'code' => 'database_restore_busy' ] );
+			}
+			$handle = $wpdb->__get( 'dbh' );
+		}
 		if ( ! $handle instanceof \mysqli ) {
 			throw new DatabaseFailed( 'Database preview requires the WordPress mysqli connection.' );
 		}
 		return new MysqliConnection( $handle );
+	}
+
+	/**
+	 * Whether a mysqli handle was closed or its last call lost the server. PHP refuses every
+	 * property of a closed handle, and mysqli never reconnects one that lost its session.
+	 *
+	 * @param \mysqli $handle WordPress connection.
+	 * @return bool True if closed or gone.
+	 */
+	private static function closed( \mysqli $handle ): bool {
+		try {
+			return in_array( $handle->errno, [ 1153, 2006, 2013, 2055 ], true );
+		} catch ( \Error ) {
+			return true;
+		}
 	}
 
 	/**
@@ -795,7 +826,7 @@ final class Container {
 	 * @return WpExposureCheck Check.
 	 */
 	public function exposure(): WpExposureCheck {
-		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random(), $this->browser_probe() );
+		return new WpExposureCheck( $this->private_dir(), $this->state(), $this->random(), $this->browser_probe(), $this->plugin_file );
 	}
 
 	/**

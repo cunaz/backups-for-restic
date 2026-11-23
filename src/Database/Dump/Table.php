@@ -12,26 +12,45 @@ namespace BackupsForRestic\Database\Dump;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Name, CREATE statement, columns with their kinds, and how to page through the rows.
+ * Name, CREATE statement, columns with their kinds, and the key whose columns order the pages.
  */
 final readonly class Table {
 
 	/**
 	 * Describes a table.
 	 *
-	 * @param string                $name        Table name.
-	 * @param string                $create      CREATE TABLE statement on one line.
-	 * @param array<string, string> $columns     Column kinds by column name, in table order.
-	 * @param string|null           $key         Single integer primary key column for keyset paging, if any.
-	 * @param list<string>          $order       Columns to order by when paging by offset.
+	 * @param string                    $name    Table name.
+	 * @param string                    $create  CREATE TABLE statement on one line.
+	 * @param array<int|string, string> $columns Column kinds by column name, in table order; PHP makes a name of digits such as "123" an integer key.
+	 * @param string|null               $key     Name of the primary or unique key whose columns order the pages, or null if the table has none that can.
+	 * @param list<KeyColumn>           $order   Columns of that key, in key order; empty without a key.
+	 * @param string                    $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
+	 * @param string                    $digest  Hash of the definition without its AUTO_INCREMENT counter, of the columns and of the key; see Catalog.
+	 * @param bool                      $wide    Whether a column can hold values of any size: TEXT, BLOB, JSON or spatial.
+	 * @param list<string>              $converted Text columns whose values arrive converted to utf8mb4, so that they can arrive longer than they are stored.
+	 * @param int                       $bound   Without such columns, the most bytes in which a row can arrive, as its column types allow; 0 if unknown.
 	 */
 	public function __construct(
 		public string $name,
 		public string $create,
 		public array $columns,
 		public ?string $key,
-		public array $order
+		public array $order,
+		public string $engine = '',
+		public string $digest = '',
+		public bool $wide = false,
+		public array $converted = [],
+		public int $bound = 0
 	) {
+	}
+
+	/**
+	 * Whether a transaction gives every read of the table the same snapshot.
+	 *
+	 * @return bool True for InnoDB.
+	 */
+	public function versioned(): bool {
+		return 0 === strcasecmp( $this->engine, 'InnoDB' );
 	}
 
 	/**

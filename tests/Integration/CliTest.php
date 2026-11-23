@@ -101,6 +101,122 @@ final class CliTest extends TestCase {
 		}
 	}
 
+	public function test_while_a_file_job_holds_maintenance_only_the_plugins_commands_boot_without_other_plugins(): void {
+		[ $status, $output ] = TestSite::wp( [ 'plugin', 'activate', 'hello' ] );
+		self::assertSame( 0, $status, $output );
+		// The marker and the job's private copy are one inode, so they share a filesystem.
+		$work = dirname( TestSite::root() ) . '/bfr-maintenance-' . bin2hex( random_bytes( 6 ) );
+		$job  = '20261120T120000Z-0a0b0c';
+		mkdir( $work . '/' . $job, 0700, true );
+		file_put_contents(
+			$work . '/probe.php',
+			'<?php WP_CLI::add_wp_hook( "plugins_loaded", static function (): void {
+				require_once ABSPATH . "wp-admin/includes/plugin.php";
+				$stored = update_option( "active_plugins", [] );
+				deactivate_plugins( "backups-for-restic/backups-for-restic.php", true );
+				WP_CLI::log( "probe: hello=" . ( function_exists( "hello_dolly" ) ? "loaded" : "absent" ) . " stored=" . var_export( $stored, true ) );
+			}, PHP_INT_MAX );'
+		);
+		// WP-CLI ignores maintenance, so an eval command can still release the marker.
+		$marker = sprintf(
+			'$marker = new BackupsForRestic\Restore\FileMaintenance( (string) realpath( ABSPATH ), "backups-for-restic/backups-for-restic.php", rest_url( "backups-for-restic/v1" ), admin_url( "admin.php" ) ); $job = %s; $dir = (string) realpath( %s );',
+			var_export( $job, true ),
+			var_export( $work . '/' . $job, true )
+		);
+		try {
+			[ $status, $before ] = TestSite::wp( [ 'option', 'get', 'active_plugins', '--format=json' ] );
+			self::assertSame( 0, $status, $before );
+			[ $status, $output ] = TestSite::wp( [ 'eval', $marker . ' $marker->enter( $job, $dir, "" );' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertFileExists( TestSite::root() . '/.maintenance' );
+
+			[ $status, $output ] = TestSite::wp( [ 'plugin', 'list', '--status=active', '--field=name' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertContains( 'hello', explode( "\n", $output ), 'Another command boots with the site\'s plugins.' );
+			self::assertContains( 'backups-for-restic', explode( "\n", $output ) );
+			foreach ( [ [ 'backups-for-restic', 'status' ], [ '--skip-plugins=hello', '--skip-themes', 'backups-for-restic', 'status' ] ] as $command ) {
+				[ $status, $output ] = TestSite::wp( [ '--require=' . $work . '/probe.php', ...$command ] );
+				self::assertSame( 0, $status, $output );
+				self::assertStringContainsString( 'probe: hello=absent stored=false', $output );
+				self::assertStringContainsString( 'Active job: -', $output );
+			}
+			[ $status, $after ] = TestSite::wp( [ 'option', 'get', 'active_plugins', '--format=json' ] );
+			self::assertSame( 0, $status, $after );
+			self::assertSame( $before, $after, 'No command stored the plugin list that the plugin\'s own commands boot with.' );
+		} finally {
+			[ $status, $output ] = TestSite::wp( [ 'eval', $marker . ' $marker->release( $job, $dir );' ] );
+			TestSite::wp( [ 'plugin', 'deactivate', 'hello' ] );
+			TempDir::remove( $work );
+		}
+		self::assertSame( 0, $status, $output );
+		self::assertFileDoesNotExist( TestSite::root() . '/.maintenance' );
+	}
+
+	public function test_every_tick_of_one_process_reads_the_confirming_administrator_again(): void {
+		$login = 'bfr-confirming-' . bin2hex( random_bytes( 4 ) );
+		TestSite::user( $login, 'administrator' );
+		try {
+			// The policy that FileChanges applies before every tick, asked twice in one process
+			// as by tick --until-idle. Between the two, another request takes the role away:
+			// it writes the database, not this process's object cache.
+			[ $status, $output ] = TestSite::wp(
+				[
+					'eval',
+					sprintf(
+						'$changes = ( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) )->file_changes();
+						$allowed = ( new ReflectionProperty( $changes, "allowed" ) )->getValue( $changes );
+						$user    = get_user_by( "login", %s );
+						$first   = $allowed( $user->ID );
+						global $wpdb;
+						$wpdb->update( $wpdb->usermeta, [ "meta_value" => serialize( [ "editor" => true ] ) ], [ "user_id" => $user->ID, "meta_key" => $wpdb->get_blog_prefix() . "capabilities" ] );
+						echo wp_json_encode( [ $first, $allowed( $user->ID ) ] );',
+						var_export( $login, true )
+					),
+				]
+			);
+			self::assertSame( 0, $status, $output );
+			self::assertSame( '[true,false]', TestSite::last_line( $output ), 'The second tick sees the role that the database holds now.' );
+		} finally {
+			TestSite::wp( [ 'user', 'delete', $login, '--yes' ] );
+		}
+	}
+
+	public function test_a_permission_lost_before_a_file_job_starts_is_reported_as_such(): void {
+		$login = 'bfr-starting-' . bin2hex( random_bytes( 4 ) );
+		TestSite::user( $login, 'administrator' );
+		try {
+			// The confirmation is authorized for the administrator that this process loaded.
+			// Before start_apply() checks the account again, another request takes the role
+			// away in the database, as in a race between the two.
+			[ $status, $output ] = TestSite::wp(
+				[
+					'eval',
+					sprintf(
+						'( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) )->private_dir()->ensure();
+						$user = get_user_by( "login", %s );
+						wp_set_password( "bfr-test-password", $user->ID );
+						wp_set_current_user( $user->ID );
+						$id     = "20261120T000000Z-0d0e0f";
+						$digest = str_repeat( "a", 64 );
+						$token  = wp_create_nonce( implode( "|", [ "backups_for_restic_live", home_url(), "files", "apply", $id, "default", $digest, "" ] ) );
+						global $wpdb;
+						$wpdb->update( $wpdb->usermeta, [ "meta_value" => serialize( [ "editor" => true ] ) ], [ "user_id" => $user->ID, "meta_key" => $wpdb->get_blog_prefix() . "capabilities" ] );
+						$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/restores/" . $id . "/apply" );
+						$request->set_header( "content-type", "application/json" );
+						$request->set_body( wp_json_encode( [ "reviewed" => true, "site_url" => home_url(), "digest" => $digest, "review_token" => $token, "user_password" => "bfr-test-password" ] ) );
+						$response = rest_do_request( $request );
+						echo wp_json_encode( [ $response->get_status(), $response->get_data()["code"] ?? null ] );',
+						var_export( $login, true )
+					),
+				]
+			);
+			self::assertSame( 0, $status, $output );
+			self::assertSame( '[409,"backups_for_restic_file_writes_refused"]', TestSite::last_line( $output ), 'The administrator learns that the permission is gone, not that other work is in the way.' );
+		} finally {
+			TestSite::wp( [ 'user', 'delete', $login, '--yes' ] );
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
 	public function test_recovery_kit_requires_explicit_redirect_and_records_delivery_without_credentials(): void {
 		$before            = TestSite::state( 'recovery_kit' );
@@ -145,6 +261,37 @@ final class CliTest extends TestCase {
 		sort( $listed );
 		sort( $expected );
 		self::assertSame( $expected, $listed, $output );
+	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_snapshots_prints_a_host_name_with_its_control_characters_quoted(): void {
+		TestSite::idle( 600 );
+		// Any client of a shared repository chooses the host names of its snapshots.
+		$host    = "evil\e[2J\e]0;spoofed\x07\nline";
+		$fixture = TempDir::create( 'cli-host-name' );
+		$id      = '';
+		try {
+			file_put_contents( $fixture . '/file.txt', 'a file of another client' );
+			foreach ( explode( "\n", TestSite::restic()->must( [ 'backup', '--json', '--host', $host, $fixture . '/file.txt' ] ) ) as $line ) {
+				$message = json_decode( $line, true );
+				if ( is_array( $message ) && 'summary' === ( $message['message_type'] ?? null ) ) {
+					$id = (string) ( $message['snapshot_id'] ?? '' );
+				}
+			}
+			self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $id );
+
+			[ $status, $output ] = self::command( [ 'snapshots' ] );
+
+			self::assertSame( 0, $status, $output );
+			self::assertMatchesRegularExpression( '/^' . substr( $id, 0, 8 ) . '  \S+  "evil\\\\x1b\[2J\\\\x1b\]0;spoofed\\\\a\\\\nline"$/m', $output );
+			self::assertStringNotContainsString( "\e", $output, 'No escape sequence reaches the terminal.' );
+			self::assertStringNotContainsString( "\x07", $output );
+		} finally {
+			if ( '' !== $id ) {
+				TestSite::restic()->must( [ 'forget', $id ] );
+			}
+			TempDir::remove( $fixture );
+		}
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
@@ -335,6 +482,115 @@ final class CliTest extends TestCase {
 		self::assertNotEmpty( $ids );
 		self::assertContainsOnlyString( $ids );
 		return $ids;
+	}
+
+	public function test_undo_prints_its_review_and_refuses_or_records_an_apply_with_nothing_to_revert(): void {
+		$site    = TestSite::root();
+		$applies = [ '20261121T100000Z-0a0c00', '20261121T100000Z-0a0d00' ];
+		TestSite::idle( 120 );
+		try {
+			// An entry that the site now maps to another live path is kept with its reason, and
+			// nothing else is left: the undo is refused with the reasons in its review.
+			TestSite::undoable_apply( $applies[0], [ [ $site . '/bfr-mapped.txt', $site . '/bfr-elsewhere.txt', 'create' ] ] );
+			[ $status, $output ] = self::command( [ 'undo', $applies[0], '--yes' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( '"action":"keep"', $output );
+			self::assertStringContainsString( '"reason":"destination_changed"', $output );
+			self::assertStringContainsString( 'To restore: 0. To remove: 0. To keep: 1.', $output );
+			self::assertStringContainsString( 'Error: Nothing of this apply can be undone now. Every entry it changed is already undone or is kept, for example because it changed after the apply or the site no longer permits the change.', $output );
+			// An apply whose entries have nothing left to revert is recorded as undone by its
+			// review, and is no longer offered.
+			TestSite::undoable_apply( $applies[1], [ [ $site . '/bfr-never-written.txt', $site . '/bfr-never-written.txt', 'create' ] ] );
+			[ $status, $output ] = self::command( [ 'undo', $applies[1], '--yes' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'To restore: 0. To remove: 0. To keep: 1.', $output );
+			self::assertStringContainsString( 'Success: Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', $output );
+			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $applies[1] . '/undo/reverted' );
+			[ $status, $output ] = self::command( [ 'undo', $applies[1], '--yes' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'This apply has no available undo.', $output );
+		} finally {
+			foreach ( $applies as $apply ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $apply );
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . substr( $apply, 0, -1 ) . '1' );
+				TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+			}
+		}
+	}
+
+	public function test_undo_reports_what_an_undo_kept_also_when_it_stopped(): void {
+		$undos  = [ '20261121T110000Z-0b0c01', '20261121T110000Z-0b0c02', '20261121T110000Z-0b0c03', '20261121T110000Z-0b0c04', '20261121T110000Z-0b0c05' ];
+		$kept   = [ [ TestSite::root() . '/wp-content/uploads/bfr-kept.txt', 'changed_since_apply' ] ];
+		$result = [
+			'restore'              => '20261120T000000Z-0a0b02',
+			'files_changed'        => 1,
+			'restored'             => 1,
+			'removed'              => 0,
+			'unchanged'            => 0,
+			'kept'                 => 1,
+			'changed_after_review' => 0,
+			'apply_state'          => 'partly_undone',
+		];
+		// What the undo command prints once its job has ended.
+		$report = static fn ( string $id ): array => TestSite::wp(
+			[
+				'eval',
+				sprintf(
+					'( new ReflectionMethod( BackupsForRestic\WordPress\CliCommand::class, "report" ) )->invoke( new BackupsForRestic\WordPress\CliCommand( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) ), %s );',
+					var_export( $id, true )
+				),
+			]
+		);
+		try {
+			TestSite::ended_undo( $undos[0], 'succeeded', $result, $kept );
+			[ $status, $output ] = $report( $undos[0] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( '"reason":"changed_since_apply"', $output );
+			self::assertStringContainsString( 'Warning: Kept 1 entry: changed after the apply.', $output );
+			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged. The kept entries are listed above with their reasons.', $output );
+			// A cancelled or failed undo says what it did before it stopped, and lists what it kept.
+			TestSite::ended_undo( $undos[1], 'cancelled', $result, $kept );
+			[ $status, $output ] = $report( $undos[1] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Warning: Kept 1 entry: changed after the apply.', $output );
+			self::assertStringContainsString( 'Error: The undo was cancelled. Before it stopped, it did this: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
+			TestSite::ended_undo( $undos[2], 'failed', $result, $kept, 'file_writes_refused' );
+			[ $status, $output ] = $report( $undos[2] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( '"reason":"changed_since_apply"', $output );
+			self::assertStringContainsString( 'Error: The site no longer allows these file changes, or the administrator who confirmed them may no longer make them. Before it stopped, it did this: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
+			// An undo that could not seal the list of what it kept says so, and still what it did.
+			TestSite::ended_undo( $undos[3], 'succeeded', $result, [] );
+			[ $status, $output ] = $report( $undos[3] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( "Warning: The list of the entries that this undo kept is not available; the job's log says why.", $output );
+			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged. The kept entries stay undoable', $output );
+			self::assertStringNotContainsString( 'listed above', $output );
+			// A sealed list whose page was changed since cannot be read: the undo still says what it did, and how it ended.
+			TestSite::ended_undo( $undos[4], 'succeeded', $result, $kept );
+			$page = TestSite::private_dir() . '/jobs/' . $undos[4] . '/kept/rows-0.1';
+			self::assertFileExists( $page );
+			file_put_contents( $page, str_replace( 'changed_since_apply', 'deleted_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $output ] = $report( $undos[4] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Warning: The list of the entries that this undo kept cannot be read to its end: a part of it is missing or was changed.', $output );
+			self::assertStringNotContainsString( 'deleted_since_apply', $output );
+			self::assertStringNotContainsString( 'Warning: Kept', $output );
+			self::assertStringContainsString( 'Success: The apply is partly undone: 1 restored, 0 removed, 1 kept, 0 unchanged. The kept entries stay undoable', $output );
+			self::assertStringNotContainsString( 'listed above', $output );
+			// A stopped undo with such a list keeps its failure and its counts.
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $undos[4] );
+			TestSite::ended_undo( $undos[4], 'cancelled', $result, $kept );
+			file_put_contents( $page, str_replace( 'changed_since_apply', 'deleted_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $output ] = $report( $undos[4] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Warning: The list of the entries that this undo kept cannot be read to its end', $output );
+			self::assertStringContainsString( 'Error: The undo was cancelled. Before it stopped, it did this: 1 restored, 0 removed, 1 kept, 0 unchanged.', $output );
+		} finally {
+			foreach ( $undos as $undo ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $undo );
+			}
+		}
 	}
 
 	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]

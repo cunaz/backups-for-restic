@@ -43,6 +43,7 @@ final class AccessTest extends TestCase {
 			[ 'GET', '/jobs/' . self::JOB ],
 			[ 'POST', '/jobs/' . self::JOB . '/cancel' ],
 			[ 'GET', '/jobs/' . self::JOB . '/log' ],
+			[ 'GET', '/jobs/' . self::JOB . '/kept-entries' ],
 			[ 'GET', '/snapshots' ],
 			[ 'GET', '/snapshots/' . self::SNAPSHOT ],
 			[ 'GET', '/snapshots/' . self::SNAPSHOT . '/tree' ],
@@ -56,6 +57,7 @@ final class AccessTest extends TestCase {
 			[ 'GET', '/database-changes' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/undo-plan' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/undo' ],
+			[ 'POST', '/database-changes/' . self::JOB . '/discard' ],
 			[ 'GET', '/undo' ],
 			[ 'POST', '/undo/' . self::JOB . '/plan' ],
 			[ 'POST', '/undo/' . self::JOB ],
@@ -150,13 +152,13 @@ final class AccessTest extends TestCase {
 				$caps["update_core"] = false;
 				return $caps;
 			} );
-			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo" ] as $route ) {
+			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo", "/database-changes/" . $arguments[0] . "/discard" ] as $route ) {
 				echo rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1" . $route ) )->get_status(), "\n";
 			}
 			',
 			[ self::JOB ]
 		);
-		self::assertSame( [ '403', '403' ], explode( "\n", trim( $output ) ) );
+		self::assertSame( [ '403', '403', '403' ], explode( "\n", trim( $output ) ) );
 	}
 
 	public function test_database_writes_require_explicit_confirmation_in_the_json_body(): void {
@@ -165,6 +167,145 @@ final class AccessTest extends TestCase {
 			self::assertSame( 400, $status, $raw );
 			self::assertSame( 'backups_for_restic_live_confirmation', $error['code'] ?? null, $raw );
 		}
+	}
+
+	public function test_downloads_of_restored_content_need_the_wordpress_password_and_reports_do_not(): void {
+		$route = '/restores/' . self::JOB . '/download';
+		// A restored file or archive can be wp-config.php or the database; an unknown kind is treated as such.
+		foreach ( [ 'file', 'archive', 'database', '' ] as $kind ) {
+			foreach ( [ [], [ 'user_password' => '' ], [ 'user_password' => [ TestSite::ADMIN_PASSWORD ] ] ] as $proof ) {
+				[ $status, $error, $raw ] = TestSite::api( 'POST', $route, [ 'kind' => $kind ] + $proof );
+				self::assertSame( 403, $status, $kind . ': ' . $raw );
+				self::assertSame( 'backups_for_restic_wrong_user_password', $error['code'] ?? null, $raw );
+			}
+			// The password counts only in the JSON body, never in the address.
+			[ $status, $error, $raw ] = TestSite::api( 'POST', $route . '&kind=' . $kind . '&user_password=' . rawurlencode( TestSite::ADMIN_PASSWORD ), [] );
+			self::assertSame( 403, $status, $raw );
+			self::assertSame( 'backups_for_restic_wrong_user_password', $error['code'] ?? null, $raw );
+
+			[ $status, $error, $raw ] = TestSite::api(
+				'POST',
+				$route,
+				[
+					'kind'          => $kind,
+					'user_password' => TestSite::ADMIN_PASSWORD,
+				]
+			);
+			self::assertSame( 404, $status, $raw );
+			self::assertSame( 'backups_for_restic_download_not_found', $error['code'] ?? null, $raw );
+		}
+		// The reports hold names, counts and table metadata, which the page fetches by itself.
+		foreach ( [ 'report', 'database_report' ] as $kind ) {
+			[ $status, $error, $raw ] = TestSite::api( 'POST', $route, [ 'kind' => $kind ] );
+			self::assertSame( 404, $status, $raw );
+			self::assertSame( 'backups_for_restic_download_not_found', $error['code'] ?? null, $raw );
+		}
+	}
+
+	public function test_discarding_a_database_binding_counts_a_wrong_password_like_every_confirmation(): void {
+		$output = TestSite::php(
+			'
+			$reported = 0;
+			add_action( "wp_login_failed", static function () use ( &$reported ) {
+				++$reported;
+			} );
+			wp_set_current_user( 1 );
+			$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/database-changes/" . $arguments[0] . "/discard" );
+			$request->set_header( "content-type", "application/json" );
+			$request->set_body( wp_json_encode( [ "user_password" => "wrong-password-test-only" ] ) );
+			$response = rest_do_request( $request );
+			$state    = get_option( "backups_for_restic_state" );
+			$failures = ( $state["password_confirmation"] ?? [] )["user_1"]["failures"] ?? null;
+			unset( $state["password_confirmation"]["user_1"] );
+			update_option( "backups_for_restic_state", $state, false );
+			echo "\n", wp_json_encode( [ $response->get_status(), $response->get_data()["code"] ?? null, $failures, $reported ] );
+			',
+			[ self::JOB ]
+		);
+		self::assertSame( [ 403, 'backups_for_restic_wrong_user_password', 1, 1 ], json_decode( TestSite::last_line( $output ), true ), $output );
+	}
+
+	public function test_wrong_passwords_are_counted_per_user_slowed_down_and_reported_to_login_limiters(): void {
+		$output  = TestSite::php(
+			'
+			require_once ABSPATH . "wp-admin/includes/user.php";
+			$existing = get_user_by( "login", "bfr-confirm" );
+			if ( $existing instanceof WP_User ) {
+				wp_delete_user( $existing->ID );
+			}
+			$user = wp_insert_user( [ "user_login" => "bfr-confirm", "user_pass" => "right-password-test-only", "user_email" => "bfr-confirm@example.com", "role" => "administrator" ] );
+			$failed = [];
+			add_action( "wp_login_failed", static function ( $login, $error ) use ( &$failed ) {
+				$failed[] = [ $login, $error instanceof WP_Error ? $error->get_error_code() : null ];
+			}, 10, 2 );
+			// The download of a restored file asks for the password; the job does not exist, so a right one gets 404.
+			$ask = static function ( int $as, string $password ) use ( $arguments ): array {
+				wp_set_current_user( $as );
+				$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/restores/" . $arguments[0] . "/download" );
+				$request->set_header( "content-type", "application/json" );
+				$request->set_body( wp_json_encode( [ "kind" => "file", "path" => "/wp-config.php", "user_password" => $password ] ) );
+				$response = rest_do_request( $request );
+				$data     = $response->get_data();
+				return [ $response->get_status(), $data["code"] ?? null, $response->get_headers()["Retry-After"] ?? null ];
+			};
+			$record = static fn (): mixed => ( get_option( "backups_for_restic_state" )["password_confirmation"] ?? [] )[ "user_" . $user ] ?? null;
+			// As if the minute had passed.
+			$wait = static function ( int $until ) use ( $user ): void {
+				$state = get_option( "backups_for_restic_state" );
+				$state["password_confirmation"][ "user_" . $user ]["until"] = $until;
+				update_option( "backups_for_restic_state", $state, false );
+			};
+			$results = [];
+			foreach ( [ "wrong 1", "wrong 2", "wrong 3", "wrong 4" ] as $guess ) {
+				$results["wrong"][] = $ask( $user, $guess );
+			}
+			$results["right while waiting"] = $ask( $user, "right-password-test-only" );
+			$results["empty while waiting"] = $ask( $user, "" );
+			$results["other user"]          = $ask( 1, "admin-password-test-only" );
+			$results["failures"]            = $record()["failures"] ?? null;
+			$wait( time() - 1 );
+			$results["right after the wait"] = $ask( $user, "right-password-test-only" );
+			$results["forgotten"]            = null === $record();
+			// The tenth wrong password in a row locks the confirmation for an hour.
+			$results["wrong"][] = $ask( $user, "wrong 5" );
+			$state = get_option( "backups_for_restic_state" );
+			$state["password_confirmation"][ "user_" . $user ] = [ "failures" => 9, "last" => time(), "until" => time() - 1 ];
+			update_option( "backups_for_restic_state", $state, false );
+			$results["tenth"]  = $ask( $user, "wrong 10" );
+			$results["locked"] = $ask( $user, "right-password-test-only" );
+			$results["admin"]  = ( get_option( "backups_for_restic_state" )["password_confirmation"] ?? [] )["user_1"] ?? null;
+			$results["other user while locked"] = $ask( 1, "admin-password-test-only" );
+			$results["reported"] = $failed;
+			$state = get_option( "backups_for_restic_state" );
+			unset( $state["password_confirmation"][ "user_" . $user ] );
+			update_option( "backups_for_restic_state", $state, false );
+			wp_delete_user( $user );
+			echo "\n", wp_json_encode( $results );
+			',
+			[ self::JOB ]
+		);
+		$results = json_decode( TestSite::last_line( $output ), true );
+		self::assertIsArray( $results, $output );
+		$wrong     = [ 403, 'backups_for_restic_wrong_user_password', null ];
+		$throttled = 'backups_for_restic_user_password_throttled';
+		$not_found = [ 404, 'backups_for_restic_download_not_found', null ];
+
+		self::assertSame( [ $wrong, $wrong, $wrong, $wrong, $wrong ], $results['wrong'], $output );
+		foreach ( [ 'right while waiting', 'empty while waiting' ] as $attempt ) {
+			self::assertSame( [ 429, $throttled ], array_slice( $results[ $attempt ], 0, 2 ), $attempt . ': ' . $output );
+			self::assertContains( $results[ $attempt ][2], [ '59', '60' ], 'After the fourth wrong password the next attempt waits a minute.' );
+		}
+		self::assertSame( $not_found, $results['other user'], 'Another user is not slowed down.' );
+		self::assertSame( 4, $results['failures'], 'An attempt during the wait is not counted.' );
+		self::assertSame( $not_found, $results['right after the wait'] );
+		self::assertTrue( $results['forgotten'], 'The right password forgets the count.' );
+		self::assertSame( $wrong, $results['tenth'] );
+		self::assertSame( [ 429, $throttled ], array_slice( $results['locked'], 0, 2 ), $output );
+		self::assertGreaterThan( 3500, (int) $results['locked'][2], 'From the tenth on each wrong password locks for an hour.' );
+		self::assertNull( $results['admin'], 'Nothing was counted for the other user.' );
+		self::assertSame( $not_found, $results['other user while locked'] );
+		// Login limiters count each wrong password as core's login reports it, and nothing else.
+		self::assertSame( array_fill( 0, 6, [ 'bfr-confirm', 'incorrect_password' ] ), $results['reported'], $output );
 	}
 
 	public function test_live_writes_respect_the_hosts_file_modification_policy(): void {
@@ -179,6 +320,76 @@ final class AccessTest extends TestCase {
 			[ self::JOB ]
 		);
 		self::assertSame( [ '403', '403' ], explode( "\n", trim( $statuses ) ) );
+	}
+
+	public function test_kept_entries_are_served_only_for_an_ended_undo_and_a_page_of_its_list(): void {
+		$undo  = '20261121T120000Z-0c0d01';
+		$apply = '20261121T120000Z-0c0d10';
+		TestSite::ended_undo(
+			$undo,
+			'cancelled',
+			[
+				'restored'             => 0,
+				'removed'              => 1,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			[ [ TestSite::root() . '/wp-content/uploads/bfr-kept.txt', 'protected' ] ]
+		);
+		TestSite::undoable_apply( $apply, [ [ TestSite::root() . '/bfr-mapped.txt', TestSite::root() . '/bfr-elsewhere.txt', 'create' ] ] );
+		// An undo that kept an entry and could not seal the list of it.
+		$unsealed = '20261121T120000Z-0c0d02';
+		TestSite::ended_undo(
+			$unsealed,
+			'succeeded',
+			[
+				'restored'             => 1,
+				'removed'              => 0,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			[]
+		);
+		try {
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $unsealed . '/kept-entries' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_kept_list_unavailable', $error['code'] ?? null, $raw );
+			[ $status, $page, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries' );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( [ 1, 0, null, $undo ], [ $page['total'], $page['offset'], $page['next_offset'], $page['plan_job'] ] );
+			self::assertSame( [ 'keep', 'protected' ], [ $page['entries'][0]['action'] ?? null, $page['entries'][0]['reason'] ?? null ], $raw );
+			[ $status, $page, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries&offset=1' );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( [ [], 1, null ], [ $page['entries'], $page['offset'], $page['next_offset'] ] );
+			// An offset that is no number of up to seven digits, or that lies beyond the list.
+			foreach ( [ '2', 'x', '-1', '1.5', '12345678' ] as $offset ) {
+				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries&offset=' . rawurlencode( $offset ) );
+				self::assertSame( 400, $status, $offset . ': ' . $raw );
+				self::assertSame( 'backups_for_restic_invalid_plan_page', $error['code'] ?? null, $raw );
+			}
+			// A job that is no ended undo, or no job at all.
+			foreach ( [ $apply, '20261121T120000Z-0c0d99' ] as $id ) {
+				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $id . '/kept-entries' );
+				self::assertSame( 404, $status, $id . ': ' . $raw );
+				self::assertSame( 'backups_for_restic_not_found', $error['code'] ?? null, $raw );
+			}
+			// A sealed list whose page was changed since is unavailable too, not an entry that the undo never recorded.
+			$page = TestSite::private_dir() . '/jobs/' . $undo . '/kept/rows-0.1';
+			self::assertFileExists( $page );
+			file_put_contents( $page, str_replace( 'protected', 'changed_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_kept_list_unavailable', $error['code'] ?? null, $raw );
+		} finally {
+			foreach ( [ $undo, $unsealed, $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
 	}
 
 	public function test_invalid_preview_page_identifiers_are_rejected_before_planning(): void {
@@ -253,7 +464,7 @@ final class AccessTest extends TestCase {
 		[ $status, , $raw ] = TestSite::api( 'GET', '/status' );
 		self::assertSame( 200, $status, $raw );
 
-		foreach ( [ '/', '/index.php', '/.htaccess', '/web.config', '/jobs/', '/cache/', '/restores/' ] as $path ) {
+		foreach ( [ '/', '/index.php', '/.htaccess', '/web.config', '/jobs/', '/cache/', '/restores/', '/restores/index.php', '/restores/.htaccess', '/restores/web.config' ] as $path ) {
 			self::assertFileExists( TestSite::private_dir() . $path );
 			$handle = curl_init( TestSite::url() . '/wp-content/' . PrivateDirectory::NAME . $path );
 			curl_setopt_array(

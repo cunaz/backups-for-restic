@@ -6,13 +6,19 @@
  * directory. The repository on the server is never touched (FR-15): the backups stay
  * restorable with the restic command line and the recovery kit.
  *
+ * This file must stay parseable by old PHP versions, because the refusal below runs on them:
+ * everything that needs PHP 8.3 lives in src/.
+ *
  * @package BackupsForRestic
  */
 
 defined( 'WP_UNINSTALL_PLUGIN' ) || exit;
 
+// Without the cleanup, staged plaintext, retained database tables and the encrypted
+// secrets would stay behind with nothing left to expire them; WordPress deletes the plugin
+// after this file returns, so it must not return.
 if ( version_compare( PHP_VERSION, '8.3', '<' ) ) {
-	return;
+	wp_die( esc_html__( 'Switch back to PHP 8.3 or later before deleting Backups for restic, so it can safely remove its restored files, the database tables it kept and its stored passwords.', 'backups-for-restic' ) );
 }
 
 if ( PHP_INT_SIZE < 8 ) {
@@ -47,7 +53,8 @@ try {
 			break;
 		}
 	}
-} catch ( \BackupsForRestic\Exception\PluginException ) {
+} catch ( \BackupsForRestic\Exception\PluginException $backups_for_restic_failure ) {
+	// The variable is named: a catch without one is a parse error before PHP 8.0.
 	$backups_for_restic_clean = false;
 }
 if ( ! $backups_for_restic_clean ) {

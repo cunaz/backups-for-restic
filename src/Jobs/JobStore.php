@@ -22,6 +22,12 @@ defined( 'ABSPATH' ) || exit;
  * Keeps each job in its own directory under jobs/ (ADR 0014): job.json, written atomically,
  * events.log and the step's working files. IDs sort by creation time.
  *
+ * A job document is on disk when save() returns: it is synchronised before its rename, so a
+ * crash cannot leave it empty, and its directory after it, so a power loss cannot bring back
+ * an older document than the one that a step's next change, such as a live file apply or a
+ * table exchange, relies on. A new job directory is synchronised in jobs/ before its first
+ * document is written.
+ *
  * After its creation a job document has one writer at a time: whoever holds the runner lock,
  * as a rule a tick. A request to cancel therefore is a file of its own next to the document.
  */
@@ -46,14 +52,18 @@ final class JobStore {
 	/**
 	 * Opens the store.
 	 *
-	 * @param string       $directory The private directory's jobs/ folder.
-	 * @param Redactor     $redactor  Removes secrets from everything written.
-	 * @param RandomSource $random    Randomness for IDs.
+	 * @param string                                $directory The private directory's jobs/ folder.
+	 * @param Redactor                              $redactor  Removes secrets from everything written.
+	 * @param RandomSource                          $random    Randomness for IDs.
+	 * @param (\Closure(string, string): void)|null $observer  Optional observer of each new job directory,
+	 *                                                          synchronisation and document rename, with the
+	 *                                                          path, in order; the tests check that order.
 	 */
 	public function __construct(
 		private readonly string $directory,
 		private readonly Redactor $redactor,
-		private readonly RandomSource $random
+		private readonly RandomSource $random,
+		private readonly ?\Closure $observer = null
 	) {
 	}
 
@@ -73,7 +83,7 @@ final class JobStore {
 	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
 		$lock = $this->held ? null : $this->lock();
 		try {
-			$this->require_idle();
+			$this->require_idle( $type );
 			$job       = new Job( $this->reserve_id( $now ), $type, $trigger, $now );
 			$job->data = $data;
 			try {
@@ -121,6 +131,7 @@ final class JobStore {
 			if ( ! @mkdir( $path, 0700 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Report storage exhaustion without PHP's path-bearing warning.
 				throw new StorageFailed( 'The new job directory could not be reserved.' );
 			}
+			$this->created( $path );
 			return $id;
 		}
 		throw new StorageFailed( 'An unused job ID could not be allocated.' );
@@ -227,8 +238,9 @@ final class JobStore {
 	}
 
 	/**
-	 * Writes a job atomically. After the job's creation only the holder of the runner lock
-	 * calls this; everyone else would overwrite what a tick saves, or be overwritten by it.
+	 * Writes a job atomically and durably. After the job's creation only the holder of the
+	 * runner lock calls this; everyone else would overwrite what a tick saves, or be
+	 * overwritten by it.
 	 *
 	 * @param Job $job Job.
 	 */
@@ -246,7 +258,18 @@ final class JobStore {
 			$fields['progress']['current'] = $this->redactor->redact( $job->progress['current'] );
 		}
 		$json = json_encode( $fields, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR );
-		Files::write_atomic( $this->directory( $job ) . '/job.json', $json . "\n" );
+		Files::write_durable( $this->directory( $job ) . '/job.json', $json . "\n", $this->observer );
+	}
+
+	/**
+	 * The observer of this store's durable writes, for other records in a job's directory
+	 * that its document counts, such as the entries an undo kept, so that their writes are
+	 * observed in one order with the document's.
+	 *
+	 * @return (\Closure(string, string): void)|null Observer.
+	 */
+	public function observer(): ?\Closure {
+		return $this->observer;
 	}
 
 	/**
@@ -332,10 +355,26 @@ final class JobStore {
 		if ( 1 !== preg_match( self::ID_PATTERN, $job->id ) || is_link( $this->directory ) || is_link( $path ) ) {
 			throw new StorageFailed( 'The job directory is invalid.' );
 		}
-		if ( ! is_dir( $path ) && ! mkdir( $path, 0700, true ) && ! is_dir( $path ) ) {
-			StorageFailed::raise( 'A job directory could not be created in the private directory.', [ 'job' => $job->id ] );
+		if ( ! is_dir( $path ) ) {
+			if ( ! mkdir( $path, 0700, true ) && ! is_dir( $path ) ) {
+				StorageFailed::raise( 'A job directory could not be created in the private directory.', [ 'job' => $job->id ] );
+			}
+			$this->created( $path );
 		}
 		return $path;
+	}
+
+	/**
+	 * Puts a new job directory's entry in jobs/ on disk, so that a power loss cannot drop the
+	 * directory together with the synchronised documents and journals inside it.
+	 *
+	 * @param string $path New job directory.
+	 */
+	private function created( string $path ): void {
+		if ( null !== $this->observer ) {
+			( $this->observer )( 'mkdir', $path );
+		}
+		Files::sync_directory( $this->directory, $this->observer );
 	}
 
 	/**
@@ -480,9 +519,14 @@ final class JobStore {
 	 * creation lock holds. An unknown layout cannot prove that a job has finished, even if
 	 * its raw state field looks familiar; no part of that layout is interpreted here.
 	 *
+	 * The private tables of a database restore that belong to another database server are
+	 * not on this one, so they cannot reach a backup and need no cleanup here. Only a new
+	 * database apply waits until an administrator has discarded that binding.
+	 *
+	 * @param JobType|null $type Type of the job about to be created, if any.
 	 * @throws JobConflict If a job is active or its state cannot be established.
 	 */
-	private function require_idle(): void {
+	private function require_idle( ?JobType $type = null ): void {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( null === $job && is_file( $this->directory . '/' . $id . '/job.json' ) ) {
@@ -493,6 +537,18 @@ final class JobStore {
 						'code' => 'job_unreadable',
 					]
 				);
+			}
+			if ( null !== $job && $job->state->is_terminal() && isset( $job->data['database_owner'], $job->data['database_foreign'] ) ) {
+				if ( JobType::DatabaseApply === $type ) {
+					JobConflict::raise(
+						'A database restore still holds private tables on another database server. Discard its binding before applying another database.',
+						[
+							'job'  => $id,
+							'code' => 'database_exchange_foreign',
+						]
+					);
+				}
+				continue;
 			}
 			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {
 				JobConflict::raise(

@@ -543,6 +543,105 @@ final class TestSite {
 	}
 
 	/**
+	 * Writes the document of a file undo that has ended, with its sealed list of kept entries,
+	 * as the worker leaves them. Its apply and restore need not exist: the list is read from
+	 * the undo alone. No kept entries with a result that counts some is an undo whose list could
+	 * not be sealed.
+	 *
+	 * @param string                    $id     Job ID.
+	 * @param string                    $state  succeeded, failed or cancelled.
+	 * @param array<string, int|string> $result Result of the undo.
+	 * @param list<array{string, string}> $kept Kept entries as live path and reason.
+	 * @param string|null               $error  Error code of a failed undo.
+	 */
+	public static function ended_undo( string $id, string $state, array $result, array $kept, ?string $error = null ): void {
+		self::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$jobs  = $container->jobs();
+			$spec  = json_decode( $arguments[2], true );
+			$undo  = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Undo, "cli", time() - 60 );
+			$apply = "20261120T000000Z-0a0b01";
+			$undo->data = [ "apply" => $apply, "restore" => "20261120T000000Z-0a0b02" ];
+			if ( [] !== $spec["kept"] ) {
+				$directory = $jobs->directory( $undo ) . "/kept";
+				BackupsForRestic\Jobs\Apply\ApplyJournal::directory( $directory );
+				$list   = new BackupsForRestic\Restore\KeptList( $directory );
+				$digest = null;
+				foreach ( $spec["kept"] as $count => [ $path, $reason ] ) {
+					$digest = $list->append( $count, $digest, BackupsForRestic\Restore\ApplyManifest::row( BackupsForRestic\Support\Bytes::base64url_encode( $path ), $path, "keep", $reason ) );
+				}
+				$undo->data["kept_page_digest"] = $digest;
+				$undo->data["kept_digest"]      = $list->seal( $apply, $undo->data["restore"], count( $spec["kept"] ), $digest );
+			}
+			$undo->state       = BackupsForRestic\Jobs\JobState::from( $arguments[1] );
+			$undo->finished_at = time();
+			$undo->result      = $spec["result"];
+			if ( null !== $spec["error"] ) {
+				$undo->error = new BackupsForRestic\Jobs\JobError( $spec["error"], "The undo stopped.", false );
+			}
+			$jobs->save( $undo );
+			',
+			[
+				$id,
+				$state,
+				(string) json_encode(
+					[
+						'result' => $result,
+						'kept'   => $kept,
+						'error'  => $error,
+					]
+				),
+			]
+		);
+	}
+
+	/**
+	 * Writes a finished file apply that attempted the given entries and recorded no journal
+	 * for any of them, with the staged restore it came from: what an undo review reads. The
+	 * test site cannot apply files itself, because it lies in the plugin's own directory.
+	 *
+	 * @param string                               $id   Job ID of the apply; the restore's ends in 1 instead.
+	 * @param list<array{string, string, string}>   $rows Snapshot path, live destination and action of each entry.
+	 */
+	public static function undoable_apply( string $id, array $rows ): void {
+		self::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$jobs    = $container->jobs();
+			$restore = new BackupsForRestic\Jobs\Job( substr( $arguments[0], 0, -1 ) . "1", BackupsForRestic\Jobs\JobType::Restore, "cli", time() - 120 );
+			$restore->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$restore->finished_at = time() - 60;
+			$jobs->save( $restore );
+			$files = $container->private_dir()->subdirectory( "restores" ) . "/" . $restore->id . "/files";
+			if ( ! is_dir( $files ) ) {
+				mkdir( $files, 0700, true );
+			}
+			$manifest = [];
+			foreach ( json_decode( $arguments[1], true ) as [ $source, $destination, $action ] ) {
+				$row         = BackupsForRestic\Restore\ApplyManifest::row( BackupsForRestic\Support\Bytes::base64url_encode( $source ), $destination, $action, "missing" );
+				$row["mode"] = 0644;
+				$manifest[]  = $row;
+			}
+			$json  = json_encode( $manifest, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR );
+			$apply = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Apply, "cli", time() - 60 );
+			$apply->data        = [ "restore" => $restore->id, "include_config" => false, "digest" => str_repeat( "0", 64 ), "manifest_hash" => hash( "sha256", $json ), "plan_job" => null ];
+			$apply->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$apply->finished_at = time();
+			$apply->result      = [ "restore" => $restore->id, "files_changed" => count( $manifest ) ];
+			$workspace          = $jobs->directory( $apply ) . "/undo";
+			BackupsForRestic\Jobs\Apply\ApplyJournal::directory( $workspace );
+			file_put_contents( $workspace . "/manifest.json", $json );
+			file_put_contents( $workspace . "/attempted", (string) count( $manifest ) );
+			$jobs->save( $apply );
+			',
+			[ $id, (string) json_encode( $rows ) ]
+		);
+	}
+
+	/**
 	 * The last line of what a PHP program printed: whatever WordPress printed before it is
 	 * not part of the answer.
 	 */

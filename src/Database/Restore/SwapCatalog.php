@@ -32,6 +32,15 @@ final readonly class SwapCatalog {
 	/** Direct database-wide permissions needed to see triggers and exchange site tables. */
 	public const array PRIVILEGES = [ 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'LOCK TABLES', 'TRIGGER' ];
 
+	/** At most this many other sessions of the site's account can be waited for. */
+	public const int MAX_SESSIONS = 4096;
+
+	/**
+	 * Blockers of a live exchange that do not concern dropping an expired private table.
+	 * Disabled InnoDB table locks are not among them: every DROP runs in WriteBarrier.
+	 */
+	public const array EXCHANGE_ONLY = [ 'performance_schema', 'binlog_format', 'wsrep_on' ];
+
 	/**
 	 * Creates the catalog for this destination.
 	 *
@@ -99,6 +108,8 @@ final readonly class SwapCatalog {
 		}
 		if ( $facts['mariadb'] ) {
 			$issues[] = 'write_locked_rename';
+		} else {
+			array_push( $issues, ...$this->settings() );
 		}
 		if ( [] !== $missing ) {
 			$issues[] = 'database_privileges';
@@ -145,6 +156,10 @@ final readonly class SwapCatalog {
 				$issues[] = 'live_object_identity';
 			}
 		}
+		if ( ! $facts['mariadb'] ) {
+			// Without PROCESS other accounts' sessions stay hidden, which dictionary_privilege reports.
+			array_push( $issues, ...$this->visibility( $facts['database'], ! in_array( 'dictionary_privilege', $issues, true ) ) );
+		}
 		return [
 			'facts'              => $facts,
 			'ids'                => $ids,
@@ -190,6 +205,137 @@ final readonly class SwapCatalog {
 		}
 		ksort( $ids, SORT_STRING );
 		return $ids;
+	}
+
+	/**
+	 * Names the settings of this session under which the exchange would fail only after the
+	 * full import, or would not hold its locks on every node. MySQL 8.4 warns when
+	 * binlog_format is read as a variable, so the values come from SHOW SESSION VARIABLES.
+	 *
+	 * @return list<string> Blocker codes, each named after its setting.
+	 */
+	public function settings(): array {
+		$values = array_column( $this->connection->rows( "SHOW SESSION VARIABLES WHERE Variable_name IN ('binlog_format','innodb_table_locks','log_bin','sql_log_bin','wsrep_on')" ), 'Value', 'Variable_name' );
+		$issues = [];
+		if ( 'ON' !== ( $values['innodb_table_locks'] ?? null ) ) {
+			// LOCK TABLES then takes no InnoDB table locks, and WriteBarrier refuses to start.
+			$issues[] = 'innodb_table_locks';
+		}
+		if ( 'ON' === ( $values['log_bin'] ?? null ) && 'ON' === ( $values['sql_log_bin'] ?? null ) && 'STATEMENT' === strtoupper( $values['binlog_format'] ?? '' ) ) {
+			// The protected copy's INSERT ... SELECT is unsafe for statement-based logging and
+			// returns note 1592, which this port refuses like any warning.
+			$issues[] = 'binlog_format';
+		}
+		if ( 'ON' === ( $values['wsrep_on'] ?? null ) ) {
+			// A Galera node takes LOCK TABLES for itself only.
+			$issues[] = 'wsrep_on';
+		}
+		return $issues;
+	}
+
+	/**
+	 * Lists the other sessions of this session's account whose default database is the
+	 * site's. WordPress selects that database right after connecting, so every request that
+	 * started before maintenance and still runs is listed. MySQL 8.4 warns about the
+	 * deprecated INFORMATION_SCHEMA.PROCESSLIST, also behind SHOW PROCESSLIST, and this port
+	 * refuses warnings. The Performance Schema table lists an account's own sessions even
+	 * without PROCESS, and nothing at all while the Performance Schema is disabled.
+	 *
+	 * @param string $database Site database.
+	 * @return list<string>|null Connection IDs in ascending order, without this session, or
+	 *                           null while the list cannot be shown to be complete, before
+	 *                           and after it was read.
+	 * @throws DatabaseFailed If the sessions cannot be listed, with the code performance_schema.
+	 */
+	public function sessions( string $database ): ?array {
+		$account = $this->account( $database );
+		if ( null === $account ) {
+			DatabaseFailed::raise( 'The Performance Schema does not list the sessions of the site database account.', [ 'code' => 'performance_schema' ] );
+		}
+		if ( ! $this->complete() ) {
+			return null;
+		}
+		$rows = $this->connection->rows( 'SELECT ID FROM performance_schema.processlist WHERE USER=' . Session::literal( $account ) . ' AND DB=' . Session::literal( $database ) . ' AND ID<>CONNECTION_ID() ORDER BY ID LIMIT ' . ( self::MAX_SESSIONS + 1 ) );
+		// A session that connected without a thread instance after the check above is missing
+		// from these rows. It is still connected now, so the check finds it afterwards.
+		if ( ! $this->complete() ) {
+			return null;
+		}
+		if ( count( $rows ) > self::MAX_SESSIONS ) {
+			DatabaseFailed::raise( 'Too many other sessions use the site database account.', [ 'code' => 'database_exchange_sessions' ] );
+		}
+		$ids = [];
+		foreach ( $rows as $row ) {
+			$id = $row['ID'] ?? '';
+			if ( 1 !== preg_match( '/\A[1-9][0-9]{0,19}\z/', $id ) ) {
+				throw new DatabaseFailed( 'The database session list is unreadable.' );
+			}
+			$ids[] = $id;
+		}
+		return $ids;
+	}
+
+	/**
+	 * The preflight's view of the session list that the drain relies on: this session must
+	 * be listed with the site's database, and the list must show every connection.
+	 *
+	 * @param string $database Site database.
+	 * @param bool   $all Whether this account can see other accounts' sessions.
+	 * @return list<string> The blocker performance_schema, or nothing.
+	 * @throws DatabaseFailed If an unexpected server error prevents the lookup.
+	 */
+	public function visibility( string $database, bool $all ): array {
+		return null === $this->account( $database ) || ( $all && ! $this->complete() ) ? [ 'performance_schema' ] : [];
+	}
+
+	/**
+	 * Whether the Performance Schema lists every connection of the server. A server out of
+	 * thread instances leaves later connections out of performance_schema.processlist while
+	 * Threads_connected counts them; on MySQL 8.4.11 such a session was missing for every
+	 * other session too, and FLUSH STATUS reset Performance_schema_thread_instances_lost, so
+	 * that counter proves nothing. A connection that opens or closes between the two counts
+	 * can spoil one reading, so three are taken. Needs PROCESS to count other accounts.
+	 * Every call asks the server again, so two calls can answer differently.
+	 *
+	 * @phpstan-impure
+	 * @return bool Whether at least as many sessions are listed as are connected.
+	 * @throws DatabaseFailed If the server reports unreadable counts.
+	 */
+	private function complete(): bool {
+		for ( $reading = 0; $reading < 3; ++$reading ) {
+			$row       = $this->connection->rows( "SELECT (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Threads_connected') AS connected,(SELECT COUNT(*) FROM performance_schema.processlist WHERE COMMAND<>'Daemon') AS listed" )[0] ?? [];
+			$connected = $row['connected'] ?? '';
+			$listed    = $row['listed'] ?? '';
+			if ( 1 !== preg_match( '/\A[0-9]{1,9}\z/', $connected ) || 1 !== preg_match( '/\A[0-9]{1,9}\z/', $listed ) ) {
+				throw new DatabaseFailed( 'The database server reported no readable session counts.' );
+			}
+			if ( (int) $listed >= (int) $connected ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Finds this session in the Performance Schema. Its database must be listed as well,
+	 * or a filter on the site's database would wait for nothing.
+	 *
+	 * @param string $database Site database.
+	 * @return string|null Account user name, or null if the sessions are not visible.
+	 * @throws DatabaseFailed If an unexpected server error prevents the lookup.
+	 */
+	private function account( string $database ): ?string {
+		try {
+			$own = $this->connection->rows( 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()' );
+		} catch ( DatabaseFailed $error ) {
+			// MySQL before 8.0.22 has no such table; a server can also deny access to it.
+			if ( ! in_array( $error->context()['code'] ?? null, [ 1044, 1142, 1146 ], true ) ) {
+				throw $error;
+			}
+			return null;
+		}
+		$account = $own[0]['account'] ?? '';
+		return 1 === count( $own ) && '' !== $account && $database === ( $own[0]['current_database'] ?? null ) ? $account : null;
 	}
 
 	/**

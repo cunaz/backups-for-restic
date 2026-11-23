@@ -212,8 +212,26 @@ The **database suite** dumps tables that exercise every code path (keyset and of
 paging, composite and missing keys, binary data, `BIT`, a latin1 column, NUL bytes, line
 breaks, quotes, emoji, a generated column, a view) with forced stops between pages, imports
 the files with the `mariadb` client exactly as the disaster-recovery guide says, and compares
-`CHECKSUM TABLE` results. The conformance suite's `BackupJobTest` runs the whole backup job
-without WordPress against a TLS rest-server and the database.
+`CHECKSUM TABLE` results. It also changes tables while they are dumped: rows deleted and
+inserted before the cursor for keys of every comparable type, a row deleted and inserted
+again within one tick, a table without a key, a column added between ticks and during one,
+and DDL that waits for the tick's metadata lock. It checks TIMESTAMP values across daylight
+saving time, a latin1 connection, definitions with Cyrillic, CJK and Nordic text and a row
+above 16 MiB. Each test names the connection it reads through. On the site's connection and
+on the dump's own run the import of every code path, a column added between ticks, a table
+without a key, the TIMESTAMP values, the latin1 connection, column names of digits only, a
+row limit left on the session, a table that another connection keeps locked and a table of
+rows of 3 MiB. Only on the dump's own run a row deleted and inserted again within one tick,
+DDL that waits for the metadata lock, a definition that changes at every tick and a row too
+large for the memory limit, which depend on its snapshot or its single read of a table
+without a key. Only on the site's connection run keys of every type and rows changed
+before the cursor, a DOUBLE key in exponent notation, resumed against uninterrupted dumps, a
+change within one tick, the row above 16 MiB and the definitions in other scripts.
+`DedicatedConnectionTest` checks the opening of the dump's own connection against a
+stand-in for `wpdb`, its encryption, the end of a table's transaction under every
+`completion_type`, a lock wait and an abandoned read. The conformance suite's
+`BackupJobTest` runs the whole backup job without WordPress against a TLS rest-server and
+the database.
 
 The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
 checksums, including invisible columns and expression defaults, and check that live tables
@@ -253,7 +271,10 @@ installed is skipped:
 
 - **`AccessTest`**: every route without credentials and as an editor; its list of routes is
   compared with what WordPress has registered, so a new route cannot go untested; the files
-  of the private directory are not served.
+  of the private directory are not served. The download of restored content needs the
+  WordPress password in the JSON body and the reports do not; wrong passwords of one user
+  are counted, slowed down, locked and reported to `wp_login_failed` while another user is
+  unaffected.
 - **`WordPressSiteTest`**: the wizard through the REST API against a TLS rest-server with its
   CA certificate, then a backup driven only by requests to `wp-cron.php`, `restic check
   --read-data`, a restore of the fixture's uploads directory, a database import with
@@ -269,7 +290,8 @@ installed is skipped:
   key replaced in `wp-config.php` and the two passwords entered again; repository
   requests that verify certificates while a must-use plugin switches verification off for
   the site (`bin/test-site-hostile-filters.php`); the probe of the private directory as a
-  browser makes it, on a site that the same file keeps from requesting itself; a setup
+  browser makes it, on a site that the same file keeps from requesting itself, where a
+  refusal counts only with the plugin's stylesheet requested beside it; a setup
   that is not completed, and a backup that does not run, while the private directory is
   served.
 - **`RestoreJobTest`**: after a backup of its own, a restore job started with `POST /jobs`
@@ -277,7 +299,10 @@ installed is skipped:
   and nothing that the web server hands out; invalid snapshot IDs and paths are refused
   with 400 and a code; a schedule slot that comes due while a restore is active stays
   unhandled and starts its backup once the restore has ended.
-- **`RestoreStagingTest`**: a finished restore is listed by `GET /restores` with what its
+- **`RestoreStagingTest`**: single-use downloads of a staged file, ZIP and report, the first
+  two only with the WordPress password and each recorded with user, job, kind and path; the
+  user that the restore job records; the deny files of `restores/` and of a staging
+  directory; a finished restore is listed by `GET /restores` with what its
   job recorded and `DELETE /restores/{id}` removes it, with 400, 404 and 409 for a name
   that is no job ID, a job without staging and a restore that has not ended; staging whose
   job document says it ended before the configured hours leaves the list, and a heartbeat
@@ -289,7 +314,8 @@ installed is skipped:
   to retention mode external without a deletion, backups that go on, the proposal to switch
   back, and no deletion until an administrator decides.
 - **`CliTest`**: the WP-CLI commands with a real, pinned WP-CLI
-  (`bin/install-test-tools.sh wp-cli`): `doctor`, `status`, `snapshots`, `backup`, `forget`,
+  (`bin/install-test-tools.sh wp-cli`): `doctor`, `status`, `snapshots` (with a host name of
+  control characters, which it quotes), `backup`, `forget`,
   `prune` and `check` with `--wait`, `tick --until-idle`, a second job that is refused,
   forget and prune that are refused in retention mode external, `settings` with the
   refusals of the settings page, and `cancel` and `logs` on a backup that is at work.
@@ -298,7 +324,8 @@ installed is skipped:
   is refused for the network and for one site, and a plugin that is active all the same
   registers no route, no cron event and no command, and shows its notice.
 - **`UninstallTest`**: what the Plugins screen runs on "Delete" leaves no option, transient,
-  cron event or file of the plugin, and the repository unchanged.
+  cron event or file of the plugin, and the repository unchanged; on a PHP older than 8.3
+  it refuses and removes nothing.
 
 `BFR_SITE_FIXTURE_MB` and `BFR_DB_FIXTURE_MB` set the fixture sizes (64 and 32 by default);
 the nightly CI run uses 2048 and 300. The tests that catch a backup in the middle add
@@ -644,8 +671,9 @@ for every point that applies, "not affected" for the others.
    in the URL. The requests to the site itself (the tick chain, the loopback test and the
    exposure probe) stay the only others.
 7. **WordPress surface.** Every REST route has a `permission_callback` that checks the
-   capability, and a route that returns a secret asks for the WordPress password again
-   ([security](03-security-and-threat-model.md) §5.5). Input is validated against
+   capability, and a route that returns a secret, or restored content that can decrypt
+   one, asks for the WordPress password again through the one shared check
+   (`WordPress\PasswordConfirmation`, [security](03-security-and-threat-model.md) §5.5). Input is validated against
    `Settings\Schema` and output is escaped. WP-CLI restricts recovery-kit delivery to
    the authorised, audited `recovery-kit` command. Redirected output requires `--force`.
 8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`

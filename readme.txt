@@ -25,11 +25,11 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * **Retention and maintenance.** Old snapshots are removed by a restic-compatible policy, data that no snapshot uses any more is deleted weekly, and a monthly check downloads and verifies a share of the stored data. Data in packs that still hold used data stays until a full `restic prune` from another computer; the dashboard shows how much that is.
 * **Append-only aware.** If your server is append-only, nobody who takes over the website can delete your backups. The plugin notices it, stops deleting, and tells you how to clean up from another computer.
 * **E-mail notifications** when a backup or a maintenance job (removing old snapshots, deleting unused data, the check) fails, when no backup succeeded for too long, when it works again, when a check finds damage, and when the plugin stops removing old snapshots because the server became append-only.
-* **Restore selected files.** Browse a snapshot and stage files in a private directory. Download a file, a ZIP archive or the restore report. Staging expires after 24 hours by default.
+* **Restore selected files.** Browse a snapshot and stage files in a private directory. Download a file, a ZIP archive or the restore report; a restored file or ZIP asks for your WordPress password, and each such download is recorded. Staging expires after 24 hours by default.
 * **Review before live changes.** Compare staged files with the receiving site, confirm the exact changes and undo eligible changes for 24 hours. WordPress startup files and configuration have a separate offline recovery procedure.
 * **Rehearse the database.** Verify snapshot tables in private shadow tables. On an eligible MySQL installation, confirm the table exchange and keep the destination administrator, site address and backup settings. MariaDB and incompatible schemas use the manual SQL import guide.
 * **Recovery kit.** One page with everything needed to restore without the website: repository address, passwords, the CA certificate of a server with its own certificate authority, and the exact restic commands.
-* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`, `ls`, `restore`, `apply-plan`). Use `undo` for a reviewed file reversal and `recovery-kit` for offline credentials. Setup and settings are done in the admin area.
+* **WP-CLI** commands that check the server, start backups and maintenance jobs, run their work in the terminal, show the status and list snapshots (`doctor`, `backup`, `forget`, `prune`, `check`, `tick`, `status`, `snapshots`, `ls`, `restore`, `apply-plan`). Use `undo` for a reviewed file reversal, `database-discard` to forget the private tables of a database restore that stayed on another database server, and `recovery-kit` for offline credentials. Setup and settings are done in the admin area.
 * **Site Health** checks and debug information.
 
 = Requirements =
@@ -38,6 +38,7 @@ What it writes is a normal restic repository. You can list, check and restore ev
 * At least 128 MB of free disk space for the plugin's working files.
 * Outbound HTTPS to the repository server.
 * For an existing repository in restic's format 2 with compressed data, the zstd PHP extension. Repositories that the plugin creates do not need it.
+* For applying restored files to the live site, the POSIX and intl PHP extensions are recommended: with them, the review checks file ownership and Unicode file names before any file is changed.
 * A restic REST server: your own [rest-server](https://github.com/restic/rest-server), or a hosted one.
 * Multisite networks are not supported yet.
 
@@ -76,7 +77,7 @@ Yes. Every backup is a normal restic repository. The recovery kit lists the comm
 
 = Can I restore from the WordPress admin area? =
 
-Yes. In **Backups > Snapshots**, select the files or directories you need. Download them from private staging, or review the file changes and confirm your site address and password to apply them. You can review an undo for 24 hours. On a replacement WordPress installation, connect with the recovery kit and select **Restore from an existing snapshot** to stage content, map uploads to their new location and rehearse the database import. The database report shows whether the destination supports a confirmed live table exchange and undo. MariaDB users can import the verified SQL into a separate database using the recovery guide. The recovery kit also works on a separate computer with the restic CLI.
+Yes. In **Backups > Snapshots**, select the files or directories you need. Download them from private staging, or review the file changes and confirm your site address and password to apply them. You can review an undo for 24 hours: it reverts every file that is still as the apply left it and keeps the files changed since. On a replacement WordPress installation, connect with the recovery kit and select **Restore from an existing snapshot** to stage content, map uploads to their new location and rehearse the database import. The database report shows whether the destination supports a confirmed live table exchange and undo. MariaDB users can import the verified SQL into a separate database using the recovery guide. The recovery kit also works on a separate computer with the restic CLI.
 
 = Why does the plugin use direct filesystem access? =
 
@@ -104,11 +105,11 @@ Set **Settings > Advanced > Processor use** to "Gentle". Jobs then work in short
 
 = Where are the passwords stored? =
 
-Encrypted in the database with a key derived from the security keys in `wp-config.php`, or, if you prefer, as constants in `wp-config.php`. They never appear in logs or URLs. The setup wizard shows the recovery kit once, right after it creates or connects the repository; later, viewing it in the admin area requires your WordPress password. A shell operator can export it with `wp backups-for-restic recovery-kit`. Each delivery records the time and account.
+Encrypted in the database with a key derived from the security keys in `wp-config.php`, or, if you prefer, as constants in `wp-config.php`. They never appear in logs or URLs. The setup wizard shows the recovery kit once, right after it creates or connects the repository; later, viewing it in the admin area requires your WordPress password, and so does downloading restored files, which can contain `wp-config.php` and the database. Repeated wrong passwords make the next attempt wait, up to an hour, and are reported to login limiters as failed logins. A shell operator can export the kit with `wp backups-for-restic recovery-kit`. Each delivery and each download of restored files records the time and account.
 
 = What happens to my backups when I uninstall the plugin? =
 
-Nothing. Uninstalling removes the plugin's settings, passwords and working files from the website, also from a working directory that was chosen with the `BACKUPS_FOR_RESTIC_PRIVATE_DIR` constant or the `backups_for_restic_private_dir` filter. The repository on the server is never touched and stays restorable with the recovery kit.
+Nothing. Uninstalling removes the plugin's settings, passwords and working files from the website, also from a working directory that was chosen with the `BACKUPS_FOR_RESTIC_PRIVATE_DIR` constant or the `backups_for_restic_private_dir` filter. The repository on the server is never touched and stays restorable with the recovery kit. On a PHP version older than 8.3 the plugin cannot clean up, so deleting it stops with a message: switch back to PHP 8.3 or later first.
 
 = Is multisite supported? =
 

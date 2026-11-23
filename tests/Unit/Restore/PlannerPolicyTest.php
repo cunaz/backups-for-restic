@@ -11,6 +11,7 @@ use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\DirectorySpellings;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class PlannerPolicyTest extends TestCase {
@@ -47,6 +48,157 @@ final class PlannerPolicyTest extends TestCase {
 			file_put_contents( $this->staged . $path, 'stage' );
 			self::assertSame( 'create', $plan->inspect( $this->files, $this->live . $path )['action'] );
 		}
+	}
+
+	public function test_bootstrap_and_private_locations_are_protected_in_every_spelling_of_a_canonical_target(): void {
+		mkdir( $this->live . '/content/private', 0700, true );
+		mkdir( $this->live . '/content/advanced' );
+		symlink( $this->live . '/content', $this->root . '/content-link' );
+		symlink( '/', $this->root . '/top' );
+		$missing = '/bfr-missing-' . bin2hex( random_bytes( 6 ) );
+		$plan    = new ApplyPlan(
+			[ $this->live ],
+			[ $this->live . '//content//private/', $this->root . '/top' . $missing . '/state' ],
+			[],
+			false,
+			null,
+			[
+				// WP_CONTENT_DIR with a trailing slash makes WordPress derive WPMU_PLUGIN_DIR with "//".
+				$this->live . '/content//mu-plugins',
+				$this->live . '/content/must-use/',
+				// Drop-ins and directories named through a link, whether they exist or not.
+				$this->root . '/content-link/object-cache.php',
+				$this->root . '/content-link/advanced',
+				$this->root . '/content-link/private',
+			]
+		);
+		foreach ( [ '/content/mu-plugins', '/content/MU-PLUGINS/loader.php', '/content/must-use', '/content/must-use/loader.php', '/content/object-cache.php', '/content/advanced/cache.php' ] as $suffix ) {
+			self::assertSame( 'offline_restore_required', $plan->inspect( $this->files, $this->live . $suffix )['reason'], $suffix );
+		}
+		foreach ( [ '/content/must-useful', '/content/object-cache.php.bak', '/content/advanced-cache.php' ] as $suffix ) {
+			self::assertSame( 'missing_or_linked_source', $plan->inspect( $this->files, $this->live . $suffix )['reason'], $suffix );
+		}
+		// The configured spelling stays protected as well, although it can never be written.
+		self::assertSame( 'offline_restore_required', $plan->inspect( $this->files, $this->root . '/content-link/object-cache.php' )['reason'] );
+		// A location listed twice keeps the reason it was listed with first.
+		self::assertSame( 'protected', $plan->inspect( $this->files, $this->live . '/content/private/spool' )['reason'] );
+		self::assertSame( 'offline_restore_required', $plan->inspect( $this->files, $this->root . '/content-link/private' )['reason'] );
+		// A link to the filesystem root resolves to the root itself.
+		self::assertSame( 'protected', $plan->inspect( $this->files, $missing . '/state/key' )['reason'] );
+		self::assertSame( 'outside_roots', $plan->inspect( $this->files, $missing . '/stateful' )['reason'] );
+	}
+
+	public function test_a_protected_location_that_is_not_a_plain_absolute_path_refuses_the_plan(): void {
+		foreach ( [ 'wp-content/mu-plugins', $this->live . '/../mu-plugins', $this->live . '/./mu-plugins', '/', '', $this->live . "/mu\0plugins" ] as $location ) {
+			foreach ( [ [ [ $location ], [], [] ], [ [], [ $location ], [] ], [ [], [], [ $location ] ] ] as [ $excluded, $config, $bootstrap ] ) {
+				try {
+					new ApplyPlan( [ $this->live ], $excluded, $config, false, null, $bootstrap );
+					self::fail( 'A plan was built that cannot protect ' . $location );
+				} catch ( InvalidArgument $error ) {
+					self::assertSame( 'protected_path_invalid', $error->context()['code'] ?? null, $location );
+					self::assertSame( 'A location that file apply protects is not an absolute path without dot segments.', $error->getMessage() );
+				}
+			}
+		}
+		// A location that is a link to the filesystem root would cover every path.
+		symlink( '/', $this->root . '/top' );
+		foreach ( [ $this->root . '/top', $this->root . '/top/' ] as $location ) {
+			try {
+				new ApplyPlan( [ $this->live ], [ $location ] );
+				self::fail( 'A plan was built with a protected location that resolves to the root.' );
+			} catch ( InvalidArgument $error ) {
+				self::assertSame( 'protected_path_invalid', $error->context()['code'] ?? null );
+				self::assertSame( 'A location that file apply protects resolves to the filesystem root.', $error->getMessage() );
+			}
+		}
+		// A configuration file that the review includes is not protected, so it is not checked.
+		self::assertSame( 'live_root', ( new ApplyPlan( [ $this->live ], [], [ 'wp-config.php' ], true ) )->inspect( $this->files, $this->live )['reason'] );
+	}
+
+	/**
+	 * @return iterable<string, array{bool}>
+	 */
+	public static function normalizers(): iterable {
+		yield 'with intl' => [ true ];
+		yield 'without intl' => [ false ];
+	}
+
+	#[DataProvider( 'normalizers' )]
+	public function test_protected_names_are_compared_as_loosely_as_case_insensitive_filesystems_compare_them( bool $normalizer ): void {
+		if ( $normalizer && ! class_exists( \Normalizer::class ) ) {
+			self::markTestSkipped( 'The intl extension is not loaded.' );
+		}
+		$plan     = new ApplyPlan( [ $this->live ], [ $this->live . '/plugins/backups-for-restic', $this->live . '/privé', $this->live . "/\xff-dir", $this->live . '/a;b' ], [ $this->live . '/wp-config.php' ], false, null, [ $this->live . '/mu-plugins', $this->live . '/.htaccess' ], false, $normalizer );
+		$expected = [
+			// Full case folding, as ext4 and f2fs casefolding apply it.
+			'/WP-CONFIG.PHP'                       => 'protected',
+			"/wp-con\u{FB01}g.php"                 => 'protected',
+			"/plugins/backups-for-re\u{FB06}ic/x"  => 'protected',
+			"/plugins/backups-for-re\u{FB05}ic"    => 'protected',
+			"/plugins/bac\u{212A}ups-for-restic/x" => 'protected',
+			"/mu-plugin\u{017F}/loader.php"        => 'offline_restore_required',
+			"/.htacce\u{00DF}"                     => 'offline_restore_required',
+			// Characters that HFS+ and older casefolding kernels ignore.
+			"/wp-con\u{200C}fig.php"               => 'protected',
+			"/mu-\u{FEFF}plugins/loader.php"       => 'offline_restore_required',
+			// NTFS and SMB uppercase a dotless i to I; decomposition maps the Greek question mark.
+			"/wp-conf\u{0131}g.php"                => 'protected',
+			"/a\u{037E}b/c"                        => 'protected',
+			// Names without valid UTF-8 differ only in ASCII case.
+			"/\xFF-DIR/x"                          => 'protected',
+			"/\xfe-dir/x"                          => 'missing_or_linked_source',
+			// The same spelling needs no normalization.
+			'/privé/key'                           => 'protected',
+			// Neighbours stay ordinary names.
+			'/wp-config.php.bak'                   => 'missing_or_linked_source',
+			"/wp-con\u{FB02}g.php"                 => 'missing_or_linked_source',
+			'/plugins/backups-for-restic-old/x'    => 'missing_or_linked_source',
+			// One name with a fullwidth solidus, which normalization turns into a slash, is not two names.
+			"/plugins\u{FF0F}backups-for-restic/x" => 'missing_or_linked_source',
+			"/mu-plugins\u{FF0F}loader.php"        => 'missing_or_linked_source',
+			"/uploads/caf\u{00E9}.jpg"             => 'missing_or_linked_source',
+		];
+		// Compatibility and canonical equivalence need intl; without it, two names that both
+		// keep other characters are refused rather than guessed.
+		$expected["/prive\u{0301}/key"]    = $normalizer ? 'protected' : 'unverified_name';
+		$expected['/wp-config.ｐｈｐ']        = $normalizer ? 'protected' : 'missing_or_linked_source';
+		$expected["/priv\u{00E8}/key"]     = $normalizer ? 'missing_or_linked_source' : 'unverified_name';
+		$expected["/priv\u{00E9}\u{00E9}"] = $normalizer ? 'missing_or_linked_source' : 'unverified_name';
+		// What canonical equivalence leaves alone still tells other names apart.
+		$expected["/pr\u{00EF}vate/key"] = 'missing_or_linked_source';
+		$expected["/caf\u{00E9}/key"]    = 'missing_or_linked_source';
+		foreach ( $expected as $suffix => $reason ) {
+			$entry = $plan->inspect( $this->files, $this->live . $suffix );
+			self::assertSame( $reason, $entry['reason'], $suffix );
+			self::assertSame( in_array( $reason, [ 'unverified_name', 'missing_or_linked_source' ], true ) ? 'refuse' : 'skip', $entry['action'], $suffix );
+		}
+		// Outside the live roots nothing is written, so an uncertain name needs no refusal.
+		$outside = new ApplyPlan( [ $this->live ], [ $this->root . '/privé' ], [], false, null, [], false, $normalizer );
+		self::assertSame( $normalizer ? 'protected' : 'outside_roots', $outside->inspect( $this->files, $this->root . "/prive\u{0301}/key" )['reason'] );
+		self::assertSame( 'outside_roots', $outside->inspect( $this->files, $this->root . "/priv\u{00EA}/key" )['reason'] );
+		// A name that keeps other characters never equals an ASCII name, in either direction,
+		// and a parent directory of a protected path is not protected itself.
+		$nested = new ApplyPlan( [ $this->live ], [ $this->live . '/priv', $this->live . '/café/deep' ], [], false, null, [], false, $normalizer );
+		foreach ( [ "/priv\u{00E9}/key", "/caf/\u{00E9}", "/cafe\u{0301}", "/caf\u{00E9}" ] as $suffix ) {
+			self::assertSame( 'missing_or_linked_source', $nested->inspect( $this->files, $this->live . $suffix )['reason'], $suffix );
+		}
+		self::assertSame( $normalizer ? 'protected' : 'unverified_name', $nested->inspect( $this->files, $this->live . "/cafe\u{0301}/deep/x" )['reason'] );
+	}
+
+	public function test_names_that_read_as_dot_entries_without_invisible_characters_are_refused(): void {
+		$plan = new ApplyPlan( [ $this->live ], [] );
+		foreach ( [ "/\u{200B}", "/\u{FEFF}.", "/..\u{200D}", "/x/\u{2060}\u{00AD}../y" ] as $suffix ) {
+			self::assertSame( 'invalid_path', $plan->inspect( $this->files, $this->live . $suffix )['reason'], bin2hex( $suffix ) );
+		}
+		foreach ( [ "/a\u{200B}b", "/\u{200B}.php", '/...' ] as $suffix ) {
+			self::assertSame( 'missing_or_linked_source', $plan->inspect( $this->files, $this->live . $suffix )['reason'], bin2hex( $suffix ) );
+		}
+	}
+
+	public function test_names_are_normalized_wherever_the_intl_extension_is_loaded(): void {
+		$plan   = new ApplyPlan( [ $this->live ], [ $this->live . '/privé' ] );
+		$reason = $plan->inspect( $this->files, $this->live . "/prive\u{0301}/key" )['reason'];
+		self::assertSame( class_exists( \Normalizer::class ) ? 'protected' : 'unverified_name', $reason );
 	}
 
 	public function test_roots_and_staging_are_checked_again_after_the_plan_was_created(): void {
@@ -184,6 +336,108 @@ final class PlannerPolicyTest extends TestCase {
 		new ApplyPlan( [ $this->live ], [], [], true, $layout );
 	}
 
+	public function test_a_plan_maps_a_snapshot_path_only_to_the_live_path_that_its_layout_gives_it(): void {
+		// Without a layout every path is its own live path.
+		$plain = new ApplyPlan( [ $this->live ], [] );
+		self::assertTrue( $plain->maps( $this->live . '/file', $this->live . '/file' ) );
+		self::assertFalse( $plain->maps( $this->live . '/file', $this->live . '/other' ) );
+		// A fresh site maps the snapshot's content tree into the receiving one, and the snapshot's
+		// uploads into the receiving uploads tree, which lies in the receiving content tree.
+		$snapshot  = str_repeat( 'c', 64 );
+		$job       = new Job( '20270115T030000Z-abcdef', JobType::Restore, 'manual', 1800000000 );
+		$job->data = [
+			'fresh_install' => true,
+			'snapshot'      => $snapshot,
+			'site_layout'   => SiteLayout::bind(
+				$snapshot,
+				[
+					'database' => true,
+					'content'  => '/old/content',
+					'uploads'  => '/media/files',
+				],
+				'/old/private/spool/manifest.json'
+			),
+		];
+		$layout    = SiteLayout::from_job( $job, $this->live, $this->live . '/uploads' );
+		self::assertNotNull( $layout );
+		$plan = new ApplyPlan( [ $this->live ], [], [], false, $layout );
+		self::assertTrue( $plan->maps( '/old/content/themes/site', $this->live . '/themes/site' ) );
+		self::assertTrue( $plan->maps( '/media/files/2026/photo.jpg', $this->live . '/uploads/2026/photo.jpg' ) );
+		self::assertFalse( $plan->maps( '/old/content/themes/site', '/old/content/themes/site' ) );
+		self::assertFalse( $plan->maps( '/old/content/themes/site', $this->live . '/themes/other' ) );
+		// A path outside both trees maps to no live path.
+		self::assertNull( $plan->destination( '/old/private/archive' ) );
+		self::assertFalse( $plan->maps( '/old/private/archive', $this->live . '/private/archive' ) );
+		// The layout refuses a content path that would land in the receiving uploads tree, whose
+		// files come from the snapshot's uploads, and a path that is not a snapshot path. Both
+		// map to no live path, also not to the one that a projection of the path would give.
+		$refused = [
+			'/old/content/uploads/2026/photo.jpg' => [ $this->live . '/uploads/2026/photo.jpg', 'Two snapshot locations would map to the same live file.' ],
+			'/old/content/../content/themes/site' => [ $this->live . '/themes/site', 'The snapshot path contains an empty, dot or parent component.' ],
+			'old/content/themes/site'             => [ $this->live . '/themes/site', 'Use an absolute path inside the snapshot, at most 4096 bytes long.' ],
+		];
+		foreach ( $refused as $path => [ $target, $refusal ] ) {
+			try {
+				$plan->destination( $path );
+				self::fail( 'The layout must refuse ' . $path );
+			} catch ( InvalidArgument $error ) {
+				self::assertSame( $refusal, $error->getMessage() );
+			}
+			self::assertFalse( $plan->maps( $path, $target ), $path );
+		}
+	}
+
+	public function test_a_fresh_site_never_maps_a_spool_into_its_content(): void {
+		$snapshot  = str_repeat( 'b', 64 );
+		$job       = new Job( '20270115T030000Z-abcdef', JobType::Restore, 'manual', 1800000000 );
+		$job->data = [
+			'fresh_install' => true,
+			'snapshot'      => $snapshot,
+			'site_layout'   => SiteLayout::bind(
+				$snapshot,
+				[
+					'database' => true,
+					'content'  => '/old/content',
+					'uploads'  => '/old/content/uploads',
+				],
+				'/old/private/spool/manifest.json'
+			),
+		];
+		$layout    = SiteLayout::from_job( $job, $this->live, $this->live . '/uploads' );
+		self::assertNotNull( $layout );
+		$plan = new ApplyPlan( [ $this->live ], [], [], false, $layout );
+		// The snapshot's own spool, and a copy that an earlier apply left in the content tree.
+		foreach ( [ '/old/private/spool', '/old/content/backups-for-restic/spool' ] as $spool ) {
+			mkdir( $this->files . $spool . '/database', 0700, true );
+			file_put_contents( $this->files . $spool . '/database/010-wp_users.sql', "-- backups-for-restic-dump/1 table `wp_users`\nINSERT INTO `wp_users` VALUES (1);\n" );
+		}
+		file_put_contents( $this->files . '/old/content/theme.css', 'body {}' );
+		$rows = array_column( iterator_to_array( $plan->actions( $this->files ) ), null, 'path' );
+		self::assertSame( 'create', $rows['/old/content/theme.css']['action'] );
+		self::assertSame( 'mkdir', $rows['/old/content/backups-for-restic']['action'] );
+		self::assertSame( 'outside_roots', $rows['/old/private']['reason'] );
+		self::assertArrayNotHasKey( '/old/private/spool', $rows );
+		self::assertSame(
+			[
+				'path'        => '/old/private/spool/database',
+				'destination' => null,
+				'action'      => 'skip',
+				'reason'      => 'snapshot_spool',
+			],
+			$plan->inspect( $this->files, '/old/private/spool/database' )
+		);
+		self::assertSame(
+			[
+				'path'        => '/old/content/backups-for-restic/spool',
+				'destination' => $this->live . '/backups-for-restic/spool',
+				'action'      => 'skip',
+				'reason'      => 'snapshot_spool',
+			],
+			$rows['/old/content/backups-for-restic/spool']
+		);
+		self::assertSame( 'snapshot_spool', $plan->inspect( $this->files, '/old/content/backups-for-restic/spool/database/010-wp_users.sql' )['reason'] );
+	}
+
 	public function test_live_links_pipes_and_executable_files_receive_the_exact_policy_decision(): void {
 		$plan   = new ApplyPlan( [ $this->live ], [] );
 		$target = $this->live . '/service';
@@ -199,6 +453,117 @@ final class PlannerPolicyTest extends TestCase {
 		touch( $target );
 		chmod( $target, 0755 );
 		self::assertSame( 'existing_file', $plan->inspect( $this->files, $target )['reason'] );
+	}
+
+	public function test_a_replacement_is_refused_when_the_apply_could_not_keep_owner_group_or_mode(): void {
+		$target = $this->live . '/deployed.php';
+		file_put_contents( $this->staged . '/deployed.php', 'restored' );
+		file_put_contents( $target, 'live' );
+		clearstatcache( true );
+		$stat = lstat( $target );
+		self::assertIsArray( $stat );
+		$decide = fn ( array|false $process ): string => ( new ApplyPlan( [ $this->live ], [], [], false, null, [], $process ) )->inspect( $this->files, $target )['reason'];
+		// Files deployed by another user: the apply would create its copy as itself.
+		self::assertSame( 'foreign_owner', $decide( self::writer( $stat['uid'] + 1, null ) ) );
+		// A group the process is not a member of, and that it could not give the copy.
+		self::assertSame( 'foreign_group', $decide( self::writer( $stat['uid'], [ $stat['gid'] + 1 ] ) ) );
+		self::assertSame( 'existing_file', $decide( self::writer( $stat['uid'], [ $stat['gid'] + 1, $stat['gid'] ] ) ) );
+		// Root can give any group to a file it owns.
+		self::assertSame( 'existing_file', $decide( self::writer( $stat['uid'], null ) ) );
+		// Without the POSIX extension the identity is unknown; the apply checks before each replacement.
+		self::assertSame( 'existing_file', $decide( false ) );
+		self::assertSame( 'refuse', ( new ApplyPlan( [ $this->live ], [], [], false, null, [], self::writer( $stat['uid'] + 1, null ) ) )->inspect( $this->files, $target )['action'] );
+		// The apply never replaces a file with setuid, setgid or sticky bits.
+		foreach ( [ 04644, 02644, 01644 ] as $mode ) {
+			chmod( $target, $mode );
+			clearstatcache( true );
+			if ( ( lstat( $target )['mode'] & 07777 ) !== $mode ) {
+				continue;
+			}
+			self::assertSame( 'special_permissions', $decide( false ), sprintf( '%o', $mode ) );
+			self::assertSame( 'special_permissions', $decide( self::writer( $stat['uid'] + 1, null ) ), sprintf( '%o', $mode ) );
+		}
+		chmod( $target, 04644 );
+		clearstatcache( true );
+		self::assertSame( 04644, lstat( $target )['mode'] & 07777, 'The owner can always set the setuid bit.' );
+		// A new file has no owner to keep; only its directory must be writable.
+		file_put_contents( $this->staged . '/new.php', 'new' );
+		self::assertSame( 'missing_destination', ( new ApplyPlan( [ $this->live ], [], [], false, null, [], self::writer( $stat['uid'] + 1, [] ) ) )->inspect( $this->files, $this->live . '/new.php' )['reason'] );
+	}
+
+	public function test_the_writing_identity_comes_from_the_posix_extension(): void {
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			self::assertFalse( ApplyPlan::process() );
+			return;
+		}
+		$groups = posix_getgroups();
+		self::assertIsArray( $groups );
+		$member = 0 === posix_geteuid() ? null : array_merge( [ posix_getegid() ], $groups );
+		self::assertSame(
+			[
+				'uid'    => posix_geteuid(),
+				'groups' => $member,
+			],
+			ApplyPlan::process()
+		);
+		// The apply builds its copies in the private directory. Below a setgid directory a new
+		// file takes the directory's group, also one the user is not a member of.
+		$storage = stat( $this->root );
+		self::assertIsArray( $storage );
+		self::assertSame(
+			[
+				'uid'    => posix_geteuid(),
+				'groups' => null === $member ? null : array_merge( $member, [ $storage['gid'] ] ),
+			],
+			ApplyPlan::process( $this->root )
+		);
+		// Something that is not a directory adds no group.
+		file_put_contents( $this->root . '/file', '' );
+		self::assertSame( ApplyPlan::process(), ApplyPlan::process( $this->root . '/missing' ) );
+		self::assertSame( ApplyPlan::process(), ApplyPlan::process( $this->root . '/file' ) );
+		// The default identity is this process, which owns the files the tests create.
+		file_put_contents( $this->staged . '/own.php', 'restored' );
+		file_put_contents( $this->live . '/own.php', 'live' );
+		self::assertSame( 'existing_file', ( new ApplyPlan( [ $this->live ], [] ) )->inspect( $this->files, $this->live . '/own.php' )['reason'] );
+	}
+
+	public function test_a_host_that_disables_one_posix_function_has_no_known_identity(): void {
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			self::markTestSkipped( 'The POSIX extension is not loaded.' );
+		}
+		// PHP leaves a disabled function undefined, which only another process can show.
+		$code = 'require ' . var_export( dirname( __DIR__, 2 ) . '/bootstrap.php', true ) . '; echo json_encode( \\BackupsForRestic\\Restore\\ApplyPlan::process( sys_get_temp_dir() ) );';
+		foreach ( [ 'posix_geteuid', 'posix_getegid', 'posix_getgroups' ] as $function ) {
+			$process = proc_open(
+				[ PHP_BINARY, '-d', 'disable_functions=' . $function, '-r', $code ],
+				[
+					1 => [ 'pipe', 'w' ],
+					2 => [ 'pipe', 'w' ],
+				],
+				$pipes
+			);
+			self::assertIsResource( $process );
+			$output = stream_get_contents( $pipes[1] );
+			$errors = stream_get_contents( $pipes[2] );
+			fclose( $pipes[1] );
+			fclose( $pipes[2] );
+			self::assertSame( 0, proc_close( $process ), $function . ': ' . $errors );
+			self::assertSame( 'false', $output, $function );
+		}
+	}
+
+	/**
+	 * An identity that writes the replacements.
+	 *
+	 * @param int            $uid    Effective user.
+	 * @param list<int>|null $groups Groups it can give a file, null for any.
+	 * @return array{uid: int, groups: list<int>|null} Identity.
+	 */
+	private static function writer( int $uid, ?array $groups ): array {
+		return [
+			'uid'    => $uid,
+			'groups' => $groups,
+		];
 	}
 
 	public function test_comparing_an_unreadable_regular_file_reports_the_comparison_failure(): void {

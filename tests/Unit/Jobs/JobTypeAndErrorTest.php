@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Unit\Jobs;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Exception\AppendOnlyRefused;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
 use BackupsForRestic\Exception\InvalidArgument;
@@ -89,11 +90,21 @@ final class JobTypeAndErrorTest extends TestCase {
 		yield 'damage' => [ new FormatException( 'damaged', [ 'code' => 'repository_damaged' ] ), 'repository_damaged' ];
 		yield 'online file review capacity' => [ new InvalidArgument( 'too large', [ 'code' => 'file_plan_too_large' ] ), 'file_plan_too_large' ];
 		yield 'no snapshots' => [ new InvalidArgument( 'empty', [ 'code' => 'no_snapshots' ] ), 'no_snapshots' ];
+		yield 'a protected location without a plain path' => [ new InvalidArgument( 'invalid', [ 'code' => 'protected_path_invalid' ] ), 'protected_path_invalid' ];
 		yield 'other context codes do not override' => [ new InvalidArgument( 'bad', [ 'code' => 'something_else' ] ), 'configuration' ];
 	}
 
 	#[DataProvider( 'errors' )]
 	public function test_error_codes( \Throwable $error, string $code ): void {
 		self::assertSame( $code, JobError::from_throwable( $error )->code );
+	}
+
+	public function test_sessions_that_outlast_maintenance_are_retried_but_a_hidden_session_list_is_not(): void {
+		$sessions = JobError::from_throwable( new DatabaseFailed( 'open', [ 'code' => 'database_exchange_sessions' ] ) );
+		self::assertSame( 'database_exchange_sessions', $sessions->code );
+		self::assertTrue( $sessions->retryable );
+		$hidden = JobError::from_throwable( new DatabaseFailed( 'hidden', [ 'code' => 'performance_schema' ] ) );
+		self::assertSame( 'performance_schema', $hidden->code );
+		self::assertFalse( $hidden->retryable );
 	}
 }

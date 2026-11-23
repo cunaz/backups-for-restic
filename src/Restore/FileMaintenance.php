@@ -18,6 +18,15 @@ defined( 'ABSPATH' ) || exit;
 /** Publishes its marker exclusively and leaves another updater's marker untouched. */
 final readonly class FileMaintenance {
 
+	/** Readable by every PHP process of the site, as core's own marker is. */
+	private const int MODE = 0644;
+
+	/** Largest marker the job publishes and later removes. */
+	private const int MAX_BYTES = 8192;
+
+	/** Longest wait in a request for OPcache to notice a marker that it would not drop. */
+	private const int MAX_STALE_SECONDS = 5;
+
 	/**
 	 * Names the live WordPress root.
 	 *
@@ -36,7 +45,7 @@ final readonly class FileMaintenance {
 	 * @param string $id Job ID.
 	 * @param string $directory Private job directory.
 	 * @param string $grant SHA-256 of the scoped control token, empty for CLI.
-	 * @throws StorageFailed If the job cannot take or refresh maintenance.
+	 * @throws StorageFailed If the job cannot take or refresh maintenance, or this server could keep running an earlier marker.
 	 */
 	public function enter( string $id, string $directory, string $grant ): void {
 		$this->require_directory( $id, $directory );
@@ -45,35 +54,49 @@ final readonly class FileMaintenance {
 		}
 		$marker = $this->root . '/.maintenance';
 		$temp   = $directory . '/maintenance.php';
+		$proof  = $directory . '/maintenance.sha256';
 		clearstatcache( true );
-		$gate = dirname( __DIR__ ) . '/WordPress/FileMaintenanceGate.php';
-		// Every value comes from the authorized job or site configuration. var_export
-		// produces PHP string literals even when a path contains quote characters.
-		// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generate quoted PHP literals for the core maintenance file.
-		$args   = array_map( static fn ( string $value ): string => var_export( $value, true ), [ $id, $grant, $this->plugin, $this->api, $this->admin ] );
-		$script = '<?php $upgrading = (float) filemtime(__FILE__); if (is_file(' . var_export( $gate, true ) . ')) { require_once ' . var_export( $gate, true ) . '; $upgrading = \BackupsForRestic\WordPress\FileMaintenanceGate::stamp(' . implode( ',', $args ) . ',(int) $upgrading); }' . "\n";
-		// phpcs:enable WordPress.PHP.DevelopmentFunctions.error_log_var_export
-		$proof = $directory . '/maintenance.sha256';
 		if ( ! is_file( $temp ) ) {
 			if ( file_exists( $marker ) || is_link( $marker ) ) {
 				throw new StorageFailed( 'Another updater owns the maintenance marker.' );
 			}
-
+			// The marker is rendered once, by the job's first tick. Later ticks boot under it,
+			// without the theme and ordinary plugins, whose filters can change these URLs.
+			$gate = dirname( __DIR__ ) . '/WordPress/FileMaintenanceGate.php';
+			// Every value comes from the authorized job or site configuration. var_export
+			// produces PHP string literals even when a path contains quote characters.
+			// phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generate quoted PHP literals for the core maintenance file.
+			$args   = array_map( static fn ( string $value ): string => var_export( $value, true ), [ $id, $grant, $this->plugin, $this->api, $this->admin ] );
+			$script = '<?php $upgrading = (float) filemtime(__FILE__); if (is_file(' . var_export( $gate, true ) . ')) { require_once ' . var_export( $gate, true ) . '; $upgrading = \BackupsForRestic\WordPress\FileMaintenanceGate::stamp(' . implode( ',', $args ) . ',(int) $upgrading); }' . "\n";
+			// phpcs:enable WordPress.PHP.DevelopmentFunctions.error_log_var_export
 			Files::write_atomic( $proof, hash( 'sha256', $script ) );
 			Files::write_atomic( $temp, $script );
 		}
-		$ours = is_file( $temp ) && ! is_link( $temp ) ? lstat( $temp ) : false;
-		if ( false === $ours || 0100000 !== ( $ours['mode'] & 0170000 ) || strlen( $script ) !== $ours['size'] || ! hash_equals( hash( 'sha256', $script ), (string) hash_file( 'sha256', $temp ) ) ) {
+		$expected = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
+		$ours     = is_file( $temp ) && ! is_link( $temp ) ? lstat( $temp ) : false;
+		if ( ! is_string( $expected ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $expected ) || false === $ours || 0100000 !== ( $ours['mode'] & 0170000 ) || $ours['size'] >= self::MAX_BYTES || ! hash_equals( $expected, (string) hash_file( 'sha256', $temp ) ) ) {
 			throw new StorageFailed( 'The private maintenance marker is unavailable.' );
 		}
-		if ( ! file_exists( $marker ) && ! is_link( $marker ) && ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) ) {
-			throw new StorageFailed( 'Maintenance requires writable WordPress and private storage on the same filesystem.' );
+		// Core reads the marker in every request, also in PHP processes of other system
+		// users, and writes its own marker readable for all of them. This one holds no
+		// secret: the grant is a hash. It is the same inode as the private copy, which the
+		// owner-only job directory keeps out of reach.
+		if ( self::MODE !== ( $ours['mode'] & 0777 ) && ! chmod( $temp, self::MODE ) ) {
+			throw new StorageFailed( 'The maintenance marker could not be made readable.' );
+		}
+		$linked = false;
+		if ( ! file_exists( $marker ) && ! is_link( $marker ) ) {
+			if ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) {
+				throw new StorageFailed( 'Maintenance requires writable WordPress and private storage on the same filesystem.' );
+			}
+			$linked = true;
 		}
 		clearstatcache( true );
 		$active = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
 		if ( false === $active || $ours['dev'] !== $active['dev'] || $ours['ino'] !== $active['ino'] || ! touch( $temp ) ) {
 			throw new StorageFailed( 'The active WordPress maintenance marker has changed.' );
 		}
+		self::refresh( $marker, $linked );
 	}
 
 	/**
@@ -95,15 +118,83 @@ final readonly class FileMaintenance {
 		$ours      = lstat( $temp );
 		$proof     = $directory . '/maintenance.sha256';
 		$expected  = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
-		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < 8192 && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
+		$unchanged = is_string( $expected ) && false !== $ours && $ours['size'] < self::MAX_BYTES && hash_equals( $expected, (string) hash_file( 'sha256', $temp ) );
 		$active    = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
-		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] && ! unlink( $marker ) ) {
-			throw new StorageFailed( 'The site could not leave maintenance mode.' );
+		if ( $unchanged && false !== $active && $ours['dev'] === $active['dev'] && $ours['ino'] === $active['ino'] ) {
+			// OPcache finds a cached script only while its file exists. A refusal does not keep
+			// the site in maintenance: the next marker is checked when it is published.
+			if ( null !== self::opcode_cache() ) {
+				self::invalidate( $marker );
+			}
+			if ( ! unlink( $marker ) ) {
+				throw new StorageFailed( 'The site could not leave maintenance mode.' );
+			}
 		}
 		if ( ! unlink( $temp ) ) {
 			throw new StorageFailed( 'The private maintenance marker could not be removed.' );
 		}
 	}
+
+	/**
+	 * Makes this server's opcode cache run the marker just verified. Every job publishes its
+	 * marker under the same name, so the cache can still hold an earlier job's marker, or
+	 * core's own from a past update, whose old time ends maintenance while files change. A
+	 * command-line process checks only its own cache, which says nothing about the web
+	 * server's.
+	 *
+	 * @param string $marker Live marker path.
+	 * @param bool   $linked Whether this call published the marker.
+	 * @throws StorageFailed If OPcache refused and could keep running an earlier marker.
+	 */
+	private static function refresh( string $marker, bool $linked ): void {
+		$cache = self::opcode_cache();
+		if ( null === $cache || self::invalidate( $marker ) ) {
+			return;
+		}
+		// opcache.restrict_api refused the call. Without timestamp checks the server runs the
+		// compiled earlier marker for as long as it runs.
+		$wait = $cache['revalidate'] + 1;
+		if ( ! $cache['validate'] || $wait > self::MAX_STALE_SECONDS ) {
+			StorageFailed::raise( 'OPcache refused to invalidate the maintenance marker and could keep running an earlier one.', [ 'code' => 'maintenance_opcache' ] );
+		}
+		if ( $linked ) {
+			// OPcache compares the file's time again at most revalidate_freq seconds later. No
+			// live change may start before every new request runs this marker.
+			$until = microtime( true ) + $wait;
+			while ( microtime( true ) < $until ) {
+				usleep( 100000 );
+			}
+		}
+	}
+
+	/**
+	 * Whether this process has an opcode cache, and how it notices a changed file. On the
+	 * command line it has one only with opcache.enable_cli.
+	 *
+	 * @return array{validate: bool, revalidate: int}|null Timestamp checks and their interval in seconds, or null without a cache.
+	 */
+	private static function opcode_cache(): ?array {
+		$on = static fn ( string $setting ): bool => filter_var( ini_get( $setting ), FILTER_VALIDATE_BOOLEAN );
+		if ( ! function_exists( 'opcache_invalidate' ) || ! $on( 'opcache.enable' ) || ( in_array( php_sapi_name(), [ 'cli', 'phpdbg' ], true ) && ! $on( 'opcache.enable_cli' ) ) ) {
+			return null;
+		}
+		return [
+			'validate'   => $on( 'opcache.validate_timestamps' ),
+			'revalidate' => max( 0, (int) ini_get( 'opcache.revalidate_freq' ) ),
+		];
+	}
+
+	/**
+	 * Drops a compiled marker from this server's OPcache.
+	 *
+	 * @param string $marker Live marker path.
+	 * @return bool False if OPcache refused, as opcache.restrict_api does outside its path.
+	 */
+	private static function invalidate( string $marker ): bool {
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- The caller acts on the refusal that PHP also reports as a warning.
+		return @opcache_invalidate( $marker, true );
+	}
+
 	/**
 	 * Checks local paths before using a job-owned marker.
 	 *
