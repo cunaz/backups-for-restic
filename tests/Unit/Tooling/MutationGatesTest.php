@@ -145,8 +145,8 @@ final class MutationGatesTest extends TestCase {
 		try {
 			UserSpaceFiles::enable();
 			try {
-				$problem  = MutationProcess::canary( $marker );
-				$finished = MutationProcess::finish( $marker );
+				$problem  = MutationProcess::canary( [ $marker ] );
+				$finished = MutationProcess::finish( [ $marker ] );
 			} finally {
 				UserSpaceFiles::disable();
 			}
@@ -161,13 +161,153 @@ final class MutationGatesTest extends TestCase {
 			);
 
 			unlink( $marker );
-			self::assertNull( MutationProcess::canary( $marker ) );
-			self::assertTrue( MutationProcess::finish( $marker ) );
+			self::assertNull( MutationProcess::canary( [ $marker ] ) );
+			self::assertTrue( MutationProcess::finish( [ $marker ] ) );
 			self::assertFileDoesNotExist( $marker );
 		} finally {
 			UserSpaceFiles::disable();
 			TempDir::remove( $scratch );
 		}
+	}
+
+	public function test_a_canary_whose_first_marker_cannot_be_written_reports_in_the_second(): void {
+		$scratch  = TempDir::create( 'mutation-canary' );
+		$missing  = $scratch . '/no-such-directory/marker';
+		$fallback = $scratch . '/fallback';
+		try {
+			UserSpaceFiles::enable();
+			try {
+				$problem = MutationProcess::canary( [ $missing, $fallback ] );
+			} finally {
+				UserSpaceFiles::disable();
+			}
+			self::assertNotNull( $problem );
+			self::assertFileDoesNotExist( $missing );
+			self::assertSame( [ 'Process ' . getmypid() . ': ' . $problem ], file( $fallback, FILE_IGNORE_NEW_LINES ) );
+		} finally {
+			UserSpaceFiles::disable();
+			TempDir::remove( $scratch );
+		}
+	}
+
+	public function test_the_markers_are_the_variable_and_the_fallback_of_the_checkout(): void {
+		$previous = getenv( MutationProcess::MARKER_VARIABLE );
+		try {
+			putenv( MutationProcess::MARKER_VARIABLE . '=/tmp/gate/marker' );
+			self::assertSame( [ '/tmp/gate/marker', '/repo/.tools/mutation-canary' ], MutationProcess::markers( '/repo' ) );
+			putenv( MutationProcess::MARKER_VARIABLE );
+			self::assertSame( [ '/repo/.tools/mutation-canary' ], MutationProcess::markers( '/repo' ) );
+		} finally {
+			putenv( false === $previous ? MutationProcess::MARKER_VARIABLE : MutationProcess::MARKER_VARIABLE . '=' . $previous );
+		}
+	}
+
+	/**
+	 * What bin/mutation-gate.sh does after an Infection run, with a stand-in for Infection.
+	 *
+	 * @return array<string, array{array<string, string>, int, string}>
+	 */
+	public static function gate_runs(): array {
+		return [
+			'a clean run passes and passes the arguments on' => [ [], 0, 'infection --threads=2 --no-progress' ],
+			'Infection fails and nothing was marked'  => [ [ 'FAKE_STATUS' => '3' ], 3, 'infection --threads=2' ],
+			'Infection fails and a process marked the variable' => [
+				[
+					'FAKE_STATUS' => '3',
+					'FAKE_MARK'   => 'variable',
+				],
+				1,
+				'::error::Mutant processes that could not write durably: 2.',
+			],
+			'a process could write only the fallback' => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
+		];
+	}
+
+	/**
+	 * Infection's exit status passes through, and a marker fails the gate after a failed run too.
+	 *
+	 * @param array<string, string> $environment What the stand-in for Infection does.
+	 * @param int                   $expected    The script's exit status.
+	 * @param string                $printed     Text it prints.
+	 */
+	#[DataProvider( 'gate_runs' )]
+	public function test_the_gate_script_reports_infection_and_the_markers( array $environment, int $expected, string $printed ): void {
+		$root = self::gate_checkout();
+		try {
+			[ $status, $output ] = self::gate( $root, $environment );
+			self::assertSame( $expected, $status, $output );
+			self::assertStringContainsString( $printed, $output );
+			self::assertFileDoesNotExist( $root . '/.tools/mutation-canary' );
+		} finally {
+			chmod( $root . '/.tools', 0700 );
+			TempDir::remove( $root );
+		}
+	}
+
+	public function test_the_gate_script_refuses_to_start_when_a_marker_cannot_be_written(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'File permissions do not bind root.' );
+		}
+		$root = self::gate_checkout();
+		try {
+			chmod( $root . '/.tools', 0500 );
+			[ $status, $output ] = self::gate( $root, [] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( '::error::The canary marker ' . $root . '/.tools/mutation-canary cannot be written', $output );
+			self::assertStringNotContainsString( 'infection --threads=2', $output, 'Infection did not start.' );
+		} finally {
+			chmod( $root . '/.tools', 0700 );
+			TempDir::remove( $root );
+		}
+	}
+
+	/**
+	 * A copy of bin/mutation-gate.sh in a temporary checkout, with a stand-in for Infection that
+	 * prints its arguments, writes the markers that FAKE_MARK names, and exits with FAKE_STATUS.
+	 */
+	private static function gate_checkout(): string {
+		$root = TempDir::create( 'mutation-gate' );
+		mkdir( $root . '/bin' );
+		mkdir( $root . '/.tools/bin', 0700, true );
+		copy( dirname( __DIR__, 3 ) . '/bin/mutation-gate.sh', $root . '/bin/mutation-gate.sh' );
+		file_put_contents(
+			$root . '/.tools/bin/infection',
+			<<<'BASH'
+			#!/usr/bin/env bash
+			echo "infection $*"
+			case "${FAKE_MARK:-}" in
+				variable) printf 'Process 7: fsync() failed\nProcess 7: still user-space\nProcess 8: fsync() failed\n' >> "$BFR_MUTATION_CANARY" ;;
+				fallback) printf 'Process 7: fsync() failed\n' >> "$(dirname "$0")/../mutation-canary" ;;
+			esac
+			exit "${FAKE_STATUS:-0}"
+			BASH
+		);
+		chmod( $root . '/bin/mutation-gate.sh', 0755 );
+		chmod( $root . '/.tools/bin/infection', 0755 );
+		return $root;
+	}
+
+	/**
+	 * Runs the copied script with --threads=2 --no-progress.
+	 *
+	 * @param array<string, string> $environment Variables for the stand-in.
+	 * @return array{int, string} The exit status and the output.
+	 */
+	private static function gate( string $root, array $environment ): array {
+		$process = proc_open(
+			[ 'bash', $root . '/bin/mutation-gate.sh', '--threads=2', '--no-progress' ],
+			[
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'redirect', 1 ],
+			],
+			$pipes,
+			$root,
+			$environment + [ 'TMPDIR' => $root ] + getenv()
+		);
+		self::assertIsResource( $process );
+		$output = (string) stream_get_contents( $pipes[1] );
+		fclose( $pipes[1] );
+		return [ proc_close( $process ), $output ];
 	}
 
 	/**

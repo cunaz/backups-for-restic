@@ -28,7 +28,8 @@ use Throwable;
  * loaded after the restore is the original, and its mutants escape. Nothing here fails the
  * process, because Infection counts a process that fails as a detected mutant. When durable
  * writes still fail after the restore, or the user-space wrapper is back when the process ends,
- * a marker file is left behind, and bin/mutation-gate.sh fails the gate on it.
+ * a line is left in a marker file, the second one if the first cannot take it, and
+ * bin/mutation-gate.sh fails the gate on it.
  */
 final class MutationProcess {
 
@@ -56,7 +57,7 @@ final class MutationProcess {
 	 * @param string $root The repository's root directory.
 	 */
 	public static function prepare( string $root ): void {
-		$marker = self::marker( $root );
+		$markers = self::markers( $root );
 		if ( self::intercepted() ) {
 			try {
 				self::preload( $root, self::DIRECTORIES );
@@ -66,12 +67,12 @@ final class MutationProcess {
 				// includes the file again, and Infection reports a syntax error.
 				return;
 			} catch ( Throwable $error ) {
-				self::leave( $marker, 'The classes under mutation could not be loaded: ' . $error->getMessage() );
+				self::leave( $markers, 'The classes under mutation could not be loaded: ' . $error->getMessage() );
 			}
 			stream_wrapper_restore( 'file' );
 		}
-		self::canary( $marker );
-		register_shutdown_function( [ self::class, 'finish' ], $marker );
+		self::canary( $markers );
+		register_shutdown_function( [ self::class, 'finish' ], $markers );
 	}
 
 	/**
@@ -133,10 +134,10 @@ final class MutationProcess {
 	 * Writes, flushes and fsyncs a temporary file, as Storage\Files::write_durable() does, and
 	 * leaves a marker when that fails or the stream is not a plain file.
 	 *
-	 * @param string $marker The marker file.
+	 * @param list<string> $markers The marker files, see markers().
 	 * @return string|null Why durable writes fail, or null when they work.
 	 */
-	public static function canary( string $marker ): ?string {
+	public static function canary( array $markers ): ?string {
 		$problem = null;
 		$path    = tempnam( sys_get_temp_dir(), 'bfr-canary-' );
 		$handle  = false === $path ? false : @fopen( $path, 'wb' );
@@ -156,7 +157,7 @@ final class MutationProcess {
 			@unlink( $path );
 		}
 		if ( null !== $problem ) {
-			self::leave( $marker, $problem );
+			self::leave( $markers, $problem );
 		}
 		return $problem;
 	}
@@ -165,34 +166,49 @@ final class MutationProcess {
 	 * Run when the process ends: leaves a marker when file:// is a user-space wrapper again, for
 	 * example because the interceptor was enabled after this bootstrap.
 	 *
-	 * @param string $marker The marker file.
+	 * @param list<string> $markers The marker files, see markers().
 	 * @return bool Whether the plain wrapper was still in place.
 	 */
-	public static function finish( string $marker ): bool {
+	public static function finish( array $markers ): bool {
 		if ( ! self::intercepted() ) {
 			return true;
 		}
-		self::leave( $marker, 'file:// was a user-space stream wrapper when the process ended.' );
+		self::leave( $markers, 'file:// was a user-space stream wrapper when the process ended.' );
 		return false;
 	}
 
 	/**
-	 * The marker file: the path in BFR_MUTATION_CANARY, or .tools/mutation-canary.
+	 * The marker files, in the order they are tried: the path in BFR_MUTATION_CANARY, and
+	 * .tools/mutation-canary. bin/mutation-gate.sh puts the first under TMPDIR, which is tmpfs in
+	 * CI, and the second is on the disk of the checkout, so that a full file system leaves the
+	 * other one. The script checks both before Infection starts and fails on either.
 	 *
 	 * @param string $root The repository's root directory.
+	 * @return list<string>
 	 */
-	public static function marker( string $root ): string {
-		$path = getenv( self::MARKER_VARIABLE );
-		return is_string( $path ) && '' !== $path ? $path : $root . '/.tools/mutation-canary';
+	public static function markers( string $root ): array {
+		$fallback = $root . '/.tools/mutation-canary';
+		$path     = getenv( self::MARKER_VARIABLE );
+		return is_string( $path ) && '' !== $path && $fallback !== $path ? [ $path, $fallback ] : [ $fallback ];
 	}
 
 	/**
-	 * Appends one line to the marker file, whatever happens.
+	 * Appends one line to the first marker file that takes it.
 	 *
-	 * @param string $marker  The marker file.
-	 * @param string $problem What went wrong.
+	 * @param list<string> $markers The marker files, see markers().
+	 * @param string       $problem What went wrong.
+	 * @return bool Whether a marker took the line.
 	 */
-	private static function leave( string $marker, string $problem ): void {
-		@file_put_contents( $marker, 'Process ' . getmypid() . ': ' . $problem . "\n", FILE_APPEND );
+	private static function leave( array $markers, string $problem ): bool {
+		$line = 'Process ' . getmypid() . ': ' . $problem . "\n";
+		foreach ( $markers as $marker ) {
+			if ( false !== @file_put_contents( $marker, $line, FILE_APPEND ) ) {
+				return true;
+			}
+		}
+		// Neither file takes the line. The process must still not fail, because Infection would
+		// count its mutant as killed; standard error at least reaches Infection's log.
+		@fwrite( STDERR, 'Mutation canary, no marker could be written: ' . $line );
+		return false;
 	}
 }
