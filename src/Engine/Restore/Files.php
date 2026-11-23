@@ -12,6 +12,7 @@ namespace BackupsForRestic\Engine\Restore;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\StorageFailed;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -19,9 +20,17 @@ defined( 'ABSPATH' ) || exit;
  * No operation follows a destination link or accepts a multiply linked working file.
  * The caller must keep these directories private; PHP has no portable openat/no-follow API.
  *
+ * A file operation that the file system refuses, as a full disk, a quota or missing
+ * permissions make it, raises StorageFailed with the code WRITE_FAILED: it is a local
+ * problem, not damage in the repository. An entry that changed or is not what the run left
+ * there raises FormatException.
+ *
  * @phpstan-import-type Directory from State
  */
 final class Files {
+
+	/** The error code of a file operation in the private directory that failed. */
+	public const string WRITE_FAILED = 'staging_write';
 
 	/**
 	 * Resolves a directory once and records its identity.
@@ -150,6 +159,7 @@ final class Files {
 	 *
 	 * @param State $state State to publish.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if it cannot be written or published.
 	 */
 	public static function persist( State $state ): void {
 		self::verify( $state->work );
@@ -167,7 +177,7 @@ final class Files {
 			self::close( $handle );
 		}
 		if ( ! rename( $temp, $path ) ) {
-			throw new FormatException( 'The restore checkpoint cannot be published.' );
+			StorageFailed::raise( 'The restore checkpoint cannot be published.', [ 'code' => self::WRITE_FAILED ] );
 		}
 	}
 
@@ -190,12 +200,13 @@ final class Files {
 	 *
 	 * @param string $temp Temporary checkpoint path.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if it cannot be removed.
 	 */
 	private static function remove_temporary( string $temp ): void {
 		if ( self::exists( $temp ) ) {
 			self::regular( $temp );
 			if ( ! unlink( $temp ) ) {
-				throw new FormatException( 'A restore checkpoint temporary file cannot be removed.' );
+				StorageFailed::raise( 'A restore checkpoint temporary file cannot be removed.', [ 'code' => self::WRITE_FAILED ] );
 			}
 		}
 	}
@@ -210,6 +221,7 @@ final class Files {
 	 * @param bool   $create Create exclusively, otherwise require an existing regular file.
 	 * @return resource Checked handle.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if it cannot be opened or made private.
 	 * @throws \Throwable Preserves the original failure after releasing owned resources.
 	 */
 	public static function open( string $path, bool $create = false ) {
@@ -221,7 +233,7 @@ final class Files {
 			umask( $umask );
 		}
 		if ( false === $handle ) {
-			throw new FormatException( 'A restore file cannot be opened.' );
+			StorageFailed::raise( 'A restore file cannot be opened.', [ 'code' => self::WRITE_FAILED ] );
 		}
 		try {
 			$stat  = fstat( $handle );
@@ -230,7 +242,7 @@ final class Files {
 				throw new FormatException( 'A restore file changed while it was being opened.' );
 			}
 			if ( ! chmod( $path, 0600 ) ) {
-				throw new FormatException( 'A restore file cannot be made private.' );
+				StorageFailed::raise( 'A restore file cannot be made private.', [ 'code' => self::WRITE_FAILED ] );
 			}
 		} catch ( \Throwable $error ) {
 			fclose( $handle );
@@ -244,12 +256,16 @@ final class Files {
 	 *
 	 * @param resource $handle Open file.
 	 * @param int      $offset Committed length.
-	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws FormatException If the file is shorter than its committed length.
+	 * @throws StorageFailed With the code WRITE_FAILED if it cannot be cut or positioned.
 	 */
 	public static function rewind( $handle, int $offset ): void {
 		$stat = fstat( $handle );
-		if ( $offset < 0 || false === $stat || $stat['size'] < $offset || ! ftruncate( $handle, $offset ) || 0 !== fseek( $handle, $offset ) ) {
+		if ( $offset < 0 || false === $stat || $stat['size'] < $offset ) {
 			throw new FormatException( 'A restore file cannot be resumed at its committed offset.' );
+		}
+		if ( ! ftruncate( $handle, $offset ) || 0 !== fseek( $handle, $offset ) ) {
+			StorageFailed::raise( 'A restore file cannot be resumed at its committed offset.', [ 'code' => self::WRITE_FAILED ] );
 		}
 	}
 
@@ -258,7 +274,7 @@ final class Files {
 	 *
 	 * @param resource $handle Open file.
 	 * @param string   $bytes Bytes to write.
-	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if a write makes no progress: a full disk, a quota.
 	 */
 	public static function write( $handle, string $bytes ): void {
 		$offset = 0;
@@ -266,7 +282,7 @@ final class Files {
 		while ( $offset < $length ) {
 			$written = fwrite( $handle, substr( $bytes, $offset ) );
 			if ( false === $written || 0 === $written ) {
-				throw new FormatException( 'A restore file cannot be written completely.' );
+				StorageFailed::raise( 'A restore file cannot be written completely.', [ 'code' => self::WRITE_FAILED ] );
 			}
 			$offset += $written;
 		}
@@ -276,11 +292,11 @@ final class Files {
 	 * Checks buffered writes before publishing a cursor.
 	 *
 	 * @param resource $handle Open file.
-	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if the buffered bytes cannot be written.
 	 */
 	public static function flush( $handle ): void {
 		if ( ! fflush( $handle ) ) {
-			throw new FormatException( 'A restore file cannot be flushed.' );
+			StorageFailed::raise( 'A restore file cannot be flushed.', [ 'code' => self::WRITE_FAILED ] );
 		}
 	}
 
@@ -288,11 +304,11 @@ final class Files {
 	 * Reports delayed write errors.
 	 *
 	 * @param resource $handle Open file.
-	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if a delayed write fails.
 	 */
 	public static function close( $handle ): void {
 		if ( ! fclose( $handle ) ) {
-			throw new FormatException( 'A restore file cannot be closed.' );
+			StorageFailed::raise( 'A restore file cannot be closed.', [ 'code' => self::WRITE_FAILED ] );
 		}
 	}
 
@@ -312,13 +328,13 @@ final class Files {
 	 *
 	 * @param string $path Path.
 	 * @return array{dev: int, ino: int, mode: int, nlink: int, size: int} Relevant stat fields.
-	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code WRITE_FAILED if the entry is gone or cannot be inspected.
 	 */
 	public static function stat( string $path ): array {
 		clearstatcache( true, $path );
 		$stat = lstat( $path );
 		if ( false === $stat ) {
-			throw new FormatException( 'A restore directory or file cannot be inspected.' );
+			StorageFailed::raise( 'A restore directory or file cannot be inspected.', [ 'code' => self::WRITE_FAILED ] );
 		}
 		return [
 			'dev'   => $stat['dev'],

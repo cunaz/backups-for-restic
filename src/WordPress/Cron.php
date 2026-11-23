@@ -272,14 +272,19 @@ final class Cron {
 	 * successful backup, then prune and check. One job at a time; whatever cannot start now
 	 * starts at a later heartbeat. The first slot of each schedule after setup is only recorded.
 	 *
+	 * A handled slot that lies ahead of the clock (SchedulePolicy::handled()) is put back to
+	 * the current slot of its schedule first, and the notifier reports it once: until the
+	 * clock reached it, no job of that schedule would start.
+	 *
 	 * @param Container $container Services.
 	 * @param int       $now       Unix time.
 	 */
 	private static function start_due( Container $container, int $now ): void {
 		$settings = $container->settings();
 		$state    = $container->state();
-		$schedule = $state->get( 'schedule' );
 		$zone     = wp_timezone();
+		self::correct_slots( $container, $now, $zone );
+		$schedule = $state->get( 'schedule' );
 		$plugin   = 'plugin' === $settings->string( 'retention.mode' );
 
 		$slot    = SchedulePolicy::last_backup_slot( $settings, $zone, $now );
@@ -315,6 +320,47 @@ final class Cron {
 			}
 			return;
 		}
+	}
+
+	/**
+	 * Puts every handled slot that lies ahead of the clock back to the current slot of its
+	 * schedule, in one change of the state, and reports it once.
+	 *
+	 * @param Container     $container Services.
+	 * @param int           $now       Unix time.
+	 * @param \DateTimeZone $zone      Site time zone.
+	 */
+	private static function correct_slots( Container $container, int $now, \DateTimeZone $zone ): void {
+		$settings = $container->settings();
+		$current  = [
+			'backup_slot' => SchedulePolicy::last_backup_slot( $settings, $zone, $now ),
+			'prune_slot'  => SchedulePolicy::last_maintenance_slot( $settings, $zone, $now, 'prune' ),
+			'check_slot'  => SchedulePolicy::last_maintenance_slot( $settings, $zone, $now, 'check' ),
+		];
+		$ahead    = 0;
+		$schedule = $container->state()->get( 'schedule' );
+		foreach ( $current as $key => $slot ) {
+			$stored = Decoded::int( $schedule[ $key ] ?? null );
+			if ( SchedulePolicy::handled( $stored, $slot, $now ) !== $stored ) {
+				$ahead = max( $ahead, $stored );
+			}
+		}
+		if ( 0 === $ahead ) {
+			return;
+		}
+		$container->state()->update(
+			'schedule',
+			static function ( array $stored ) use ( $current, $now ): array {
+				foreach ( $current as $key => $slot ) {
+					$handled = Decoded::int( $stored[ $key ] ?? null );
+					if ( SchedulePolicy::handled( $handled, $slot, $now ) !== $handled ) {
+						$stored[ $key ] = $slot;
+					}
+				}
+				return $stored;
+			}
+		);
+		$container->notifier()->clock_set_back( $now, $ahead );
 	}
 
 	/**

@@ -532,3 +532,24 @@ All notable changes are documented here. The format follows
 - A row limit (`sql_select_limit`) that the server's settings or a plugin left on the
   database session no longer cuts the database backup short. It could leave out tables,
   columns, parts of a key or rows without an error.
+- A private directory that `BACKUPS_FOR_RESTIC_PRIVATE_DIR` names through a symbolic link,
+  as some hosts mount their data volume, is used by its real path. Large file previews failed there,
+  and after one had failed, no restore staging expired any more. Expiry also goes on when
+  the preview data or the undo workspace of one job cannot be removed.
+- Restores run on hosts that disable `disk_free_space()` or do not report the free space:
+  the job says so in a warning and stops only if a write fails. Releasing the lock of a
+  finished restore can no longer cost its staged files, whatever goes wrong there.
+- A full disk, a quota or missing permissions during a restore are reported as such
+  (`staging_space`, `staging_write`), with what to do, instead of as damage in the
+  repository; a selected path that the snapshot lacks has a message of its own
+  (`restore_path_missing`).
+- After the server clock was ahead and was set back, scheduled backups, prune and check
+  go on at their next time instead of waiting until the clock catches up, and the notice
+  about old backups comes again when it is due. One e-mail reports that the clock was set
+  back, if failure notices are on.
+- Cancelling a restore, or deactivating the plugin, while its ZIP is built or its
+  database rehearsed ends only that work and keeps the staged files.
+- A restore builds its ZIP only when the disk has room for it beside the staged files and
+  a reserve; otherwise it says so, and the files can be downloaded one by one.
+- The ticks of a restore use the index cache and no longer download the whole repository
+  index again in every tick.
