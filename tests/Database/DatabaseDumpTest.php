@@ -989,6 +989,21 @@ final class DatabaseDumpTest extends TestCase {
 		self::assertSame( [], $other->rows( "SHOW FULL TABLES LIKE 'gone_rows'" ), 'Nothing held the metadata lock of the view any longer.' );
 	}
 
+	public function test_a_table_named_like_an_alias_of_the_session_read_back_is_backed_up(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS bfr_dump_one' );
+		// The read-back names a derived table bfr_dump_one beside the table it checks.
+		$db->execute( 'CREATE TABLE bfr_dump_one (id INT NOT NULL PRIMARY KEY, note VARCHAR(10) NOT NULL) ENGINE=InnoDB' );
+		$db->execute( "INSERT INTO bfr_dump_one VALUES (1, 'one'), (2, 'two')" );
+		try {
+			$this->dump_and_import( $db, 'bfr_dump_' );
+			$query = 'SELECT * FROM bfr_dump_one ORDER BY id';
+			self::assertSame( $db->rows( $query ), self::database( self::$target )->rows( $query ) );
+		} finally {
+			$db->execute( 'DROP TABLE IF EXISTS bfr_dump_one' );
+		}
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().
