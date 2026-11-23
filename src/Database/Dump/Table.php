@@ -27,8 +27,8 @@ final readonly class Table {
 	 * @param string                    $engine  Storage engine from the definition, for example InnoDB; empty if unknown.
 	 * @param string                    $digest  Hash of the definition without its AUTO_INCREMENT counter, of the columns and of the key; see Catalog.
 	 * @param bool                      $wide    Whether a column can hold values of any size: TEXT, BLOB, JSON or spatial.
-	 * @param list<string>              $unbounded Those columns; empty where only $wide is known, and every text and binary column counts.
 	 * @param list<string>              $converted Text columns whose values arrive converted to utf8mb4, so that they can arrive longer than they are stored.
+	 * @param int                       $bound   Without such columns, the most bytes in which a row can arrive, as its column types allow; 0 if unknown.
 	 */
 	public function __construct(
 		public string $name,
@@ -39,8 +39,8 @@ final readonly class Table {
 		public string $engine = '',
 		public string $digest = '',
 		public bool $wide = false,
-		public array $unbounded = [],
-		public array $converted = []
+		public array $converted = [],
+		public int $bound = 0
 	) {
 	}
 

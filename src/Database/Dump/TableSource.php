@@ -663,7 +663,8 @@ final class TableSource implements ResumableByteSource {
 		$size    = null === $cap ? '' : $this->size();
 		$guarded = [];
 		if ( null !== $cap ) {
-			foreach ( [] !== $this->table->unbounded ? $this->table->unbounded : array_keys( array_filter( $this->table->columns, static fn ( string $kind ): bool => in_array( $kind, [ SqlFormatter::TEXT, SqlFormatter::BINARY ], true ) ) ) as $name ) {
+			// Every text and binary column: a VARCHAR can also have grown since its size was read.
+			foreach ( array_keys( array_filter( $this->table->columns, static fn ( string $kind ): bool => in_array( $kind, [ SqlFormatter::TEXT, SqlFormatter::BINARY ], true ) ) ) as $name ) {
 				$guarded[ (string) $name ] = true;
 			}
 		}
@@ -890,7 +891,7 @@ final class TableSource implements ResumableByteSource {
 		}
 		// Values of any size: the server first says how large the next rows are, so that the
 		// page fetches no more of them than PHP can hold.
-		[ $limit, $more, $cap ] = $this->table->wide ? $this->fitting( $range, $offset ) : [ $this->page, true, null ];
+		[ $limit, $more, $cap ] = $this->table->wide ? $this->fitting( $range, $offset ) : [ $this->bounded(), true, null ];
 		$rows                   = 0 === $limit ? [] : $this->connection->rows( 'SELECT ' . $this->selection( $cap ) . $range . $limit . $offset );
 		// Also a read that finds nothing more is a moment of its own outside a snapshot.
 		$this->viewed();
@@ -1015,6 +1016,21 @@ final class TableSource implements ResumableByteSource {
 			}
 		}
 		return [] === $sizes ? '0' : implode( ' + ', $sizes );
+	}
+
+	/**
+	 * How many rows a page of a table without values of any size fetches: no more than fit,
+	 * with their SQL, into the memory left if every row were as large as its column types
+	 * allow; a VARCHAR(65000) in latin1 can arrive as 195,000 bytes of utf8mb4.
+	 *
+	 * @return int Rows.
+	 */
+	private function bounded(): int {
+		$room = self::room();
+		if ( PHP_INT_MAX === $room || $this->table->bound <= 0 ) {
+			return $this->page;
+		}
+		return max( 1, min( $this->page, intdiv( max( 0, $room ), $this->table->bound + $this->estimate( $this->table->bound ) ) ) );
 	}
 
 	/**

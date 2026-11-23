@@ -5,6 +5,7 @@ namespace BackupsForRestic\Tests\Unit\Database;
 
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\Connection;
 use BackupsForRestic\Database\Dump\KeyColumn;
 use BackupsForRestic\Database\Dump\SqlFormatter;
@@ -293,8 +294,7 @@ final class DumpLimitsTest extends TestCase {
 			[ new KeyColumn( 'id', KeyColumn::INTEGER ) ],
 			'InnoDB',
 			'',
-			true,
-			[ 'body' ]
+			true
 		);
 		$source = new TableSource( $db, $table, '', null, static function (): void {} );
 		try {
@@ -306,6 +306,88 @@ final class DumpLimitsTest extends TestCase {
 			self::assertSame( 'database_dump_row_memory', JobError::from_throwable( $error )->code );
 		}
 		self::assertFalse( $db->fetched_whole, 'The grown row never reached PHP.' );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_page_of_long_varchars_fetches_no_more_rows_than_fit_at_their_largest(): void {
+		ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 48 * 1048576 ) ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This separate process checks what one page fetches.
+		// No TEXT or BLOB, but a latin1 VARCHAR(65000) can arrive as 195,000 bytes of utf8mb4.
+		$create  = "CREATE TABLE `wp_long` (\n  `id` int NOT NULL,\n  `title` varchar(65000) CHARACTER SET latin1 DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+		$columns = [
+			[
+				'Field'     => 'id',
+				'Type'      => 'int',
+				'Collation' => null,
+				'Null'      => 'NO',
+				'Extra'     => '',
+			],
+			[
+				'Field'     => 'title',
+				'Type'      => 'varchar(65000)',
+				'Collation' => 'latin1_swedish_ci',
+				'Null'      => 'YES',
+				'Extra'     => '',
+			],
+		];
+		$db      = new class( $create, $columns ) implements Connection {
+			/** @var list<string> */
+			public array $pages = [];
+
+			/**
+			 * @param list<array<string, string|null>> $columns Rows of SHOW FULL COLUMNS.
+			 */
+			public function __construct( private readonly string $create, private readonly array $columns ) {
+			}
+
+			public function rows( string $sql ): array {
+				if ( str_starts_with( $sql, 'SELECT @@SESSION.sql_quote_show_create' ) ) {
+					return [
+						[
+							'quote_names' => '1',
+							'mode'        => 'NO_AUTO_VALUE_ON_ZERO',
+						],
+					];
+				}
+				if ( str_starts_with( $sql, 'SHOW CREATE TABLE' ) ) {
+					return [ [ 'Create Table' => $this->create ] ];
+				}
+				if ( str_starts_with( $sql, 'SHOW FULL COLUMNS' ) ) {
+					return $this->columns;
+				}
+				if ( str_starts_with( $sql, 'SHOW KEYS' ) ) {
+					return [
+						[
+							'Key_name'     => 'PRIMARY',
+							'Non_unique'   => '0',
+							'Seq_in_index' => '1',
+							'Column_name'  => 'id',
+							'Sub_part'     => null,
+						],
+					];
+				}
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					return [ [ 'size' => '10' ], [ 'size' => '10' ] ];
+				}
+				if ( str_starts_with( $sql, 'SELECT ' ) ) {
+					$this->pages[] = $sql;
+				}
+				return [];
+			}
+		};
+		$table   = ( new Catalog( $db ) )->table( 'wp_long' );
+		self::assertFalse( $table->wide );
+		self::assertGreaterThanOrEqual( 260000, $table->bound, 'Four bytes for each of 65,000 characters.' );
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		while ( '' !== $source->read( 65536 ) ) {
+			continue;
+		}
+
+		self::assertCount( 1, $db->pages );
+		self::assertMatchesRegularExpression( '/ LIMIT (\d+)\z/', $db->pages[0] );
+		preg_match( '/ LIMIT (\d+)\z/', $db->pages[0], $match );
+		// 32 MiB for rows of up to 260 KB, with twice that as SQL: about 43, not 500.
+		self::assertLessThanOrEqual( 50, (int) $match[1] );
+		self::assertGreaterThanOrEqual( 30, (int) $match[1] );
 	}
 
 	#[RunInSeparateProcess]

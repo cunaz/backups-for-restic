@@ -139,12 +139,16 @@ and makes an interrupted dump start from zero.
   if the row fits on its own into the memory left when the statement starts, so that no scan
   of the table looks for its largest row first. Through `$wpdb` the sizes and the page are two reads,
   and a row can grow in between: each row of the page may take an equal share of the memory
-  left, and the page asks the server to send a row's values only if the row stays within
-  that share. A row that has grown beyond it comes with its size but without its values;
-  the page ends before it, and the next page reads its size again and fetches it on its own
-  if it fits. The page can therefore fetch no more than the memory it was admitted for.
-  What remains is memory that other code takes between the two reads, which the reserve of
-  16 MiB for the backup's own reading has to cover.
+  left, and the page asks the server to send a row's text and binary values, VARCHAR
+  included, only if the row stays within that share. A row that has grown beyond it comes
+  with its size but without those values; the page ends before it, and the next page reads
+  its size again and fetches it on its own if it fits. The page can therefore fetch no more
+  than the memory it was admitted for. What remains is memory that other code takes between
+  the two reads, which the reserve of 16 MiB for the backup's own reading has to cover. A
+  table without such columns has rows that its column types bound, at four bytes for each
+  character of text: its pages fetch no more rows than fit into the memory left if each were
+  that large, so a latin1 VARCHAR(65000), which can arrive as 195,000 bytes of utf8mb4,
+  makes pages of a few dozen rows where memory is tight.
 - Restore: database files are restored to staging and executed through `$wpdb` in budgeted
   batches with maintenance mode and plugin state preserved (Milestone 3). The manual path is
   `cat *.sql | mariadb`, verified in the database test suite.

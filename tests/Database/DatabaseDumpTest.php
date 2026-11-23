@@ -1004,6 +1004,26 @@ final class DatabaseDumpTest extends TestCase {
 		}
 	}
 
+	#[DataProvider( 'connections' )]
+	public function test_long_latin1_varchars_with_and_without_a_blob_import_unchanged( bool $dedicated ): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP TABLE IF EXISTS long_plain, long_wide' );
+		// "€" is one byte in latin1 and three in utf8mb4: 65,000 of them arrive as 195,000 bytes.
+		$db->execute( 'CREATE TABLE long_plain (id INT NOT NULL PRIMARY KEY, title VARCHAR(65000) CHARACTER SET latin1) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE long_wide (id INT NOT NULL PRIMARY KEY, title VARCHAR(20000) CHARACTER SET latin1, body LONGBLOB) ENGINE=InnoDB' );
+		for ( $id = 1; $id <= 30; ++$id ) {
+			$db->execute( sprintf( 'INSERT INTO long_plain VALUES (%d, REPEAT(0x80, %d))', $id, 0 === $id % 3 ? 65000 : $id ) );
+			$db->execute( sprintf( 'INSERT INTO long_wide VALUES (%d, REPEAT(0x80, %d), REPEAT(0x%02X, %d))', $id, 0 === $id % 3 ? 20000 : $id, $id, 1000 * $id ) );
+		}
+
+		$this->dump_and_import( $db, 'long_', null, $dedicated ? self::dedicated() : null );
+
+		$target = self::database( self::$target );
+		foreach ( [ 'SELECT id, SHA2(title, 256) AS title FROM long_plain ORDER BY id', 'SELECT id, SHA2(title, 256) AS title, SHA2(body, 256) AS body FROM long_wide ORDER BY id' ] as $query ) {
+			self::assertSame( $db->rows( $query ), $target->rows( $query ), $query );
+		}
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().

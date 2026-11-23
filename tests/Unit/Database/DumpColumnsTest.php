@@ -430,6 +430,84 @@ final class DumpColumnsTest extends TestCase {
 		}
 	}
 
+	public function test_a_page_of_a_wide_table_fetches_no_text_or_binary_column_unchecked(): void {
+		// A latin1 VARCHAR beside a BLOB: it can grow between the read of sizes and the page.
+		$create  = "CREATE TABLE `wp_wide` (\n  `id` int NOT NULL,\n  `title` varchar(65000) CHARACTER SET latin1 DEFAULT NULL,\n  `body` longblob,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+		$columns = [
+			self::column( 'id', 'int', null, 'NO' ),
+			self::column( 'title', 'varchar(65000)', 'latin1_swedish_ci', 'YES' ),
+			self::column( 'body', 'longblob', null, 'YES' ),
+		];
+		$db      = new class( $create, $columns ) implements Connection {
+			/** @var list<string> */
+			public array $pages = [];
+
+			/**
+			 * @param list<array<string, string|null>> $columns Rows of SHOW FULL COLUMNS.
+			 */
+			public function __construct( private readonly string $create, private readonly array $columns ) {
+			}
+
+			public function rows( string $sql ): array {
+				if ( str_starts_with( $sql, 'SELECT @@SESSION.sql_quote_show_create' ) ) {
+					return [
+						[
+							'quote_names' => '1',
+							'mode'        => 'NO_AUTO_VALUE_ON_ZERO',
+						],
+					];
+				}
+				if ( str_starts_with( $sql, 'SHOW CREATE TABLE' ) ) {
+					return [ [ 'Create Table' => $this->create ] ];
+				}
+				if ( str_starts_with( $sql, 'SHOW FULL COLUMNS' ) ) {
+					return $this->columns;
+				}
+				if ( str_starts_with( $sql, 'SHOW KEYS' ) ) {
+					return [
+						[
+							'Key_name'     => 'PRIMARY',
+							'Non_unique'   => '0',
+							'Seq_in_index' => '1',
+							'Column_name'  => 'id',
+							'Sub_part'     => null,
+						],
+					];
+				}
+				if ( str_contains( $sql, ' AS size FROM ' ) ) {
+					return [ [ 'size' => '10' ], [ 'size' => '10' ] ];
+				}
+				if ( str_starts_with( $sql, 'SELECT ' ) ) {
+					$this->pages[] = $sql;
+				}
+				return [];
+			}
+		};
+		$table   = ( new Catalog( $db ) )->table( 'wp_wide' );
+		self::assertTrue( $table->wide );
+		$source = new TableSource( $db, $table, '', null, static function (): void {} );
+		while ( '' !== $source->read( 65536 ) ) {
+			continue;
+		}
+
+		self::assertNotSame( [], $db->pages );
+		foreach ( [ 'title', 'body' ] as $name ) {
+			self::assertMatchesRegularExpression( '/IF\(.+ <= \d+, `' . $name . '`, NULL\) AS `' . $name . '`/', $db->pages[0], $name );
+		}
+		self::assertStringContainsString( 'OCTET_LENGTH(CONVERT(`title` USING utf8mb4))', $db->pages[0], 'The latin1 text is sized as it arrives.' );
+	}
+
+	/** @return array<string, string|null> */
+	private static function column( string $field, string $type, ?string $collation, string $nullable ): array {
+		return [
+			'Field'     => $field,
+			'Type'      => $type,
+			'Collation' => $collation,
+			'Null'      => $nullable,
+			'Extra'     => '',
+		];
+	}
+
 	public function test_generated_only_tables_keep_each_row_without_inserting_generated_values(): void {
 		$db     = new class() implements Connection {
 			public function rows( string $sql ): array {
