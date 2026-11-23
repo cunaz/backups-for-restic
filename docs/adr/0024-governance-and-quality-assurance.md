@@ -114,24 +114,24 @@ can operate.
   confirmation, which waits for a link e-mailed to the committers, is the factor outside
   GitHub, and the owner keeps only fine-grained tokens without administration, variable,
   environment, deployment or workflow rights on development machines.
-- Point 3 is wider: six mutation gates count code that no test reaches (`--with-uncovered`
-  and a minimum MSI), and besides `Crypto`, `Format`, `Engine\Forget` and the database import
-  filter they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL,
-  the import and the atomic exchange. The covered score of the core stays the merge gate at
-  90 %; the others have floors at the scores measured on 2026-11-23, which may only rise. 90 %
-  is the goal for all of them. The database gate is too slow for every pull request; the
-  release gate requires it.
+- Point 3 is wider: six mutation gates count code that no test reaches (`--with-uncovered` and a
+  minimum MSI), and besides `Crypto`, `Format`, `Engine\Forget` and the database import filter
+  they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL, the import
+  and the atomic exchange. The covered score of the core stays the merge gate at 90 %; the
+  others have floors at the scores measured on 2026-11-23 with `main` at `e40ab18`, which later
+  pull requests keep and may only raise. 90 % is the goal for all of them. The database gate is
+  too slow for every pull request; the release gate requires it.
 - 2026-11-23: the mutation gates had counted mutants as killed that no test killed. Infection
   serves the mutated class through a `file://` wrapper of its own, and the tests ran under it:
-  `fsync()` fails on that wrapper, and it reports unreadable files and links to removed files
-  as missing. Tests that write a job document or journal record durably, read an unreadable
-  file or remove such a link therefore failed or warned whatever the mutation. The tests now
-  run with PHP's own wrapper, a canary fails a gate whose mutant processes still cannot write
-  durably, and the floors are the scores measured that way
-  ([development guide](../04-development-and-quality.md) §5.6). The file planner kills 88.80 %
+  `fsync()` fails on that wrapper, and it reports unreadable files and links to removed files as
+  missing. Tests that write a job document or journal record durably, read an unreadable file or
+  remove such a link therefore failed or warned whatever the mutation. The tests now run with
+  PHP's own wrapper, a canary fails a gate whose mutant processes still cannot write durably,
+  and the floors are the scores measured that way
+  ([development guide](../04-development-and-quality.md) §5.6). The file planner kills 88.99 %
   of its covered mutants, not the 98.48 % its gate reported on `main`, and stays below this
-  decision's 90 % until tests are added. The file restore gate scores 77.83 % covered against
-  the 85 % its floor promised, the apply gate 74.14 % instead of 100 %, the ZIP gate 84.98 %
-  instead of 99.87 %, and the database gate, whose code and tests grew since its floors were
-  set, 82.38 % in one run and 82.58 % in another, perhaps less (development guide §5.6). The
-  core, the merge gate of point 3, barely moved: 90.48 %.
+  decision's 90 % until tests are added. With `main` at `e40ab18`, the file restore gate scores
+  81.84 % covered against the 85 % its floor promised, the apply gate 83.58 % instead of 100 %,
+  the ZIP gate 84.98 % instead of 99.87 %, and the database gate 86.13 % and 86.11 % in two
+  runs, perhaps less. The core, the merge gate of point 3, barely moved under PHP's own wrapper
+  (90.48 %), and the tests of #52 and #59 raised it to 92.22 %.

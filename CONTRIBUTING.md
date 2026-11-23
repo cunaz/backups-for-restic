@@ -80,6 +80,9 @@ test reaches against a floor. `composer mutation:planner`, `mutation:restore`,
 `mutation:apply`, `mutation:zip` and, with a database server, `mutation:database` are the
 other gates. In CI they run on `main` and on pull requests that change the code they depend
 on ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
+Each gate's configuration holds its floors, measured with `main` at `e40ab18`: a pull request
+keeps them, and one that adds tests may raise them. A new unit test of a class that a gate
+mutates goes into that gate's suite in `tests/Mutation`.
 The scripts run Infection through `bin/mutation-gate.sh`, which fails a gate when its mutant
 processes could not write durably; `.tools/bin/infection` alone does not check that.
 
