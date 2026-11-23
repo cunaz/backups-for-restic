@@ -106,13 +106,31 @@ final readonly class PluginList {
 	}
 
 	/**
-	 * The list with a plugin at its end, as it is when the list has it already.
+	 * The list with a plugin at its end, as it is when the list has it already. Each list that
+	 * this class holds can be read back: renumbering never lengthens a list that parse() read, and
+	 * a list that the entry would take beyond MAX_BYTES is refused here, before anything writes it.
 	 *
 	 * @param string $plugin A path that entry() accepts.
 	 * @return self List.
+	 * @throws DatabaseFailed With the code database_plugins_too_large if the list with the entry would be longer than MAX_BYTES.
 	 */
 	public function with( string $plugin ): self {
-		return $this->has( $plugin ) ? $this : new self( [ ...$this->entries, $plugin ] );
+		if ( $this->has( $plugin ) ) {
+			return $this;
+		}
+		$list  = new self( [ ...$this->entries, $plugin ] );
+		$bytes = strlen( $list->stored() );
+		if ( $bytes > self::MAX_BYTES ) {
+			DatabaseFailed::raise(
+				'With this plugin added, the list of active plugins would be longer than the review reads.',
+				[
+					'code'  => 'database_plugins_too_large',
+					'bytes' => $bytes,
+					'limit' => self::MAX_BYTES,
+				]
+			);
+		}
+		return $list;
 	}
 
 	/**

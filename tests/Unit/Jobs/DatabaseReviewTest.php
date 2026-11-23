@@ -12,6 +12,7 @@ use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FixedRandom;
+use BackupsForRestic\Tests\Support\ActivePlugins;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\TempDir;
 use BackupsForRestic\Tests\Support\WordPressRoles;
@@ -221,6 +222,16 @@ final class DatabaseReviewTest extends TestCase {
 			$other['state']['plugin']
 		);
 		self::assertSame( self::OWN, $other['state']['plugins']['deactivated']['entries'][0]['plugin'] );
+	}
+
+	public function test_a_list_that_this_plugin_would_take_beyond_the_bound_is_refused_as_too_large(): void {
+		// Just below the bound: the exchange could not read the list back with this plugin's entry.
+		$list  = serialize( ActivePlugins::of_length( PluginList::MAX_BYTES - 8 ) );
+		$facts = $this->reviewer()->state( self::live( WordPressRoles::defaults(), [ self::OWN ] ), 1, serialize( WordPressRoles::defaults() ), $list );
+		self::assertSame( [ 'database_plugins_too_large' ], $facts['blockers'] );
+		self::assertTrue( $facts['state']['plugin']['added'] );
+		self::assertSame( DatabaseReview::blank( self::OWN )['plugins'], $facts['state']['plugins'] );
+		self::assertSame( [], $this->looked );
 	}
 
 	public function test_each_list_shows_fifty_entries_and_counts_the_rest(): void {
@@ -437,6 +448,25 @@ final class DatabaseReviewTest extends TestCase {
 		foreach ( [ $changed, $file, $added, $more, $unread, $unlisted ] as $other ) {
 			self::assertNotSame( $review['digest'], DatabaseReview::summary( 'restore', 1, $entries, [], [], [ 'apply', 'binding' ], $other )['digest'] );
 		}
+		// The same capability in each of the four lists of a role is another review.
+		$none    = [
+			'entries' => [],
+			'more'    => 0,
+		];
+		$lists   = [ 'added', 'removed', 'denials_added', 'denials_removed' ];
+		$digests = [];
+		foreach ( $lists as $list ) {
+			$role                       = [
+				'role'   => 'editor',
+				'change' => 'changed',
+			] + array_fill_keys( $lists, $none );
+			$role[ $list ]['entries']   = [ 'update_core' ];
+			$listed                     = $state;
+			$listed['roles']['entries'] = [ $role ];
+			$digests[ $list ]           = DatabaseReview::summary( 'restore', 1, $entries, [], [], [ 'apply', 'binding' ], $listed )['digest'];
+		}
+		self::assertCount( 4, array_unique( $digests ) );
+		self::assertNotContains( $review['digest'], $digests );
 		$refused = DatabaseReview::summary( 'restore', 1, $entries, [ 'database_admin_capabilities' ], [], [ 'apply', 'binding' ], $state );
 		self::assertFalse( $refused['applicable'] );
 	}

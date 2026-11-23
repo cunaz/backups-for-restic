@@ -238,12 +238,14 @@ final readonly class WordPressState {
 	/**
 	 * Adds this plugin at the end of the list of active plugins in a private options table, if
 	 * the list lacks it, and commits. The caller holds a write lock on that one private table and
-	 * has verified its identity; the live tables stay unlocked.
+	 * has verified its identity; the live tables stay unlocked. A list that the entry would take
+	 * beyond what PluginList reads is left as it is, so that nothing is written that the exchange
+	 * could not read back.
 	 *
 	 * @param string $table Verified private options table.
 	 * @param string $plugin This plugin's path, one that PluginList::entry() accepts.
 	 * @return bool Whether the entry was added.
-	 * @throws DatabaseFailed With the code database_plugins_invalid if the list is not one that WordPress writes; without one if the write fails.
+	 * @throws DatabaseFailed With the code database_plugins_invalid if the list is not one that WordPress writes, database_plugins_too_large if it is or would become longer than PluginList reads; without one if the write fails.
 	 */
 	public function activate( string $table, string $plugin ): bool {
 		$list = PluginList::parse( $this->option( $table, 'active_plugins', PluginList::MAX_BYTES ) );

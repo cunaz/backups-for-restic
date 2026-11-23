@@ -15,6 +15,7 @@ use BackupsForRestic\Database\Restore\RoleMap;
 use BackupsForRestic\Database\Restore\WordPressState;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\Apply\DatabaseReview;
 use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Job;
@@ -26,6 +27,7 @@ use BackupsForRestic\Jobs\RunnerLock;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Redactor;
+use BackupsForRestic\Tests\Support\ActivePlugins;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Database\Restore\MysqliConnection as Direct;
 use BackupsForRestic\Database\Restore\SessionDrain;
@@ -418,7 +420,7 @@ final class DatabaseExchangeTest extends TestCase {
 	 *
 	 * @return array{changes:DatabaseChanges,runner:Runner,jobs:JobStore,staging:Staging,clock:FrozenClock,source:Job,files:string,site:string}
 	 */
-	private function services( ?SessionDrain $drain = null, ?\Closure $refresh = null, ?\Closure $connection = null ): array {
+	private function services( ?SessionDrain $drain = null, ?\Closure $refresh = null, ?\Closure $connection = null, ?\Closure $capabilities = null ): array {
 		$clock   = new FrozenClock();
 		$random  = new SystemRandom();
 		$jobs    = new JobStore( $this->directory . '/jobs', new Redactor(), $random );
@@ -459,7 +461,7 @@ final class DatabaseExchangeTest extends TestCase {
 			static fn ( int $id ): array => 1 === $id ? [] : [ 'database_account' ],
 			new FileMaintenance( $site ),
 			$refresh ?? static function (): void {},
-			new ExchangeSite( self::OWN, static fn (): array => [ 'manage_options', ...WordPressRoles::DATABASE ], static fn ( string $plugin ): bool => self::LATER_PLUGIN === $plugin ),
+			new ExchangeSite( self::OWN, $capabilities ?? static fn (): array => [ 'manage_options', ...WordPressRoles::DATABASE ], static fn ( string $plugin ): bool => self::LATER_PLUGIN === $plugin ),
 			$drain ?? new SessionDrain( 0.05, 10.0, 5.0, 0.02, 0.1 )
 		);
 		return [
@@ -1577,11 +1579,12 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertTrue( $services['changes']->preview_undo( $applied->id, 1 )['applicable'] );
 	}
 
-	public function test_the_running_sites_roles_and_plugins_that_cannot_be_read_do_not_block_the_restore(): void {
-		$this->mysql_only();
-		// The review's case: someone with an option-write primitive gave the subscriber role two
-		// capabilities in a form that WordPress reads and honours but that the strict reader refuses,
-		// and activated a plugin through a named entry of the list.
+	/**
+	 * The review's case: someone with an option-write primitive gave the subscriber role two
+	 * capabilities in a form that WordPress reads and honours but that the strict reader refuses,
+	 * and activated a plugin through a named entry of the list.
+	 */
+	private function tamper_with_the_running_site(): void {
 		$tampered                       = WordPressRoles::with( 'subscriber', [ 'manage_options', 'promote_users' ] );
 		$tampered['subscriber']['note'] = 'x';
 		$this->option( 'wp_user_roles', serialize( $tampered ) );
@@ -1594,6 +1597,24 @@ final class DatabaseExchangeTest extends TestCase {
 				]
 			)
 		);
+	}
+
+	/**
+	 * Runs a reviewed apply of this suite's rehearsal to its end, then lets time pass, so that a
+	 * review of its undo is a later one.
+	 *
+	 * @param array{changes:DatabaseChanges,runner:Runner,source:Job,clock:FrozenClock} $services Job services.
+	 */
+	private static function applied( array $services ): Job {
+		$applied = self::advance( $services['runner'], self::before_swap( $services ) );
+		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
+		$services['clock']->seconds += 10;
+		return $applied;
+	}
+
+	public function test_the_running_sites_roles_and_plugins_that_cannot_be_read_are_listed_without_a_comparison(): void {
+		$this->mysql_only();
+		$this->tamper_with_the_running_site();
 		$services = $this->services();
 		$review   = $services['changes']->preview( $services['source']->id, 1 );
 		self::assertTrue( $review['applicable'], implode( ',', $review['blockers'] ) );
@@ -1603,15 +1624,25 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( [ 'added' ], array_values( array_unique( array_column( $review['roles']['entries'], 'change' ) ) ) );
 		self::assertSame( [ self::SNAPSHOT_PLUGIN ], array_column( $review['plugins']['activated']['entries'], 'plugin' ) );
 		self::assertSame( [], $review['plugins']['deactivated']['entries'] );
-		$applied = self::advance( $services['runner'], $services['changes']->start_apply( $services['source']->id, 1, $review['digest'] ) );
-		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
+	}
+
+	public function test_the_running_sites_roles_and_plugins_that_cannot_be_read_do_not_block_the_restore(): void {
+		$this->mysql_only();
+		$this->tamper_with_the_running_site();
+		self::applied( $this->services() );
 		self::assertSame( serialize( WordPressRoles::defaults() ), $this->options()['wp_user_roles'] );
 		self::assertSame( [ 'manage_options', 'promote_users' ], $this->lacks( 2, [ 'manage_options', 'promote_users' ] ) );
 		self::assertSame( serialize( [ self::SNAPSHOT_PLUGIN, self::OWN ] ), $this->options()['active_plugins'] );
+	}
+
+	public function test_the_undo_of_a_restore_whose_running_site_could_not_be_read_is_refused(): void {
+		$this->mysql_only();
+		$this->tamper_with_the_running_site();
+		$services = $this->services();
+		$applied  = self::applied( $services );
 		// The undo would bring the tampered values back and cannot check the administrator under
 		// them: it is refused, as the review of the restore said.
-		$services['clock']->seconds += 10;
-		$undo                        = $services['changes']->preview_undo( $applied->id, 1 );
+		$undo = $services['changes']->preview_undo( $applied->id, 1 );
 		self::assertFalse( $undo['applicable'] );
 		self::assertSame( [ 'database_plugins_invalid', 'database_roles_invalid' ], $undo['blockers'] );
 	}
@@ -1628,12 +1659,10 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( serialize( WordPressRoles::defaults() ), $this->options()['wp_user_roles'] );
 	}
 
-	public function test_an_undo_compares_the_live_roles_and_plugins_only_and_refuses_unreadable_earlier_ones(): void {
+	public function test_an_undo_only_compares_the_roles_and_plugins_of_the_restored_generation(): void {
 		$this->mysql_only();
 		$services = $this->services();
-		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
-		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
-		$services['clock']->seconds += 10;
+		$applied  = self::applied( $services );
 		// The restored generation, which the undo takes out of service: its values are only compared.
 		$restored                       = WordPressRoles::defaults();
 		$restored['subscriber']['note'] = 'x';
@@ -1652,44 +1681,89 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertFalse( $undo['roles']['readable'] );
 		self::assertTrue( $undo['plugins']['readable'] );
 		self::assertSame( [ self::LATER_PLUGIN ], array_column( $undo['plugins']['activated']['entries'], 'plugin' ) );
-		// The earlier generation, which the undo brings back: its values have to be readable.
-		$plan     = DatabaseGeneration::load( $this->direct, $services['jobs']->get( $applied->id ) )->exchange();
-		$retained = self::private_options( $plan, 'retained' );
-		$this->private_option( $retained, 'active_plugins', str_repeat( 'x', PluginList::MAX_BYTES + 1 ) );
-		$refused = $services['changes']->preview_undo( $applied->id, 1 );
-		self::assertSame( [ 'database_plugins_too_large' ], $refused['blockers'] );
-		$this->private_option( $retained, 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN ] ) );
-		$undone = self::advance( $services['runner'], $services['changes']->start_undo( $applied->id, 1, $services['changes']->preview_undo( $applied->id, 1 )['digest'] ) );
+		$undone = self::advance( $services['runner'], $services['changes']->start_undo( $applied->id, 1, $undo['digest'] ) );
 		self::assertSame( JobState::Succeeded, $undone->state, $undone->error?->message ?? '' );
 		self::assertSame( serialize( WordPressRoles::with( 'subscriber', [ 'manage_options', 'edit_users' ] ) ), $this->options()['wp_user_roles'] );
 	}
 
-	public function test_an_unreadable_record_of_the_administrators_capabilities_is_named_alike_in_both_reviews(): void {
+	public function test_an_undo_refuses_an_earlier_list_of_active_plugins_beyond_the_bound(): void {
 		$this->mysql_only();
-		$duplicate = 'INSERT INTO wp_usermeta (user_id,meta_key,meta_value) SELECT user_id,meta_key,meta_value FROM wp_usermeta WHERE user_id=1 AND meta_key=' . self::text( 'wp_capabilities' );
-		$services  = $this->services();
-		$this->db->execute( $duplicate );
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		// The earlier generation, which the undo brings back: its values have to be readable.
+		$plan = DatabaseGeneration::load( $this->direct, $services['jobs']->get( $applied->id ) )->exchange();
+		$this->private_option( self::private_options( $plan, 'retained' ), 'active_plugins', str_repeat( 'x', PluginList::MAX_BYTES + 1 ) );
+		self::assertSame( [ 'database_plugins_too_large' ], $services['changes']->preview_undo( $applied->id, 1 )['blockers'] );
+	}
+
+	/** Stores the approving administrator's record of roles and capabilities a second time. */
+	private function duplicate_the_administrators_record(): void {
+		$this->db->execute( 'INSERT INTO wp_usermeta (user_id,meta_key,meta_value) SELECT user_id,meta_key,meta_value FROM wp_usermeta WHERE user_id=1 AND meta_key=' . self::text( 'wp_capabilities' ) );
+	}
+
+	public function test_a_record_of_the_administrators_capabilities_stored_twice_is_named_in_the_review(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$this->duplicate_the_administrators_record();
 		$review = $services['changes']->preview( $services['source']->id, 1 );
 		self::assertSame( [ 'database_admin_capabilities_unreadable' ], $review['blockers'] );
 		self::assertSame( [], $review['missing_capabilities'] );
-		$this->db->execute( "DELETE FROM wp_usermeta WHERE user_id=1 AND meta_key='wp_capabilities' ORDER BY umeta_id DESC LIMIT 1" );
-		$applied = self::advance( $services['runner'], self::before_swap( $services ) );
-		self::assertSame( JobState::Succeeded, $applied->state, $applied->error?->message ?? '' );
-		$services['clock']->seconds += 10;
-		$this->db->execute( $duplicate );
+	}
+
+	public function test_a_record_of_the_administrators_capabilities_stored_twice_is_named_in_the_undo_review(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$this->duplicate_the_administrators_record();
 		$undo = $services['changes']->preview_undo( $applied->id, 1 );
 		self::assertSame( [ 'database_admin_capabilities_unreadable' ], $undo['blockers'] );
 		self::assertSame( [], $undo['missing_capabilities'] );
+	}
+
+	public function test_a_missing_record_of_the_administrators_capabilities_is_named_in_the_undo_review(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
 		$this->db->execute( "DELETE FROM wp_usermeta WHERE user_id=1 AND meta_key='wp_capabilities'" );
 		$undo = $services['changes']->preview_undo( $applied->id, 1 );
 		self::assertSame( [ 'database_admin_capabilities_unreadable' ], $undo['blockers'] );
 		self::assertSame( [], $undo['missing_capabilities'] );
 	}
 
-	public function test_a_role_map_over_the_bound_is_refused_as_too_large_at_review_and_exchange(): void {
-		$this->mysql_only();
+	/** The private options table of the rehearsal, whose values the report of services() holds as the backup's. */
+	private function rehearsed_options(): string {
 		$number = array_search( 'wp_options', array_column( $this->manifest->tables, 'name' ), true );
 		self::assertIsInt( $number );
+		return $this->importer->tables->shadow( $number );
+	}
+
+	/**
+	 * The rehearsal report of services(), decoded.
+	 *
+	 * @param array{files:string} $services Job services.
+	 * @return array<string,mixed>
+	 */
+	private static function report( array $services ): array {
+		return json_decode( (string) file_get_contents( $services['files'] . '/../../../database-preview.json' ), true, flags: JSON_THROW_ON_ERROR );
+	}
+
+	/**
+	 * Rewrites the rehearsal report of services() and binds its restore to the new content.
+	 *
+	 * @param array{jobs:JobStore,source:Job,files:string}        $services Job services.
+	 * @param \Closure(array<string,mixed>):array<string,mixed> $change What to change in the decoded report.
+	 */
+	private static function rewrite_report( array $services, \Closure $change ): void {
+		$bytes = json_encode( $change( self::report( $services ) ), JSON_THROW_ON_ERROR );
+		file_put_contents( $services['files'] . '/../../../database-preview.json', $bytes );
+		$source = $services['jobs']->get( $services['source']->id );
+		self::assertNotNull( $source );
+		$source->result['database_report_sha256'] = hash( 'sha256', $bytes );
+		$services['jobs']->save( $source );
+	}
+
+	/** Gives the backup a role map longer than the review reads; returns the stored value. */
+	private function rehearse_a_role_map_beyond_the_bound(): string {
 		$large = serialize(
 			WordPressRoles::defaults() + [
 				'bulk' => [
@@ -1699,38 +1773,70 @@ final class DatabaseExchangeTest extends TestCase {
 			]
 		);
 		$large = substr( $large, 0, -1 ) . str_repeat( ' ', RoleMap::MAX_BYTES ) . '}';
-		$this->private_option( $this->importer->tables->shadow( $number ), 'wp_user_roles', $large );
+		$this->private_option( $this->rehearsed_options(), 'wp_user_roles', $large );
+		return $large;
+	}
+
+	public function test_a_backups_role_map_beyond_the_bound_is_refused_as_too_large_at_the_review(): void {
+		$this->mysql_only();
+		$large    = $this->rehearse_a_role_map_beyond_the_bound();
 		$services = $this->services();
-		$report   = json_decode( (string) file_get_contents( $services['files'] . '/../../../database-preview.json' ), true, flags: JSON_THROW_ON_ERROR );
-		self::assertSame( strlen( $large ), $report['wordpress_state']['user_roles'], 'The report keeps the length of a value too long to read.' );
-		$review = $services['changes']->preview( $services['source']->id, 1 );
-		self::assertSame( [ 'database_roles_too_large' ], $review['blockers'] );
-		// The same at the exchange, in the generation that it brings live: here the plan's import is
-		// the rehearsal's, which already holds the large role map.
-		$plan = $this->prepared();
+		self::assertSame( strlen( $large ), self::report( $services )['wordpress_state']['user_roles'], 'The report keeps the length of a value too long to read.' );
+		self::assertSame( [ 'database_roles_too_large' ], $services['changes']->preview( $services['source']->id, 1 )['blockers'] );
+	}
+
+	public function test_a_role_map_beyond_the_bound_is_not_brought_live(): void {
+		$this->mysql_only();
+		$large = $this->rehearse_a_role_map_beyond_the_bound();
+		// The plan's import is the rehearsal's, which holds the large role map.
+		$plan   = $this->prepared();
+		$worker = new TableExchange( $this->direct );
 		self::assertSame( $large, $this->options( self::private_options( $plan ) )['wp_user_roles'] );
 		try {
-			( new TableExchange( $this->direct ) )->run( $plan, 1, false, self::continuity() );
+			$worker->run( $plan, 1, false, self::continuity() );
 			self::fail( 'A role map beyond the bound was brought live.' );
 		} catch ( DatabaseFailed $refused ) {
 			self::assertSame( 'database_roles_too_large', $refused->context()['code'] ?? null );
-			self::assertSame( 'prepared', ( new TableExchange( $this->direct ) )->status( $plan ) );
+			self::assertSame( 'prepared', $worker->status( $plan ) );
 		}
 	}
 
-	public function test_roles_and_plugin_lists_that_wordpress_does_not_write_are_refused_in_the_generation_brought_live(): void {
+	public function test_a_list_of_active_plugins_that_wordpress_does_not_write_is_not_extended(): void {
 		$this->mysql_only();
 		$plan   = $this->prepared();
-		$worker = new TableExchange( $this->direct );
 		$shadow = self::private_options( $plan );
-		$this->private_option( $shadow, 'active_plugins', 'a:1:{i:0;s:9:"hello.php";' );
+		$broken = 'a:1:{i:0;s:9:"hello.php";';
+		$this->private_option( $shadow, 'active_plugins', $broken );
 		try {
-			$worker->activate( $plan, false, self::OWN );
+			( new TableExchange( $this->direct ) )->activate( $plan, false, self::OWN );
 			self::fail( 'A broken list of active plugins was extended.' );
 		} catch ( DatabaseFailed $refused ) {
 			self::assertSame( 'database_plugins_invalid', $refused->context()['code'] ?? null );
 		}
-		$this->private_option( $shadow, 'wp_user_roles', serialize( [ 'administrator' => [ 'name' => 'Administrator' ] ] ) );
+		self::assertSame( $broken, $this->options( $shadow )['active_plugins'] );
+	}
+
+	public function test_this_plugin_is_not_added_to_a_list_of_active_plugins_that_it_would_take_beyond_the_bound(): void {
+		$this->mysql_only();
+		$plan   = $this->prepared();
+		$shadow = self::private_options( $plan );
+		// Just below the bound: with this plugin's entry the list would be too long to read back.
+		$list = serialize( ActivePlugins::of_length( PluginList::MAX_BYTES - 8 ) );
+		$this->private_option( $shadow, 'active_plugins', $list );
+		try {
+			( new TableExchange( $this->direct ) )->activate( $plan, false, self::OWN );
+			self::fail( 'This plugin was added to a list too long to read back.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_plugins_too_large', $refused->context()['code'] ?? null );
+		}
+		self::assertSame( $list, $this->options( $shadow )['active_plugins'] );
+	}
+
+	public function test_a_role_map_that_wordpress_does_not_write_is_not_brought_live(): void {
+		$this->mysql_only();
+		$plan   = $this->prepared();
+		$worker = new TableExchange( $this->direct );
+		$this->private_option( self::private_options( $plan ), 'wp_user_roles', serialize( [ 'administrator' => [ 'name' => 'Administrator' ] ] ) );
 		try {
 			$worker->run( $plan, 1, false, self::continuity() );
 			self::fail( 'A role map that WordPress does not write was brought live.' );
@@ -1743,10 +1849,7 @@ final class DatabaseExchangeTest extends TestCase {
 
 	public function test_a_backups_role_map_that_wordpress_does_not_write_is_refused_at_the_review(): void {
 		$this->mysql_only();
-		// The rehearsal reads the snapshot's values from its import.
-		$number = array_search( 'wp_options', array_column( $this->manifest->tables, 'name' ), true );
-		self::assertIsInt( $number );
-		$shadow = $this->importer->tables->shadow( $number );
+		$shadow = $this->rehearsed_options();
 		$this->private_option(
 			$shadow,
 			'wp_user_roles',
@@ -1769,12 +1872,45 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( [], $review['plugins']['activated']['entries'] );
 	}
 
-	public function test_a_review_from_before_the_comparison_or_with_changed_facts_cannot_be_confirmed(): void {
+	public function test_a_backup_without_a_list_of_active_plugins_is_refused_with_the_code_that_names_it(): void {
+		$this->mysql_only();
+		$this->db->execute( 'DELETE FROM `' . $this->rehearsed_options() . "` WHERE option_name='active_plugins'" );
+		$services = $this->services();
+		// The rehearsal says that it found none, which is not a report from before the comparison.
+		$state = self::report( $services )['wordpress_state'];
+		self::assertIsArray( $state );
+		self::assertArrayHasKey( 'active_plugins', $state );
+		self::assertNull( $state['active_plugins'] );
+		self::assertSame( [ 'database_plugins_invalid' ], $services['changes']->preview( $services['source']->id, 1 )['blockers'] );
+	}
+
+	public function test_a_backup_without_a_role_map_is_refused_with_the_code_that_names_it(): void {
+		$this->mysql_only();
+		$this->db->execute( 'DELETE FROM `' . $this->rehearsed_options() . "` WHERE option_name='wp_user_roles'" );
+		$services = $this->services();
+		$state    = self::report( $services )['wordpress_state'];
+		self::assertIsArray( $state );
+		self::assertArrayHasKey( 'user_roles', $state );
+		self::assertNull( $state['user_roles'] );
+		self::assertSame( [ 'database_roles_invalid' ], $services['changes']->preview( $services['source']->id, 1 )['blockers'] );
+	}
+
+	public function test_a_site_without_its_user_meta_table_is_reviewed_with_that_blocker_and_without_a_comparison(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$this->db->execute( 'DROP TABLE wp_usermeta' );
+		$review = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertSame( [ 'wordpress_tables' ], $review['blockers'] );
+		self::assertFalse( $review['applicable'] );
+		$blank = DatabaseReview::blank( self::OWN );
+		self::assertSame( $blank, array_intersect_key( $review, $blank ) );
+	}
+
+	public function test_a_plugin_activated_after_the_review_refuses_its_confirmation(): void {
 		$this->mysql_only();
 		$services = $this->services();
 		$review   = $services['changes']->preview( $services['source']->id, 1 );
 		self::assertTrue( $review['applicable'] );
-		// A plugin activated after the review changes what the review compared.
 		$this->option( 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN, 'another/another.php' ] ) );
 		self::assertNotSame( $review['digest'], $services['changes']->preview( $services['source']->id, 1 )['digest'] );
 		try {
@@ -1783,35 +1919,87 @@ final class DatabaseExchangeTest extends TestCase {
 		} catch ( JobConflict $refused ) {
 			self::assertSame( 'database_exchange_changed', $refused->context()['code'] ?? null );
 		}
-		// The same after the confirmation: the exchange binds the live list of active plugins.
-		$job = self::before_swap( $services );
-		$this->option( 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN ] ) );
+	}
+
+	public function test_a_plugin_activated_after_the_confirmation_stops_the_exchange(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$job      = self::before_swap( $services );
+		// The exchange binds the live list of active plugins that the review compared.
+		$this->option( 'active_plugins', serialize( [ self::OWN, self::LATER_PLUGIN, 'another/another.php' ] ) );
 		$failed = self::advance( $services['runner'], $job );
 		self::assertSame( 'database_exchange_changed', $failed->error?->code );
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
-		// A job confirmed before the review compared roles and plugins holds no capabilities.
-		$services['clock']->seconds += 10;
-		$job                         = self::before_swap( $services );
+	}
+
+	public function test_a_job_confirmed_before_the_review_compared_roles_and_plugins_is_not_exchanged(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$job      = self::before_swap( $services );
+		// Such a job holds no capabilities that its review checked.
 		unset( $job->data['capabilities'] );
 		$services['jobs']->save( $job );
 		$failed = self::advance( $services['runner'], $job );
 		self::assertSame( 'database_exchange_changed', $failed->error?->code );
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
-		// A rehearsal from before the comparison has no stored roles and plugins in its report.
-		$report = $services['files'] . '/../../../database-preview.json';
-		$bytes  = (string) file_get_contents( $report );
-		$data   = json_decode( $bytes, true, flags: JSON_THROW_ON_ERROR );
-		unset( $data['wordpress_state'] );
-		$bytes = json_encode( $data, JSON_THROW_ON_ERROR );
-		file_put_contents( $report, $bytes );
-		$source                                   = $services['jobs']->get( $services['source']->id );
-		$source->result['database_report_sha256'] = hash( 'sha256', $bytes );
-		$services['jobs']->save( $source );
+	}
+
+	public function test_a_rehearsal_from_before_the_comparison_has_to_be_repeated(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		// Its report holds no roles and plugins of the backup.
+		self::rewrite_report(
+			$services,
+			static function ( array $report ): array {
+				unset( $report['wordpress_state'] );
+				return $report;
+			}
+		);
 		try {
 			$services['changes']->preview( $services['source']->id, 1 );
 			self::fail( 'A rehearsal without the stored roles and plugins was reviewed.' );
 		} catch ( JobConflict $refused ) {
 			self::assertSame( 'database_review_required', $refused->context()['code'] ?? null );
 		}
+	}
+
+	/**
+	 * Services whose backup capability the test configures, as a filter of another plugin could.
+	 *
+	 * @param string $configured The backup capability, read again on every check.
+	 * @return array{changes:DatabaseChanges,runner:Runner,jobs:JobStore,staging:Staging,clock:FrozenClock,source:Job,files:string,site:string}
+	 */
+	private function configured( string &$configured ): array {
+		return $this->services(
+			capabilities: static function () use ( &$configured ): array {
+				return [ $configured, ...WordPressRoles::DATABASE ];
+			}
+		);
+	}
+
+	public function test_a_backup_capability_configured_after_the_review_stops_the_exchange(): void {
+		$this->mysql_only();
+		$capability = 'manage_options';
+		$services   = $this->configured( $capability );
+		$job        = self::before_swap( $services );
+		// The backup's administrator role lacks it, and the exchange would check what was reviewed.
+		$capability = 'manage_backups';
+		$failed     = self::advance( $services['runner'], $job );
+		self::assertSame( 'database_exchange_changed', $failed->error?->code );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	public function test_a_backup_capability_configured_after_the_undo_review_stops_the_undo(): void {
+		$this->mysql_only();
+		$capability = 'manage_options';
+		$services   = $this->configured( $capability );
+		$applied    = self::applied( $services );
+		$review     = $services['changes']->preview_undo( $applied->id, 1 );
+		self::assertTrue( $review['applicable'], implode( ',', $review['blockers'] ) );
+		$undo       = self::advance( $services['runner'], $services['changes']->start_undo( $applied->id, 1, $review['digest'] ), static fn ( Job $job ): bool => 'swapping_database' === $job->step );
+		$capability = 'manage_backups';
+		$failed     = self::advance( $services['runner'], $undo );
+		self::assertSame( 'database_exchange_changed', $failed->error?->code );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
 }

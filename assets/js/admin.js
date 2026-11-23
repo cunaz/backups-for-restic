@@ -1899,7 +1899,7 @@
 			database_roles_invalid: __( 'The user roles of the backup are not stored the way WordPress stores them, so the review cannot check your account under them. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			database_roles_too_large: __( 'The user roles of the backup are larger than 1 MiB, the most that the review reads, so the live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			database_plugins_invalid: __( 'The list of active plugins of the backup is not stored the way WordPress stores it, so the restore cannot keep Backups for restic active in it. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
-			database_plugins_too_large: __( 'The list of active plugins of the backup is larger than 256 KiB, the most that the review reads, so the live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_plugins_too_large: __( 'The list of active plugins of the backup is larger than 256 KiB, the most that the review reads, or would be with Backups for restic added to it, so the live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			database_wordpress_version: __( 'The source and destination WordPress database schema versions differ.', 'backups-for-restic' ),
 			database_exchange_changed: __( 'The destination table generations or administrator no longer match this review.', 'backups-for-restic' ),
 			snapshot_check: __( 'The snapshot contains a CHECK constraint that needs manual handling.', 'backups-for-restic' ),
@@ -1946,7 +1946,7 @@
 			database_roles_invalid: __( 'The user roles of the earlier database, which the undo brings back, are not stored the way WordPress stores them, so the review cannot check your account under them. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
 			database_roles_too_large: __( 'The user roles of the earlier database are larger than 1 MiB, the most that the review reads, so the undo is not available. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
 			database_plugins_invalid: __( 'The list of active plugins of the earlier database, which the undo brings back, is not stored the way WordPress stores it, so the undo cannot keep Backups for restic active in it. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
-			database_plugins_too_large: __( 'The list of active plugins of the earlier database is larger than 256 KiB, the most that the review reads, so the undo is not available. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
+			database_plugins_too_large: __( 'The list of active plugins of the earlier database is larger than 256 KiB, the most that the review reads, or would be with Backups for restic added to it, so the undo is not available. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
 		};
 	}
 
@@ -2088,15 +2088,15 @@
 			const shown = textList( listing.entries );
 			return listing.more ? el( 'div', {}, [ shown, rest( listing.more ) ] ) : shown;
 		}
-		function capabilities( granted, denied ) {
-			const parts = [];
-			if ( granted.entries.length ) {
-				parts.push( el( 'p', {}, [ __( 'Granted:', 'backups-for-restic' ) ] ), names( granted ) );
-			}
-			if ( denied.entries.length ) {
-				parts.push( el( 'p', {}, [ __( 'Denied:', 'backups-for-restic' ) ] ), names( denied ) );
-			}
-			return parts.length ? el( 'div', {}, parts ) : '–';
+		// The four ways in which a role's stored capabilities can differ, each shown when it has entries.
+		function capabilities( role ) {
+			const lists = [
+				[ role.added, __( 'Granted afterwards, not now:', 'backups-for-restic' ) ],
+				[ role.removed, __( 'Granted now, not afterwards:', 'backups-for-restic' ) ],
+				[ role.denials_added, __( 'Denied afterwards, not now:', 'backups-for-restic' ) ],
+				[ role.denials_removed, __( 'Denied now, not afterwards:', 'backups-for-restic' ) ],
+			].filter( ( [ listing ] ) => listing.entries.length );
+			return lists.length ? el( 'div', {}, lists.flatMap( ( [ listing, label ] ) => [ el( 'p', {}, [ label ] ), names( listing ) ] ) ) : '–';
 		}
 		function plugins( listing, text ) {
 			if ( ! listing.entries.length ) {
@@ -2115,14 +2115,14 @@
 			] );
 		}
 		const roles = plan.roles.entries.length ? el( 'div', {}, [
-			el( 'p', {}, [ undo ? __( 'Roles whose stored capabilities differ in the earlier database, for every account that has them. A stored denial takes away what another role of the same account grants.', 'backups-for-restic' ) : __( 'Roles whose stored capabilities differ in the backup, for every account that has them. A stored denial takes away what another role of the same account grants.', 'backups-for-restic' ) ] ),
+			el( 'p', {}, [ undo ? __( 'Roles whose stored capabilities differ in the earlier database, for every account that has them.', 'backups-for-restic' ) : __( 'Roles whose stored capabilities differ in the backup, for every account that has them.', 'backups-for-restic' ) ] ),
+			el( 'p', {}, [ __( 'A denial takes the capability from an account that holds this role together with another role that grants it, unless that other role comes after this one in the account’s roles or the capability is granted to the account itself.', 'backups-for-restic' ) ] ),
 			el( 'table', { className: 'widefat striped bfr-database-roles' }, [
-				el( 'thead', {}, [ el( 'tr', {}, [ __( 'Role', 'backups-for-restic' ), __( 'Change', 'backups-for-restic' ), __( 'Capabilities afterwards only', 'backups-for-restic' ), __( 'Capabilities now only', 'backups-for-restic' ) ].map( ( label ) => el( 'th', { scope: 'col' }, [ label ] ) ) ) ] ),
+				el( 'thead', {}, [ el( 'tr', {}, [ __( 'Role', 'backups-for-restic' ), __( 'Change', 'backups-for-restic' ), __( 'Capabilities that differ', 'backups-for-restic' ) ].map( ( label ) => el( 'th', { scope: 'col' }, [ label ] ) ) ) ] ),
 				el( 'tbody', {}, plan.roles.entries.map( ( role ) => el( 'tr', {}, [
 					el( 'td', {}, [ el( 'code', {}, [ untrusted( role.role ) ] ) ] ),
 					el( 'td', {}, [ changes[ role.change ] || role.change ] ),
-					el( 'td', {}, [ capabilities( role.added, role.denials_added ) ] ),
-					el( 'td', {}, [ capabilities( role.removed, role.denials_removed ) ] ),
+					el( 'td', {}, [ capabilities( role ) ] ),
 				] ) ) ),
 			] ),
 			more( plan.roles ),

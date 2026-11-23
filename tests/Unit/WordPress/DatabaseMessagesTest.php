@@ -80,6 +80,8 @@ final class DatabaseMessagesTest extends TestCase {
 		foreach ( [ 'database_apply', 'database_undo' ] as $type ) {
 			self::assertStringContainsString( 'larger than 1 MiB', self::text( 'database_roles_too_large', $type ) );
 			self::assertStringContainsString( 'larger than 256 KiB', self::text( 'database_plugins_too_large', $type ) );
+			// Also refused: a list that this plugin's entry would take beyond the bound.
+			self::assertStringContainsString( 'or would be with Backups for restic added to it', self::text( 'database_plugins_too_large', $type ) );
 		}
 		$record = self::text( 'database_admin_capabilities_unreadable' );
 		self::assertStringContainsString( 'stored more than once, longer than 64 KiB', $record );

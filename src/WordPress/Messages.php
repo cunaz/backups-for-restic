@@ -252,7 +252,7 @@ final class Messages {
 				'hint'    => __( 'The restore takes the active plugins from the backup and adds Backups for restic to them. Restore the database by hand with the staged SQL files, and check the option active_plugins there.', 'backups-for-restic' ),
 			],
 			'database_plugins_too_large' => [
-				'message' => __( 'The list of active plugins of the backup is larger than 256 KiB, the most that a database review reads.', 'backups-for-restic' ),
+				'message' => __( 'The list of active plugins of the backup is larger than 256 KiB, the most that a database review reads, or would be with Backups for restic added to it.', 'backups-for-restic' ),
 				'hint'    => __( 'The live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			],
 			'database_wordpress_version' => [
@@ -370,7 +370,7 @@ final class Messages {
 				'hint'    => $retained,
 			],
 			'database_plugins_too_large' => [
-				'message' => __( 'The list of active plugins of the earlier database is larger than 256 KiB, the most that a database review reads.', 'backups-for-restic' ),
+				'message' => __( 'The list of active plugins of the earlier database is larger than 256 KiB, the most that a database review reads, or would be with Backups for restic added to it.', 'backups-for-restic' ),
 				'hint'    => $retained,
 			],
 			default => null,

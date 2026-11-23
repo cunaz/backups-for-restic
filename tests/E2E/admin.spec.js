@@ -732,6 +732,8 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		expect( fs.readFileSync( configFile ) ).toEqual( configuration );
 		await settings.reload();
 		await expect( settings.getByLabel( 'Keep one snapshot per day, for this many days' ) ).toHaveValue( '13' );
+		// A role whose only difference is a stored denial, which the review has to show as well.
+		wordpress( target.root, 'get_role( "editor" )->add_cap( "update_core", false );' );
 		const db = staged.locator( 'details' ).filter( { has: destination.getByText( 'Restore tables to the live database', { exact: true } ) } );
 		await db.getByText( 'Restore tables to the live database', { exact: true } ).click();
 		const [ review ] = await Promise.all( [
@@ -747,6 +749,11 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		await expect( db ).toContainText( 'Your user account with all of its user metadata, including your active sessions.' );
 		await expect( db ).toContainText( 'Everything else comes from the backup, among it:' );
 		await expect( db ).toContainText( 'The user roles and their capabilities, for every account.' );
+		const editor = db.locator( 'table.bfr-database-roles tr' ).filter( { hasText: 'editor' } );
+		await expect( editor ).toContainText( 'Capabilities change' );
+		await expect( editor ).toContainText( 'Denied now, not afterwards:' );
+		await expect( editor ).toContainText( 'update_core' );
+		await expect( db ).toContainText( 'A denial takes the capability from an account that holds this role together with another role that grants it' );
 		const applyDatabase = db.getByRole( 'button', { name: 'Apply database restore', exact: true } );
 		if ( '1' === process.env.BFR_E2E_EXPECT_DATABASE_SWAP ) {
 			await expect( applyDatabase ).toBeVisible();
@@ -776,6 +783,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 			const undo = destination.locator( 'section.bfr-card' ).filter( { has: destination.getByRole( 'button', { name: 'Preview database undo' } ) } );
 			await undo.getByRole( 'button', { name: 'Preview database undo' } ).click();
 			await expect( undo ).toContainText( 'Everything else comes back with the earlier database, among it:' );
+			await expect( undo.locator( 'table.bfr-database-roles tr' ).filter( { hasText: 'editor' } ) ).toContainText( 'Denied afterwards, not now:' );
 			await exchange( undo, undo.getByRole( 'button', { name: 'Undo database restore', exact: true } ), 'Database restore undone.' );
 			expect( await publicPost( request, target.url, 'bfr-migration-destination' ) ).toEqual( [ 'bfr-migration-destination' ] );
 			expect( await publicPost( request, target.url, 'bfr-migration-source' ) ).toEqual( [] );

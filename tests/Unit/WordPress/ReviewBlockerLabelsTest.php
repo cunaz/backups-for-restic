@@ -114,6 +114,9 @@ final class ReviewBlockerLabelsTest extends TestCase {
 		}
 		self::assertStringContainsString( '1 MiB', $apply['database_roles_too_large'] . $undo['database_roles_too_large'] );
 		self::assertStringContainsString( '256 KiB', $apply['database_plugins_too_large'] );
+		foreach ( [ $apply, $undo ] as $labelled ) {
+			self::assertStringContainsString( 'or would be with Backups for restic added to it', $labelled['database_plugins_too_large'] );
+		}
 		self::assertStringContainsString( '64 KiB', $apply['database_admin_capabilities_unreadable'] );
 	}
 }

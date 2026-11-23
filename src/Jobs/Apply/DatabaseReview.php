@@ -116,7 +116,7 @@ final readonly class DatabaseReview {
 			JobConflict::raise( 'This rehearsal does not bind the verified SQL content to the reviewed snapshot.', [ 'code' => 'database_review_required' ] );
 		}
 		$stored = $report['wordpress_state'] ?? null;
-		if ( ! is_array( $stored ) || ! self::encoded( $stored['user_roles'] ?? false ) || ! self::encoded( $stored['active_plugins'] ?? false ) ) {
+		if ( ! is_array( $stored ) || ! self::encoded( $stored, 'user_roles' ) || ! self::encoded( $stored, 'active_plugins' ) ) {
 			JobConflict::raise( 'This rehearsal was made before the review compared the roles and active plugins of the backup with the site.', [ 'code' => 'database_review_required' ] );
 		}
 		$source = StagedDatabase::open( $files, $report['source_directory'], $this->prefix );
@@ -137,12 +137,14 @@ final readonly class DatabaseReview {
 		if ( count( $rows ) > Manifest::MAX_TABLES ) {
 			$blockers[] = 'table_count';
 		}
-		$live = array_fill_keys( array_values( array_filter( array_column( $rows, 'TABLE_NAME' ), 'is_string' ) ), true );
+		$live    = array_fill_keys( array_values( array_filter( array_column( $rows, 'TABLE_NAME' ), 'is_string' ) ), true );
+		$present = true;
 		foreach ( WordPressState::TABLES as $suffix ) {
 			$name = $this->prefix . $suffix;
 			if ( ! isset( $live[ $name ] ) || ! in_array( $name, $names, true ) ) {
 				$blockers[] = 'wordpress_tables';
 			}
+			$present = $present && isset( $live[ $name ] );
 		}
 		$entries = [];
 		foreach ( $names as $name ) {
@@ -158,7 +160,12 @@ final readonly class DatabaseReview {
 				'action' => 'keep',
 			];
 		}
-		$facts     = $this->state( $connection, $user, self::decoded( $stored['user_roles'] ), self::decoded( $stored['active_plugins'] ) );
+		// Without the live options and user tables there is nothing to compare, and nothing to read.
+		$facts     = $present ? $this->state( $connection, $user, self::decoded( $stored['user_roles'] ), self::decoded( $stored['active_plugins'] ) ) : [
+			'state'        => self::blank( $this->site->plugin ),
+			'blockers'     => [],
+			'capabilities' => [],
+		];
 		$blockers  = [ ...$blockers, ...$facts['blockers'] ];
 		$authority = '';
 		if ( [] === $blockers ) {
@@ -195,7 +202,8 @@ final readonly class DatabaseReview {
 	 * still give every capability that a database restore needs.
 	 *
 	 * The values of the generation that becomes live and the administrator's own record have to
-	 * be readable; otherwise the review refuses with a code that names the value. The running
+	 * be readable, and so does that generation's list of active plugins with this plugin's entry
+	 * added; otherwise the review refuses with a code that names the value. The running
 	 * site's role map and list of active plugins are read for the comparison only, because the
 	 * exchange discards them: if one cannot be read, the review says so (readable: false) and
 	 * lists everything of the other generation instead.
@@ -229,6 +237,13 @@ final readonly class DatabaseReview {
 		$next     = self::required( static fn (): RoleMap => RoleMap::parse( $roles ), $blockers );
 		$own      = self::required( static fn (): array => RoleMap::own( $current['own'] ), $blockers );
 		$after    = self::required( static fn (): PluginList => PluginList::parse( $plugins ), $blockers );
+		$plugin   = $continuity->plugin;
+		if ( null !== $after && null !== $plugin ) {
+			$state['plugin']['added'] = ! $after->has( $plugin );
+			// The exchange adds this plugin's entry, and the list has to stay one that it reads.
+			$list  = $after;
+			$after = self::required( static fn (): PluginList => $list->with( $plugin ), $blockers );
+		}
 		// The running site's values: a refusal only means that they cannot be compared.
 		$now_roles                    = self::optional( static fn (): RoleMap => RoleMap::parse( $current['roles'] ) );
 		$now_plugins                  = self::optional( static fn (): PluginList => PluginList::parse( $current['plugins'] ) );
@@ -244,15 +259,11 @@ final readonly class DatabaseReview {
 			$state['roles'] = self::bounded( ( $now_roles ?? RoleMap::none() )->changes( $next ), self::role( ... ) ) + [ 'readable' => null !== $now_roles ];
 		}
 		if ( null !== $after ) {
-			if ( null !== $continuity->plugin ) {
-				$state['plugin']['added'] = ! $after->has( $continuity->plugin );
-				$after                    = $after->with( $continuity->plugin );
-			}
 			// This plugin runs this review, so it is active now even where the list cannot be read.
-			$now              = $now_plugins ?? ( null === $continuity->plugin ? PluginList::none() : PluginList::none()->with( $continuity->plugin ) );
-			$file             = fn ( string $plugin ): array => [
-				'plugin' => $plugin,
-				'file'   => true === ( $this->site->installed )( $plugin ),
+			$now              = $now_plugins ?? ( null === $plugin ? PluginList::none() : PluginList::none()->with( $plugin ) );
+			$file             = fn ( string $path ): array => [
+				'plugin' => $path,
+				'file'   => true === ( $this->site->installed )( $path ),
 			];
 			$state['plugins'] = [
 				'deactivated' => self::bounded( $now->without( $after ), $file ),
@@ -391,13 +402,19 @@ final readonly class DatabaseReview {
 	}
 
 	/**
-	 * Whether a report field holds a stored value, the length of one too long to read, or says
-	 * that there is none.
+	 * Whether the report has a field that holds a stored value, the length of one too long to
+	 * read, or null, which says that the rehearsal found none. A report from before the
+	 * comparison lacks the field.
 	 *
-	 * @param mixed $value Field.
-	 * @return bool Whether it is null, a string or a positive integer.
+	 * @param array<mixed> $state The report's wordpress_state.
+	 * @param string       $field Field name.
+	 * @return bool Whether the field is present and null, a string or a positive integer.
 	 */
-	private static function encoded( mixed $value ): bool {
+	private static function encoded( array $state, string $field ): bool {
+		if ( ! array_key_exists( $field, $state ) ) {
+			return false;
+		}
+		$value = $state[ $field ];
 		return null === $value || is_string( $value ) || ( is_int( $value ) && $value > 0 );
 	}
 

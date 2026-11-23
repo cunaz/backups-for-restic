@@ -864,18 +864,33 @@ final readonly class DatabaseChanges implements StepProvider {
 	/**
 	 * The capabilities that the review checked for the approving administrator, from the job,
 	 * with this plugin's path. A job confirmed before the review compared the roles and plugins
-	 * of both generations has none and has to be reviewed again.
+	 * of both generations has none and has to be reviewed again. So does one whose capabilities
+	 * are no longer those that the site requires: a filter of the backup capability may have
+	 * changed since the review, and the exchange checks the administrator under the other
+	 * generation's roles with the capabilities that it gets here.
 	 *
 	 * @param Job $job Database apply or undo.
 	 * @return Continuity What the exchange has to leave working.
-	 * @throws JobConflict If the job lacks valid capabilities.
+	 * @throws JobConflict If the job lacks valid capabilities or the site requires others now.
 	 */
 	private function continuity( Job $job ): Continuity {
 		try {
-			return Continuity::of( $job->data['capabilities'] ?? null, $this->site->plugin );
+			$reviewed = Continuity::of( $job->data['capabilities'] ?? null, $this->site->plugin );
 		} catch ( InvalidArgument ) {
 			JobConflict::raise( 'This database change was confirmed before its review compared the roles and active plugins of both generations.', [ 'code' => 'database_exchange_changed' ] );
 		}
+		try {
+			$required = $this->site->continuity()->capabilities;
+		} catch ( InvalidArgument ) {
+			$required = [];
+		}
+		sort( $required, SORT_STRING );
+		$checked = $reviewed->capabilities;
+		sort( $checked, SORT_STRING );
+		if ( $required !== $checked ) {
+			JobConflict::raise( 'The capabilities that a database restore requires changed after the review.', [ 'code' => 'database_exchange_changed' ] );
+		}
+		return $reviewed;
 	}
 
 	/**

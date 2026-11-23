@@ -8,6 +8,7 @@ use BackupsForRestic\Database\Restore\PluginList;
 use BackupsForRestic\Database\Restore\RoleMap;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\InvalidArgument;
+use BackupsForRestic\Tests\Support\ActivePlugins;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -140,6 +141,29 @@ final class PluginListTest extends TestCase {
 		self::assertSame( $added->entries, unserialize( $added->stored() ) );
 		self::assertSame( $added->entries, PluginList::parse( $added->stored() )->entries );
 		self::assertSame( 'a:0:{}', PluginList::parse( 'a:0:{}' )->stored() );
+	}
+
+	public function test_this_plugin_is_added_only_while_the_list_stays_within_the_bound(): void {
+		// Its entry adds 55 bytes to a list of 100 to 998 entries: i:N;s:41:"…"; with the count as long as before.
+		$fits = PluginList::parse( serialize( ActivePlugins::of_length( PluginList::MAX_BYTES - 55 ) ) );
+		self::assertSame( PluginList::MAX_BYTES, strlen( $fits->with( self::OWN )->stored() ) );
+		$over = PluginList::parse( serialize( ActivePlugins::of_length( PluginList::MAX_BYTES - 54 ) ) );
+		try {
+			$over->with( self::OWN );
+			self::fail( 'This plugin was added to a list that would be too long to read back.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame(
+				[
+					'code'  => 'database_plugins_too_large',
+					'bytes' => PluginList::MAX_BYTES + 1,
+					'limit' => PluginList::MAX_BYTES,
+				],
+				$refused->context()
+			);
+		}
+		// A list that holds this plugin already stays as it is, up to the bound.
+		$full = PluginList::parse( serialize( [ ...ActivePlugins::of_length( PluginList::MAX_BYTES - 55 ), self::OWN ] ) );
+		self::assertSame( $full, $full->with( self::OWN ) );
 	}
 
 	public function test_without_lists_the_entries_that_the_other_list_lacks_in_this_order(): void {
