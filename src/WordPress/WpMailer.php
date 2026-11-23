@@ -147,6 +147,16 @@ final class WpMailer implements Mailer {
 					__( 'Do not delete anything. The dashboard lists the findings. Run "restic check" from another computer; the disaster-recovery guide explains how to repair the repository.', 'backups-for-restic' ),
 				];
 				break;
+			case NoticeKind::Clock:
+				/* translators: %s: site title. */
+				$subject = sprintf( __( '[%s] The server clock was set back', 'backups-for-restic' ), $site );
+				$lines   = [
+					/* translators: 1: site address, 2: date and time in the future, 3: date and time. */
+					sprintf( __( 'The backup plugin of %1$s had recorded the time %2$s, but on %3$s the clock of the server was earlier than that. The clock was ahead and has been set back.', 'backups-for-restic' ), $url, self::time( $notice->since ), self::time( $notice->at ) ),
+					'',
+					__( 'Scheduled jobs go on with their next time, and the age of the last backup counts from now, so you are told again if no backup succeeds. Snapshots made while the clock was ahead carry its time. Make sure that the server keeps its clock synchronised.', 'backups-for-restic' ),
+				];
+				break;
 			default:
 				/* translators: %s: site title. */
 				$subject = sprintf( __( '[%s] Old backups are no longer removed by this site', 'backups-for-restic' ), $site );

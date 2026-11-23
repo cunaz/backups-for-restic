@@ -133,6 +133,14 @@ final class State {
 	public int $report_bytes = 0;
 
 	/**
+	 * Whether the host did not report the free space of the staging or the working
+	 * filesystem when the plan was checked against it. Absent from older checkpoints.
+	 *
+	 * @var bool
+	 */
+	public bool $space_unknown = false;
+
+	/**
 	 * Creates a run identity before any repository request.
 	 *
 	 * @param string    $repository Repository configuration ID.
@@ -226,7 +234,12 @@ final class State {
 		foreach ( [ 'locked_at', 'planned_files', 'planned_bytes', 'planned_entries', 'files', 'bytes', 'skipped', 'report_bytes' ] as $key ) {
 			$state->$key = self::number( $data, $key );
 		}
-		$state->found = self::paths( $data['found'] ?? null );
+		$space = $data['space_unknown'] ?? false;
+		if ( ! is_bool( $space ) ) {
+			throw new FormatException( 'The restore checkpoint has an invalid free-space note.' );
+		}
+		$state->space_unknown = $space;
+		$state->found         = self::paths( $data['found'] ?? null );
 		if ( [] !== array_diff( $state->found, $state->selection->paths ) ) {
 			throw new FormatException( 'The restore checkpoint has an invalid selection cursor.' );
 		}

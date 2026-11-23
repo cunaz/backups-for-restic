@@ -222,4 +222,36 @@ final class ScheduleTest extends TestCase {
 			);
 		}
 	}
+
+	#[Depends( 'test_manual_schedules_start_nothing' )]
+	public function test_slots_that_a_clock_ahead_handled_are_put_back_to_the_current_slot(): void {
+		TestSite::idle( 600 );
+		// As if the clock had been a year ahead when the heartbeat handled them, and was set back since.
+		$ahead = time() + 365 * 86400;
+		TestSite::schedule_state(
+			[
+				'backup_slot' => $ahead,
+				'prune_slot'  => $ahead,
+				'check_slot'  => $ahead,
+			]
+		);
+		$known = self::known();
+
+		$deadline = time() + 180;
+		do {
+			TestSite::heartbeat();
+			$handled = TestSite::schedule_state();
+			sleep( 1 );
+		} while ( ( $handled['backup_slot'] ?? 0 ) > time() && time() < $deadline );
+
+		foreach ( [
+			'backup_slot' => 86400,
+			'prune_slot'  => 7 * 86400,
+			'check_slot'  => 31 * 86400,
+		] as $key => $interval ) {
+			self::assertLessThanOrEqual( time(), $handled[ $key ] ?? PHP_INT_MAX, $key . ' no longer waits for the clock to catch up.' );
+			self::assertGreaterThan( time() - $interval, $handled[ $key ] ?? 0, $key . ' is the current slot of its schedule.' );
+		}
+		self::assertSame( [], array_values( array_diff( self::known(), $known ) ), 'The current slot counts as handled: nothing runs twice.' );
+	}
 }

@@ -81,7 +81,43 @@ final class PrivateDirectoryTest extends TestCase {
 		$directory->ensure();
 		$directory->remove_contents();
 		self::assertSame( [ '.', '..' ], scandir( $this->root . '/outside' ) );
-		self::assertTrue( is_link( $directory->path ) );
+		self::assertTrue( is_link( $this->root . '/working' ) );
+		self::assertSame( realpath( $this->root . '/outside' ), $directory->path );
+	}
+
+	public function test_a_directory_named_through_a_link_is_used_by_its_real_path(): void {
+		mkdir( $this->root . '/volumes/data', 0700, true );
+		if ( ! symlink( $this->root . '/volumes/data', $this->root . '/data' ) ) {
+			self::markTestSkipped( 'Symbolic links cannot be created here.' );
+		}
+		$real = realpath( $this->root . '/volumes/data' ) . '/acme/private';
+		// As on the first request after BACKUPS_FOR_RESTIC_PRIVATE_DIR was set: nothing exists yet.
+		$directory = PrivateDirectory::locate( $this->root . '/data/acme//private/', $this->root . '/content', $this->root . '/uploads' );
+		self::assertSame( $this->root . '/data/acme//private', $directory->configured );
+		self::assertSame( $real, $directory->path );
+
+		$directory->ensure();
+		foreach ( PrivateDirectory::SUBDIRECTORIES as $name ) {
+			self::assertSame( realpath( $directory->subdirectory( $name ) ), $directory->subdirectory( $name ), $name );
+		}
+		self::assertSame( $real, ( new PrivateDirectory( $this->root . '/data/acme/private' ) )->path, 'Every later request uses the same form.' );
+		self::assertTrue( $directory->owns_contents() );
+
+		$directory->remove_contents();
+		self::assertDirectoryDoesNotExist( $real );
+	}
+
+	public function test_a_directory_linked_from_the_web_root_counts_as_inside_it(): void {
+		mkdir( $this->root . '/site/wp-content', 0700, true );
+		mkdir( $this->root . '/outside' );
+		if ( ! symlink( $this->root . '/outside', $this->root . '/site/wp-content/' . PrivateDirectory::NAME ) ) {
+			self::markTestSkipped( 'Symbolic links cannot be created here.' );
+		}
+		$directory = new PrivateDirectory( $this->root . '/site/wp-content/' . PrivateDirectory::NAME );
+
+		self::assertSame( realpath( $this->root . '/outside' ), $directory->path );
+		self::assertTrue( $directory->is_inside( $this->root . '/site' ), 'A web server that follows the link serves it below the site.' );
+		self::assertFalse( ( new PrivateDirectory( $this->root . '/outside' ) )->is_inside( $this->root . '/site' ) );
 	}
 
 	public function test_location_prefers_the_constant_then_wp_content_then_uploads(): void {

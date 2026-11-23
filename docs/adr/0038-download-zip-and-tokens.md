@@ -114,6 +114,16 @@ after releasing the repository lock. The runner resumes the ZIP in subsequent ti
 staged files remain downloadable if an entry cannot be archived, and the job warning
 identifies the refused name. Expiry removes the archive together with the restored files.
 
+Before the first byte, the job compares what the archive needs at most with the free space
+where the host reports it: the staged bytes once more, three times the size of the report
+for the headers (a stored entry writes its name in its local header, its central record and
+the spool of those records, with at most 228 bytes besides, and a line of the report holds
+the name and more than a hundred bytes), and a reserve of 64 MiB for the site's other
+writers. An archive that does not fit is not begun, and the job says so in a warning;
+without a figure for the free space the archive is built and a full disk is noticed as
+before. A request to cancel that arrives while the archive is built discards it and keeps
+the staged files ([ADR 0037](0037-restore-job.md)).
+
 An administrator requests a download with `POST /restores/<job>/download`. The response
 contains a form that submits the one-time token and encoded subject to `admin-post.php`.
 A grant of restored content needs the WordPress password and is recorded (last section).

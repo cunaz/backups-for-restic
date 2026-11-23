@@ -118,3 +118,20 @@ over links, the names set aside for removal (`.removing-<job-id>`) and directori
 removal renames at the same moment, and nothing there stops a request. The staged tree
 under `files/` gets no such file: it is the snapshot's content and is applied to the live
 site as it is.
+
+## Canonical path (2026-11)
+
+The plugin uses the directory by its canonical path: `PrivateDirectory` resolves the
+longest existing part of the configured path with `realpath()` and appends the parts that
+do not exist yet, so the directories it creates there have that path. Everything the
+plugin keeps lies below it. Staging, file previews and the restore engine refuse a path
+whose real location differs from its spelling; with the configured path, a host that names
+the directory through a link, as `BACKUPS_FOR_RESTIC_PRIVATE_DIR=/data/acme/private` where
+`/data` is a link to the volume, failed every large file preview and then stopped the expiry
+of all staging. The configured path is kept where its spelling matters: the refusal of
+relative paths and dot segments, the URLs that the exposure probe derives from the web
+roots (a web server that follows a link serves the directory under the root that the
+configured path names), the containment in the document root, the protected paths of a
+file apply, and the uninstall, which does not remove a directory that the configuration
+names through a link of its own. The probe's observations are bound to the real path as
+before.
