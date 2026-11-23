@@ -4,7 +4,9 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
+use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
@@ -57,6 +59,13 @@ final class RestoreStepsTest extends TestCase {
 
 	private FrozenClock $clock;
 
+	/**
+	 * The free-space probe that the restore services get; the host's by default.
+	 *
+	 * @var (\Closure(string): (float|false))|null
+	 */
+	private ?\Closure $space = null;
+
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'restore-steps' );
 		$this->site      = $this->directory . '/site';
@@ -105,7 +114,9 @@ final class RestoreStepsTest extends TestCase {
 				new SystemRandom(),
 				new Identity( 'example.com', 'www-data' ),
 				static fn ( Job $job ): BackupPlan => new BackupPlan( [ $site ] )
-			)
+			),
+			null,
+			$this->space
 		);
 	}
 
@@ -184,6 +195,69 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( [], $done->warnings );
 	}
 
+	/**
+	 * A restore of the docs with an archive, driven until the archive is being written.
+	 */
+	private function archiving(): Job {
+		$job      = $this->restore_job( $this->backup(), [ $this->site . '/docs' ], true );
+		$building = $this->drive( $job, static fn ( Job $pending ): bool => ( $pending->progress['archive_bytes'] ?? 0 ) > 0 );
+		self::assertSame( 'archiving', $building->progress['phase'] ?? null );
+		self::assertFileExists( $this->staging( $job ) . '/selection.zip.part', 'The archive is being written.' );
+		return $building;
+	}
+
+	/**
+	 * What a cancel that came while the archive was built leaves: the staged files, recorded
+	 * as the result of a restore that succeeded, and nothing of the archive.
+	 */
+	private function assert_staged_without_archive( Job $job ): void {
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+		self::assertFileExists( $this->staging( $job ) . '/entries.jsonl' );
+		foreach ( [ '', '.part', '.entries', '.state' ] as $suffix ) {
+			self::assertFileDoesNotExist( $this->staging( $job ) . '/selection.zip' . $suffix );
+		}
+		self::assertCount( 1, $job->warnings );
+		self::assertStringContainsString( 'the ZIP was not built', $job->warnings[0] );
+		self::assertSame( $job->id, ( new SiteState( $this->options ) )->get( 'last_restore' )['job'] ?? null );
+		self::assertSame( [], $this->locks() );
+	}
+
+	public function test_a_cancel_while_the_zip_is_built_ends_only_the_zip(): void {
+		$job = $this->archiving();
+
+		$this->runner()->cancel( $job->id );
+
+		$this->assert_staged_without_archive( $this->drive( $job ) );
+	}
+
+	public function test_deactivating_the_plugin_while_the_zip_is_built_keeps_the_staged_files(): void {
+		$job = $this->archiving();
+
+		// What the deactivation does: no tick comes after this call.
+		$stopped = $this->runner()->stop( 10.0, [ 'reason' => 'deactivation' ] );
+
+		self::assertNotNull( $stopped );
+		$this->assert_staged_without_archive( $stopped );
+	}
+
+	public function test_a_zip_that_would_not_fit_is_not_begun_and_the_staged_files_stay(): void {
+		$job = $this->restore_job( $this->backup(), [ $this->site . '/docs' ], true );
+		$this->drive( $job, static fn ( Job $pending ): bool => 'archiving' === ( $pending->progress['phase'] ?? null ) );
+		// The files are staged. A second copy of them and the reserve beside it do not fit.
+		$this->space = static fn ( string $path ): float => 32.0 * 1048576;
+
+		$done = $this->drive( $job );
+
+		self::assertSame( JobState::Succeeded, $done->state, (string) $done->error?->message );
+		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+		foreach ( [ '', '.part', '.entries', '.state' ] as $suffix ) {
+			self::assertFileDoesNotExist( $this->staging( $job ) . '/selection.zip' . $suffix, 'Not a byte of the archive was written.' );
+		}
+		self::assertCount( 1, $done->warnings );
+		self::assertStringContainsString( 'ZIP unavailable. It needs about 66 MiB of free disk space, and 32 MiB are free.', $done->warnings[0] );
+	}
+
 	public function test_a_backup_and_a_restore_in_many_short_ticks_stage_identical_bytes(): void {
 		$snapshot = $this->backup();
 
@@ -217,6 +291,19 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( [], $this->locks() );
 		$last = ( new SiteState( $this->options ) )->get( 'last_restore' );
 		self::assertSame( [ $job->id, $snapshot, 4, 'restores/' . $job->id ], [ $last['job'] ?? null, $last['snapshot'] ?? null, $last['files'] ?? null, $last['staging'] ?? null ] );
+	}
+
+	public function test_the_ticks_of_a_restore_share_the_index_cache_of_the_jobs(): void {
+		$snapshot = $this->backup();
+		$before   = count( $this->server->requests );
+
+		$job = $this->drive( $this->restore_job( $snapshot ) );
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertGreaterThan( 8, $job->ticks );
+		$downloads = array_filter( array_slice( $this->server->requests, $before ), static fn ( string $request ): bool => 1 === preg_match( '~^GET /site/index/[0-9a-f]{64}~', $request ) );
+		self::assertNotSame( [], $downloads, 'The index file that the backup wrote last is not in its cache yet.' );
+		self::assertSame( array_values( array_unique( $downloads ) ), array_values( $downloads ), 'No tick of the restore downloads an index file again.' );
 	}
 
 	public function test_a_restore_of_selected_paths_stages_only_those(): void {
@@ -341,9 +428,176 @@ final class RestoreStepsTest extends TestCase {
 		$job = $this->drive( $this->restore_job( $snapshot, [ $this->site . '/missing' ] ) );
 
 		self::assertSame( JobState::Failed, $job->state );
-		self::assertSame( 'configuration', $job->error?->code );
+		self::assertSame( 'restore_path_missing', $job->error?->code, 'The setup is complete; the snapshot lacks the path.' );
 		self::assertSame( [], $this->locks() );
 		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
+	public function test_a_restore_that_is_known_not_to_fit_fails_with_a_space_error_before_a_file_is_written(): void {
+		$snapshot    = $this->backup();
+		$this->space = static fn ( string $path ): float => 1048576.0;
+
+		$job = $this->drive( $this->restore_job( $snapshot ) );
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'staging_space', $job->error?->code, 'Not "the repository contains data the plugin cannot read".' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
+	public function test_a_restore_without_a_free_space_figure_goes_on_and_says_so_once(): void {
+		$snapshot    = $this->backup();
+		$this->space = static fn ( string $path ): bool => false;
+
+		$job = $this->drive( $this->restore_job( $snapshot ) );
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertCount( 1, $job->warnings );
+		self::assertStringContainsString( 'free disk space is unknown', $job->warnings[0] );
+		self::assertFileEquals( $this->site . '/docs/deep/large.bin', $this->staging( $job ) . '/files' . $this->site . '/docs/deep/large.bin' );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_write_that_the_disk_refuses_fails_the_restore_with_a_storage_error(): void {
+		if ( ! function_exists( 'posix_setrlimit' ) || ! function_exists( 'pcntl_signal_get_handler' ) || ! defined( 'POSIX_RLIMIT_FSIZE' ) ) {
+			self::markTestSkipped( 'This failure injection needs POSIX file-size limits and signals.' );
+		}
+		$snapshot = $this->backup();
+		$limits   = posix_getrlimit();
+		$soft     = is_int( $limits['soft filesize'] ) ? $limits['soft filesize'] : POSIX_RLIMIT_INFINITY;
+		$hard     = is_int( $limits['hard filesize'] ) ? $limits['hard filesize'] : POSIX_RLIMIT_INFINITY;
+		$handler  = pcntl_signal_get_handler( SIGXFSZ );
+		// As a full disk or a quota refuses a write: no file may grow beyond 512 KiB, and the site has one of 1.5 MB.
+		pcntl_signal( SIGXFSZ, SIG_IGN );
+		self::assertTrue( posix_setrlimit( POSIX_RLIMIT_FSIZE, 524288, $hard ) );
+		set_error_handler( static fn (): bool => true, E_WARNING | E_NOTICE );
+		try {
+			$job = $this->drive( $this->restore_job( $snapshot ) );
+		} finally {
+			restore_error_handler();
+			posix_setrlimit( POSIX_RLIMIT_FSIZE, $soft, $hard );
+			pcntl_signal( SIGXFSZ, $handler );
+		}
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'staging_write', $job->error?->code, 'The user is told about the disk, not about damage in the repository.' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ), 'A failed restore leaves no partial tree.' );
+	}
+
+	/**
+	 * What a restore that stages every file and then meets a failure in the same call leaves:
+	 * a job that succeeded, every staged byte, one warning, and no lock once it ended.
+	 */
+	private function assert_complete_despite( Job $job, string $cause ): void {
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		$staged = $this->staging( $job ) . '/files' . $this->site;
+		foreach ( [ '/hello.txt', '/empty.txt', '/docs/readme.md', '/docs/deep/large.bin' ] as $file ) {
+			self::assertFileEquals( $this->site . $file, $staged . $file );
+		}
+		self::assertSame( 4, $job->result['files'] ?? null );
+		self::assertSame( 100, $job->progress['percent'] ?? null );
+		self::assertCount( 1, $job->warnings );
+		self::assertStringContainsString( 'Every file is staged, but what followed the last one failed (' . $cause . ')', $job->warnings[0] );
+		$log = (string) file_get_contents( $this->directory . '/private/jobs/' . $job->id . '/events.log' );
+		self::assertStringContainsString( '"code":"' . RestoreSteps::RELEASE_DEFERRED . '"', $log );
+		self::assertSame( [], $this->locks(), 'The lock went with a later attempt.' );
+		self::assertSame( $job->id, ( new SiteState( $this->options ) )->get( 'last_restore' )['job'] ?? null );
+	}
+
+	/**
+	 * @return iterable<string, array{\Closure(): ?HttpResponse, string}>
+	 */
+	public static function failed_releases(): iterable {
+		yield 'the server refuses it' => [ static fn (): HttpResponse => new HttpResponse( 401, [], '' ), 'unauthorized' ];
+		yield 'an error of PHP' => [
+			static function (): never {
+				throw new \Error( 'Call to undefined function disk_free_space()' );
+			},
+			'internal',
+		];
+	}
+
+	/**
+	 * @param \Closure(): ?HttpResponse $answer What the first deletion of a lock gets.
+	 */
+	#[DataProvider( 'failed_releases' )]
+	public function test_a_lock_release_that_fails_when_the_last_file_is_staged_keeps_the_restore( \Closure $answer, string $cause ): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot );
+		$failed   = false;
+		// The first lock the restore deletes is its own, in the call that stages its last file.
+		$this->server->before = static function ( string $method, string $path ) use ( &$failed, $answer ): ?HttpResponse {
+			if ( $failed || 'DELETE' !== $method || ! str_starts_with( $path, '/site/locks/' ) ) {
+				return null;
+			}
+			$failed = true;
+			return $answer();
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertTrue( $failed, 'The release failed.' );
+		$this->assert_complete_despite( $job, $cause );
+	}
+
+	public function test_a_checkpoint_that_cannot_be_written_after_the_last_file_keeps_the_restore(): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot );
+		$work     = $this->directory . '/private/jobs/' . $job->id . '/restore';
+		$planted  = false;
+		// While the lock is released after the last file, a directory takes the place of the
+		// checkpoint's temporary file: the checkpoint that forgets the lock cannot be written.
+		$this->server->before = static function ( string $method, string $path ) use ( &$planted, $work ): ?HttpResponse {
+			if ( ! $planted && 'DELETE' === $method && str_starts_with( $path, '/site/locks/' ) ) {
+				$planted = mkdir( $work . '/restore.json.tmp' );
+			}
+			return null;
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertTrue( $planted );
+		$this->assert_complete_despite( $job, 'repository_damaged' );
+		self::assertDirectoryDoesNotExist( $work, 'The cleanup removed the working files.' );
+	}
+
+	public function test_a_failure_after_the_last_file_ends_the_job_when_the_staging_directory_was_replaced(): void {
+		$snapshot = $this->backup();
+		$job      = $this->restore_job( $snapshot );
+		$files    = $this->staging( $job ) . '/files';
+		$failed   = false;
+		// While the lock is released, the staged tree is swapped for another directory.
+		$this->server->before = static function ( string $method, string $path ) use ( &$failed, $files ): ?HttpResponse {
+			if ( $failed || 'DELETE' !== $method || ! str_starts_with( $path, '/site/locks/' ) ) {
+				return null;
+			}
+			$failed = rename( $files, $files . '-moved' ) && mkdir( $files, 0700 );
+			return new HttpResponse( 401, [], '' );
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertTrue( $failed );
+		self::assertSame( JobState::Failed, $job->state, 'A checkpoint that names another directory proves nothing.' );
+		self::assertSame( 'unauthorized', $job->error?->code );
+		self::assertDirectoryDoesNotExist( $files );
+	}
+
+	public function test_an_error_of_php_while_a_finished_restore_releases_its_lock_keeps_the_staged_files(): void {
+		$snapshot = $this->backup();
+		$job      = $this->drive( $this->restore_job( $snapshot ), static fn ( Job $now ): bool => 'recording' === $now->step );
+		self::assertFalse( $job->state->is_terminal() );
+		// As where a host disabled a function that the request releasing the lock calls.
+		$this->server->before = static function ( string $method, string $path ): never {
+			throw new \Error( 'Call to undefined function disk_free_space()' );
+		};
+
+		$job = $this->drive( $job );
+
+		self::assertSame( JobState::Succeeded, $job->state, (string) $job->error?->message );
+		self::assertFileEquals( $this->site . '/hello.txt', $this->staging( $job ) . '/files' . $this->site . '/hello.txt' );
+		self::assertStringContainsString( 'could not be asked for leftover locks', (string) file_get_contents( $this->directory . '/private/jobs/' . $job->id . '/events.log' ) );
 	}
 
 	/**
@@ -428,6 +682,11 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( [ 'preflight', 'unlocking', 'planning', 'restoring', 'recording' ], JobType::Restore->steps() );
 		self::assertSame( [ 'releasing', 'cleaning_up' ], JobType::Restore->cleanup_steps() );
 		self::assertTrue( JobType::Restore->cancels_before( 'restoring' ) );
+		self::assertTrue( JobType::Restore->cancels_before( 'restoring', 'restore' ) );
+		foreach ( [ 'complete', 'database_import', 'database_cleanup', 'archiving' ] as $phase ) {
+			self::assertFalse( JobType::Restore->cancels_before( 'restoring', $phase ), 'Every file is staged in ' . $phase . '; the step answers the cancel itself.' );
+		}
+		self::assertTrue( JobType::Backup->cancels_before( 'backing_up', 'archiving' ), 'Only a restore knows these phases.' );
 		self::assertFalse( JobType::Restore->cancels_before( 'recording' ), 'Staged files are recorded, not thrown away by a late cancel.' );
 		self::assertFalse( JobType::Restore->is_maintenance() );
 	}

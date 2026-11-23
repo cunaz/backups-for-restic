@@ -12,11 +12,13 @@ namespace BackupsForRestic\Engine\Restore;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Engine\Identity;
+use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\RepositoryChanged;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Id;
@@ -44,6 +46,12 @@ final class RestoreRun {
 	 * not hold. A caller that retries after a lost lock need not retry this.
 	 */
 	public const string SNAPSHOT_MISSING = 'snapshot_missing';
+
+	/**
+	 * The bytes that the free-space check keeps beyond the files for the report and the
+	 * checkpoints, besides a rounding of every entry.
+	 */
+	private const int RESERVE = 16777216;
 
 	/**
 	 * Index loaded under the current lease.
@@ -93,17 +101,21 @@ final class RestoreRun {
 	 * @param State                                  $state Checkpoint.
 	 * @param Clock                                  $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
-	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe; native by default.
+	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe; disk_free_space() by default, unknown where a host disables it.
+	 * @param IndexCache|null                        $cache Local index cache; the index files are read from the server without one.
 	 */
 	private function __construct(
 		private readonly Repository $repository,
 		private State $state,
 		private readonly Clock $clock,
 		private readonly ?Throttle $throttle,
-		?\Closure $free_space
+		?\Closure $free_space,
+		private readonly ?IndexCache $cache
 	) {
-		$this->locking    = new Locking( $repository, new Identity( $state->hostname ), $clock, $state->pid );
-		$this->free_space = $free_space ?? disk_free_space( ... );
+		$this->locking = new Locking( $repository, new Identity( $state->hostname ), $clock, $state->pid );
+		// PHP treats a function in disable_functions as undefined: it is looked for when the
+		// space is checked, not taken as a callable here, which would end every restore.
+		$this->free_space = $free_space ?? static fn ( string $path ): float|false => function_exists( 'disk_free_space' ) ? disk_free_space( $path ) : false;
 		$this->verify_state();
 	}
 
@@ -119,14 +131,16 @@ final class RestoreRun {
 	 * @param Clock|null                             $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
 	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
+	 * @param IndexCache|null                        $cache Local index cache; the index files are read from the server without one.
 	 * @return self New run; no file has been restored yet.
 	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws StorageFailed With the code staging_write if the working directory cannot be created.
 	 */
-	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string|array $selection = '/', ?Identity $identity = null, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
+	public static function start( Repository $repository, Id $snapshot, string $target, string $work_dir, string|array $selection = '/', ?Identity $identity = null, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null, ?IndexCache $cache = null ): self {
 		$selected    = new Selection( is_string( $selection ) ? [ $selection ] : $selection );
 		$destination = Files::bind( $target );
 		if ( ! Files::exists( $work_dir ) && ! mkdir( $work_dir, 0700, true ) ) {
-			throw new InvalidArgument( 'The restore working directory cannot be created.' );
+			StorageFailed::raise( 'The restore working directory cannot be created.', [ 'code' => Files::WRITE_FAILED ] );
 		}
 		$work       = Files::bind( $work_dir );
 		$target_key = Names::key( '\\' === DIRECTORY_SEPARATOR ? str_replace( '\\', '/', $destination['path'] ) : $destination['path'] );
@@ -141,7 +155,7 @@ final class RestoreRun {
 			Files::discard_unpublished( $work['path'] );
 			Files::empty_directory( $work['path'], true );
 			$state = new State( $repository->config()->id, $snapshot, $selected, $destination, $work, ( $identity ?? new Identity( 'backups-for-restic-restore' ) )->hostname, random_int( 1, 2147483647 ) );
-			$run   = new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
+			$run   = new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space, $cache );
 			Files::persist( $state );
 			return $run;
 		} finally {
@@ -157,16 +171,17 @@ final class RestoreRun {
 	 * @param Clock|null                             $clock Lease clock.
 	 * @param Throttle|null                          $throttle Optional CPU pacing.
 	 * @param (\Closure(string): (float|false))|null $free_space Disk-space probe.
+	 * @param IndexCache|null                        $cache Local index cache; the index files are read from the server without one.
 	 * @return self Resumed run.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
-	public static function resume( Repository $repository, string $work_dir, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null ): self {
+	public static function resume( Repository $repository, string $work_dir, ?Clock $clock = null, ?Throttle $throttle = null, ?\Closure $free_space = null, ?IndexCache $cache = null ): self {
 		$work  = Files::bind( $work_dir );
 		$state = Files::read( $work['path'] );
 		if ( $work !== $state->work ) {
 			throw new FormatException( 'The restore checkpoint belongs to another working directory.' );
 		}
-		return new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space );
+		return new self( $repository, $state, $clock ?? new SystemClock(), $throttle, $free_space, $cache );
 	}
 
 	/**
@@ -263,6 +278,16 @@ final class RestoreRun {
 			'total_bytes' => $this->state->planned_bytes,
 			'skipped'     => $this->state->skipped,
 		];
+	}
+
+	/**
+	 * Whether the host did not report the free space when the plan was checked against it.
+	 * The run went on then, and only its checked writes stop it if the disk is full.
+	 *
+	 * @return bool True if the free space was unknown.
+	 */
+	public function space_unknown(): bool {
+		return $this->state->space_unknown;
 	}
 
 	/**
@@ -368,9 +393,14 @@ final class RestoreRun {
 		return $found;
 	}
 
-	/** Loads the index and root tree only after taking a lock. */
+	/**
+	 * Loads the index and root tree only after taking a lock. With a cache, only the index
+	 * files that the cache does not cover are downloaded. After a lock gap keep_lock() has
+	 * dropped the index, and the cache answers with what the server lists now: a cache that
+	 * covers an index file that is gone, as after a prune elsewhere, is not used.
+	 */
 	private function prepare(): void {
-		$this->index ??= $this->repository->load_index( keep_lock: $this->keep_lock( ... ) );
+		$this->index ??= null === $this->cache ? $this->repository->load_index( keep_lock: $this->keep_lock( ... ) ) : $this->cache->load( $this->repository, keep_lock: $this->keep_lock( ... ) );
 		$this->keep_lock();
 		if ( null === $this->state->tree ) {
 			$snapshot = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, $this->state->snapshot ) );
@@ -517,7 +547,8 @@ final class RestoreRun {
 	/**
 	 * Finishes preflight before writing; completion checks actual bytes against the plan.
 	 *
-	 * @throws InvalidArgument If restore inputs or directories are unsuitable.
+	 * @throws InvalidArgument With the code restore_path_missing if a selected path is not in the snapshot.
+	 * @throws StorageFailed With the code staging_space if the files are known not to fit.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
 	 */
 	private function finish_pass(): void {
@@ -526,19 +557,13 @@ final class RestoreRun {
 		}
 		if ( 'plan' === $this->state->phase ) {
 			if ( [] !== array_diff( $this->state->selection->paths, $this->state->found ) ) {
-				throw new InvalidArgument( 'A selected path does not exist in the snapshot.' );
+				InvalidArgument::raise( 'A selected path does not exist in the snapshot.', [ 'code' => 'restore_path_missing' ] );
 			}
 			Files::empty_directory( $this->state->target['path'] );
-			$free = ( $this->free_space )( $this->state->target['path'] );
 			// Round each entry up generously and reserve room for the report/checkpoint.
-			$needed = $this->state->planned_bytes + (float) $this->state->planned_entries * 8192 + 16777216;
-			if ( false === $free || ! is_finite( $free ) || $free < $needed ) {
-				throw new FormatException( 'The staging filesystem has insufficient or unknown free space for this restore.' );
-			}
-			$work_free = ( $this->free_space )( $this->state->work['path'] );
-			if ( false === $work_free || ! is_finite( $work_free ) || $work_free < (float) $this->state->planned_entries * 8192 + 16777216 ) {
-				throw new FormatException( 'The working filesystem has insufficient or unknown free space for the restore report.' );
-			}
+			$reserve = (float) $this->state->planned_entries * 8192 + self::RESERVE;
+			$this->require_space( $this->state->target['path'], $this->state->planned_bytes + $reserve, 'The staging filesystem has too little free space for this restore.' );
+			$this->require_space( $this->state->work['path'], $reserve, 'The working filesystem has too little free space for the restore report.' );
 			$this->state->phase = 'restore';
 			$this->reset_stack();
 			return;
@@ -547,6 +572,34 @@ final class RestoreRun {
 			throw new FormatException( 'The restored payload does not match its planned totals.' );
 		}
 		$this->state->phase = 'complete';
+	}
+
+	/**
+	 * Refuses a restore that is known not to fit. Free space that the host does not report,
+	 * or reports as no number, is unknown, not too little: the run notes it and goes on, as
+	 * the rest of the plugin does, and every write it makes is checked all the same.
+	 *
+	 * @param string $path    Directory on the filesystem in question.
+	 * @param float  $needed  Bytes the restore needs there.
+	 * @param string $refusal Constant message of the refusal.
+	 * @throws StorageFailed With the code staging_space if less is free.
+	 */
+	private function require_space( string $path, float $needed, string $refusal ): void {
+		$free = ( $this->free_space )( $path );
+		if ( false === $free || ! is_finite( $free ) || $free < 0 ) {
+			$this->state->space_unknown = true;
+			return;
+		}
+		if ( $free < $needed ) {
+			StorageFailed::raise(
+				$refusal,
+				[
+					'code'   => 'staging_space',
+					'needed' => $needed,
+					'free'   => $free,
+				]
+			);
+		}
 	}
 
 	/**
@@ -615,6 +668,7 @@ final class RestoreRun {
 	 *
 	 * @param string $relative Raw relative destination.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code staging_write if the directory cannot be created.
 	 */
 	private function create_directory( string $relative ): void {
 		$path = Files::destination( $this->state, $relative );
@@ -628,7 +682,7 @@ final class RestoreRun {
 			throw new FormatException( 'The restore directory intent does not match its traversal.' );
 		}
 		if ( ! Files::exists( $path ) && ! mkdir( $path, 0700 ) ) {
-			throw new FormatException( 'A staging directory cannot be created.' );
+			StorageFailed::raise( 'A staging directory cannot be created.', [ 'code' => Files::WRITE_FAILED ] );
 		}
 		if ( ( Files::stat( $path )['mode'] & 0170000 ) !== 0040000 ) {
 			throw new FormatException( 'A staging directory was replaced with a link or file.' );
@@ -720,6 +774,7 @@ final class RestoreRun {
 	 * @param string $mtime Snapshot timestamp.
 	 * @param bool   $directory Whether this is a directory.
 	 * @throws FormatException If checkpoint data or local restore I/O is invalid.
+	 * @throws StorageFailed With the code staging_write if the mode or time cannot be set.
 	 */
 	private function metadata( string $path, string $mtime, bool $directory ): void {
 		$stat = Files::stat( $path );
@@ -727,7 +782,7 @@ final class RestoreRun {
 			throw new FormatException( 'A restored entry was replaced before its metadata was applied.' );
 		}
 		if ( ! chmod( $path, $directory ? 0700 : 0600 ) || ! touch( $path, Rfc3339::parse( $mtime )[0] ) ) {
-			throw new FormatException( 'Restored entry metadata cannot be applied.' );
+			StorageFailed::raise( 'Restored entry metadata cannot be applied.', [ 'code' => Files::WRITE_FAILED ] );
 		}
 	}
 
