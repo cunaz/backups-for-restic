@@ -50,7 +50,7 @@ final readonly class FileMaintenance {
 	public function enter( string $id, string $directory, string $grant ): void {
 		$this->require_directory( $id, $directory );
 		if ( '' !== $grant && 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $grant ) ) {
-			throw new StorageFailed( 'The maintenance control grant is invalid.' );
+			StorageFailed::raise( 'The maintenance control grant is invalid.', [ 'code' => 'maintenance_failed' ] );
 		}
 		$marker = $this->root . '/.maintenance';
 		$temp   = $directory . '/maintenance.php';
@@ -58,7 +58,7 @@ final readonly class FileMaintenance {
 		clearstatcache( true );
 		if ( ! is_file( $temp ) ) {
 			if ( file_exists( $marker ) || is_link( $marker ) ) {
-				throw new StorageFailed( 'Another updater owns the maintenance marker.' );
+				StorageFailed::raise( 'Another updater owns the maintenance marker.', [ 'code' => 'maintenance_busy' ] );
 			}
 			// The marker is rendered once, by the job's first tick. Later ticks boot under it,
 			// without the theme and ordinary plugins, whose filters can change these URLs.
@@ -75,26 +75,26 @@ final readonly class FileMaintenance {
 		$expected = is_file( $proof ) && ! is_link( $proof ) ? file_get_contents( $proof, false, null, 0, 65 ) : false;
 		$ours     = is_file( $temp ) && ! is_link( $temp ) ? lstat( $temp ) : false;
 		if ( ! is_string( $expected ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $expected ) || false === $ours || 0100000 !== ( $ours['mode'] & 0170000 ) || $ours['size'] >= self::MAX_BYTES || ! hash_equals( $expected, (string) hash_file( 'sha256', $temp ) ) ) {
-			throw new StorageFailed( 'The private maintenance marker is unavailable.' );
+			StorageFailed::raise( 'The private maintenance marker is unavailable.', [ 'code' => 'maintenance_failed' ] );
 		}
 		// Core reads the marker in every request, also in PHP processes of other system
 		// users, and writes its own marker readable for all of them. This one holds no
 		// secret: the grant is a hash. It is the same inode as the private copy, which the
 		// owner-only job directory keeps out of reach.
 		if ( self::MODE !== ( $ours['mode'] & 0777 ) && ! chmod( $temp, self::MODE ) ) {
-			throw new StorageFailed( 'The maintenance marker could not be made readable.' );
+			StorageFailed::raise( 'The maintenance marker could not be made readable.', [ 'code' => 'maintenance_failed' ] );
 		}
 		$linked = false;
 		if ( ! file_exists( $marker ) && ! is_link( $marker ) ) {
 			if ( ! function_exists( 'link' ) || ! link( $temp, $marker ) ) {
-				throw new StorageFailed( 'Maintenance requires writable WordPress and private storage on the same filesystem.' );
+				StorageFailed::raise( 'Maintenance requires writable WordPress and private storage on the same filesystem.', [ 'code' => 'maintenance_failed' ] );
 			}
 			$linked = true;
 		}
 		clearstatcache( true );
 		$active = is_file( $marker ) && ! is_link( $marker ) ? lstat( $marker ) : false;
 		if ( false === $active || $ours['dev'] !== $active['dev'] || $ours['ino'] !== $active['ino'] || ! touch( $temp ) ) {
-			throw new StorageFailed( 'The active WordPress maintenance marker has changed.' );
+			StorageFailed::raise( 'The active WordPress maintenance marker has changed.', [ 'code' => 'maintenance_failed' ] );
 		}
 		self::refresh( $marker, $linked );
 	}
@@ -127,7 +127,7 @@ final readonly class FileMaintenance {
 				self::invalidate( $marker );
 			}
 			if ( ! unlink( $marker ) ) {
-				throw new StorageFailed( 'The site could not leave maintenance mode.' );
+				StorageFailed::raise( 'The site could not leave maintenance mode.', [ 'code' => 'maintenance_stuck' ] );
 			}
 		}
 		if ( ! unlink( $temp ) ) {

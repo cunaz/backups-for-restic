@@ -604,8 +604,9 @@ final class TestSite {
 	 *
 	 * @param string                               $id   Job ID of the apply; the restore's ends in 1 instead.
 	 * @param list<array{string, string, string}>   $rows Snapshot path, live destination and action of each entry.
+	 * @param int                                  $age  Seconds since the apply ended; from 86400 on its undo window has ended.
 	 */
-	public static function undoable_apply( string $id, array $rows ): void {
+	public static function undoable_apply( string $id, array $rows, int $age = 0 ): void {
 		self::php(
 			'
 			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
@@ -613,7 +614,7 @@ final class TestSite {
 			$jobs    = $container->jobs();
 			$restore = new BackupsForRestic\Jobs\Job( substr( $arguments[0], 0, -1 ) . "1", BackupsForRestic\Jobs\JobType::Restore, "cli", time() - 120 );
 			$restore->state       = BackupsForRestic\Jobs\JobState::Succeeded;
-			$restore->finished_at = time() - 60;
+			$restore->finished_at = time() - 60 - (int) $arguments[2];
 			$jobs->save( $restore );
 			$files = $container->private_dir()->subdirectory( "restores" ) . "/" . $restore->id . "/files";
 			if ( ! is_dir( $files ) ) {
@@ -629,7 +630,7 @@ final class TestSite {
 			$apply = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Apply, "cli", time() - 60 );
 			$apply->data        = [ "restore" => $restore->id, "include_config" => false, "digest" => str_repeat( "0", 64 ), "manifest_hash" => hash( "sha256", $json ), "plan_job" => null ];
 			$apply->state       = BackupsForRestic\Jobs\JobState::Succeeded;
-			$apply->finished_at = time();
+			$apply->finished_at = time() - (int) $arguments[2];
 			$apply->result      = [ "restore" => $restore->id, "files_changed" => count( $manifest ) ];
 			$workspace          = $jobs->directory( $apply ) . "/undo";
 			BackupsForRestic\Jobs\Apply\ApplyJournal::directory( $workspace );
@@ -637,7 +638,7 @@ final class TestSite {
 			file_put_contents( $workspace . "/attempted", (string) count( $manifest ) );
 			$jobs->save( $apply );
 			',
-			[ $id, (string) json_encode( $rows ) ]
+			[ $id, (string) json_encode( $rows ), (string) $age ]
 		);
 	}
 

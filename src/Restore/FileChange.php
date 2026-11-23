@@ -167,7 +167,7 @@ final readonly class FileChange {
 			}
 			$previous = 'replace' === $action ? self::regular( $path ) : null;
 			if ( null !== $previous && 0 !== ( $previous['mode'] & 07000 ) ) {
-				throw new StorageFailed( 'A file with special permission bits cannot be replaced.' );
+				StorageFailed::raise( 'A file with special permission bits cannot be replaced.', [ 'code' => 'file_changed_after_review' ] );
 			}
 			$record = [
 				'path'      => hash( 'sha256', $path . "\0" . ( $this->source_path ?? $path ) ),
@@ -250,7 +250,7 @@ final readonly class FileChange {
 					throw new StorageFailed( 'The retained undo copy changed before the live file could be replaced.' );
 				}
 				if ( ApplyManifest::identity( $path ) !== $live ) {
-					throw new StorageFailed( 'The live original changed during verification of its undo copy.' );
+					StorageFailed::raise( 'The live original changed during verification of its undo copy.', [ 'code' => 'file_changed_after_review' ] );
 				}
 				// The digests above can take long: recheck the folders and the name last.
 				$this->require_action( $path, $action );
@@ -265,7 +265,7 @@ final readonly class FileChange {
 		$this->sync_directory( dirname( $path ) );
 		$this->require_action( $path, 'replace' );
 		if ( self::metadata( $path ) !== $record['installed'] || ! $this->matches( $path, $source_hash ) ) {
-			throw new StorageFailed( 'The published file has changed.' );
+			StorageFailed::raise( 'The published file has changed.', [ 'code' => 'file_changed_after_review' ] );
 		}
 		$record['phase'] = 'done';
 		self::invalidate( $path );
@@ -730,7 +730,7 @@ final readonly class FileChange {
 		$this->sync_directory( dirname( $path ) );
 		$this->require_action( $path, 'keep' );
 		if ( self::metadata( $path ) !== $record['installed'] ) {
-			throw new StorageFailed( 'The published directory has changed.' );
+			StorageFailed::raise( 'The published directory has changed.', [ 'code' => 'file_changed_after_review' ] );
 		}
 		$record['phase'] = 'done';
 		$this->save( $record );
@@ -798,7 +798,7 @@ final readonly class FileChange {
 	 */
 	private function require_action( string $path, string $expected ): void {
 		if ( $this->live_action( $path ) !== $expected ) {
-			throw new StorageFailed( 'The live file plan changed since it was reviewed.' );
+			StorageFailed::raise( 'The live file plan changed since it was reviewed.', [ 'code' => 'file_changed_after_review' ] );
 		}
 	}
 
@@ -846,7 +846,7 @@ final readonly class FileChange {
 	 */
 	private function require_parent( string $path, array $record ): void {
 		if ( self::directory_identity( dirname( $path ) ) !== $record['parent'] ) {
-			throw new StorageFailed( 'The parent of the reviewed file changed.' );
+			StorageFailed::raise( 'The parent of the reviewed file changed.', [ 'code' => 'file_changed_after_review' ] );
 		}
 	}
 
@@ -861,7 +861,7 @@ final readonly class FileChange {
 		$stat = self::regular( $path );
 		if ( self::identity( $stat ) !== $record['previous'] || $stat['uid'] !== $record['uid'] || $stat['gid'] !== $record['gid']
 			|| ( $stat['mode'] & 07777 ) !== $record['mode'] || $stat['mtime'] !== $record['mtime'] || ! $this->matches( $path, $record['original'] ) ) {
-			throw new StorageFailed( 'The live file no longer matches the reviewed original.' );
+			StorageFailed::raise( 'The live file no longer matches the reviewed original.', [ 'code' => 'file_changed_after_review' ] );
 		}
 	}
 
@@ -897,7 +897,7 @@ final readonly class FileChange {
 		try {
 			$opened = fstat( $input );
 			if ( false === $opened || self::identity( $opened ) !== self::identity( $before ) ) {
-				throw new StorageFailed( 'The source changed while opening a file.' );
+				StorageFailed::raise( 'The source changed while opening a file.', [ 'code' => 'file_changed_after_review' ] );
 			}
 			$offset = self::exists( $target ) ? self::regular( $target )['size'] : 0;
 			if ( $offset === $before['size'] && self::exists( $target ) && $this->matches( $target, $digest ) ) {
@@ -928,7 +928,7 @@ final readonly class FileChange {
 			fclose( $input );
 		}
 		if ( ! $this->matches( $target, $digest ) ) {
-			throw new StorageFailed( 'A private file copy differs from its reviewed digest.' );
+			StorageFailed::raise( 'A private file copy differs from its reviewed digest.', [ 'code' => 'file_changed_after_review' ] );
 		}
 		return true;
 	}

@@ -280,9 +280,30 @@ final class FileChangeTest extends TestCase {
 		try {
 			$this->change->apply( $this->path, 'replace', hash( 'sha256', 'reviewed' ), hash( 'sha256', 'old' ), INF );
 			self::fail( 'The new content must match the manifest.' );
-		} catch ( StorageFailed ) {
+		} catch ( StorageFailed $refused ) {
 			self::assertSame( 'old', file_get_contents( $this->path ) );
+			// The job says that a file changed after the review, not that this server cannot run a backup.
+			self::assertSame( 'file_changed_after_review', $refused->context()['code'] ?? null );
 		}
+	}
+
+	public function test_a_live_file_that_changed_after_the_review_stops_its_replacement_with_a_code_of_its_own(): void {
+		$old = str_repeat( 'o', ChunkDigest::BLOCK + 1 );
+		file_put_contents( $this->staging . $this->path, 'new' );
+		file_put_contents( $this->path, $old );
+		// The worker records its intent and yields while it verifies the large original.
+		self::assertFalse( $this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', $old ), 0.0 ) );
+		self::assertFileExists( $this->journal . '/entry.json' );
+		// Someone edits the live file before the worker goes on.
+		file_put_contents( $this->path, str_repeat( 'e', ChunkDigest::BLOCK + 1 ) );
+		try {
+			$this->change->apply( $this->path, 'replace', hash( 'sha256', 'new' ), hash( 'sha256', $old ), INF );
+			self::fail( 'A live original that changed after the review must not be replaced.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertSame( 'The live file no longer matches the reviewed original.', $refused->getMessage() );
+			self::assertSame( 'file_changed_after_review', $refused->context()['code'] ?? null );
+		}
+		self::assertSame( str_repeat( 'e', ChunkDigest::BLOCK + 1 ), file_get_contents( $this->path ) );
 	}
 
 	/**

@@ -258,7 +258,7 @@ final class Runner {
 				$job->consecutive_failures = 0;
 				$job->not_before           = 0;
 			} catch ( \Throwable $exception ) {
-				$error = JobError::from_throwable( $exception );
+				$error = JobError::from_throwable( $exception, $job->type );
 				// The table a database error is about, which its message cannot name.
 				$table = $exception instanceof PluginException ? $exception->context()['table'] ?? null : null;
 				$log->write(

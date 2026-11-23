@@ -336,6 +336,55 @@ final class StagingTest extends TestCase {
 		}
 	}
 
+	public function test_a_refused_removal_says_whether_a_job_uses_the_staging_or_until_when_its_undo_needs_it(): void {
+		$restore = $this->restored( $this->clock->seconds - 7200 );
+		$applies = [];
+		foreach ( [ 3600, 600 ] as $ago ) {
+			// Two applies of the same staging that changed live files, an hour and ten minutes ago.
+			$apply       = $this->job( JobState::Failed, $this->clock->seconds - $ago, [], JobType::Apply );
+			$apply->data = [ 'restore' => $restore->id ];
+			$this->jobs->save( $apply );
+			$workspace = $this->jobs->directory( $apply ) . '/undo';
+			mkdir( $workspace, 0700, true );
+			file_put_contents( $workspace . '/attempted', '1' );
+			$applies[] = $apply;
+		}
+		$refusal = function () use ( $restore ): array {
+			try {
+				$this->staging->remove( $restore->id, self::NO_DEADLINE );
+			} catch ( JobConflict $conflict ) {
+				// Not "this restore is still running": a restore that ended has nothing to cancel.
+				return $conflict->context();
+			}
+			self::fail( 'Staged files that an undo needs must not be removed.' );
+		};
+		// The later apply's window ends last.
+		self::assertSame(
+			[
+				'code'  => 'restore_kept_for_undo',
+				'until' => $this->clock->seconds - 600 + 86400,
+			],
+			$refusal()
+		);
+		self::assertSame( [ $restore->id => $this->clock->seconds - 600 + 86400 ], $this->jobs->restore_pins( $this->clock->seconds ) );
+		self::assertSame( [ $restore->id => true ], $this->jobs->pinned_restores( $this->clock->seconds ) );
+		// A preview of the same staging that is still at work: the files are in use.
+		$preview       = $this->job( JobState::Running, 0, [], JobType::FilePlan );
+		$preview->data = [ 'restore' => $restore->id ];
+		$this->jobs->save( $preview );
+		self::assertSame( [ 'code' => 'restore_in_use' ], $refusal() );
+		self::assertSame( [ $restore->id => null ], $this->jobs->restore_pins( $this->clock->seconds ) );
+		$preview->state       = JobState::Succeeded;
+		$preview->finished_at = $this->clock->seconds;
+		$this->jobs->save( $preview );
+		// Once both windows have ended, the files can go.
+		file_put_contents( $this->jobs->directory( $applies[1] ) . '/undo/reverted', '1' );
+		self::assertSame( $this->clock->seconds - 3600 + 86400, $refusal()['until'] );
+		$this->clock->advance( 86400 );
+		self::assertSame( [], $this->jobs->restore_pins( $this->clock->seconds ) );
+		self::assertTrue( $this->staging->remove( $restore->id, self::NO_DEADLINE ) );
+	}
+
 	public function test_an_active_job_without_a_staging_directory_is_a_conflict_not_an_unknown_job(): void {
 		$job = $this->job( JobState::Queued );
 
