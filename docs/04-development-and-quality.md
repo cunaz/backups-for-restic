@@ -845,10 +845,14 @@ the repository, not files, so a pull request cannot make them.
    checks to pass* with every check listed in `.github/required-checks.txt` (§6). Merge
    through GitHub (the merge button or `gh pr merge`), because a merge pushed from a local
    clone is refused.
-2. **Ruleset for release tags** (New tag ruleset): include the pattern `v*`; enforcement
-   *Active*; bypass list empty. Rules: *Restrict updates* and *Restrict deletions*. A
-   published release tag can then neither be moved nor deleted, not even by the owner, without
-   first changing the ruleset.
+2. **Ruleset for release tags** (New tag ruleset): include the pattern `v*`, which GitHub
+   stores as `refs/tags/v*`, and exclude nothing; enforcement *Active*; bypass list empty.
+   Rules: *Restrict updates* and *Restrict deletions*. A published release tag can then neither
+   be moved nor deleted, not even by the owner, without first changing the ruleset. The release
+   gate counts a tag ruleset only when an include pattern reaches the tag the way GitHub
+   matches it, with `*` and `?` inside one segment of `refs/tags/<tag>`: `refs/tags/v*`,
+   `refs/tags/*` or `refs/**/*`, but not `refs/*`. An exclude pattern that could match the tag
+   even with `*` across segments takes the ruleset out.
 3. **Environment `wordpress-org`** (Settings → Environments), before the first tag: required
    reviewer the owner and nobody else, because GitHub needs the approval of one listed reviewer
    and another one could approve alone; *Prevent self-review* off, because the owner approves

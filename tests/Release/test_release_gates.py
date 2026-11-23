@@ -138,6 +138,15 @@ def job_name(template, combination):
     return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", evaluate, str(template))
 
 
+def load_gate():
+    """bin/check-release-gates.py as a module, for the functions that need no API answers."""
+    import importlib.util  # noqa: PLC0415 - only the matching tests need it
+    spec = importlib.util.spec_from_file_location("check_release_gates", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class ReleaseGates(unittest.TestCase):
     def gate(self, responses, *arguments):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -229,6 +238,39 @@ class ReleaseGates(unittest.TestCase):
         responses = protections()
         responses[key("rulesets/2")]["body"]["conditions"]["ref_name"]["exclude"] = ["refs/tags/v1.*"]
         self.refused(self.protections(responses), "no active tag ruleset stops refs/tags/v1.2.3 from being deleted")
+
+    def test_a_tag_ruleset_counts_only_where_its_pattern_reaches_the_tag_segment_by_segment(self):
+        # GitHub matches ruleset patterns with File::FNM_PATHNAME: * stays within one segment.
+        for pattern in ("refs/tags/v*", "refs/tags/*", "refs/**/*", "refs/tags/v1.2.3", "refs/tags/v[0-9]*", "~ALL"):
+            responses = protections()
+            responses[key("rulesets/2")]["body"]["conditions"]["ref_name"]["include"] = [pattern]
+            status, output = self.protections(responses)
+            self.assertEqual(0, status, f"{pattern}: {output}")
+        for pattern in ("refs/*", "refs/tags/*/x", "*", "refs/**", "v*", "~DEFAULT_BRANCH"):
+            responses = protections()
+            responses[key("rulesets/2")]["body"]["conditions"]["ref_name"]["include"] = [pattern]
+            self.refused(self.protections(responses), "no active tag ruleset stops refs/tags/v1.2.3 from being moved")
+
+    def test_an_exclusion_that_may_reach_the_tag_in_any_reading_removes_the_ruleset(self):
+        for pattern in ("refs/*", "refs/tags/v1.*", "*", "~ALL"):
+            responses = protections()
+            responses[key("rulesets/2")]["body"]["conditions"]["ref_name"]["exclude"] = [pattern]
+            self.refused(self.protections(responses), "no active tag ruleset stops refs/tags/v1.2.3 from being deleted")
+        responses = protections()
+        responses[key("rulesets/2")]["body"]["conditions"]["ref_name"]["exclude"] = ["refs/heads/*", "refs/tags/w*", "~DEFAULT_BRANCH"]
+        status, output = self.protections(responses)
+        self.assertEqual(0, status, output)
+
+    def test_a_branch_is_matched_the_same_way(self):
+        gate = load_gate()
+        branch = "refs/heads/main"
+        for include in ("~DEFAULT_BRANCH", "~ALL", "refs/heads/*", "refs/heads/main", "refs/**/main"):
+            self.assertTrue(gate.applies({"ref_name": {"include": [include], "exclude": []}}, branch), include)
+        for include in ("refs/*", "refs/heads/*/main", "main", "*"):
+            self.assertFalse(gate.applies({"ref_name": {"include": [include], "exclude": []}}, branch), include)
+        for exclude in ("~DEFAULT_BRANCH", "refs/*", "refs/heads/m*", "*"):
+            self.assertFalse(gate.applies({"ref_name": {"include": ["~ALL"], "exclude": [exclude]}}, branch), exclude)
+        self.assertFalse(gate.applies({"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "refs/heads/feature"))
 
     def test_a_tag_ruleset_must_block_both_moving_and_deleting(self):
         responses = protections()

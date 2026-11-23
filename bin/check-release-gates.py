@@ -158,11 +158,73 @@ def main_branch_rules(api):
     return problems, f"pull request, the {len(required)} checks of .github/required-checks.txt, no force push, no deletion"
 
 
+def within_segments(name, pattern):
+    """Whether name matches pattern as GitHub matches ruleset and deployment patterns, with
+    File::FNM_PATHNAME: * and ? stay within one /-separated segment, [...] never matches /, and
+    **/ at the start of a segment stands for any number of whole segments. Any other ** is read
+    as *, so that a pattern counts only in the narrowest reading."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i) and (i == 0 or pattern[i - 1] == "/"):
+            out.append("(?:[^/]*/)*")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append("[^/]*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        elif pattern[i] == "[" and (end := _bracket_end(pattern, i)) is not None:
+            body = pattern[i + 1:end]
+            negated = body.startswith("!")
+            body = (body[1:] if negated else body).replace("\\", "\\\\").replace("[", "\\[")
+            if not negated and body.startswith("^"):
+                body = "\\" + body
+            out.append("(?!/)[" + ("^" if negated else "") + body + "]")
+            i = end + 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(out), name) is not None
+
+
+def _bracket_end(pattern, start):
+    """The index of the ] that closes the class at start, as fnmatch reads it, or None."""
+    j = start + 1
+    if j < len(pattern) and pattern[j] == "!":
+        j += 1
+    if j < len(pattern) and pattern[j] == "]":
+        j += 1
+    end = pattern.find("]", j)
+    return None if end < 0 else end
+
+
 def applies(conditions, ref):
+    """Whether a ruleset's ref_name conditions certainly cover ref, failing closed both ways: an
+    include pattern counts only when it matches segment by segment (within_segments), and an
+    exclude pattern removes the ruleset when it matches in the widest reading too, with * across
+    /, as fnmatch reads it."""
     names = (conditions or {}).get("ref_name") or {}
-    def matches(pattern):
-        return pattern == "~ALL" or fnmatch.fnmatchcase(ref, pattern)
-    return any(matches(p) for p in names.get("include", [])) and not any(matches(p) for p in names.get("exclude", []))
+
+    def special(pattern):
+        if pattern == "~ALL":
+            return True
+        if pattern == "~DEFAULT_BRANCH":
+            return ref == f"refs/heads/{MAIN}"
+        return None
+
+    def included(pattern):
+        known = special(pattern)
+        return within_segments(ref, pattern) if known is None else known
+
+    def excluded(pattern):
+        known = special(pattern)
+        return fnmatch.fnmatchcase(ref, pattern) if known is None else known
+
+    return any(included(p) for p in names.get("include", [])) and not any(excluded(p) for p in names.get("exclude", []))
 
 
 def tag_rules(api, tag):
@@ -224,7 +286,7 @@ def environment(api, tag):
     wrong = [p.get("name", "") for p in listed if p.get("type") != "tag" or not p.get("name", "").startswith("v")]
     if not listed or wrong:
         problems.append(f"{ENVIRONMENT} must allow only tags matching v* (it allows: {', '.join(p.get('type', '?') + ' ' + p.get('name', '?') for p in listed) or 'nothing'})")
-    elif not any(fnmatch.fnmatchcase(tag, p["name"]) for p in listed):
+    elif not any(within_segments(tag, p["name"]) for p in listed):
         problems.append(f"{ENVIRONMENT} does not allow the tag {tag}")
     return problems, f"review by {owner} alone, self-review allowed, no administrator bypass, tags {', '.join(p['name'] for p in listed)} only"
 
