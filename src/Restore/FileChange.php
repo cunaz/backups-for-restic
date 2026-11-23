@@ -285,7 +285,8 @@ final readonly class FileChange {
 	 *
 	 * Absence is decided before the parent: a created file or directory that is gone, also
 	 * below a directory that was removed since, leaves nothing to revert, and a replaced file
-	 * that is gone is kept. A parent that is no longer the recorded canonical directory keeps
+	 * that is gone is kept. An entry is gone only where its name is missing from a folder
+	 * that this process can search; one that cannot be looked up is kept as changed. A parent that is no longer the recorded canonical directory keeps
 	 * the entry. Whether a created directory holds entries that the undo keeps is for the
 	 * caller to decide, which knows the other entries.
 	 *
@@ -487,14 +488,16 @@ final readonly class FileChange {
 		if ( 'undone' === $record['phase'] ) {
 			return self::decision( 'keep', 'already_undone' );
 		}
+		// A live name that cannot be looked up is neither missing nor someone else's entry: such
+		// an entry falls through to the checks below, which keep it as changed.
 		$private = 'mkdir' === $action
 			? null === $record['candidate'] || self::at( $this->item_directory . '/directory', $record['candidate'] )
-			: 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ! self::at( $path, $record['candidate'] );
+			: 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ( self::absent( $path ) || ( self::exists( $path ) && ! self::at( $path, $record['candidate'] ) ) );
 		if ( $private ) {
 			// Nothing was published: the prepared entry is still private.
 			return self::decision( 'keep', 'not_applied' );
 		}
-		if ( ! self::exists( $path ) ) {
+		if ( self::absent( $path ) ) {
 			return self::decision( 'keep', 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' );
 		}
 		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
@@ -1210,6 +1213,26 @@ final readonly class FileChange {
 	}
 
 	/**
+	 * Whether an entry is established to be missing: its name is not in a parent directory
+	 * that this process can search, or that parent is missing in the same sense. A name that
+	 * cannot be looked up, for example below a folder without search permission, where
+	 * file_exists() answers false for a file that is there, is not missing.
+	 *
+	 * @param string $path Path to test.
+	 * @return bool Whether the entry is missing.
+	 */
+	private static function absent( string $path ): bool {
+		if ( self::exists( $path ) ) {
+			return false;
+		}
+		$parent = dirname( $path );
+		if ( $parent === $path ) {
+			return false;
+		}
+		return is_dir( $parent ) ? is_executable( $parent ) : self::absent( $parent );
+	}
+
+	/**
 	 * Drops stale bytecode for code that was installed or removed.
 	 *
 	 * @param string $path Changed live path.
@@ -1241,7 +1264,10 @@ final readonly class FileChange {
 	private function read( string $path, string $action ): ?array {
 		$file = $this->item_directory . '/entry.json';
 		if ( ! self::exists( $file ) ) {
-			return null;
+			if ( self::absent( $file ) ) {
+				return null;
+			}
+			throw new StorageFailed( 'The file change journal cannot be read.' );
 		}
 		$stat = self::regular( $file );
 		$text = $stat['size'] <= 4096 ? file_get_contents( $file ) : false;

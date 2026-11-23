@@ -340,6 +340,82 @@ final class FileChangeTest extends TestCase {
 		}
 	}
 
+	public function test_an_entry_that_cannot_be_looked_up_is_not_taken_for_a_missing_one(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root searches every folder.' );
+		}
+		$folder = $this->site . '/folder';
+		$file   = $folder . '/created.txt';
+		mkdir( $folder );
+		mkdir( $this->staging . $folder, 0700 );
+		file_put_contents( $this->staging . $file, 'created' );
+		self::assertTrue( $this->change->apply( $file, 'create', hash( 'sha256', 'created' ), null, INF ) );
+		$kept         = [
+			'action' => 'keep',
+			'reason' => 'changed_since_apply',
+		];
+		$unsearchable = function ( string $directory, \Closure $check ): void {
+			// file_exists() and lstat() answer false below it, also for a file that is there.
+			chmod( $directory, 0600 );
+			try {
+				$check();
+			} finally {
+				chmod( $directory, 0700 );
+			}
+		};
+		$unsearchable(
+			$folder,
+			function () use ( $file, $kept ): void {
+				self::assertSame( $kept, $this->change->undo_review( $file, 'create' ) );
+				self::assertSame( self::outcome( 'kept', 'changed_since_apply' ), $this->change->undo( $file, 'create', INF, 'remove' ) );
+			}
+		);
+		self::assertSame( 'created', file_get_contents( $file ) );
+		self::assertSame( 'remove', $this->change->undo_action( $file, 'create' ) );
+		// Missing from a folder that can be searched, or below one that is itself missing, the file is gone.
+		unlink( $file );
+		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
+		rmdir( $folder );
+		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
+		// A journal record that cannot be looked up is not a missing one either.
+		$unsearchable(
+			$this->journal,
+			function () use ( $file ): void {
+				try {
+					$this->change->undo_review( $file, 'create' );
+					self::fail( 'A journal that cannot be read must not count as missing.' );
+				} catch ( StorageFailed $refused ) {
+					self::assertStringContainsString( 'cannot be read', $refused->getMessage() );
+				}
+			}
+		);
+		// A create stopped after its link, before it released its private name: published, though
+		// the private name remains. Below a folder that cannot be searched, that is not told apart
+		// from an entry that was never published, and the entry is kept.
+		mkdir( $folder );
+		$journal = $this->root . '/journal-linked';
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$stop    = static function ( string $done, string $on ) use ( $file ): void {
+			if ( 'link' === $done && $file === $on ) {
+				throw new \DomainException( 'The worker was killed.' );
+			}
+		};
+		try {
+			( new FileChange( $plan, $this->staging, $journal, null, 'apply', $stop ) )->apply( $file, 'create', hash( 'sha256', 'created' ), null, INF );
+			self::fail( 'The worker must stop after its link.' );
+		} catch ( \DomainException ) {
+			self::assertFileExists( $journal . '/candidate' );
+		}
+		$linked = new FileChange( $plan, $this->staging, $journal );
+		$unsearchable(
+			$folder,
+			function () use ( $linked, $file, $kept ): void {
+				self::assertSame( $kept, $linked->undo_review( $file, 'create' ) );
+			}
+		);
+		self::assertSame( 'remove', $linked->undo_action( $file, 'create' ) );
+	}
+
 	public function test_a_created_folder_that_gained_many_names_is_kept_without_listing_them(): void {
 		$folder = $this->site . '/uploads';
 		mkdir( $this->staging . $folder, 0700 );

@@ -1147,6 +1147,29 @@ final class FileChangesTest extends TestCase {
 		self::assertTrue( $this->changes->preview_undo( $job->id )['undone'] ?? null );
 	}
 
+	public function test_a_review_does_not_retire_an_apply_whose_file_cannot_be_looked_up(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root searches every folder.' );
+		}
+		// An apply of one file into a folder that the site has already.
+		$file = $this->live . '/sub/single.txt';
+		mkdir( $this->live . '/sub' );
+		$restore = $this->second_restore( [ $file => 'one' ] );
+		$job     = $this->run_job( $this->changes->start_apply( $restore, false, $this->changes->preview( $restore )['digest'] ) );
+		// The folder loses its search permission: the file looks missing, but it is there.
+		chmod( $this->live . '/sub', 0600 );
+		try {
+			$review = $this->changes->preview_undo( $job->id );
+		} finally {
+			chmod( $this->live . '/sub', 0700 );
+		}
+		self::assertSame( [ [ $file, 'keep', 'changed_since_apply' ] ], array_map( static fn ( array $entry ): array => [ $entry['path'], $entry['action'], $entry['reason'] ], $review['entries'] ) );
+		self::assertArrayNotHasKey( 'undone', $review );
+		self::assertFileDoesNotExist( $this->jobs->directory( $job ) . '/undo/reverted' );
+		self::assertSame( 'one', file_get_contents( $file ) );
+		self::assertSame( 'remove', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
+	}
+
 	public function test_a_review_does_not_retire_an_apply_whose_entry_came_back_since(): void {
 		$plan  = $this->run_job( $this->queue_large_preview() );
 		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
