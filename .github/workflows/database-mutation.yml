@@ -44,8 +44,9 @@ jobs:
   mutation:
     name: Mutation testing (database code, MySQL 8.4)
     runs-on: ubuntu-24.04
-    # The gate took 112 minutes on the runner on 2026-11-23.
-    timeout-minutes: 200
+    # The gate took 112 minutes on the runner on 2026-11-23. The tests of the exchange that
+    # main gained afterwards made it about 1.6 times as slow locally.
+    timeout-minutes: 300
     services:
       database:
         # The image of the database job in ci.yml, by digest.
