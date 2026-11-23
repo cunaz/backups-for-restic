@@ -21,6 +21,7 @@ on:
       - 'composer.lock'
       - 'bin/install-test-tools.sh'
       - 'bin/mutation-gate.sh'
+      - '.github/actions/mutation-tmpdir/**'
       - '.github/workflows/database-mutation.yml'
   workflow_dispatch:
 
@@ -79,6 +80,7 @@ jobs:
         run: |
           vendor/bin/phpunit --testsuite database --log-junit "$RUNNER_TEMP/database.xml"
           php bin/check-skipped-tests.php "$RUNNER_TEMP/database.xml" tests/Skips/database-mysql.txt
+      - uses: ./.github/actions/mutation-tmpdir
       # composer mutation:database passes --with-uncovered; the floors live in
       # infection-database.json5.dist.
       - run: composer mutation:database -- --no-progress
