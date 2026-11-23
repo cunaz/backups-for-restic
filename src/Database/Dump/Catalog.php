@@ -85,28 +85,125 @@ final class Catalog {
 		if ( ! isset( $create[0]['Create Table'] ) ) {
 			DatabaseFailed::raise( 'The table structure cannot be read.', [ 'table' => $name ] );
 		}
-		$columns      = [];
-		$integer_keys = [];
-		foreach ( $this->connection->rows( 'SHOW COLUMNS FROM ' . $quoted ) as $column ) {
+		$columns   = [];
+		$usable    = [];
+		$wide      = false;
+		$mosts     = [];
+		$converted = [];
+		foreach ( $this->connection->rows( 'SHOW FULL COLUMNS FROM ' . $quoted ) as $column ) {
 			// Generated columns cannot be inserted; the server computes them again on import.
+			// Their values are not read, so they cannot order pages either.
 			$extra = strtoupper( $column['Extra'] ?? '' );
-			if ( ! str_contains( $extra, 'VIRTUAL GENERATED' ) && ! str_contains( $extra, 'STORED GENERATED' ) ) {
-				$field             = (string) $column['Field'];
-				$type              = (string) $column['Type'];
-				$columns[ $field ] = SqlFormatter::kind( $type );
-				if ( 1 === preg_match( '/\A(tinyint|smallint|mediumint|int|integer|bigint)\b/i', $type ) ) {
-					$integer_keys[] = $field;
-				}
+			if ( str_contains( $extra, 'VIRTUAL GENERATED' ) || str_contains( $extra, 'STORED GENERATED' ) ) {
+				continue;
+			}
+			$field             = (string) $column['Field'];
+			$type              = (string) $column['Type'];
+			$columns[ $field ] = SqlFormatter::kind( $type );
+			$mosts[ $field ]   = self::most( $type );
+			$wide              = $wide || null === $mosts[ $field ];
+			// The dump reads utf8mb4: text in another character set arrives converted, and
+			// latin1 "é" or "€" takes two or three bytes there instead of one.
+			$charset = is_string( $column['Collation'] ?? null ) ? strtolower( (string) strtok( $column['Collation'], '_' ) ) : '';
+			if ( '' !== $charset && ! in_array( $charset, [ 'utf8mb4', 'utf8mb3', 'utf8', 'ascii', 'binary' ], true ) ) {
+				$converted[] = $field;
+			}
+			if ( 'NO' === ( $column['Null'] ?? null ) ) {
+				$usable[ $field ] = KeyColumn::of( $field, $type, $column['Collation'] ?? null );
 			}
 		}
-		$primary = [];
-		foreach ( $this->connection->rows( 'SHOW KEYS FROM ' . $quoted . " WHERE Key_name = 'PRIMARY'" ) as $key ) {
-			$primary[ (int) $key['Seq_in_index'] ] = (string) $key['Column_name'];
+		[ $key, $order ] = $this->key( $quoted, $usable );
+		$bound           = array_sum( $mosts );
+		foreach ( $order as $column ) {
+			// A key value that needs an expression of its own arrives a second time.
+			$bound += $column->computed() ? $mosts[ $column->name ] ?? 0 : 0;
 		}
-		ksort( $primary );
-		$primary = array_values( $primary );
-		$key     = 1 === count( $primary ) && in_array( $primary[0], $integer_keys, true ) ? $primary[0] : null;
-		return new Table( $name, SqlFormatter::one_line( $create[0]['Create Table'] ), $columns, $key, $primary );
+		$raw = $create[0]['Create Table'];
+		// The table options follow the line that closes the column list; no literal can start a
+		// line, and the table comment comes after AUTO_INCREMENT, which changes with every insert.
+		$engine     = 1 === preg_match( '/^\) ENGINE=([A-Za-z0-9_]+)/m', $raw, $match ) ? $match[1] : '';
+		$definition = (string) preg_replace( '/^(\)[^\'\n]*?) AUTO_INCREMENT=[0-9]+/m', '$1', $raw );
+		$parts      = [ $definition, (string) $key ];
+		foreach ( $columns as $field => $kind ) {
+			$parts[] = $field . "\t" . $kind;
+		}
+		foreach ( $order as $column ) {
+			$parts[] = $column->name . "\t" . $column->kind . "\t" . $column->collation;
+		}
+		return new Table( $name, SqlFormatter::one_line( $raw ), $columns, $key, $order, $engine, hash( 'sha256', implode( "\n", $parts ) ), $wide, $converted, $wide ? 0 : $bound );
+	}
+
+	/**
+	 * The most bytes in which a value of a column type arrives, converted to utf8mb4: four per
+	 * character of text, whatever its character set, one per byte of a binary string, and the
+	 * longest text of a number, date or time.
+	 *
+	 * @param string $type Column type from SHOW FULL COLUMNS.
+	 * @return int|null Bytes, or null for TEXT, BLOB, JSON, spatial and unknown types, whose values can have any size.
+	 */
+	private static function most( string $type ): ?int {
+		return match ( true ) {
+			1 === preg_match( '/\A(?:var)?char\((\d+)\)/i', $type, $match )   => 4 * (int) $match[1],
+			1 === preg_match( '/\A(?:var)?binary\((\d+)\)/i', $type, $match ) => (int) $match[1],
+			// The names of the members are part of the type.
+			1 === preg_match( '/\A(?:enum|set)\(/i', $type )                    => 4 * strlen( $type ),
+			1 === preg_match( '/\A(?:tinyint|smallint|mediumint|int|integer|bigint)\b(?:\((\d+)\))?/i', $type, $match ) => max( 21, (int) ( $match[1] ?? 0 ) + 1 ),
+			1 === preg_match( '/\A(?:decimal|numeric|dec|fixed)\b(?:\((\d+))?/i', $type, $match ) => max( 12, (int) ( $match[1] ?? 0 ) + 2 ),
+			1 === preg_match( '/\A(?:float|double|real|bit|year|date|datetime|timestamp|time|uuid|inet4|inet6)\b/i', $type ) => 48,
+			default                                                              => null,
+		};
+	}
+
+
+	/**
+	 * The key whose columns order the pages: the primary key, otherwise a unique key whose
+	 * columns are all NOT NULL, stored and of a type that compares exactly (KeyColumn). Among
+	 * unique keys, one that the server uses and that indexes whole values comes first, so that
+	 * every page is a range of the index.
+	 *
+	 * @param string                        $quoted Quoted table name.
+	 * @param array<string, KeyColumn|null> $usable NOT NULL stored columns by name; null for a type that cannot order pages.
+	 * @return array{0: string|null, 1: list<KeyColumn>} Key name and its columns, or null and none.
+	 * @throws DatabaseFailed If the keys cannot be read.
+	 */
+	private function key( string $quoted, array $usable ): array {
+		$keys = [];
+		foreach ( $this->connection->rows( 'SHOW KEYS FROM ' . $quoted ) as $part ) {
+			if ( '0' !== ( $part['Non_unique'] ?? null ) ) {
+				continue;
+			}
+			$name = $part['Key_name'] ?? '';
+			$key  = $keys[ $name ] ?? [
+				'name'   => $name,
+				'rank'   => 'PRIMARY' === $name ? 0 : 1,
+				'parts'  => [],
+				'usable' => true,
+			];
+			// A functional key part has no column; its key cannot be compared column by column.
+			$column = $part['Column_name'] ?? null;
+			$found  = null === $column ? null : ( $usable[ $column ] ?? null );
+			if ( null === $found ) {
+				$key['usable'] = false;
+			} else {
+				$key['parts'][ (int) ( $part['Seq_in_index'] ?? 0 ) ] = $found;
+			}
+			// A prefix part or a key the server does not use makes every page a sort.
+			if ( null !== ( $part['Sub_part'] ?? null ) || 'NO' === ( $part['Visible'] ?? 'YES' ) || 'YES' === ( $part['Ignored'] ?? 'NO' ) ) {
+				$key['rank'] = 'PRIMARY' === $name ? 2 : 3;
+			}
+			$keys[ $name ] = $key;
+		}
+		$best = null;
+		foreach ( $keys as $key ) {
+			if ( $key['usable'] && ( null === $best || $key['rank'] < $best['rank'] ) ) {
+				$best = $key;
+			}
+		}
+		if ( null === $best ) {
+			return [ null, [] ];
+		}
+		ksort( $best['parts'] );
+		return [ $best['name'], array_values( $best['parts'] ) ];
 	}
 
 	/**
@@ -154,18 +251,6 @@ final class Catalog {
 			$previous = '' === $mode ? "''" : '0x' . bin2hex( $mode );
 			$this->connection->rows( 'SET SESSION sql_quote_show_create = ' . $quoted . ', sql_mode = ' . $previous );
 		}
-	}
-
-	/**
-	 * Time zone offset of the session, so that TIMESTAMP values import unchanged.
-	 *
-	 * @return string Offset such as +02:00.
-	 * @throws DatabaseFailed If the server does not answer.
-	 */
-	public function time_zone(): string {
-		$rows = $this->connection->rows( "SELECT TIME_FORMAT(TIMEDIFF(NOW(), UTC_TIMESTAMP()), '%H:%i') AS tz_offset" );
-		$diff = $rows[0]['tz_offset'] ?? '00:00';
-		return str_starts_with( $diff, '-' ) ? $diff : '+' . $diff;
 	}
 
 	/**

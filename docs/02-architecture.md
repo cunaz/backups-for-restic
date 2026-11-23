@@ -135,13 +135,14 @@ src/
 │   ├── RestRoutes.php             REST API backups-for-restic/v1 (§13.2)
 │   ├── AdminPage.php              menu and page frame; assets/js/admin.js fills it
 │   ├── SiteHealth.php, CliCommand.php, RecoveryKit.php, Messages.php (translated texts for core codes)
+│   ├── Downloads.php, PasswordConfirmation.php   one-time downloads of staged files; the one check of the WordPress password where a route asks for it again
 │   ├── JobEvents.php              the plugin's actions on job state changes; hands finished jobs to the notifier
 │   ├── WpMailer.php               notification e-mails: translated plain text through wp_mail()
 ├── Support/                       GoJson (Go-compatible JSON), GoQuote, Rfc3339, Bytes (strict base64, base64url, integers), Decoded, RawJson, ByteSource (+ Stream, String, Resumable), Clock (+ SystemClock), Redactor, Throttle (gentle CPU mode)
 ├── Exception/                     PluginException and one subclass per failure the UI explains
 ├── Settings/                      Schema (every field once), Field, Settings (immutable), SettingsStore (option + wp-config.php overrides)
 ├── Secrets/                       Secret (value hidden in a closure), SecretName, SecretStore, EncryptedOptionStore (HKDF over the salts + secretbox), ConstantOverrideStore
-├── Storage/                       Options port, PrivateDirectory, SiteState, SchemaVersion (layout number of the options, §18), Files, CacheDirectory, ExposureCheck port, DownloadTokens (one-time tokens for downloads, hashed in a file; ADR 0038), Zip/ (ZipWriter: a stored zip of a directory tree in resumable calls; ZipRecords; Crc32)
+├── Storage/                       Options port, PrivateDirectory, SiteState, SchemaVersion (layout number of the options, §18), Files, CacheDirectory, ExposureCheck port, BrowserProbe, ConfirmationThrottle (counts wrong WordPress passwords per user, §13.2), DownloadTokens (one-time tokens for downloads, hashed in a file; ADR 0038), Zip/ (ZipWriter: a stored zip of a directory tree in resumable calls; ZipRecords; Crc32)
 ├── Crypto/                        restic primitives
 │   ├── Cipher.php                 seal()/open(): nonce ‖ AES-256-CTR ‖ Poly1305-AES tag
 │   ├── Poly1305.php               pure-PHP Poly1305 (ADR 0027)
@@ -172,7 +173,7 @@ src/
 │   ├── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
 │   └── Restore/                   RestoreSteps (preflight, planning, restoring, recording, releasing, cleaning_up), RestoreServices, RestoreRequest (ADR 0037)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
-├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
+├── Database/Dump/                 Connection port, SharedConnection and DedicatedConnection (the dump's session settings and snapshots), Catalog, Table, KeyColumn, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
 ├── Restore/                       SnapshotBrowser (snapshot lists with the retention preview, details and directory pages as response data, §13.2); Staging (list, expiry and removal, ADR 0040), StagedRestore; (M3) Selection, Apply, database Importer
@@ -299,9 +300,10 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 - `detecting` is the append-only probe of forget and prune jobs
   ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
   by the heartbeat after a successful backup, not a step of the backup job.
-- An error with a retryable code (`repository_unreachable`, `repository_locked`) does not
-  fail the job at once: the runner waits 30 s, then twice as long after each further failure
-  in a row, and fails the job at the sixth.
+- An error with a retryable code (`repository_unreachable`, `repository_locked`,
+  `database_restore_busy`, `database_exchange_sessions`, `database_dump_locked`) does not fail
+  the job at once: the runner waits 30 s, then twice as long after each further failure in a
+  row, and fails the job at the sixth.
 - A **restore job** ([ADR 0037](adr/0037-restore-job.md)) carries its request in the job
   document from its creation: `data.snapshot`, the full ID, and `data.paths`, the selected
   snapshot paths (`Jobs\Restore\RestoreRequest`; an invalid request creates no job).
@@ -599,9 +601,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
    and `.nobackup` markers). A file whose size, mtime, ctime and inode match the parent
    reuses its blobs; others are chunked, deduplicated, encrypted and packed. Inside the
    private directory only `spool/` is walked: `spool/manifest.json` and the database files
-   of §7 are virtual. Directories become tree blobs bottom-up, then the snapshot is written
-   with `summary` and tags `backups-for-restic`, `site:<hash>` and `run:<job>`. The lock is
-   refreshed every five minutes and released at the end.
+   of §7 are virtual. A virtual file whose source cannot continue after its cursor, such as
+   a table whose definition changed, starts over, and the chunks of its earlier parts are
+   dropped; a complete source hands its warnings to the run. Directories become tree blobs
+   bottom-up, then the snapshot is written with `summary` and tags `backups-for-restic`,
+   `site:<hash>` and `run:<job>`. The lock is refreshed every five minutes and released at
+   the end.
 4. **Recording**: last result in `backups_for_restic_state` for the dashboard and Site Health.
 5. **Releasing** and **cleaning up** run on every path to the end: an unfinished run releases
    its lock, the scrypt files and the checkpoint are deleted, old jobs are pruned to
@@ -625,7 +630,7 @@ snapshot the database appears as a directory:
 <private>/spool/database/010-wp_posts.sql
 …
 <private>/spool/database/900-views.sql           CREATE OR REPLACE VIEW …
-<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows and bytes, views
+<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows, bytes and how they were read, views
 <private>/spool/manifest.json                    site manifest (format id, home URL, paths, roots, excludes, prefix, plugin, WordPress and PHP versions, repository format)
 ```
 
@@ -634,25 +639,54 @@ running SHA-256 cannot be carried across ticks ([ADR 0021](adr/0021-database-str
 
 Format `backups-for-restic-dump/1`: one SQL statement per line, escaped values, hex-encoded
 binary, ≈ 1 MiB `INSERT` batches, and a trailer line `-- end table rows=<n> bytes=<n>` per
-file ([ADR 0021](adr/0021-database-streaming.md)). The importer reads bounded lines and
+file ([ADR 0021](adr/0021-database-streaming.md)). Rows and definitions are read in
+utf8mb4 and with the session time zone `+00:00`, whatever `DB_CHARSET` and the site's
+session use; the files and the manifest say so. The importer reads bounded lines and
 validates a constrained CREATE/INSERT grammar; it never executes an arbitrary SQL script
 ([ADR 0035](adr/0035-transactional-shadow-import.md)).
 
-The writer and reader share a hard 16 MiB SQL statement limit, including the semicolon
-and excluding LF. An encoded row that cannot fit causes a database error before the dump
-is completed. Binary hex encoding can roughly double the source row size. Generated-only
+The importer reads statements up to 16 MiB, including the semicolon and excluding LF. The
+writer does not refuse a larger one: a row too large to share a statement is written as one
+of its own, whatever its size, as long as PHP can hold it, and the manifest records each
+table's largest statement so that an importer can compare it with `max_allowed_packet`.
+Binary hex encoding can roughly double the source row size. A row whose statement would not
+fit into the PHP memory limit stops the dump with `database_dump_row_memory`. Tables with
+values of any size fetch only as many rows per page as fit into the memory left, after the
+server has reported their sizes, so a row that fits on its own is backed up and one that
+does not stops the dump before it is fetched. Generated-only
 tables use empty INSERT tuples to preserve their row counts without assigning generated
 values. These files remain importable by a normal MySQL/MariaDB client.
 
 Streaming and resumability: a table is produced page by page and fed to the chunker like a
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
 yesterday's dump. When a tick's time is up, the table stops after the current page and the
-next tick continues after it, so tables of any size finish. Pages follow an integer primary
-key, otherwise an offset in primary-key order. Consistency is per page, as with a
-non-transactional `mysqldump`: every row comes from exactly one read, but the pages of a
-table and the tables themselves are read at different moments. That holds in every mode,
-WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
-remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
+next tick continues after it, so tables of any size finish. Pages follow the primary key, or
+a unique key over NOT NULL columns, in full, with a row-value comparison that orders exactly
+as `ORDER BY` for every column type: a row that exists for the whole dump of its table, and
+whose values in that key do not change meanwhile, appears exactly once, whatever is inserted
+or deleted meanwhile. A row whose key value changes between two ticks can be missing or
+appear twice: once before and once after the change, if it moves from behind the cursor to
+ahead of it, or not at all if it moves the other way.
+
+Consistency is one snapshot per table and tick. The dump reads through a connection of its
+own, opened with `$wpdb`'s settings and used only once it is verified to reach the same
+server and database, encrypted if the site's connection is. Each table's part of a tick is
+one read-only transaction there, which also holds the table's definition. The plugin never
+opens a transaction on the site's connection. Without a verified connection of its own the
+dump reads through `$wpdb`, with the same session settings around every query, and each
+page is then its own read. A table without a usable key is read with one statement on the
+dump's own connection; read in several parts, its rows can be missing or repeated, and the
+manifest and a job warning say so. Across ticks, the pages of one table and the tables
+themselves are read at different moments: a row deleted and inserted again with a new key
+between two ticks can appear twice, and an import then stops with a duplicate key. The
+manifest records for each table which key ordered its pages, whether all rows come from one
+read view, how often it started over and its largest statement, unless the manifest would
+then be larger than the 2 MiB that the plugin's restore reads. A table whose definition
+changes during its dump starts over, at most three times, then the backup stops with
+`database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)). Every read waits at
+most five seconds for a lock that another connection holds on a table; then the tick stops
+with the retryable `database_dump_locked`, and the job continues the table later. Every read
+also runs without a row limit, whatever `sql_select_limit` the session inherited.
 
 Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
 rows, cursor and content transcript commit in one transaction. The report compares
@@ -660,8 +694,10 @@ engine, charset, collation and rows with the current site and lists compatibilit
 Its digest and the original snapshot bind a subsequent live review to the same source.
 
 A separately confirmed database apply reimports the source on supported MySQL sites,
-compares its transcript and checks native table identities. One multi-table RENAME
-under WRITE locks swaps every selected table and its operation witness. The destination
+compares its transcript and checks native table identities. After WordPress enters
+maintenance, the job waits until the requests that started earlier have ended, for at most
+a minute. One multi-table RENAME under WRITE locks then swaps every selected table and its
+operation witness. The destination
 keeps its site address, active plugins, plugin options, cron and confirming administrator.
 The previous generation remains available for undo for 24 hours. Undo retains the entire
 post-apply generation for another 24 hours and supports manual recovery of later edits.
@@ -835,7 +871,9 @@ a request left behind is removed once it is a minute old.
 ├── jobs/<job-id>/                         job.json (atomic and synchronised), events.log (redacted, capped at 1 MiB), cancel-requested (marker of a cancel request, §4.4), backup/ (backup checkpoint), database.json (dump state), maintenance/ (checkpoint of forget, prune or check), restore/ (checkpoint, local lock and growing report of a restore run; deleted when the job ends)
 ├── spool/, spool/database/                empty directories the backup walks into; their content is virtual
 ├── tmp/, logs/                            reserved, empty
+├── restores/.htaccess, web.config, index.php   the deny files and empty index of the root, so that a server that lists directories does not list the job IDs
 ├── restores/<job-id>/                     staging of a restore job that succeeded (ADR 0037); a failed or cancelled job leaves none
+│   ├── .htaccess, web.config, index.php   the same, written when the job creates the directory and by every later request that finds them missing
 │   ├── files/<path in the snapshot>       the restored tree, each entry under its full snapshot path; owner-only (directories 0700, files 0600) whatever the snapshot recorded
 │   └── entries.jsonl                      report: one line per selected entry with type, mode, time, size and link target; links are listed here, not created
 └── restores/.removing-<job-id>/           a staging directory whose removal has begun: renamed first, so that no list shows it, then deleted (ADR 0040)
@@ -863,8 +901,9 @@ ciphertext including the cached master key), `backups_for_restic_state` (autoloa
 last backup and the last forget, prune and check, the check alert, the exposure and
 append-only probes, the retention switch and proposal, the handled schedule slots, the
 repository that the first five belong to, the probe from the browser, the last twenty
-deliveries of the recovery kit, and the number and size of the repository's packs as a
-backup or a prune last listed them),
+deliveries of the recovery kit, the last twenty grants of restored files and archives for
+download, the count of wrong WordPress passwords per user (§13.2), and the number and size
+of the repository's packs as a backup or a prune last listed them),
 `backups_for_restic_notifications` (autoload no: failure streaks, the stale marker, the
 repository both are counted for, and the outbox of unsent notices; streaks and marker start
 anew when the jobs turn to another repository), and `backups_for_restic_schema_version`
@@ -1089,7 +1128,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | --- | --- |
 | `GET /status` | dashboard: last backup, next slot, active and recent jobs, repository host and how much it holds (`usage`, from the listing of its packs after the last backup or prune; a job asks for that listing once, so a listing that outlasts the request cannot keep a finished job from ending), retention mode with switch and proposal, last and next maintenance runs, check alert with translated findings |
 | `GET /environment?fresh=1` | Doctor results with translated texts, and `browser_probe`: whether the site's own probe of the private directory got no answer |
-| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root); then that name with the status and body the browser got, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, or a failed request) |
+| `POST /environment/probe`, `POST /environment/probe/report` | the probe of the private directory from the administrator's browser (§13.4): a probe file's name and URL (URL null if the directory is outside the web root) and as `control` the URL of the plugin's stylesheet at the same origin (null if there is none); then that name with the status and body the browser got for both, the stylesheet's as `control_status` and `control_body`, answered with `exposed` true, false, or null for a report that says nothing (not the pending probe, older than five minutes, a failed request, or a refusal without the stylesheet) |
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job, or with `type: restore` a restore to staging: `snapshot` is the full 64-character ID, `paths` a list of at most 256 absolute paths as the snapshot holds them, the whole snapshot without it. Refused with 400 `invalid_job_type`, `invalid_snapshot` or `invalid_paths`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
@@ -1098,22 +1137,41 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
 | `GET /restores` | what finished restores staged, newest first (§10, [ADR 0040](adr/0040-restore-staging-expiry.md)): for each `job`, `snapshot`, `finished`, `expires`, `files`, `bytes`, `staging` and `report`, the last two as names relative to the private directory. Snapshot, counts and `finished` come from the job document and are null once it was pruned. Also `expiry_hours`, the setting, and `removing`, the number of directories that are due or being deleted. Staging that expired and the directory of a restore that has not ended are not listed |
 | `DELETE /restores/{id}` | removes the staging directory of one job, whatever became of the job. It leaves the list at once; `removed.complete` is false when deleting takes longer than ten seconds, and the heartbeat finishes it. The answer carries the list as `GET /restores` gives it. 400 `invalid_job_id` for a name that is no job ID, 404 `restore_not_found` if nothing is staged for the job, 409 `restore_active` while the job is a restore that has not ended (an active job of another type has no staging and answers 404), 409 `job_unreadable` if its document cannot be read |
-| `POST /restores/{id}/download` | Issues a single-use browser POST form for a file, ZIP, restore report or database rehearsal report. The browser submits the grant to WordPress for streaming. |
+| `POST /restores/{id}/download` | Issues a single-use browser POST form for a file, ZIP, restore report or database rehearsal report. The browser submits the grant to WordPress for streaming. A file (`kind: file` with `path`) or the ZIP (`archive`) is restored site content, possibly `wp-config.php` and the database dump: its grant needs the WordPress password of the current user as `user_password` in the JSON body (403 `wrong_user_password`, 429 `user_password_throttled`), and it is recorded before the token is issued. The two reports (`report`, `database_report`) hold names, counts and table metadata and need the capability alone. Every other kind counts as content. 404 `download_not_found` for what the restore does not hold |
 | `POST /restores/{id}/database/plan`, `POST /restores/{id}/database/apply` | Review a rehearsed database exchange and confirm the exact table generations. |
 | `GET /database-changes`, `POST /database-changes/{id}/undo-plan`, `POST /database-changes/{id}/undo` | Discover retained database generations, review an undo and queue it. |
+| `POST /database-changes/{id}/discard` | Forgets the binding of a database apply whose private tables are on another database server or in another database, with the WordPress password as `user_password` in the JSON body (403 `wrong_user_password`). Nothing is dropped; the answer names the database, the server UUID and the private table names to remove there. 409 `database_binding_verified` if the connected database holds the tables, `database_binding_missing` if the job holds no binding, `job_conflict` while it or an undo of it runs ([ADR 0043](adr/0043-atomic-mysql-database-exchange.md)). |
 | `POST /restores/{id}/apply-plan`, `POST /restores/{id}/apply` | Inspect live file changes, then queue the reviewed plan. The optional JSON boolean `include_config` includes configuration in the detailed review. Startup files, including wp-config.php, require offline recovery. |
 | `GET /undo`, `POST /undo/{id}/plan`, `POST /undo/{id}` | List reversible apply jobs, review the original files to recover, then queue the reviewed undo. |
-| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size |
+| `GET /settings`, `PUT /settings` | settings; secrets only as set/overridden flags; PUT accepts schedule, retention, backup, restore, notifications and advanced fields; GET also reports the cache size, the latest five deliveries of the recovery kit (`kit_views`) and the latest five grants of restored content (`downloads`: time, login, job, kind and the path in Go's quoting) |
 | `DELETE /cache` | clears the local cache (409 while a job runs) |
 | `POST /repository/test`, `POST /repository/save` | connection test; test and save. For an own server both take an optional `ca_certificate` (PEM): the test uses it from a file of its own under `tmp/` in the private directory, removed after the test, `save` stores it as the server's certificate once the server is saved, and saving a server of the preset removes a stored one. A request without `password` uses the stored REST password, but only for the host, port and user name it was saved for; for another server or user name it is refused with 400 `password_required` before anything is sent. `save` changes nothing while a job is active (409 `job_conflict`). A save that fails half way, also because the options table refused a write without an error (`Options::set()` answers false, `SettingsStore::update()` and `SiteState::bind()` raise `StorageFailed`), tries to put back what it changed: the settings, the REST password, the cached key and the certificate. Each part is tried on its own; while the database keeps refusing writes, a part can stay as the failed save left it, and the request answers with the error either way. Where `wp-config.php` defines the address, the certificate of a tested address that is another one is not stored; saving another address empties `repository.id` and drops the results remembered for the old repository |
 | `POST /repository/create`, `POST /repository/connect` | new repository, or the password of an existing one plus an unlock job. Both answer with the recovery kit: without further proof until the setup is completed, afterwards only if the request carries the administrator's WordPress password as `user_password`, else 403 `wrong_user_password`. `create` refuses a chosen repository password of fewer than 12 characters with 400 `password_too_short`; neither stores anything while a job is active (409 `job_conflict`). `create` stores the repository password before the repository exists and puts the earlier one back if the repository does not come to exist; `connect` keeps an entered password apart until the unlock job has opened the repository with it, and only then replaces the stored password and the cached key; a wrong password leaves both in place, and the kit in its answer names the entered one. `connect` without a password unlocks with the stored one. Both answer 409 `ca_certificate_missing` if the settings name an uploaded CA certificate that is not in the private directory |
 | `POST`/`DELETE /repository/ca-certificate` | CA certificate of a self-hosted server |
 | `POST /setup/complete` | finish the wizard after the recovery kit is acknowledged; 409 `environment_blocked` while the Doctor has a critical finding |
-| `POST /recovery-kit` | the recovery kit, only with the administrator's WordPress password as `user_password` (403 `wrong_user_password`); 409 `ca_certificate_missing` as above |
+| `POST /recovery-kit` | the recovery kit, only with the administrator's WordPress password as `user_password` (403 `wrong_user_password`, 429 `user_password_throttled`); 409 `ca_certificate_missing` as above |
 
 Every REST endpoint requires the configured backup capability (default `manage_options`).
 WordPress authenticates cookie requests with its REST nonce and also accepts Application
 Passwords. Download grants, review tokens and recovery kits carry `Cache-Control: no-store`.
+A job summary names in `user` (`id` and `login`, the login empty for a deleted account) who
+started a restore or confirmed a database change; other jobs have null there.
+
+Every route that asks for the WordPress password asks through one check
+(`WordPress\PasswordConfirmation`): the recovery kit, `create` and `connect` after the
+setup, file and database apply and undo, and the download of restored content. The
+password is read from the JSON body only, never from the address. Wrong passwords are
+counted per user in the state option (`Storage\ConfirmationThrottle`), under its lock and
+before the password is checked, so that requests sent together cannot share one try. The
+first three in a row cost nothing; after the fourth the next attempt waits one minute, and
+each further one doubles the wait up to 32 minutes; from the tenth on, each one locks the
+confirmation of that user for an hour. While a user waits, no password of theirs is
+checked, and the answer is 429 `user_password_throttled` with a `Retry-After` header and
+`retry_after` in the error data. The right password forgets the count, and so does a day
+without an attempt. An attempt without a password is refused and not counted, as core's
+login does. Each wrong password fires core's `wp_login_failed` action with the user's login
+and a `WP_Error` with the code `incorrect_password`, so that login limiters and fail2ban
+rules count it.
 
 A restore accepts JSON flags `archive` and `database_preview`. To import on another
 installation, send `fresh_install: true`, `database_preview: true` and the full snapshot
@@ -1128,7 +1186,8 @@ usual. Once it succeeds, send the same preview request with its `plan_job` ID an
 `plan_job` ID and digest. Completed previews expire after one hour.
 
 Live file apply and undo also require `update_core` and permission to modify files under the
-site's `wp_is_file_mod_allowed()` policy. Preview reports list actions and their reasons.
+site's `wp_is_file_mod_allowed()` policy. Every tick of the job checks both again for the
+confirming user. Preview reports list actions and their reasons.
 Confirmation uses the preview digest, a review token bound to the authenticated session,
 source job, site URL and configuration choice, explicit acknowledgment, the site's exact
 home URL and the account's WordPress password. Send those fields in a JSON POST body.
@@ -1136,18 +1195,20 @@ The initiating response returns a short-lived `control_token` and sets it in an 
 SameSite=Strict cookie. HTTPS adds Secure. During the job's maintenance window the
 initiating client can poll or cancel the job using the cookie or the
 `X-Backups-For-Restic-Control` header. The normal WordPress capability and nonce checks
-also apply.
+also apply. Such a request cannot name a `rest_route` in a form body. It boots, like the
+job's workers, with only this plugin and without the theme.
 
 Live database apply and undo require the configured backup capability plus
 `manage_options`, `edit_users`, `promote_users` and `update_core`. The worker checks the
 confirming user again before exchanging the tables. Database changes use a distinct
 session-bound review token, the typed home URL and the user's WordPress password.
-Staging, downloads and rehearsal use the configured backup capability. A database
-preview can report `applicable: false` with compatibility or privilege blockers.
+Staging, the reports and rehearsal use the configured backup capability; the download of a
+restored file or ZIP also needs the WordPress password. A database preview can report
+`applicable: false` with compatibility or privilege blockers.
 
 The recovery kit is in the answer of three routes. During the setup `create` and `connect`
 return it freely, which is how the wizard shows it once; from then on all three ask for the
-WordPress password of the current user in every request (`wp_check_password`). The stored
+WordPress password of the current user in every request, through the check described above. The stored
 REST password leaves the site only for the server it was saved for
 (`Connection\Setup::rest_password()`): the same host, compared without regard to case, the
 same port and the same user name. A request that tests or saves another server or user name
@@ -1257,7 +1318,8 @@ directory and the target after a link. The snapshot is its full ID or the first 
 characters, as `snapshots` prints them, if exactly one snapshot starts with them; the path
 is an absolute path or a token. A name or target with control characters, a quote, a
 backslash or invalid UTF-8 is printed in double quotes with Go's escapes (`\x1b`, `\xff`),
-so that a stored name cannot send control sequences to the terminal.
+so that a stored name cannot send control sequences to the terminal. `snapshots` prints a
+snapshot's host name the same way: another client of the repository chose it.
 `settings set` changes what the settings page can change
 (`Settings\Schema::editable()`), with the same validation; `cancel` asks the active or the
 named job to stop and runs one tick for its cleanup; `logs` prints a job's event log,
@@ -1269,8 +1331,13 @@ completed, without a repository address, and `forget` and `prune` in retention m
 `restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
 private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
 records. Configuration and startup files require offline recovery. `undo <apply-job>`
-reviews and confirms reversal of live file changes. The recovery guide includes the
+reviews and confirms reversal of live file changes. `database-discard <apply-job> [--yes]`
+lists the private tables of a database apply whose binding belongs to another database
+server or database, and forgets that binding after confirmation without dropping anything. The recovery guide includes the
 `--skip-plugins` procedure for a site whose active plugin prevents normal startup.
+While a file job holds WordPress maintenance, the plugin's own commands boot like its
+workers, with only this plugin and without the theme. Every other WP-CLI command runs with
+the site's plugins, as during core's maintenance ([ADR 0041](adr/0041-guarded-file-changes.md)).
 Use the admin page to initiate live changes, configure a repository or review retention.
 `recovery-kit` exports credentials on an interactive terminal after setup. The explicit
 `--force` option permits a pipe or file. Every delivery is audited.
@@ -1291,7 +1358,12 @@ file, requests the file's URL without credentials, waits at most ten seconds for
 and reports status and body under the probe's name to `POST /environment/probe/report`. A
 report on another probe than the pending one, as from a second tab, changes nothing. A
 report with the file's content is the finding
-`exposed`. HTTP 403, 404 and 410 without the token count as protected. Other answers leave the result unknown. The site's own probe, where it gets a conclusive answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
+`exposed`. HTTP 403, 404 and 410 without the token count as protected only when the same
+probe also got the plugin's stylesheet (`assets/css/admin.css`) back byte for byte from the
+same scheme, host and port, with a random query past any cache: a firewall, a CDN
+challenge or another virtual host refuses the probe as well, while this site's web server
+may serve the directory. The site's own probe makes the same control request after a
+refusal, and the browser requests the stylesheet beside the probe file. Other answers leave the result unknown. The site's own probe, where it gets a conclusive answer, comes first. Two more checks are hints that block nothing: `jit`, when PHP's JIT
 compiler is on (with it PHP has crashed in backup ticks, §4.2), and `repository_server`,
 when the repository server did not answer a request from this host. The latter is asked
 only when the checks are run afresh, with one request that waits ten seconds at most, and
@@ -1307,7 +1379,9 @@ directory and the time of the last backup; it does not list the last jobs.
 Actions `backups_for_restic_job_state_changed( $job_id, $type, $state, $previous )`,
 `backups_for_restic_backup_succeeded( $job_id, $snapshot_id )`,
 `backups_for_restic_backup_failed( $job_id, $error_code )`,
-`backups_for_restic_recovery_kit_shown( $user_id, $via )` and, from Milestone 3,
+`backups_for_restic_recovery_kit_shown( $user_id, $via )`,
+`backups_for_restic_download_granted( $user_id, $job_id, $kind, $path )` (a grant of a
+restored file or ZIP, the path in Go's quoting) and, from Milestone 3,
 `backups_for_restic_restore_applied`; filters `backups_for_restic_capability`,
 `backups_for_restic_backup_roots`, `backups_for_restic_backup_excludes`,
 `backups_for_restic_database_tables_excluded`,
@@ -1338,13 +1412,15 @@ translated message and a hint. The codes:
 | `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change; or a secret that was just stored does not read back unchanged (`EncryptedOptionStore::set()`) |
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
 | `database_dump_failed` | a query of the dump failed |
+| `database_dump_locked` | another connection kept a table locked for longer than the dump waits, five seconds; retryable ([ADR 0021](adr/0021-database-streaming.md)) |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
 | `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |
 
-Only `repository_unreachable` and `repository_locked` are retryable (§4.4). A cancelled job
+Only `repository_unreachable`, `repository_locked`, `database_restore_busy`,
+`database_exchange_sessions` and `database_dump_locked` are retryable (§4.4). A cancelled job
 ends in the state `cancelled` without an error code, and there is no `timeout` code: a tick
 that runs out of time simply continues in the next one. Codes for restore
 (`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.
@@ -1354,7 +1430,10 @@ The REST API has codes of its own for requests it refuses: `not_found` (unknown 
 `invalid_job_id`, `restore_not_found` and `restore_active` (`DELETE /restores/{id}` with a
 name that is no job ID, for a job without staging, and for a restore that has not ended),
 `invalid_certificate`, `recovery_kit_not_acknowledged`, `wrong_user_password` (the recovery
-kit was asked for without the right WordPress password), `password_required` (a request
+kit, a live change or a download of restored content was asked for without the right
+WordPress password), `user_password_throttled` (HTTP 429: too many wrong WordPress passwords
+of this user came before, and the password is not checked until the wait is over),
+`download_not_found`, `password_required` (a request
 names a server or user name that the stored REST password is not for and carries no
 password), `password_too_short` (a chosen repository password of fewer than 12 characters),
 `ca_certificate_missing` (the settings name an uploaded CA certificate that is not there, so
@@ -1530,7 +1609,12 @@ and schedules are slots in the site's time zone.
   `backups_for_restic_private_dir` may replace, and without either the default location.
   The location that applies without the filter is cleaned as well, in case the filter was
   added after the plugin had worked there. The plugin asks for no confirmation of its own.
-  The repository on the server is untouched.
+  The repository on the server is untouched. On a PHP older than 8.3 the main file keeps
+  the plugin inert and the uninstall cannot run its cleanup; it refuses with `wp_die()` and
+  asks to switch back to PHP 8.3 or later first, because WordPress would otherwise delete
+  the plugin and leave staged files, retained database tables and the encrypted secrets
+  behind with nothing to expire them. `uninstall.php` therefore uses no syntax newer than
+  PHP 7.2, the oldest PHP that WordPress 6.7 runs on.
 - Plugin headers and `readme.txt` (`Requires at least: 6.7`, `Requires PHP: 8.3`,
   `Tested up to`, `Stable tag`) are WordPress.org metadata kept in sync by the release
   checklist.

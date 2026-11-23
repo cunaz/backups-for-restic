@@ -83,7 +83,7 @@ final class JobStore {
 	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
 		$lock = $this->held ? null : $this->lock();
 		try {
-			$this->require_idle();
+			$this->require_idle( $type );
 			$job       = new Job( $this->reserve_id( $now ), $type, $trigger, $now );
 			$job->data = $data;
 			try {
@@ -508,9 +508,14 @@ final class JobStore {
 	 * creation lock holds. An unknown layout cannot prove that a job has finished, even if
 	 * its raw state field looks familiar; no part of that layout is interpreted here.
 	 *
+	 * The private tables of a database restore that belong to another database server are
+	 * not on this one, so they cannot reach a backup and need no cleanup here. Only a new
+	 * database apply waits until an administrator has discarded that binding.
+	 *
+	 * @param JobType|null $type Type of the job about to be created, if any.
 	 * @throws JobConflict If a job is active or its state cannot be established.
 	 */
-	private function require_idle(): void {
+	private function require_idle( ?JobType $type = null ): void {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( null === $job && is_file( $this->directory . '/' . $id . '/job.json' ) ) {
@@ -521,6 +526,18 @@ final class JobStore {
 						'code' => 'job_unreadable',
 					]
 				);
+			}
+			if ( null !== $job && $job->state->is_terminal() && isset( $job->data['database_owner'], $job->data['database_foreign'] ) ) {
+				if ( JobType::DatabaseApply === $type ) {
+					JobConflict::raise(
+						'A database restore still holds private tables on another database server. Discard its binding before applying another database.',
+						[
+							'job'  => $id,
+							'code' => 'database_exchange_foreign',
+						]
+					);
+				}
+				continue;
 			}
 			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {
 				JobConflict::raise(

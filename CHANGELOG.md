@@ -74,8 +74,8 @@ All notable changes are documented here. The format follows
 - Database rehearsal imports staged table data into separate InnoDB tables, with checked
   SQL and resumable transactions. The administrator can download its comparison report.
   It also handles tables containing only generated columns and fixed-format MyISAM
-  sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
-  cannot report success with a row that the bounded importer cannot read.
+  sources. It reads SQL statements up to 16 MiB; a larger one, which a backup writes for a
+  row too large to share a statement, is restored with a command-line client.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses
@@ -230,8 +230,50 @@ All notable changes are documented here. The format follows
   normalization. A name such as `wp-conﬁg.php` with a ligature no longer passes for an
   ordinary file. Without intl, a name that only normalization could tell apart from a
   protected one is refused (`unverified_name`).
+- While a live file change holds the site in maintenance, a request that the job's control
+  token admits can no longer reach another REST route through a `rest_route` field in its
+  form body, and no admitted request can store the shortened list of active plugins that
+  it starts with. Every tick of a file apply or undo checks again that the administrator
+  who confirmed it still has the backup capability and `update_core`
+  (`file_writes_refused`). The check reads the account from the database, so a role taken
+  away also stops a running `wp backups-for-restic tick --until-idle`.
+- Downloading a restored file or a restore's ZIP asks for the WordPress password, as the
+  recovery kit does, and every grant is recorded with time, account, restore job, kind and
+  path; the Settings tab lists the latest beside the deliveries of the recovery kit, and
+  the action `backups_for_restic_download_granted` fires. A restored `wp-config.php` and
+  database dump together decrypt the stored passwords; before, any session or application
+  password with the plugin's capability could download them without a trace. Staging and
+  the two reports still need the capability alone. Restore jobs record who started them,
+  and the job view shows it.
+- Wrong WordPress passwords at the recovery kit, at creating and connecting a repository,
+  at live file and database changes and at downloads are counted per account. The first
+  three cost nothing; then each makes the next attempt wait longer, from one minute
+  doubling up to 32, and from the tenth on each locks the confirmation of that account for
+  an hour (HTTP 429 `user_password_throttled` with `Retry-After`). Each fires core's
+  `wp_login_failed` action, so that login limiters and fail2ban rules count it. The
+  password is read from the JSON body of a request only.
+- A refusal of the probe of the private directory counts as protection only when the same
+  check also gets the plugin's own stylesheet back from the site. A 403 or 404 from a
+  firewall, a CDN challenge or another virtual host no longer allows plaintext restore
+  staging; the probe says it could not be verified instead. `restores/` and every staging
+  directory get the deny files and `index.php` of the private directory, so that a server
+  that lists directories does not list the restores.
+- Deleting the plugin on a PHP older than 8.3 stops with a message that asks to switch
+  back first. Before, the uninstall did nothing there and WordPress deleted the plugin,
+  leaving staged files, retained database tables and the encrypted secrets behind with
+  nothing left to expire them.
+- `wp backups-for-restic snapshots` prints host names with control characters quoted, as
+  `ls` prints names; a client of a shared repository could send escape sequences to the
+  terminal through the host name of a snapshot.
 
 ### Fixed
+- A live database exchange waits, for at most a minute, until requests that started before maintenance have ended: the site's database account must have had no other connection to the site database for a second, so a request that reconnected in between is waited for as well. Such a request could otherwise write a post or an order into one database generation and its metadata into the other. Connections that stay open, such as persistent database connections or long-running WP-CLI processes, make the exchange try again later. The exchange now needs MySQL 8.0.22 or later with the Performance Schema enabled and listing every connection; the review reports a server that leaves connections out.
+- After a database migration or a failover to another server, a database restore that kept private tables no longer stops backups and all other jobs. Only another database restore waits. The new `wp backups-for-restic database-discard` command and REST action list those tables for removal on the old server and forget them without dropping anything. Uninstall no longer fails on such a restore, and all-tables backups no longer fail because of it.
+- A database undo whose reply was lost is recorded by a later tick or by the heartbeat, which then expires the replaced tables. Before, the heartbeat stopped at that undo for good.
+- `OPTIMIZE TABLE` and other table rebuilds after a database exchange no longer cost the undo of a rebuilt live table, and a rebuilt witness no longer stops expiry and uninstall. A rebuilt retained table is kept and listed on the job instead of being left behind unnoticed.
+- One database restore whose cleanup keeps failing no longer stops older ones from expiring.
+- The database review reports disabled InnoDB table locks, statement-based binary logging and a Galera node before the import starts, instead of failing after it.
+- A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent, and the job log names its size, the limit it needs and the server's limit. It was reported as a busy database and retried.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a
@@ -412,3 +454,61 @@ All notable changes are documented here. The format follows
 - Applying many files into one large folder no longer lists the folder several times for
   every file while the site is in maintenance: 500 new files beside 20,000 others needed
   27 seconds of checks before and less than half a second now.
+- While a live file change holds the site in maintenance, WP-CLI commands other than the
+  plugin's own run with the site's plugins, as during a WordPress update. Before, every
+  command started with this plugin alone: `wp plugin activate`, or deactivating this
+  plugin, could leave every other plugin inactive, and `wp cron event run --due-now`
+  dropped other plugins' due events. Requests that run cron themselves, as with
+  `ALTERNATE_WP_CRON`, release only this plugin's events during the job.
+- A file apply or undo keeps the maintenance marker that its first tick wrote and the
+  uploads directory it was confirmed with. URL and upload-directory filters in the theme or
+  a regular plugin, which do not load during maintenance, made its first change fail or
+  refused uploads after other files had changed.
+- The maintenance marker is readable like WordPress's own, so PHP processes of other
+  system users show the maintenance page instead of a fatal error. It is also cleared from
+  OPcache, so hosts without timestamp checks run the current job's marker. Where
+  `opcache.restrict_api` keeps the plugin from clearing it, a host without timestamp checks
+  stops the change before it touches a file (`maintenance_opcache`), and a host with them
+  waits until OPcache has seen the new marker.
+- A file job that the site's file modification policy stops reports `file_writes_refused`
+  instead of "Another backup job is still running". A confirmation that finds the
+  permission gone just before the job would start reports it too, instead of asking the
+  administrator to wait for active work to finish.
+- The database backup reads every table along its whole primary key, or a unique key over
+  NOT NULL columns. Before, a table without a single-column integer key, such as
+  `wp_term_relationships`, was read by position: a row added or removed while the backup
+  ran made it skip a row that existed all along, or write one twice, which stopped the
+  import with a duplicate key.
+- The database backup reads each table's part of a backup step from one consistent
+  snapshot, on a database connection of its own that it opens with the site's settings and
+  checks before it uses it. A transient that is renewed while a table is read is no longer
+  in the backup twice. Where no such connection can be opened, the backup reads through the
+  site's connection as before, with its own settings around every query. A database drop-in
+  that sends those queries, or the reads of a table, to another connection than the settings
+  stops the backup with its own message instead of writing values in another time zone or
+  character set. A table without a key is read with one statement, or marked in the
+  database manifest and named in a warning of the job when it could not be.
+- A table whose structure changes while it is backed up, for example by a plugin update, is
+  backed up again from its beginning instead of producing a file that cannot be imported.
+  A table that keeps changing stops the backup with its own message.
+- TIMESTAMP values keep their instant: the database is read and written in UTC. Before,
+  values from the other half of the year moved by the daylight saving hour on import.
+- Text is read in utf8mb4 whatever `DB_CHARSET` is, so a site with a latin1 connection
+  gets its stored bytes back and no longer loses characters outside latin1 as `?`.
+- Table definitions with characters such as "х", "内" or "Å" in a comment, a default, an
+  ENUM value or a column name are no longer damaged in the backup.
+- FLOAT columns are backed up with every digit they hold.
+- A row larger than 16 MiB as SQL no longer fails every backup: it is written as a statement
+  of its own, and the database manifest records each table's largest statement. A table of
+  large rows is read only as many rows at a time as fit into the PHP memory limit, so that
+  every row that fits on its own is backed up; before, a page of such rows could end the
+  request. A row too large for the PHP memory limit stops the backup with its own message,
+  before it is read, and the log of the job names the table of a failed database dump.
+- A table that another connection keeps locked, for example with `LOCK TABLES` or during
+  a long `ALTER TABLE`, no longer holds a backup step for as long as the server lets a
+  query wait for a lock, a year on MySQL and a day on MariaDB by default. The backup waits
+  five seconds and then tries again later, with growing pauses; a table that stays locked
+  stops the backup at the sixth try with its own message, which names the table.
+- A row limit (`sql_select_limit`) that the server's settings or a plugin left on the
+  database session no longer cuts the database backup short. It could leave out tables,
+  columns, parts of a key or rows without an error.

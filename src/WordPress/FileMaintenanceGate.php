@@ -17,6 +17,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class FileMaintenanceGate {
 
+	/** The plugin's WP-CLI command. CliCommand registers it under this name. */
+	public const string COMMAND = 'backups-for-restic';
+
 	/**
 	 * Called by the marker. Only the controller's requests may boot before cleanup.
 	 *
@@ -34,9 +37,15 @@ final class FileMaintenanceGate {
 		if ( time() - $updated >= 600 ) {
 			return (float) $updated;
 		}
-		$cron   = function_exists( 'wp_doing_cron' ) && wp_doing_cron();
-		$worker = $cron || ( defined( 'WP_CLI' ) && true === WP_CLI );
-		if ( ! $worker && ! self::admitted( $id, $grant, $api, $admin, $_SERVER, $_GET, $_COOKIE ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- This controls early boot only. WordPress verifies the REST nonce at the route.
+		if ( defined( 'WP_CLI' ) && true === WP_CLI ) {
+			// WP-CLI switches core's maintenance check off for every command, so a command
+			// other than this plugin's boots as during core's own maintenance: with the
+			// site's plugins and options, even when it defines DOING_CRON early.
+			$admitted = self::own_command( $GLOBALS['argv'] ?? null );
+		} else {
+			$admitted = ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) || self::admitted( $id, $grant, $api, $admin, $_SERVER, $_GET, $_POST, $_COOKIE ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended, WordPress.Security.NonceVerification.Missing -- This controls early boot only. WordPress verifies the REST nonce at the route.
+		}
+		if ( ! $admitted ) {
 			// A float still expires under core's ten-minute grace period. Core reserves
 			// integer timestamps for its extension-editor scrape workflow.
 			return (float) $updated;
@@ -44,13 +53,16 @@ final class FileMaintenanceGate {
 		// The controller must boot even half-way through replacing an active extension.
 		// The filters affect this request only; the installed site's options stay intact.
 		add_filter( 'pre_option_active_plugins', static fn (): array => [ $plugin ], PHP_INT_MAX );
+		// update_option() compares a new list with this substitute, so activate_plugin(),
+		// deactivate_plugins() or the REST plugins endpoint would store a list derived
+		// from it. The stored list stays as it is.
+		add_filter( 'pre_update_option_active_plugins', static fn ( mixed $value, mixed $old_value ): mixed => $old_value, PHP_INT_MAX, 2 );
 		add_filter( 'template_directory', static fn (): string => __DIR__, PHP_INT_MAX );
 		add_filter( 'stylesheet_directory', static fn (): string => __DIR__, PHP_INT_MAX );
-		if ( $cron ) {
-			// Other extensions did not register their callbacks. Leave their due events
-			// scheduled for the first normal cron boot after the job ends.
-			add_filter( 'pre_get_ready_cron_jobs', self::ready_events( ... ), PHP_INT_MAX );
-		}
+		// Other extensions did not register their callbacks. Leave their due events
+		// scheduled for the first normal cron boot after the job ends. A request that is
+		// not a cron request can still run cron, for example with ALTERNATE_WP_CRON.
+		add_filter( 'pre_get_ready_cron_jobs', self::ready_events( ... ), PHP_INT_MAX );
 		return 0.0;
 	}
 
@@ -80,6 +92,39 @@ final class FileMaintenanceGate {
 	}
 
 	/**
+	 * Recognises this plugin's WP-CLI command before WordPress loads, from the same
+	 * arguments and by the same rules as WP-CLI's own parser: the script name and a
+	 * leading alias such as "@staging" are not part of the command, and every word that
+	 * starts with "--" and a name is a parameter (--path=…, --url=…, --user=…,
+	 * --skip-plugins, --skip-themes=…, --allow-root, --no-color), wherever it stands.
+	 * The first other word names the command.
+	 *
+	 * @param mixed $argv Process arguments as WP-CLI reads them, $GLOBALS['argv'].
+	 * @return bool Whether the command is this plugin's.
+	 */
+	public static function own_command( mixed $argv ): bool {
+		if ( ! is_array( $argv ) || ! array_is_list( $argv ) ) {
+			return false;
+		}
+		$words = array_slice( $argv, 1 );
+		// WP_CLI\Configurator::ALIAS_REGEX.
+		if ( isset( $words[0] ) && is_string( $words[0] ) && 1 === preg_match( '#^@[A-Za-z0-9-_\.\-]+$#', $words[0] ) ) {
+			array_shift( $words );
+		}
+		foreach ( $words as $word ) {
+			if ( ! is_string( $word ) ) {
+				return false;
+			}
+			// WP_CLI\Configurator::extract_assoc() reads --name, --no-name and --name=value
+			// as parameters; "--" alone and "--=value" are positional.
+			if ( 1 !== preg_match( '/\A--[^=]/', $word ) ) {
+				return self::COMMAND === $word;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Checks the token and exact request before WordPress boot. Route authorization and
 	 * the logged-in user's REST nonce remain the responsibility of WordPress afterwards.
 	 *
@@ -89,14 +134,17 @@ final class FileMaintenanceGate {
 	 * @param string                 $admin Configured admin.php URL.
 	 * @param array<array-key,mixed> $server Server environment.
 	 * @param array<array-key,mixed> $query Parsed query.
+	 * @param array<array-key,mixed> $body Parsed form body.
 	 * @param array<array-key,mixed> $cookies Cookies.
 	 * @return bool Whether to let this request reach the ordinary authenticated route.
 	 */
-	public static function admitted( string $id, string $grant, string $api, string $admin, array $server, array $query, array $cookies ): bool {
+	public static function admitted( string $id, string $grant, string $api, string $admin, array $server, array $query, array $body, array $cookies ): bool {
 		$token  = $server['HTTP_X_BACKUPS_FOR_RESTIC_CONTROL'] ?? $cookies['bfr_file_control'] ?? null;
 		$uri    = $server['REQUEST_URI'] ?? null;
 		$method = $server['REQUEST_METHOD'] ?? null;
-		if ( ! is_string( $token ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $token ) || ! hash_equals( $grant, hash( 'sha256', $token ) ) || ! is_string( $uri ) || ! is_string( $method ) || isset( $query['_method'] ) || isset( $server['HTTP_X_HTTP_METHOD_OVERRIDE'] ) ) {
+		// WordPress takes rest_route from a form body before the one in the address or the
+		// path, so a body could send an admitted address to any other route.
+		if ( ! is_string( $token ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $token ) || ! hash_equals( $grant, hash( 'sha256', $token ) ) || ! is_string( $uri ) || ! is_string( $method ) || isset( $query['_method'] ) || isset( $server['HTTP_X_HTTP_METHOD_OVERRIDE'] ) || isset( $body['rest_route'] ) ) {
 			return false;
 		}
 		// phpcs:disable WordPress.WP.AlternativeFunctions.parse_url_parse_url -- wp_parse_url() loads after the maintenance gate.

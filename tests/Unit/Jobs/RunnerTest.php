@@ -7,6 +7,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\BackendException;
+use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Jobs\EventLog;
@@ -189,6 +190,32 @@ final class RunnerTest extends TestCase {
 		self::assertFalse( $failed->error->retryable );
 	}
 
+	public function test_the_log_of_a_failure_names_the_table_a_database_error_is_about(): void {
+		$store                      = $this->store();
+		$this->script['backing_up'] = [
+			new DatabaseFailed(
+				'The definition of a database table kept changing while it was backed up.',
+				[
+					'table' => 'wp_postmeta',
+					'code'  => 'database_dump_unstable',
+				]
+			),
+		];
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+
+		$this->runner( $store )->tick( 10 );
+
+		$errors = array_values( array_filter( $store->log( $job )->read( 100 ), static fn ( array $event ): bool => 'error' === $event['level'] ) );
+		self::assertSame(
+			[
+				'code'  => 'database_dump_unstable',
+				'step'  => 'backing_up',
+				'table' => 'wp_postmeta',
+			],
+			$errors[0]['context'] ?? null
+		);
+	}
+
 	public function test_retryable_errors_back_off_and_then_fail(): void {
 		$store                      = $this->store();
 		$this->script['backing_up'] = array_fill( 0, 6, new BackendException( 'Connection reset.' ) );
@@ -209,6 +236,38 @@ final class RunnerTest extends TestCase {
 		self::assertSame( JobState::Failed, $failed?->state );
 		self::assertSame( 'repository_unreachable', $failed->error?->code );
 		self::assertSame( [ 'releasing', 'cleaning_up' ], array_slice( $this->calls, -2 ) );
+	}
+
+	public function test_a_table_that_stays_locked_is_tried_again_and_then_fails_with_its_own_code(): void {
+		$store                      = $this->store();
+		$this->script['backing_up'] = array_fill(
+			0,
+			6,
+			new DatabaseFailed(
+				'A database table stayed locked by another connection for longer than the dump waits.',
+				[
+					'table' => 'wp_options',
+					'code'  => 'database_dump_locked',
+				]
+			)
+		);
+		$job                        = $store->create( JobType::Backup, 'manual', $this->clock->seconds );
+		$runner                     = $this->runner( $store );
+
+		$runner->tick( 10 );
+		$waiting = $store->get( $job->id );
+		self::assertSame( JobState::Running, $waiting?->state );
+		self::assertSame( 1, $waiting->consecutive_failures );
+		self::assertSame( $this->clock->seconds + 30, $waiting->not_before );
+
+		for ( $attempt = 2; $attempt <= 6; $attempt++ ) {
+			$this->clock->advance( 3600 );
+			$runner->tick( 10 );
+		}
+		$failed = $store->get( $job->id );
+		self::assertSame( JobState::Failed, $failed?->state );
+		self::assertSame( 'database_dump_locked', $failed->error?->code );
+		self::assertTrue( $failed->error->retryable );
 	}
 
 	public function test_cancellation_runs_the_cleanup_steps(): void {

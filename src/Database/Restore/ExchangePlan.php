@@ -139,7 +139,7 @@ final readonly class ExchangePlan {
 			}
 			foreach ( [ $pair['before'], $pair['after'] ] as $id ) {
 				if ( null !== $id ) {
-					if ( isset( $ids[ $id ] ) ) {
+					if ( true === ( $ids[ $id ] ?? false ) ) {
 						throw new FormatException( 'The database exchange repeats a physical table identity.' );
 					}
 					$ids[ $id ] = true;
@@ -170,6 +170,26 @@ final readonly class ExchangePlan {
 			],
 			$owned
 		);
+	}
+
+	/**
+	 * The same generations with the current identities of tables that a rebuild renumbered.
+	 * OPTIMIZE TABLE, ALTER TABLE ... FORCE or ENGINE, TRUNCATE TABLE and copying ALTERs give
+	 * an InnoDB table a new TABLE_ID while its name, definition and comment stay.
+	 *
+	 * @param array<int,string> $after Identities of the applied generation's tables, by ordinal.
+	 * @param string|null       $witness Identity of the rebuilt witness, or null if unchanged.
+	 * @return self Validated plan.
+	 * @throws FormatException If an ordinal is unknown or an identity is invalid or repeated.
+	 */
+	public function rebind( array $after, ?string $witness ): self {
+		$document = $this->document;
+		foreach ( $after as $number => $id ) {
+			// An unknown ordinal adds a table without a name, which load() refuses.
+			$document['pairs'][ $number ]['after'] = $id;
+		}
+		$document['witness'] = $witness ?? $document['witness'];
+		return self::load( $document, $this->owned, $document['prefix'] );
 	}
 
 	/**
