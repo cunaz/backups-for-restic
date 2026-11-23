@@ -69,14 +69,31 @@ final readonly class WordPressState {
 		$options = SqlFormatter::identifier( $prefix . 'options' );
 		$meta    = SqlFormatter::identifier( $prefix . 'usermeta' );
 		$user    = $this->connection->rows( 'SELECT SHA2(JSON_ARRAY(user_login,user_pass,user_email),256) AS f FROM ' . $users . ' WHERE ID=' . $admin )[0]['f'] ?? null;
-		$roles   = $this->connection->rows( 'SELECT SHA2(option_value,256) AS f FROM ' . $options . ' WHERE option_name=' . Session::literal( $prefix . 'user_roles' ) )[0]['f'] ?? null;
 		$caps    = $this->connection->rows( 'SELECT SHA2(meta_value,256) AS f FROM ' . $meta . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . ' ORDER BY umeta_id LIMIT 2' );
+		$roles   = $this->connection->rows( 'SELECT SHA2(option_value,256) AS f FROM ' . $options . ' WHERE option_name=' . Session::literal( $prefix . 'user_roles' ) )[0]['f'] ?? '';
 		$plugins = $this->connection->rows( 'SELECT SHA2(option_value,256) AS f FROM ' . $options . ' WHERE option_name=' . Session::literal( 'active_plugins' ) )[0]['f'] ?? '';
-		if ( ! is_string( $user ) || ! is_string( $roles ) || 1 !== count( $caps ) || ! is_string( $caps[0]['f'] ?? null ) ) {
-			DatabaseFailed::raise( 'The approving administrator has an ambiguous local identity or capabilities.', [ 'code' => 'database_admin_collision' ] );
+		if ( ! is_string( $user ) ) {
+			DatabaseFailed::raise( 'The approving administrator has no local identity.', [ 'code' => 'database_admin_collision' ] );
 		}
-		// Versioned: an authority from before the live plugin list was bound never matches.
-		return hash( 'sha256', 'backups-for-restic-authority/2:' . $user . $roles . $caps[0]['f'] . $plugins );
+		if ( 1 !== count( $caps ) || ! is_string( $caps[0]['f'] ?? null ) ) {
+			DatabaseFailed::raise( 'The approving administrator\'s own roles and capabilities are absent or stored more than once.', [ 'code' => 'database_admin_capabilities_unreadable' ] );
+		}
+		return self::bound( $user, $caps[0]['f'], $roles, $plugins );
+	}
+
+	/**
+	 * The authority from its parts. Versioned: an authority from before the live list of active
+	 * plugins was bound, the SHA-256 of the user's, the roles' and the capabilities' fingerprints
+	 * alone, never matches, so an exchange confirmed before that stops.
+	 *
+	 * @param string $user Fingerprint of the user row.
+	 * @param string $capabilities Fingerprint of the account's own roles and capabilities.
+	 * @param string $roles Fingerprint of the live role map, empty if it is absent.
+	 * @param string $plugins Fingerprint of the live list of active plugins, empty if it is absent.
+	 * @return string SHA-256.
+	 */
+	private static function bound( string $user, string $capabilities, string $roles, string $plugins ): string {
+		return hash( 'sha256', 'backups-for-restic-authority/2:' . $user . $roles . $capabilities . $plugins );
 	}
 
 	/**
@@ -115,10 +132,10 @@ final readonly class WordPressState {
 		}
 		$options = SqlFormatter::identifier( $prefix . 'options' );
 		$meta    = SqlFormatter::identifier( $prefix . 'usermeta' );
-		$roles   = $this->connection->rows( 'SELECT 1 AS present FROM ' . $options . ' WHERE option_name=' . Session::literal( $prefix . 'user_roles' ) . " AND option_value<>'' LIMIT 1" );
-		$caps    = $this->connection->rows( 'SELECT 1 AS present FROM ' . $meta . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . " AND meta_value<>'' LIMIT 1" );
-		if ( [] === $roles || [] === $caps ) {
-			throw new DatabaseFailed( 'The confirming administrator has no local WordPress roles and capabilities to preserve.' );
+		// The running site's role map does not matter here: the exchange discards it.
+		$caps = $this->connection->rows( 'SELECT 1 AS present FROM ' . $meta . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . " AND meta_value<>'' LIMIT 1" );
+		if ( [] === $caps ) {
+			DatabaseFailed::raise( 'The confirming administrator has no record of their own roles and capabilities to keep.', [ 'code' => 'database_admin_capabilities_unreadable' ] );
 		}
 		// Never carry state into an incompatible WordPress database schema.
 		$target_options = SqlFormatter::identifier( $targets[ $prefix . 'options' ] );
@@ -164,16 +181,16 @@ final readonly class WordPressState {
 	}
 
 	/**
-	 * Reads one option of a generation's options table.
+	 * Reads one option of a generation's options table. A value longer than the limit is not
+	 * transferred; its length is returned instead.
 	 *
 	 * @param string $table Live or verified private options table.
 	 * @param string $name Option name.
 	 * @param int    $limit Longest value read, in bytes.
-	 * @return string|null Stored value, or null if the table holds no such option, more than one or a longer value.
+	 * @return string|int|null Stored value; its length in bytes if longer than the limit; null if the table holds no such option or more than one.
 	 */
-	public function option( string $table, string $name, int $limit ): ?string {
-		$rows = $this->connection->rows( 'SELECT IF(LENGTH(option_value)<=' . $limit . ',option_value,NULL) AS stored_value FROM ' . SqlFormatter::identifier( $table ) . ' WHERE option_name=' . Session::literal( $name ) . ' LIMIT 2' );
-		return 1 === count( $rows ) ? $rows[0]['stored_value'] : null;
+	public function option( string $table, string $name, int $limit ): string|int|null {
+		return self::bounded( $this->connection->rows( 'SELECT LENGTH(option_value) AS stored_bytes,IF(LENGTH(option_value)<=' . $limit . ',option_value,NULL) AS stored_value FROM ' . SqlFormatter::identifier( $table ) . ' WHERE option_name=' . Session::literal( $name ) . ' LIMIT 2' ) );
 	}
 
 	/**
@@ -182,11 +199,24 @@ final readonly class WordPressState {
 	 *
 	 * @param string $prefix Current WordPress table prefix.
 	 * @param int    $admin Confirmed WordPress user ID.
-	 * @return string|null Stored value, or null if absent, ambiguous or longer than RoleMap reads.
+	 * @return string|int|null Stored value; its length in bytes if longer than RoleMap reads; null if absent or stored more than once.
 	 */
-	public function capabilities( string $prefix, int $admin ): ?string {
-		$rows = $this->connection->rows( 'SELECT IF(LENGTH(meta_value)<=' . RoleMap::MAX_OWN_BYTES . ',meta_value,NULL) AS stored_value FROM ' . SqlFormatter::identifier( $prefix . 'usermeta' ) . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . ' LIMIT 2' );
-		return 1 === count( $rows ) ? $rows[0]['stored_value'] : null;
+	public function capabilities( string $prefix, int $admin ): string|int|null {
+		return self::bounded( $this->connection->rows( 'SELECT LENGTH(meta_value) AS stored_bytes,IF(LENGTH(meta_value)<=' . RoleMap::MAX_OWN_BYTES . ',meta_value,NULL) AS stored_value FROM ' . SqlFormatter::identifier( $prefix . 'usermeta' ) . ' WHERE user_id=' . $admin . ' AND meta_key=' . Session::literal( $prefix . 'capabilities' ) . ' LIMIT 2' ) );
+	}
+
+	/**
+	 * The value of exactly one row, or its length when it was too long to transfer.
+	 *
+	 * @param list<array<string,string|null>> $rows Rows with stored_bytes and stored_value.
+	 * @return string|int|null Value, length, or null for no row, several rows or a NULL value.
+	 */
+	private static function bounded( array $rows ): string|int|null {
+		if ( 1 !== count( $rows ) ) {
+			return null;
+		}
+		$bytes = $rows[0]['stored_bytes'] ?? null;
+		return $rows[0]['stored_value'] ?? ( null === $bytes ? null : (int) $bytes );
 	}
 
 	/**

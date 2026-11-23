@@ -37,7 +37,7 @@ final readonly class RehearsalReport {
 	 *
 	 * @param Manifest    $manifest Validated dump.
 	 * @param OwnedTables $owned Completed rehearsal's private objects.
-	 * @return array{tables:list<array<string,int|string|null>>,views_not_imported:list<string>,snapshot_server:string,destination_server:string,findings:list<array{code:string,table:string}>,rows:int,content_digest:string|null,swap_preflight:array{blockers:list<string>,missing_privileges:list<string>,required_database_privileges:list<string>,required_global_privileges:list<string>},wordpress_state:array{user_roles:string|null,active_plugins:string|null}}
+	 * @return array{tables:list<array<string,int|string|null>>,views_not_imported:list<string>,snapshot_server:string,destination_server:string,findings:list<array{code:string,table:string}>,rows:int,content_digest:string|null,swap_preflight:array{blockers:list<string>,missing_privileges:list<string>,required_database_privileges:list<string>,required_global_privileges:list<string>},wordpress_state:array{user_roles:string|int|null,active_plugins:string|int|null}}
 	 * @throws FormatException If the live inventory exceeds the same table limit as the dump.
 	 * @throws DatabaseFailed If the completed ledger and imported shadows do not match the inventory.
 	 */
@@ -182,13 +182,13 @@ final readonly class RehearsalReport {
 	}
 
 	/**
-	 * The snapshot's role map and list of active plugins as they are stored, base64-encoded,
-	 * or null where the snapshot's options table lacks the option, holds it more than once,
-	 * holds a longer value than the review reads, or lacks the standard columns.
+	 * The snapshot's role map and list of active plugins as they are stored, base64-encoded; the
+	 * length in bytes of a value longer than the review reads; or null where the snapshot's
+	 * options table lacks the option, holds it more than once, or lacks the standard columns.
 	 *
 	 * @param Manifest    $manifest Validated dump.
 	 * @param OwnedTables $owned Completed rehearsal's private objects.
-	 * @return array{user_roles:string|null,active_plugins:string|null} Stored values.
+	 * @return array{user_roles:string|int|null,active_plugins:string|int|null} Stored values.
 	 */
 	private function wordpress_state( Manifest $manifest, OwnedTables $owned ): array {
 		$number = array_search( $manifest->prefix . 'options', array_column( $manifest->tables, 'name' ), true );
@@ -209,6 +209,6 @@ final readonly class RehearsalReport {
 			'user_roles'     => $state->option( $table, $manifest->prefix . 'user_roles', RoleMap::MAX_BYTES ),
 			'active_plugins' => $state->option( $table, 'active_plugins', PluginList::MAX_BYTES ),
 		];
-		return array_map( static fn ( ?string $value ): ?string => null === $value ? null : Bytes::base64_encode( $value ), $values );
+		return array_map( static fn ( string|int|null $value ): string|int|null => is_string( $value ) ? Bytes::base64_encode( $value ) : $value, $values );
 	}
 }

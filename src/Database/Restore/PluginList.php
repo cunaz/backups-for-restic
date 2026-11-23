@@ -39,18 +39,29 @@ final readonly class PluginList {
 	/**
 	 * Reads a stored list.
 	 *
-	 * @param string|null $stored Value of active_plugins, or null if absent or too long to read.
+	 * @param string|int|null $stored Value of active_plugins; its length in bytes if longer than MAX_BYTES; null if absent or ambiguous.
 	 * @return self List.
-	 * @throws DatabaseFailed With the code database_plugins_invalid if the value is not one that WordPress writes.
+	 * @throws DatabaseFailed With the code database_plugins_too_large if the value is longer than MAX_BYTES, database_plugins_invalid if it is not one that WordPress writes.
 	 */
-	public static function parse( ?string $stored ): self {
+	public static function parse( string|int|null $stored ): self {
+		$bytes = is_string( $stored ) ? strlen( $stored ) : $stored;
+		if ( null !== $bytes && $bytes > self::MAX_BYTES ) {
+			DatabaseFailed::raise(
+				'The stored list of active plugins is longer than the review reads.',
+				[
+					'code'  => 'database_plugins_too_large',
+					'bytes' => $bytes,
+					'limit' => self::MAX_BYTES,
+				]
+			);
+		}
 		try {
-			$value = null === $stored || strlen( $stored ) > self::MAX_BYTES ? null : SerializedValue::decode( $stored, 1 );
+			$value = is_string( $stored ) ? SerializedValue::decode( $stored, 1 ) : null;
 		} catch ( FormatException $error ) {
 			DatabaseFailed::raise( 'The stored list of active plugins is not one that WordPress writes.', [ 'code' => 'database_plugins_invalid' ], $error );
 		}
 		if ( ! is_array( $value ) ) {
-			DatabaseFailed::raise( 'The stored list of active plugins is absent, too long or not an array.', [ 'code' => 'database_plugins_invalid' ] );
+			DatabaseFailed::raise( 'The stored list of active plugins is absent or not an array.', [ 'code' => 'database_plugins_invalid' ] );
 		}
 		$entries = [];
 		$seen    = [];
@@ -62,6 +73,16 @@ final readonly class PluginList {
 			$entries[]      = $entry;
 		}
 		return new self( $entries );
+	}
+
+	/**
+	 * A list without plugins: what the comparison starts from when the running site's list cannot
+	 * be read, so that every plugin of the other generation is listed.
+	 *
+	 * @return self Empty list.
+	 */
+	public static function none(): self {
+		return new self( [] );
 	}
 
 	/**

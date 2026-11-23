@@ -16,14 +16,21 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * The role map of one database generation, the option {prefix}user_roles that WP_Roles reads,
- * with each capability reduced to granted or not, as WP_User::has_cap() reads it. Only the form
- * that WordPress writes is accepted: role names mapped to exactly a display name and a map of
- * capability names to scalars. A name has to be UTF-8 without control characters.
+ * with each stored capability granted or denied, as WP_User::has_cap() reads it; a capability
+ * that a role does not store is absent. Only the form that WordPress writes is accepted: role
+ * names mapped to exactly a display name and a map of capability names to scalars. A name has to
+ * be UTF-8 without control characters.
+ *
+ * @phpstan-type Change array{role:string,change:'added'|'removed'|'changed',added:list<string>,removed:list<string>,denials_added:list<string>,denials_removed:list<string>}
  */
 final readonly class RoleMap {
 
-	/** Longest stored role map that is read, in bytes. WordPress's own five roles take about 6 KiB. */
-	public const int MAX_BYTES = 524288;
+	/**
+	 * Longest stored role map that is read, in bytes. WordPress's own five roles take about
+	 * 3 KiB. At this bound the exchange's checks under its write barrier took about 50 ms more
+	 * than with WordPress's own roles (ADR 0043).
+	 */
+	public const int MAX_BYTES = 1048576;
 
 	/** Longest stored list of an account's own roles and capabilities that is read, in bytes. */
 	public const int MAX_OWN_BYTES = 65536;
@@ -34,7 +41,7 @@ final readonly class RoleMap {
 	/**
 	 * Holds a checked role map.
 	 *
-	 * @param array<array-key,array<array-key,bool>> $roles Each role's capabilities, granted or not.
+	 * @param array<array-key,array<array-key,bool>> $roles Each role's stored capabilities, granted or denied.
 	 */
 	private function __construct( public array $roles ) {
 	}
@@ -42,14 +49,14 @@ final readonly class RoleMap {
 	/**
 	 * Reads a stored role map.
 	 *
-	 * @param string|null $stored Value of {prefix}user_roles, or null if absent or too long to read.
+	 * @param string|int|null $stored Value of {prefix}user_roles; its length in bytes if longer than MAX_BYTES; null if absent or ambiguous.
 	 * @return self Role map.
-	 * @throws DatabaseFailed With the code database_roles_invalid if the value is not one that WordPress writes.
+	 * @throws DatabaseFailed With the code database_roles_too_large if the value is longer than MAX_BYTES, database_roles_invalid if it is not one that WordPress writes.
 	 */
-	public static function parse( ?string $stored ): self {
+	public static function parse( string|int|null $stored ): self {
 		$code  = 'database_roles_invalid';
 		$roles = [];
-		foreach ( self::decode( $stored, self::MAX_BYTES, 3, $code ) as $role => $definition ) {
+		foreach ( self::decode( $stored, self::MAX_BYTES, 3, $code, 'database_roles_too_large' ) as $role => $definition ) {
 			if ( ! self::name( $role ) || ! is_array( $definition ) || 2 !== count( $definition ) || ! is_string( $definition['name'] ?? null ) || ! is_array( $definition['capabilities'] ?? null ) ) {
 				DatabaseFailed::raise( 'A stored WordPress role is not one that WordPress writes.', [ 'code' => $code ] );
 			}
@@ -59,14 +66,25 @@ final readonly class RoleMap {
 	}
 
 	/**
+	 * A role map without roles: what the comparison starts from when the running site's role map
+	 * cannot be read, so that every role of the other generation is listed.
+	 *
+	 * @return self Empty role map.
+	 */
+	public static function none(): self {
+		return new self( [] );
+	}
+
+	/**
 	 * Reads an account's own roles and capabilities, the user meta {prefix}capabilities.
 	 *
-	 * @param string|null $stored Stored value, or null if absent, ambiguous or too long to read.
+	 * @param string|int|null $stored Stored value; its length in bytes if longer than MAX_OWN_BYTES; null if absent or stored more than once.
 	 * @return array<array-key,bool> Role and capability names, granted or not, in their stored order.
-	 * @throws DatabaseFailed With the code database_admin_capabilities if the value is not one that WordPress writes.
+	 * @throws DatabaseFailed With the code database_admin_capabilities_unreadable if the value is absent, ambiguous, too long or not one that WordPress writes.
 	 */
-	public static function own( ?string $stored ): array {
-		return self::grants( self::decode( $stored, self::MAX_OWN_BYTES, 1, 'database_admin_capabilities' ), 'database_admin_capabilities' );
+	public static function own( string|int|null $stored ): array {
+		$code = 'database_admin_capabilities_unreadable';
+		return self::grants( self::decode( $stored, self::MAX_OWN_BYTES, 1, $code, $code ), $code );
 	}
 
 	/**
@@ -103,47 +121,57 @@ final readonly class RoleMap {
 	}
 
 	/**
-	 * The roles whose capabilities differ between this map and the one an exchange brings live,
-	 * by role name in byte order. A role that only one map has is added or removed; a role in
-	 * both is listed only if it grants other capabilities afterwards.
+	 * The roles that differ between this map and the one an exchange brings live, by role name
+	 * in byte order. A role that only one map has is added or removed. A role in both is listed
+	 * if it grants or denies other capabilities afterwards: a stored denial matters for an account
+	 * with several roles, where a later role's denial takes away what an earlier one grants.
 	 *
 	 * @param self $next The role map that becomes live.
-	 * @return list<array{role:string,change:'added'|'removed'|'changed',added:list<string>,removed:list<string>}> Each role with the capabilities granted only afterwards and only now, in byte order.
+	 * @return list<Change> Each role with the capabilities granted only afterwards (added) and only now (removed), and the denials stored only afterwards and only now, in byte order.
 	 */
 	public function changes( self $next ): array {
 		$names = array_map( strval( ... ), array_keys( $this->roles + $next->roles ) );
 		sort( $names, SORT_STRING );
 		$changes = [];
 		foreach ( $names as $name ) {
-			$now     = self::granted( $this->roles[ $name ] ?? [] );
-			$after   = self::granted( $next->roles[ $name ] ?? [] );
-			$added   = array_values( array_diff( $after, $now ) );
-			$removed = array_values( array_diff( $now, $after ) );
-			$change  = match ( true ) {
+			$now    = $this->roles[ $name ] ?? [];
+			$after  = $next->roles[ $name ] ?? [];
+			$lists  = [
+				'added'           => self::only( $after, $now, true ),
+				'removed'         => self::only( $now, $after, true ),
+				'denials_added'   => self::only( $after, $now, false ),
+				'denials_removed' => self::only( $now, $after, false ),
+			];
+			$change = match ( true ) {
 				! isset( $this->roles[ $name ] ) => 'added',
 				! isset( $next->roles[ $name ] ) => 'removed',
 				default                          => 'changed',
 			};
-			if ( 'changed' !== $change || [] !== $added || [] !== $removed ) {
+			if ( 'changed' !== $change || [] !== array_merge( ...array_values( $lists ) ) ) {
 				$changes[] = [
-					'role'    => $name,
-					'change'  => $change,
-					'added'   => $added,
-					'removed' => $removed,
-				];
+					'role'   => $name,
+					'change' => $change,
+				] + $lists;
 			}
 		}
 		return $changes;
 	}
 
 	/**
-	 * The names of the granted capabilities.
+	 * The capabilities that one role stores with a value and the other does not.
 	 *
-	 * @param array<array-key,bool> $capabilities Capabilities, granted or not.
-	 * @return list<string> Granted ones, in byte order.
+	 * @param array<array-key,bool> $these Capabilities of the role on one side.
+	 * @param array<array-key,bool> $those Capabilities of the role on the other side.
+	 * @param bool                  $granted Whether to compare grants or denials.
+	 * @return list<string> Names, in byte order.
 	 */
-	private static function granted( array $capabilities ): array {
-		$names = array_map( strval( ... ), array_keys( array_filter( $capabilities ) ) );
+	private static function only( array $these, array $those, bool $granted ): array {
+		$names = [];
+		foreach ( $these as $name => $value ) {
+			if ( $granted === $value && $granted !== ( $those[ $name ] ?? null ) ) {
+				$names[] = (string) $name;
+			}
+		}
 		sort( $names, SORT_STRING );
 		return $names;
 	}
@@ -172,21 +200,33 @@ final readonly class RoleMap {
 	/**
 	 * Decodes a bounded stored array.
 	 *
-	 * @param string|null $stored Stored value.
-	 * @param int         $limit Longest value read, in bytes.
-	 * @param int         $depth Deepest nesting.
-	 * @param string      $code Refusal code.
+	 * @param string|int|null $stored Stored value, its length if it was too long to read, or null.
+	 * @param int             $limit Longest value read, in bytes.
+	 * @param int             $depth Deepest nesting.
+	 * @param string          $code Refusal code for a value that is absent or not an array as WordPress writes it.
+	 * @param string          $large Refusal code for a value longer than the limit.
 	 * @return array<array-key,mixed> Array.
-	 * @throws DatabaseFailed With the code if the value is absent, too long or not an array as WordPress writes it.
+	 * @throws DatabaseFailed With one of the codes.
 	 */
-	private static function decode( ?string $stored, int $limit, int $depth, string $code ): array {
+	private static function decode( string|int|null $stored, int $limit, int $depth, string $code, string $large ): array {
+		$bytes = is_string( $stored ) ? strlen( $stored ) : $stored;
+		if ( null !== $bytes && $bytes > $limit ) {
+			DatabaseFailed::raise(
+				'A stored WordPress value is longer than the review reads.',
+				[
+					'code'  => $large,
+					'bytes' => $bytes,
+					'limit' => $limit,
+				]
+			);
+		}
 		try {
-			$value = null === $stored || strlen( $stored ) > $limit ? null : SerializedValue::decode( $stored, $depth );
+			$value = is_string( $stored ) ? SerializedValue::decode( $stored, $depth ) : null;
 		} catch ( FormatException $error ) {
 			DatabaseFailed::raise( 'A stored WordPress value is not one that WordPress writes.', [ 'code' => $code ], $error );
 		}
 		if ( ! is_array( $value ) ) {
-			DatabaseFailed::raise( 'A stored WordPress value is absent, too long or not an array.', [ 'code' => $code ] );
+			DatabaseFailed::raise( 'A stored WordPress value is absent or not an array.', [ 'code' => $code ] );
 		}
 		return $value;
 	}

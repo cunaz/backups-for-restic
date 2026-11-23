@@ -24,8 +24,12 @@ defined( 'ABSPATH' ) || exit;
  */
 final class SerializedValue {
 
-	/** Elements in one value: every value, nested ones included, keys not. */
-	public const int MAX_ELEMENTS = 65536;
+	/**
+	 * Elements in one value: every value, nested ones included, keys not. Every element takes at
+	 * least six bytes with its key, so no value within the size limits of RoleMap and PluginList,
+	 * at most 1 MiB, reaches this bound; it guards other callers.
+	 */
+	public const int MAX_ELEMENTS = 262144;
 
 	/** A boolean: b:0; or b:1;. */
 	private const string BOOLEAN = '/\Gb:([01]);/';

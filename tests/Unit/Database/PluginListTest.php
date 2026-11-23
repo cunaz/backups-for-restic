@@ -86,8 +86,40 @@ final class PluginListTest extends TestCase {
 		$stored = serialize( [ ...$entries, $last ] );
 		self::assertSame( PluginList::MAX_BYTES, strlen( $stored ) );
 		self::assertCount( count( $entries ) + 1, PluginList::parse( $stored )->entries );
-		$this->expectException( DatabaseFailed::class );
-		PluginList::parse( serialize( [ ...$entries, $last . 'x' ] ) );
+		try {
+			PluginList::parse( serialize( [ ...$entries, $last . 'x' ] ) );
+			self::fail( 'A list beyond the bound was read.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame(
+				[
+					'code'  => 'database_plugins_too_large',
+					'bytes' => PluginList::MAX_BYTES + 1,
+					'limit' => PluginList::MAX_BYTES,
+				],
+				$refused->context()
+			);
+		}
+	}
+
+	public function test_a_length_instead_of_a_value_is_too_large_or_nothing_that_can_be_read(): void {
+		foreach ( [
+			PluginList::MAX_BYTES + 1 => 'database_plugins_too_large',
+			PluginList::MAX_BYTES     => 'database_plugins_invalid',
+		] as $bytes => $code ) {
+			try {
+				PluginList::parse( $bytes );
+				self::fail( 'A length was read as a list.' );
+			} catch ( DatabaseFailed $refused ) {
+				self::assertSame( $code, $refused->context()['code'] ?? null );
+			}
+		}
+	}
+
+	public function test_without_the_running_sites_list_every_plugin_of_the_other_generation_starts(): void {
+		$after = PluginList::parse( serialize( [ 'b.php', 'a/a.php' ] ) );
+		self::assertSame( [], PluginList::none()->entries );
+		self::assertSame( [ 'b.php', 'a/a.php' ], $after->without( PluginList::none() ) );
+		self::assertSame( [], PluginList::none()->without( $after ) );
 	}
 
 	public function test_adds_this_plugin_at_the_end_once_and_stores_the_list_as_serialize_does(): void {

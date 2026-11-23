@@ -1594,9 +1594,12 @@
 		return {
 			write_locked_rename: __( 'MariaDB requires a manual live database restore on this server. Recover the SQL dump from the staging ZIP or recovery kit and import it into a separate database.', 'backups-for-restic' ),
 			database_admin_collision: __( 'The snapshot has a different user with the same ID, login or email as the confirming administrator.', 'backups-for-restic' ),
-			database_admin_capabilities: __( 'Under the roles of the database that this change brings live, your account would lack a capability that a database restore needs. The change keeps your account with its own roles and capabilities, but the roles themselves come from that database. Confirm with an administrator account whose role there has the backup capability, manage_options, edit_users, promote_users and update_core, or restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
-			database_roles_invalid: __( 'The user roles of one of the two databases are not stored the way WordPress stores them, so they cannot be compared or checked. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
-			database_plugins_invalid: __( 'The list of active plugins of one of the two databases is not stored the way WordPress stores it, so it cannot be compared. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_admin_capabilities: __( 'Under the roles of the backup, your account would lack a capability that a database restore needs. The restore keeps your account with its own roles and capabilities, but the roles themselves come from the backup. Confirm with an administrator account whose role in the backup has the backup capability, manage_options, edit_users, promote_users and update_core, or restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_admin_capabilities_unreadable: __( 'Your account’s own record of roles and capabilities on this site (user meta such as wp_capabilities) is missing, stored more than once, longer than 64 KiB or not in the form WordPress writes, so the review cannot check what your account could do afterwards. WordPress uses the first record if there are several. Repair the record, then open a new review.', 'backups-for-restic' ),
+			database_roles_invalid: __( 'The user roles of the backup are not stored the way WordPress stores them, so the review cannot check your account under them. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_roles_too_large: __( 'The user roles of the backup are larger than 1 MiB, the most that the review reads, so the live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_plugins_invalid: __( 'The list of active plugins of the backup is not stored the way WordPress stores it, so the restore cannot keep Backups for restic active in it. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			database_plugins_too_large: __( 'The list of active plugins of the backup is larger than 256 KiB, the most that the review reads, so the live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			database_wordpress_version: __( 'The source and destination WordPress database schema versions differ.', 'backups-for-restic' ),
 			database_exchange_changed: __( 'The destination table generations or administrator no longer match this review.', 'backups-for-restic' ),
 			snapshot_check: __( 'The snapshot contains a CHECK constraint that needs manual handling.', 'backups-for-restic' ),
@@ -1625,6 +1628,23 @@
 			snapshot_engine: __( 'The source storage engine requires review.', 'backups-for-restic' ),
 			live_object_type: __( 'The live object has a different type.', 'backups-for-restic' ),
 			live_engine: __( 'The live storage engine requires review.', 'backups-for-restic' ),
+		};
+	}
+
+	/**
+	 * Labels of an undo review where they differ from those of a restore: the undo brings the
+	 * earlier database back, which only the tables kept under private names hold, until the undo
+	 * window ends; the staged SQL files are the backup, which is live already.
+	 *
+	 * @return {Object} Labels by code.
+	 */
+	function databaseUndoFindings() {
+		return {
+			database_admin_capabilities: __( 'Under the roles of the earlier database, which the undo brings back, your account would lack a capability that a database restore needs. The undo keeps your account with its own roles and capabilities, but the roles themselves come from the earlier database. Give your account on this site a role that the earlier database also has, with the backup capability, manage_options, edit_users, promote_users and update_core, for example Administrator, or confirm with such an account. Until the undo window ends, a database administrator can also recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
+			database_roles_invalid: __( 'The user roles of the earlier database, which the undo brings back, are not stored the way WordPress stores them, so the review cannot check your account under them. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
+			database_roles_too_large: __( 'The user roles of the earlier database are larger than 1 MiB, the most that the review reads, so the undo is not available. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
+			database_plugins_invalid: __( 'The list of active plugins of the earlier database, which the undo brings back, is not stored the way WordPress stores it, so the undo cannot keep Backups for restic active in it. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
+			database_plugins_too_large: __( 'The list of active plugins of the earlier database is larger than 256 KiB, the most that the review reads, so the undo is not available. Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' ),
 		};
 	}
 
@@ -1753,6 +1773,16 @@
 			const shown = textList( listing.entries );
 			return listing.more ? el( 'div', {}, [ shown, rest( listing.more ) ] ) : shown;
 		}
+		function capabilities( granted, denied ) {
+			const parts = [];
+			if ( granted.entries.length ) {
+				parts.push( el( 'p', {}, [ __( 'Granted:', 'backups-for-restic' ) ] ), names( granted ) );
+			}
+			if ( denied.entries.length ) {
+				parts.push( el( 'p', {}, [ __( 'Denied:', 'backups-for-restic' ) ] ), names( denied ) );
+			}
+			return parts.length ? el( 'div', {}, parts ) : '–';
+		}
 		function plugins( listing, text ) {
 			if ( ! listing.entries.length ) {
 				return null;
@@ -1770,18 +1800,29 @@
 			] );
 		}
 		const roles = plan.roles.entries.length ? el( 'div', {}, [
-			el( 'p', {}, [ undo ? __( 'Roles whose capabilities differ in the earlier database, for every account that has them:', 'backups-for-restic' ) : __( 'Roles whose capabilities differ in the backup, for every account that has them:', 'backups-for-restic' ) ] ),
+			el( 'p', {}, [ undo ? __( 'Roles whose stored capabilities differ in the earlier database, for every account that has them. A stored denial takes away what another role of the same account grants.', 'backups-for-restic' ) : __( 'Roles whose stored capabilities differ in the backup, for every account that has them. A stored denial takes away what another role of the same account grants.', 'backups-for-restic' ) ] ),
 			el( 'table', { className: 'widefat striped bfr-database-roles' }, [
 				el( 'thead', {}, [ el( 'tr', {}, [ __( 'Role', 'backups-for-restic' ), __( 'Change', 'backups-for-restic' ), __( 'Capabilities afterwards only', 'backups-for-restic' ), __( 'Capabilities now only', 'backups-for-restic' ) ].map( ( label ) => el( 'th', { scope: 'col' }, [ label ] ) ) ) ] ),
 				el( 'tbody', {}, plan.roles.entries.map( ( role ) => el( 'tr', {}, [
 					el( 'td', {}, [ el( 'code', {}, [ role.role ] ) ] ),
 					el( 'td', {}, [ changes[ role.change ] || role.change ] ),
-					el( 'td', {}, [ names( role.added ) ] ),
-					el( 'td', {}, [ names( role.removed ) ] ),
+					el( 'td', {}, [ capabilities( role.added, role.denials_added ) ] ),
+					el( 'td', {}, [ capabilities( role.removed, role.denials_removed ) ] ),
 				] ) ) ),
 			] ),
 			more( plan.roles ),
 		] ) : null;
+		const unreadable = [];
+		if ( ! plan.roles.readable ) {
+			unreadable.push( undo
+				? __( 'The roles of the running site cannot be read, so they cannot be compared: every role comes back with the earlier database, and all of them are listed.', 'backups-for-restic' )
+				: __( 'The roles of the running site cannot be read, so they cannot be compared: every role comes from the backup, and all of them are listed. An undo of this restore would bring these roles back and could not check your account under them either: it would be refused, and only a database administrator could recover the earlier tables before the undo window ends.', 'backups-for-restic' ) );
+		}
+		if ( ! plan.plugins.readable ) {
+			unreadable.push( undo
+				? __( 'The list of active plugins of the running site cannot be read, so it cannot be compared: the active plugins come back with the earlier database, and all of them are listed as starting.', 'backups-for-restic' )
+				: __( 'The list of active plugins of the running site cannot be read, so it cannot be compared: the active plugins come from the backup, and all of them are listed as starting. An undo of this restore would bring this list back and could not keep Backups for restic active in it: it would be refused, and only a database administrator could recover the earlier tables before the undo window ends.', 'backups-for-restic' ) );
+		}
 		let added = null;
 		if ( plan.plugin.added ) {
 			added = el( 'p', {}, [ undo
@@ -1794,8 +1835,9 @@
 			el( 'p', {}, [ undo ? __( 'Everything else comes back with the earlier database, among it:', 'backups-for-restic' ) : __( 'Everything else comes from the backup, among it:', 'backups-for-restic' ) ] ),
 			texts( plan.restored, restored ),
 			added,
+			...unreadable.map( ( text ) => notice( 'warning', text ) ),
 			plugins( plan.plugins.deactivated, __( 'Active now and inactive afterwards. WordPress does not run their deactivation routines.', 'backups-for-restic' ) ),
-			plugins( plan.plugins.activated, __( 'Inactive now and active afterwards. WordPress does not run their activation routines and skips a plugin whose file is missing.', 'backups-for-restic' ) ),
+			plugins( plan.plugins.activated, __( 'Inactive now and active afterwards. WordPress does not run their activation routines and skips a plugin whose file is missing. Such a plugin can change what accounts may do, also on the pages of Backups for restic, for example by filtering capabilities or the capability that Backups for restic requires. If your account then lacks access, deactivate that plugin on the Plugins screen.', 'backups-for-restic' ) ),
 			roles,
 			plan.missing_capabilities.length ? detailTable( 'bfr-database-capabilities', [ [ __( 'Capabilities your account would lack afterwards', 'backups-for-restic' ), textList( plan.missing_capabilities ) ] ] ) : null,
 		];
@@ -1820,7 +1862,7 @@
 			replace( body, [] );
 			status.textContent = __( 'Inspecting database tables…', 'backups-for-restic' );
 			api( base + ( undo ? '/undo-plan' : '/database/plan' ), { method: 'POST' } ).then( function ( plan ) {
-				const labels = databaseFindings();
+				const labels = undo ? Object.assign( databaseFindings(), databaseUndoFindings() ) : databaseFindings();
 				const actions = {
 					replace: __( 'Replace live table', 'backups-for-restic' ), create: __( 'Create live table', 'backups-for-restic' ),
 					keep: __( 'Keep live table', 'backups-for-restic' ), remove_from_live: __( 'Remove table from the live database', 'backups-for-restic' ),

@@ -168,6 +168,26 @@ final class RoleMapTest extends TestCase {
 		self::refused( 'database_roles_invalid', static fn (): RoleMap => RoleMap::parse( $stored ) );
 	}
 
+	public function test_a_value_too_long_to_read_is_refused_with_its_size(): void {
+		try {
+			RoleMap::parse( RoleMap::MAX_BYTES + 1 );
+			self::fail( 'A role map beyond the bound was read.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame(
+				[
+					'code'  => 'database_roles_too_large',
+					'bytes' => RoleMap::MAX_BYTES + 1,
+					'limit' => RoleMap::MAX_BYTES,
+				],
+				$refused->context()
+			);
+		}
+		// A length within the bound can only mean a value that was not read: it is not a role map.
+		self::refused( 'database_roles_invalid', static fn (): RoleMap => RoleMap::parse( RoleMap::MAX_BYTES ) );
+		self::refused( 'database_admin_capabilities_unreadable', static fn (): array => RoleMap::own( RoleMap::MAX_OWN_BYTES + 1 ) );
+		self::assertSame( 1048576, RoleMap::MAX_BYTES );
+	}
+
 	public function test_names_have_bounded_length_and_no_control_characters(): void {
 		self::assertTrue( RoleMap::name( str_repeat( 'é', RoleMap::MAX_NAME / 2 ) ) );
 		self::assertFalse( RoleMap::name( str_repeat( 'é', RoleMap::MAX_NAME / 2 ) . 'x' ) );
@@ -192,11 +212,11 @@ final class RoleMapTest extends TestCase {
 		);
 		self::assertSame( RoleMap::MAX_BYTES, strlen( $stored ) );
 		self::assertArrayHasKey( 'role', RoleMap::parse( $stored )->roles );
-		self::refused( 'database_roles_invalid', static fn (): RoleMap => RoleMap::parse( $stored . ' ' ) );
+		self::refused( 'database_roles_too_large', static fn (): RoleMap => RoleMap::parse( $stored . ' ' ) );
 		$own = self::sized( RoleMap::MAX_OWN_BYTES, static fn ( array $capabilities ): string => serialize( $capabilities ) );
 		self::assertSame( RoleMap::MAX_OWN_BYTES, strlen( $own ) );
 		self::assertNotSame( [], RoleMap::own( $own ) );
-		self::refused( 'database_admin_capabilities', static fn (): array => RoleMap::own( $own . ' ' ) );
+		self::refused( 'database_admin_capabilities_unreadable', static fn (): array => RoleMap::own( $own . ' ' ) );
 	}
 
 	/**
@@ -240,7 +260,7 @@ final class RoleMapTest extends TestCase {
 
 	#[DataProvider( 'invalid_own' )]
 	public function test_refuses_an_account_capability_list_that_wordpress_does_not_write( ?string $stored ): void {
-		self::refused( 'database_admin_capabilities', static fn (): array => RoleMap::own( $stored ) );
+		self::refused( 'database_admin_capabilities_unreadable', static fn (): array => RoleMap::own( $stored ) );
 	}
 
 	public function test_an_account_has_what_its_roles_and_own_capabilities_give_it(): void {
@@ -355,10 +375,12 @@ final class RoleMapTest extends TestCase {
 		self::assertSame(
 			[
 				[
-					'role'    => 'subscriber',
-					'change'  => 'changed',
-					'added'   => [],
-					'removed' => [ 'edit_users', 'manage_options' ],
+					'role'            => 'subscriber',
+					'change'          => 'changed',
+					'added'           => [],
+					'removed'         => [ 'edit_users', 'manage_options' ],
+					'denials_added'   => [],
+					'denials_removed' => [],
 				],
 			],
 			$live->changes( $next )
@@ -366,13 +388,110 @@ final class RoleMapTest extends TestCase {
 		self::assertSame(
 			[
 				[
-					'role'    => 'subscriber',
-					'change'  => 'changed',
-					'added'   => [ 'edit_users', 'manage_options' ],
-					'removed' => [],
+					'role'            => 'subscriber',
+					'change'          => 'changed',
+					'added'           => [ 'edit_users', 'manage_options' ],
+					'removed'         => [],
+					'denials_added'   => [],
+					'denials_removed' => [],
 				],
 			],
 			$next->changes( $live )
+		);
+	}
+
+	public function test_a_stored_denial_that_differs_is_a_change_because_it_overrides_another_role(): void {
+		// The review's case: on the running site the moderator role denies edit_users, so that an
+		// account that is editor and moderator cannot edit users; in the backup the role has no such key.
+		$moderator = static fn ( array $capabilities ): array => WordPressRoles::defaults() + [
+			'moderator' => [
+				'name'         => 'Moderator',
+				'capabilities' => [ 'moderate_comments' => true ] + $capabilities,
+			],
+		];
+		$editor    = self::map( WordPressRoles::with( 'editor', [ 'edit_users' ] ) + $moderator( [ 'edit_users' => false ] ) );
+		$backup    = self::map( WordPressRoles::with( 'editor', [ 'edit_users' ] ) + $moderator( [] ) );
+		$both      = [
+			'editor'    => true,
+			'moderator' => true,
+		];
+		self::assertSame( [ 'edit_users' ], $editor->missing( $both, [ 'edit_users' ] ) );
+		self::assertSame( [], $backup->missing( $both, [ 'edit_users' ] ), 'After the exchange the account may edit users.' );
+		$change = [
+			'role'            => 'moderator',
+			'change'          => 'changed',
+			'added'           => [],
+			'removed'         => [],
+			'denials_added'   => [],
+			'denials_removed' => [ 'edit_users' ],
+		];
+		self::assertSame( [ $change ], $editor->changes( $backup ) );
+		self::assertSame(
+			[
+				array_replace(
+					$change,
+					[
+						'denials_added'   => [ 'edit_users' ],
+						'denials_removed' => [],
+					]
+				),
+			],
+			$backup->changes( $editor )
+		);
+		// A grant that becomes a denial is both: no longer granted, and denied now.
+		$granting = self::map( WordPressRoles::with( 'editor', [ 'edit_users' ] ) + $moderator( [ 'edit_users' => true ] ) );
+		self::assertSame(
+			[
+				[
+					'role'            => 'moderator',
+					'change'          => 'changed',
+					'added'           => [ 'edit_users' ],
+					'removed'         => [],
+					'denials_added'   => [],
+					'denials_removed' => [ 'edit_users' ],
+				],
+			],
+			$editor->changes( $granting )
+		);
+	}
+
+	public function test_without_the_running_sites_roles_every_role_of_the_other_generation_is_listed(): void {
+		$next = self::map(
+			[
+				'reader' => [
+					'name'         => 'Reader',
+					'capabilities' => [
+						'read'       => true,
+						'edit_posts' => false,
+					],
+				],
+				'empty'  => [
+					'name'         => 'Empty',
+					'capabilities' => [],
+				],
+			]
+		);
+		self::assertSame( [], RoleMap::none()->roles );
+		self::assertSame(
+			[
+				[
+					'role'            => 'empty',
+					'change'          => 'added',
+					'added'           => [],
+					'removed'         => [],
+					'denials_added'   => [],
+					'denials_removed' => [],
+				],
+				[
+					'role'            => 'reader',
+					'change'          => 'added',
+					'added'           => [ 'read' ],
+					'removed'         => [],
+					'denials_added'   => [ 'edit_posts' ],
+					'denials_removed' => [],
+				],
+			],
+			RoleMap::none()->changes( $next )
 		);
 	}
 
@@ -395,12 +514,19 @@ final class RoleMapTest extends TestCase {
 					'name'         => 'Five',
 					'capabilities' => [ '7' => true ],
 				],
+				'renamed'      => [
+					'name'         => 'Old name',
+					'capabilities' => [
+						'read'   => true,
+						'denied' => 0,
+					],
+				],
 			]
 		);
 		$next = self::map(
 			[
 				'reader'      => [
-					'name'         => 'Renamed reader',
+					'name'         => 'Reader',
 					'capabilities' => [
 						'read'   => true,
 						'unused' => false,
@@ -413,30 +539,52 @@ final class RoleMapTest extends TestCase {
 						'edit_posts' => true,
 					],
 				],
+				'renamed'     => [
+					'name'         => 'New name',
+					'capabilities' => [
+						'read'   => 1,
+						'denied' => '',
+					],
+				],
 			]
 		);
 		self::assertSame(
 			[
 				[
-					'role'    => '5',
-					'change'  => 'removed',
-					'added'   => [],
-					'removed' => [ '7' ],
+					'role'            => '5',
+					'change'          => 'removed',
+					'added'           => [],
+					'removed'         => [ '7' ],
+					'denials_added'   => [],
+					'denials_removed' => [],
 				],
 				[
-					'role'    => 'contributor',
-					'change'  => 'added',
-					'added'   => [ 'edit_posts', 'read' ],
-					'removed' => [],
+					'role'            => 'contributor',
+					'change'          => 'added',
+					'added'           => [ 'edit_posts', 'read' ],
+					'removed'         => [],
+					'denials_added'   => [],
+					'denials_removed' => [],
 				],
 				[
-					'role'    => 'shop_manager',
-					'change'  => 'removed',
-					'added'   => [],
-					'removed' => [ 'manage_woocommerce', 'read' ],
+					'role'            => 'reader',
+					'change'          => 'changed',
+					'added'           => [],
+					'removed'         => [],
+					'denials_added'   => [ 'unused' ],
+					'denials_removed' => [],
+				],
+				[
+					'role'            => 'shop_manager',
+					'change'          => 'removed',
+					'added'           => [],
+					'removed'         => [ 'manage_woocommerce', 'read' ],
+					'denials_added'   => [],
+					'denials_removed' => [ 'view_reports' ],
 				],
 			],
-			$now->changes( $next )
+			$now->changes( $next ),
+			'A role whose display name or stored values change, but not what it grants or denies, is not listed.'
 		);
 	}
 }

@@ -267,9 +267,28 @@ final class RestoreJobTest extends TestCase {
 			self::assertCount( 1, $subscriber, $raw );
 			self::assertSame( 'changed', $subscriber[0]['change'] );
 			self::assertSame( [ 'edit_users', 'manage_options' ], $subscriber[0]['removed']['entries'] );
+			self::assertSame( [], $subscriber[0]['denials_added']['entries'] );
+			self::assertTrue( $review['roles']['readable'] );
+			self::assertTrue( $review['plugins']['readable'] );
 			self::assertSame( [], $review['missing_capabilities'] );
 			self::assertNotContains( 'database_admin_capabilities', $review['blockers'] );
 			self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] );
+			// A role map that WordPress reads, with a field that it never writes: the review does
+			// not compare it, lists every role of the backup, and does not refuse for it.
+			$saved = TestSite::last_line( TestSite::php( 'echo base64_encode( serialize( get_option( "wp_user_roles" ) ) );' ) );
+			try {
+				TestSite::php( '$roles = get_option( "wp_user_roles" ); $roles["subscriber"]["note"] = "x"; update_option( "wp_user_roles", $roles );' );
+				self::assertSame( 'yes', TestSite::last_line( TestSite::php( 'echo get_role( "subscriber" )->has_cap( "manage_options" ) ? "yes" : "no";' ) ), 'WordPress reads the role map.' );
+				[ $status, $unread, $raw ] = TestSite::api( 'POST', '/restores/' . $restore . '/database/plan' );
+				self::assertSame( 200, $status, $raw );
+				self::assertFalse( $unread['roles']['readable'] );
+				self::assertNotContains( 'database_roles_invalid', $unread['blockers'] );
+				self::assertContains( 'subscriber', array_column( $unread['roles']['entries'], 'role' ) );
+				self::assertSame( [ 'added' ], array_values( array_unique( array_column( $unread['roles']['entries'], 'change' ) ) ) );
+				self::assertNotSame( $review['digest'], $unread['digest'] );
+			} finally {
+				TestSite::php( 'update_option( "wp_user_roles", unserialize( base64_decode( $arguments[0] ) ) );', [ $saved ] );
+			}
 		} finally {
 			TestSite::php( $change, [ $later, '0' ] );
 			unlink( $directory . '/bfr-activated-later.php' );

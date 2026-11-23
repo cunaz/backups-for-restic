@@ -345,22 +345,25 @@ final readonly class DatabaseChanges implements StepProvider {
 				'action' => null === $pair['before'] ? 'remove_from_live' : 'replace',
 			];
 		}
-		$blockers = ( $this->policy )( $user );
-		if ( $this->prefix !== $plan->document['prefix'] ) {
-			$blockers[] = 'wordpress_environment';
-		}
+		$blockers  = ( $this->policy )( $user );
 		$authority = '';
 		$state     = DatabaseReview::blank( $this->site->plugin );
 		$required  = [];
-		if ( [] === $blockers ) {
+		if ( $this->prefix !== $plan->document['prefix'] ) {
+			$blockers[] = 'wordpress_environment';
+		} else {
+			// As in the apply review: the comparison first, then the authority if nothing blocks,
+			// so that both reviews answer the same for the same account.
 			try {
-				$authority           = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
 				[ $plan, $retained ] = ( new TableExchange( $connection ) )->review_undo( $recorded, $user );
 				// The undo brings back the retained generation's own roles and active plugins.
 				$facts    = $this->reviews->state( $connection, $user, $retained['roles'], $retained['plugins'] );
 				$state    = $facts['state'];
 				$required = $facts['capabilities'];
 				$blockers = [ ...$blockers, ...$facts['blockers'] ];
+				if ( [] === $blockers ) {
+					$authority = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
+				}
 			} catch ( DatabaseFailed | FormatException $error ) {
 				$code       = $error->context()['code'] ?? null;
 				$blockers[] = is_string( $code ) ? $code : 'database_exchange_changed';

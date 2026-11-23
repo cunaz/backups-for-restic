@@ -209,7 +209,7 @@ final readonly class TableExchange {
 	 *
 	 * @param ExchangePlan $plan Stored owning apply.
 	 * @param int          $admin Proposed undo administrator.
-	 * @return array{ExchangePlan,array{roles:string|null,plugins:string|null}} The plan with the observed identities, for the confirmation, and the retained generation's stored role map and list of active plugins.
+	 * @return array{ExchangePlan,array{roles:string|int|null,plugins:string|int|null}} The plan with the observed identities, for the confirmation, and the retained generation's stored role map and list of active plugins, each its length if too long to read, null if absent.
 	 * @throws DatabaseFailed With the code database_exchange_rebuilt if a retained table was rebuilt.
 	 */
 	public function review_undo( ExchangePlan $plan, int $admin ): array {

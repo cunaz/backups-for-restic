@@ -4,6 +4,8 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Database\Restore\PluginList;
+use BackupsForRestic\Database\Restore\RoleMap;
 use BackupsForRestic\Jobs\Apply\DatabaseReview;
 use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\JobStore;
@@ -68,25 +70,39 @@ final class DatabaseReviewTest extends TestCase {
 	}
 
 	/**
-	 * The live site's options and the approving administrator's own capabilities.
+	 * The live site's options and the approving administrator's own capabilities, read as
+	 * WordPressState reads them: a value longer than the bound as its length.
 	 *
-	 * @param array<string,string|null> $options Stored option values by name.
+	 * @param array<string,string>     $options Stored option values by name.
+	 * @param string|list<string>|null $own The administrator's record of capabilities; a list for several records.
 	 */
-	private static function site( array $options, ?string $own ): Connection {
+	private static function site( array $options, string|array|null $own ): Connection {
 		return new class( $options, $own ) implements Connection {
-			/** @param array<string,string|null> $options */
-			public function __construct( private array $options, private ?string $own ) {}
+			/**
+			 * @param array<string,string>     $options
+			 * @param string|list<string>|null $own
+			 */
+			public function __construct( private array $options, private string|array|null $own ) {}
 
 			public function rows( string $sql ): array {
-				if ( 1 === preg_match( '/\ASELECT IF\(LENGTH\(option_value\)<=\d+,option_value,NULL\) AS stored_value FROM `wp_options` WHERE option_name=0x([0-9a-f]+) LIMIT 2\z/', $sql, $match ) ) {
-					$name = (string) hex2bin( $match[1] );
-					return array_key_exists( $name, $this->options ) ? [ [ 'stored_value' => $this->options[ $name ] ] ] : [];
+				if ( 1 === preg_match( '/\ASELECT LENGTH\(option_value\) AS stored_bytes,IF\(LENGTH\(option_value\)<=(\d+),option_value,NULL\) AS stored_value FROM `wp_options` WHERE option_name=0x([0-9a-f]+) LIMIT 2\z/', $sql, $match ) ) {
+					$name = (string) hex2bin( $match[2] );
+					return array_key_exists( $name, $this->options ) ? [ self::bounded( $this->options[ $name ], (int) $match[1] ) ] : [];
 				}
-				if ( 1 === preg_match( '/\ASELECT IF\(LENGTH\(meta_value\)<=\d+,meta_value,NULL\) AS stored_value FROM `wp_usermeta` WHERE user_id=1 AND meta_key=0x([0-9a-f]+) LIMIT 2\z/', $sql, $match ) ) {
-					TestCase::assertSame( 'wp_capabilities', hex2bin( $match[1] ) );
-					return null === $this->own ? [] : [ [ 'stored_value' => $this->own ] ];
+				if ( 1 === preg_match( '/\ASELECT LENGTH\(meta_value\) AS stored_bytes,IF\(LENGTH\(meta_value\)<=(\d+),meta_value,NULL\) AS stored_value FROM `wp_usermeta` WHERE user_id=1 AND meta_key=0x([0-9a-f]+) LIMIT 2\z/', $sql, $match ) ) {
+					TestCase::assertSame( 'wp_capabilities', hex2bin( $match[2] ) );
+					$records = is_array( $this->own ) ? $this->own : ( null === $this->own ? [] : [ $this->own ] );
+					return array_map( static fn ( string $value ): array => self::bounded( $value, (int) $match[1] ), array_slice( $records, 0, 2 ) );
 				}
 				throw new \LogicException( 'Unexpected query: ' . $sql );
+			}
+
+			/** @return array{stored_bytes:string,stored_value:string|null} */
+			private static function bounded( string $value, int $limit ): array {
+				return [
+					'stored_bytes' => (string) strlen( $value ),
+					'stored_value' => strlen( $value ) <= $limit ? $value : null,
+				];
 			}
 
 			public function execute( string $sql ): int {
@@ -129,21 +145,30 @@ final class DatabaseReviewTest extends TestCase {
 		self::assertSame( [], $facts['blockers'] );
 		self::assertSame(
 			[
-				'entries' => [
+				'entries'  => [
 					[
-						'role'    => 'subscriber',
-						'change'  => 'changed',
-						'added'   => [
+						'role'            => 'subscriber',
+						'change'          => 'changed',
+						'added'           => [
 							'entries' => [],
 							'more'    => 0,
 						],
-						'removed' => [
+						'removed'         => [
 							'entries' => [ 'edit_users', 'manage_options' ],
+							'more'    => 0,
+						],
+						'denials_added'   => [
+							'entries' => [],
+							'more'    => 0,
+						],
+						'denials_removed' => [
+							'entries' => [],
 							'more'    => 0,
 						],
 					],
 				],
-				'more'    => 0,
+				'more'     => 0,
+				'readable' => true,
 			],
 			$facts['state']['roles']
 		);
@@ -167,6 +192,7 @@ final class DatabaseReviewTest extends TestCase {
 					],
 					'more'    => 0,
 				],
+				'readable'    => true,
 			],
 			$facts['state']['plugins']
 		);
@@ -257,57 +283,117 @@ final class DatabaseReviewTest extends TestCase {
 		self::assertSame( [ 'backups' ], $backup['state']['missing_capabilities'] );
 	}
 
-	public function test_values_that_wordpress_does_not_write_are_refused_with_their_own_codes(): void {
-		$roles   = serialize( WordPressRoles::defaults() );
-		$plugins = serialize( [ self::OWN ] );
-		$cases   = [
-			'backup roles'           => [ self::live( WordPressRoles::defaults(), [ self::OWN ] ), 'O:8:"stdClass":0:{}', $plugins, [ 'database_roles_invalid' ] ],
-			'live roles'             => [
-				self::site(
-					[
-						'wp_user_roles'  => 'live roles',
-						'active_plugins' => $plugins,
-					],
-					serialize( [ 'administrator' => true ] )
-				),
-				$roles,
-				$plugins,
-				[ 'database_roles_invalid' ],
-			],
-			'backup plugins'         => [ self::live( WordPressRoles::defaults(), [ self::OWN ] ), $roles, serialize( [ 'k' => self::OWN ] ), [ 'database_plugins_invalid' ] ],
-			'live plugins absent'    => [ self::site( [ 'wp_user_roles' => $roles ], serialize( [ 'administrator' => true ] ) ), $roles, $plugins, [ 'database_plugins_invalid' ] ],
-			'administrator absent'   => [
-				self::site(
-					[
-						'wp_user_roles'  => $roles,
-						'active_plugins' => $plugins,
-					],
-					null
-				),
-				$roles,
-				$plugins,
-				[ 'database_admin_capabilities' ],
-			],
-			'administrator a string' => [
-				self::site(
-					[
-						'wp_user_roles'  => $roles,
-						'active_plugins' => $plugins,
-					],
-					'administrator'
-				),
-				$roles,
-				$plugins,
-				[ 'database_admin_capabilities' ],
-			],
-			'both absent'            => [ self::live( WordPressRoles::defaults(), [ self::OWN ] ), null, null, [ 'database_roles_invalid', 'database_plugins_invalid' ] ],
+	public function test_values_of_the_generation_that_becomes_live_are_refused_with_codes_that_name_them(): void {
+		$live  = self::live( WordPressRoles::defaults(), [ self::OWN ] );
+		$roles = serialize( WordPressRoles::defaults() );
+		$list  = serialize( [ self::OWN ] );
+		$cases = [
+			'roles not as WordPress writes them' => [ 'O:8:"stdClass":0:{}', $list, [ 'database_roles_invalid' ] ],
+			'roles longer than the bound'        => [ RoleMap::MAX_BYTES + 1, $list, [ 'database_roles_too_large' ] ],
+			'plugins not as WordPress writes'    => [ $roles, serialize( [ 'k' => self::OWN ] ), [ 'database_plugins_invalid' ] ],
+			'plugins longer than the bound'      => [ $roles, PluginList::MAX_BYTES + 1, [ 'database_plugins_too_large' ] ],
+			'both absent'                        => [ null, null, [ 'database_roles_invalid', 'database_plugins_invalid' ] ],
 		];
-		foreach ( $cases as $case => [ $site, $next_roles, $next_plugins, $blockers ] ) {
-			$facts = $this->reviewer()->state( $site, 1, $next_roles, $next_plugins );
+		foreach ( $cases as $case => [ $next_roles, $next_plugins, $blockers ] ) {
+			$facts = $this->reviewer()->state( $live, 1, $next_roles, $next_plugins );
 			self::assertSame( $blockers, $facts['blockers'], $case );
-			if ( in_array( 'database_admin_capabilities', $blockers, true ) ) {
-				self::assertSame( self::REQUIRED, $facts['state']['missing_capabilities'], $case );
-			}
+			self::assertSame( [], $facts['state']['missing_capabilities'], $case );
+			self::assertTrue( $facts['state']['roles']['readable'], $case );
+			self::assertTrue( $facts['state']['plugins']['readable'], $case );
+		}
+	}
+
+	public function test_the_running_sites_roles_and_plugins_that_cannot_be_read_are_not_compared_and_do_not_block(): void {
+		// Forms that WordPress reads and honours, but the strict reader refuses: the exchange discards
+		// these values, so they are only not compared. The values of the backup are all listed.
+		$extra                = WordPressRoles::with( 'subscriber', [ 'manage_options' ] );
+		$extra['subscriber'] += [ 'note' => 'x' ];
+		$float                = WordPressRoles::defaults();
+		$float['subscriber']['capabilities']['manage_options'] = 1.0;
+		$control = WordPressRoles::with( 'subscriber', [ "promote_users\t" ] );
+		$plugins = serialize( [ self::OWN, 'later/later.php' ] );
+		$roles   = [
+			'an extra field in a role' => serialize( $extra ),
+			'a float grant'            => serialize( $float ),
+			'a control character'      => serialize( $control ),
+			'a role map over 1 MiB'    => serialize( WordPressRoles::defaults() ) . str_repeat( ' ', RoleMap::MAX_BYTES ),
+		];
+		$backup  = [
+			'reader' => [
+				'name'         => 'Reader',
+				'capabilities' => [
+					'read'       => true,
+					'edit_posts' => false,
+				],
+			],
+		] + WordPressRoles::defaults();
+		foreach ( $roles as $case => $stored ) {
+			$site  = self::site(
+				[
+					'wp_user_roles'  => $stored,
+					'active_plugins' => $plugins,
+				],
+				serialize( [ 'administrator' => true ] )
+			);
+			$facts = $this->reviewer()->state( $site, 1, serialize( $backup ), serialize( [ self::OWN ] ) );
+			self::assertSame( [], $facts['blockers'], $case );
+			self::assertFalse( $facts['state']['roles']['readable'], $case );
+			self::assertTrue( $facts['state']['plugins']['readable'], $case );
+			self::assertSame( [ 'administrator', 'author', 'contributor', 'editor', 'reader', 'subscriber' ], array_column( $facts['state']['roles']['entries'], 'role' ), $case );
+			self::assertSame( [ 'added' ], array_values( array_unique( array_column( $facts['state']['roles']['entries'], 'change' ) ) ), $case );
+			self::assertSame( [ 'edit_posts' ], $facts['state']['roles']['entries'][4]['denials_added']['entries'], $case );
+		}
+		$site  = self::site( [ 'active_plugins' => $plugins ], serialize( [ 'administrator' => true ] ) );
+		$facts = $this->reviewer()->state( $site, 1, serialize( $backup ), serialize( [ self::OWN ] ) );
+		self::assertSame( [], $facts['blockers'], 'A running site without a role map.' );
+		self::assertFalse( $facts['state']['roles']['readable'] );
+		$lists = [
+			'a named entry'       => serialize( [ 'k' => self::OWN ] ),
+			'a repeated entry'    => serialize( [ self::OWN, 'later/later.php', self::OWN ] ),
+			'a list over 256 KiB' => serialize( [ self::OWN ] ) . str_repeat( ' ', PluginList::MAX_BYTES ),
+			'no list at all'      => null,
+		];
+		foreach ( $lists as $case => $stored ) {
+			$options = [ 'wp_user_roles' => serialize( WordPressRoles::defaults() ) ] + ( null === $stored ? [] : [ 'active_plugins' => $stored ] );
+			$facts   = $this->reviewer( [ 'b/b.php' ] )->state( self::site( $options, serialize( [ 'administrator' => true ] ) ), 1, serialize( WordPressRoles::defaults() ), serialize( [ 'b/b.php', 'a/a.php' ] ) );
+			self::assertSame( [], $facts['blockers'], $case );
+			self::assertFalse( $facts['state']['plugins']['readable'], $case );
+			self::assertTrue( $facts['state']['roles']['readable'], $case );
+			self::assertSame( [], $facts['state']['plugins']['deactivated']['entries'], $case );
+			self::assertSame(
+				[
+					[
+						'plugin' => 'b/b.php',
+						'file'   => true,
+					],
+					[
+						'plugin' => 'a/a.php',
+						'file'   => false,
+					],
+				],
+				$facts['state']['plugins']['activated']['entries'],
+				$case
+			);
+			self::assertTrue( $facts['state']['plugin']['added'], $case );
+		}
+	}
+
+	public function test_an_unreadable_record_of_the_administrators_capabilities_is_named_not_evaluated(): void {
+		$records = [
+			'absent'              => null,
+			'stored twice'        => [ serialize( [ 'administrator' => true ] ), serialize( [ 'administrator' => true ] ) ],
+			'not serialized'      => 'administrator',
+			'longer than 64 KiB'  => serialize( [ 'administrator' => true ] ) . str_repeat( ' ', RoleMap::MAX_OWN_BYTES ),
+			'not a list of names' => serialize( [ 'administrator' => [ true ] ] ),
+		];
+		$options = [
+			'wp_user_roles'  => serialize( WordPressRoles::defaults() ),
+			'active_plugins' => serialize( [ self::OWN ] ),
+		];
+		foreach ( $records as $case => $own ) {
+			$facts = $this->reviewer()->state( self::site( $options, $own ), 1, serialize( WordPressRoles::defaults() ), serialize( [ self::OWN ] ) );
+			self::assertSame( [ 'database_admin_capabilities_unreadable' ], $facts['blockers'], $case );
+			self::assertSame( [], $facts['state']['missing_capabilities'], $case . ': nothing was evaluated.' );
 		}
 	}
 
@@ -340,11 +426,15 @@ final class DatabaseReviewTest extends TestCase {
 		];
 		$file = $changed;
 		$file['plugins']['deactivated']['entries'][0]['file'] = false;
-		$added                    = $state;
-		$added['plugin']['added'] = true;
-		$more                     = $state;
-		$more['roles']['more']    = 1;
-		foreach ( [ $changed, $file, $added, $more ] as $other ) {
+		$added                           = $state;
+		$added['plugin']['added']        = true;
+		$more                            = $state;
+		$more['roles']['more']           = 1;
+		$unread                          = $state;
+		$unread['roles']['readable']     = false;
+		$unlisted                        = $state;
+		$unlisted['plugins']['readable'] = false;
+		foreach ( [ $changed, $file, $added, $more, $unread, $unlisted ] as $other ) {
 			self::assertNotSame( $review['digest'], DatabaseReview::summary( 'restore', 1, $entries, [], [], [ 'apply', 'binding' ], $other )['digest'] );
 		}
 		$refused = DatabaseReview::summary( 'restore', 1, $entries, [ 'database_admin_capabilities' ], [], [ 'apply', 'binding' ], $state );

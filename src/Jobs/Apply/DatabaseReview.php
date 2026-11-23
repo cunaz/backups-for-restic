@@ -36,12 +36,15 @@ defined( 'ABSPATH' ) || exit;
  * source transcript, the reviewed physical targets and those differences, independently of
  * estimated counts, which change during ordinary WordPress activity.
  *
+ * @phpstan-import-type Change from RoleMap
  * @phpstan-type Entry array{table:string,action:string}
  * @phpstan-type Listing array{entries:list<string>,more:int}
  * @phpstan-type Plugins array{entries:list<array{plugin:string,file:bool}>,more:int}
- * @phpstan-type Roles array{entries:list<array{role:string,change:string,added:Listing,removed:Listing}>,more:int}
- * @phpstan-type State array{kept:list<string>,restored:list<string>,plugin:array{entry:string|null,added:bool},plugins:array{deactivated:Plugins,activated:Plugins},roles:Roles,missing_capabilities:list<string>}
- * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,entries:list<Entry>,blockers:list<string>,missing_privileges:list<string>,kept:list<string>,restored:list<string>,plugin:array{entry:string|null,added:bool},plugins:array{deactivated:Plugins,activated:Plugins},roles:Roles,missing_capabilities:list<string>}
+ * @phpstan-type Role array{role:string,change:string,added:Listing,removed:Listing,denials_added:Listing,denials_removed:Listing}
+ * @phpstan-type Roles array{entries:list<Role>,more:int,readable:bool}
+ * @phpstan-type PluginChanges array{deactivated:Plugins,activated:Plugins,readable:bool}
+ * @phpstan-type State array{kept:list<string>,restored:list<string>,plugin:array{entry:string|null,added:bool},plugins:PluginChanges,roles:Roles,missing_capabilities:list<string>}
+ * @phpstan-type Preview array{restore:string,digest:string,applicable:bool,entries:list<Entry>,blockers:list<string>,missing_privileges:list<string>,kept:list<string>,restored:list<string>,plugin:array{entry:string|null,added:bool},plugins:PluginChanges,roles:Roles,missing_capabilities:list<string>}
  * @phpstan-type Target array{database:string,uuid:string,ids:array<string,string>,schemas:array<string,string>}
  */
 final readonly class DatabaseReview {
@@ -60,8 +63,11 @@ final readonly class DatabaseReview {
 	/** Entries of each list that a review shows; it counts the rest. */
 	public const int LIST_LIMIT = 50;
 
-	/** A swap supports at most 128 source tables. Bound the report before JSON decoding. */
-	private const int MAX_REPORT = 2097152;
+	/**
+	 * Bound of the report before JSON decoding: the metadata of at most 128 tables, and the
+	 * backup's role map and list of active plugins, at most 1 MiB and 256 KiB, base64-encoded.
+	 */
+	private const int MAX_REPORT = 3145728;
 
 	/**
 	 * Creates a read-only reviewer for this installation.
@@ -158,8 +164,9 @@ final readonly class DatabaseReview {
 		if ( [] === $blockers ) {
 			try {
 				$authority = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
-			} catch ( DatabaseFailed ) {
-				$blockers[] = 'database_admin_collision';
+			} catch ( DatabaseFailed $refused ) {
+				$code       = $refused->context()['code'] ?? null;
+				$blockers[] = is_string( $code ) ? $code : 'database_admin_collision';
 			}
 		}
 		$target = [
@@ -183,27 +190,31 @@ final readonly class DatabaseReview {
 	 * What the exchange keeps from the running site, what it takes from the generation that
 	 * becomes live, and how the two differ: the plugins that WordPress loads now and would not
 	 * afterwards and the other way round, each with whether its file is on the site, and the
-	 * roles whose capabilities differ. The approving administrator keeps their own roles and
-	 * capabilities, so these, under the other generation's roles, must still give every
-	 * capability that a database restore needs. Values that are not stored the way WordPress
-	 * writes them are refused without being shown.
+	 * roles whose stored capabilities differ, granted or denied. The approving administrator
+	 * keeps their own roles and capabilities, so these, under the other generation's roles, must
+	 * still give every capability that a database restore needs.
 	 *
-	 * @param Connection  $connection Current session.
-	 * @param int         $user Approving administrator.
-	 * @param string|null $roles Stored role map of the generation that becomes live.
-	 * @param string|null $plugins Stored list of active plugins of that generation.
+	 * The values of the generation that becomes live and the administrator's own record have to
+	 * be readable; otherwise the review refuses with a code that names the value. The running
+	 * site's role map and list of active plugins are read for the comparison only, because the
+	 * exchange discards them: if one cannot be read, the review says so (readable: false) and
+	 * lists everything of the other generation instead.
+	 *
+	 * @param Connection      $connection Current session.
+	 * @param int             $user Approving administrator.
+	 * @param string|int|null $roles Stored role map of the generation that becomes live, its length if too long, or null.
+	 * @param string|int|null $plugins Stored list of active plugins of that generation, its length if too long, or null.
 	 * @return array{state:State,blockers:list<string>,capabilities:list<string>} Facts for the review, refusal codes and the capabilities checked.
 	 */
-	public function state( Connection $connection, int $user, ?string $roles, ?string $plugins ): array {
-		$live     = new WordPressState( $connection );
-		$options  = $this->prefix . 'options';
-		$current  = [
+	public function state( Connection $connection, int $user, string|int|null $roles, string|int|null $plugins ): array {
+		$live    = new WordPressState( $connection );
+		$options = $this->prefix . 'options';
+		$current = [
 			'roles'   => $live->option( $options, $this->prefix . 'user_roles', RoleMap::MAX_BYTES ),
 			'plugins' => $live->option( $options, 'active_plugins', PluginList::MAX_BYTES ),
 			'own'     => $live->capabilities( $this->prefix, $user ),
 		];
-		$state    = self::blank( $this->site->plugin );
-		$blockers = [];
+		$state   = self::blank( $this->site->plugin );
 		try {
 			$continuity = $this->site->continuity();
 		} catch ( InvalidArgument ) {
@@ -214,27 +225,31 @@ final readonly class DatabaseReview {
 				'capabilities' => [],
 			];
 		}
-		try {
-			$next = RoleMap::parse( $roles );
-			try {
-				$state['missing_capabilities'] = $next->missing( RoleMap::own( $current['own'] ), $continuity->capabilities );
-			} catch ( DatabaseFailed ) {
-				$state['missing_capabilities'] = $continuity->capabilities;
-			}
+		$blockers = [];
+		$next     = self::required( static fn (): RoleMap => RoleMap::parse( $roles ), $blockers );
+		$own      = self::required( static fn (): array => RoleMap::own( $current['own'] ), $blockers );
+		$after    = self::required( static fn (): PluginList => PluginList::parse( $plugins ), $blockers );
+		// The running site's values: a refusal only means that they cannot be compared.
+		$now_roles                    = self::optional( static fn (): RoleMap => RoleMap::parse( $current['roles'] ) );
+		$now_plugins                  = self::optional( static fn (): PluginList => PluginList::parse( $current['plugins'] ) );
+		$state['roles']['readable']   = null !== $now_roles;
+		$state['plugins']['readable'] = null !== $now_plugins;
+		if ( null !== $next && null !== $own ) {
+			$state['missing_capabilities'] = $next->missing( $own, $continuity->capabilities );
 			if ( [] !== $state['missing_capabilities'] ) {
 				$blockers[] = 'database_admin_capabilities';
 			}
-			$state['roles'] = self::bounded( RoleMap::parse( $current['roles'] )->changes( $next ), self::role( ... ) );
-		} catch ( DatabaseFailed ) {
-			$blockers[] = 'database_roles_invalid';
 		}
-		try {
-			$now   = PluginList::parse( $current['plugins'] );
-			$after = PluginList::parse( $plugins );
+		if ( null !== $next ) {
+			$state['roles'] = self::bounded( ( $now_roles ?? RoleMap::none() )->changes( $next ), self::role( ... ) ) + [ 'readable' => null !== $now_roles ];
+		}
+		if ( null !== $after ) {
 			if ( null !== $continuity->plugin ) {
 				$state['plugin']['added'] = ! $after->has( $continuity->plugin );
 				$after                    = $after->with( $continuity->plugin );
 			}
+			// This plugin runs this review, so it is active now even where the list cannot be read.
+			$now              = $now_plugins ?? ( null === $continuity->plugin ? PluginList::none() : PluginList::none()->with( $continuity->plugin ) );
 			$file             = fn ( string $plugin ): array => [
 				'plugin' => $plugin,
 				'file'   => true === ( $this->site->installed )( $plugin ),
@@ -242,15 +257,47 @@ final readonly class DatabaseReview {
 			$state['plugins'] = [
 				'deactivated' => self::bounded( $now->without( $after ), $file ),
 				'activated'   => self::bounded( $after->without( $now ), $file ),
+				'readable'    => null !== $now_plugins,
 			];
-		} catch ( DatabaseFailed ) {
-			$blockers[] = 'database_plugins_invalid';
 		}
 		return [
 			'state'        => $state,
 			'blockers'     => $blockers,
 			'capabilities' => $continuity->capabilities,
 		];
+	}
+
+	/**
+	 * Reads a value that the exchange needs; a refusal becomes a blocker with its code.
+	 *
+	 * @template T
+	 * @param \Closure():T $read Reader that refuses with a coded DatabaseFailed.
+	 * @param list<string> $blockers Refusal codes, extended.
+	 * @return T|null The value, or null if it was refused.
+	 */
+	private static function required( \Closure $read, array &$blockers ): mixed {
+		try {
+			return $read();
+		} catch ( DatabaseFailed $refused ) {
+			$code       = $refused->context()['code'] ?? null;
+			$blockers[] = is_string( $code ) ? $code : 'database_exchange_failed';
+			return null;
+		}
+	}
+
+	/**
+	 * Reads a value that only the comparison needs.
+	 *
+	 * @template T
+	 * @param \Closure():T $read Reader that refuses with DatabaseFailed.
+	 * @return T|null The value, or null if it cannot be read.
+	 */
+	private static function optional( \Closure $read ): mixed {
+		try {
+			return $read();
+		} catch ( DatabaseFailed ) {
+			return null;
+		}
 	}
 
 	/**
@@ -274,8 +321,9 @@ final readonly class DatabaseReview {
 			'plugins'              => [
 				'deactivated' => $none,
 				'activated'   => $none,
+				'readable'    => true,
 			],
-			'roles'                => $none,
+			'roles'                => $none + [ 'readable' => true ],
 			'missing_capabilities' => [],
 		];
 	}
@@ -327,36 +375,42 @@ final readonly class DatabaseReview {
 	/**
 	 * One role that differs, with bounded lists of capabilities.
 	 *
-	 * @param array{role:string,change:'added'|'removed'|'changed',added:list<string>,removed:list<string>} $change Difference.
-	 * @return array{role:string,change:string,added:Listing,removed:Listing} Shown difference.
+	 * @param Change $change Difference.
+	 * @return Role Shown difference.
 	 */
 	private static function role( array $change ): array {
 		$name = static fn ( string $capability ): string => $capability;
 		return [
-			'role'    => $change['role'],
-			'change'  => $change['change'],
-			'added'   => self::bounded( $change['added'], $name ),
-			'removed' => self::bounded( $change['removed'], $name ),
+			'role'            => $change['role'],
+			'change'          => $change['change'],
+			'added'           => self::bounded( $change['added'], $name ),
+			'removed'         => self::bounded( $change['removed'], $name ),
+			'denials_added'   => self::bounded( $change['denials_added'], $name ),
+			'denials_removed' => self::bounded( $change['denials_removed'], $name ),
 		];
 	}
 
 	/**
-	 * Whether a report field holds a stored value or says that there is none.
+	 * Whether a report field holds a stored value, the length of one too long to read, or says
+	 * that there is none.
 	 *
 	 * @param mixed $value Field.
-	 * @return bool Whether it is null or a string.
+	 * @return bool Whether it is null, a string or a positive integer.
 	 */
 	private static function encoded( mixed $value ): bool {
-		return null === $value || is_string( $value );
+		return null === $value || is_string( $value ) || ( is_int( $value ) && $value > 0 );
 	}
 
 	/**
 	 * Decodes a stored value of the report.
 	 *
-	 * @param mixed $value Base64 text or null.
-	 * @return string|null Stored value, or null if there is none or it does not decode.
+	 * @param mixed $value Base64 text, the length of a value too long to read, or null.
+	 * @return string|int|null Stored value or length, or null if there is none or it does not decode.
 	 */
-	private static function decoded( mixed $value ): ?string {
+	private static function decoded( mixed $value ): string|int|null {
+		if ( is_int( $value ) ) {
+			return $value;
+		}
 		if ( ! is_string( $value ) ) {
 			return null;
 		}

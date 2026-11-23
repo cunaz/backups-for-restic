@@ -1632,7 +1632,7 @@ final class RestRoutes {
 	private function job_summary( Job $job ): array {
 		$error = null;
 		if ( null !== $job->error ) {
-			$error = [ 'code' => $job->error->code ] + Messages::job_error( $job->error->code );
+			$error = [ 'code' => $job->error->code ] + Messages::job_error( $job->error->code, $job->type->value );
 		}
 		return [
 			'id'               => $job->id,

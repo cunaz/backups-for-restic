@@ -24,9 +24,16 @@ final class Messages {
 	 * Message and hint for a job error code.
 	 *
 	 * @param string $code Error code.
+	 * @param string $type Job type, for the few codes whose advice differs for a database undo.
 	 * @return array{message: string, hint: string} Texts.
 	 */
-	public static function job_error( string $code ): array {
+	public static function job_error( string $code, string $type = '' ): array {
+		if ( 'database_undo' === $type ) {
+			$undo = self::database_undo_error( $code );
+			if ( null !== $undo ) {
+				return $undo;
+			}
+		}
 		return match ( $code ) {
 			'wrong_password'                 => [
 				'message' => __( 'The repository password is wrong.', 'backups-for-restic' ),
@@ -185,16 +192,28 @@ final class Messages {
 				'hint'    => __( 'Check the administrator’s ID, login, email and local role assignments in both installations. Resolve the conflict before starting a new rehearsal.', 'backups-for-restic' ),
 			],
 			'database_admin_capabilities' => [
-				'message' => __( 'With the roles of the database that the restore would bring live, your account would lack a capability that a database restore needs.', 'backups-for-restic' ),
-				'hint'    => __( 'The restore keeps your account with its own roles and capabilities, but the roles themselves come from that database. Under them your account needs the backup capability, manage_options, edit_users, promote_users and update_core, so that you can still manage the site and finish or undo the restore. Confirm with an administrator account whose role has these capabilities in that database, or restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+				'message' => __( 'Under the roles of the backup, your account would lack a capability that a database restore needs.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore keeps your account with its own roles and capabilities, but the roles themselves come from the backup. Under them your account needs the backup capability, manage_options, edit_users, promote_users and update_core, so that you can still manage the site and finish or undo the restore. Confirm with an administrator account whose role has these capabilities in the backup, or restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
+			],
+			'database_admin_capabilities_unreadable' => [
+				'message' => __( 'Your account’s own record of roles and capabilities on this site cannot be read.', 'backups-for-restic' ),
+				'hint'    => __( 'The record (user meta such as wp_capabilities) is missing, stored more than once, longer than 64 KiB or not in the form WordPress writes. WordPress uses the first record if there are several. Repair the record, then review and confirm the database change again.', 'backups-for-restic' ),
 			],
 			'database_roles_invalid' => [
-				'message' => __( 'The user roles of one of the two databases are not stored the way WordPress stores them.', 'backups-for-restic' ),
-				'hint'    => __( 'The restore takes the roles from the database that it brings live and has to read them to check your account. Restore the database by hand with the staged SQL files, and check the option with the user roles there.', 'backups-for-restic' ),
+				'message' => __( 'The user roles of the backup are not stored the way WordPress stores them.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore takes the roles from the backup and has to read them to check your account. Restore the database by hand with the staged SQL files, and check the option with the user roles there.', 'backups-for-restic' ),
+			],
+			'database_roles_too_large' => [
+				'message' => __( 'The user roles of the backup are larger than 1 MiB, the most that a database review reads.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			],
 			'database_plugins_invalid' => [
-				'message' => __( 'The list of active plugins of one of the two databases is not stored the way WordPress stores it, or lacks Backups for restic.', 'backups-for-restic' ),
-				'hint'    => __( 'The restore takes the active plugins from the database that it brings live and adds Backups for restic to them. Restore the database by hand with the staged SQL files, and check the option active_plugins there.', 'backups-for-restic' ),
+				'message' => __( 'The list of active plugins of the backup is not stored the way WordPress stores it, or lacks Backups for restic.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore takes the active plugins from the backup and adds Backups for restic to them. Restore the database by hand with the staged SQL files, and check the option active_plugins there.', 'backups-for-restic' ),
+			],
+			'database_plugins_too_large' => [
+				'message' => __( 'The list of active plugins of the backup is larger than 256 KiB, the most that a database review reads.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange is not available for this backup. Restore the database by hand with the staged SQL files.', 'backups-for-restic' ),
 			],
 			'database_wordpress_version' => [
 				'message' => __( 'The snapshot and destination use different WordPress database versions.', 'backups-for-restic' ),
@@ -280,6 +299,41 @@ final class Messages {
 				'message' => __( 'An unexpected error stopped the job.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job has the details. Please report it if it happens again.', 'backups-for-restic' ),
 			],
+		};
+	}
+
+	/**
+	 * Texts of a failed database undo where they differ from those of a restore: the undo brings
+	 * the earlier database back, which exists only in the tables that the plugin keeps under
+	 * private names until the undo window ends, so the staged SQL files are no way back to it.
+	 *
+	 * @param string $code Error code.
+	 * @return array{message: string, hint: string}|null Texts, or null where the restore's apply.
+	 */
+	private static function database_undo_error( string $code ): ?array {
+		$retained = __( 'Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' );
+		return match ( $code ) {
+			'database_admin_capabilities' => [
+				'message' => __( 'Under the roles of the earlier database, which the undo brings back, your account would lack a capability that a database restore needs.', 'backups-for-restic' ),
+				'hint'    => __( 'The undo keeps your account with its own roles and capabilities, but the roles themselves come from the earlier database. Give your account on this site a role that the earlier database also has, with the backup capability, manage_options, edit_users, promote_users and update_core, for example Administrator, or confirm with such an account.', 'backups-for-restic' ) . ' ' . $retained,
+			],
+			'database_roles_invalid' => [
+				'message' => __( 'The user roles of the earlier database, which the undo brings back, are not stored the way WordPress stores them.', 'backups-for-restic' ),
+				'hint'    => $retained,
+			],
+			'database_roles_too_large' => [
+				'message' => __( 'The user roles of the earlier database are larger than 1 MiB, the most that a database review reads.', 'backups-for-restic' ),
+				'hint'    => $retained,
+			],
+			'database_plugins_invalid' => [
+				'message' => __( 'The list of active plugins of the earlier database is not stored the way WordPress stores it, or lacks Backups for restic.', 'backups-for-restic' ),
+				'hint'    => $retained,
+			],
+			'database_plugins_too_large' => [
+				'message' => __( 'The list of active plugins of the earlier database is larger than 256 KiB, the most that a database review reads.', 'backups-for-restic' ),
+				'hint'    => $retained,
+			],
+			default => null,
 		};
 	}
 
