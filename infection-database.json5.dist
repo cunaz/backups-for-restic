@@ -27,17 +27,19 @@
         "summary": ".tools/infection-database/summary.log",
         "github": true
     },
-    // Floors at the scores measured on 2026-11-23 against MySQL 8.4.11 with the tests'
-    // temporary files on tmpfs, as in CI: 77.45 % and 82.38 % covered in one run, 77.64 % and
-    // 82.58 % in another. 79 mutants were killed in one run and not the other, 78 of them by
-    // DatabaseExchangeTest, whose exchange checks the other sessions of the account, and
-    // Infection's processes share one server and account. The floors are the 76.49 % and
-    // 81.37 % over the mutants that both runs killed, rounded down to a tenth; the true scores
-    // may be lower still. They may only rise; ADR 0024's 90 % is the goal. The 73.75 % and
-    // 79.20 % of 2026-11-20 were measured on older code, under Infection's file wrapper, on
-    // which every durable write of a job document failed (docs/04 §5.6).
-    "minMsi": 76.4,
-    "minCoveredMsi": 81.3,
+    // Floors at the scores measured on 2026-11-23 with the tests' temporary files on tmpfs, as
+    // in CI (docs/04 §5.6): 77.82 % and 82.78 % covered, and 77.37 % and 82.30 %, in two runs
+    // with 8 processes against MySQL 8.4.11, and 76.57 % and 81.45 % in CI's run with 4, on
+    // the same code with one test less. 103 mutants were killed in some runs and not in
+    // others; every local kill among them came from DatabaseExchangeTest, whose exchange
+    // checks the other sessions of its account, and Infection's processes share one server
+    // and account. The floors are the 76.28 % and 81.14 % over the mutants that all three runs
+    // killed, rounded down to a tenth; the true scores may be lower still. They may only
+    // rise; ADR 0024's 90 % is the goal. The 73.75 % and 79.20 % of 2026-11-20 were measured
+    // on older code, under Infection's file wrapper, on which every durable write of a job
+    // document failed.
+    "minMsi": 76.2,
+    "minCoveredMsi": 81.1,
     "mutators": {
         "@default": true
     }

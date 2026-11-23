@@ -24,15 +24,15 @@
         "github": true
     },
     // Floors at the scores measured on 2026-11-23 with the tests' temporary files on tmpfs, as
-    // in CI (67.69 % and 74.14 % covered in two runs; 67.61 % and 74.05 % on ext4), rounded
-    // down, but not above the 67.45 % and 73.88 % over the mutants that all three runs
-    // killed: six mutants are killed or not depending on how long a step takes, hence 73.8.
-    // They may only rise; ADR 0024's 90 % is the goal. Since job documents and journal records
-    // are written durably (2026-11-22), fsync() failed under Infection's file wrapper in every
-    // test that writes one, and the gate counted their mutants as killed: it reported 100 %
-    // covered (docs/04 §5.6).
-    "minMsi": 67,
-    "minCoveredMsi": 73.8,
+    // in CI: 78.92 % and 83.13 % covered in one local run and in CI's, 78.98 % and 83.19 % in
+    // another local run. Two mutants of PlanBuild were killed in some runs and not in others.
+    // Rounded down, and not above the 78.86 % and 83.06 % over the mutants that all three runs
+    // killed. They may only rise; ADR 0024's 90 % is the goal. Since job documents and journal
+    // records are written durably (2026-11-22), fsync() failed under Infection's file wrapper
+    // in every test that writes one, and the gate counted their mutants as killed: it reported
+    // 100 % covered (docs/04 §5.6).
+    "minMsi": 78,
+    "minCoveredMsi": 83,
     "mutators": {
         "@default": true
     }
