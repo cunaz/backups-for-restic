@@ -15,7 +15,11 @@
     "phpUnit": {
         "configDir": "tests/Mutation/database"
     },
-    "testFrameworkOptions": "--testsuite=database",
+    // One test lowers the server's max_allowed_packet for a moment. A mutant process killed
+    // inside it at the timeout never restores the limit, and a process that connects meanwhile
+    // gets it too; in either case large statements fail whatever the mutation, and on
+    // 2026-11-23 188 mutants counted as killed that way. The database suite runs that test.
+    "testFrameworkOptions": "--testsuite=database --exclude-filter=test_a_batch_beyond_max_allowed_packet_is_refused_before_it_is_sent",
     "timeout": 60,
     "tmpDir": ".tools/infection-database-tmp",
     "logs": {
