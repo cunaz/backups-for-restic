@@ -1734,6 +1734,39 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
+	public function test_a_background_undo_queued_with_a_review_without_totals_is_reviewed_again(): void {
+		$plan  = $this->run_job( $this->queue_large_preview() );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		// Queued as an earlier version queued it, with a review sealed without totals; one of
+		// them also after the worker had passed its preflight.
+		foreach ( [ 'preflight', 'undoing' ] as $step ) {
+			$review = $this->run_job( $this->changes->request_preview( $apply->id, true, false ) );
+			$page   = $this->changes->request_preview( $apply->id, true, false, $review->id );
+			self::assertIsArray( $page );
+			$undo = $this->changes->start_undo( $apply->id, $page['digest'], '', $review->id );
+			if ( 'undoing' === $step ) {
+				$this->runner->tick( 0.0 ); // Preflight.
+				self::assertSame( 'undoing', $this->jobs->get( $undo->id )?->step );
+			}
+			$sealed = dirname( $this->files ) . '/plans/' . $review->id . '/sealed.json';
+			$header = json_decode( (string) file_get_contents( $sealed ), true, 512, JSON_THROW_ON_ERROR );
+			unset( $header['actions'] );
+			$old                      = json_encode( $header, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
+			$review->result['digest'] = hash( 'sha256', $old );
+			file_put_contents( $sealed, $old );
+			$this->jobs->save( $review );
+			// That version confirmed the undo with the digest of its review.
+			$queued                 = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+			$queued->data['digest'] = $review->result['digest'];
+			$this->jobs->save( $queued );
+			$failed = $this->run_job( $undo, JobState::Failed );
+			self::assertSame( 'undo_review_required', $failed->error?->code, $step );
+			self::assertSame( $step, $this->failed_step( $failed ) );
+			self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+			self::assertFileExists( $this->live . '/b-new/new.txt' );
+		}
+	}
+
 	public function test_a_background_undo_review_rebuilds_a_checkpoint_from_before_its_totals(): void {
 		$plan   = $this->run_job( $this->queue_large_preview() );
 		$apply  = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );

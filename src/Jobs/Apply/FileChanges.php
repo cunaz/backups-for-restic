@@ -528,6 +528,7 @@ final readonly class FileChanges implements StepProvider {
 			if ( $head['restore'] !== ApplyJournal::field( $original, 'restore' ) || $head['subject'] !== $original->id || true !== $head['undo'] || $head['config'] || $head['entries'] !== $total || $head['changes'] < 1 || $head['refused'] > 0 ) {
 				throw new JobConflict( 'The sealed file preview does not match the approved operation.' );
 			}
+			self::totals_sealed( $head );
 		} else {
 			self::reviewed( $job, $total );
 			$this->load( $original );
@@ -721,6 +722,9 @@ final readonly class FileChanges implements StepProvider {
 		$forward  = is_string( $original->data['plan_job'] ?? null ) ? $this->plans->approved( $original ) : null;
 		$rows     = null === $forward ? $this->load( $original ) : [];
 		$review   = is_string( $job->data['plan_job'] ?? null ) ? $this->plans->approved( $job ) : null;
+		if ( null !== $review ) {
+			self::totals_sealed( $review->header() );
+		}
 		$total    = $this->journal->attempted( $original );
 		$reviewed = null === $review ? self::reviewed( $job, $total ) : [];
 		$done     = $job->progress['done'] ?? 0;
@@ -1211,6 +1215,21 @@ final readonly class FileChanges implements StepProvider {
 			$decisions[] = [ $pair[0], $pair[1] ];
 		}
 		return $decisions;
+	}
+
+	/**
+	 * Requires the totals by action that a background undo review seals since this version.
+	 * An undo that an earlier version queued with a review sealed without them is refused
+	 * and reviewed again, as one that it queued without the decisions of an inline review.
+	 *
+	 * @param array<string,mixed> $head Header of the sealed review.
+	 * @throws JobConflict If the review has no totals.
+	 */
+	private static function totals_sealed( array $head ): void {
+		$actions = $head['actions'] ?? null;
+		if ( ! is_array( $actions ) || ! isset( $actions['restore'], $actions['remove'], $actions['keep'] ) ) {
+			JobConflict::raise( 'This undo was confirmed with a review sealed before the decisions of its entries were totalled.', [ 'code' => 'undo_review_required' ] );
+		}
 	}
 
 	/**
