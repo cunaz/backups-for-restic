@@ -58,8 +58,10 @@ final readonly class FileChange {
 	 *                                                     undo that its restore and completing records name.
 	 * @param (\Closure(string, string): void)|null $observer Optional observer, called after each journal record
 	 *                                                         (with its phase), synchronisation and live operation
-	 *                                                         (with its path), in order. Tests use it to stop a
-	 *                                                         worker at each crash point.
+	 *                                                         (with its path), and after an undo's last check
+	 *                                                         (check, with the path), in order. Tests use it to
+	 *                                                         stop a worker at each crash point and to change an
+	 *                                                         entry after its last check.
 	 */
 	public function __construct( private ApplyPlan $plan, private string $files, private string $item_directory, private ?string $source_path = null, private string $scope = 'legacy', private ?\Closure $observer = null ) {
 		$this->proofs = new FileVerification( $item_directory, $scope );
@@ -401,10 +403,15 @@ final readonly class FileChange {
 		if ( null !== $changed ) {
 			return self::outcome( 'kept', $changed );
 		}
+		$this->observe( 'check', $path );
 		if ( 'restore' === $decision['action'] ) {
 			$this->publish( $old, $path );
 		} elseif ( 'mkdir' === $action ) {
-			$this->remove_directory( $path );
+			$changed = $this->remove_directory( $path );
+			if ( null !== $changed ) {
+				// Something was put into the folder after its last check: it stays.
+				return self::outcome( 'kept', $changed );
+			}
 		} else {
 			$this->remove_file( $path );
 		}
@@ -457,7 +464,8 @@ final readonly class FileChange {
 			return $policy['reason'];
 		}
 		if ( 'mkdir' === $action ) {
-			return self::empty_directory( $path ) ? null : 'new_children';
+			$child = self::has_child( $path );
+			return false === $child ? null : ( true === $child ? 'new_children' : 'changed_since_apply' );
 		}
 		return self::live_identity( $path ) === $decision['live'] ? null : 'changed_since_apply';
 	}
@@ -656,7 +664,7 @@ final readonly class FileChange {
 			$this->save( $record );
 		}
 		if ( ! self::at( $path, $record['candidate'] ) ) {
-			if ( ! self::at( $prepared, $record['candidate'] ) || self::metadata( $prepared ) !== $record['installed'] || ! self::empty_directory( $prepared ) ) {
+			if ( ! self::at( $prepared, $record['candidate'] ) || self::metadata( $prepared ) !== $record['installed'] || false !== self::has_child( $prepared ) ) {
 				throw new StorageFailed( 'The prepared directory changed before publication.' );
 			}
 			$this->require_parent( $path, $record );
@@ -691,7 +699,7 @@ final readonly class FileChange {
 	 */
 	private function prepare_candidate_directory( string $prepared, int $mode, string $live_parent ): void {
 		clearstatcache( true );
-		if ( is_link( $prepared ) || ( file_exists( $prepared ) && ( realpath( $prepared ) !== $prepared || ! is_dir( $prepared ) || ! self::empty_directory( $prepared ) ) ) ) {
+		if ( is_link( $prepared ) || ( file_exists( $prepared ) && ( realpath( $prepared ) !== $prepared || ! is_dir( $prepared ) || false !== self::has_child( $prepared ) ) ) ) {
 			throw new StorageFailed( 'The private copy of a reviewed directory is not an empty directory.' );
 		}
 		if ( ! is_dir( $prepared ) ) {
@@ -1114,39 +1122,44 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Removes a directory that this entry created, only while it is empty.
+	 * Removes a directory that this entry created, only while it is empty: rmdir() itself is
+	 * the last check. A name that appeared in it since its last check keeps the directory.
 	 *
 	 * @param string $path Verified directory.
-	 * @throws StorageFailed If the directory has an entry or cannot be removed.
+	 * @return string|null new_children for a directory that holds a name now, null once it is removed.
+	 * @throws StorageFailed If the directory cannot be removed and no name in it could be read.
 	 */
-	private function remove_directory( string $path ): void {
-		if ( ! self::empty_directory( $path ) || ! rmdir( $path ) ) {
-			throw new StorageFailed( 'A directory created by file apply is no longer empty or cannot be removed.' );
+	private function remove_directory( string $path ): ?string {
+		if ( ! @rmdir( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A refusal is answered below, from what the directory holds.
+			if ( true === self::has_child( $path ) ) {
+				return 'new_children';
+			}
+			throw new StorageFailed( 'A directory created by file apply cannot be removed.' );
 		}
 		$this->plan->changed( $path, false );
 		$this->observe( 'rmdir', $path );
+		return null;
 	}
 
 	/**
-	 * Whether a directory holds no entry, read only up to its first name: a folder that gained
-	 * very many names is not listed in full to tell that it is not empty. The removal itself
-	 * remains the final check.
+	 * Whether a directory holds an entry, read only up to its first name: a folder that gained
+	 * very many names is not listed in full to tell that it is not empty.
 	 *
 	 * @param string $path Directory.
-	 * @return bool Whether it could be read and holds no entry.
+	 * @return bool|null True when a name in it was read, false when it holds none, null when it cannot be read.
 	 */
-	private static function empty_directory( string $path ): bool {
-		$handle = opendir( $path );
+	private static function has_child( string $path ): ?bool {
+		$handle = @opendir( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A directory that cannot be read is answered with null.
 		if ( false === $handle ) {
-			return false;
+			return null;
 		}
 		try {
 			for ( $name = readdir( $handle ); false !== $name; $name = readdir( $handle ) ) {
 				if ( '.' !== $name && '..' !== $name ) {
-					return false;
+					return true;
 				}
 			}
-			return true;
+			return false;
 		} finally {
 			closedir( $handle );
 		}

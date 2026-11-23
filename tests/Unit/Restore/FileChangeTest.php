@@ -284,6 +284,62 @@ final class FileChangeTest extends TestCase {
 		}
 	}
 
+	public function test_a_folder_that_gains_a_name_after_its_last_check_is_kept_and_the_undo_goes_on(): void {
+		$folder = $this->site . '/uploads';
+		mkdir( $this->staging . $folder, 0700 );
+		self::assertTrue( $this->change->apply( $folder, 'mkdir', null, null, INF ) );
+		$plan   = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$worker = fn ( \Closure $gap ): FileChange => new FileChange(
+			$plan,
+			$this->staging,
+			$this->journal,
+			null,
+			'undo',
+			static function ( string $done, string $on ) use ( $gap, $folder ): void {
+				if ( 'check' === $done && $folder === $on ) {
+					$gap();
+				}
+			}
+		);
+		$phase  = fn (): string => json_decode( (string) file_get_contents( $this->journal . '/entry.json' ), true, flags: JSON_THROW_ON_ERROR )['phase'];
+		// A file arrives in the folder after its last check and before its removal: the folder
+		// is kept with its reason, as at the check, and the undo goes on with the next entry.
+		$upload = static function () use ( $folder ): void {
+			file_put_contents( $folder . '/photo.jpg', 'photo' );
+		};
+		self::assertSame( self::outcome( 'kept', 'new_children' ), $worker( $upload )->undo( $folder, 'mkdir', INF, 'remove' ) );
+		self::assertSame( 'photo', file_get_contents( $folder . '/photo.jpg' ) );
+		self::assertSame( 'done', $phase() );
+		unlink( $folder . '/photo.jpg' );
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			return;
+		}
+		// A removal refused for another reason, with no name in the folder, still stops the undo,
+		// and so does one with a name that cannot be read.
+		$refusals = [
+			'site not writable'   => function (): void {
+				chmod( $this->site, 0500 );
+			},
+			'folder not readable' => static function () use ( $folder ): void {
+				file_put_contents( $folder . '/hidden', 'hidden' );
+				chmod( $folder, 0300 );
+			},
+		];
+		foreach ( $refusals as $case => $gap ) {
+			try {
+				$worker( $gap )->undo( $folder, 'mkdir', INF, 'remove' );
+				self::fail( 'The removal must stop the undo: ' . $case );
+			} catch ( StorageFailed $refused ) {
+				self::assertStringContainsString( 'cannot be removed', $refused->getMessage(), $case );
+			} finally {
+				chmod( $this->site, 0700 );
+				chmod( $folder, 0700 );
+			}
+			self::assertDirectoryExists( $folder );
+			self::assertSame( 'done', $phase() );
+		}
+	}
+
 	public function test_a_created_folder_that_gained_many_names_is_kept_without_listing_them(): void {
 		$folder = $this->site . '/uploads';
 		mkdir( $this->staging . $folder, 0700 );
@@ -338,7 +394,7 @@ final class FileChangeTest extends TestCase {
 		);
 		$steps = [];
 		self::assertSame( self::outcome( 'restored', 'undo_journal' ), $change->undo( $this->path, 'replace', INF ) );
-		self::assertSame( [ 'sync ' . $copy, 'journal restore', 'rename ' . $this->path, 'sync ' . $this->site, 'journal undone' ], $steps );
+		self::assertSame( [ 'sync ' . $copy, 'journal restore', 'check ' . $this->path, 'rename ' . $this->path, 'sync ' . $this->site, 'journal undone' ], $steps );
 		self::assertSame( 'old', file_get_contents( $this->path ) );
 		// An entry that is undone already is neither touched nor recorded again, by a later
 		// undo or by a retry of this one.
@@ -368,7 +424,7 @@ final class FileChangeTest extends TestCase {
 		);
 		$steps = [];
 		self::assertSame( self::outcome( 'removed', 'undo_journal' ), $change->undo( $created, 'create', INF ) );
-		self::assertSame( [ 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
+		self::assertSame( [ 'check ' . $created, 'unlink ' . $created, 'sync ' . $this->site, 'journal undone' ], $steps );
 	}
 
 	public function test_a_retry_counts_a_revert_only_from_the_record_that_proves_it(): void {

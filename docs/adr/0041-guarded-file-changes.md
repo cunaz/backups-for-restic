@@ -220,7 +220,9 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   with another inode and other times, has its file replaced or removed instead, as the
   residual risks above describe; the same holds for an empty directory put in place of a
   created one before its `rmdir()`. A created directory is removed only while it is empty,
-  which `rmdir()` itself enforces.
+  which `rmdir()` itself enforces: a name that arrives in it after the last check keeps it
+  as `new_children`, as at the check, and the undo goes on with the next entry. Only a
+  refusal of `rmdir()` that leaves no name to read in the directory stops the undo.
 - The confirmed review binds the exact set of entries. Its digest covers every entry with
   its action and reason. An inline undo stores the reviewed decisions with its job, a
   background one reads them from the sealed review, whose header now also carries the
