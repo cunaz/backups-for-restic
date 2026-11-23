@@ -61,7 +61,10 @@ The site records each delivery. Store the file with the other offline recovery m
 1. Open **Backups → Snapshots**, select the snapshot and tick the files or directories
    you need. **Select entire snapshot** includes every path.
 2. Choose **Build a ZIP for download** if you want one archive. Its size is about the
-   total size of the staged files. Select **Restore to staging** to start the job.
+   total size of the staged files. It is built only if the disk has room for it beside
+   them and 64 MiB more; otherwise the job says so, and the files can be downloaded one by
+   one. Select **Restore to staging** to start the job. Cancelling the job after every
+   file is staged ends only the ZIP or the database rehearsal; the staged files stay.
 3. Follow progress under **Backups → Restores**. Download a file by its absolute path
    in the snapshot, or download the ZIP you requested. Both ask for your WordPress
    password, because a restored `wp-config.php` and database dump together unlock the
@@ -542,6 +545,18 @@ run number, without loading the repository index or resuming the backup. It does
 remove another run's or another host's locks. If the ownership record itself is unreadable
 or the server is unreachable, the stale-lock procedure above still applies.
 
+### Local restore staging failures
+
+A restore that stops with "There is too little free disk space for the files of this
+restore" (`staging_space`) knew the free space and found it short of the selected files and
+a reserve of 16 MiB and 8 KiB per entry. One that stops with "The restore could not write its
+files to the working directory" (`staging_write`) met a write, a directory or a permission
+that the file system refused: often a full disk or an account over its quota whose free
+space the host does not report. Check free disk space, the quota and the directory's
+permissions, or restore fewer files; the repository is not damaged and needs no check.
+Where the host does not report the free space at all, the restore goes on with a warning
+and stops only if a write fails. A failed restore removes what it staged.
+
 ### Local backup working-file failures
 
 An environment error naming a backup working file means that PHP could not create, read,
@@ -734,8 +749,9 @@ the memory available to PHP. It is a local capacity limit, not a finding that th
 is damaged. A backup first tries smaller packs, down to 4 MiB, and records that adjustment
 in the job log. If the budget still does not fit, the job stops.
 
-The budget is checked after each pack in an index has been decoded. A single large index
-file or pack can exhaust PHP memory before this check, so a PHP out-of-memory error is
+The budget is checked after each pack in an index has been decoded. A compressed index file
+is also checked before it is decoded, against what decoding it takes. A single large index
+file or pack can exhaust PHP memory before these checks, so a PHP out-of-memory error is
 also possible. The same capacity guidance below applies; neither error proves repository
 damage.
 

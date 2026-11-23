@@ -73,10 +73,13 @@ final class IndexCache {
 	/**
 	 * Returns the current index of the repository.
 	 *
-	 * @param Repository        $repository Open repository.
-	 * @param list<string>|null $listed     The index files to read the index from, for a caller
-	 *                                      that has to know which they were; all that the
-	 *                                      server lists otherwise.
+	 * @param Repository              $repository Open repository.
+	 * @param list<string>|null       $listed     The index files to read the index from, for a caller
+	 *                                            that has to know which they were; all that the
+	 *                                            server lists otherwise.
+	 * @param (\Closure(): void)|null $keep_lock  Checks and refreshes the caller's lock before the
+	 *                                            listing and around every index file downloaded,
+	 *                                            as Repository::load_index() does.
 	 * @return IndexSet Index.
 	 * @throws BackendException If an index file disappears or a server request fails.
 	 * @throws AuthenticationFailed If an index file does not authenticate.
@@ -86,7 +89,8 @@ final class IndexCache {
 	 * @throws StorageFailed If the cache cannot be written.
 	 * @throws IndexTooLarge If the index does not fit into the repository's memory budget.
 	 */
-	public function load( Repository $repository, ?array $listed = null ): IndexSet {
+	public function load( Repository $repository, ?array $listed = null, ?\Closure $keep_lock = null ): IndexSet {
+		$keep_lock?->__invoke();
 		$listed ??= $repository->names( ObjectType::Index );
 		$cached   = $this->read( $repository, $listed );
 		$readable = null !== $cached;
@@ -98,10 +102,12 @@ final class IndexCache {
 		unset( $cached );
 		$new = array_values( array_diff( $listed, $covered ) );
 		foreach ( $new as $name ) {
+			$keep_lock?->__invoke();
 			foreach ( IndexFile::packs( $repository->load_unpacked( ObjectType::Index, Id::from_hex( $name ) ) ) as $pack => $entries ) {
 				$index->add_pack( Id::from_hex( $pack ), $entries );
 				$repository->memory()?->check_index();
 			}
+			$keep_lock?->__invoke();
 		}
 		// Before the write: a cache directory that holds nothing else can then be removed when
 		// the index does not fit, and an index that fits finds the room its leftovers took.

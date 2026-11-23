@@ -116,6 +116,31 @@ final readonly class MemoryBudget {
 	}
 
 	/**
+	 * Reserves room before a frame of a compressed index file is decoded. The decoder says what
+	 * it takes beside the memory in use (Format\Compression); two MiB remain for allocation
+	 * rounding and reporting the refusal, as for the encrypted input. A file that does not fit
+	 * is refused here as an index too large for this host, before the decoder would refuse it as
+	 * an object too large to decompress.
+	 *
+	 * @param int $bytes What decoding the next frame takes.
+	 * @throws IndexTooLarge If decoding could exhaust PHP's limit.
+	 */
+	public function check_index_decoding( int $bytes ): void {
+		$reserved  = self::reserved();
+		$available = max( 0, $this->limit - $reserved - 2097152 );
+		if ( $bytes > $available ) {
+			IndexTooLarge::raise(
+				'The next index file does not fit beside the memory already in use.',
+				[
+					'memory_limit'   => $this->limit,
+					'reserved'       => $reserved,
+					'decoding_bytes' => $bytes,
+				]
+			);
+		}
+	}
+
+	/**
 	 * The pack size a backup can afford with the memory that is free now.
 	 *
 	 * @param int $wanted Configured pack size in bytes.

@@ -320,9 +320,20 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   the staged files, writes the job's result (`snapshot`, `files`, `bytes`, `skipped` for
   entries such as links that are recorded but not created, `staging` and `report` as names
   relative to the private directory) and the `last_restore` entry of the state.
-  `releasing` aborts the run, which releases its repository lock, on every path.
+  `releasing` aborts the run, which releases its repository lock, on every path; a run whose
+  checkpoint already says that every file is staged stays complete when the release in the
+  call that staged the last file fails, and `releasing` tries again.
   `cleaning_up` removes the run's working files, and after a failure or a cancellation the
-  staging directory too: only a restore that succeeded leaves files behind. While a restore
+  staging directory too: only a restore that succeeded leaves files behind. Once the last
+  file is staged, `restoring` goes on with the database rehearsal and the archive where the
+  request asks for them; a request to cancel that comes then ends only that work (the
+  phases `database_import`, `database_cleanup` and `archiving`, which
+  `JobType::cancels_before()` is given): the step discards an unfinished archive, stops the
+  rehearsal and removes its tables, adds a warning, and the job records its staged files.
+  The run takes the index cache of the jobs. Free space that the host does not report lets
+  it go on with a warning; free space known to be too little ends the job with
+  `staging_space`, and an archive that would not fit beside the staged files is not begun.
+  While a restore
   is queued or running, no other job starts, scheduled ones included: the heartbeat leaves
   the schedule slot unhandled and tries again. The notifier does not report restore jobs;
   an administrator started the job and watches it.
@@ -894,7 +905,15 @@ and its counts are unknown. An administrator removes one directory with
 `DELETE /restores/{id}`. Every removal renames the directory to `.removing-<job-id>` before
 it deletes anything, deletes until a deadline (five seconds in a heartbeat, ten in a
 request) and is continued by the next heartbeat; symbolic links are removed, never
-followed.
+followed. The preview data of a file review and the undo workspace of an apply that are
+due are removed first, each on its own: one that the file system refuses is counted and
+tried again, and never keeps staging from expiring.
+
+The plugin uses the private directory by its canonical path, every symbolic link on the way
+resolved, and everything above is below that path ([ADR 0007](adr/0007-private-directory.md)).
+The path as configured counts where its spelling matters: the checks for relative paths and
+dot segments, the URLs that the exposure probe derives from the web roots, the containment
+in the document root and the protected paths of a file apply.
 
 No plaintext site data is written to the private directory except restore staging and
 database import files, both explicit admin actions; the import arrives with Milestone 3. The
@@ -1415,13 +1434,17 @@ translated message and a hint. The codes:
 | `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
 | `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
-| `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
+| `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it, or a compressed index file cannot be decoded beside the memory in use ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
+| `decompression_limit` | a compressed object that would decode to more than 128 MiB, or whose decoding does not fit into the memory PHP has left, such as a large data blob read beside a large index ([ADR 0019](adr/0019-repository-format-and-chunker.md)) |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
 | `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |
 | `quota_exceeded`, `upload_rejected` | HTTP 507; HTTP 400 (hash mismatch) |
 | `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change; or a secret that was just stored does not read back unchanged (`EncryptedOptionStore::set()`) |
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
+| `staging_space` | the free space where a restore stages is known to be too little for the selected files and a reserve ([ADR 0036](adr/0036-selected-file-staging.md)); free space that the host does not report is no refusal |
+| `staging_write` | a file operation of a restore in the private directory failed (a write, flush, close, directory, permission or rename): a full disk, a quota or missing permissions |
+| `restore_path_missing` | a path selected for a restore is not in the snapshot |
 | `database_dump_failed` | a query of the dump failed |
 | `database_dump_locked` | another connection kept a table locked for longer than the dump waits, five seconds; retryable ([ADR 0021](adr/0021-database-streaming.md)) |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
@@ -1485,6 +1508,7 @@ filter:
 | Recovery | once, when that job type succeeds again after a failure or stale notice; a check that finishes with errors sends the check-findings notice instead | follows the notice it answers |
 | Check findings | every check that finds errors | `on_failure` |
 | Retention external | when retention switches to `external`: the probe of a forget or prune job or of the heartbeat found the server append-only, or the server refused a deletion (ADR 0010) | `on_failure` |
+| Clock | once, when the heartbeat finds a handled schedule slot or the time the stale notice counts from more than an hour after the current time: the server clock was ahead and has been set back. The slot is put back to the current slot of its schedule, and the age of the backups counts from the moment this was found, until a newer backup replaces the record that lay ahead ([ADR 0011](adr/0011-scheduling.md)) | `on_failure` |
 
 An e-mail is built from codes, times and counts only, never from log lines, paths or
 settings, so it cannot carry a secret. Notices wait in an outbox (`backups_for_restic_notifications`)

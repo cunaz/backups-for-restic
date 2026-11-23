@@ -292,6 +292,8 @@ All notable changes are documented here. The format follows
 - One database restore whose cleanup keeps failing no longer stops older ones from expiring.
 - The database review reports disabled InnoDB table locks, statement-based binary logging and a Galera node before the import starts, instead of failing after it.
 - A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent, and the job log names its size, the limit it needs and the server's limit. It was reported as a busy database and retried.
+- A file in a compressed repository can be restored when restic stored one of its chunks as a full 8 MiB of data that does not compress, such as part of a photo or a video. Such a chunk is stored 202 bytes longer than itself, and restore refused it as an oversized blob.
+- A compressed index file is decoded beside one copy of itself, and the check before decoding counts what the zstd extension allocates: twice a declared size. Index files of 150,000 blobs, as restic 0.14 to 0.16 write them in compressed repositories, load under 128 MiB with WordPress loaded, and so do 8 MiB data blobs beside a large index in restore and check. An index file that cannot be decoded in the memory left stops the job with `index_too_large` instead of a PHP out-of-memory error.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a
@@ -550,3 +552,24 @@ All notable changes are documented here. The format follows
 - A row limit (`sql_select_limit`) that the server's settings or a plugin left on the
   database session no longer cuts the database backup short. It could leave out tables,
   columns, parts of a key or rows without an error.
+- A private directory that `BACKUPS_FOR_RESTIC_PRIVATE_DIR` names through a symbolic link,
+  as some hosts mount their data volume, is used by its real path. Large file previews failed there,
+  and after one had failed, no restore staging expired any more. Expiry also goes on when
+  the preview data or the undo workspace of one job cannot be removed.
+- Restores run on hosts that disable `disk_free_space()` or do not report the free space:
+  the job says so in a warning and stops only if a write fails. Releasing the lock of a
+  finished restore can no longer cost its staged files, whatever goes wrong there.
+- A full disk, a quota or missing permissions during a restore are reported as such
+  (`staging_space`, `staging_write`), with what to do, instead of as damage in the
+  repository; a selected path that the snapshot lacks has a message of its own
+  (`restore_path_missing`).
+- After the server clock was ahead and was set back, scheduled backups, prune and check
+  go on at their next time instead of waiting until the clock catches up, and the notice
+  about old backups comes again when it is due. One e-mail reports that the clock was set
+  back, if failure notices are on.
+- Cancelling a restore, or deactivating the plugin, while its ZIP is built or its
+  database rehearsed ends only that work and keeps the staged files.
+- A restore builds its ZIP only when the disk has room for it beside the staged files and
+  a reserve; otherwise it says so, and the files can be downloaded one by one.
+- The ticks of a restore use the index cache and no longer download the whole repository
+  index again in every tick.

@@ -20,6 +20,13 @@ defined( 'ABSPATH' ) || exit;
  * Created with owner-only permissions and deny rules for Apache and IIS. Deny files are a
  * second line of defence only: the Doctor fetches a probe file over HTTP and blocks setup
  * and backups while the directory is reachable from the web.
+ *
+ * The plugin works with one form of the path: the canonical one, with every symbolic link on
+ * the way resolved. A host can name the directory through a link, as a mounted data
+ * volume often is one, and the checks that refuse a path whose real location differs from its spelling
+ * (staging, file previews, the restore engine) must hold for everything below it. The form
+ * that was configured is kept for what depends on how a path is written: whether it is
+ * absolute and free of dot segments, and where a web server maps it.
  */
 final readonly class PrivateDirectory {
 
@@ -37,11 +44,70 @@ final readonly class PrivateDirectory {
 	private const string WEB_CONFIG = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\t<system.webServer>\n\t\t<authorization>\n\t\t\t<deny users=\"*\" />\n\t\t</authorization>\n\t</system.webServer>\n</configuration>\n";
 
 	/**
+	 * The path as it was configured or located. A symbolic link on the way makes it differ
+	 * from $path; it is what a web server maps to a URL.
+	 *
+	 * @var string
+	 */
+	public string $configured;
+
+	/**
+	 * The canonical path: the configured one with every symbolic link, double slash and
+	 * trailing slash resolved, or the configured one where it is not absolute or has dot
+	 * segments, which ensure() refuses. Every file of the plugin lies below it.
+	 *
+	 * @var string
+	 */
+	public string $path;
+
+	/**
 	 * Uses a directory.
 	 *
 	 * @param string $path Absolute path without trailing slash.
 	 */
-	public function __construct( public string $path ) {
+	public function __construct( string $path ) {
+		$this->configured = $path;
+		$this->path       = self::canonical( $path );
+	}
+
+	/**
+	 * Resolves a path that may not exist yet: its longest existing part by realpath(), and
+	 * the parts that do not exist yet appended as they are written. They cannot be links, so
+	 * the directories that ensure() creates there have this path.
+	 *
+	 * @param string $path Configured path.
+	 * @return string Canonical path, or the path itself if it is not absolute and clean.
+	 */
+	private static function canonical( string $path ): string {
+		if ( ! self::clean( $path ) ) {
+			return $path;
+		}
+		$missing = '';
+		for ( $existing = $path; ; $existing = dirname( $existing ) ) {
+			// An ancestor outside open_basedir cannot be resolved, and PHP warns about it.
+			$real = @realpath( $existing ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A host's open_basedir may hide the ancestors of the directory.
+			if ( false !== $real ) {
+				return '' === $missing ? $real : rtrim( $real, '/' . DIRECTORY_SEPARATOR ) . $missing;
+			}
+			if ( dirname( $existing ) === $existing ) {
+				return $path;
+			}
+			$missing = '/' . basename( $existing ) . $missing;
+		}
+	}
+
+	/**
+	 * Whether a path is written as an absolute path without NUL bytes and dot segments.
+	 *
+	 * @param string $path Path as configured.
+	 * @return bool True if it can name a directory without depending on the current one.
+	 */
+	private static function clean( string $path ): bool {
+		$path = str_replace( DIRECTORY_SEPARATOR, '/', $path );
+		if ( '' === $path || str_contains( $path, "\0" ) || 1 === preg_match( '~(?:^|/)[.]{1,2}(?:/|$)~', $path ) ) {
+			return false;
+		}
+		return str_starts_with( $path, '/' ) || ( '\\' === DIRECTORY_SEPARATOR && 1 === preg_match( '~^[A-Za-z]:/~', $path ) );
 	}
 
 	/**
@@ -166,20 +232,17 @@ final readonly class PrivateDirectory {
 
 	/**
 	 * Rejects relative paths, dot segments, filesystem roots and aliases of roots before
-	 * creating directories, changing their permissions or cleaning an installation.
+	 * creating directories, changing their permissions or cleaning an installation. The
+	 * spelling is checked as configured, the roots as configured and as resolved.
 	 *
 	 * @return bool Whether this path can name a dedicated directory.
 	 */
 	private function dedicated_path(): bool {
-		$path = str_replace( DIRECTORY_SEPARATOR, '/', $this->path );
-		if ( '' === $path || str_contains( $path, "\0" ) || 1 === preg_match( '~(?:^|/)[.]{1,2}(?:/|$)~', $path ) ) {
-			return false;
-		}
-		if ( ! str_starts_with( $path, '/' ) && ( '\\' !== DIRECTORY_SEPARATOR || 1 !== preg_match( '~^[A-Za-z]:/~', $path ) ) ) {
+		if ( ! self::clean( $this->configured ) ) {
 			return false;
 		}
 		$real = realpath( $this->path );
-		return dirname( $this->path ) !== $this->path && ( false === $real || dirname( $real ) !== $real );
+		return dirname( $this->configured ) !== $this->configured && dirname( $this->path ) !== $this->path && ( false === $real || dirname( $real ) !== $real );
 	}
 
 	/**
@@ -228,7 +291,8 @@ final readonly class PrivateDirectory {
 	}
 
 	/**
-	 * Whether the directory lies inside another one, such as the web root.
+	 * Whether the directory lies inside another one, such as the web root. A web server that
+	 * follows links serves it under the root that its configured path names, too.
 	 *
 	 * @param string $root Absolute path.
 	 * @return bool True if inside or equal.
@@ -236,7 +300,8 @@ final readonly class PrivateDirectory {
 	public function is_inside( string $root ): bool {
 		$real_path = realpath( $this->path );
 		$real_root = realpath( $root );
-		return str_starts_with( $this->path . '/', rtrim( $root, '/' ) . '/' )
+		return str_starts_with( $this->configured . '/', rtrim( $root, '/' ) . '/' )
+			|| str_starts_with( $this->path . '/', rtrim( $root, '/' ) . '/' )
 			|| ( false !== $real_path && false !== $real_root && str_starts_with( $real_path . DIRECTORY_SEPARATOR, rtrim( $real_root, DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR ) );
 	}
 
@@ -312,7 +377,8 @@ final readonly class PrivateDirectory {
 			}
 		}
 		$entries = is_dir( $this->path ) ? scandir( $this->path ) : false;
-		if ( [ '.', '..' ] === $entries && ! is_link( $this->path ) ) {
+		// A directory that the configuration names through a link of its own stays, as the link does.
+		if ( [ '.', '..' ] === $entries && ! is_link( $this->configured ) && ! is_link( $this->path ) ) {
 			rmdir( $this->path );
 		}
 	}
