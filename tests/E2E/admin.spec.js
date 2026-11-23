@@ -15,6 +15,13 @@ test.describe.configure( { mode: 'serial' } );
 const SOURCE_UPLOAD = 'bfr-acceptance-source.txt';
 const SOURCE_BYTES = 'Uploaded to the source installation before its first backup.\n';
 
+// A name and a link target with a right-to-left override: shown as they are, the file would
+// read "bfr-namephp.txt" and the target "bfr-tegrat". They lie in the WordPress directory,
+// which no restore in these tests applies.
+const REVERSED_NAME = 'bfr-name\u202Etxt.php';
+const REVERSED_LINK = 'bfr-link';
+const REVERSED_TARGET = 'bfr-\u202Etarget';
+
 const DESTINATION_ADMIN = { login: 'destination-owner', password: 'destination-owner-acceptance-only' };
 
 function publishPost( root, slug ) {
@@ -150,6 +157,8 @@ test( 'the wizard sets the site up and runs the first backup', async ( { page } 
 	fs.writeFileSync( file, SOURCE_BYTES, { flag: 'wx' } );
 	const many = fs.mkdtempSync( path.join( uploads, 'bfr-file-review-' ) );
 	const sourcePost = publishPost( siteRoot(), 'bfr-migration-source' );
+	fs.writeFileSync( path.join( siteRoot(), REVERSED_NAME ), 'A name that reads otherwise.\n' );
+	fs.symlinkSync( REVERSED_TARGET, path.join( siteRoot(), REVERSED_LINK ) );
 	try {
 		// Combined with the packaged content, this forces more than 1,000 real
 		// restore entries through the persistent planner in the migration test.
@@ -162,6 +171,8 @@ test( 'the wizard sets the site up and runs the first backup', async ( { page } 
 	} finally {
 		fs.rmSync( many, { recursive: true } );
 		fs.unlinkSync( file );
+		fs.unlinkSync( path.join( siteRoot(), REVERSED_NAME ) );
+		fs.unlinkSync( path.join( siteRoot(), REVERSED_LINK ) );
 		wordpress( siteRoot(), 'wp_delete_post( (int) $argv[2], true );', [ sourcePost ] );
 	}
 
@@ -240,6 +251,19 @@ test( 'a selected snapshot file can be staged and downloaded', async ( { page } 
 	// A file is ticked and named in the selection, which stays while another directory is open.
 	const license = page.getByLabel( 'Select license.txt', { exact: true } );
 	await unlocked( page, license );
+
+	// A name and a link target with a right-to-left override are shown quoted with Go's
+	// escapes, in an element of their own, and so is the path in the selection.
+	const reversed = entries.locator( 'tr' ).filter( { hasText: 'bfr-name' } );
+	await expect( reversed.locator( 'td.bfr-name bdi' ) ).toHaveText( '"bfr-name\\u202etxt.php"' );
+	expect( await entries.innerText() ).not.toContain( '\u202E' );
+	await expect( entries.locator( 'tr' ).filter( { hasText: REVERSED_LINK } ).locator( 'td.bfr-name' ) ).toContainText( '→ "bfr-\\u202etarget"' );
+	const escaped = page.getByLabel( 'Select "bfr-name\\u202etxt.php"', { exact: true } );
+	await escaped.check();
+	await expect( page.locator( '.bfr-selection code' ) ).toHaveText( '"' + siteRoot() + '/bfr-name\\u202etxt.php"' );
+	await escaped.uncheck();
+	await expect( page.locator( '.bfr-selection' ) ).toContainText( 'Nothing is selected.' );
+
 	await license.check();
 	const selection = page.locator( '.bfr-selection' );
 	await expect( selection ).toContainText( '1 path selected:' );
@@ -275,7 +299,14 @@ test( 'a selected snapshot file can be staged and downloaded', async ( { page } 
 	await expect( selection ).toContainText( 'Nothing is selected.' );
 	await page.getByRole( 'button', { name: 'Select entire snapshot' } ).click();
 	await expect( page.getByLabel( 'Rehearse the database import in temporary tables.' ) ).toBeVisible();
+	// The entire snapshot holds every entry of the directory that is open, and the boxes say so.
+	await expect( license ).toBeChecked();
+	await expect( license ).toBeDisabled();
+	await expect( page.locator( '.bfr-covered' ) ).toHaveText( 'The entire snapshot is selected: a restore brings back everything in it.' );
+	await expect( selection ).toContainText( '1 path selected:' );
 	await page.getByRole( 'button', { name: 'Clear selection' } ).click();
+	await expect( license ).toBeEnabled();
+	await expect( page.locator( '.bfr-covered' ) ).toBeHidden();
 
 	await license.check();
 	await expect( page.getByLabel( 'Rehearse the database import in temporary tables.' ) ).toHaveCount( 0 );
@@ -327,9 +358,15 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 	}
 
 	try {
-		fs.writeFileSync( file, 'Before the preview.\n' );
 		await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
 		const preview = staged.getByRole( 'button', { name: 'Preview live file changes' } );
+		// The live file is as the snapshot holds it: the review keeps it and says why in words.
+		await preview.click();
+		await expect( staged.getByRole( 'cell', { name: 'Same content as the live file', exact: true } ) ).toBeVisible();
+		await expect( staged.getByRole( 'cell', { name: 'identical_contents', exact: true } ) ).toHaveCount( 0 );
+		await expect( staged.getByRole( 'button', { name: 'Apply to live site' } ) ).toHaveCount( 0 );
+
+		fs.writeFileSync( file, 'Before the preview.\n' );
 		await page.route( ( requestURL ) => decodeURIComponent( requestURL.href ).includes( '/apply-plan' ), async ( route ) => {
 			const response = await route.fetch();
 			const plan = await response.json();
@@ -343,6 +380,8 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 		await preview.click();
 		await expect( staged.locator( '.bfr-file-space' ) ).toContainText( 'Available disk space' );
 		await expect( staged.getByRole( 'cell', { name: 'Replace file', exact: true } ) ).toBeVisible();
+		// What the review does as a whole stands above the confirmation.
+		await expect( staged.locator( '.bfr-apply-totals' ) ).toContainText( 'To create: 0 files and 0 directories. To replace: 1.' );
 
 		const apply = 'Apply to live site';
 		await confirm( staged, apply, url + '/another-site', ADMIN.password );
@@ -356,11 +395,57 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 		expect( fs.readFileSync( file, 'utf8' ) ).toBe( revision );
 
 		await preview.click();
+		// The answer to the confirmation is lost before the request reaches the server: no job
+		// started, and the page says that the request may still have been accepted.
+		const isApply = ( requestURL ) => /\/restores\/[^/?&]+\/apply(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		await page.route( isApply, ( route ) => route.abort( 'connectionreset' ), { times: 1 } );
 		await confirm( staged, apply, url, ADMIN.password );
+		await expect( staged ).toContainText( 'The request may still have been accepted' );
+		expect( fs.readFileSync( file, 'utf8' ) ).toBe( revision );
+		// The server accepts the confirmation, and a proxy answers with an error page of its own:
+		// the page finds the job that the confirmation started and follows it.
+		let started = null;
+		await page.route( isApply, async ( route ) => {
+			const response = await route.fetch();
+			started = ( await response.json() ).job.id;
+			await route.fulfill( { status: 504, contentType: 'text/html', body: '<html><body>Gateway Timeout</body></html>' } );
+		}, { times: 1 } );
+		await confirm( staged, apply, url, ADMIN.password );
+		await page.waitForURL( ( current ) => null !== started && started === current.searchParams.get( 'job' ) );
 		await expect.poll( () => fs.readFileSync( file ), { timeout: 120000 } ).toEqual( original );
+		await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 120000 } );
 
+		// The undo of the apply needs the staged files: they are kept, and the page says until when.
+		await staged.getByRole( 'button', { name: 'Delete staged files' } ).click();
+		await staged.getByRole( 'button', { name: 'Confirm deletion' } ).click();
+		await expect( staged ).toContainText( 'These staged files are kept until ' );
+		await expect( staged ).not.toContainText( 'This restore is still running.' );
+
+		// Reading the lists again keeps an open review and what was typed into it. The page
+		// follows the apply once more, held as running until the review is open.
+		let hold = true;
+		const isFollowed = ( requestURL ) => decodeURIComponent( requestURL.href ).includes( '/jobs/' + started );
+		await page.route( isFollowed, async ( route ) => {
+			const response = await route.fetch();
+			const answer = await response.json();
+			await route.fulfill( { response, json: hold && answer.job ? { ...answer, job: { ...answer.job, state: 'running' } } : answer } );
+		} );
+		await page.reload();
 		const undo = page.locator( 'section.bfr-card' ).filter( { hasText: 'Preview undo' } );
 		await undo.getByRole( 'button', { name: 'Preview undo' } ).click();
+		const address = undo.getByLabel( 'Type the site address to confirm' );
+		await address.fill( url );
+		const isList = ( name ) => ( response ) => 'GET' === response.request().method() && new RegExp( 'backups-for-restic/v1/' + name + '(?:[?&]|$)' ).test( decodeURIComponent( response.url() ) );
+		const reread = Promise.all( [ page.waitForResponse( isList( 'undo' ) ), page.waitForResponse( isList( 'restores' ) ) ] );
+		hold = false;
+		await reread;
+		await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible();
+		// The answers are handled in the page before a script of the test runs there.
+		await page.evaluate( () => 0 );
+		await expect( address ).toHaveValue( url );
+		await expect( undo.locator( '.bfr-file-actions' ) ).toBeVisible();
+		await page.unroute( isFollowed );
+
 		await confirm( undo, 'Undo live file changes', url, ADMIN.password );
 		await expect.poll( () => fs.readFileSync( file, 'utf8' ), { timeout: 120000 } ).toBe( revision );
 	} finally {
@@ -545,7 +630,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		await settings.getByLabel( 'Continue jobs with loopback requests' ).selectOption( 'off' );
 		await settings.getByRole( 'button', { name: 'Save settings' } ).click();
 		await expect( notice( settings, 'success', 'Settings saved.' ) ).toBeVisible();
-		async function apply( resume = false ) {
+		async function apply( resume = false, beforeConfirm = null ) {
 			await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
 			await expect( staged.getByLabel( 'Include wp-config.php in the preview.' ) ).toHaveCount( 0 );
 			const preview = staged.getByRole( 'button', { name: 'Preview live file changes' } );
@@ -560,10 +645,24 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 					destination.waitForResponse( ( response ) => isPlan( response ) && 200 === response.status() && response.request().postDataJSON().plan_job === id ),
 					preview.click(),
 				] );
+				// The stored preview is shown as what it is, with the time it was finished, a way to
+				// inspect the live site again, and the confirmation.
+				const stored = staged.locator( '.bfr-stored-preview' );
+				await expect( stored ).toContainText( 'This preview was finished on' );
+				await expect( staged.getByRole( 'button', { name: 'Apply to live site' } ) ).toBeVisible();
+				const [ again ] = await Promise.all( [
+					destination.waitForResponse( ( response ) => isPlan( response ) && 202 === response.status() ),
+					stored.getByRole( 'button', { name: 'Inspect again' } ).click(),
+				] );
+				expect( ( await again.json() ).job.id ).not.toBe( id );
+				await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+				await expect( staged.locator( '.bfr-stored-preview' ) ).toHaveCount( 0 );
 			} else {
 				await preview.click();
 			}
 			await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+			// A preview of more than one page says what it does as a whole above the confirmation.
+			await expect( staged.locator( '.bfr-apply-totals' ) ).toContainText( /To create: \d+ files and \d+ directories\. To replace: \d+\. Left as they are: [1-9]\d*\. Skipped: \d+\. Refused: 0\./ );
 			const actions = staged.locator( '.bfr-file-actions' );
 			await expect( actions ).toContainText( /Showing file changes 1–100 of [1-9]\d{3,}\./ );
 			const next = actions.getByRole( 'button', { name: 'Next file changes' } );
@@ -589,6 +688,9 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 			await staged.getByLabel( 'I have reviewed these changes to the live site.' ).check();
 			await staged.getByLabel( 'Type the site address to confirm' ).fill( target.url );
 			await staged.getByLabel( 'Your WordPress password' ).fill( DESTINATION_ADMIN.password );
+			if ( beforeConfirm ) {
+				beforeConfirm();
+			}
 			await staged.getByRole( 'button', { name: 'Apply to live site' } ).click();
 		}
 		await apply( true );
@@ -601,8 +703,26 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		expect( ( await request.get( target.url + '/' ) ).status() ).toBe( 503 );
 		await destination.getByRole( 'button', { name: 'Cancel', exact: true } ).click();
 		await expect( notice( destination, 'info', 'Cancelled' ) ).toBeVisible();
+		// How far the apply got: what it changed can be undone.
+		await expect( destination.locator( '.bfr-apply-stopped' ) ).toHaveText( /^The apply (stopped before it changed any live file\.|completed \d+ of the \d+ file changes? that it attempted before it stopped\. They can be undone on the Restores tab while the recovery window lasts, a change that was interrupted included\.)$/ );
 		expect( fs.existsSync( marker ) ).toBe( false );
 		expect( ( await request.get( target.url + '/' ) ).status() ).toBe( 200 );
+		// A file that the reviewed plan creates appears between the confirmation and the job: the
+		// apply stops before its first change and says why, not that another job is running.
+		const uploadsDirectory = path.dirname( upload );
+		const hadUploads = fs.existsSync( uploadsDirectory );
+		await apply( false, () => {
+			fs.mkdirSync( uploadsDirectory, { recursive: true } );
+			fs.writeFileSync( upload, 'Written on the destination after the review.\n' );
+		} );
+		await expect( notice( destination, 'error', 'changed after the review, so the apply stopped.' ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
+		await expect( notice( destination, 'error', 'Another backup job is still running.' ) ).toHaveCount( 0 );
+		await expect( destination.locator( '.bfr-apply-stopped' ) ).toHaveText( 'The apply stopped before it changed any live file.' );
+		expect( fs.readFileSync( upload, 'utf8' ) ).toBe( 'Written on the destination after the review.\n' );
+		fs.rmSync( upload );
+		if ( ! hadUploads ) {
+			fs.rmSync( uploadsDirectory, { recursive: true } );
+		}
 		await apply();
 		await expect( notice( destination, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
 		expect( fs.readFileSync( upload, 'utf8' ) ).toBe( SOURCE_BYTES );

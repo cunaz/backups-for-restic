@@ -102,6 +102,137 @@
 		] );
 	}
 
+	// Characters that Go's strconv.IsPrint() accepts above U+00FF: letters, marks, numbers, punctuation and symbols.
+	const PRINTABLE = /^[\p{L}\p{M}\p{N}\p{P}\p{S}]$/u;
+
+	/**
+	 * Whether Go's strconv.IsPrint() prints a character as it is.
+	 *
+	 * @param {string} character One character.
+	 * @return {boolean} Whether it prints.
+	 */
+	function prints( character ) {
+		const point = character.codePointAt( 0 );
+		return point <= 0xff ? ( point >= 0x20 && point <= 0x7e ) || ( point >= 0xa1 && 0xad !== point ) : PRINTABLE.test( character );
+	}
+
+	/**
+	 * How Go's strconv.Quote() writes a character that it does not print.
+	 *
+	 * @param {number} point Code point.
+	 * @return {string} Escape.
+	 */
+	function goEscape( point ) {
+		const named = { 7: '\\a', 8: '\\b', 9: '\\t', 10: '\\n', 11: '\\v', 12: '\\f', 13: '\\r' };
+		if ( named[ point ] ) {
+			return named[ point ];
+		}
+		if ( point < 0x20 || 0x7f === point ) {
+			return '\\x' + point.toString( 16 ).padStart( 2, '0' );
+		}
+		return point < 0x10000 ? '\\u' + point.toString( 16 ).padStart( 4, '0' ) : '\\U' + point.toString( 16 ).padStart( 8, '0' );
+	}
+
+	/**
+	 * A name, path, link target or other text from a snapshot, its manifest or the database as
+	 * the page shows it: as it is when every character prints, otherwise in double quotes with
+	 * Go's escapes, as the command line prints it (SnapshotBrowser::printable()) and the file
+	 * review writes it. A right-to-left override, an invisible or a control character then
+	 * cannot make a name look like another one.
+	 *
+	 * @param {string} text Text.
+	 * @return {string} What to show.
+	 */
+	function printable( text ) {
+		const value = String( text );
+		if ( /^[\x20\x21\x23-\x5b\x5d-\x7e]*$/.test( value ) ) {
+			return value;
+		}
+		let quoted = '';
+		for ( const character of value ) {
+			if ( '"' === character || '\\' === character ) {
+				quoted += '\\' + character;
+			} else {
+				quoted += prints( character ) ? character : goEscape( character.codePointAt( 0 ) );
+			}
+		}
+		return quoted === value ? value : '"' + quoted + '"';
+	}
+
+	/**
+	 * A value as JSON, with every character that does not print written as a JSON escape.
+	 *
+	 * @param {Object} value Value, such as the context of a log entry.
+	 * @return {string} JSON.
+	 */
+	function printableJson( value ) {
+		return Array.from( JSON.stringify( value ) ).map( function ( character ) {
+			if ( prints( character ) ) {
+				return character;
+			}
+			// A character above U+FFFF is two UTF-16 units, as JSON escapes it.
+			return character.split( '' ).map( ( unit ) => '\\u' + unit.charCodeAt( 0 ).toString( 16 ).padStart( 4, '0' ) ).join( '' );
+		} ).join( '' );
+	}
+
+	/**
+	 * Text from a snapshot, its manifest or the database in an element that keeps its writing
+	 * direction apart from the text around it, with what does not print escaped.
+	 *
+	 * @param {string} text Text.
+	 * @return {HTMLElement} Element.
+	 */
+	function untrusted( text ) {
+		return el( 'bdi', {}, [ printable( text ) ] );
+	}
+
+	/**
+	 * Puts the cards of a list in place, one for each item, and keeps the card of an item that
+	 * is still listed and has not changed: an open review, what was typed into it and an
+	 * answer that is still on its way stay where they are. Each item is a job's entry with its
+	 * ID as `job`.
+	 *
+	 * @param {Map}                       cards Cards by job ID from the last time; updated.
+	 * @param {Array}                     items Entries of the list.
+	 * @param {(item: Object) => Element} build Creates the card of an entry.
+	 * @return {Array} The cards in the order of the list.
+	 */
+	function keyedCards( cards, items, build ) {
+		const kept = new Map();
+		const nodes = items.map( function ( item ) {
+			const version = JSON.stringify( item );
+			const known = cards.get( item.job );
+			const card = known && known.version === version ? known : { version, node: build( item ) };
+			kept.set( item.job, card );
+			return card.node;
+		} );
+		cards.clear();
+		kept.forEach( function ( card, key ) {
+			cards.set( key, card );
+		} );
+		return nodes;
+	}
+
+	/**
+	 * Makes these nodes the children of a parent, in this order, without taking a node out
+	 * that already stands in its place: one that is kept keeps the focus and what was typed.
+	 *
+	 * @param {Element} parent Parent.
+	 * @param {Array}   nodes  Children.
+	 */
+	function place( parent, nodes ) {
+		Array.from( parent.childNodes ).forEach( function ( child ) {
+			if ( ! nodes.includes( child ) ) {
+				child.remove();
+			}
+		} );
+		nodes.forEach( function ( node, index ) {
+			if ( parent.childNodes[ index ] !== node ) {
+				parent.insertBefore( node, parent.childNodes[ index ] || null );
+			}
+		} );
+	}
+
 	/* ------------------------------------------------------------------ Jobs */
 
 	function progressLines( job ) {
@@ -217,6 +348,13 @@
 				undoOutcome( job ),
 			] );
 		}
+		if ( 'apply' === job.type && 'succeeded' !== job.state && 'number' === typeof result.entries_attempted ) {
+			// A stopped apply says how far it got: what it changed can be undone.
+			return el( 'div', {}, [
+				'failed' === job.state && job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : notice( 'info', job.state_label ),
+				applyStopped( result ),
+			] );
+		}
 		if ( 'failed' === job.state && job.error ) {
 			return notice( 'error', job.error.message + ' ' + job.error.hint );
 		}
@@ -281,6 +419,29 @@
 			);
 		}
 		return notice( 'info', job.state_label );
+	}
+
+	/**
+	 * How far a failed or cancelled apply got: the entries that it completed of those that it
+	 * attempted. An attempted entry that did not complete was interrupted; the undo covers it.
+	 *
+	 * @param {Object} result Result of the apply: entries_completed and entries_attempted.
+	 * @return {Element} Paragraph.
+	 */
+	function applyStopped( result ) {
+		if ( ! result.entries_attempted ) {
+			return el( 'p', { className: 'bfr-apply-stopped' }, [ __( 'The apply stopped before it changed any live file.', 'backups-for-restic' ) ] );
+		}
+		return el( 'p', { className: 'bfr-apply-stopped' }, [
+			sprintf(
+				/* translators: 1: file changes completed, 2: file changes attempted. */
+				_n( 'The apply completed %1$d of the %2$d file change that it attempted before it stopped.', 'The apply completed %1$d of the %2$d file changes that it attempted before it stopped.', result.entries_attempted, 'backups-for-restic' ),
+				result.entries_completed || 0,
+				result.entries_attempted,
+			),
+			' ',
+			__( 'They can be undone on the Restores tab while the recovery window lasts, a change that was interrupted included.', 'backups-for-restic' ),
+		] );
 	}
 
 	/**
@@ -692,9 +853,12 @@
 	 * The paths that are ticked in the directory browser, for a restore to start from. They
 	 * belong to one snapshot: opening another one empties the selection. `paths` maps the
 	 * token of an entry, which is what a request names it by, to `{ path, exact, type, above }`:
-	 * the text to show, whether that text is the stored name, file, dir, symlink or other,
-	 * and the tokens of the directories above the entry. A restore brings back everything in
-	 * a ticked directory, so the map never holds an entry together with a directory above it.
+	 * the text of the path, whether that text is the stored name byte for byte, file, dir,
+	 * symlink or other, and the tokens of the directories above the entry. `exact` says only
+	 * that the stored bytes are valid UTF-8: such a text can still hold control, invisible and
+	 * right-to-left characters, so the page shows every name through printable(). A restore
+	 * brings back everything in a ticked directory, so the map never holds an entry together
+	 * with a directory above it. The entire snapshot is the key null and holds every entry.
 	 */
 	const restoreSelection = { snapshot: null, paths: new Map() };
 
@@ -702,9 +866,10 @@
 	const MAX_SELECTED_PATHS = 256;
 
 	function formatStamp( text ) {
-		// Snapshots carry nanoseconds, of which Date takes three digits.
+		// Snapshots carry nanoseconds, of which Date takes three digits. A text that is no
+		// time comes from the repository as it is, and is shown as such.
 		const date = new Date( String( text ).replace( /(\.\d{3})\d+/, '$1' ) );
-		return Number.isNaN( date.getTime() ) ? String( text ) : date.toLocaleString();
+		return Number.isNaN( date.getTime() ) ? printable( text ) : date.toLocaleString();
 	}
 
 	/**
@@ -746,7 +911,7 @@
 
 	function tagList( tags ) {
 		return el( 'ul', { className: 'bfr-tags' }, ( tags || [] ).map( function ( tag ) {
-			return el( 'li', {}, [ tag ] );
+			return el( 'li', {}, [ untrusted( tag ) ] );
 		} ) );
 	}
 
@@ -770,7 +935,7 @@
 	function textList( items ) {
 		const texts = Array.isArray( items ) ? items : [];
 		return texts.length ? el( 'ul', { className: 'bfr-paths' }, texts.map( function ( item ) {
-			return el( 'li', {}, [ el( 'code', {}, [ item ] ) ] );
+			return el( 'li', {}, [ el( 'code', {}, [ untrusted( item ) ] ) ] );
 		} ) ) : '–';
 	}
 
@@ -789,8 +954,12 @@
 		}
 		const data = snapshot.manifest.data || {};
 		const versions = data.versions || {};
+		// Every field comes from the snapshot, which any client of the repository can write.
 		const text = function ( value ) {
-			return 'string' === typeof value && '' !== value ? value : null;
+			return 'string' === typeof value && '' !== value ? untrusted( value ) : null;
+		};
+		const code = function ( value ) {
+			return 'string' === typeof value && '' !== value ? el( 'code', {}, [ untrusted( value ) ] ) : null;
 		};
 		let database = null;
 		if ( 'boolean' === typeof data.database ) {
@@ -802,15 +971,15 @@
 				[ __( 'WordPress version', 'backups-for-restic' ), text( versions.wordpress ) ],
 				[ __( 'PHP version', 'backups-for-restic' ), text( versions.php ) ],
 				[ __( 'Plugin version', 'backups-for-restic' ), text( versions.plugin ) ],
-				[ __( 'Table prefix', 'backups-for-restic' ), text( data.prefix ) ? el( 'code', {}, [ data.prefix ] ) : null ],
+				[ __( 'Table prefix', 'backups-for-restic' ), code( data.prefix ) ],
 				[ __( 'Database', 'backups-for-restic' ), database ],
-				[ __( 'WordPress directory', 'backups-for-restic' ), text( data.abspath ) ? el( 'code', {}, [ data.abspath ] ) : null ],
-				[ __( 'Content directory', 'backups-for-restic' ), text( data.content ) ? el( 'code', {}, [ data.content ] ) : null ],
-				[ __( 'Uploads directory', 'backups-for-restic' ), text( data.uploads ) ? el( 'code', {}, [ data.uploads ] ) : null ],
+				[ __( 'WordPress directory', 'backups-for-restic' ), code( data.abspath ) ],
+				[ __( 'Content directory', 'backups-for-restic' ), code( data.content ) ],
+				[ __( 'Uploads directory', 'backups-for-restic' ), code( data.uploads ) ],
 				[ __( 'Directories in the backup', 'backups-for-restic' ), textList( data.roots ) ],
 				[ __( 'Exclude patterns', 'backups-for-restic' ), textList( data.excludes ) ],
 				[ __( 'Written', 'backups-for-restic' ), text( data.created ) ? formatStamp( data.created ) : null ],
-				[ __( 'Stored in the snapshot as', 'backups-for-restic' ), text( snapshot.manifest.path ) ? el( 'code', {}, [ snapshot.manifest.path ] ) : null ],
+				[ __( 'Stored in the snapshot as', 'backups-for-restic' ), code( snapshot.manifest.path ) ],
 			] ),
 		];
 	}
@@ -892,7 +1061,7 @@
 					sprintf( _n( '%d path selected:', '%d paths selected:', count, 'backups-for-restic' ), count ),
 				] ),
 				el( 'ul', { className: 'bfr-paths' }, entries.map( function ( chosen ) {
-					return el( 'li', {}, [ el( 'code', {}, [ chosen.path ] ), chosen.exact ? null : ' ', chosen.exact ? null : inexactMark() ] );
+					return el( 'li', {}, [ el( 'code', {}, [ untrusted( chosen.path ) ] ), chosen.exact ? null : ' ', chosen.exact ? null : inexactMark() ] );
 				} ) ),
 				count >= MAX_SELECTED_PATHS ? el( 'p', { className: 'bfr-selection-full' }, [
 					/* translators: %d: number of files and directories. */
@@ -934,14 +1103,26 @@
 		/**
 		 * Whether a ticked directory already holds everything below these directories. A
 		 * restore brings such entries back whatever their own boxes say, so the boxes say it too.
+		 * The whole snapshot, selected as such, holds every entry.
 		 *
 		 * @param {Array} above Tokens of directories, the top one first.
-		 * @return {boolean} Whether one of them is selected.
+		 * @return {boolean} Whether the whole snapshot or one of them is selected.
 		 */
 		function covered( above ) {
-			return above.some( function ( token ) {
+			return restoreSelection.paths.has( null ) || above.some( function ( token ) {
 				return restoreSelection.paths.has( token );
 			} );
+		}
+
+		/**
+		 * The note above the entries of a directory that a selection already holds.
+		 *
+		 * @return {string} Text.
+		 */
+		function coveredNote() {
+			return restoreSelection.paths.has( null )
+				? __( 'The entire snapshot is selected: a restore brings back everything in it.', 'backups-for-restic' )
+				: __( 'This directory lies in a selected directory: a restore brings back everything in it.', 'backups-for-restic' );
 		}
 
 		function request( token, offset ) {
@@ -964,7 +1145,7 @@
 		function trail( crumbs ) {
 			return el( 'nav', { className: 'bfr-trail', 'aria-label': __( 'Path in the snapshot', 'backups-for-restic' ) }, [
 				el( 'ol', {}, crumbs.map( function ( crumb, position ) {
-					const label = 0 === position ? __( 'Top directory', 'backups-for-restic' ) : crumb.name;
+					const label = 0 === position ? __( 'Top directory', 'backups-for-restic' ) : untrusted( crumb.name );
 					const mark = crumb.exact ? null : inexactMark();
 					if ( position === crumbs.length - 1 ) {
 						return el( 'li', { 'aria-current': 'location' }, [ el( 'strong', {}, [ label ] ), mark ? ' ' : null, mark ] );
@@ -989,7 +1170,7 @@
 				disabled: inside,
 				dataset: { token: entry.token },
 				/* translators: %s: name of a file or directory. */
-				'aria-label': sprintf( __( 'Select %s', 'backups-for-restic' ), entry.name ),
+				'aria-label': sprintf( __( 'Select %s', 'backups-for-restic' ), printable( entry.name ) ),
 				onChange() {
 					if ( select.checked ) {
 						// What lies below this entry comes back with it and is not counted twice.
@@ -1013,12 +1194,13 @@
 				open( crumbs.concat( [ { name: entry.name, exact: entry.exact, token: entry.token } ] ) );
 			};
 			// Only a directory leads further. A link is shown, never followed: its target is text.
-			const name = 'dir' === entry.type ? el( 'button', { type: 'button', className: 'button-link', onClick: enter }, [ entry.name ] ) : entry.name;
+			const name = 'dir' === entry.type ? el( 'button', { type: 'button', className: 'button-link', onClick: enter }, [ untrusted( entry.name ) ] ) : untrusted( entry.name );
 			return el( 'tr', {}, [
 				el( 'td', { className: 'bfr-select' }, [ select ] ),
 				el( 'td', { className: 'bfr-name' }, [
 					name,
-					'symlink' === entry.type && null !== entry.target ? ' → ' + entry.target : null,
+					'symlink' === entry.type && null !== entry.target ? ' → ' : null,
+					'symlink' === entry.type && null !== entry.target ? untrusted( entry.target ) : null,
 					entry.exact ? null : ' ',
 					entry.exact ? null : inexactMark(),
 					entry.incomplete ? ' ' : null,
@@ -1034,7 +1216,7 @@
 			const rows = el( 'tbody' );
 			const shown = el( 'p', { className: 'description bfr-shown' } );
 			const more = el( 'div' );
-			const note = el( 'p', { className: 'description bfr-covered' }, [ __( 'This directory lies in a selected directory: a restore brings back everything in it.', 'backups-for-restic' ) ] );
+			const note = el( 'p', { className: 'description bfr-covered' }, [ coveredNote() ] );
 			let count = 0;
 			shownAbove = crumbs.map( function ( crumb ) {
 				return crumb.token;
@@ -1142,6 +1324,7 @@
 				const note = box.querySelector( '.bfr-covered' );
 				if ( note ) {
 					note.hidden = ! inside;
+					note.textContent = coveredNote();
 				}
 			},
 		};
@@ -1178,7 +1361,7 @@
 						detailTable( 'bfr-snapshot', [
 							[ __( 'Time', 'backups-for-restic' ), formatStamp( snapshot.time ) ],
 							[ __( 'ID', 'backups-for-restic' ), el( 'code', {}, [ snapshot.id ] ) ],
-							[ __( 'Host', 'backups-for-restic' ), snapshot.hostname ],
+							[ __( 'Host', 'backups-for-restic' ), untrusted( snapshot.hostname ) ],
 							[ __( 'Tags', 'backups-for-restic' ), ( snapshot.tags || [] ).length ? tagList( snapshot.tags ) : '–' ],
 							[ __( 'Paths', 'backups-for-restic' ), textList( snapshot.paths ) ],
 							[ __( 'Files', 'backups-for-restic' ), null === snapshot.files ? '–' : String( snapshot.files ) ],
@@ -1324,6 +1507,11 @@
 			missing_destination: __( 'New path on the live site', 'backups-for-restic' ),
 			existing_directory: __( 'Directory already exists', 'backups-for-restic' ),
 			existing_file: __( 'File already exists', 'backups-for-restic' ),
+			identical_contents: __( 'Same content as the live file', 'backups-for-restic' ),
+			different_filesystem: __( 'The live directory is on another file system than the plugin\'s private directory', 'backups-for-restic' ),
+			overlapping_destinations: __( 'Another staged entry would be written to the same live path', 'backups-for-restic' ),
+			parent_excluded: __( 'A directory above it is skipped or refused', 'backups-for-restic' ),
+			staged_type_changed: __( 'The staged entry changed its type after the restore', 'backups-for-restic' ),
 			unstaged_special_entry: __( 'Special entry recorded in the restore report', 'backups-for-restic' ),
 			changed_since_apply: __( 'Live file changed after the apply job', 'backups-for-restic' ),
 			undo_journal: __( 'Still as the apply job left it', 'backups-for-restic' ),
@@ -1345,11 +1533,12 @@
 			return { entries: plan.entries.slice( offset, offset + 50 ), offset, next_offset: offset + 50 < total ? offset + 50 : null };
 		}
 		function render( page ) {
+			// The server quotes the paths as Go does; they only keep their direction to themselves.
 			replace( rows, page.entries.map( function ( entry ) {
 				return el( 'tr', {}, [
 					el( 'td', {}, [ actions[ entry.action ] || entry.action ] ),
-					mapped ? el( 'td', {}, [ el( 'code', {}, [ entry.source ] ) ] ) : null,
-					el( 'td', {}, [ el( 'code', {}, [ mapped ? ( entry.destination || '–' ) : entry.path ] ) ] ),
+					mapped ? el( 'td', {}, [ el( 'code', {}, [ el( 'bdi', {}, [ entry.source ] ) ] ) ] ) : null,
+					el( 'td', {}, [ el( 'code', {}, [ el( 'bdi', {}, [ mapped ? ( entry.destination || '–' ) : entry.path ] ) ] ) ] ),
 					el( 'td', {}, [ reasons[ entry.reason ] || entry.reason ] ),
 				] );
 			} ) );
@@ -1380,10 +1569,32 @@
 	}
 
 	/**
+	 * Looks for the job that a confirmation started, when its answer did not arrive: the
+	 * active job, or the newest job in the list, of the type the confirmation starts and
+	 * created no earlier than the review that it confirmed.
+	 *
+	 * @param {string} type  Job type: apply, undo, database_apply or database_undo.
+	 * @param {number} since Server time of the review, from its answer.
+	 * @return {Promise<Object|null>} The job, or null if none is listed.
+	 */
+	function startedJob( type, since ) {
+		const started = ( job ) => job && type === job.type && job.created_at >= since;
+		return api( '/status' ).then( function ( status ) {
+			if ( started( status.active_job ) ) {
+				return status.active_job;
+			}
+			return api( '/jobs' ).then( ( response ) => response.jobs.find( started ) || null );
+		} );
+	}
+
+	/**
 	 * Confirms a reviewed live change without retaining a password or exposing it in a URL.
+	 * When the server's answer is lost or is not one of the REST API, as behind a proxy that
+	 * timed out, the job may have started all the same: the form looks for it and follows it,
+	 * and otherwise says that the request may have been accepted.
 	 *
 	 * @param {Object} plan    Authorized preview.
-	 * @param {Object} options Submit label, endpoint, operation-specific arguments and UI callbacks.
+	 * @param {Object} options Submit label, endpoint, job type, operation-specific arguments and UI callbacks.
 	 * @return {Element} Confirmation form.
 	 */
 	function reviewConfirmation( plan, options ) {
@@ -1391,6 +1602,17 @@
 		const typed = el( 'input', { type: 'text', className: 'regular-text code', autocomplete: 'off' } );
 		const password = el( 'input', { type: 'password', className: 'regular-text', autocomplete: 'current-password' } );
 		const message = el( 'div', { role: 'status' } );
+		function started( id ) {
+			if ( options.submitted ) {
+				options.submitted();
+			}
+			window.location.assign( config.pageUrl + '&tab=restores&job=' + encodeURIComponent( id ) );
+		}
+		function unknown() {
+			options.busy( false );
+			submit.disabled = false;
+			replace( message, [ notice( 'warning', __( 'The server did not answer in a way that this page can read, and no job of this confirmation is listed. The request may still have been accepted: reload this page, or look at the Logs tab, where every job is listed, before you confirm again.', 'backups-for-restic' ), false ) ] );
+		}
 		const submit = button( options.submitLabel, function () {
 			submit.disabled = true;
 			options.busy( true );
@@ -1398,14 +1620,23 @@
 				...options.data, reviewed: reviewed.checked, site_url: typed.value, user_password: password.value,
 				digest: plan.digest, review_token: plan.review_token,
 			} } ).then( function ( response ) {
-				if ( options.submitted ) {
-					options.submitted();
-				}
-				window.location.assign( config.pageUrl + '&tab=restores&job=' + encodeURIComponent( response.job.id ) );
+				started( response.job.id );
 			} ).catch( function ( error ) {
 				password.value = '';
+				if ( ! error || ! error.data || 'number' !== typeof error.data.status ) {
+					// No answer of the REST API: the request may have reached the server.
+					replace( message, [ notice( 'info', __( 'The answer to the confirmation did not arrive. Looking for the job that it may have started…', 'backups-for-restic' ), false ) ] );
+					( 'number' === typeof plan.reviewed_at ? startedJob( options.jobType, plan.reviewed_at ) : Promise.resolve( null ) ).then( function ( job ) {
+						if ( job ) {
+							started( job.id );
+						} else {
+							unknown();
+						}
+					} ).catch( unknown );
+					return;
+				}
 				options.busy( false );
-				if ( error.data && 409 === error.data.status ) {
+				if ( 409 === error.data.status ) {
 					options.stale( error );
 				} else {
 					submit.disabled = false;
@@ -1428,6 +1659,18 @@
 		] );
 	}
 
+	/**
+	 * The preview and confirmation of a live file change or of its undo. A selection that is
+	 * too large to inspect at once is inspected by a background job, whose ID the tab keeps
+	 * for this page: after a reload, the first preview follows that job while it runs. A
+	 * preview that it finished before is shown with the time it was finished, beside a
+	 * control that inspects the live site again: files may have changed since.
+	 *
+	 * @param {string}  id    Restore or apply job.
+	 * @param {boolean} undo  Whether to undo an apply.
+	 * @param {boolean} fresh Whether content roots are mapped onto a new installation.
+	 * @return {Element} Preview.
+	 */
 	function liveChange( id, undo, fresh = false ) {
 		const base = ( undo ? '/undo/' : '/restores/' ) + encodeURIComponent( id );
 		const report = el( 'div' );
@@ -1456,98 +1699,154 @@
 		function busy( active ) {
 			preview.setAttribute( 'aria-disabled', String( active ) );
 		}
-		const preview = button( undo ? __( 'Preview undo', 'backups-for-restic' ) : __( 'Preview live file changes', 'backups-for-restic' ), function () {
-			if ( 'true' === preview.getAttribute( 'aria-disabled' ) ) {
+		function fetchPage( job = null, offset = 0 ) {
+			return api( base + ( undo ? '/plan' : '/apply-plan' ), { method: 'POST', data: { plan_job: job, offset } } );
+		}
+		function failed( error ) {
+			remember( null );
+			busy( false );
+			replace( report, [ notice( 'error', errorText( error ), false ) ] );
+			status.textContent = errorText( error );
+		}
+		function track( idOfPlan ) {
+			remember( idOfPlan );
+			follow( idOfPlan, report, function ( job ) {
+				if ( 'succeeded' === job.state ) {
+					fetchPage( idOfPlan ).then( ( plan ) => display( plan, null ) ).catch( failed );
+				} else {
+					remember( null );
+					busy( false );
+					status.textContent = job.state_label;
+				}
+			}, failed );
+		}
+
+		/**
+		 * Shows a reviewed preview.
+		 *
+		 * @param {Object}      plan     Preview, or the queued job of a background preview.
+		 * @param {number|null} finished When a stored preview was finished; null for one inspected now.
+		 */
+		function display( plan, finished ) {
+			if ( plan.job ) {
+				track( plan.job.id );
 				return;
 			}
-			const resume = shown ? null : remembered();
+			const totals = undo && plan.totals ? plan.totals : null;
+			const totalsLine = totals ? el( 'p', { className: 'bfr-undo-totals' }, [ sprintf(
+				/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
+				__( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), totals.restore, totals.remove, totals.keep,
+			) ] ) : null;
+			// A large preview is read page by page: what it does as a whole comes first.
+			const actions = ! undo && plan.actions ? plan.actions : null;
+			const actionsLine = actions ? el( 'p', { className: 'bfr-apply-totals' }, [ sprintf(
+				/* translators: 1: files to create, 2: directories to create, 3: files to replace, 4: entries left as they are, 5: entries skipped, 6: entries refused. */
+				__( 'To create: %1$d files and %2$d directories. To replace: %3$d. Left as they are: %4$d. Skipped: %5$d. Refused: %6$d.', 'backups-for-restic' ),
+				actions.create, actions.mkdir, actions.replace, actions.keep, actions.skip, actions.refuse,
+			) ] ) : null;
+			if ( undo && plan.undone ) {
+				// The review recorded the apply as undone; there is nothing to preview again.
+				remember( null );
+				const done = __( 'Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', 'backups-for-restic' );
+				status.textContent = done;
+				replace( report, [ totalsLine, notice( 'success', done ) ] );
+				return;
+			}
+			busy( false );
+			if ( null !== finished ) {
+				/* translators: %s: date and time when the preview was finished. */
+				status.textContent = sprintf( __( 'Showing the file preview finished on %s.', 'backups-for-restic' ), formatTime( finished ) );
+			} else {
+				status.textContent = false === plan.enough_space ? __( 'File preview ready. The destination needs more disk space.', 'backups-for-restic' ) : __( 'File preview ready.', 'backups-for-restic' );
+			}
+			let refusal = __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' );
+			if ( totals && 0 === totals.restore + totals.remove ) {
+				refusal = __( 'Nothing of this apply can be undone now: every entry is already undone or is kept. The list gives the reason for each entry.', 'backups-for-restic' );
+			}
+			let controls;
+			if ( false === plan.enough_space ) {
+				controls = notice( 'warning', __( 'There is too little disk space for these file changes. Free space on the destination and open a new preview.', 'backups-for-restic' ) );
+			} else if ( plan.applicable && plan.write_allowed ) {
+				controls = reviewConfirmation( plan, {
+					path: base + ( undo ? '' : '/apply' ),
+					jobType: undo ? 'undo' : 'apply',
+					submitLabel: undo ? __( 'Undo live file changes', 'backups-for-restic' ) : __( 'Apply to live site', 'backups-for-restic' ),
+					data: { plan_job: plan.plan_job || null },
+					busy, submitted: () => remember( null ),
+					stale( error ) {
+						remember( null );
+						replace( report, [ notice( 'warning', errorText( error ) ) ] );
+						status.textContent = errorText( error );
+						preview.focus();
+					},
+				} );
+			} else {
+				controls = notice( 'info', plan.applicable
+					? __( 'This account or installation does not permit live file changes.', 'backups-for-restic' )
+					: refusal );
+			}
+			const stored = null === finished ? null : el( 'div', { className: 'notice notice-warning inline bfr-stored-preview' }, [
+				el( 'p', {}, [
+					/* translators: %s: date and time when the preview was finished. */
+					sprintf( __( 'This preview was finished on %s. Files may have changed since then; inspect again to see the live site as it is now.', 'backups-for-restic' ), formatTime( finished ) ),
+				] ),
+				el( 'p', {}, [ button( __( 'Inspect again', 'backups-for-restic' ), () => inspect( null ) ) ] ),
+			] );
+			replace( report, [
+				stored,
+				'required_bytes' in plan ? detailTable( 'bfr-file-space', [
+					[ __( 'Additional disk space needed at peak', 'backups-for-restic' ), 'number' === typeof plan.required_bytes ? formatBytes( plan.required_bytes ) : __( 'Open a new preview for an estimate.', 'backups-for-restic' ) ],
+					[ __( 'Available disk space', 'backups-for-restic' ), 'number' === typeof plan.available_bytes ? formatBytes( plan.available_bytes ) : __( 'Unknown on this host', 'backups-for-restic' ) ],
+				] ) : null,
+				totalsLine,
+				actionsLine,
+				fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
+				controls,
+			] );
+		}
+
+		/**
+		 * Inspects the live site, or goes on with a background preview that this tab began.
+		 *
+		 * @param {string|null} resume ID of that preview, or null for a new inspection.
+		 */
+		function inspect( resume ) {
 			shown = true;
 			busy( true );
 			status.textContent = __( 'Inspecting files…', 'backups-for-restic' );
 			replace( report, [ el( 'p', {}, [ __( 'Inspecting files…', 'backups-for-restic' ) ] ) ] );
-
-			function fetchPage( job = null, offset = 0 ) {
-				return api( base + ( undo ? '/plan' : '/apply-plan' ), { method: 'POST', data: { plan_job: job, offset } } );
-			}
-			function failed( error ) {
+			function anew() {
 				remember( null );
-				busy( false );
-				replace( report, [ notice( 'error', errorText( error ), false ) ] );
-				status.textContent = errorText( error );
+				fetchPage().then( ( plan ) => display( plan, null ) ).catch( failed );
 			}
-			function track( idOfPlan ) {
-				remember( idOfPlan );
-				follow( idOfPlan, report, function ( job ) {
-					if ( 'succeeded' === job.state ) {
-						fetchPage( idOfPlan ).then( display ).catch( failed );
-					} else {
-						remember( null );
-						busy( false );
-						status.textContent = job.state_label;
-					}
-				}, failed );
+			if ( ! resume ) {
+				anew();
+				return;
 			}
-			function display( plan ) {
-				if ( plan.job ) {
-					track( plan.job.id );
-					return;
-				}
-				const totals = undo && plan.totals ? plan.totals : null;
-				const totalsLine = totals ? el( 'p', { className: 'bfr-undo-totals' }, [ sprintf(
-					/* translators: 1: files to restore, 2: files and folders to remove, 3: entries to keep. */
-					__( 'To restore: %1$d. To remove: %2$d. To keep: %3$d.', 'backups-for-restic' ), totals.restore, totals.remove, totals.keep,
-				) ] ) : null;
-				if ( undo && plan.undone ) {
-					// The review recorded the apply as undone; there is nothing to preview again.
-					remember( null );
-					const done = __( 'Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', 'backups-for-restic' );
-					status.textContent = done;
-					replace( report, [ totalsLine, notice( 'success', done ) ] );
-					return;
-				}
-				busy( false );
-				status.textContent = false === plan.enough_space ? __( 'File preview ready. The destination needs more disk space.', 'backups-for-restic' ) : __( 'File preview ready.', 'backups-for-restic' );
-				let refusal = __( 'This preview has no file changes that can be applied safely.', 'backups-for-restic' );
-				if ( totals && 0 === totals.restore + totals.remove ) {
-					refusal = __( 'Nothing of this apply can be undone now: every entry is already undone or is kept. The list gives the reason for each entry.', 'backups-for-restic' );
-				}
-				let controls;
-				if ( false === plan.enough_space ) {
-					controls = notice( 'warning', __( 'There is too little disk space for these file changes. Free space on the destination and open a new preview.', 'backups-for-restic' ) );
-				} else if ( plan.applicable && plan.write_allowed ) {
-					controls = reviewConfirmation( plan, {
-						path: base + ( undo ? '' : '/apply' ),
-						submitLabel: undo ? __( 'Undo live file changes', 'backups-for-restic' ) : __( 'Apply to live site', 'backups-for-restic' ),
-						data: { plan_job: plan.plan_job || null },
-						busy, submitted: () => remember( null ),
-						stale( error ) {
-							remember( null );
-							replace( report, [ notice( 'warning', errorText( error ) ) ] );
-							status.textContent = errorText( error );
-							preview.focus();
-						},
+			api( '/jobs/' + resume ).then( function ( response ) {
+				const job = response.job;
+				if ( [ 'queued', 'running' ].includes( job.state ) ) {
+					track( resume );
+				} else if ( 'succeeded' === job.state ) {
+					fetchPage( resume ).then( ( plan ) => display( plan, job.finished_at ) ).catch( function ( error ) {
+						// A preview that expired or whose staging is gone: the live site is inspected now.
+						if ( error.data && [ 400, 409 ].includes( error.data.status ) ) {
+							anew();
+						} else {
+							failed( error );
+						}
 					} );
 				} else {
-					controls = notice( 'info', plan.applicable
-						? __( 'This account or installation does not permit live file changes.', 'backups-for-restic' )
-						: refusal );
+					anew();
 				}
-				replace( report, [
-					'required_bytes' in plan ? detailTable( 'bfr-file-space', [
-						[ __( 'Additional disk space needed at peak', 'backups-for-restic' ), 'number' === typeof plan.required_bytes ? formatBytes( plan.required_bytes ) : __( 'Open a new preview for an estimate.', 'backups-for-restic' ) ],
-						[ __( 'Available disk space', 'backups-for-restic' ), 'number' === typeof plan.available_bytes ? formatBytes( plan.available_bytes ) : __( 'Unknown on this host', 'backups-for-restic' ) ],
-					] ) : null,
-					totalsLine,
-					fileActions( plan, ( offset ) => fetchPage( plan.plan_job, offset ), fresh ),
-					controls,
-				] );
+			} ).catch( anew );
+		}
+
+		const preview = button( undo ? __( 'Preview undo', 'backups-for-restic' ) : __( 'Preview live file changes', 'backups-for-restic' ), function () {
+			if ( 'true' === preview.getAttribute( 'aria-disabled' ) ) {
+				return;
 			}
-			if ( resume ) {
-				track( resume );
-			} else {
-				remember( null );
-				fetchPage().then( display ).catch( failed );
-			}
+			inspect( shown ? null : remembered() );
 		} );
 
 		return el( 'div', {}, [
@@ -1622,7 +1921,22 @@
 			snapshot_engine: __( 'The source storage engine requires review.', 'backups-for-restic' ),
 			live_object_type: __( 'The live object has a different type.', 'backups-for-restic' ),
 			live_engine: __( 'The live storage engine requires review.', 'backups-for-restic' ),
+			database_exchange_foreign: __( 'An earlier database restore keeps private tables on another database server or in another database. Before another database restore, run "wp backups-for-restic database-discard" with the ID of that restore job: it lists the tables and forgets them without dropping anything.', 'backups-for-restic' ),
+			database_exchange_rebuilt: __( 'A private table kept for the undo was rebuilt since, so the undo cannot prove that it holds the original tables. Restore from a snapshot instead.', 'backups-for-restic' ),
 		};
+	}
+
+	/**
+	 * The sentence for a finding or blocker of a database review, also for a code that this
+	 * version of the page does not know.
+	 *
+	 * @param {Object} labels Sentences by code.
+	 * @param {string} code   Code.
+	 * @return {string} Sentence.
+	 */
+	function findingText( labels, code ) {
+		/* translators: %s: code of a finding of the database review. */
+		return labels[ code ] || sprintf( __( 'The review found a condition that blocks this exchange (%s).', 'backups-for-restic' ), code );
 	}
 
 	function databaseTables( name, labels, tables, cells ) {
@@ -1649,22 +1963,22 @@
 		( report.findings || [] ).forEach( ( item ) => {
 			const table = item.table || '';
 			const group = findings.get( table ) || [];
-			group.push( labels[ item.code ] || item.code );
+			group.push( findingText( labels, item.code ) );
 			findings.set( table, group );
 		} );
 		const head = [ __( 'Table', 'backups-for-restic' ), __( 'Verified source rows', 'backups-for-restic' ), __( 'Estimated live rows', 'backups-for-restic' ), __( 'Source engine and collation', 'backups-for-restic' ), __( 'Live engine and collation', 'backups-for-restic' ), __( 'Findings', 'backups-for-restic' ) ];
 		const tables = databaseTables( 'bfr-database-tables', head, report.tables, function ( table ) {
 			const source = [ table.snapshot_engine, table.snapshot_charset, table.snapshot_collation ].filter( Boolean ).join( ' · ' );
 			const live = [ table.live_engine, table.live_charset, table.live_collation ].filter( Boolean ).join( ' · ' );
-			return [ table.name, table.snapshot_rows ?? '–', table.live_rows_estimate ?? '–', source || '–', live || '–', ( findings.get( table.name ) || [] ).join( ' ' ) ];
+			return [ untrusted( table.name ), table.snapshot_rows ?? '–', table.live_rows_estimate ?? '–', source || '–', live || '–', ( findings.get( table.name ) || [] ).join( ' ' ) ];
 		} );
-		const issues = ( preflight.blockers || [] ).map( ( code ) => labels[ code ] || code ).concat( findings.get( '' ) || [] );
+		const issues = ( preflight.blockers || [] ).map( ( code ) => findingText( labels, code ) ).concat( findings.get( '' ) || [] );
 		return el( 'div', {}, [
 			detailTable( 'bfr-database-versions', [
-				[ __( 'Source database server', 'backups-for-restic' ), report.snapshot_server ],
-				[ __( 'Destination database server', 'backups-for-restic' ), report.destination_server ],
+				[ __( 'Source database server', 'backups-for-restic' ), null === report.snapshot_server || undefined === report.snapshot_server ? null : untrusted( report.snapshot_server ) ],
+				[ __( 'Destination database server', 'backups-for-restic' ), null === report.destination_server || undefined === report.destination_server ? null : untrusted( report.destination_server ) ],
 				[ __( 'Verified source rows', 'backups-for-restic' ), report.rows ],
-				[ __( 'Views excluded from rehearsal', 'backups-for-restic' ), ( report.views_not_imported || [] ).join( ', ' ) || null ],
+				[ __( 'Views excluded from rehearsal', 'backups-for-restic' ), ( report.views_not_imported || [] ).length ? untrusted( report.views_not_imported.map( printable ).join( ', ' ) ) : null ],
 				[ __( 'Missing database privileges', 'backups-for-restic' ), ( preflight.missing_privileges || [] ).join( ', ' ) || null ],
 			] ),
 			issues.length ? notice( 'warning', issues.join( ' ' ) ) : null,
@@ -1737,17 +2051,18 @@
 				const confirmation = canApply ? reviewConfirmation( plan, {
 					submitLabel: undo ? __( 'Undo database restore', 'backups-for-restic' ) : __( 'Apply database restore', 'backups-for-restic' ),
 					path: base + ( undo ? '/undo' : '/database/apply' ), data: {}, busy,
+					jobType: undo ? 'database_undo' : 'database_apply',
 					stale( error ) {
 						showError( error );
 						preview.focus();
 					},
 				} ) : null;
 				const table = databaseTables( 'bfr-database-changes', [ __( 'Table', 'backups-for-restic' ), __( 'Action', 'backups-for-restic' ) ], plan.entries,
-					( entry ) => [ el( 'code', {}, [ entry.table ] ), actions[ entry.action ] || entry.action ] );
+					( entry ) => [ el( 'code', {}, [ untrusted( entry.table ) ] ), actions[ entry.action ] || entry.action ] );
 				replace( body, [
 					plan.preserve_admin && plan.preserve_address ? el( 'p', {}, [ __( 'The exchange keeps this site address, your administrator account and its active sessions, and the backup configuration.', 'backups-for-restic' ) ] ) : null,
 					plan.entries.length ? table : null,
-					...plan.blockers.map( ( code ) => notice( 'warning', labels[ code ] || code ) ),
+					...plan.blockers.map( ( code ) => notice( 'warning', findingText( labels, code ) ) ),
 					plan.missing_privileges.length ? detailTable( 'bfr-database-privileges', [ [ __( 'Missing database privileges', 'backups-for-restic' ), plan.missing_privileges.join( ', ' ) ] ] ) : null,
 					! plan.write_allowed ? notice( 'info', __( 'This account cannot apply or undo live database changes.', 'backups-for-restic' ) ) : null,
 					! canApply && plan.write_allowed && ! plan.blockers.length ? notice( 'info', __( 'No database changes can be applied from this review.', 'backups-for-restic' ) ) : null,
@@ -1768,6 +2083,14 @@
 
 	function stagedRestore( staged, render ) {
 		const endpoint = '/restores/' + encodeURIComponent( staged.job );
+		// The field holds the stored name; a name with what does not print is shown escaped beside it.
+		const shownFile = staged.file && printable( staged.file ) !== staged.file
+			? sprintf(
+				/* translators: %s: path of the restored file, quoted with escapes for what does not print. */
+				__( 'The restored file, with what does not print escaped: %s', 'backups-for-restic' ),
+				printable( staged.file ),
+			)
+			: null;
 		const message = el( 'div' );
 		const path = el( 'input', { type: 'text', className: 'regular-text code', value: staged.file || '', placeholder: '/wp-content/uploads/photo.jpg' } );
 		// Restored files can be wp-config.php or the database, so they need the WordPress
@@ -1827,7 +2150,7 @@
 				[ __( 'Size', 'backups-for-restic' ), formatBytes( staged.bytes ) ],
 				[ __( 'Expires', 'backups-for-restic' ), formatTime( staged.expires ) ],
 			] ),
-			field( __( 'Absolute file path in the snapshot', 'backups-for-restic' ), path ),
+			field( __( 'Absolute file path in the snapshot', 'backups-for-restic' ), path, shownFile ),
 			field( __( 'WordPress password for downloads', 'backups-for-restic' ), password, __( 'Your WordPress password, needed for every download of a restored file or the ZIP, which is recorded. The reports need no password.', 'backups-for-restic' ) ),
 			el( 'p', {}, [
 				download( __( 'Download file', 'backups-for-restic' ), 'file' ), ' ',
@@ -1851,53 +2174,55 @@
 		const progress = el( 'div' );
 		const history = el( 'div' );
 		const databaseHistory = el( 'div' );
-		let stagedVersion = null;
+		// The cards of the three lists by job ID. A list read again keeps a card whose entry is
+		// unchanged, with its open review and what was typed into it: only a card whose job
+		// left the list or changed is built anew.
+		const stagedCards = new Map();
+		const undoCards = new Map();
+		const databaseCards = new Map();
+		const noStaged = el( 'p', {}, [ __( 'No staged files. Open a snapshot to restore files or directories.', 'backups-for-restic' ) ] );
+		const undoHeading = el( 'h2', {}, [ __( 'Undo live file changes', 'backups-for-restic' ) ] );
+		const databaseHeading = el( 'h2', {}, [ __( 'Undo live database changes', 'backups-for-restic' ) ] );
 		function render( response ) {
-			const version = JSON.stringify( response.restores );
-			if ( version === stagedVersion ) {
-				return;
-			}
-			stagedVersion = version;
-			replace( list, response.restores.length
-				? response.restores.map( ( staged ) => stagedRestore( staged, render ) )
-				: [ el( 'p', {}, [ __( 'No staged files. Open a snapshot to restore files or directories.', 'backups-for-restic' ) ] ) ] );
+			const cards = keyedCards( stagedCards, response.restores, ( staged ) => stagedRestore( staged, render ) );
+			place( list, cards.length ? cards : [ noStaged ] );
+		}
+		function undoCard( job ) {
+			return el( 'section', { className: 'bfr-card' }, [
+				el( 'h3', {}, [ job.job ] ),
+				el( 'p', {}, [
+					/* translators: %s: date and time when the saved original files expire. */
+					sprintf( __( 'Original files available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
+				] ),
+				undoState( job ),
+				liveChange( job.job, true ),
+			] );
+		}
+		function databaseCard( job ) {
+			return el( 'section', { className: 'bfr-card' }, [
+				el( 'h3', {}, [ job.job ] ),
+				el( 'p', {}, [
+					/* translators: %s: date and time when the previous live database tables expire. */
+					sprintf( __( 'Previous database tables available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
+				] ),
+				databaseChange( job.job, true ),
+			] );
 		}
 		function load() {
 			api( '/undo' ).then( function ( response ) {
-				const jobs = response.jobs;
-				replace( history, jobs.length ? [
-					el( 'h2', {}, [ __( 'Undo live file changes', 'backups-for-restic' ) ] ),
-					...jobs.map( ( job ) => el( 'section', { className: 'bfr-card' }, [
-						el( 'h3', {}, [ job.job ] ),
-						el( 'p', {}, [
-							/* translators: %s: date and time when the saved original files expire. */
-							sprintf( __( 'Original files available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
-						] ),
-						undoState( job ),
-						liveChange( job.job, true ),
-					] ) ),
-				] : [] );
+				const cards = keyedCards( undoCards, response.jobs, undoCard );
+				place( history, cards.length ? [ undoHeading, ...cards ] : [] );
 			} ).catch( function ( error ) {
-				replace( history, [ notice( 'error', errorText( error ) ) ] );
+				place( history, [ notice( 'error', errorText( error ) ) ] );
 			} );
 			api( '/database-changes' ).then( function ( response ) {
-				replace( databaseHistory, response.jobs.length ? [
-					el( 'h2', {}, [ __( 'Undo live database changes', 'backups-for-restic' ) ] ),
-					...response.jobs.map( ( job ) => el( 'section', { className: 'bfr-card' }, [
-						el( 'h3', {}, [ job.job ] ),
-						el( 'p', {}, [
-							/* translators: %s: date and time when the previous live database tables expire. */
-							sprintf( __( 'Previous database tables available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
-						] ),
-						databaseChange( job.job, true ),
-					] ) ),
-				] : [] );
+				const cards = keyedCards( databaseCards, response.jobs, databaseCard );
+				place( databaseHistory, cards.length ? [ databaseHeading, ...cards ] : [] );
 			} ).catch( function ( error ) {
-				replace( databaseHistory, [ notice( 'error', errorText( error ) ) ] );
+				place( databaseHistory, [ notice( 'error', errorText( error ) ) ] );
 			} );
 			api( '/restores' ).then( render ).catch( function ( error ) {
-				stagedVersion = null;
-				replace( list, [ notice( 'error', errorText( error ) ), button( __( 'Try again', 'backups-for-restic' ), load ) ] );
+				place( list, [ notice( 'error', errorText( error ) ), button( __( 'Try again', 'backups-for-restic' ), load ) ] );
 			} );
 		}
 		replace( root, [
@@ -2015,7 +2340,7 @@
 				return el( 'tr', {}, [
 					el( 'td', {}, [ formatStamp( snapshot.time ) ] ),
 					el( 'td', {}, [ show ] ),
-					el( 'td', {}, [ snapshot.hostname ] ),
+					el( 'td', {}, [ untrusted( snapshot.hostname ) ] ),
 					el( 'td', {}, [ tags.length ? tagList( tags ) : '–' ] ),
 					el( 'td', {}, [ null === snapshot.files ? '–' : String( snapshot.files ) ] ),
 					el( 'td', {}, [ formatBytes( snapshot.bytes ) ] ),
@@ -2698,7 +3023,7 @@
 										return el( 'tr', {}, [
 											el( 'td', {}, [ formatTime( entry.time ) ] ),
 											el( 'td', {}, [ entry.level ] ),
-											el( 'td', {}, [ entry.message, entry.context && Object.keys( entry.context ).length ? ' ' + JSON.stringify( entry.context ) : '' ] ),
+											el( 'td', {}, [ entry.message, entry.context && Object.keys( entry.context ).length ? ' ' + printableJson( entry.context ) : '' ] ),
 										] );
 									} ),
 								),
