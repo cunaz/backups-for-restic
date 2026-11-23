@@ -401,7 +401,9 @@ on one site, without retries:
 The restore tests download the selected file, ZIP and report. On a disposable site they
 exercise rejected and accepted live-file confirmations, a stale preview, undo and staged
 deletion. The two-installation test uses a second real WordPress, database, URL and content
-directory, created for that test from the same package.
+directory, created for that test from the same package. Where the database exchange is
+expected, its review must say what the exchange keeps from the site and that roles, plugins
+and scheduled events come from the backup, or with the undo from the earlier database.
 
 ### 5.6 Mutation testing and fuzzing
 

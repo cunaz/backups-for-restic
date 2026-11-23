@@ -55,11 +55,13 @@ manual SQL procedure.
    report binds the table transcripts to the exact manifest and snapshot. WordPress
    stores the report digest in the successful restore job.
 2. The review checks the current destination and describes every table it will replace,
-   create or keep. The confirmation binds the restore, report, physical table IDs, schema
-   digests, selected administrator and that administrator's current credentials and
-   database-backed permissions. WordPress verifies the current password, typed home URL
-   and user/session-bound review proof. The current user must have the configured backup
-   capability, manage_options, edit_users, promote_users and update_core.
+   create or keep. It also says what the exchange keeps from the running site and how the
+   roles and active plugins of the two generations differ (decision 5). The confirmation
+   binds the restore, report, physical table IDs, schema digests, selected administrator,
+   that administrator's current credentials and database-backed permissions, the live list
+   of active plugins and those differences. WordPress verifies the current password, typed
+   home URL and user/session-bound review proof. The current user must have the configured
+   backup capability, manage_options, edit_users, promote_users and update_core.
 3. A separate apply job imports again with a new token. Its private job document exists
    before the first SQL mutation. The completed import must reproduce the reviewed
    transcript. The job records each original and shadow InnoDB TABLE_ID, schema digest,
@@ -73,13 +75,20 @@ manual SQL procedure.
    It refreshes protected WordPress state in the destination, commits that copy, and
    moves every table plus the witness in one RENAME TABLE. The witness distinguishes a
    committed rename from a pending one after a lost reply. WordPress then flushes its
-   local object cache and ensures the heartbeat is scheduled.
-5. The protected records include the current home and site addresses, active plugins,
-   plugin options and transients, cron array, WordPress roles, and the approving user's
-   full record and user metadata including session tokens. The account's ID, login or
-   email conflicting in the destination stops the job. The SQL copy preserves the user ID
-   and allocates local option and user-meta row IDs. A limit of 4,096 rows per protected
-   source or destination set bounds the write-lock interval.
+   local object cache, reads the roles again and ensures the heartbeat is scheduled.
+5. The protected records are the current home and site addresses, the WordPress database
+   version, which both generations must share, WP-Cron's lock (the `doing_cron` transient
+   and its timeout), this plugin's options and transients, and the approving user's full
+   record and user metadata including session tokens. The roles, the list of active plugins
+   and the cron array are those of the generation that becomes live: the backup's for an
+   apply, the earlier generation's for an undo. That list gets this plugin's entry if it
+   lacks it, and under that generation's roles the approving user's own roles and
+   capabilities must still give the five capabilities of decision 2 (amended 2026-11-23,
+   see "Roles, active plugins and scheduled events" below; until then the running site's
+   roles, active plugins and cron array were protected records as well). The account's ID,
+   login or email conflicting in the destination stops the job. The SQL copy preserves the
+   user ID and allocates local option and user-meta row IDs. A limit of 4,096 rows per
+   protected source or destination set bounds the write-lock interval.
 6. A confirmed undo uses the same exchange protocol and rechecks the current
    administrator. It binds to the physical tables observed at its review, which a rebuild
    may have renumbered since the apply (see "Table rebuilds" below). The original generation stays available for 24 hours after apply.
@@ -278,12 +287,127 @@ Expiry visits the owning jobs newest first. A generation whose cleanup fails is 
 its job, and the older ones are still expired; the first failure is raised after every due
 generation had its turn.
 
+### Roles, active plugins and scheduled events
+
+Until 2026-11-23 the exchange copied the running site's role map (`{prefix}user_roles`), its
+list of active plugins and its cron array into the generation that it brought live. A restore
+of a clean backup therefore kept what had changed on the site since the backup: a
+capability given to the subscriber role after the backup reached every restored subscriber,
+and a plugin activated since stayed active. The review did not show it, and the confirmation
+said only that the site address, the administrator's account and sessions and the backup
+configuration were kept (finding B1-5 of the review of 2026-11-20). A restore brings back
+what the backup holds. The exchange now keeps from the running site only what keeps the site
+reachable, the approving administrator in control and this plugin able to finish, report and
+undo the exchange:
+
+- `home` and `siteurl`, so that the site answers at its address;
+- `db_version`, which both generations must already share (decision 5);
+- `_transient_doing_cron` and its timeout: the WP-Cron request that runs the exchange holds
+  this lock, and `wp-cron.php` compares it after every event;
+- this plugin's options and transients: its settings, its encrypted secrets and its state;
+- the approving administrator's user row and all of their user meta, session tokens and their
+  own roles and capabilities included.
+
+The roles, the active plugins and the scheduled events stay those of the generation that
+becomes live. The three reasons why they were copied are kept as follows.
+
+- **This plugin stays active.** Its job has steps after the RENAME, and its heartbeat expires
+  the retained generations and offers the undo. If the generation's list of active plugins
+  lacks this plugin's path, as that of a backup made before the plugin was installed does,
+  the path is appended to it. That happens on the private target before the exchange takes
+  its write barrier over the live tables, under a write lock on that one private table and
+  after its identity check, and again on every attempt; a list that has the path is not
+  rewritten. Under the barrier the exchange checks that the list holds the path
+  (`database_plugins_invalid` otherwise). The path is the one that `activate_plugin()`
+  stores, `plugin_basename()` of the main file, and only for a copy that WordPress loads from
+  the plugins directory; a copy loaded otherwise, for example as a must-use plugin, adds
+  nothing. Network activation does not occur: the exchange refuses multisite installations
+  (blocker `wordpress_environment`), so `active_sitewide_plugins` never takes part.
+- **The heartbeat stays scheduled.** After the exchange WordPress flushes its object cache and
+  reads the generation's cron array from the database; `Cron::ensure_heartbeat()` schedules
+  the heartbeat if the array lacks it (`Container::after_exchange()`), and it runs again on
+  every `init`. A backup's array without the heartbeat gets it; the integration suite checks
+  this on a real WordPress with the database changed under its cache.
+- **The approving administrator stays in control.** Their own roles and capabilities
+  (`{prefix}capabilities`) are kept. Under the roles of the generation that becomes live they
+  must still give the configured backup capability, `manage_options`, `edit_users`,
+  `promote_users` and `update_core`, evaluated as `WP_User::get_role_caps()` evaluates them:
+  every role that the account's list names, in its order, then the list itself. Filters such
+  as `user_has_cap` and `map_meta_cap` do not take part, so a capability that only a filter
+  grants counts as missing. The review refuses otherwise (`database_admin_capabilities`), and
+  the exchange checks it again under the write barrier, where it already rechecks the
+  administrator's identity. Nothing grants a capability or changes a role to make it pass.
+  The review stores the capabilities it checked in the job, and the exchange checks those.
+
+The role map, the list of active plugins and the account's own capabilities come from a
+backup or from tables that other code can write. `Database\Restore\SerializedValue` reads
+them without `unserialize()`: only arrays with integer or string keys, strings, integers,
+booleans and null, exactly as `serialize()` writes them, at most 65,536 elements, nested no
+deeper than the value needs, no data after the value. Objects, references, floats and
+anything else are refused, as are a role map larger than 512 KiB, a list of active plugins
+larger than 256 KiB, an account's capabilities larger than 64 KiB, and names that are empty,
+longer than 1,024 bytes, not UTF-8 or contain control characters. A role needs exactly a
+display name and a map of capabilities; a list of active plugins has integer keys and
+distinct paths. Refusals have their own codes: `database_roles_invalid` and
+`database_plugins_invalid`. The rehearsal report records the snapshot's role map and list of
+active plugins as stored (base64, `wordpress_state`); a rehearsal from before has no such
+record and its review is refused with `database_review_required`.
+
+The review answers what the exchange keeps (`kept`) and takes from the other generation
+(`restored`), whether it adds this plugin's path (`plugin`), the plugins active now and not
+afterwards and the other way round, each with whether WordPress would find its file on the
+site (`plugins`), the roles whose granted capabilities differ, with the capabilities granted
+only afterwards and only now (`roles`), and the capabilities the administrator would lack
+(`missing_capabilities`). Each list shows at most 50 entries and counts the rest. Every
+name is untrusted text: the page shows it as text. The digest (now version 2) covers all of
+it and the capabilities checked, so a review from before or with other facts cannot be
+confirmed (`database_exchange_changed`). The authority that the exchange compares under its
+write barrier (now versioned) covers the live list of active plugins as well as the live role
+map: a plugin activated between the review and the exchange stops the job with
+`database_exchange_changed`, and so does a job confirmed before this change, which has no
+checked capabilities stored. Whether a plugin's file exists is read at the review only.
+
+An undo uses the same protocol in the other direction. The earlier generation comes back
+with its own roles, active plugins and scheduled events, as they were when the apply took it
+out of service; this plugin's path is appended to its list if it lacks it, for example after
+the plugin moved to another directory; the administrator's own capabilities, kept from the
+running site, must still give the five capabilities under its roles. The undo's review shows
+the same facts with the earlier generation in place of the backup.
+
+Two consequences are accepted and shown in the review rather than prevented:
+
+- A plugin that is active in the backup but whose file is missing on the site is not loaded:
+  `wp_get_active_and_valid_plugins()` skips it, and the Plugins screen removes it from the
+  list with a notice. Its scheduled events stay in the restored array and run without a
+  callback. The review shows it with "file: no"; installing the plugin before the restore
+  avoids it.
+- A plugin that is active now and not in the backup stops without its deactivation routine.
+  Its scheduled events leave with the running site's cron array; what it keeps outside the
+  restored tables stays. Likewise, a plugin that the backup activates runs without its
+  activation routine, with the options and tables it had when the backup was made.
+
+What remains: a WP-Cron request that runs the exchange goes on with the events that were due
+when it started and come after this plugin's tick in its list. WordPress reschedules each of
+them in the cron array that is now live before it runs it, so such an event of the running
+site can reach the restored array. In a request that the maintenance gate admitted, only this
+plugin's events are due.
+
 ## Evidence
 
 The database suite exercises actual MySQL and MariaDB. MySQL tests cover a concurrent
 writer queued on a live name, worker processes killed immediately before and after RENAME, changed native
 identities, changed administrator authority, original table comments, protected
-WordPress state, post-apply writes retained after undo and expiry replay. The job tests
+WordPress state, post-apply writes retained after undo and expiry replay. Since the
+amendment of decision 5 they also cover the finding's case end to end (a capability added to
+the subscriber role and a plugin activated after the backup are gone after the exchange and
+back after its undo), the backup's cron array at the refresh, this plugin's path appended
+once on the private target and never written after the exchange or into a replaced table,
+an administrator refused at the review, at the exchange and at an undo review, role maps and
+plugin lists that WordPress does not write, a fact changed after the review, and a job and a
+rehearsal from before the amendment. Unit tests check the reader against `unserialize()`
+with mutated input, the role evaluation against WordPress's order rules, and the review's
+bounds and digest; a real WordPress shows the review of a rehearsal and the heartbeat after a
+cron array without it. The job tests
 exercise the normal filesystem store, timeout, confirmation digest, staging pin, history
 pruning and recovery windows. A local real WordPress 7.1.4, PHP 8.4 and MySQL 8.4.11
 restore also verified authentication state, addresses, active plugins and the heartbeat.

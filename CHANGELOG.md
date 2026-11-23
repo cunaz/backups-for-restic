@@ -7,7 +7,7 @@ All notable changes are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- Eligible MySQL installations can exchange a reviewed snapshot database in one atomic operation, preserve the destination administrator, address and backup configuration, and undo the exchange for 24 hours. The database report explains manual recovery on MariaDB and other incompatible installations.
+- Eligible MySQL installations can exchange a reviewed snapshot database in one atomic operation, preserve the destination administrator, address and backup configuration, bring back the snapshot's roles, active plugins and scheduled events, and undo the exchange for 24 hours. The database report explains manual recovery on MariaDB and other incompatible installations.
 - File review runs as a resumable job, serves entries in pages, and checks identities and contents before applying or reversing an approved change. WP-CLI can resume an interrupted job and undo file changes if an installed plugin breaks WordPress.
 - `wp backups-for-restic recovery-kit` exports an audited copy of the recovery instructions. Writing credentials to a file or pipe requires `--force`.
 - Selected files can be staged from the snapshot browser or WP-CLI and downloaded through single-use forms. Completed restores can include ZIP archives and a database rehearsal report.
@@ -189,6 +189,24 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- A live database restore brings back the roles, the active plugins and the scheduled events
+  of the backup. Before, it kept those of the running site, so a change made after the
+  backup survived the restore: a capability given to a role reached every restored account,
+  and a plugin activated since stayed active, which the review did not show. The exchange now
+  keeps from the running site only its address, the WordPress database version, WP-Cron's
+  lock, the settings and state of Backups for restic and the approving administrator's
+  account with its user metadata and sessions, and adds Backups for restic to the backup's
+  active plugins if they lack it. An undo brings back the earlier database's own roles,
+  plugins and events. The review lists what is kept, the plugins that stop or start, each
+  with whether its file is on the site, and the roles whose capabilities change; a plugin
+  that stops does so without its deactivation routine, and WordPress skips a plugin of the
+  backup whose file is missing. If the backup's roles would leave your account without the
+  backup capability, `manage_options`, `edit_users`, `promote_users` or `update_core`, the
+  review and the exchange refuse with `database_admin_capabilities`; stored roles or plugin
+  lists that WordPress does not write are refused with `database_roles_invalid` and
+  `database_plugins_invalid`. Rehearse a staged database again before you review it, and
+  review and confirm again a database change that was confirmed before this version: it
+  stops with `database_exchange_changed`.
 - Compressed repository objects have their zstd frame sizes, windows and cumulative output checked before allocation. Verified pack data must also match its expected size and SHA-256.
 - Uninstall checks all plugin-owned recovery records before deleting local data, including records in the default working directory after a change of configuration.
 - The plugin reads no more of a server's answer than a repository file of that kind can
