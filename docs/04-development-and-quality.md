@@ -417,62 +417,157 @@ directory, created for that test from the same package.
 ### 5.6 Mutation testing and fuzzing
 
 Infection runs in six gates, each with its own code, its own tests from
-`tests/Mutation/phpunit.xml.dist` and its own thresholds:
+`tests/Mutation/phpunit.xml.dist` and its own thresholds. The database gate's tests have a
+configuration of their own, `tests/Mutation/database/phpunit.xml.dist`, with a memory limit of
+256M instead of 128M: the initial run of a gate keeps the coverage of every test in one
+process, and beside it the 16 MiB row of `DatabaseDumpTest` does not always fit into 128M.
+The gate also leaves out the test of a batch beyond `max_allowed_packet` in
+`DatabaseExchangeTest`, which the database suite runs. It lowers the server's limit for a
+moment, and a mutant process killed inside it at the timeout, or one that connects meanwhile,
+leaves or meets a server on which large statements fail whatever the mutation: on 2026-11-23
+188 mutants counted as killed that way.
 
 | Gate (Composer script, configuration) | Mutated code | Runs in | MSI floor | Covered MSI |
 | --- | --- | --- | ---: | ---: |
 | Core (`mutation`, `infection.json5.dist`) | `Crypto`, `Format`, `Engine\Forget` and `Database\Restore` without the ten classes that only the database suite reaches | `ci.yml` | 87 % | 90 % |
-| Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 96 % | 90 % |
-| File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 80 % | 85 % |
-| File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its three `Database*` classes | `ci.yml` | 67 % | 74 % |
-| ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 97 % | 99 % |
-| Database (`mutation:database`) | all of `Database\Restore` and the `Database*` classes of `src/Jobs/Apply`, killed by `tests/Unit/Database` and `tests/Database` against MySQL | `database-mutation.yml` | 73 % | 79 % |
+| Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 87 % | 88 % |
+| File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 73 % | 77 % |
+| File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its three `Database*` classes | `ci.yml` | 67 % | 73.8 % |
+| ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 83 % | 84 % |
+| Database (`mutation:database`) | all of `Database\Restore` and the `Database*` classes of `src/Jobs/Apply`, killed by `tests/Unit/Database` and `tests/Database` against MySQL | `database-mutation.yml` | 76.4 % | 81.3 % |
 
 Every script passes `--with-uncovered`. Without it Infection mutates only lines that a test
 covers, so code that no test reaches produced no mutant and counted nowhere: before
 2026-11-22 the core gate listed `Database\Restore`, but ten of its classes, reached only by
-the database suite, created no mutant at all. The MSI counts such code as not killed. The
-covered MSI of the core and of the planner stays ADR 0024's merge gate at 90 %. The other
-thresholds are floors: the lowest scores of repeated local runs on 2026-11-20 and
-2026-11-22 (PHP 8.3 with ext-zstd and pcov, MySQL 8.4.11), rounded down. A floor may only
-rise; the pull request that adds the tests raises it. The goal for every gate is ADR 0024's
-90 %.
+the database suite, created no mutant at all. The MSI counts such code as not killed.
+The covered MSI of the core stays ADR 0024's merge gate at 90 %. The other thresholds are
+floors: the scores measured on 2026-11-23 (below), rounded down, and never above the score
+over the mutants that every run of the gate killed, hence the tenths of the apply and the
+database gate. A floor may only rise; the pull request that adds the tests raises it. The goal
+for every gate is ADR 0024's 90 %. The planner had a covered threshold of 90 % as well; it
+scores 88.80 % and has a floor like the others until tests raise it.
 
-| Gate | Mutants | Not covered | MSI | Covered MSI | Spread over the runs |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Core | 4,406 | 121 | 87.90 % | 90.39 % | two runs, identical |
-| Planner | 745 | 13 | 96.64 % | 98.36 % | two runs, identical |
-| File restore | 2,857 | 150 | 80.96 % | 85.45 % | 80.96 to 80.99 % |
-| File apply jobs | 1,254 | 109 | 67.62 % | 74.06 % | 67.62 to 67.86 % |
-| ZIP downloads | 794 | 15 | 97.98 % | 99.87 % | two runs, identical |
-| Database | 3,295 | 227 | 73.75 % | 79.20 % | one run without other load |
+**What a mutant process measures.** Infection runs each mutant in a PHPUnit process of its
+own and serves the mutated class there through a user-space `file://` stream wrapper in place
+of PHP's own. Until 2026-11-23 the tests ran under that wrapper, which differs from PHP's in
+two ways that fail tests whatever the mutation, and every mutant that such a test covers
+counted as killed:
 
-The table names the lowest result of each gate. A mutant that runs into the timeout counts as
-killed, and Infection leaves one out ("skipped") when its tests took at least the timeout in
-the first run, so a run on a loaded machine differs. Two runs during other test runs are not in
-the table: one of the file-restore gate left out 254 mutants and scored 80.02 %, and one of the
-database gate counted 530 timeouts instead of 8 and scored 88.10 %. One mutant of the ZIP
-writer writes its checkpoint files into the working directory; delete `.head`, `.names` and
+- `fsync()` fails on every stream it opens. Since 2026-11-22 every job document and journal
+  record is written durably ([ADR 0041](adr/0041-guarded-file-changes.md)), so each test that
+  saves one failed. The file restore gate reported 98 % covered and the apply gate 100 %.
+- Its `url_stat()` reports a path that it cannot read as missing: an unreadable file, or a
+  link whose target has been removed. Tests of unreadable files failed, and cleanups left
+  links and their directories behind and warned, which fails a run under `failOnWarning`.
+  The planner gate reported 98.48 % covered on `main` and the ZIP gate 99.87 %.
+
+Since then the mutation suites start with `tests/Mutation/bootstrap.php`
+(`tests/Support/MutationProcess.php`). In a mutant process it loads every class below the
+gates' source directories while the wrapper is in place, so that the mutated class is the one
+in memory, and then restores PHP's own wrapper. That costs about 16 ms and 3 MiB per process.
+A class first loaded after the restore is the original, so a gap in the list lowers a score
+instead of raising it. A mutated copy that does not compile keeps the wrapper, and the tests
+meet its syntax error as before. The initial test run has no such wrapper, and the bootstrap
+loads nothing there.
+
+The bootstrap never fails a mutant process, because Infection would count that as a kill.
+When `fsync()` still fails after the restore, or the user-space wrapper is back when the
+process ends, it appends a line to a marker file instead. `bin/mutation-gate.sh`, through
+which the Composer scripts and so CI run Infection, fails the gate on that whatever the score.
+`tests/Unit/Tooling/MutationGatesTest.php` checks outside any mutant process that the
+bootstrap of every gate loads every directory the gate mutates, that loading them prints and
+defines nothing, and that the canary fires under a user-space wrapper.
+
+The jobs keep the tests' temporary files on tmpfs (`.github/actions/mutation-tmpdir`): a gate
+measures the tests, not the disk, and on the runner's ext4 every `fsync()` of a durable write
+costs milliseconds, so the file restore gate would not finish within its job limit.
+
+Measured on 2026-11-23 with `main` at `f0ea681` merged: PHP 8.3.37 with ext-zstd and pcov, 8
+threads, the tests' temporary files on tmpfs as in CI, and MySQL 8.4.11 for the database
+gate. "Before" is the covered MSI that the gate reported while its tests ran
+under Infection's wrapper: on 2026-11-22 for the planner, file restore, apply and ZIP gates,
+on 2026-11-20 for the core and the database gate.
+
+| Gate | Mutants | Not covered | Escaped | Timed out | MSI | Covered MSI | Minutes | Before |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Core | 4,453 | 123 | 412 | 65 | 87.99 % | 90.48 % | 15.3 | 90.39 % |
+| Planner | 745 | 13 | 82 | 2 | 87.25 % | 88.80 % | 1.1 | 98.36 % |
+| File restore | 3,178 | 174 | 666 | 24 | 73.57 % | 77.83 % | 15.0 | 98 % |
+| File apply jobs | 1,275 | 111 | 301 | 0 | 67.69 % | 74.14 % | 3.4 | 100 % |
+| ZIP downloads | 794 | 15 | 117 | 14 | 83.38 % | 84.98 % | 0.5 | 99.87 % |
+| Database | 3,756 | 225 | 622 | 9 | 77.45 % | 82.38 % | 31.9 | 79.20 % |
+
+The core gate's score barely moved. The planner and ZIP gates gave the same figures in two
+runs on tmpfs and one on ext4, and the apply gate the same figures in two runs on tmpfs. With
+the tests' temporary files on ext4, as on GitHub's runners without the tmpfs step, the file
+restore gate scored 73.63 % and 77.92 % in 55.5 minutes, and the apply gate 67.61 % and
+74.05 % in 15.6 minutes. Between the runs 21 mutants of the file restore gate and 6 of the
+apply gate went from killed to escaped or back, two of them between the two runs on tmpfs.
+Their tests take a path that depends on how long a step takes, such as a time-sliced
+directory listing or the deadline of a planning tick, not on the file system's semantics. So
+no floor is above the score over the mutants that every run killed: 73.29 % and 77.53 % for
+the file restore gate, 67.45 % and 73.88 % for the apply gate.
+
+The database gate scored 77.45 % and 82.38 % in the run in the table and 77.64 % and 82.58 % in
+a second one. 79 mutants were killed in one run and not the other, 78 of them by
+`DatabaseExchangeTest`: the exchange checks the other sessions of its account on the server,
+and Infection's processes share one server and account, so such a test can fail through
+another process whatever the mutation. The floors are the 76.49 % and 81.37 % over the
+mutants that both runs killed, rounded down to a tenth; the true scores may be lower still.
+A database account per process, or serial runs of these tests, would settle that.
+
+Infection gives each mutant a timeout of five seconds plus five times what its covering test
+classes took in the initial run, at most the configured timeout; a mutant that runs into it
+counts as killed. It skips a mutant without running it when the quickest test class that
+covers it took at least the configured timeout in the initial run, which collects coverage and
+is slower. With 30 s that left all 255 mutants of `Restore\SnapshotBrowser` unmeasured: its
+tests take about 45 s with coverage and 6 s without. The file restore gate now allows 120 s
+and the apply gate 60 s, and no gate skipped a mutant on 2026-11-23. A run on a loaded machine
+still differs: on 2026-11-20 a run of the database gate during other test runs counted 530
+timeouts instead of 8. One mutant of the ZIP writer writes its checkpoint files into the
+working directory, and so do mutants of the file restore gate; delete `.head`, `.names` and
 `.state` there after a local run.
+
+The escaped mutants by class, the work of a later package:
+
+- Core: `Database\Restore\CreateStatement` 77, `Database\Restore\TableFile` 63,
+  `Format\Compression` 44, `Engine\Forget\ForgetRun` 35, `Database\Restore\Session` 27,
+  `Database\Restore\Manifest` 24, `Format\Index\IndexSet` 22, `Format\ZstdFrame` 21,
+  `Engine\Forget\Forget` 20, `Crypto\Scrypt` 16, `Format\Index\IndexFile` 13 and 50 in
+  thirteen other classes.
+- Planner: `ApplyPlan` 81, `SiteLayout` 1.
+- File restore: `FileChange` 181, `Staging` 103, `DiskFilePlan` 86, `DirectorySpellings` 60,
+  `ApplyManifest` 56, `FileMaintenance` 53, `LiveSpellings` 44, `ChunkDigest` 28,
+  `SnapshotBrowser` 25, `FileVerification` 17, `FileSpace` 11, `StagedRestore` 2.
+- File apply jobs: `FileChanges` 134, `PlanBuild` 77, `FilePlans` 74, `ApplyJournal` 16.
+- ZIP downloads: `ZipWriter` 87, `ZipRecords` 29, `Crc32` 1. The last is equivalent: a 33rd
+  row of the matrix in `Crc32::power()`, which no 32-bit vector reads.
+- Database: `Jobs\Apply\DatabaseChanges` 117, `Jobs\Apply\DatabaseGeneration` 66,
+  `Jobs\Apply\DatabaseReview` 47, and in `Database\Restore` `CreateStatement` 57,
+  `SwapCatalog` 40, `RehearsalReport` 37, `WordPressState` 37, `TableExchange` 32, `Manifest`
+  31, `OwnedTables` 31, `TableFile` 29, `Ledger` 20, `TableImporter` 18, `WriteBarrier` 15,
+  `ExchangePlan` 12, `InsertStatement` 9, `Session` 9, `SqlLexer` 7, `MysqliConnection` 6,
+  `SessionDrain` 2.
 
 The core job runs with ext-zstd since 2026-11-22, so the native decompression of format 2 is
 mutated and tested too. With it, 78 mutants of `Format\Compression` are covered and 44 of
 them escape; the covered MSI of the core fell from 91.21 % (4,210 covered mutants, the CI run
-of `acaecdc`) to 90.39 % (4,285). The run takes about 40 minutes. The core and the four
-restore gates run on every push to `main`, and on every pull request that changes a file their
-result can depend on (`.github/actions/mutation-scope`): for the core anything under
+of `acaecdc`) to 90.39 % (4,285). The run takes about 40 minutes on a runner. The core and the
+four restore gates run on every push to `main`, and on every pull request that changes a file
+their result can depend on (`.github/actions/mutation-scope`): for the core anything under
 `src/Crypto`, `src/Format`, `src/Engine`, `src/Support`, `src/Exception`, `src/Backend`,
 `src/Storage`, `src/Secrets`, `src/Database` or `tests/`, or one of `infection.json5.dist`,
-`composer.json`, `composer.lock`, `phpunit.xml.dist`, `bin/install-test-tools.sh` and
+`composer.json`, `composer.lock`, `phpunit.xml.dist`, `bin/install-test-tools.sh`,
+`bin/mutation-gate.sh`, `.github/actions/mutation-tmpdir/action.yml` and
 `.github/workflows/ci.yml`; for the restore gates anything under `src/` or `tests/`, their
 configurations and the same tool files. The list is wider than the mutated code on purpose.
 On any other pull request a job says in a notice that it skipped the run, and ends green, so
 that it can stay a required check. When the job cannot list the files of a pull request, it
 runs. Each job checks for a nonempty report and uploads its logs.
 
-The database gate needs a server and takes longer than a pull request should wait (six minutes
-with 23 threads locally, so presumably most of an hour on a runner with four). It runs in
-`database-mutation.yml` on every push to `main`, on pull requests that change the database
+The database gate needs a server and takes longer than a pull request should wait (31.9
+minutes with 8 threads locally, so presumably more than an hour on a runner with four). It runs
+in `database-mutation.yml` on every push to `main`, on pull requests that change the database
 code, its tests or its configuration, and on request. It is not a required check of a pull
 request; the release gate requires a successful run for the release commit (§7).
 

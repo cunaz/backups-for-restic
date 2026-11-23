@@ -80,6 +80,8 @@ test reaches against a floor. `composer mutation:planner`, `mutation:restore`,
 `mutation:apply`, `mutation:zip` and, with a database server, `mutation:database` are the
 other gates. In CI they run on `main` and on pull requests that change the code they depend
 on ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
+The scripts run Infection through `bin/mutation-gate.sh`, which fails a gate when its mutant
+processes could not write durably; `.tools/bin/infection` alone does not check that.
 
 The package that would ship, and the translation template built from it:
 
