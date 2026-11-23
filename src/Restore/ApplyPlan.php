@@ -523,7 +523,7 @@ final class ApplyPlan {
 		if ( null !== $review && $review->known( $directory ) ) {
 			return $review->unique( $directory, $name );
 		}
-		$handle = opendir( $directory );
+		$handle = @opendir( $directory ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A folder that cannot be read is answered by the return value.
 		if ( false === $handle ) {
 			return false;
 		}

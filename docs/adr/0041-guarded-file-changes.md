@@ -188,6 +188,22 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   (`undo_nothing_to_revert`). Before, a partial apply stopped by `file_space` could become
   impossible to undo through one upload into a folder that it created, and the journal with
   the only copies of the original files expired with its window.
+- What can be known about one entry keeps that entry with a reason, and the undo goes on
+  with the next one; the reviews, inline and background, the worker's last check and the
+  cleanup of a stopped undo read an entry by the same rule. Only three things stop an undo:
+  a journal record that is damaged or cannot be looked up; a write of the plugin's own
+  records or private copies that fails, such as a journal record, the attributes of the
+  retained original, the list of kept entries or the job document; and a refusal of the file
+  system that no check could foresee, a rename or unlink refused after every check passed or
+  an `rmdir()` refused while the folder holds no name to read. A review stops as a whole
+  only for what concerns every entry: a site layout or protected location that is invalid,
+  or a staged tree, apply manifest or sealed plan that is gone or damaged. A created
+  directory that a review cannot read, or that is gone when its names are read, is kept as
+  `changed_since_apply`, as the worker's last check keeps it, and one whose interrupted
+  reading cannot find its place again as `new_children`. Before, such a directory failed a
+  background review with an internal error, and the inline review kept an unreadable one as
+  `new_children`; the name checks of the site policy that cannot read a folder answer
+  without a PHP warning, which a debugging site could print into the review's reply.
 - Whether an entry is still what the apply left there is decided by content and attributes,
   not by the inode alone. The inode that the apply published, with the attributes it
   recorded, counts as before while its content has the reviewed digest. A regular file with

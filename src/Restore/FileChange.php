@@ -21,6 +21,16 @@ defined( 'ABSPATH' ) || exit;
  * still is what the apply left there and keeps it, with its journal, otherwise.
  * The caller serializes writers and pins staging and the item directory until undo expires.
  *
+ * The undo decides entry by entry (ADR 0041). Whatever can be known about one entry keeps
+ * that entry with a reason, and the undo goes on with the next one: an entry that changed,
+ * is gone or cannot be read, a parent that is not the recorded folder or that the worker
+ * may not change, a destination that the site no longer maps to it, a policy refusal, a
+ * name that arrives after the last check. Only three things stop an undo: a journal record
+ * that is damaged or cannot be looked up, a write of the plugin's own records or private
+ * copies that fails, and a refusal of the file system that no check could foresee, such
+ * as a rename or unlink refused after every check passed. The reviews, the worker's last
+ * check and the cleanup of a stopped undo read an entry by the same rule.
+ *
  * Every journal record is synchronised to disk before the live change it authorises, and a
  * private copy before the record that names it. A live publication or removal is
  * synchronised in its directory before the record that marks it complete, so a power loss

@@ -1596,6 +1596,85 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'destination_changed', $this->kept( $undo )[ $this->live . '/changed-layout/settings.php' ] );
 	}
 
+	#[DataProvider( 'inline_and_background' )]
+	public function test_a_created_folder_that_the_worker_cannot_read_is_kept_and_the_undo_goes_on( bool $background ): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root reads every folder.' );
+		}
+		if ( $background ) {
+			$restore                  = $this->jobs->get( $this->restore ) ?? self::fail( 'The restore is gone.' );
+			$restore->result['files'] = DiskFilePlan::PAGE + 1;
+			$this->jobs->save( $restore );
+			$plan = $this->run_job( $this->changes->request_preview( $this->restore, false, false ) );
+			$job  = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		} else {
+			$job = $this->run_job( $this->start() );
+		}
+		// The folder that the apply created keeps the attributes that the apply recorded, and
+		// the worker cannot read it, as a worker of another user cannot read a folder that the
+		// apply's worker created for itself alone. Only the record of its permissions is
+		// brought in line with the folder here.
+		$folder = $this->live . '/b-new';
+		chmod( $folder, 0311 );
+		clearstatcache();
+		$stat = lstat( $folder );
+		self::assertIsArray( $stat );
+		$entries = glob( $this->jobs->directory( $job ) . '/undo/item-*/entry.json' );
+		self::assertNotEmpty( $entries );
+		foreach ( $entries as $entry ) {
+			$record = json_decode( (string) file_get_contents( $entry ), true, flags: JSON_THROW_ON_ERROR );
+			if ( 'mkdir' === $record['action'] ) {
+				$record['installed'] = hash( 'sha256', implode( '|', [ $stat['mode'], $stat['uid'], $stat['gid'], 0 ] ) );
+				file_put_contents( $entry, json_encode( $record, JSON_THROW_ON_ERROR ) );
+			}
+		}
+		try {
+			$review   = $this->changes->request_preview( $job->id, true, false );
+			$plan_job = null;
+			if ( $review instanceof Job ) {
+				$plan_job = $this->run_job( $review )->id;
+				$review   = $this->changes->request_preview( $job->id, true, false, $plan_job );
+			}
+			self::assertIsArray( $review );
+			$decisions = [];
+			foreach ( $review['entries'] as $entry ) {
+				$decisions[ (string) $entry['destination'] ] = [ $entry['action'], $entry['reason'] ];
+			}
+			// The site policy cannot rule out another spelling of the file's name in the folder,
+			// and the folder cannot be told empty: both are kept, and the rest is reverted.
+			self::assertSame(
+				[
+					$folder . '/new.txt'        => [ 'keep', 'ambiguous_destination' ],
+					$folder                     => [ 'keep', 'changed_since_apply' ],
+					$this->live . '/a-existing' => [ 'restore', 'undo_journal' ],
+				],
+				$decisions
+			);
+			$undo = $this->run_job( $this->changes->start_undo( $job->id, $review['digest'], '', $plan_job ) );
+			self::assertSame(
+				[
+					'restored'             => 1,
+					'removed'              => 0,
+					'unchanged'            => 0,
+					'kept'                 => 2,
+					'changed_after_review' => 0,
+					'apply_state'          => 'partly_undone',
+				],
+				self::outcomes( $undo )
+			);
+			self::assertSame(
+				[
+					$folder . '/new.txt' => 'ambiguous_destination',
+					$folder              => 'changed_since_apply',
+				],
+				$this->kept( $undo )
+			);
+			self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		} finally {
+			chmod( $folder, 0755 );
+		}
+	}
+
 	public function test_a_confirmed_apply_keeps_its_uploads_root_while_its_ticks_boot_without_the_filter(): void {
 		$this->stage_fresh();
 		$confirmed = $this->uploads;

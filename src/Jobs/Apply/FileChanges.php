@@ -1149,11 +1149,12 @@ final readonly class FileChanges implements StepProvider {
 				'action' => 'keep',
 				'reason' => 'destination_changed',
 			];
-			if ( 'remove' === $decision['action'] && 'mkdir' === $row['action'] && ! self::children_removed( $path, $removals ) ) {
+			$held     = 'remove' === $decision['action'] && 'mkdir' === $row['action'] ? self::children_kept( $path, $removals ) : null;
+			if ( null !== $held ) {
 				// What someone added stays, and so does the directory that holds it.
 				$decision = [
 					'action' => 'keep',
-					'reason' => 'new_children',
+					'reason' => $held,
 				];
 			}
 			if ( 'remove' === $decision['action'] ) {
@@ -1178,24 +1179,25 @@ final readonly class FileChanges implements StepProvider {
 
 	/**
 	 * A directory can be removed only if all current children are already scheduled for
-	 * removal by an earlier step in the reversed plan.
+	 * removal by an earlier step in the reversed plan. One that cannot be read is kept as
+	 * changed, as the worker's last check keeps it, and the review goes on.
 	 *
 	 * @param string             $path Live directory created by the apply.
 	 * @param array<string,true> $removals Confirmed child removals.
-	 * @return bool Whether this directory will be empty.
+	 * @return string|null The reason to keep the directory, or null when it will be empty.
 	 */
-	private static function children_removed( string $path, array $removals ): bool {
-		$handle = opendir( $path );
+	private static function children_kept( string $path, array $removals ): ?string {
+		$handle = @opendir( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A directory that cannot be read is answered with its reason.
 		if ( false === $handle ) {
-			return false;
+			return 'changed_since_apply';
 		}
 		try {
 			for ( $entry = readdir( $handle ); false !== $entry; $entry = readdir( $handle ) ) {
 				if ( '.' !== $entry && '..' !== $entry && ! isset( $removals[ $path . '/' . $entry ] ) ) {
-					return false;
+					return 'new_children';
 				}
 			}
-			return true;
+			return null;
 		} finally {
 			closedir( $handle );
 		}

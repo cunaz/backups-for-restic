@@ -258,10 +258,10 @@ final class PlanBuild {
 				if ( null === $covered ) {
 					return false;
 				}
-				if ( ! $covered ) {
+				if ( true !== $covered ) {
 					$decision = [
 						'action' => 'keep',
-						'reason' => 'new_children',
+						'reason' => $covered,
 					];
 				}
 			}
@@ -295,22 +295,31 @@ final class PlanBuild {
 	 * a row that it reviews again with another decision, and children are reviewed before
 	 * their directory.
 	 *
+	 * What is found about the directory keeps that directory with a reason, and the review
+	 * goes on with the next entry: a name that is not a reviewed removal, or a directory that
+	 * changed while it was read, keeps it as `new_children`, and one that is gone or cannot
+	 * be read since its own decision keeps it as changed, as the worker's last check does.
+	 *
 	 * @param DiskFilePlan        $disk Current undo preview.
 	 * @param string              $target Created live directory.
 	 * @param float               $deadline Worker deadline.
 	 * @param array<string,mixed> $cursor Persisted position in the same directory.
-	 * @return bool|null Whether all children are covered, or null to yield.
-	 * @throws StorageFailed If the directory cannot be enumerated consistently.
+	 * @return true|string|null True when every child is covered, the reason to keep the
+	 *                          directory otherwise, or null to yield.
+	 * @throws StorageFailed If the claims of this review cannot be read.
 	 */
-	public static function children_removable( DiskFilePlan $disk, string $target, float $deadline, array &$cursor ): ?bool {
-		$identity = ApplyManifest::identity( $target );
-		$offset   = $cursor['offset'] ?? 0;
+	public static function children_removable( DiskFilePlan $disk, string $target, float $deadline, array &$cursor ): true|string|null {
+		$identity = self::folder_identity( $target );
+		if ( null === $identity ) {
+			return 'changed_since_apply';
+		}
+		$offset = $cursor['offset'] ?? 0;
 		if ( ! is_int( $offset ) || $offset < 0 || $identity !== ( $cursor['identity'] ?? $identity ) || realpath( $target ) !== $target || ! is_dir( $target ) ) {
-			return false;
+			return 'new_children';
 		}
 		$ctime = filectime( $target );
 		if ( false === $ctime ) {
-			return false;
+			return 'changed_since_apply';
 		}
 		if ( $offset > 0 && true !== ( $cursor['stable'] ?? false ) ) {
 			if ( time() <= $ctime ) {
@@ -323,27 +332,38 @@ final class PlanBuild {
 		if ( $offset > 0 && ! is_string( $cursor['last'] ?? null ) ) {
 			$offset = 0;
 		}
-		$stable  = time() > $ctime;
-		$entries = new \DirectoryIterator( $target );
+		$stable = time() > $ctime;
+		try {
+			$entries = new \DirectoryIterator( $target );
+		} catch ( \UnexpectedValueException ) {
+			return 'changed_since_apply';
+		}
 		if ( $offset > 0 ) {
-			$entries->seek( $offset - 1 );
+			try {
+				$entries->seek( $offset - 1 );
+			} catch ( \OutOfBoundsException ) {
+				// Names left the directory without a change of its identity, as where a file
+				// system keeps coarse times: the boundary of the last tick is gone.
+				return 'new_children';
+			}
 			if ( ! $entries->valid() || hash( 'sha256', $entries->getFilename() ) !== ( $cursor['last'] ?? null ) ) {
-				return false;
+				return 'new_children';
 			}
 			$entries->next();
 		}
 		while ( $entries->valid() ) {
 			if ( ! $entries->isDot() ) {
 				if ( null === $disk->lookup( 'remove', $target . '/' . $entries->getFilename() ) ) {
-					return false;
+					return 'new_children';
 				}
 			}
 			$last = $entries->getFilename();
 			$entries->next();
 			++$offset;
 			if ( microtime( true ) >= $deadline && $entries->valid() ) {
-				if ( ApplyManifest::identity( $target ) !== $identity ) {
-					return false;
+				$same = self::same_folder( $target, $identity );
+				if ( true !== $same ) {
+					return $same;
 				}
 				$cursor = [
 					'offset'   => $offset,
@@ -354,7 +374,36 @@ final class PlanBuild {
 				return null;
 			}
 		}
-		return ApplyManifest::identity( $target ) === $identity;
+		return self::same_folder( $target, $identity );
+	}
+
+	/**
+	 * The identity of a live directory, or null when it is gone or cannot be looked up.
+	 *
+	 * @param string $target Live directory.
+	 * @return string|null Identity.
+	 */
+	private static function folder_identity( string $target ): ?string {
+		try {
+			return ApplyManifest::identity( $target );
+		} catch ( StorageFailed ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Whether a directory still has the identity with which its reading began.
+	 *
+	 * @param string $target Live directory.
+	 * @param string $identity Identity before the reading.
+	 * @return true|string True, or the reason to keep the directory.
+	 */
+	private static function same_folder( string $target, string $identity ): true|string {
+		$now = self::folder_identity( $target );
+		if ( $now === $identity ) {
+			return true;
+		}
+		return null === $now ? 'changed_since_apply' : 'new_children';
 	}
 
 	/**
