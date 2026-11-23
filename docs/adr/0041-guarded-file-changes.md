@@ -291,13 +291,21 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   outcome is on disk before the job document that counts it: a kept entry's page is written
   durably, a revert's journal record is. A restarted tick repeats only the entry that the
   document does not count yet, and a kept entry is written again at the same place in the
-  list. A kept entry costs one more synchronised write, its page of the list, and its index
-  of page digests is replaced as a whole with the same durable write rather than updated in
-  place, so that a stop or a short write leaves the slots that were last committed. When the
-  list is sealed, also by an undo that was cancelled or failed and does not retry the entry,
-  a page that a stopped worker began beyond the counted entries is cut, and a counted page
-  that it wrote with an uncounted entry before it updated the page's slot is cut back to
-  the entries that the slot authenticates; any other mismatch is refused.
+  list. The list keeps one invariant: at every moment the files on disk authenticate at
+  least the entries that the job document counts. Each kept entry writes its page as a new
+  version, named by the number of entries on it (`rows-0.3`), on disk before the document
+  that counts it, and no write replaces a version that a count names: a retry writes the
+  uncounted version again, also with another reason, the next entry writes a version with
+  one more, and only versions below the counted one are removed. The index of page digests
+  is computed when the list is sealed, from the versions that the counts name, so that a
+  stop at any write, also a second stop in the retry, leaves a list that is sealed with the
+  counted entries, also by an undo that was cancelled or failed. A kept entry costs one more
+  synchronised write, its page version. Before, the list kept one file per page and an index
+  that each entry replaced, and a retry that changed an entry's reason and stopped between
+  its page and its index left a slot that matched neither the page nor its counted entries,
+  so that a cancelled undo could not seal its list. A test stops an undo with several kept
+  entries at every synchronisation, rename and removal of the list and of the document, and
+  again at every one of a retry with another reason, and reads the list after each stop.
 - The result counts what this undo did, and a retry counts a revert as its own only from a
   record of this undo that proves it. The record that completes an entry names the undo job
   that reverted it, and so does the `restore` record before a restore's rename; the retained

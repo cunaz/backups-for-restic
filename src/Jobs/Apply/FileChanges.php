@@ -1321,7 +1321,9 @@ final readonly class FileChanges implements StepProvider {
 	}
 
 	/**
-	 * The paged list of the entries that an undo kept, written durably.
+	 * The paged list of the entries that an undo kept, written durably in versioned pages:
+	 * the files on disk authenticate at least the entries that the undo's document counts,
+	 * so that the list is sealed with those counts after any stop (DiskFilePlan).
 	 *
 	 * @param Job  $job Undo.
 	 * @param bool $create Create its directory.
@@ -1332,7 +1334,7 @@ final readonly class FileChanges implements StepProvider {
 		if ( $create ) {
 			ApplyJournal::directory( $directory );
 		}
-		return new DiskFilePlan( $directory, true );
+		return new DiskFilePlan( $directory, true, $this->jobs->observer() );
 	}
 
 	/**

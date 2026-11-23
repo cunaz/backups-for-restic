@@ -64,6 +64,9 @@ final class FileChangesTest extends TestCase {
 	 */
 	private ?\Closure $job_writes = null;
 
+	/** Snapshots taken of job directories (snapshot()). */
+	private int $snapshots = 0;
+
 	protected function setUp(): void {
 		$this->directory = TempDir::create( 'apply-job' );
 		$this->live      = $this->directory . '/live';
@@ -1227,24 +1230,146 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( [], $this->changes->undoable() );
 	}
 
-	public function test_a_stopped_undo_lists_its_kept_entries_after_a_page_was_written_before_its_slot(): void {
-		$job = $this->run_job( $this->start() );
-		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+	public function test_a_stopped_undo_lists_the_entries_its_document_counted_after_a_stop_at_any_write(): void {
+		// Four replaced files that someone edits between the review and the worker: the undo
+		// keeps each of them and reverts the other entries.
+		$replaced = [];
+		foreach ( [ 1, 2, 3, 4 ] as $number ) {
+			$path = $this->live . '/replaced-' . $number;
+			file_put_contents( $path, 'original' );
+			file_put_contents( $this->files . $path, 'replacement' );
+			$replaced[] = $path;
+		}
+		$this->write_report( $this->live . '/skipped-link' );
+		$job  = $this->run_job( $this->start() );
 		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
-		$this->runner->tick( 0.0 ); // Preflight.
-		$this->runner->tick( 0.0 ); // The edited file is kept and counted.
-		self::assertSame( 1, $this->jobs->get( $undo->id )?->data['undo_counts']['kept'] );
-		// The worker wrote the list's page with the next kept entry, the folder, and was stopped
-		// before the page's slot and the document; then the undo is cancelled.
-		$page    = $this->jobs->directory( $undo ) . '/kept/rows-0';
-		$rows    = json_decode( (string) file_get_contents( $page ), true, flags: JSON_THROW_ON_ERROR );
-		$rows[]  = ApplyManifest::row( Bytes::base64url_encode( $this->live . '/b-new' ), $this->live . '/b-new', 'keep', 'new_children' );
-		$encoded = json_encode( $rows, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES );
-		file_put_contents( $page, $encoded );
-		$this->runner->cancel( $undo->id );
-		$cancelled = $this->run_job( $undo, JobState::Cancelled );
-		self::assertSame( [ 0, 1 ], [ $cancelled->result['removed'], $cancelled->result['kept'] ] );
-		self::assertSame( [ $this->live . '/b-new/new.txt' => 'changed_since_apply' ], $this->kept( $cancelled ) );
+		foreach ( $replaced as $path ) {
+			file_put_contents( $path, 'edited after the review' );
+		}
+		// What the undo's directory holds right after each synchronisation, rename and removal
+		// of its document and of its list of kept entries: what a stop there leaves.
+		$directory        = $this->jobs->directory( $undo );
+		$stops            = [];
+		$this->job_writes = function ( string $operation, string $path ) use ( &$stops, $directory ): void {
+			$stops[] = [ $operation . ' ' . basename( $path ), $this->snapshot( $directory ) ];
+		};
+		$kept             = $this->kept( $this->run_job( $undo ) );
+		$this->job_writes = null;
+		self::assertEqualsCanonicalizing( $replaced, array_keys( $kept ) );
+		self::assertSame( [ 'changed_since_apply' ], array_values( array_unique( $kept ) ) );
+		self::assertContains( 'rename rows-0.4', array_column( $stops, 0 ) );
+		self::assertContains( 'unlink rows-0.2', array_column( $stops, 0 ) );
+		$manifest = json_decode( (string) file_get_contents( $this->jobs->directory( $job ) . '/undo/manifest.json' ), true, flags: JSON_THROW_ON_ERROR );
+		$retried  = 0;
+		foreach ( $stops as [ $stop, $snapshot ] ) {
+			// Cancelled after the stop: the list holds what the document counted.
+			$document = $this->ended_after( $undo, $snapshot, $stop, $kept );
+			$done     = $document->progress['done'] ?? 0;
+			if ( 'undoing' !== $document->step || $document->state->is_terminal() || $done >= count( $manifest ) ) {
+				continue;
+			}
+			$path = Bytes::base64url_decode( $manifest[ count( $manifest ) - 1 - $done ]['destination'] );
+			if ( ! in_array( $path, $replaced, true ) ) {
+				continue;
+			}
+			// The worker comes back instead, after someone deleted the file at its cursor, keeps
+			// that entry for another reason and is stopped again at any write.
+			$this->stopped( $undo, $snapshot );
+			if ( is_file( $path ) ) {
+				unlink( $path );
+			}
+			$again            = [];
+			$this->job_writes = function ( string $operation, string $written ) use ( &$again, $directory ): void {
+				$again[] = [ $operation . ' ' . basename( $written ), $this->snapshot( $directory ) ];
+			};
+			$this->runner->tick( 0.0 );
+			$this->job_writes = null;
+			self::assertContains( 'rename job.json', array_column( $again, 0 ), $stop );
+			$counted = array_slice( $kept, 0, $document->data['undo_counts']['kept'] ?? 0, true ) + [ $path => 'deleted_since_apply' ];
+			foreach ( $again as [ $second, $retry ] ) {
+				$this->ended_after( $undo, $retry, $stop . ', then ' . $second, $counted );
+				++$retried;
+			}
+		}
+		self::assertGreaterThan( 20, $retried );
+	}
+
+	/**
+	 * Puts back what a stop left in an undo's directory, lets the undo end, cancelled unless
+	 * only its recording was left, and compares its list of kept entries with the entries
+	 * that the document on disk counted.
+	 *
+	 * @param Job                  $undo Undo.
+	 * @param string               $snapshot What the stop left (snapshot()).
+	 * @param string               $stop Where the worker stopped.
+	 * @param array<string,string> $kept Reasons of the kept entries in the order the undo kept them.
+	 * @return Job The document that the stop left.
+	 */
+	private function ended_after( Job $undo, string $snapshot, string $stop, array $kept ): Job {
+		$document = $this->stopped( $undo, $snapshot );
+		$counted  = $document->data['undo_counts']['kept'] ?? 0;
+		$ended    = $document;
+		if ( ! $document->state->is_terminal() ) {
+			// A queued undo is cancelled at once; a running one by its next tick.
+			$ended = $this->runner->cancel( $undo->id ) ?? self::fail( 'The undo is gone.' );
+			if ( ! $ended->state->is_terminal() ) {
+				$ended = $this->run_job( $undo, 'recording' === $document->step ? JobState::Succeeded : JobState::Cancelled );
+			}
+		}
+		self::assertSame( array_slice( $kept, 0, $counted, true ), $this->kept( $ended ), $stop );
+		self::assertSame( $counted, $ended->result['kept'] ?? 0, $stop );
+		return $document;
+	}
+
+	/**
+	 * Puts back what a stop left in an undo's directory, and lets the lease of the stopped
+	 * tick run out, as it does when no worker renews it.
+	 *
+	 * @return Job The document that the stop left.
+	 */
+	private function stopped( Job $undo, string $snapshot ): Job {
+		$this->restore_directory( $this->jobs->directory( $undo ), $snapshot );
+		$document = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		if ( '' !== $document->lease_owner ) {
+			$this->clock->advance( max( 0, $document->lease_expires_at - $this->clock->now()[0] ) + 1 );
+		}
+		return $document;
+	}
+
+	/**
+	 * Keeps what a directory holds now by hard links: the job store and the list of kept
+	 * entries replace a file by a rename or remove it and never write one in place, and the
+	 * private maintenance marker stays the inode of the live one.
+	 *
+	 * @return string Directory of the snapshot.
+	 */
+	private function snapshot( string $directory ): string {
+		++$this->snapshots;
+		$copy = $this->directory . '/snapshots/' . $this->snapshots;
+		mkdir( $copy, 0700, true );
+		foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $directory, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $item ) {
+			$target = $copy . substr( $item->getPathname(), strlen( $directory ) );
+			if ( $item->isDir() ) {
+				mkdir( $target, 0700 );
+			} else {
+				link( $item->getPathname(), $target );
+			}
+		}
+		return $copy;
+	}
+
+	/** Makes a directory hold what a snapshot holds, by the same inodes. */
+	private function restore_directory( string $directory, string $copy ): void {
+		TempDir::remove( $directory );
+		mkdir( $directory, 0700 );
+		foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $copy, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $item ) {
+			$target = $directory . substr( $item->getPathname(), strlen( $copy ) );
+			if ( $item->isDir() ) {
+				mkdir( $target, 0700 );
+			} else {
+				link( $item->getPathname(), $target );
+			}
+		}
 	}
 
 	public function test_a_review_whose_last_check_ends_after_its_budget_does_not_retire_the_apply(): void {
