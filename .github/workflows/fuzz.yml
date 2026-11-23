@@ -37,7 +37,16 @@ jobs:
       - name: Fuzz
         env:
           FUZZ_SECONDS: ${{ inputs.seconds || '120' }}
-        run: php bin/fuzz.php --seconds="$FUZZ_SECONDS" --seed="$GITHUB_RUN_ID"
+        # The job's name states this duration and the release gate reads it from there, so it
+        # must be what the fuzzer runs: whole seconds in ASCII digits, nothing else.
+        run: |
+          case "$FUZZ_SECONDS" in
+            '' | *[!0123456789]* | ??????*)
+              echo "::error::The input seconds must be a whole number of seconds in ASCII digits, not '$FUZZ_SECONDS'."
+              exit 1
+              ;;
+          esac
+          php bin/fuzz.php --seconds="$FUZZ_SECONDS" --seed="$GITHUB_RUN_ID"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

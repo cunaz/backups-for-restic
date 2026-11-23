@@ -252,6 +252,9 @@ class ReleaseGates(unittest.TestCase):
         responses = evidence()
         responses[jobs_key(17)] = jobs("Fuzz parsers (10 s per target)")
         self.refused(self.evidence(responses), "no run fuzzed every target for at least 120 seconds")
+        # Arabic-Indic digits read as 120 with \d and int(); bin/fuzz.php refuses them.
+        responses[jobs_key(17)] = jobs("Fuzz parsers (\u0661\u0662\u0660 s per target)")
+        self.refused(self.evidence(responses), "no run fuzzed every target for at least 120 seconds")
         responses = evidence()
         responses[runs_key("fuzz.yml")] = runs(run(17, "schedule"), run(22, "workflow_dispatch", conclusion="failure"))
         responses[jobs_key(22)] = jobs("Fuzz parsers (120 s per target)", conclusion="failure")

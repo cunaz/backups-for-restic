@@ -31,7 +31,8 @@ import urllib.request
 ENVIRONMENT = "wordpress-org"
 LIVE_JOB = "Operator-configured private repositories"
 ACCEPTANCE_SUFFIX = "(acceptance size)"
-FUZZ_JOB = re.compile(r"^Fuzz parsers \((\d+) s per target\)$")
+# ASCII digits only: \d and int() also take other scripts' digits, which bin/fuzz.php refuses.
+FUZZ_JOB = re.compile(r"^Fuzz parsers \(([0-9]+) s per target\)$")
 FUZZ_SECONDS = 120
 MAIN = "main"
 
