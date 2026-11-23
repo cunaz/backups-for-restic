@@ -25,6 +25,7 @@ use BackupsForRestic\Restore\LiveSpellings;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Support\Bytes;
+use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -93,10 +94,16 @@ final class FileChangesTest extends TestCase {
 		file_put_contents( $this->files . $this->live . '/wp-config.php', 'never publish' );
 		$this->write_report( $this->live . '/skipped-link' );
 		$this->uploads = $this->live . '/uploads';
-		$this->changes = new FileChanges(
+		$this->changes = $this->service( $this->clock );
+		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
+	}
+
+	/** The service of the test site, with the given clock. */
+	private function service( Clock $clock ): FileChanges {
+		return new FileChanges(
 			$this->jobs,
 			$this->staging,
-			$this->clock,
+			$clock,
 			1,
 			function ( bool $config, string $id, ?string $uploads = null ): ApplyPlan {
 				$restore = $this->jobs->get( $id );
@@ -111,7 +118,6 @@ final class FileChangesTest extends TestCase {
 			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free ),
 			fn (): string => $this->uploads
 		);
-		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
 	}
 
 	private function write_report( string $link ): void {
@@ -1105,6 +1111,40 @@ final class FileChangesTest extends TestCase {
 		$cancelled = $this->run_job( $undo, JobState::Cancelled );
 		self::assertSame( [ 0, 1 ], [ $cancelled->result['removed'], $cancelled->result['kept'] ] );
 		self::assertSame( [ $this->live . '/b-new/new.txt' => 'changed_since_apply' ], $this->kept( $cancelled ) );
+	}
+
+	public function test_a_review_whose_last_check_ends_after_its_budget_does_not_retire_the_apply(): void {
+		// An apply of one file, which is gone since: nothing of it is left to revert.
+		$restore = $this->second_restore( [ $this->live . '/single.txt' => 'one' ] );
+		$job     = $this->run_job( $this->changes->start_apply( $restore, false, $this->changes->preview( $restore )['digest'] ) );
+		unlink( $this->live . '/single.txt' );
+		// Each reading of this clock is one and a half seconds after the one before: the check of
+		// the entry begins within the budget of two seconds and ends after it.
+		$clock  = new class( $this->clock->seconds ) implements Clock {
+			private float $time;
+
+			public function __construct( int $start ) {
+				$this->time = $start;
+			}
+
+			public function now(): array {
+				$this->time += 1.5;
+				return [ (int) floor( $this->time ), (int) round( fmod( $this->time, 1.0 ) * 1000000000 ) ];
+			}
+		};
+		$review = $this->service( $clock )->preview_undo( $job->id );
+		self::assertSame(
+			[
+				'restore' => 0,
+				'remove'  => 0,
+				'keep'    => 1,
+			],
+			$review['totals']
+		);
+		self::assertArrayNotHasKey( 'undone', $review );
+		self::assertFileDoesNotExist( $this->jobs->directory( $job ) . '/undo/reverted' );
+		// Within the budget, the same review retires the apply.
+		self::assertTrue( $this->changes->preview_undo( $job->id )['undone'] ?? null );
 	}
 
 	public function test_a_review_does_not_retire_an_apply_whose_entry_came_back_since(): void {

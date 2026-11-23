@@ -303,13 +303,13 @@ final readonly class FileChanges implements StepProvider {
 	 * Whether every attempted entry of an apply has nothing left to revert, decided against its
 	 * live path now. An entry that came back since a review, a check that does not finish in
 	 * SETTLE_SECONDS, such as one that verifies a large file, and anything that cannot be read
-	 * leave the apply as it is.
+	 * leave the apply as it is. The service's clock measures the budget.
 	 *
 	 * @param Job $apply Apply.
 	 * @return bool Whether nothing of it can be reverted any more.
 	 */
 	private function nothing_to_revert( Job $apply ): bool {
-		$deadline = microtime( true ) + self::SETTLE_SECONDS;
+		$deadline = $this->seconds() + self::SETTLE_SECONDS;
 		try {
 			$restore = ApplyJournal::field( $apply, 'restore' );
 			$files   = $this->journal->files( $restore, true );
@@ -320,7 +320,7 @@ final readonly class FileChanges implements StepProvider {
 			for ( $i = 0; $i < $total; ++$i ) {
 				$record = $forward?->mutation( $i );
 				$row    = $record['row'] ?? $rows[ $i ] ?? null;
-				if ( null === $row || microtime( true ) >= $deadline ) {
+				if ( null === $row || $this->seconds() >= $deadline ) {
 					return false;
 				}
 				$source = Bytes::base64url_decode( $row['path'] );
@@ -337,7 +337,18 @@ final readonly class FileChanges implements StepProvider {
 		} catch ( PluginException | FileWorkPending ) {
 			return false;
 		}
-		return true;
+		// The last check can also end after the budget, and then proves as little.
+		return $this->seconds() < $deadline;
+	}
+
+	/**
+	 * The clock's time in seconds, with their fraction.
+	 *
+	 * @return float Seconds.
+	 */
+	private function seconds(): float {
+		[ $seconds, $nanoseconds ] = $this->clock->now();
+		return $seconds + $nanoseconds / 1000000000;
 	}
 
 	/**
