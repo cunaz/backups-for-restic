@@ -18,7 +18,8 @@ defined( 'ABSPATH' ) || exit;
  *
  * The source closure opens the content from the beginning, or, for a ResumableByteSource
  * that stopped early, after the cursor it handed out. Sources that are not resumable are
- * restarted from the beginning when a backup is interrupted inside them.
+ * restarted from the beginning when a backup is interrupted inside them, and so is a
+ * resumable source that reports it could not continue after its cursor.
  */
 final readonly class VirtualFile {
 

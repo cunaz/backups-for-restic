@@ -212,8 +212,26 @@ The **database suite** dumps tables that exercise every code path (keyset and of
 paging, composite and missing keys, binary data, `BIT`, a latin1 column, NUL bytes, line
 breaks, quotes, emoji, a generated column, a view) with forced stops between pages, imports
 the files with the `mariadb` client exactly as the disaster-recovery guide says, and compares
-`CHECKSUM TABLE` results. The conformance suite's `BackupJobTest` runs the whole backup job
-without WordPress against a TLS rest-server and the database.
+`CHECKSUM TABLE` results. It also changes tables while they are dumped: rows deleted and
+inserted before the cursor for keys of every comparable type, a row deleted and inserted
+again within one tick, a table without a key, a column added between ticks and during one,
+and DDL that waits for the tick's metadata lock. It checks TIMESTAMP values across daylight
+saving time, a latin1 connection, definitions with Cyrillic, CJK and Nordic text and a row
+above 16 MiB. Each test names the connection it reads through. On the site's connection and
+on the dump's own run the import of every code path, a column added between ticks, a table
+without a key, the TIMESTAMP values, the latin1 connection, column names of digits only, a
+row limit left on the session, a table that another connection keeps locked and a table of
+rows of 3 MiB. Only on the dump's own run a row deleted and inserted again within one tick,
+DDL that waits for the metadata lock, a definition that changes at every tick and a row too
+large for the memory limit, which depend on its snapshot or its single read of a table
+without a key. Only on the site's connection run keys of every type and rows changed
+before the cursor, a DOUBLE key in exponent notation, resumed against uninterrupted dumps, a
+change within one tick, the row above 16 MiB and the definitions in other scripts.
+`DedicatedConnectionTest` checks the opening of the dump's own connection against a
+stand-in for `wpdb`, its encryption, the end of a table's transaction under every
+`completion_type`, a lock wait and an abandoned read. The conformance suite's
+`BackupJobTest` runs the whole backup job without WordPress against a TLS rest-server and
+the database.
 
 The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
 checksums, including invisible columns and expression defaults, and check that live tables
