@@ -21,6 +21,8 @@
     <testsuites>
         <testsuite name="database">
             <directory>../../Unit/Database</directory>
+            <file>../../Unit/Jobs/DatabaseChangesTest.php</file>
+            <file>../../Unit/Jobs/DatabaseReviewTest.php</file>
             <directory>../../Database</directory>
         </testsuite>
     </testsuites>

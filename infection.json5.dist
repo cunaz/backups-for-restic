@@ -10,9 +10,9 @@
             "src/Engine/Forget",
             "src/Database/Restore"
         ],
-        // Classes of src/Database/Restore that only tests/Database reaches, against a real
-        // server. infection-database.json5.dist measures them with a database; here they
-        // would only count as not covered.
+        // Classes of src/Database/Restore that tests/Database tests against a real server.
+        // infection-database.json5.dist measures them with a database; here they would mostly
+        // count as not covered (WordPressStateAuthorityTest reaches a part of WordPressState).
         "excludes": [
             "ExchangePlan.php",
             "Ledger.php",

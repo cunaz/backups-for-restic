@@ -37,6 +37,7 @@
         <testsuite name="restore">
             <directory>../Unit/Restore</directory>
             <file>../Unit/Jobs/FileChangesTest.php</file>
+            <file>../Unit/Jobs/PlanBuildTest.php</file>
         </testsuite>
         <testsuite name="zip">
             <directory>../Unit/Storage/Zip</directory>

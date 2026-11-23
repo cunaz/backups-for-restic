@@ -5,7 +5,8 @@
     "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
     "source": {
         "directories": ["src/Jobs/Apply"],
-        "excludes": ["DatabaseChanges.php", "DatabaseGeneration.php", "DatabaseReview.php"]
+        // The database half, with ExchangeSite, which only it uses: infection-database.json5.dist.
+        "excludes": ["DatabaseChanges.php", "DatabaseGeneration.php", "DatabaseReview.php", "ExchangeSite.php"]
     },
     "bootstrap": "tests/bootstrap.php",
     "phpUnit": {
