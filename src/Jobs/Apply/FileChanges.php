@@ -775,7 +775,7 @@ final readonly class FileChanges implements StepProvider {
 				$counts['changed_after_review'] += 'keep' !== $action || FileChange::settled( $reason ) ? 1 : 0;
 				$kept                          ??= $this->kept( $job, true );
 				// The document names the version of the last page that holds what it counts.
-				$job->data['kept_page'] = $kept->append( $counts['kept'] - 1, self::kept_named( $job ), ApplyManifest::row( $row['path'], $path, 'keep', $outcome['reason'] ) );
+				$job->data['kept_page_digest'] = $kept->append( $counts['kept'] - 1, self::kept_named( $job ), ApplyManifest::row( $row['path'], $path, 'keep', $outcome['reason'] ) );
 			}
 			$job->data['undo_counts'] = $counts;
 			$job->progress['done']    = ++$done;
@@ -1347,7 +1347,7 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * The paged list of the entries that an undo kept, which the undo writes entry by entry and
 	 * seals with what its job document counts (KeptList). The document stores the count and
-	 * the digest of the last page's counted version (`kept_page`).
+	 * the digest of the last page's counted version (`kept_page_digest`).
 	 *
 	 * @param Job  $job Undo.
 	 * @param bool $create Create its directory.
@@ -1370,7 +1370,7 @@ final readonly class FileChanges implements StepProvider {
 	 * @return string|null Digest.
 	 */
 	private static function kept_named( Job $job ): ?string {
-		$digest = $job->data['kept_page'] ?? null;
+		$digest = $job->data['kept_page_digest'] ?? null;
 		return is_string( $digest ) ? $digest : null;
 	}
 

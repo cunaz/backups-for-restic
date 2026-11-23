@@ -838,9 +838,9 @@ final class FileChangesTest extends TestCase {
 			$document->step                = 'undoing';
 			$document->progress['done']    = $done;
 			$document->data['undo_counts'] = $outcomes;
-			unset( $document->data['kept_page'] );
+			unset( $document->data['kept_page_digest'] );
 			if ( null !== $page ) {
-				$document->data['kept_page'] = $page;
+				$document->data['kept_page_digest'] = $page;
 			}
 			$this->jobs->save( $document );
 		};
@@ -870,7 +870,7 @@ final class FileChangesTest extends TestCase {
 		$this->runner->tick( 0.0 ); // The edited file again, at the same place in the list.
 		self::assertSame( $counts( 1, 1, 1 ), $saved()->data['undo_counts'] );
 		// And one killed after the document counted the last entry, before the next step.
-		$rewind( 3, $counts( 1, 1, 1 ), $saved()->data['kept_page'] );
+		$rewind( 3, $counts( 1, 1, 1 ), $saved()->data['kept_page_digest'] );
 		$done = $this->run_job( $undo );
 		self::assertSame(
 			[
@@ -1503,6 +1503,32 @@ final class FileChangesTest extends TestCase {
 		try {
 			$this->changes->kept_page( $undo->id, 0 );
 			self::fail( 'A list that could not be sealed must not be read as empty.' );
+		} catch ( JobConflict $unavailable ) {
+			self::assertSame( 'kept_list_unavailable', $unavailable->context()['code'] ?? null );
+		}
+	}
+
+	public function test_an_undo_whose_document_counts_kept_entries_without_naming_their_page_stops(): void {
+		$job = $this->run_job( $this->start() );
+		file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The edited file is kept.
+		// A document as an earlier version of the list wrote it: the count without the digest of
+		// the page that holds what it counts.
+		$document = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		self::assertSame( 1, $document->data['undo_counts']['kept'] );
+		unset( $document->data['kept_page_digest'] );
+		$this->jobs->save( $document );
+		// The next kept entry is not built on a page that the document does not name: the undo
+		// stops, and records what it did without the list.
+		$failed = $this->run_job( $undo, JobState::Failed );
+		self::assertSame( [ 'environment', 'The job does not name the counted page of its kept entries.' ], [ $failed->error?->code, $failed->error?->message ] );
+		self::assertSame( [ 0, 1, 'applied' ], [ $failed->result['restored'], $failed->result['kept'], $failed->result['apply_state'] ] );
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+		try {
+			$this->changes->kept_page( $undo->id, 0 );
+			self::fail( 'The list must be said to be unavailable.' );
 		} catch ( JobConflict $unavailable ) {
 			self::assertSame( 'kept_list_unavailable', $unavailable->context()['code'] ?? null );
 		}

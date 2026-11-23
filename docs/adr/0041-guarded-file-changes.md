@@ -298,39 +298,39 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   durably, a revert's journal record is. A restarted tick repeats only the entry that the
   document does not count yet, and a kept entry is written again at the same place in the
   list. The job document is the one commit point, and it names what it counts: with the
-  number of kept entries it stores `kept_page`, the digest of the version of the last page
-  that holds them, computed from the bytes when they were written (`KeptList`). The list
-  holds four invariants. I1: at every moment the files on disk hold at least the entries
-  that the document counts, and no write replaces a version that a count names; each kept
-  entry writes its page as a new version named by the number of entries on it (`rows-0.3`),
-  a retry writes the uncounted version again, also with another reason, the next entry
-  writes a version with one more, and only versions below the counted one are removed. I2:
-  the digest of a full page enters the index of page digests only once the document counts
-  that page, and it is the digest that the document held, not one read from the file later;
-  every slot is a digest that a saved document held. I3: sealing reads one page, the last
-  counted one, and the index, whatever the length of the list. I4: a counted page that
-  changed on disk after it was written is refused: the last page by the seal, and by the
-  next entry that builds on it, against the digest that the document names; every other page
-  when it is read, against its slot. The entry at position c, while the document counts c
-  entries with the digest d, is written in this order: when c begins a page p, the index
-  gets slot p-1 = d unless it holds it already, replaced as a whole on disk; the page's
-  version with the new entry is written on disk on top of the counted version, whose digest
-  must be d; the version below the counted one is removed; then the document is saved with
-  c+1 and the new digest. A stop between any two of these leaves either the earlier document
-  with an index slot that it names and an uncounted version, or the new document, so that a
-  cancelled or failed undo seals its list with the counted entries. The seal gives the index
-  the last page's digest as its last slot and writes the summary; a seal after a stop of an
-  earlier one writes the same summary. A kept entry costs one more synchronised write, its
-  page version, and the index one more on each page boundary. A list that cannot be sealed,
-  such as one whose counted page changed on disk, does not keep the undo from recording its
-  counts and the state of its apply: the result has no list, the job's log says why, and
-  `GET /jobs/{id}/kept-entries` answers 409 `kept_list_unavailable` and WP-CLI says that the
-  list is unavailable, instead of showing an empty list. Before, the seal read and hashed
-  every counted page as it found it, so that a page changed on disk was sealed as if the
-  undo had written it, a long list had to be read in one request, and a seal that failed
-  left the undo without a result. Tests stop an undo with several kept entries, and one
-  across the end of a page, at every synchronisation, rename and removal of the list and of
-  the document, and again at every one of a retry with another reason, and read the list
+  number of kept entries it stores `kept_page_digest`, the digest of the version of the last
+  page that holds them, computed from the bytes when they were written (`KeptList`). The
+  list holds four invariants. I1: at every moment the files on disk hold at least the
+  entries that the document counts, and no write replaces a version that a count names; each
+  kept entry writes its page as a new version named by the number of entries on it
+  (`rows-0.3`), a retry writes the uncounted version again, also with another reason, the
+  next entry writes a version with one more, and only versions below the counted one are
+  removed. I2: the digest of a full page enters the index of page digests only once the
+  document counts that page, and it is the digest that the document held, not one read from
+  the file later; every slot is a digest that a saved document held. I3: sealing reads one
+  page, the last counted one, and the index, whatever the length of the list. I4: a counted
+  page that changed on disk after it was written is refused: the last page by the seal, and
+  by the next entry that builds on it, against the digest that the document names; every
+  other page when it is read, against its slot. The entry at position c, while the document
+  counts c entries with the digest d, is written in this order: when c begins a page p, the
+  index gets slot p-1 = d unless it holds it already, replaced as a whole on disk; the
+  page's version with the new entry is written on disk on top of the counted version, whose
+  digest must be d; the version below the counted one is removed; then the document is saved
+  with c+1 and the new digest. A stop between any two of these leaves either the earlier
+  document with an index slot that it names and an uncounted version, or the new document,
+  so that a cancelled or failed undo seals its list with the counted entries. The seal gives
+  the index the last page's digest as its last slot and writes the summary; a seal after a
+  stop of an earlier one writes the same summary. A kept entry costs one more synchronised
+  write, its page version, and the index one more on each page boundary. A list that cannot
+  be sealed, such as one whose counted page changed on disk, does not keep the undo from
+  recording its counts and the state of its apply: the result has no list, the job's log
+  says why, and `GET /jobs/{id}/kept-entries` answers 409 `kept_list_unavailable` and WP-CLI
+  says that the list is unavailable, instead of showing an empty list. Before, the seal read
+  and hashed every counted page as it found it, so that a page changed on disk was sealed as
+  if the undo had written it, a long list had to be read in one request, and a seal that
+  failed left the undo without a result. Tests stop an undo with several kept entries, and
+  one across the end of a page, at every synchronisation, rename and removal of the list and
+  of the document, and again at every one of a retry with another reason, and read the list
   after each stop.
 - The result counts what this undo did, and a retry counts a revert as its own only from a
   record of this undo that proves it. The record that completes an entry names the undo job

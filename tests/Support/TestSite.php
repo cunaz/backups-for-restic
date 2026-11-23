@@ -572,8 +572,8 @@ final class TestSite {
 				foreach ( $spec["kept"] as $count => [ $path, $reason ] ) {
 					$digest = $list->append( $count, $digest, BackupsForRestic\Restore\ApplyManifest::row( BackupsForRestic\Support\Bytes::base64url_encode( $path ), $path, "keep", $reason ) );
 				}
-				$undo->data["kept_page"]   = $digest;
-				$undo->data["kept_digest"] = $list->seal( $apply, $undo->data["restore"], count( $spec["kept"] ), $digest );
+				$undo->data["kept_page_digest"] = $digest;
+				$undo->data["kept_digest"]      = $list->seal( $apply, $undo->data["restore"], count( $spec["kept"] ), $digest );
 			}
 			$undo->state       = BackupsForRestic\Jobs\JobState::from( $arguments[1] );
 			$undo->finished_at = time();
