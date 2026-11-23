@@ -43,8 +43,10 @@
         "github": true
     },
     // The covered score is ADR 0024's merge gate. The score with uncovered code is a floor
-    // at the value measured on 2026-11-20 (87.90 % with ext-zstd), rounded down; raise it
-    // as tests are added, never lower it. The goal is 90 % for both.
+    // at the value measured on 2026-11-23 with ext-zstd (87.99 %, 90.48 % covered; 87.90 %
+    // and 90.39 % on 2026-11-20), rounded down; raise it as tests are added, never lower it.
+    // The goal is 90 % for both. Unlike the other gates' scores, this one barely moved when
+    // the tests stopped running under Infection's file wrapper (docs/04 §5.6).
     "minCoveredMsi": 90,
     "minMsi": 87,
     "mutators": {
