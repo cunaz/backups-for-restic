@@ -326,7 +326,7 @@ final readonly class FileChanges implements StepProvider {
 				$source = Bytes::base64url_decode( $row['path'] );
 				$path   = self::target( $row );
 				$change = new FileChange( $plan, $files, $this->journal->workspace( $apply ) . '/item-' . ( $record['index'] ?? $i ), $source );
-				$now    = $plan->destination( $source ) === $path ? $change->undo_review( $path, $row['action'], $deadline ) : [
+				$now    = $plan->maps( $source, $path ) ? $change->undo_review( $path, $row['action'], $deadline ) : [
 					'action' => 'keep',
 					'reason' => 'destination_changed',
 				];
@@ -756,7 +756,7 @@ final readonly class FileChanges implements StepProvider {
 					'outcome' => 'kept',
 					'reason'  => $reason,
 				];
-			} elseif ( $plan->destination( $source ) !== $path ) {
+			} elseif ( ! $plan->maps( $source, $path ) ) {
 				$outcome = [
 					'outcome' => 'kept',
 					'reason'  => 'destination_changed',
@@ -799,7 +799,7 @@ final readonly class FileChanges implements StepProvider {
 	 */
 	private static function still_settled( FileChange $change, ApplyPlan $plan, string $source, string $path, string $action, string $reason, float $deadline ): ?array {
 		try {
-			$now = $plan->destination( $source ) === $path ? $change->undo_review( $path, $action, $deadline ) : [
+			$now = $plan->maps( $source, $path ) ? $change->undo_review( $path, $action, $deadline ) : [
 				'action' => 'keep',
 				'reason' => 'destination_changed',
 			];
@@ -1075,7 +1075,7 @@ final readonly class FileChanges implements StepProvider {
 			$source   = Bytes::base64url_decode( $row['path'] );
 			$path     = self::target( $row );
 			$change   = new FileChange( $plan, $files, $this->journal->workspace( $apply ) . '/item-' . $i, $source );
-			$decision = $plan->destination( $source ) === $path ? $change->undo_review( $path, $row['action'] ) : [
+			$decision = $plan->maps( $source, $path ) ? $change->undo_review( $path, $row['action'] ) : [
 				'action' => 'keep',
 				'reason' => 'destination_changed',
 			];

@@ -1393,6 +1393,55 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
 	}
 
+	/**
+	 * An inline and a background apply and their undo.
+	 *
+	 * @return array<string, array{bool}>
+	 */
+	public static function inline_and_background(): array {
+		return [
+			'inline'     => [ false ],
+			'background' => [ true ],
+		];
+	}
+
+	#[DataProvider( 'inline_and_background' )]
+	public function test_an_entry_whose_mapping_the_layout_now_refuses_is_kept_and_the_undo_goes_on( bool $background ): void {
+		$this->stage_fresh();
+		// A file that the apply installs in a folder of the content tree.
+		mkdir( $this->files . '/old/site-content/changed-layout', 0700 );
+		file_put_contents( $this->files . '/old/site-content/changed-layout/settings.php', 'settings' );
+		$this->write_report( '/old/site-content/link' );
+		if ( $background ) {
+			$restore                  = $this->jobs->get( $this->restore ) ?? self::fail( 'The restore is gone.' );
+			$restore->result['files'] = DiskFilePlan::PAGE + 1;
+			$this->jobs->save( $restore );
+			$plan = $this->run_job( $this->changes->request_preview( $this->restore, false, false ) );
+			$job  = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		} else {
+			$job = $this->run_job( $this->changes->start_apply( $this->restore, false, $this->changes->preview( $this->restore )['digest'] ) );
+		}
+		self::assertSame( 'settings', file_get_contents( $this->live . '/changed-layout/settings.php' ) );
+		// That folder becomes the uploads root: the content path of the file would now map into
+		// the uploads tree, a mapping that the layout refuses.
+		$this->uploads = $this->live . '/changed-layout';
+		$review        = $this->changes->request_preview( $job->id, true, false );
+		$plan_job      = null;
+		if ( $review instanceof Job ) {
+			$plan_job = $this->run_job( $review )->id;
+			$review   = $this->changes->request_preview( $job->id, true, false, $plan_job );
+		}
+		self::assertIsArray( $review );
+		$reasons = array_column( $review['entries'], 'reason', 'destination' );
+		self::assertSame( 'destination_changed', $reasons[ $this->live . '/changed-layout/settings.php' ] );
+		self::assertSame( 'destination_changed', $reasons[ $this->live . '/changed-layout' ] );
+		self::assertSame( 'undo_journal', $reasons[ $this->live . '/a-existing' ] );
+		$undo = $this->run_job( $this->changes->start_undo( $job->id, $review['digest'], '', $plan_job ) );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertSame( 'settings', file_get_contents( $this->live . '/changed-layout/settings.php' ) );
+		self::assertSame( 'destination_changed', $this->kept( $undo )[ $this->live . '/changed-layout/settings.php' ] );
+	}
+
 	public function test_a_confirmed_apply_keeps_its_uploads_root_while_its_ticks_boot_without_the_filter(): void {
 		$this->stage_fresh();
 		$confirmed = $this->uploads;

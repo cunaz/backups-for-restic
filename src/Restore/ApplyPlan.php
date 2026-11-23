@@ -254,6 +254,22 @@ final class ApplyPlan {
 	}
 
 	/**
+	 * Whether the site maps a snapshot path to a live path now. A mapping that the site's
+	 * layout refuses, because it would be ambiguous, maps the path to no live path.
+	 *
+	 * @param string $path Absolute snapshot path.
+	 * @param string $target Live path.
+	 * @return bool Whether the path maps to the live path.
+	 */
+	public function maps( string $path, string $target ): bool {
+		try {
+			return $this->destination( $path ) === $target;
+		} catch ( FormatException | InvalidArgument ) {
+			return false;
+		}
+	}
+
+	/**
 	 * Enumerates the directory without materializing the plan or following snapshot links.
 	 *
 	 * @param string                                     $files Canonical staging directory.

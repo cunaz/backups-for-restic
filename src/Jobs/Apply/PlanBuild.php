@@ -246,7 +246,7 @@ final class PlanBuild {
 			$target = Bytes::base64url_decode( $row['destination'] ?? '' );
 			$change = new FileChange( $this->plan, $this->files, $workspace . '/item-' . $item['index'], $source, $scope );
 			try {
-				$decision = $this->plan->destination( $source ) === $target ? $change->undo_review( $target, $row['action'], $deadline, $spellings ) : [
+				$decision = $this->plan->maps( $source, $target ) ? $change->undo_review( $target, $row['action'], $deadline, $spellings ) : [
 					'action' => 'keep',
 					'reason' => 'destination_changed',
 				];
