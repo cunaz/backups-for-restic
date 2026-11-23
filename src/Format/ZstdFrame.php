@@ -14,8 +14,9 @@ use BackupsForRestic\Exception\FormatException;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Checks the frame envelope before ext-zstd allocates its window and output buffers.
- * A stream without a declared size is bounded by its block types and window size.
+ * Checks the frame envelope before ext-zstd allocates its window and output buffers, and tells
+ * the caller what they can take (Compression). A stream without a declared size is bounded by
+ * its block types and window size.
  */
 final readonly class ZstdFrame {
 
@@ -25,8 +26,10 @@ final readonly class ZstdFrame {
 	 * @param int      $end Offset immediately after the frame.
 	 * @param int|null $size Declared content size, when present.
 	 * @param bool     $skip Whether this is a skippable frame.
+	 * @param int      $bound The most bytes the blocks of the frame can decode to.
+	 * @param int      $window Window size from the frame header; 0 for a single segment.
 	 */
-	private function __construct( public int $end, public ?int $size, public bool $skip = false ) {
+	private function __construct( public int $end, public ?int $size, public bool $skip, public int $bound, public int $window ) {
 	}
 
 	/**
@@ -47,7 +50,7 @@ final readonly class ZstdFrame {
 		if ( ( ord( $magic[0] ) & 0xf0 ) === 0x50 && "\x2a\x4d\x18" === substr( $magic, 1 ) ) {
 			$cursor = $start + 4;
 			$skip   = self::integer( $data, $cursor, 4, $length - $cursor - 4 );
-			return new self( $cursor + $skip, 0, true );
+			return new self( $cursor + $skip, 0, true, 0, 0 );
 		}
 		$flags = ord( $data[ $start + 4 ] );
 		if ( "\x28\xb5\x2f\xfd" !== $magic || 0 !== ( $flags & 8 ) ) {
@@ -88,7 +91,7 @@ final readonly class ZstdFrame {
 		if ( $cursor > $length ) {
 			throw new FormatException( 'Compressed repository data ends inside a frame.' );
 		}
-		return new self( $cursor, $size );
+		return new self( $cursor, $size, false, $bound, $window );
 	}
 
 	/**
