@@ -18,9 +18,9 @@ final class DatabaseMessagesTest extends TestCase {
 	 *
 	 * @param string $code Job error code.
 	 */
-	private static function text( string $code ): string {
+	private static function text( string $code, string $type = '' ): string {
 		require_once dirname( __DIR__, 2 ) . '/Fixtures/WordPress/translate.php';
-		$texts = Messages::job_error( $code );
+		$texts = Messages::job_error( $code, $type );
 		return $texts['message'] . ' ' . $texts['hint'];
 	}
 
@@ -56,5 +56,35 @@ final class DatabaseMessagesTest extends TestCase {
 		self::assertStringContainsString( 'does not list every connection', $text );
 		self::assertStringContainsString( 'performance_schema_max_thread_instances', $text );
 		self::assertStringContainsString( 'PROCESS', $text );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_an_undo_points_to_the_retained_tables_and_a_restore_to_the_staged_sql(): void {
+		foreach ( [ 'database_admin_capabilities', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large' ] as $code ) {
+			$undo = self::text( $code, 'database_undo' );
+			self::assertStringContainsString( 'the earlier database', $undo, $code );
+			self::assertStringContainsString( 'Until the undo window ends, a database administrator can recover the earlier tables', $undo, $code );
+			self::assertStringNotContainsString( 'staged SQL', $undo, $code );
+			$apply = self::text( $code, 'database_apply' );
+			self::assertStringContainsString( 'the backup', $apply, $code );
+			self::assertStringContainsString( 'staged SQL files', $apply, $code );
+			self::assertSame( $apply, self::text( $code ), $code );
+		}
+		self::assertStringContainsString( 'Give your account on this site a role that the earlier database also has', self::text( 'database_admin_capabilities', 'database_undo' ) );
+		// Codes without an undo text of their own keep the restore's.
+		self::assertSame( self::text( 'database_exchange_changed' ), self::text( 'database_exchange_changed', 'database_undo' ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_value_beyond_its_bound_is_named_with_the_bound(): void {
+		foreach ( [ 'database_apply', 'database_undo' ] as $type ) {
+			self::assertStringContainsString( 'larger than 1 MiB', self::text( 'database_roles_too_large', $type ) );
+			self::assertStringContainsString( 'larger than 256 KiB', self::text( 'database_plugins_too_large', $type ) );
+			// Also refused: a list that this plugin's entry would take beyond the bound.
+			self::assertStringContainsString( 'or would be with Backups for restic added to it', self::text( 'database_plugins_too_large', $type ) );
+		}
+		$record = self::text( 'database_admin_capabilities_unreadable' );
+		self::assertStringContainsString( 'stored more than once, longer than 64 KiB', $record );
+		self::assertSame( $record, self::text( 'database_admin_capabilities_unreadable', 'database_undo' ) );
 	}
 }

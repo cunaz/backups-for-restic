@@ -300,11 +300,16 @@ snapshot**. The same action is available under **Backups → Restores**.
    up to 100 actions per page.
 4. Expand **Restore tables to the live database** and choose **Preview live database
    changes**. Review each table marked for replacement or creation and any compatibility
-   findings. On an eligible MySQL installation, acknowledge the plan, type the destination
-   home URL, enter your WordPress password and choose **Apply database restore**. The
-   exchange keeps this site's address, the confirming administrator and active sessions,
-   roles, active plugins, cron and backup configuration. Open the site and verify its
-   content after the job succeeds.
+   findings. The review lists what the exchange keeps from this site: its address, the
+   WordPress database version, WP-Cron's lock, the settings and state of Backups for restic,
+   and your account with all of its user metadata and active sessions. Everything else
+   comes from the backup, the user roles, the active plugins and the scheduled events among
+   it. The review shows the plugins that are active now and will not be afterwards and the
+   other way round, each with whether its file is on this site, and the roles whose
+   capabilities change for every account that has them. Read them before you confirm. On
+   an eligible MySQL installation, acknowledge the plan, type the destination home URL,
+   enter your WordPress password and choose **Apply database restore**. Open the site and
+   verify its content after the job succeeds.
 5. **Undo live database changes** lists the previous table generations and their expiry.
    Choose **Preview database undo**, review the tables and confirm with the site's URL and
    your WordPress password. Reverting returns the earlier generation to service. Changes
@@ -313,7 +318,14 @@ snapshot**. The same action is available under **Backups → Restores**.
 6. If the preview reports a blocker, use the staged SQL dump and the manual import
    procedure in Scenario D. MariaDB's write-lock behavior requires manual import.
    An automatic exchange requires the configured backup capability and all four WordPress
-   capabilities `manage_options`, `edit_users`, `promote_users` and `update_core`.
+   capabilities `manage_options`, `edit_users`, `promote_users` and `update_core`: now, and
+   under the roles of the backup, because the exchange keeps your account with its own
+   roles and capabilities but takes the roles themselves from the backup. If the backup's
+   roles would not give them to you, for example because your role was created after the
+   backup, the review refuses and names the capabilities. Confirm with an administrator
+   account whose role has them in the backup, or restore by hand. The limits of what the
+   review reads are listed under "Applying a rehearsed database on a running installation"
+   below.
 
 ## Scenario C — a single file or folder
 
@@ -388,9 +400,50 @@ maintenance have ended: the site's database account must have had no other conne
 the site database for a second, so a request that reconnected in between is waited for as
 well. Persistent database connections, long-running WP-CLI processes or another
 application using the same database account keep it waiting; it then leaves maintenance
-and tries again later, at most five times. The current home and site URLs,
-active plugins, roles, confirming administrator and sessions, backup configuration and
-cron schedule carry across.
+and tries again later, at most five times. The current home and site URLs, the
+WordPress database version, WP-Cron's lock, the backup configuration and state of Backups
+for restic and the confirming administrator with all of their user metadata and sessions
+carry across. The roles, the active plugins and the scheduled events are those of the
+backup; Backups for restic is added to the backup's active plugins if they lack it. A plugin
+that is active now and not in the backup stops without its deactivation routine, and
+WordPress skips a plugin of the backup whose file is missing on this site; the review lists
+both. Install the plugins that you need before the restore.
+
+**What the review reads, and its limits.** The review reads the backup's user roles (at most
+1 MiB), its list of active plugins (at most 256 KiB, also with Backups for restic added to it)
+and your account's own record of roles and capabilities on this site (at most 64 KiB). A larger
+value, or one that is not stored the way WordPress stores it, refuses the exchange with a
+message that names it: use the manual
+SQL import of Scenario D for such a backup, or repair your account's record, which WordPress
+reads from the first of several entries, and review again. The roles and the list of active
+plugins of the running site are only compared, because the exchange replaces them. If they
+cannot be read, the review says so and lists all of the backup's roles or plugins instead; the
+restore can go ahead, but its undo would bring those values back and could not check them,
+so it would be refused: only a database administrator could then bring back the earlier
+tables before the undo window ends. The review lists, for every role that differs, the
+capabilities it grants and the denials it stores only afterwards or only now, each list under
+its own label. A denial takes the capability from an account that holds this role together
+with another role that grants it, unless that other role comes after it in the account's roles
+or the capability is granted to the account itself. If the capability that Backups for restic
+requires is configured differently between your confirmation and the exchange, the exchange
+stops before it changes anything; review and confirm again.
+
+**Three things the review cannot show.**
+- A plugin that the backup starts can change what an account may do once it runs: it can
+  filter capabilities, change the capability that the pages of Backups for restic require
+  (the filter `backups_for_restic_capability`) or forbid file changes, which takes
+  `update_core` away. The review checks your account with the capability that this site
+  requires now and the roles as stored, without filters. If your account lacks access after
+  the restore, deactivate that plugin on the Plugins screen.
+- A WP-Cron request that ran the exchange goes on with the events that were due when it
+  started. WordPress moves each of them to its next time in the event list that is now live,
+  so such an event of the earlier site can appear in the restored list. The plugins of the
+  earlier site are still loaded in that request, so a due event of a plugin that is no longer
+  active can still run there once, against the restored database. In later requests its
+  event finds no plugin that answers it.
+- A backup whose list of active plugins names another copy of Backups for restic in another
+  directory starts that copy next to this one. The review lists it as a plugin that starts;
+  delete the other copy's directory first if it is still on the site.
 
 The automatic exchange supports writable MySQL 8.0.22 or later with the Performance
 Schema enabled and enough of its thread instances to list every connection, InnoDB tables with InnoDB table locks, binary logging in the row or mixed
@@ -408,7 +461,12 @@ administrator to perform a manual import where these grants are unavailable.
 
 **Undo and edits made after apply.** An apply job records a 24-hour undo deadline.
 Within it, review and confirm the undo on the Restores screen. Undo brings the original
-generation live and copies across the current protected administrator and site state.
+generation live, with its own roles, active plugins and scheduled events, and copies across
+the same state from the running site as the apply. Its review compares the two generations
+in the same way. If the undo is refused because your account would lack a capability under
+the earlier roles, give your account on this site a role that the earlier database also has,
+for example Administrator, and review again; the staged SQL files hold the backup, which is
+live already, not the earlier database.
 New posts, users and ordinary settings created in the intervening live generation then
 remain in private database tables for a further 24 hours. Export any required newer
 data before the undo job's reported retention deadline. The plugin's heartbeat expires

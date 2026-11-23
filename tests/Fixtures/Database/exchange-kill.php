@@ -5,6 +5,7 @@ declare( strict_types=1 );
 require dirname( __DIR__, 2 ) . '/bootstrap.php';
 
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Database\Restore\Continuity;
 use BackupsForRestic\Database\Restore\ExchangePlan;
 use BackupsForRestic\Database\Restore\MysqliConnection;
 use BackupsForRestic\Database\Restore\OwnedTables;
@@ -48,5 +49,5 @@ $connection = new class( $direct, $directory . '/exchange-kill', $point ) implem
 $saved = json_decode( (string) file_get_contents( $directory . '/exchange-plan.json' ), true, flags: JSON_THROW_ON_ERROR );
 $owned = new OwnedTables( $connection, 'wp_', $saved['fingerprint'], $saved['token'] );
 $plan  = ExchangePlan::load( $saved['plan'], $owned, 'wp_' );
-( new TableExchange( $connection ) )->run( $plan, 1, 'undo' === $phase );
+( new TableExchange( $connection ) )->run( $plan, 1, 'undo' === $phase, Continuity::of( [ 'manage_options', 'edit_users', 'promote_users', 'update_core' ], null ) );
 throw new RuntimeException( 'The exchange worker missed the requested RENAME boundary.' );

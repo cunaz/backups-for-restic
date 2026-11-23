@@ -11,6 +11,7 @@ namespace BackupsForRestic\Jobs\Apply;
 
 use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Database\Restore\Continuity;
 use BackupsForRestic\Database\Restore\ExchangePlan;
 use BackupsForRestic\Database\Restore\SessionDrain;
 use BackupsForRestic\Database\Restore\TableExchange;
@@ -77,7 +78,8 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param \Closure():Connection      $connection Non-reconnecting SQL handle.
 	 * @param \Closure(int):list<string> $policy Current site, cache and initiating user eligibility.
 	 * @param FileMaintenance            $maintenance Scoped WordPress maintenance marker.
-	 * @param \Closure():void            $refresh Clear WordPress caches and reschedule heartbeat.
+	 * @param \Closure():void            $refresh Clear WordPress caches and roles and reschedule heartbeat.
+	 * @param ExchangeSite               $site This plugin's path, the capabilities a restore needs and the plugin file check.
 	 * @param SessionDrain               $drain Wait for requests from before maintenance.
 	 */
 	public function __construct(
@@ -91,6 +93,7 @@ final readonly class DatabaseChanges implements StepProvider {
 		private \Closure $policy,
 		private FileMaintenance $maintenance,
 		private \Closure $refresh,
+		private ExchangeSite $site,
 		private SessionDrain $drain = new SessionDrain()
 	) {
 		/**
@@ -99,7 +102,7 @@ final readonly class DatabaseChanges implements StepProvider {
 		 * @var \ArrayObject<string,true> $interrupted
 		 */
 		$interrupted       = new \ArrayObject();
-		$this->reviews     = new DatabaseReview( $jobs, $staging, $hours, $prefix );
+		$this->reviews     = new DatabaseReview( $jobs, $staging, $hours, $prefix, $site );
 		$this->interrupted = $interrupted;
 	}
 
@@ -325,7 +328,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param Job  $owner Owning apply.
 	 * @param int  $user Initiating administrator.
 	 * @param bool $pinned A queued undo pins the original window.
-	 * @return array{preview:Preview,authority:string,rebound:array{after:array<int,string>,witness:string|null}} Undo review and private binding.
+	 * @return array{preview:Preview,authority:string,rebound:array{after:array<int,string>,witness:string|null},capabilities:list<string>} Undo review, private binding and the capabilities checked.
 	 * @throws JobConflict If the recovery window expired.
 	 */
 	private function undo_review( Job $owner, int $user, bool $pinned ): array {
@@ -342,15 +345,25 @@ final readonly class DatabaseChanges implements StepProvider {
 				'action' => null === $pair['before'] ? 'remove_from_live' : 'replace',
 			];
 		}
-		$blockers = ( $this->policy )( $user );
+		$blockers  = ( $this->policy )( $user );
+		$authority = '';
+		$state     = DatabaseReview::blank( $this->site->plugin );
+		$required  = [];
 		if ( $this->prefix !== $plan->document['prefix'] ) {
 			$blockers[] = 'wordpress_environment';
-		}
-		$authority = '';
-		if ( [] === $blockers ) {
+		} else {
+			// As in the apply review: the comparison first, then the authority if nothing blocks,
+			// so that both reviews answer the same for the same account.
 			try {
-				$authority = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
-				$plan      = ( new TableExchange( $connection ) )->review_undo( $recorded, $user );
+				[ $plan, $retained ] = ( new TableExchange( $connection ) )->review_undo( $recorded, $user );
+				// The undo brings back the retained generation's own roles and active plugins.
+				$facts    = $this->reviews->state( $connection, $user, $retained['roles'], $retained['plugins'] );
+				$state    = $facts['state'];
+				$required = $facts['capabilities'];
+				$blockers = [ ...$blockers, ...$facts['blockers'] ];
+				if ( [] === $blockers ) {
+					$authority = ( new WordPressState( $connection ) )->authority( $this->prefix, $user );
+				}
 			} catch ( DatabaseFailed | FormatException $error ) {
 				$code       = $error->context()['code'] ?? null;
 				$blockers[] = is_string( $code ) ? $code : 'database_exchange_changed';
@@ -363,12 +376,13 @@ final readonly class DatabaseChanges implements StepProvider {
 			}
 		}
 		return [
-			'preview'   => DatabaseReview::summary( self::field( $owner, 'restore' ), $user, $entries, $blockers, [], [ 'undo', $owner->id, $owner->data['retained_until'], $plan->document, $authority ] ),
-			'authority' => $authority,
-			'rebound'   => [
+			'preview'      => DatabaseReview::summary( self::field( $owner, 'restore' ), $user, $entries, $blockers, [], [ 'undo', $owner->id, $owner->data['retained_until'], $plan->document, $authority, $required ], $state ),
+			'authority'    => $authority,
+			'rebound'      => [
 				'after'   => $after,
 				'witness' => $plan->document['witness'] !== $recorded->document['witness'] ? $plan->document['witness'] : null,
 			],
+			'capabilities' => $required,
 		];
 	}
 
@@ -465,8 +479,9 @@ final readonly class DatabaseChanges implements StepProvider {
 		if ( JobType::DatabaseUndo === $job->type ) {
 			$review = $this->undo_review( $this->original( self::field( $job, 'apply' ) ), $user, true );
 			self::confirmed( $review['preview'], $digest );
-			$job->data['authority'] = $review['authority'];
-			$job->data['rebound']   = $review['rebound'];
+			$job->data['authority']    = $review['authority'];
+			$job->data['rebound']      = $review['rebound'];
+			$job->data['capabilities'] = $review['capabilities'];
 			return true;
 		}
 		$connection = ( $this->connection )();
@@ -483,6 +498,7 @@ final readonly class DatabaseChanges implements StepProvider {
 				'uuid'        => $review['target']['uuid'],
 			];
 			$job->data['authority']      = $review['authority'];
+			$job->data['capabilities']   = $review['capabilities'];
 			$job->data['source_path']    = $review['path'];
 			$job->data['content']        = $review['content'];
 			$job->data['ids']            = $review['target']['ids'];
@@ -569,7 +585,8 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Checks the worker's current authorization, publishes maintenance, waits for requests
+	 * Adds this plugin to the generation that the exchange brings live, before maintenance,
+	 * checks the worker's current authorization, publishes maintenance, waits for requests
 	 * that started before it and performs the one live RENAME. Retry a committed operation
 	 * by refreshing caches and recording its witness. A lost SQL reply triggers the same
 	 * reconciliation in cleanup.
@@ -596,6 +613,13 @@ final readonly class DatabaseChanges implements StepProvider {
 			return false;
 		}
 		unset( $job->data['database_swap_deferred'] );
+		if ( ! $committed ) {
+			$plugin = $this->continuity( $job )->plugin;
+			if ( null !== $plugin ) {
+				// On the private target only; the live tables are neither locked nor written.
+				$exchange->activate( $plan, $undo, $plugin );
+			}
+		}
 		$this->maintenance->enter( $job->id, $directory, '' );
 		$entered = microtime( true );
 		try {
@@ -617,7 +641,7 @@ final readonly class DatabaseChanges implements StepProvider {
 				}
 				// Only a few statements separate the quiet interval from the table locks.
 				$this->drain->wait( $connection, $plan->document['database'], $entered, $deadline );
-				$exchange->run( $plan, $user, $undo, self::field( $job, 'authority' ) );
+				$exchange->run( $plan, $user, $undo, $this->continuity( $job ), self::field( $job, 'authority' ) );
 			}
 			DatabaseGeneration::record( $owner, $job, $state );
 			$this->jobs->save( $owner );
@@ -835,6 +859,38 @@ final readonly class DatabaseChanges implements StepProvider {
 		if ( ! $preview['applicable'] || ! hash_equals( $preview['digest'], $digest ) ) {
 			JobConflict::raise( 'The reviewed database plan changed or has unresolved compatibility blockers.', [ 'code' => 'database_exchange_changed' ] );
 		}
+	}
+
+	/**
+	 * The capabilities that the review checked for the approving administrator, from the job,
+	 * with this plugin's path. A job confirmed before the review compared the roles and plugins
+	 * of both generations has none and has to be reviewed again. So does one whose capabilities
+	 * are no longer those that the site requires: a filter of the backup capability may have
+	 * changed since the review, and the exchange checks the administrator under the other
+	 * generation's roles with the capabilities that it gets here.
+	 *
+	 * @param Job $job Database apply or undo.
+	 * @return Continuity What the exchange has to leave working.
+	 * @throws JobConflict If the job lacks valid capabilities or the site requires others now.
+	 */
+	private function continuity( Job $job ): Continuity {
+		try {
+			$reviewed = Continuity::of( $job->data['capabilities'] ?? null, $this->site->plugin );
+		} catch ( InvalidArgument ) {
+			JobConflict::raise( 'This database change was confirmed before its review compared the roles and active plugins of both generations.', [ 'code' => 'database_exchange_changed' ] );
+		}
+		try {
+			$required = $this->site->continuity()->capabilities;
+		} catch ( InvalidArgument ) {
+			$required = [];
+		}
+		sort( $required, SORT_STRING );
+		$checked = $reviewed->capabilities;
+		sort( $checked, SORT_STRING );
+		if ( $required !== $checked ) {
+			JobConflict::raise( 'The capabilities that a database restore requires changed after the review.', [ 'code' => 'database_exchange_changed' ] );
+		}
+		return $reviewed;
 	}
 
 	/**
