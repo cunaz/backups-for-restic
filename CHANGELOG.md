@@ -274,6 +274,8 @@ All notable changes are documented here. The format follows
 - One database restore whose cleanup keeps failing no longer stops older ones from expiring.
 - The database review reports disabled InnoDB table locks, statement-based binary logging and a Galera node before the import starts, instead of failing after it.
 - A row batch larger than the server's `max_allowed_packet` is refused with its own message before it is sent, and the job log names its size, the limit it needs and the server's limit. It was reported as a busy database and retried.
+- A file in a compressed repository can be restored when restic stored one of its chunks as a full 8 MiB of data that does not compress, such as part of a photo or a video. Such a chunk is stored 202 bytes longer than itself, and restore refused it as an oversized blob.
+- A compressed index file is decoded beside one copy of itself, and the check before decoding counts what the zstd extension allocates: twice a declared size. Index files of 150,000 blobs, as restic 0.14 to 0.16 write them in compressed repositories, load under 128 MiB with WordPress loaded, and so do 8 MiB data blobs beside a large index in restore and check. An index file that cannot be decoded in the memory left stops the job with `index_too_large` instead of a PHP out-of-memory error.
 - When the private directory runs out of space during job creation, WP-CLI reports how to retry. Scheduled backups keep their due time and retry on the next heartbeat after space becomes available.
 - Registering the REST API routes no longer emits a PHP 8.6 deprecation notice.
 - A pack listing that the server answered with something else, such as the error page of a

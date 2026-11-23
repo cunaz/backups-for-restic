@@ -63,5 +63,46 @@ algorithm deduplicates against snapshots written by restic.
   output from their blocks. It accepts concatenated frames and skips complete padding
   frames. Pack entries must also decode to the size in the pack header and match their
   SHA-256. The absolute limit is 128 MiB per object. On a host with a PHP memory limit,
-  the reader also reserves space for the native buffers and the returned PHP string.
-  A job that reaches either limit reports `decompression_limit`.
+  what decoding a frame takes must also fit into the memory that the limit leaves, less
+  2 MiB for allocation rounding and for reporting the refusal.
+  A job that reaches either limit reports `decompression_limit`. The exception is an index
+  file that cannot be decoded beside the memory in use: the job's memory budget reports it
+  as `index_too_large` ([ADR 0031](0031-compact-index-and-memory-budget.md)).
+- What decoding takes was measured with ext-zstd 0.18.0 and libzstd 1.5.7 on PHP 8.3.36
+  and 8.3.37. A frame that declares its size, as restic writes every object of 256 bytes or
+  more, is decoded in one pass into a buffer of that size. The buffer is then copied into
+  the returned string. At 8, 21.7 and 64 MiB the peak was exactly twice the size, and the
+  size remained afterwards; there is no third copy. A frame without a declared size goes
+  through a 128 KiB buffer into a string that grows by reallocation. From 1 to 64 MiB its
+  peak in use was 1.06 to 1.50 times the output. In reserved memory it varied from run to
+  run and reached 1.86 times, when the string could not grow in place. libzstd allocates
+  the window of such a frame outside PHP's limit.
+  The reader therefore counts twice a declared size, and for a frame without one, four
+  times the larger of its window and the output its blocks allow. A frame that is not the
+  whole input is copied out first. The output of a later frame is appended to what came
+  before, which can copy that once. Both count as well.
+- The first version of this check divided the memory left by four for every frame, while
+  the sealed file, its plaintext and a copy without the encoding byte were still in memory.
+  That refused the index files that restic 0.14.0 to 0.16.x write in compressed
+  repositories. These releases close an index file at 150,000 blobs
+  (`indexMaxBlobsCompressed`), 21.7 MiB of JSON and 7.5 MiB as zstd at level 3. Now the
+  sealed file and the plaintext are let go before decoding, and the decoder works beside
+  one copy of the compressed bytes. Such files were loaded through `Repository::load_index()`
+  with the job's budget under `memory_limit=128M` on PHP 8.3.37, with memory filled to a
+  baseline first.
+  The baselines move in steps of 2 MiB, as PHP reserves memory. In every tick of the CI
+  memory runs, WordPress 7.1.5 had reserved 34 MiB once it was loaded.
+
+  | Version | One file: loads up to a baseline of | Peak at 34 MiB | Two files: loads up to |
+  | --- | --- | --- | --- |
+  | Before the frame check (`9bb0902`) | 62 MiB; a fatal out-of-memory error from 64 MiB | 100.0 MiB | 48 MiB; fatal from 50 MiB |
+  | First frame check (`acaecdc`) | 16 MiB; `decompression_limit` from 18 MiB | refused | refused at every baseline down to 4 MiB |
+  | Now | 62 MiB; `index_too_large` from 64 MiB | 84.9 MiB | 52 MiB; `index_too_large` from 54 MiB |
+
+- A data blob of nearly 8 MiB that does not compress was decoded beside an index of 500,000
+  blobs, as restore and check read it, with the memory reserved before the read as the
+  measure. The first frame check refused it from 78.5 MiB, which that index and the 34 MiB
+  baseline reach. The code before the frame check decoded it up to 94.5 MiB and ended with a
+  fatal error from 96.5 MiB. Now it decodes up to 92.5 MiB and is refused with
+  `decompression_limit` above that. From 104.5 MiB, decrypting the blob alone exhausts the
+  limit in all three versions.

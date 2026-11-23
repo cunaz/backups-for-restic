@@ -1425,7 +1425,8 @@ translated message and a hint. The codes:
 | `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
 | `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
-| `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
+| `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it, or a compressed index file cannot be decoded beside the memory in use ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
+| `decompression_limit` | a compressed object that would decode to more than 128 MiB, or whose decoding does not fit into the memory PHP has left, such as a large data blob read beside a large index ([ADR 0019](adr/0019-repository-format-and-chunker.md)) |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
 | `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |

@@ -513,7 +513,7 @@ final class RestoreRun {
 		$end = min( count( $content ), $cursor['blob'] + BlobBatch::MAX_BLOBS );
 		for ( $number = $cursor['blob']; $number < $end; ++$number ) {
 			$entry = $this->current_index()->find( $content[ $number ], BlobType::Data )?->entry;
-			if ( null === $entry || $entry->length < Cipher::OVERHEAD || $entry->length > RabinChunker::MAX_SIZE + Cipher::OVERHEAD || $entry->uncompressed_length > RabinChunker::MAX_SIZE ) {
+			if ( null === $entry || $entry->length < Cipher::OVERHEAD || $entry->length > BlobBatch::max_length( $entry ) || $entry->uncompressed_length > RabinChunker::MAX_SIZE ) {
 				throw new FormatException( 'A selected file references an absent or oversized blob.' );
 			}
 			$cursor['bytes'] = self::add( $cursor['bytes'], 0 === $entry->uncompressed_length ? $entry->length - Cipher::OVERHEAD : $entry->uncompressed_length );
