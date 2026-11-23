@@ -464,6 +464,9 @@ final readonly class FileChange {
 		if ( ( 'mkdir' === $action ? 'keep' : 'replace' ) !== $policy['action'] ) {
 			return $policy['reason'];
 		}
+		if ( ! self::changeable( dirname( $path ) ) ) {
+			return 'unwritable_destination';
+		}
 		if ( 'mkdir' === $action ) {
 			$child = self::has_child( $path );
 			return false === $child ? null : ( true === $child ? 'new_children' : 'changed_since_apply' );
@@ -508,7 +511,11 @@ final readonly class FileChange {
 				return self::decision( 'keep', 'changed_since_apply' );
 			}
 			$policy = $this->live_policy( $path, $review );
-			return 'keep' === $policy['action'] ? self::decision( 'remove', 'undo_journal' ) : self::decision( 'keep', $policy['reason'] );
+			if ( 'keep' !== $policy['action'] ) {
+				return self::decision( 'keep', $policy['reason'] );
+			}
+			// rmdir() needs a parent that the worker may change; a refusal known now keeps it.
+			return self::changeable( dirname( $path ) ) ? self::decision( 'remove', 'undo_journal' ) : self::decision( 'keep', 'unwritable_destination' );
 		}
 		if ( 'restore' === $record['phase'] && self::at( $path, $record['backup'] ) && $this->holds( $path, $record['original'], 1 ) ) {
 			// An interrupted undo of this entry has put the original back already.
@@ -527,6 +534,10 @@ final readonly class FileChange {
 			if ( 'replace' !== $policy['action'] ) {
 				return self::decision( 'keep', $policy['reason'] );
 			}
+		} elseif ( ! self::changeable( dirname( $path ) ) ) {
+			// The site policy refuses an unwritable parent; a file whose private name remains
+			// is decided without it, and its unlink would be refused as well.
+			return self::decision( 'keep', 'unwritable_destination' );
 		}
 		$live = self::live_identity( $path );
 		if ( null === $live || ! $this->holds( $path, $record['source'], $linked ? 2 : 1 ) || self::live_identity( $path ) !== $live ) {
@@ -1210,6 +1221,18 @@ final readonly class FileChange {
 	private static function exists( string $path ): bool {
 		clearstatcache( true );
 		return file_exists( $path ) || is_link( $path );
+	}
+
+	/**
+	 * Whether this process may add and remove names in a folder: write and search permission.
+	 * A rename, unlink or rmdir in a folder without them would be refused.
+	 *
+	 * @param string $folder Folder.
+	 * @return bool Whether names in it can be changed.
+	 */
+	private static function changeable( string $folder ): bool {
+		clearstatcache( true, $folder );
+		return is_writable( $folder ) && is_executable( $folder );
 	}
 
 	/**

@@ -732,6 +732,30 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'remove', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
 	}
 
+	public function test_a_folder_whose_parent_would_refuse_its_removal_is_kept_and_the_undo_goes_on(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root may change every folder.' );
+		}
+		// A folder that the apply creates in one that the site has already.
+		mkdir( $this->live . '/sub' );
+		mkdir( $this->files . $this->live . '/sub/made', 0700, true );
+		$this->write_report( $this->live . '/skipped-link' );
+		$job = $this->run_job( $this->start() );
+		self::assertDirectoryExists( $this->live . '/sub/made' );
+		// That folder becomes read-only before the review.
+		chmod( $this->live . '/sub', 0500 );
+		try {
+			$review = $this->changes->preview_undo( $job->id );
+			self::assertSame( [ 'keep', 'unwritable_destination' ], [ array_column( $review['entries'], 'action', 'path' )[ $this->live . '/sub/made' ], array_column( $review['entries'], 'reason', 'path' )[ $this->live . '/sub/made' ] ] );
+			$done = $this->run_job( $this->changes->start_undo( $job->id, $review['digest'] ) );
+		} finally {
+			chmod( $this->live . '/sub', 0700 );
+		}
+		self::assertSame( [ 1, 2, 1, 'partly_undone' ], [ $done->result['restored'], $done->result['removed'], $done->result['kept'], $done->result['apply_state'] ] );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertDirectoryExists( $this->live . '/sub/made' );
+	}
+
 	public function test_an_entry_that_someone_else_removed_is_offered_again_when_it_comes_back(): void {
 		// A file that the apply creates in a folder that exists already.
 		$file = $this->live . '/c-new.txt';

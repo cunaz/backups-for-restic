@@ -161,7 +161,9 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   or a kept entry of its own; its other entries are still removed), `destination_changed`
   (the site now maps the snapshot path to another live path, or to none because its layout
   would map it ambiguously), the reason of the site's file policy where it no longer permits
-  the change (for example `protected` or `unwritable_destination`), and
+  the change (for example `protected` or `unwritable_destination`; the latter also where the
+  folder that holds a created folder, or a created file whose private name remains, no
+  longer lets the worker change its names, which the policy does not ask about there), and
   `original_unavailable` (the retained copy is damaged). An entry with nothing left to
   revert is listed as kept with `not_applied`, `already_undone` or `removed_since_apply`; it
   counts as `unchanged`, not as kept, and its journal record stays as it is: only an entry

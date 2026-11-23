@@ -463,6 +463,62 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'remove', $this->change->undo_action( $this->path, 'create' ) );
 	}
 
+	public function test_a_revert_that_its_folder_would_refuse_is_kept_and_the_undo_goes_on(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root may change every folder.' );
+		}
+		$folder = $this->site . '/folder';
+		mkdir( $folder );
+		mkdir( $this->staging . $folder . '/made', 0700, true );
+		file_put_contents( $this->staging . $folder . '/created.txt', 'created' );
+		file_put_contents( $this->staging . $folder . '/linked.txt', 'linked' );
+		file_put_contents( $folder . '/settings.php', 'old' );
+		file_put_contents( $this->staging . $folder . '/settings.php', 'new' );
+		$plan    = new ApplyPlan( [ $this->site ], [ $this->journal ] );
+		$entries = [
+			'made'         => [ 'mkdir', null, null, 'remove' ],
+			'created.txt'  => [ 'create', hash( 'sha256', 'created' ), null, 'remove' ],
+			'settings.php' => [ 'replace', hash( 'sha256', 'new' ), hash( 'sha256', 'old' ), 'restore' ],
+		];
+		foreach ( $entries as $name => [ $action, $source, $original ] ) {
+			self::assertTrue( ( new FileChange( $plan, $this->staging, $this->root . '/journal-' . $name ) )->apply( $folder . '/' . $name, $action, $source, $original, INF ) );
+		}
+		// And a create stopped after its link, whose private name remains.
+		$stop = static function ( string $done, string $on ) use ( $folder ): void {
+			if ( 'link' === $done && $folder . '/linked.txt' === $on ) {
+				throw new \DomainException( 'The worker was killed.' );
+			}
+		};
+		try {
+			( new FileChange( $plan, $this->staging, $this->root . '/journal-linked.txt', null, 'apply', $stop ) )->apply( $folder . '/linked.txt', 'create', hash( 'sha256', 'linked' ), null, INF );
+			self::fail( 'The worker must stop after its link.' );
+		} catch ( \DomainException ) {
+			self::assertFileExists( $folder . '/linked.txt' );
+		}
+		$entries['linked.txt'] = [ 'create', null, null, 'remove' ];
+		$kept                  = [
+			'action' => 'keep',
+			'reason' => 'unwritable_destination',
+		];
+		// The folder becomes read-only: none of the reverts could be made in it.
+		chmod( $folder, 0500 );
+		try {
+			foreach ( $entries as $name => [ $action ] ) {
+				$change = new FileChange( $plan, $this->staging, $this->root . '/journal-' . $name );
+				self::assertSame( $kept, $change->undo_review( $folder . '/' . $name, $action ), $name );
+			}
+			foreach ( $entries as $name => [ $action, , , $reviewed ] ) {
+				$change = new FileChange( $plan, $this->staging, $this->root . '/journal-' . $name );
+				self::assertSame( self::outcome( 'kept', 'unwritable_destination' ), $change->undo( $folder . '/' . $name, $action, INF, $reviewed ), $name );
+			}
+		} finally {
+			chmod( $folder, 0700 );
+		}
+		foreach ( $entries as $name => [ $action, , , $reviewed ] ) {
+			self::assertSame( $reviewed, ( new FileChange( $plan, $this->staging, $this->root . '/journal-' . $name ) )->undo_action( $folder . '/' . $name, $action ), $name );
+		}
+	}
+
 	public function test_a_created_folder_that_gained_many_names_is_kept_without_listing_them(): void {
 		$folder = $this->site . '/uploads';
 		mkdir( $this->staging . $folder, 0700 );
