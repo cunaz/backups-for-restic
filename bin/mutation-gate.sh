@@ -26,8 +26,9 @@ status=0
 
 for marker in "$BFR_MUTATION_CANARY" "$fallback"; do
 	if [[ -e "$marker" ]]; then
-		echo "::error::Durable writes failed in $(wc -l < "$marker") mutant processes, so the score above is not trustworthy. First lines of the marker:" >&2
-		head -n 20 "$marker" >&2
+		processes="$(cut -d: -f1 "$marker" | sort -u | wc -l)"
+		echo "::error::Mutant processes that could not write durably: $processes. So the score above counts mutants as killed that the tests did not kill. First lines of the marker:"
+		head -n 20 "$marker"
 		rm -f "$fallback"
 		exit 1
 	fi
