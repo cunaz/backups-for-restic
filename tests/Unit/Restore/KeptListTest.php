@@ -296,6 +296,27 @@ final class KeptListTest extends TestCase {
 		$plan->row( DiskFilePlan::PAGE );
 	}
 
+	public function test_a_list_is_sealed_with_up_to_the_most_entries_that_a_plan_holds(): void {
+		$list   = new KeptList( $this->directory );
+		$digest = hash( 'sha256', 'page' );
+		$most   = DiskFilePlan::MAX_ENTRIES;
+		$cases  = [
+			'no entry is appended to a full list' => [ static fn () => $list->append( $most, $digest, self::row( 0 ) ), 'The job does not name the counted page of its kept entries.' ],
+			'no list is sealed beyond the limit'  => [ static fn () => $list->seal( 'apply', 'restore', $most + 1, $digest ), 'The job does not name the counted page of its kept entries.' ],
+			// The count of a full list is accepted: the seal goes on to its last page, which is not here.
+			'a full list is sealed'               => [ static fn () => $list->seal( 'apply', 'restore', $most, $digest ), 'A file of the kept entries is missing or unreadable.' ],
+			'the last entry is appended'          => [ static fn () => $list->append( $most - 1, $digest, self::row( 0 ) ), 'A file of the kept entries is missing or unreadable.' ],
+		];
+		foreach ( $cases as $case => [ $call, $refusal ] ) {
+			try {
+				$call();
+				self::fail( 'Refused: ' . $case );
+			} catch ( StorageFailed $refused ) {
+				self::assertSame( $refusal, $refused->getMessage(), $case );
+			}
+		}
+	}
+
 	public function test_what_the_document_does_not_name_is_refused(): void {
 		$list   = new KeptList( $this->directory );
 		$digest = (string) self::keep( $list, array_map( self::row( ... ), range( 0, DiskFilePlan::PAGE - 1 ) ) );

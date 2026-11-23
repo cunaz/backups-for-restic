@@ -78,7 +78,7 @@ final class KeptList {
 	 * @throws StorageFailed If the files do not hold what the document counts, or a write fails.
 	 */
 	public function append( int $count, ?string $digest, array $row ): string {
-		self::require_position( $count, $digest );
+		self::require_position( $count, $digest, DiskFilePlan::MAX_ENTRIES - 1 );
 		$page    = intdiv( $count, DiskFilePlan::PAGE );
 		$slot    = $count % DiskFilePlan::PAGE;
 		$records = [];
@@ -112,7 +112,7 @@ final class KeptList {
 	 * @throws StorageFailed If the files do not hold what the document counts, or a write fails.
 	 */
 	public function seal( string $subject, string $restore, int $count, string $digest ): string {
-		self::require_position( $count, $digest );
+		self::require_position( $count, $digest, DiskFilePlan::MAX_ENTRIES );
 		$pages = intdiv( $count - 1, DiskFilePlan::PAGE ) + 1;
 		$this->counted( $pages - 1, $count - ( $pages - 1 ) * DiskFilePlan::PAGE, $digest );
 		$index = $this->index();
@@ -142,15 +142,18 @@ final class KeptList {
 	}
 
 	/**
-	 * Requires a count and the digest that a document holds with it.
+	 * Requires a count and the digest that a document holds with it. A list holds at most
+	 * DiskFilePlan::MAX_ENTRIES entries: an entry is appended while the document counts fewer,
+	 * and a list is sealed with up to that many.
 	 *
 	 * @param int         $count Counted entries.
 	 * @param string|null $digest Digest of the counted version of the last page.
-	 * @throws StorageFailed If they do not belong together.
+	 * @param int         $most Largest count that the caller may continue from.
+	 * @throws StorageFailed If they do not belong together, or the count is beyond the limit.
 	 */
-	private static function require_position( int $count, ?string $digest ): void {
+	private static function require_position( int $count, ?string $digest, int $most ): void {
 		$named = null !== $digest && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $digest );
-		if ( $count < 0 || $count >= DiskFilePlan::MAX_ENTRIES || ( 0 === $count ) !== ( null === $digest ) || ( $count > 0 && ! $named ) ) {
+		if ( $count < 0 || $count > $most || ( 0 === $count ) !== ( null === $digest ) || ( $count > 0 && ! $named ) ) {
 			throw new StorageFailed( 'The job does not name the counted page of its kept entries.' );
 		}
 	}
