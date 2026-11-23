@@ -1,4 +1,4 @@
-// Separate 90% gate for reviewed file destinations and fresh-install path mapping.
+// Separate gate for reviewed file destinations and fresh-install path mapping.
 // composer mutation:planner selects the two planner files from this source root and counts
 // code that no test reaches (--with-uncovered) against minMsi.
 {
@@ -18,10 +18,14 @@
         "summary": ".tools/infection-planner/summary.log",
         "github": true
     },
-    // minMsi is a floor at the value measured on 2026-11-22 (96.64 %), rounded down; it may
-    // only rise.
-    "minCoveredMsi": 90,
-    "minMsi": 96,
+    // Floors at the scores measured on 2026-11-23 (87.25 % and 88.80 % covered, the same in
+    // two runs on tmpfs and one on ext4), rounded down. They may only rise; 90 % is the goal.
+    // The 96.64 % and 98.36 % of 2026-11-22 were measured while the tests ran under
+    // Infection's file wrapper, which reports an unreadable file or a link to a removed file
+    // as missing: two tests failed and two cleanups warned whatever the mutation
+    // (docs/04 §5.6).
+    "minCoveredMsi": 88,
+    "minMsi": 87,
     "mutators": {
         "@default": true
     }
