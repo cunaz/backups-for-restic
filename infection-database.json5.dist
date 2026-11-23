@@ -11,8 +11,9 @@
         "excludes": ["ApplyJournal.php", "FileChanges.php", "FilePlans.php", "PlanBuild.php"]
     },
     "bootstrap": "tests/bootstrap.php",
+    // Its own PHPUnit configuration, for a higher memory limit than the other gates' 128M.
     "phpUnit": {
-        "configDir": "tests/Mutation"
+        "configDir": "tests/Mutation/database"
     },
     "testFrameworkOptions": "--testsuite=database",
     "timeout": 60,

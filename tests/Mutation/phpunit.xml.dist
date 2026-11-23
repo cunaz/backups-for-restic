@@ -4,6 +4,7 @@
     mutated code, so that each mutant runs in seconds. Engine-level tests that also reach this
     code, and the slow group with restic's real scrypt cost, stay with the main configuration.
     Kept apart from phpunit.xml.dist so that its suites can share files; each gate selects one.
+    The database gate's suite, which needs more memory, is in database/phpunit.xml.dist.
 -->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="../../vendor/phpunit/phpunit/phpunit.xsd"
@@ -39,11 +40,6 @@
         </testsuite>
         <testsuite name="zip">
             <directory>../Unit/Storage/Zip</directory>
-        </testsuite>
-        <!-- Needs a MySQL server: infection-database.json5.dist. -->
-        <testsuite name="database">
-            <directory>../Unit/Database</directory>
-            <directory>../Database</directory>
         </testsuite>
     </testsuites>
     <groups>
