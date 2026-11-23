@@ -212,6 +212,22 @@ final class Messages {
 				'message' => __( 'The database could not be read.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job contains the database error.', 'backups-for-restic' ),
 			],
+			'database_dump_unstable'         => [
+				'message' => __( 'A database table kept changing its structure while it was backed up.', 'backups-for-restic' ),
+				'hint'    => __( 'Plugin or theme updates may have been changing the table. Run the backup again once they are done; the log of the job names the table.', 'backups-for-restic' ),
+			],
+			'database_dump_row_memory'       => [
+				'message' => __( 'A database row is too large for the PHP memory limit of this site.', 'backups-for-restic' ),
+				'hint'    => __( 'Raise the memory limit for WordPress (WP_MAX_MEMORY_LIMIT), or leave out the table that the log of the job names in the database settings of the backup.', 'backups-for-restic' ),
+			],
+			'database_dump_locked'           => [
+				'message' => __( 'A database table stayed locked by another connection while it was backed up.', 'backups-for-restic' ),
+				'hint'    => __( 'Another program held the table through several tries of the backup, for example with LOCK TABLES or a long ALTER TABLE. Run the backup again once it is done; the log of the job names the table.', 'backups-for-restic' ),
+			],
+			'database_dump_session'          => [
+				'message' => __( 'The database connection does not keep the settings the backup needs to read the database exactly.', 'backups-for-restic' ),
+				'hint'    => __( 'A database drop-in (wp-content/db.php) sends statements to different connections, and the backup could not open a connection of its own with the settings in wp-config.php. Check the drop-in and the database settings.', 'backups-for-restic' ),
+			],
 			'job_conflict'                   => [
 				'message' => __( 'Another backup job is still running.', 'backups-for-restic' ),
 				'hint'    => __( 'Wait for it to finish or cancel it.', 'backups-for-restic' ),

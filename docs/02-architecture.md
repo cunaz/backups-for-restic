@@ -173,7 +173,7 @@ src/
 │   ├── Maintenance/               MaintenanceSteps (detecting, forgetting, pruning, checking, recording), MaintenanceServices, RetentionGuard (ADR 0010), RetentionSettings (the policy of the settings, for the forget job and the preview)
 │   └── Restore/                   RestoreSteps (preflight, planning, restoring, recording, releasing, cleaning_up), RestoreServices, RestoreRequest (ADR 0037)
 ├── Backup/                        PlanFactory (roots, excludes, spool/ with site manifest and dump), SitePaths
-├── Database/Dump/                 Connection port, Catalog, Table, SqlFormatter, TableSource (resumable per page), DatabaseDump
+├── Database/Dump/                 Connection port, SharedConnection and DedicatedConnection (the dump's session settings and snapshots), Catalog, Table, KeyColumn, SqlFormatter, TableSource (resumable per page), DatabaseDump
 ├── Doctor/                        Environment, Check, Doctor (pure checks; texts in WordPress\Messages)
 ├── Scheduling/                    SchedulePolicy (slots in the site's time zone)
 ├── Restore/                       SnapshotBrowser (snapshot lists with the retention preview, details and directory pages as response data, §13.2); Staging (list, expiry and removal, ADR 0040), StagedRestore; (M3) Selection, Apply, database Importer
@@ -300,9 +300,10 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
 - `detecting` is the append-only probe of forget and prune jobs
   ([ADR 0010](adr/0010-retention-and-append-only.md)). Forget is a job of its own, started
   by the heartbeat after a successful backup, not a step of the backup job.
-- An error with a retryable code (`repository_unreachable`, `repository_locked`) does not
-  fail the job at once: the runner waits 30 s, then twice as long after each further failure
-  in a row, and fails the job at the sixth.
+- An error with a retryable code (`repository_unreachable`, `repository_locked`,
+  `database_restore_busy`, `database_exchange_sessions`, `database_dump_locked`) does not fail
+  the job at once: the runner waits 30 s, then twice as long after each further failure in a
+  row, and fails the job at the sixth.
 - A **restore job** ([ADR 0037](adr/0037-restore-job.md)) carries its request in the job
   document from its creation: `data.snapshot`, the full ID, and `data.paths`, the selected
   snapshot paths (`Jobs\Restore\RestoreRequest`; an invalid request creates no job).
@@ -600,9 +601,12 @@ Steps of a `backup` job (`Jobs\Backup\BackupSteps`):
    and `.nobackup` markers). A file whose size, mtime, ctime and inode match the parent
    reuses its blobs; others are chunked, deduplicated, encrypted and packed. Inside the
    private directory only `spool/` is walked: `spool/manifest.json` and the database files
-   of §7 are virtual. Directories become tree blobs bottom-up, then the snapshot is written
-   with `summary` and tags `backups-for-restic`, `site:<hash>` and `run:<job>`. The lock is
-   refreshed every five minutes and released at the end.
+   of §7 are virtual. A virtual file whose source cannot continue after its cursor, such as
+   a table whose definition changed, starts over, and the chunks of its earlier parts are
+   dropped; a complete source hands its warnings to the run. Directories become tree blobs
+   bottom-up, then the snapshot is written with `summary` and tags `backups-for-restic`,
+   `site:<hash>` and `run:<job>`. The lock is refreshed every five minutes and released at
+   the end.
 4. **Recording**: last result in `backups_for_restic_state` for the dashboard and Site Health.
 5. **Releasing** and **cleaning up** run on every path to the end: an unfinished run releases
    its lock, the scrypt files and the checkpoint are deleted, old jobs are pruned to
@@ -626,7 +630,7 @@ snapshot the database appears as a directory:
 <private>/spool/database/010-wp_posts.sql
 …
 <private>/spool/database/900-views.sql           CREATE OR REPLACE VIEW …
-<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows and bytes, views
+<private>/spool/database/manifest.json           format id, server version, time zone, prefix, tables in order with file, rows, bytes and how they were read, views
 <private>/spool/manifest.json                    site manifest (format id, home URL, paths, roots, excludes, prefix, plugin, WordPress and PHP versions, repository format)
 ```
 
@@ -635,25 +639,54 @@ running SHA-256 cannot be carried across ticks ([ADR 0021](adr/0021-database-str
 
 Format `backups-for-restic-dump/1`: one SQL statement per line, escaped values, hex-encoded
 binary, ≈ 1 MiB `INSERT` batches, and a trailer line `-- end table rows=<n> bytes=<n>` per
-file ([ADR 0021](adr/0021-database-streaming.md)). The importer reads bounded lines and
+file ([ADR 0021](adr/0021-database-streaming.md)). Rows and definitions are read in
+utf8mb4 and with the session time zone `+00:00`, whatever `DB_CHARSET` and the site's
+session use; the files and the manifest say so. The importer reads bounded lines and
 validates a constrained CREATE/INSERT grammar; it never executes an arbitrary SQL script
 ([ADR 0035](adr/0035-transactional-shadow-import.md)).
 
-The writer and reader share a hard 16 MiB SQL statement limit, including the semicolon
-and excluding LF. An encoded row that cannot fit causes a database error before the dump
-is completed. Binary hex encoding can roughly double the source row size. Generated-only
+The importer reads statements up to 16 MiB, including the semicolon and excluding LF. The
+writer does not refuse a larger one: a row too large to share a statement is written as one
+of its own, whatever its size, as long as PHP can hold it, and the manifest records each
+table's largest statement so that an importer can compare it with `max_allowed_packet`.
+Binary hex encoding can roughly double the source row size. A row whose statement would not
+fit into the PHP memory limit stops the dump with `database_dump_row_memory`. Tables with
+values of any size fetch only as many rows per page as fit into the memory left, after the
+server has reported their sizes, so a row that fits on its own is backed up and one that
+does not stops the dump before it is fetched. Generated-only
 tables use empty INSERT tuples to preserve their row counts without assigning generated
 values. These files remain importable by a normal MySQL/MariaDB client.
 
 Streaming and resumability: a table is produced page by page and fed to the chunker like a
 file; chunk boundaries are content-defined, so unchanged parts of a table deduplicate against
 yesterday's dump. When a tick's time is up, the table stops after the current page and the
-next tick continues after it, so tables of any size finish. Pages follow an integer primary
-key, otherwise an offset in primary-key order. Consistency is per page, as with a
-non-transactional `mysqldump`: every row comes from exactly one read, but the pages of a
-table and the tables themselves are read at different moments. That holds in every mode,
-WP-CLI `--wait` included; the plugin opens no transaction. A consistent InnoDB snapshot
-remains a later option ([ADR 0021](adr/0021-database-streaming.md)).
+next tick continues after it, so tables of any size finish. Pages follow the primary key, or
+a unique key over NOT NULL columns, in full, with a row-value comparison that orders exactly
+as `ORDER BY` for every column type: a row that exists for the whole dump of its table, and
+whose values in that key do not change meanwhile, appears exactly once, whatever is inserted
+or deleted meanwhile. A row whose key value changes between two ticks can be missing or
+appear twice: once before and once after the change, if it moves from behind the cursor to
+ahead of it, or not at all if it moves the other way.
+
+Consistency is one snapshot per table and tick. The dump reads through a connection of its
+own, opened with `$wpdb`'s settings and used only once it is verified to reach the same
+server and database, encrypted if the site's connection is. Each table's part of a tick is
+one read-only transaction there, which also holds the table's definition. The plugin never
+opens a transaction on the site's connection. Without a verified connection of its own the
+dump reads through `$wpdb`, with the same session settings around every query, and each
+page is then its own read. A table without a usable key is read with one statement on the
+dump's own connection; read in several parts, its rows can be missing or repeated, and the
+manifest and a job warning say so. Across ticks, the pages of one table and the tables
+themselves are read at different moments: a row deleted and inserted again with a new key
+between two ticks can appear twice, and an import then stops with a duplicate key. The
+manifest records for each table which key ordered its pages, whether all rows come from one
+read view, how often it started over and its largest statement, unless the manifest would
+then be larger than the 2 MiB that the plugin's restore reads. A table whose definition
+changes during its dump starts over, at most three times, then the backup stops with
+`database_dump_unstable` ([ADR 0021](adr/0021-database-streaming.md)). Every read waits at
+most five seconds for a lock that another connection holds on a table; then the tick stops
+with the retryable `database_dump_locked`, and the job continues the table later. Every read
+also runs without a row limit, whatever `sql_select_limit` the session inherited.
 
 Restore rehearsals stream verified SQL batches into private InnoDB tables. Imported
 rows, cursor and content transcript commit in one transaction. The report compares
@@ -1379,13 +1412,15 @@ translated message and a hint. The codes:
 | `secrets_undecryptable` | the stored secrets do not decrypt, for example after a salt change; or a secret that was just stored does not read back unchanged (`EncryptedOptionStore::set()`) |
 | `environment` | the private directory cannot be used, too little disk space or memory, an exposed private directory |
 | `database_dump_failed` | a query of the dump failed |
+| `database_dump_locked` | another connection kept a table locked for longer than the dump waits, five seconds; retryable ([ADR 0021](adr/0021-database-streaming.md)) |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
 | `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `internal` | anything else |
 
-Only `repository_unreachable` and `repository_locked` are retryable (§4.4). A cancelled job
+Only `repository_unreachable`, `repository_locked`, `database_restore_busy`,
+`database_exchange_sessions` and `database_dump_locked` are retryable (§4.4). A cancelled job
 ends in the state `cancelled` without an error code, and there is no `timeout` code: a tick
 that runs out of time simply continues in the next one. Codes for restore
 (`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.

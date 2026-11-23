@@ -331,6 +331,26 @@ Every route that asks for the WordPress password asks through one check
 - Requests from the site to itself (the exposure probe, the loopback check and loopback
   chaining) follow core's `https_local_ssl_verify` filter, as core's own loopback requests
   do. They carry no secrets and never reach the repository server.
+- The database dump opens a connection of its own to the site's database server, with the
+  host, user, password and database that `$wpdb` connected with, or those of the `DB_HOST`,
+  `DB_USER`, `DB_PASSWORD` and `DB_NAME` constants in `wp-config.php` where `$wpdb` does not
+  expose them, and with the client flags of `MYSQL_CLIENT_FLAGS`
+  (`WordPress\WpdbConnection::dedicated()`, [ADR 0021](adr/0021-database-streaming.md)).
+  The plugin does not store the database password, and an error of that connection carries
+  the server's error number, never its text. Before it connects, the adapter reads the TLS
+  cipher of the site's connection. Where that connection is encrypted and the client flags do
+  not ask for TLS (`MYSQLI_CLIENT_SSL`), for example because a database drop-in sets up the
+  encryption itself, or where the cipher cannot be read because the status query returns no
+  row, it opens no second connection, so that the account does not authenticate in the clear
+  beside an encrypted site. An empty cipher means that the site's own connection is not
+  encrypted: the adapter then tries to open the second connection with the same client
+  flags, which encrypt it only if they ask for TLS. The dump reads through a second
+  connection only if it could be opened and is shown to reach the same server and database
+  as the site's and to be encrypted if the site's connection is. A connection that fails
+  one of these checks is closed, and the dump then reads through `$wpdb`, as it does when no
+  second connection was opened. With `MYSQLI_CLIENT_SSL` in the flags, the dump's connection
+  verifies the server's certificate as those flags say, which can differ from TLS settings
+  that a drop-in makes itself.
 
 ## 8. Filesystem
 

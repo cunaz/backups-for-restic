@@ -514,7 +514,9 @@ final class BackupRun {
 	/**
 	 * Backs up a virtual file. A resumable source stops at a clean boundary once the deadline
 	 * has passed and continues from its cursor in the next slice; any other source is read in
-	 * one go and restarts from its beginning if the backup is interrupted inside it.
+	 * one go and restarts from its beginning if the backup is interrupted inside it. A
+	 * resumable source that cannot continue after its cursor starts over, and the chunks kept
+	 * from its earlier slices are dropped; a complete one hands its warnings to the run.
 	 *
 	 * @param int    $depth     Frame depth.
 	 * @param string $name      File name.
@@ -535,7 +537,12 @@ final class BackupRun {
 		$content = null === $partial ? [] : Decoded::strings( $partial['content'] );
 		$size    = null === $partial ? 0 : Decoded::int( $partial['offset'] );
 
-		$source   = ( $file->source )( $cursor );
+		$source = ( $file->source )( $cursor );
+		if ( null !== $cursor && $source instanceof ResumableByteSource && $source->restarted() ) {
+			// The chunks kept so far belong to content that the source gave up.
+			$content = [];
+			$size    = 0;
+		}
 		$reader   = new ChunkReader( $source, $this->chunker );
 		$stopping = false;
 		for ( $chunk = $reader->next(); null !== $chunk; $chunk = $reader->next() ) {
@@ -563,6 +570,9 @@ final class BackupRun {
 			return;
 		}
 
+		foreach ( $source instanceof ResumableByteSource ? $source->warnings() : [] as $warning ) {
+			$this->warn( $warning );
+		}
 		$this->set_file( $depth, null );
 		$this->count( null === $this->parent_node( $depth, $name ) ? 'files_new' : 'files_changed' );
 		$this->count( 'total_files_processed' );
