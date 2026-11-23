@@ -267,9 +267,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   outcome is on disk before the job document that counts it: a kept entry's page is written
   durably, a revert's journal record is. A restarted tick repeats only the entry that the
   document does not count yet, and a kept entry is written again at the same place in the
-  list. A kept entry costs one more synchronised write, its page of the list. When the list
-  is sealed, also by an undo that was cancelled or failed and does not retry the entry, a
-  page that a stopped worker began beyond the counted entries is cut, and a counted page
+  list. A kept entry costs one more synchronised write, its page of the list, and its index
+  of page digests is replaced as a whole with the same durable write rather than updated in
+  place, so that a stop or a short write leaves the slots that were last committed. When the
+  list is sealed, also by an undo that was cancelled or failed and does not retry the entry,
+  a page that a stopped worker began beyond the counted entries is cut, and a counted page
   that it wrote with an uncounted entry before it updated the page's slot is cut back to
   the entries that the slot authenticates; any other mismatch is refused.
 - The result counts what this undo did, and a retry counts a revert as its own only from a

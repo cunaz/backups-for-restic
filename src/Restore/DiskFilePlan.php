@@ -225,20 +225,25 @@ final class DiskFilePlan {
 			}
 			[ $stream, $page_number ] = explode( '-', $file, 2 );
 			$index                    = $this->directory . '/' . $stream . '.idx';
-			$handle                   = fopen( $index, 'c+b' );
+			$offset                   = (int) $page_number * 64;
+			if ( $this->durable ) {
+				// A durable plan's index is replaced as a whole, on disk before a document counts
+				// its records: a stop or a short write leaves the slots that were last committed,
+				// and a page written before its slot can still be cut back to what they authenticate.
+				$slots = is_file( $index ) ? self::read( $index, self::INDEX_BYTES ) : '';
+				Files::write_durable( $index, str_pad( substr( $slots, 0, $offset ), $offset, "\0" ) . hash( 'sha256', $body ) . substr( $slots, $offset + 64 ) );
+				continue;
+			}
+			$handle = fopen( $index, 'c+b' );
 			if ( false === $handle ) {
 				throw new StorageFailed( 'A private file plan index could not be opened.' );
 			}
 			try {
-				if ( 0 !== fseek( $handle, (int) $page_number * 64 ) || 64 !== fwrite( $handle, hash( 'sha256', $body ) ) || ! fflush( $handle ) || ( $this->durable && ! fsync( $handle ) ) ) {
+				if ( 0 !== fseek( $handle, $offset ) || 64 !== fwrite( $handle, hash( 'sha256', $body ) ) || ! fflush( $handle ) ) {
 					throw new StorageFailed( 'A private file plan index could not be written.' );
 				}
 			} finally {
 				fclose( $handle );
-			}
-			if ( $this->durable ) {
-				// A new index is named in the directory before a document counts its records.
-				Files::sync_directory( $this->directory );
 			}
 		}
 		$this->dirty = [];

@@ -102,6 +102,30 @@ final class DiskFilePlanTest extends TestCase {
 		}
 	}
 
+	public function test_a_durable_index_is_replaced_as_a_whole_and_a_torn_slot_is_refused(): void {
+		$kept  = new DiskFilePlan( $this->directory, true );
+		$index = $this->directory . '/rows.idx';
+		$kept->put( 'rows', 0, self::row( 0 ) );
+		$kept->flush();
+		clearstatcache();
+		$committed = [ fileinode( $index ), (string) file_get_contents( $index ) ];
+		$kept->put( 'rows', 1, self::row( 1 ) );
+		$kept->flush();
+		clearstatcache();
+		// The page's new slot is in a new file, which replaced the committed one only once it was
+		// complete: a stop or a short write while it was written leaves the committed slot.
+		self::assertNotSame( $committed[0], fileinode( $index ) );
+		self::assertSame( 64, filesize( $index ) );
+		self::assertNotSame( $committed[1], file_get_contents( $index ) );
+		self::assertSame( [], glob( $this->directory . '/*.tmp' ) );
+		// A slot with parts of two digests, as a write in place could leave it, matches the counted
+		// records in no way and is refused.
+		file_put_contents( $index, substr( $committed[1], 0, 32 ) . substr( (string) file_get_contents( $index ), 32 ) );
+		$this->expectException( StorageFailed::class );
+		$this->expectExceptionMessage( 'does not match its index' );
+		( new DiskFilePlan( $this->directory, true ) )->seal( 'apply', 'restore', true, false, [ 'rows' => 1 ], 0, 0, null, [ 'keep' => 1 ] );
+	}
+
 	public function test_a_page_written_before_its_slot_is_cut_to_its_counted_records_when_sealed(): void {
 		$kept = new DiskFilePlan( $this->directory, true );
 		$kept->put( 'rows', 0, self::row( 0 ) );
