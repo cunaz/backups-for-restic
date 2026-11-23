@@ -271,15 +271,17 @@ jobs:
       # The run takes about 40 minutes, so a pull request that cannot change its result skips
       # it and the job ends green. Such a pull request touches neither the mutated code
       # (src/Crypto, src/Format, src/Engine/Forget, src/Database/Restore), nor the code it
-      # calls, nor the tests, the tools or this workflow. The list is wider than needed on
-      # purpose. A push to main always runs in full, and so does a pull request whose files
-      # cannot be listed.
+      # calls, nor the classes that every mutant process loads first (src/Restore, src/Jobs/Apply,
+      # tests/Support/MutationProcess.php), nor the tests, the tools, the actions or this
+      # workflow. The list is wider than needed on purpose; MutationJobScopeTest checks that it
+      # holds every file the job reads. A push to main always runs in full, and so does a pull
+      # request whose files cannot be listed.
       - name: Can this change alter the result?
         id: changes
         uses: ./.github/actions/mutation-scope
         with:
-          watched: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets|Database)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|bin/mutation-gate\.sh|\.github/actions/mutation-tmpdir/action\.yml|\.github/workflows/ci\.yml)$)'
-          label: src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, src/Database, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, bin/mutation-gate.sh, .github/actions/mutation-tmpdir, .github/workflows/ci.yml
+          watched: '^(src/(Crypto|Format|Engine|Support|Exception|Backend|Storage|Secrets|Database|Restore|Jobs)/|tests/|(infection\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|bin/mutation-gate\.sh|\.github/actions/mutation-scope/action\.yml|\.github/actions/mutation-tmpdir/action\.yml|\.github/workflows/ci\.yml)$)'
+          label: src/Crypto, src/Format, src/Engine, src/Support, src/Exception, src/Backend, src/Storage, src/Secrets, src/Database, src/Restore, src/Jobs, tests/, infection.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, bin/mutation-gate.sh, .github/actions/mutation-scope, .github/actions/mutation-tmpdir, .github/workflows/ci.yml
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         if: steps.changes.outputs.run == 'true'
         with:
@@ -313,8 +315,8 @@ jobs:
           retention-days: 14
 
   # The restore code that the unit tests reach, in four gates with their own scores
-  # (docs/04 §5.6): the planner at 90 %, the others at floors that may only rise. The database
-  # half of restore needs a server and runs in database-mutation.yml.
+  # (docs/04 §5.6), each at floors in its configuration that may only rise; 90 % is the goal.
+  # The database half of restore needs a server and runs in database-mutation.yml.
   restore-mutation:
     name: Mutation testing (${{ matrix.area }})
     runs-on: ubuntu-24.04
@@ -338,8 +340,8 @@ jobs:
         id: changes
         uses: ./.github/actions/mutation-scope
         with:
-          watched: '^(src/|tests/|(infection-(planner|restore|apply|zip)\.json5\.dist|composer\.json|composer\.lock|bin/install-test-tools\.sh|bin/mutation-gate\.sh|\.github/actions/mutation-tmpdir/action\.yml|\.github/workflows/ci\.yml)$)'
-          label: src/, tests/, infection-planner.json5.dist, infection-restore.json5.dist, infection-apply.json5.dist, infection-zip.json5.dist, composer.json, composer.lock, bin/install-test-tools.sh, bin/mutation-gate.sh, .github/actions/mutation-tmpdir, .github/workflows/ci.yml
+          watched: '^(src/|tests/|(infection-(planner|restore|apply|zip)\.json5\.dist|composer\.json|composer\.lock|phpunit\.xml\.dist|bin/install-test-tools\.sh|bin/mutation-gate\.sh|\.github/actions/mutation-scope/action\.yml|\.github/actions/mutation-tmpdir/action\.yml|\.github/workflows/ci\.yml)$)'
+          label: src/, tests/, infection-planner.json5.dist, infection-restore.json5.dist, infection-apply.json5.dist, infection-zip.json5.dist, composer.json, composer.lock, phpunit.xml.dist, bin/install-test-tools.sh, bin/mutation-gate.sh, .github/actions/mutation-scope, .github/actions/mutation-tmpdir, .github/workflows/ci.yml
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         if: steps.changes.outputs.run == 'true'
         with:

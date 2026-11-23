@@ -556,20 +556,25 @@ of `acaecdc`) to 90.39 % (4,285). The run takes about 40 minutes on a runner. Th
 four restore gates run on every push to `main`, and on every pull request that changes a file
 their result can depend on (`.github/actions/mutation-scope`): for the core anything under
 `src/Crypto`, `src/Format`, `src/Engine`, `src/Support`, `src/Exception`, `src/Backend`,
-`src/Storage`, `src/Secrets`, `src/Database` or `tests/`, or one of `infection.json5.dist`,
-`composer.json`, `composer.lock`, `phpunit.xml.dist`, `bin/install-test-tools.sh`,
-`bin/mutation-gate.sh`, `.github/actions/mutation-tmpdir/action.yml` and
-`.github/workflows/ci.yml`; for the restore gates anything under `src/` or `tests/`, their
-configurations and the same tool files. The list is wider than the mutated code on purpose.
-On any other pull request a job says in a notice that it skipped the run, and ends green, so
-that it can stay a required check. When the job cannot list the files of a pull request, it
-runs. Each job checks for a nonempty report and uploads its logs.
+`src/Storage`, `src/Secrets`, `src/Database`, `src/Restore`, `src/Jobs` (whose classes every
+mutant process loads first) or `tests/`, or one of `infection.json5.dist`, `composer.json`,
+`composer.lock`, `phpunit.xml.dist`, `bin/install-test-tools.sh`, `bin/mutation-gate.sh`, the
+actions `mutation-scope` and `mutation-tmpdir` and `.github/workflows/ci.yml`; for the restore
+gates anything under `src/` or `tests/`, their configurations and the same tool files. The
+list is wider than the mutated code on purpose, and
+`tests/Unit/Tooling/MutationJobScopeTest.php` checks that it holds every file that the job's
+steps, gates, PHPUnit configurations and preloaded classes name. On any other pull request a
+job says in a notice that it skipped the run, and ends green, so that it can stay a required
+check. When the job cannot list the files of a pull request, or cannot match them against the
+list, it runs. Each job checks for a nonempty report and uploads its logs.
 
 The database gate needs a server and takes longer than a pull request should wait (31.9
 minutes with 8 threads locally, so presumably more than an hour on a runner with four). It runs
-in `database-mutation.yml` on every push to `main`, on pull requests that change the database
-code, its tests or its configuration, and on request. It is not a required check of a pull
-request; the release gate requires a successful run for the release commit (§7).
+in `database-mutation.yml` on every push to `main`, on pull requests that change `src/`,
+`tests/` or a file the job reads (its configuration, `phpunit.xml.dist`, the scripts it runs,
+Composer's files and the workflow; the same test checks that list), and on request. It is not
+a required check of a pull request; the release gate requires a successful run for the release
+commit (§7).
 
 The [built-in fuzzer](adr/0028-built-in-fuzzer.md) exercises 26 parsers. It covers
 repository metadata, pack framing and decryption, REST listings, persisted listings and
@@ -663,7 +668,7 @@ copy would only go stale.
 | --- | --- | --- |
 | `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package with the release rehearsal and the tests of the release gate, and the translation template built from the package (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled, and once more on PHP 8.3 with ext-zstd; the database suite against MySQL and MariaDB; the core mutation gate and the four restore gates (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
-| `database-mutation.yml` | push to `main`, pull requests that change the database code, its tests or its configuration, manual dispatch | the database mutation gate against MySQL (§5.6) |
+| `database-mutation.yml` | push to `main`, pull requests that change `src/`, `tests/` or a file the job reads, manual dispatch | the database mutation gate against MySQL (§5.6) |
 | `fuzz.yml` | nightly, manual dispatch | fuzzing per parser, two minutes each unless the dispatch says otherwise; the job's name states the seconds; findings uploaded as an artifact |
 | `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; their job names then end in "(acceptance size)". Records with `strace` and core dumps how the server's PHP processes ended, and fails when the PHP or WordPress log holds an entry from the plugin's files (§5.3). **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5) and the same log check. |
 | `live-servers.yml` | weekly and manual dispatch on main, manual pre-release verification | disposable TLS rest-server pair and opt-in operator-configured repository pairs (§5.7) |

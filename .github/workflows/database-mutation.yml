@@ -1,24 +1,26 @@
 # Mutation testing of the code that only a real database reaches (docs/04 §5.6): the import,
 # the atomic exchange and the database half of the apply jobs, killed by tests/Unit/Database and
-# tests/Database against MySQL. It is too slow for every pull request: it runs on every push to
-# main, on pull requests that change that code, and on request. The release gate requires a
-# successful run for the release commit (docs/04 §7).
+# tests/Database against MySQL. It runs on every push to main, on pull requests that change a
+# file its result can depend on, and on request; it is not a required check, because it takes
+# longer than a pull request should wait. The release gate requires a successful run for the
+# release commit (docs/04 §7).
 name: Database mutation testing
 
 on:
   push:
     branches: [main]
   pull_request:
+    # Every file the job reads, and the code that its tests reach: the database tests run the
+    # dump, the job store, the runner, file restore and the WordPress connection, which is most
+    # of src/. MutationJobScopeTest checks that the list holds every file the job reads.
     paths:
-      - 'src/Database/**'
-      - 'src/Jobs/Apply/**'
-      - 'tests/Database/**'
-      - 'tests/Unit/Database/**'
-      - 'tests/Support/**'
-      - 'tests/Mutation/**'
+      - 'src/**'
+      - 'tests/**'
       - 'infection-database.json5.dist'
+      - 'phpunit.xml.dist'
       - 'composer.json'
       - 'composer.lock'
+      - 'bin/check-skipped-tests.php'
       - 'bin/install-test-tools.sh'
       - 'bin/mutation-gate.sh'
       - '.github/actions/mutation-tmpdir/**'
