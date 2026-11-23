@@ -22,6 +22,9 @@ final class MutationScopeTest extends TestCase {
 	public static function decisions(): array {
 		return [
 			'a watched file changed'             => [ 'pull_request', '^(src/|tests/)', 'run=true', '' ],
+			// $ must meet the end of the NUL-terminated record that grep -z reads, as in the
+			// workflows' lists of whole file names.
+			'a whole name ending in $ matches'   => [ 'pull_request', '^(src/Restore/Changed\.php$)', 'run=true', '' ],
 			'no watched file changed'            => [ 'pull_request', '^(docs/|composer\.json$)', 'run=false', '::notice::Mutation testing skipped' ],
 			'an invalid pattern runs in full'    => [ 'pull_request', '^(src/', 'run=true', '::warning::The files of the pull request could not be matched against the watched paths (grep exited with 2)' ],
 			'a push runs whatever its files are' => [ 'push', '^(docs/)', 'run=true', '' ],
