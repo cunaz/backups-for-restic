@@ -139,6 +139,15 @@ final class DatabaseDump {
 			}
 			$table = $catalog->table( $name );
 		} catch ( DatabaseFailed $error ) {
+			if ( $reader instanceof DedicatedConnection ) {
+				// No source exists yet that would end the transaction of begin(), which holds
+				// the table's metadata lock: every DDL on the table would wait for the tick.
+				try {
+					$reader->end();
+				} catch ( DatabaseFailed ) {
+					$reader->close();
+				}
+			}
 			TableSource::rethrow( $error, $name );
 		}
 		return new TableSource( $reader, $table, $preamble, $cursor, fn ( array $result ) => $this->record( $file, $name, $result ), static fn (): Table => $catalog->table( $name ) );

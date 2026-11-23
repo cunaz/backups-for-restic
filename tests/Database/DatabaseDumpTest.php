@@ -965,6 +965,30 @@ final class DatabaseDumpTest extends TestCase {
 		}
 	}
 
+	public function test_on_its_own_connection_a_table_that_cannot_be_described_keeps_no_lock(): void {
+		$db = self::database( self::$source );
+		$db->execute( 'DROP VIEW IF EXISTS gone_rows' );
+		$db->execute( 'DROP TABLE IF EXISTS gone_rows, gone_base' );
+		$db->execute( 'CREATE TABLE gone_rows (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		$db->execute( 'CREATE TABLE gone_base (id INT NOT NULL PRIMARY KEY) ENGINE=InnoDB' );
+		$files = ( new DatabaseDump( $db, $this->directory . '/gone.json', 'gone_', [], 1767323100, self::dedicated() ) )->files();
+		$table = array_values( array_filter( $files, static fn ( VirtualFile $file ): bool => '010-gone_rows.sql' === $file->name ) )[0];
+		// Between two ticks the table became a view: the read that takes its metadata lock
+		// works, the definition of a table cannot be read.
+		$db->execute( 'DROP TABLE gone_rows' );
+		$db->execute( 'CREATE VIEW gone_rows AS SELECT id FROM gone_base' );
+		try {
+			$this->read( $table->source, PHP_INT_MAX );
+			self::fail( 'A view has no table definition.' );
+		} catch ( DatabaseFailed $error ) {
+			self::assertSame( 'The table structure cannot be read.', $error->getMessage() );
+		}
+		$other = self::database( self::$source );
+		$other->execute( 'SET SESSION lock_wait_timeout = 2' );
+		$other->execute( 'DROP VIEW gone_rows' );
+		self::assertSame( [], $other->rows( "SHOW FULL TABLES LIKE 'gone_rows'" ), 'Nothing held the metadata lock of the view any longer.' );
+	}
+
 	public function test_definitions_with_cyrillic_cjk_and_nordic_text_import_unchanged(): void {
 		$db = self::database( self::$source );
 		// "х" is D1 85, "内" is E5 86 85 and "Å" is C3 85: the byte 0x85 must survive one_line().
