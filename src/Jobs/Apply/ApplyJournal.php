@@ -47,7 +47,7 @@ final readonly class ApplyJournal {
 	public function original( string $id, bool $active = false ): Job {
 		$job = $this->jobs->get( $id );
 		if ( null === $job || ! $this->eligible( $job, $active ) ) {
-			throw new JobConflict( 'This apply has no available undo.' );
+			JobConflict::raise( 'This apply has no available undo.', [ 'code' => 'undo_unavailable' ] );
 		}
 		return $job;
 	}
@@ -105,7 +105,11 @@ final readonly class ApplyJournal {
 	 * @throws InvalidArgument If this restore is unavailable or expired.
 	 */
 	public function files( string $restore, bool $retained ): string {
-		return $this->staging->files_directory( $restore, $this->hours, $retained ) ?? throw new InvalidArgument( 'This restore has no eligible staged files.' );
+		$files = $this->staging->files_directory( $restore, $this->hours, $retained );
+		if ( null === $files ) {
+			InvalidArgument::raise( 'This restore has no eligible staged files.', [ 'code' => 'file_staging_gone' ] );
+		}
+		return $files;
 	}
 
 
