@@ -79,10 +79,13 @@ runs:
         # has nothing else to find in it.
         EXCLUDE_FILES: src/Support/GoQuote.php
       run: |
-        wp=(php .tools/bin/wp --path="$SITE")
-        "${wp[@]}" plugin activate plugin-check
-        "${wp[@]}" plugin list --fields=name,status,version
-        "${wp[@]}" plugin check backups-for-restic --format=strict-json --fields=file,line,column,type,code,message \
+        # Plugin Check sets up its runtime checks before WordPress loads the plugins only when
+        # the command line begins with "plugin check" (CLI_Runner::is_plugin_check() reads the
+        # raw arguments 1 and 2), so --path comes after the subcommand.
+        wp() { php .tools/bin/wp "$@" --path="$SITE"; }
+        wp plugin activate plugin-check
+        wp plugin list --fields=name,status,version
+        wp plugin check backups-for-restic --format=strict-json --fields=file,line,column,type,code,message \
           --ignore-codes="$IGNORE_CODES" --exclude-files="$EXCLUDE_FILES" \
           --require="$SITE/wp-content/plugins/plugin-check/cli.php" > "$RUNNER_TEMP/plugin-check-results.txt"
         python3 "$GITHUB_ACTION_PATH/report.py" "$RUNNER_TEMP/plugin-check-results.txt"
