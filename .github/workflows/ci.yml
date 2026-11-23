@@ -320,19 +320,20 @@ jobs:
 
   # The restore code that the unit tests reach, in four gates with their own scores
   # (docs/04 §5.6), each at floors in its configuration that may only rise; 90 % is the goal.
-  # The database half of restore needs a server and runs in database-mutation.yml.
+  # The database half of restore needs a server and runs in database-mutation.yml. The file
+  # restore gate took 71 minutes on the runner on 2026-11-23, the others at most 15.
   restore-mutation:
     name: Mutation testing (${{ matrix.area }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: ${{ matrix.minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { gate: planner, area: file apply planner }
-          - { gate: restore, area: file restore }
-          - { gate: apply, area: file apply jobs }
-          - { gate: zip, area: ZIP downloads }
+          - { gate: planner, area: file apply planner, minutes: 75 }
+          - { gate: restore, area: file restore, minutes: 150 }
+          - { gate: apply, area: file apply jobs, minutes: 75 }
+          - { gate: zip, area: ZIP downloads, minutes: 75 }
     env:
       GATE: ${{ matrix.gate }}
     steps:
