@@ -12,7 +12,10 @@
         "configDir": "tests/Mutation"
     },
     "testFrameworkOptions": "--testsuite=restore",
-    "timeout": 30,
+    // Above the time the durably writing test classes take under coverage on ext4 (about
+    // 18 s on 2026-11-23), so that a slower runner skips none of their mutants: Infection
+    // skips a mutant whose quickest covering test class took at least the timeout.
+    "timeout": 60,
     "tmpDir": ".tools/infection-apply-tmp",
     "logs": {
         "text": ".tools/infection-apply/infection.log",

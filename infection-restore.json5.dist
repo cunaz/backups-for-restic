@@ -13,7 +13,11 @@
         "configDir": "tests/Mutation"
     },
     "testFrameworkOptions": "--testsuite=restore",
-    "timeout": 30,
+    // Infection skips a mutant without running it when its quickest covering test class took
+    // at least this long in the initial run, which collects coverage. SnapshotBrowserTest takes
+    // about 45 s that way (6 s without coverage), so with 30 s all 255 mutants of
+    // SnapshotBrowser were skipped on 2026-11-23.
+    "timeout": 120,
     "tmpDir": ".tools/infection-restore-tmp",
     "logs": {
         "text": ".tools/infection-restore/infection.log",
