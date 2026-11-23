@@ -416,6 +416,34 @@ final class FileChangeTest extends TestCase {
 		self::assertSame( 'remove', $linked->undo_action( $file, 'create' ) );
 	}
 
+	public function test_an_entry_below_a_folder_put_in_place_of_its_own_is_not_taken_for_a_missing_one(): void {
+		$folder = $this->site . '/folder';
+		$file   = $folder . '/created.txt';
+		mkdir( $folder );
+		mkdir( $this->staging . $folder, 0700 );
+		file_put_contents( $this->staging . $file, 'created' );
+		self::assertTrue( $this->change->apply( $file, 'create', hash( 'sha256', 'created' ), null, INF ) );
+		$kept = [
+			'action' => 'keep',
+			'reason' => 'parent_changed',
+		];
+		// The folder is moved aside, and a link to an empty folder, or another empty folder,
+		// takes its name: putting the folder back makes the file revertible again.
+		rename( $folder, $folder . '.aside' );
+		mkdir( $this->root . '/empty' );
+		symlink( $this->root . '/empty', $folder );
+		self::assertSame( $kept, $this->change->undo_review( $file, 'create' ) );
+		unlink( $folder );
+		mkdir( $folder );
+		self::assertSame( $kept, $this->change->undo_review( $file, 'create' ) );
+		self::assertSame( self::outcome( 'kept', 'parent_changed' ), $this->change->undo( $file, 'create', INF, 'remove' ) );
+		rmdir( $folder );
+		// With nothing in its place, the folder is missing, and so is the file.
+		self::assertSame( 'removed_since_apply', $this->change->undo_review( $file, 'create' )['reason'] );
+		rename( $folder . '.aside', $folder );
+		self::assertSame( 'remove', $this->change->undo_action( $file, 'create' ) );
+	}
+
 	public function test_a_created_folder_that_gained_many_names_is_kept_without_listing_them(): void {
 		$folder = $this->site . '/uploads';
 		mkdir( $this->staging . $folder, 0700 );

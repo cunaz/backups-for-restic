@@ -492,12 +492,12 @@ final readonly class FileChange {
 		// an entry falls through to the checks below, which keep it as changed.
 		$private = 'mkdir' === $action
 			? null === $record['candidate'] || self::at( $this->item_directory . '/directory', $record['candidate'] )
-			: 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ( self::absent( $path ) || ( self::exists( $path ) && ! self::at( $path, $record['candidate'] ) ) );
+			: 'ready' === $record['phase'] && self::at( $this->item_directory . '/candidate', $record['candidate'] ) && ( self::absent( $path, $record['parent'] ) || ( self::exists( $path ) && ! self::at( $path, $record['candidate'] ) ) );
 		if ( $private ) {
 			// Nothing was published: the prepared entry is still private.
 			return self::decision( 'keep', 'not_applied' );
 		}
-		if ( self::absent( $path ) ) {
+		if ( self::absent( $path, $record['parent'] ) ) {
 			return self::decision( 'keep', 'replace' === $action ? 'deleted_since_apply' : 'removed_since_apply' );
 		}
 		if ( self::current_directory( dirname( $path ) ) !== $record['parent'] ) {
@@ -1213,23 +1213,31 @@ final readonly class FileChange {
 	}
 
 	/**
-	 * Whether an entry is established to be missing: its name is not in a parent directory
-	 * that this process can search, or that parent is missing in the same sense. A name that
-	 * cannot be looked up, for example below a folder without search permission, where
-	 * file_exists() answers false for a file that is there, is not missing.
+	 * Whether an entry is established to be missing: its name is not in a canonical folder
+	 * that this process can search and that, where the caller knows it, is the recorded
+	 * parent, or that folder's name is missing in the same sense. A name that cannot be looked
+	 * up, below a folder without search permission, where file_exists() answers false for a
+	 * file that is there, is not missing; nor is one below an alias, such as a link in place of
+	 * the folder, or below another folder at the recorded name: the folder that holds the entry
+	 * may be elsewhere.
 	 *
-	 * @param string $path Path to test.
+	 * @param string        $path Path to test.
+	 * @param Identity|null $recorded Recorded identity of its parent, if any.
 	 * @return bool Whether the entry is missing.
 	 */
-	private static function absent( string $path ): bool {
+	private static function absent( string $path, ?array $recorded = null ): bool {
 		if ( self::exists( $path ) ) {
 			return false;
 		}
-		$parent = dirname( $path );
-		if ( $parent === $path ) {
+		$folder = dirname( $path );
+		if ( $folder === $path ) {
 			return false;
 		}
-		return is_dir( $parent ) ? is_executable( $parent ) : self::absent( $parent );
+		$identity = self::current_directory( $folder );
+		if ( null !== $identity ) {
+			return ( null === $recorded || $identity === $recorded ) && is_executable( $folder );
+		}
+		return self::absent( $folder );
 	}
 
 	/**

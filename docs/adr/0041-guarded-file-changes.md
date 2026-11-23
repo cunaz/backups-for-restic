@@ -165,10 +165,12 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   `original_unavailable` (the retained copy is damaged). An entry with nothing left to
   revert is listed as kept with `not_applied`, `already_undone` or `removed_since_apply`; it
   counts as `unchanged`, not as kept. An entry is missing only where its name is missing
-  from a folder that the worker can search, or below a folder that is missing in that sense:
-  below a folder without search permission, where `file_exists()` answers false for a file
-  that is there, the entry is kept as `changed_since_apply`, and a journal record that
-  cannot be looked up stops the undo instead of counting as an entry that was never
+  from a canonical folder that the worker can search and that is the entry's recorded
+  parent, or below a folder whose name is missing in that sense: below a folder without
+  search permission, where `file_exists()` answers false for a file that is there, the entry
+  is kept as `changed_since_apply`; below a link or another folder put in place of its own,
+  where the folder that holds it may be elsewhere, as `parent_changed`; and a journal record
+  that cannot be looked up stops the undo instead of counting as an entry that was never
   attempted. The review, inline and background, shows each entry's action and reason and the
   totals by action. A review that finds every entry with nothing left to revert, as after an
   undo that stopped after its last revert or once the kept entries were removed, records the

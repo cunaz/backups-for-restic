@@ -1170,6 +1170,26 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( 'remove', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
 	}
 
+	public function test_a_review_does_not_retire_an_apply_whose_folder_is_replaced_by_a_link(): void {
+		// An apply of one file into a folder that the site has already.
+		$file = $this->live . '/sub/single.txt';
+		mkdir( $this->live . '/sub' );
+		$restore = $this->second_restore( [ $file => 'one' ] );
+		$job     = $this->run_job( $this->changes->start_apply( $restore, false, $this->changes->preview( $restore )['digest'] ) );
+		// The folder is moved aside and a link to an empty folder takes its name.
+		rename( $this->live . '/sub', $this->live . '/sub.aside' );
+		mkdir( $this->directory . '/empty' );
+		symlink( $this->directory . '/empty', $this->live . '/sub' );
+		$review = $this->changes->preview_undo( $job->id );
+		self::assertSame( [ [ $file, 'keep', 'parent_changed' ] ], array_map( static fn ( array $entry ): array => [ $entry['path'], $entry['action'], $entry['reason'] ], $review['entries'] ) );
+		self::assertArrayNotHasKey( 'undone', $review );
+		self::assertFileDoesNotExist( $this->jobs->directory( $job ) . '/undo/reverted' );
+		// Put back, the file is revertible.
+		unlink( $this->live . '/sub' );
+		rename( $this->live . '/sub.aside', $this->live . '/sub' );
+		self::assertSame( 'remove', array_column( $this->changes->preview_undo( $job->id )['entries'], 'action', 'path' )[ $file ] );
+	}
+
 	public function test_a_review_does_not_retire_an_apply_whose_entry_came_back_since(): void {
 		$plan  = $this->run_job( $this->queue_large_preview() );
 		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
