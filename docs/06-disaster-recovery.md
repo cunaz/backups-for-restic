@@ -95,13 +95,25 @@ The site records each delivery. Store the file with the other offline recovery m
    intl extension the preview also refuses a name that might match a protected path once
    Unicode is normalized.
 5. The **Restores** tab lists available undo jobs and their expiry times. Choose
-   **Preview undo**, review the actions, then confirm to return the affected files to
-   their previous state. Files and directories that the apply created and that were
-   deleted since, such as a removed plugin, are kept as they are; a replaced file that was
-   deleted since blocks the undo. If the preview refuses one entry, for example a file that
-   was edited after the apply, the undo as a whole is not offered; restore the affected
-   files offline as in step 4. Use **Delete staged files** to remove the private
-   downloads when you are finished.
+   **Preview undo** and review the actions: the undo decides for every entry on its own.
+   An entry that is still as the apply left it is reverted: a replaced file gets its
+   original back, and a file or directory that the apply created is removed. An entry that
+   changed after the apply is kept, and the preview gives the reason: for example a file
+   that was edited or updated since, or deleted and uploaded again, also with the same
+   content, a replaced file that was deleted, or a directory the apply created into which
+   something was uploaded since (the other files the apply put there are still removed).
+   Files and directories that the apply created and that were deleted since, such as a
+   removed plugin, need nothing. The preview counts what it restores, removes and keeps;
+   confirm to revert the listed entries. The undo checks every entry again just before it
+   changes it and keeps one that changed after your review. Its result counts what it did
+   and lists every kept entry with its reason, also when the undo was cancelled or failed.
+   Kept entries stay undoable until the expiry time, and the apply stays listed as partly
+   undone: if a kept entry is put back as the apply left it, for example by undoing a later
+   apply over the same files, preview the undo again. When nothing is left to revert, the
+   preview says so and the apply is no longer listed; an undo that could only keep changed
+   entries is refused. Restore files that should not stay as they are offline as in
+   step 4. Use **Delete staged files** to remove the private downloads when you are
+   finished.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.
@@ -113,7 +125,8 @@ wp backups-for-restic restore 0123abcd /var/www/html/index.php --wait
 
 If a restored plugin prevents WordPress from starting, run WP-CLI from the destination.
 Use the affected plugin's slug and the ID of the file apply job. Keep Backups for restic
-loaded. The command presents the reviewed undo and asks for confirmation.
+loaded. The command presents the reviewed undo with its totals and asks for confirmation.
+Afterwards it lists the entries it kept, with their reasons.
 
 ```sh
 wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
@@ -179,6 +192,74 @@ plugin that stops WordPress from starting stops them as well; skip it with
    Every table's file (`010-<table>.sql`) ends with a trailer line
    `-- end table rows=… bytes=…`; a file without it was truncated and that snapshot should
    not be used for the database.
+
+   TIMESTAMP values are in UTC; every file sets the session time zone it needs. A row can
+   make a statement larger than the client's default `max_allowed_packet` of 16 MiB:
+   `manifest.json` lists each table's `largest_statement` in bytes. Then pass a larger value
+   to the client, for example `--max-allowed-packet=1G`, and set the server's
+   `max_allowed_packet` at least as high. The manifest of a database with thousands of
+   tables can leave out `largest_statement`, `snapshot`, `key` and `restarts` to stay within
+   what the plugin's restore reads; pass the larger value then if the client stops with
+   `ERROR 2020` or `Got a packet bigger than 'max_allowed_packet'`.
+
+   If the import stops with `ERROR 1062 … Duplicate entry` in a table that `manifest.json`
+   marks with `"snapshot": false`, the backup read that table at more than one moment. One
+   way to such a duplicate is a row that was deleted and inserted again with a new key in
+   between: it is in the dump twice, with its old key and with its new one. The mark alone
+   does not prove that this is what happened; the conflicting rows show it. The client
+   stopped at that statement: the tables after it in name order are missing as well. Do
+   not turn the file's `INSERT` statements into `REPLACE`: a row that `REPLACE` writes
+   deletes every row it conflicts with in any unique key, which can take two rows away for
+   one. Reconcile the table in a scratch copy:
+
+   1. Copy `010-<table>.sql`. In the copy's `CREATE TABLE` line, turn `PRIMARY KEY (…)` into
+      `KEY relaxed_primary (…)` and every `UNIQUE KEY` into a plain `KEY`, with the same
+      column lists, whichever key the error names: a row can conflict in several keys, and
+      a table that the backup read by position because it could not page by its primary key,
+      for example one over a prefix of a BLOB, can also hold one row twice with the same
+      primary key. A plain key keeps the index that an `AUTO_INCREMENT` column needs; the
+      name `PRIMARY` is reserved for the primary key. Import the copy into an empty scratch
+      database.
+   2. For each key you changed, find the groups of rows that the original key does not
+      allow. Group by exactly what the key indexes: a whole column, `LEFT(<column>, <n>)`
+      for a part with a length such as `<column>(<n>)`, or the expression of a functional
+      key part. Leave out rows in which one of these values is NULL: a unique key allows
+      any number of those, and a primary key has none.
+
+      ```sql
+      SELECT <indexed parts>, COUNT(*) FROM <table>
+      WHERE <first part> IS NOT NULL AND <second part> IS NOT NULL
+      GROUP BY <indexed parts> HAVING COUNT(*) > 1;
+      ```
+
+      Look at the rows of each group and decide which one the site had last; with a row
+      that was inserted again that is usually the one with the newer primary key, and rows
+      that are equal in every column are one row read twice. Delete the others, one at a
+      time, for example `DELETE FROM <table> WHERE <the row's values> LIMIT 1`.
+   3. Make the keys what the original `CREATE TABLE` has, in one statement, for example
+      `ALTER TABLE <table> DROP KEY relaxed_primary, ADD PRIMARY KEY (…), DROP KEY <name>,
+      ADD UNIQUE KEY <name> (…)`. A key that the server refuses to add names a group that
+      is still to be decided.
+   4. Export the reconciled table with the dump tool of the client you import with:
+      `mysqldump --set-gtid-purged=OFF <scratch> <table>` for `mysql`,
+      `mariadb-dump <scratch> <table>` for `mariadb`. Where the scratch server uses GTIDs,
+      `mysqldump` otherwise also writes `SET @@SESSION.SQL_LOG_BIN` and `GTID_PURGED`, which
+      an account limited to the recovery database may not run; `mariadb-dump` writes such
+      statements only when asked to, with `--gtid`, `--master-data` or `--dump-slave`. A
+      recent `mariadb-dump` begins its file with a line that `mysql` refuses. Save the export
+      as `reconciled/010-<table>.sql` beside the original files, which you keep unchanged; it
+      ends with `-- Dump completed` instead of the trailer line.
+   5. Import all files again, in name order, into an empty database, with the export in
+      place of the original file, as the script of Scenario D does: it checks the trailer
+      of every original table file and the last line of every export. Check that the client
+      ends without an `ERROR` line and with exit status 0 before you use that database. If
+      it stops with `ERROR 1062` in another table, repeat these steps for it.
+
+   A table marked `"key": []` was read without a key to order its pages: none of its
+   primary and unique keys consists only of stored NOT NULL columns of types that compare
+   exactly; TEXT, BLOB, JSON and spatial columns and functional key parts do not. It can
+   still have other unique keys. If it is also marked `"snapshot": false`, rows that changed
+   while it was read can be missing or repeated; the backup's job named it in a warning.
 
 6. **Adjust `wp-config.php`** for the new database credentials. If the domain changed, run
    `wp search-replace` afterwards.
@@ -262,21 +343,34 @@ give its account access only to that database. Each table dump starts with a
 In Bash, change into the directory containing `000-header.sql` and `manifest.json`.
 Check the table file names against the manifest, then import in name order using one
 database connection. Replace `recovery_user` and `recovery_database` with the account
-and new database you created.
+and new database you created. A table that you reconciled after a duplicate key (step 5 of
+Scenario B) is imported from its export in `reconciled/` instead of its original file; every
+original file must still end with its trailer.
 
 ```bash
 set -euo pipefail
+files=()
 for table in 010-*.sql; do
     tail -n 1 -- "$table" | grep -Eq '^-- end table rows=[0-9]+ bytes=[0-9]+$' || {
         echo "Incomplete table dump: $table" >&2
         exit 1
     }
+    if [ -e "reconciled/$table" ]; then
+        tail -n 1 -- "reconciled/$table" | grep -q '^-- Dump completed' || {
+            echo "Incomplete reconciled export: reconciled/$table" >&2
+            exit 1
+        }
+        files+=("reconciled/$table")
+    else
+        files+=("$table")
+    fi
 done
-cat -- 000-header.sql 010-*.sql 900-views.sql |
+cat -- 000-header.sql "${files[@]}" 900-views.sql |
     mariadb --user=recovery_user --password recovery_database
 ```
 
-Use the `mysql` client for MySQL. Check the imported table counts against the rehearsal
+Use the `mysql` client for MySQL. The notes in step 5 of Scenario B on large statements
+and duplicate keys apply here as well. Check the imported table counts against the rehearsal
 or dump manifest, and start a private WordPress copy against the recovered database with
 the snapshot's table prefix. Confirm its home URL, administrator login and content
 before switching production. A manual SQL import restores the source accounts and

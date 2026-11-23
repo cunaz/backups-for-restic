@@ -20,6 +20,7 @@ final class SqlFormatter {
 
 	public const string BINARY  = 'binary';
 	public const string BIT     = 'bit';
+	public const string FLOAT   = 'float';
 	public const string NUMERIC = 'numeric';
 	public const string TEXT    = 'text';
 
@@ -49,6 +50,11 @@ final class SqlFormatter {
 		if ( 1 === preg_match( '/\Abit\b/i', $type ) ) {
 			return self::BIT;
 		}
+		// The server prints a FLOAT with about six digits, fewer than it holds; TableSource
+		// reads it as the DOUBLE it converts to exactly, which also imports exactly.
+		if ( 1 === preg_match( '/\Afloat\b/i', $type ) ) {
+			return self::FLOAT;
+		}
 		return 1 === preg_match( self::NUMERIC_TYPES, $type ) ? self::NUMERIC : self::TEXT;
 	}
 
@@ -70,7 +76,7 @@ final class SqlFormatter {
 			// mysqlnd sends BIT values as decimal numbers, other drivers as raw bytes.
 			return '' !== $value && strspn( $value, '0123456789' ) === strlen( $value ) ? $value : '0x' . bin2hex( '' === $value ? "\0" : $value );
 		}
-		if ( self::NUMERIC === $kind && 1 === preg_match( '/\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/', $value ) ) {
+		if ( ( self::NUMERIC === $kind || self::FLOAT === $kind ) && 1 === preg_match( '/\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/', $value ) ) {
 			return $value;
 		}
 		if ( ! mb_check_encoding( $value, 'UTF-8' ) ) {
@@ -90,13 +96,56 @@ final class SqlFormatter {
 	}
 
 	/**
+	 * Formats a value as value() does, in pieces of at most twice $slice bytes plus quotes,
+	 * so that a large value is never held twice as a whole: once as hex or escaped text and
+	 * once more with its prefix or quotes.
+	 *
+	 * @param string|null $value Value as the server sent it.
+	 * @param string      $kind  Column kind.
+	 * @param int         $slice Bytes of the value per piece.
+	 * @return \Generator<int, string> Pieces of the SQL literal.
+	 */
+	public static function pieces( ?string $value, string $kind, int $slice = 1048576 ): \Generator {
+		$length = null === $value ? 0 : strlen( $value );
+		if ( null === $value || $length <= $slice || self::BIT === $kind || ( ( self::NUMERIC === $kind || self::FLOAT === $kind ) && 1 === preg_match( '/\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/', $value ) ) ) {
+			yield self::value( $value, $kind );
+			return;
+		}
+		$hex = self::BINARY === $kind || ! mb_check_encoding( $value, 'UTF-8' );
+		yield $hex ? '0x' : "'";
+		for ( $offset = 0; $offset < $length; $offset += $slice ) {
+			$part = substr( $value, $offset, $slice );
+			// Each escape replaces a single byte, so a slice can end anywhere.
+			yield $hex ? bin2hex( $part ) : strtr(
+				$part,
+				[
+					'\\'   => '\\\\',
+					"'"    => "\\'",
+					"\0"   => '\\0',
+					"\n"   => '\\n',
+					"\r"   => '\\r',
+					"\x1a" => '\\Z',
+				]
+			);
+		}
+		if ( ! $hex ) {
+			yield "'";
+		}
+	}
+
+	/**
 	 * Puts a statement from SHOW CREATE on one line. Line breaks there are only whitespace
 	 * between clauses: the server escapes them inside string literals.
+	 *
+	 * The pattern names its bytes instead of using \s or \R: without the u modifier those
+	 * also match 0x85 (and, under some locales, 0xA0), which are continuation bytes of
+	 * UTF-8 characters such as "х" (D1 85), "内" (E5 86 85) or "Å" (C3 85). With the u
+	 * modifier, a definition that is not valid UTF-8 would make preg_replace() fail.
 	 *
 	 * @param string $statement Statement.
 	 * @return string One line.
 	 */
 	public static function one_line( string $statement ): string {
-		return trim( (string) preg_replace( '/\s*\R\s*/', ' ', $statement ) );
+		return trim( (string) preg_replace( '/[ \t]*(?:(?:\r\n|\r|\n)[ \t]*)+/', ' ', $statement ) );
 	}
 }

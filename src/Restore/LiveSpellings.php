@@ -185,7 +185,7 @@ final class LiveSpellings {
 	 * @return bool Whether no other spelling of this name exists.
 	 */
 	private function scan( string $directory, string $name, array $before ): bool {
-		$handle = opendir( $directory );
+		$handle = @opendir( $directory ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A folder that cannot be read is answered by the return value.
 		if ( false === $handle ) {
 			return false;
 		}

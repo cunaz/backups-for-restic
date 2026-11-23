@@ -60,6 +60,20 @@ final class PlanBuild {
 	public int $refused = 0;
 
 	/**
+	 * Rows of an undo review by action: restore, remove and keep.
+	 *
+	 * @var array<string,int>
+	 */
+	public array $actions = [];
+
+	/**
+	 * Rows of an undo review kept with nothing left to revert.
+	 *
+	 * @var int
+	 */
+	public int $settled = 0;
+
+	/**
 	 * Conservative data allocation, or null for a plan started by an older version.
 	 *
 	 * @var int|null
@@ -89,16 +103,14 @@ final class PlanBuild {
 		$changes = $data['changes'] ?? 0;
 		$refused = $data['refused'] ?? 0;
 		$pending = $data['pending'] ?? [];
-		if ( ! is_array( $counts ) || ! is_int( $offset ) || $offset < 0 || ! is_int( $changes ) || ! is_int( $refused ) || ! is_array( $pending ) ) {
+		$actions = $data['actions'] ?? [];
+		$settled = $data['settled'] ?? 0;
+		if ( ! is_array( $counts ) || ! is_int( $offset ) || $offset < 0 || ! is_int( $changes ) || ! is_int( $refused ) || ! is_array( $pending ) || ! is_array( $actions ) || ! is_int( $settled ) || $settled < 0 ) {
 			throw new StorageFailed( 'The background file preview checkpoint is invalid.' );
 		}
-		foreach ( $counts as $name => $count ) {
-			if ( ! is_string( $name ) || ! is_int( $count ) || $count < 0 || $count > DiskFilePlan::MAX_ENTRIES ) {
-				throw new StorageFailed( 'The background file preview count is invalid.' );
-			}
-			$this->counts[ $name ] = $count;
-		}
-		$required = $data['required_bytes'] ?? ( 0 === $offset ? 0 : null );
+		$this->counts  = self::tally( $counts );
+		$this->actions = self::tally( $actions );
+		$required      = $data['required_bytes'] ?? ( 0 === $offset ? 0 : null );
 		if ( null !== $required && ( ! is_int( $required ) || $required < 0 ) ) {
 			throw new StorageFailed( 'The background file preview allocation total is invalid.' );
 		}
@@ -106,11 +118,30 @@ final class PlanBuild {
 		$this->offset         = $offset;
 		$this->changes        = $changes;
 		$this->refused        = $refused;
+		$this->settled        = $settled;
 		foreach ( $pending as $key => $value ) {
 			if ( is_string( $key ) ) {
 				$this->pending[ $key ] = $value;
 			}
 		}
+	}
+
+	/**
+	 * Reads stored counts by name.
+	 *
+	 * @param array<mixed> $map Decoded counts.
+	 * @return array<string,int> Counts.
+	 * @throws StorageFailed If a count is invalid.
+	 */
+	private static function tally( array $map ): array {
+		$counts = [];
+		foreach ( $map as $name => $count ) {
+			if ( ! is_string( $name ) || ! is_int( $count ) || $count < 0 || $count > DiskFilePlan::MAX_ENTRIES ) {
+				throw new StorageFailed( 'The background file preview count is invalid.' );
+			}
+			$counts[ $name ] = $count;
+		}
+		return $counts;
 	}
 
 	/**
@@ -181,8 +212,11 @@ final class PlanBuild {
 	}
 
 	/**
-	 * Verifies the next attempted entries in reverse order. Every completed file action
-	 * is bound to its original source, target, journal and this independent preview job.
+	 * Reviews the next attempted entries in reverse order. Every entry gets its own decision
+	 * and reason: an entry that changed since the apply is kept, and the others are still
+	 * reverted. A created directory is removed only if each current child is a removal
+	 * earlier in this review. Every completed file decision is bound to its original source,
+	 * target, journal and this independent preview job.
 	 *
 	 * @param DiskFilePlan       $forward Confirmed apply manifest.
 	 * @param int                $attempted Number of attempted forward operations.
@@ -194,6 +228,17 @@ final class PlanBuild {
 	 */
 	public function undo( DiskFilePlan $forward, int $attempted, string $workspace, string $scope, float $deadline, DirectorySpellings $spellings ): bool {
 		$done = $this->counts['rows'] ?? 0;
+		if ( array_sum( $this->actions ) !== $done ) {
+			// A checkpoint from before the totals counted kept entries as changes, or refused
+			// them: review again. Each row reviewed again replaces its claim of a removal.
+			$done                 = 0;
+			$this->changes        = 0;
+			$this->refused        = 0;
+			$this->settled        = 0;
+			$this->actions        = [];
+			$this->pending        = [];
+			$this->counts['rows'] = 0;
+		}
 		while ( $done < $attempted ) {
 			$item   = $forward->mutation( $attempted - $done - 1 );
 			$row    = $item['row'];
@@ -201,31 +246,42 @@ final class PlanBuild {
 			$target = Bytes::base64url_decode( $row['destination'] ?? '' );
 			$change = new FileChange( $this->plan, $this->files, $workspace . '/item-' . $item['index'], $source, $scope );
 			try {
-				$action = $this->plan->destination( $source ) === $target ? $change->undo_action( $target, $row['action'], $deadline, $spellings ) : 'refuse';
+				$decision = $this->plan->maps( $source, $target ) ? $change->undo_review( $target, $row['action'], $deadline, $spellings ) : [
+					'action' => 'keep',
+					'reason' => 'destination_changed',
+				];
 			} catch ( FileWorkPending ) {
 				return false;
 			}
-			if ( 'remove' === $action ) {
-				if ( 'mkdir' === $row['action'] ) {
-					$covered = self::children_removable( $this->disk, $target, $deadline, $this->pending, false );
-					if ( null === $covered ) {
-						return false;
-					}
-					$this->pending = [];
-					if ( ! $covered ) {
-						$action = 'refuse';
-					}
+			if ( 'remove' === $decision['action'] && 'mkdir' === $row['action'] ) {
+				$covered = self::children_removable( $this->disk, $target, $deadline, $this->pending );
+				if ( null === $covered ) {
+					return false;
 				}
-				if ( 'remove' === $action ) {
-					$this->disk->claim( 'remove', $target, $done );
+				if ( true !== $covered ) {
+					$decision = [
+						'action' => 'keep',
+						'reason' => $covered,
+					];
 				}
 			}
-			$row['action'] = $action;
-			$row['reason'] = 'refuse' === $action ? 'changed_since_apply' : 'undo_journal';
+			if ( 'remove' === $decision['action'] ) {
+				$this->disk->claim( 'remove', $target, $done );
+			} else {
+				// The row may be reviewed again after a checkpoint that a stopped tick did not
+				// record, or after a reset: a removal that it claimed then no longer stands.
+				$this->disk->release( 'remove', $target, $done );
+			}
+			$row['action'] = $decision['action'];
+			$row['reason'] = $decision['reason'];
 			$this->disk->put( 'rows', $done, $row );
-			$this->refused       += 'refuse' === $action ? 1 : 0;
-			$this->changes       += in_array( $action, [ 'restore', 'remove', 'keep' ], true ) ? 1 : 0;
-			$this->counts['rows'] = ++$done;
+			// A position in a folder's names belongs to the row that yielded in it, also when
+			// that row is decided otherwise once it is reviewed again.
+			$this->pending                        = [];
+			$this->changes                       += 'keep' === $decision['action'] ? 0 : 1;
+			$this->settled                       += 'keep' === $decision['action'] && FileChange::settled( $decision['reason'] ) ? 1 : 0;
+			$this->actions[ $decision['action'] ] = ( $this->actions[ $decision['action'] ] ?? 0 ) + 1;
+			$this->counts['rows']                 = ++$done;
 			if ( microtime( true ) >= $deadline ) {
 				return $done === $attempted;
 			}
@@ -234,26 +290,36 @@ final class PlanBuild {
 	}
 
 	/**
-	 * Checks immediate children against their reviewed removals across bounded ticks.
-	 * At apply time each name must refer back to its authenticated undo manifest row.
+	 * Checks immediate children against their reviewed removals across bounded ticks. A child
+	 * counts only while its row's claim of a removal stands: the review withdraws the claim of
+	 * a row that it reviews again with another decision, and children are reviewed before
+	 * their directory.
+	 *
+	 * What is found about the directory keeps that directory with a reason, and the review
+	 * goes on with the next entry: a name that is not a reviewed removal, or a directory that
+	 * changed while it was read, keeps it as `new_children`, and one that is gone or cannot
+	 * be read since its own decision keeps it as changed, as the worker's last check does.
 	 *
 	 * @param DiskFilePlan        $disk Current undo preview.
 	 * @param string              $target Created live directory.
 	 * @param float               $deadline Worker deadline.
 	 * @param array<string,mixed> $cursor Persisted position in the same directory.
-	 * @param bool                $sealed Whether authenticated undo rows are available.
-	 * @return bool|null Whether all children are covered, or null to yield.
-	 * @throws StorageFailed If the directory cannot be enumerated consistently.
+	 * @return true|string|null True when every child is covered, the reason to keep the
+	 *                          directory otherwise, or null to yield.
+	 * @throws StorageFailed If the claims of this review cannot be read.
 	 */
-	public static function children_removable( DiskFilePlan $disk, string $target, float $deadline, array &$cursor, bool $sealed ): ?bool {
-		$identity = ApplyManifest::identity( $target );
-		$offset   = $cursor['offset'] ?? 0;
+	public static function children_removable( DiskFilePlan $disk, string $target, float $deadline, array &$cursor ): true|string|null {
+		$identity = self::folder_identity( $target );
+		if ( null === $identity ) {
+			return 'changed_since_apply';
+		}
+		$offset = $cursor['offset'] ?? 0;
 		if ( ! is_int( $offset ) || $offset < 0 || $identity !== ( $cursor['identity'] ?? $identity ) || realpath( $target ) !== $target || ! is_dir( $target ) ) {
-			return false;
+			return 'new_children';
 		}
 		$ctime = filectime( $target );
 		if ( false === $ctime ) {
-			return false;
+			return 'changed_since_apply';
 		}
 		if ( $offset > 0 && true !== ( $cursor['stable'] ?? false ) ) {
 			if ( time() <= $ctime ) {
@@ -266,35 +332,38 @@ final class PlanBuild {
 		if ( $offset > 0 && ! is_string( $cursor['last'] ?? null ) ) {
 			$offset = 0;
 		}
-		$stable  = time() > $ctime;
-		$entries = new \DirectoryIterator( $target );
+		$stable = time() > $ctime;
+		try {
+			$entries = new \DirectoryIterator( $target );
+		} catch ( \UnexpectedValueException ) {
+			return 'changed_since_apply';
+		}
 		if ( $offset > 0 ) {
-			$entries->seek( $offset - 1 );
+			try {
+				$entries->seek( $offset - 1 );
+			} catch ( \OutOfBoundsException ) {
+				// Names left the directory without a change of its identity, as where a file
+				// system keeps coarse times: the boundary of the last tick is gone.
+				return 'new_children';
+			}
 			if ( ! $entries->valid() || hash( 'sha256', $entries->getFilename() ) !== ( $cursor['last'] ?? null ) ) {
-				return false;
+				return 'new_children';
 			}
 			$entries->next();
 		}
 		while ( $entries->valid() ) {
 			if ( ! $entries->isDot() ) {
-				$path  = $target . '/' . $entries->getFilename();
-				$index = $disk->lookup( 'remove', $path );
-				if ( null === $index ) {
-					return false;
-				}
-				if ( $sealed ) {
-					$row = $disk->row( $index );
-					if ( 'remove' !== $row['action'] || Bytes::base64url_encode( $path ) !== $row['destination'] ) {
-						return false;
-					}
+				if ( null === $disk->lookup( 'remove', $target . '/' . $entries->getFilename() ) ) {
+					return 'new_children';
 				}
 			}
 			$last = $entries->getFilename();
 			$entries->next();
 			++$offset;
 			if ( microtime( true ) >= $deadline && $entries->valid() ) {
-				if ( ApplyManifest::identity( $target ) !== $identity ) {
-					return false;
+				$same = self::same_folder( $target, $identity );
+				if ( true !== $same ) {
+					return $same;
 				}
 				$cursor = [
 					'offset'   => $offset,
@@ -305,7 +374,36 @@ final class PlanBuild {
 				return null;
 			}
 		}
-		return ApplyManifest::identity( $target ) === $identity;
+		return self::same_folder( $target, $identity );
+	}
+
+	/**
+	 * The identity of a live directory, or null when it is gone or cannot be looked up.
+	 *
+	 * @param string $target Live directory.
+	 * @return string|null Identity.
+	 */
+	private static function folder_identity( string $target ): ?string {
+		try {
+			return ApplyManifest::identity( $target );
+		} catch ( StorageFailed ) {
+			return null;
+		}
+	}
+
+	/**
+	 * Whether a directory still has the identity with which its reading began.
+	 *
+	 * @param string $target Live directory.
+	 * @param string $identity Identity before the reading.
+	 * @return true|string True, or the reason to keep the directory.
+	 */
+	private static function same_folder( string $target, string $identity ): true|string {
+		$now = self::folder_identity( $target );
+		if ( $now === $identity ) {
+			return true;
+		}
+		return null === $now ? 'changed_since_apply' : 'new_children';
 	}
 
 	/**
@@ -322,6 +420,8 @@ final class PlanBuild {
 			'refused'        => $this->refused,
 			'pending'        => $this->pending,
 			'required_bytes' => $this->required_bytes,
+			'actions'        => $this->actions,
+			'settled'        => $this->settled,
 		];
 	}
 

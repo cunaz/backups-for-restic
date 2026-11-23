@@ -74,8 +74,8 @@ All notable changes are documented here. The format follows
 - Database rehearsal imports staged table data into separate InnoDB tables, with checked
   SQL and resumable transactions. The administrator can download its comparison report.
   It also handles tables containing only generated columns and fixed-format MyISAM
-  sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
-  cannot report success with a row that the bounded importer cannot read.
+  sources. It reads SQL statements up to 16 MiB; a larger one, which a backup writes for a
+  row too large to share a statement, is restored with a command-line client.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses
@@ -454,6 +454,26 @@ All notable changes are documented here. The format follows
 - Applying many files into one large folder no longer lists the folder several times for
   every file while the site is in maintenance: 500 new files beside 20,000 others needed
   27 seconds of checks before and less than half a second now.
+- Undo of a file apply works entry by entry. It reverts every entry that is still as the
+  apply left it and keeps every entry that changed since, with the reason, instead of
+  refusing the whole undo for one changed entry. Before, one upload into a folder that a
+  partial apply had created, or an update of one replaced file, made the apply impossible
+  to undo, and after 24 hours the only copies of the original files expired with it. A
+  file with another inode counts as unchanged when its content, size, type, permissions,
+  owner, group and modification time are those the apply installed, so an apply can be
+  undone after a later apply over the same files was undone, while a file written after
+  the apply with the same bytes is kept. Kept entries stay undoable until the recovery
+  window ends, and the apply is listed as partly undone. The undo checks every entry again
+  just before it changes it and keeps, rather than fails on, one that changed after the
+  review. Its result counts the entries by outcome, only what the undo itself reverted,
+  and lists the kept ones with their reasons, also in `wp backups-for-restic undo` and for
+  an undo that was cancelled or failed; a list that cannot be sealed, for example because a
+  page of it changed on disk, is reported as unavailable while the counts are still
+  recorded. A review that finds nothing left to revert records
+  the apply as undone. An undo that could only keep changed entries is refused with its own
+  message, and so is an undo confirmed before this version, which is reviewed again
+  (`undo_review_required`). An undo step now advances at least one entry when it starts
+  late, as an apply step does.
 - While a live file change holds the site in maintenance, WP-CLI commands other than the
   plugin's own run with the site's plugins, as during a WordPress update. Before, every
   command started with this plugin alone: `wp plugin activate`, or deactivating this
@@ -474,6 +494,44 @@ All notable changes are documented here. The format follows
   instead of "Another backup job is still running". A confirmation that finds the
   permission gone just before the job would start reports it too, instead of asking the
   administrator to wait for active work to finish.
+- The database backup reads every table along its whole primary key, or a unique key over
+  NOT NULL columns. Before, a table without a single-column integer key, such as
+  `wp_term_relationships`, was read by position: a row added or removed while the backup
+  ran made it skip a row that existed all along, or write one twice, which stopped the
+  import with a duplicate key.
+- The database backup reads each table's part of a backup step from one consistent
+  snapshot, on a database connection of its own that it opens with the site's settings and
+  checks before it uses it. A transient that is renewed while a table is read is no longer
+  in the backup twice. Where no such connection can be opened, the backup reads through the
+  site's connection as before, with its own settings around every query. A database drop-in
+  that sends those queries, or the reads of a table, to another connection than the settings
+  stops the backup with its own message instead of writing values in another time zone or
+  character set. A table without a key is read with one statement, or marked in the
+  database manifest and named in a warning of the job when it could not be.
+- A table whose structure changes while it is backed up, for example by a plugin update, is
+  backed up again from its beginning instead of producing a file that cannot be imported.
+  A table that keeps changing stops the backup with its own message.
+- TIMESTAMP values keep their instant: the database is read and written in UTC. Before,
+  values from the other half of the year moved by the daylight saving hour on import.
+- Text is read in utf8mb4 whatever `DB_CHARSET` is, so a site with a latin1 connection
+  gets its stored bytes back and no longer loses characters outside latin1 as `?`.
+- Table definitions with characters such as "х", "内" or "Å" in a comment, a default, an
+  ENUM value or a column name are no longer damaged in the backup.
+- FLOAT columns are backed up with every digit they hold.
+- A row larger than 16 MiB as SQL no longer fails every backup: it is written as a statement
+  of its own, and the database manifest records each table's largest statement. A table of
+  large rows is read only as many rows at a time as fit into the PHP memory limit, so that
+  every row that fits on its own is backed up; before, a page of such rows could end the
+  request. A row too large for the PHP memory limit stops the backup with its own message,
+  before it is read, and the log of the job names the table of a failed database dump.
+- A table that another connection keeps locked, for example with `LOCK TABLES` or during
+  a long `ALTER TABLE`, no longer holds a backup step for as long as the server lets a
+  query wait for a lock, a year on MySQL and a day on MariaDB by default. The backup waits
+  five seconds and then tries again later, with growing pauses; a table that stays locked
+  stops the backup at the sixth try with its own message, which names the table.
+- A row limit (`sql_select_limit`) that the server's settings or a plugin left on the
+  database session no longer cuts the database backup short. It could leave out tables,
+  columns, parts of a key or rows without an error.
 - A private directory that `BACKUPS_FOR_RESTIC_PRIVATE_DIR` names through a symbolic link,
   as some hosts mount their data volume, is used by its real path. Large file previews failed there,
   and after one had failed, no restore staging expired any more. Expiry also goes on when

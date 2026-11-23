@@ -70,6 +70,7 @@ final class RestRoutes {
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})'     => [ 'GET', 'job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/cancel' => [ 'POST', 'cancel_job' ],
 			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/log' => [ 'GET', 'job_log' ],
+			'/jobs/(?P<id>\d{8}T\d{6}Z-[0-9a-f]{6})/kept-entries' => [ 'GET', 'undo_kept' ],
 			'/snapshots'                                 => [ 'GET', 'snapshots' ],
 			// Any text is taken as the ID, so that a malformed one is answered as such and not as an unknown route.
 			'/snapshots/(?P<snapshot>[^/]+)'             => [ 'GET', 'snapshot' ],
@@ -680,6 +681,29 @@ final class RestRoutes {
 		return $this->respond( [ 'jobs' => $this->container->file_changes()->undoable() ] );
 	}
 
+	/**
+	 * One page of the entries that an undo kept, with their reasons.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Page or refusal.
+	 */
+	public function undo_kept( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$offset = $request->get_param( 'offset' ) ?? '0';
+		if ( ! is_scalar( $offset ) || 1 !== preg_match( '/\A[0-9]{1,7}\z/', (string) $offset ) ) {
+			return $this->error( 'invalid_plan_page', 400 );
+		}
+		try {
+			return $this->respond( $this->container->file_changes()->kept_page( Decoded::string( $request->get_url_params()['id'] ?? null ), (int) $offset ) );
+		} catch ( JobConflict $conflict ) {
+			return 'kept_list_unavailable' === ( $conflict->context()['code'] ?? null ) ? $this->error( 'kept_list_unavailable', 409 ) : $this->error( 'not_found', 404 );
+		} catch ( InvalidArgument ) {
+			return $this->error( 'invalid_plan_page', 400 );
+		} catch ( StorageFailed ) {
+			// A sealed list whose summary or page is missing or changed. The undo's result stands.
+			return $this->error( 'kept_list_unavailable', 409 );
+		}
+	}
+
 	/** Lists database exchanges with a retained original generation available for undo. */
 	public function database_undoable(): \WP_REST_Response {
 		return $this->respond( [ 'jobs' => $this->container->database_changes()->undoable() ] );
@@ -977,7 +1001,7 @@ final class RestRoutes {
 	private function plan_error( InvalidArgument|JobConflict $refused, bool $database = false ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
 			$code = JobError::from_throwable( $refused )->code;
-			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused' ], true ) ? $code : 'live_plan_conflict', 409 );
+			return $this->error( $database || in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert' ], true ) ? $code : 'live_plan_conflict', 409 );
 		}
 		$code = JobError::from_throwable( $refused )->code;
 		return $this->error( $database ? 'database_review_required' : ( 'protected_path_invalid' === $code ? $code : 'live_plan_unavailable' ), 400 );
@@ -1665,6 +1689,10 @@ final class RestRoutes {
 			'not_found'                     => [
 				'message' => __( 'The job does not exist.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'kept_list_unavailable'         => [
+				'message' => __( 'The list of the entries that this undo kept is not available.', 'backups-for-restic' ),
+				'hint'    => __( 'The undo recorded what it did, and its result has the counts. The list of the entries it kept could not be sealed, or a part of it is missing or was changed since; if it could not be sealed, the job\'s log says why. Why that undo kept each entry is recorded nowhere else. While the recovery window of the apply lasts, a new undo preview shows what can be reverted now.', 'backups-for-restic' ),
 			],
 			'not_editable'                  => [
 				'message' => __( 'This setting cannot be changed here.', 'backups-for-restic' ),

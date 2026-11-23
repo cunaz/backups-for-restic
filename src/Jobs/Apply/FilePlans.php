@@ -112,7 +112,7 @@ final readonly class FilePlans {
 	 * @param bool   $config Configuration.
 	 * @param string $plan_job Preview job.
 	 * @param int    $offset First row.
-	 * @return array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null} Public page.
+	 * @return array{restore:string,digest:string,applicable:bool,required_bytes:int|null,available_bytes:int|null,enough_space:bool|null,entries:list<array{action:string,path:string,source:string,destination:string|null,reason:string}>,plan_job:string,total:int,offset:int,next_offset:int|null,totals?:array{restore:int,remove:int,keep:int}|null} Public page; an undo page has the totals by action, null for a review sealed before they were counted, which cannot be confirmed.
 	 * @throws JobConflict If this preview expired or does not match the request.
 	 */
 	public function plan_page( string $id, string $restore, bool $undo, bool $config, string $plan_job, int $offset ): array {
@@ -130,16 +130,37 @@ final readonly class FilePlans {
 		$entries  = array_map( ApplyManifest::display( ... ), $disk->page( $offset ) );
 		$next     = $offset + count( $entries );
 		$estimate = $this->space->estimate( $undo ? 0 : $header['required_bytes'] );
-		return [
+		$page     = [
 			'restore'     => $restore,
 			'digest'      => $digest,
-			'applicable'  => 0 === $header['refused'] && $header['changes'] > 0 && false !== $estimate['enough_space'],
+			'applicable'  => 0 === $header['refused'] && $header['changes'] > 0 && false !== $estimate['enough_space'] && ( ! $undo || isset( $header['actions']['restore'], $header['actions']['remove'], $header['actions']['keep'] ) ),
 			'entries'     => $entries,
 			'plan_job'    => $plan_job,
 			'total'       => $total,
 			'offset'      => $offset,
 			'next_offset' => $next < $total ? $next : null,
 		] + $estimate;
+		if ( $undo ) {
+			$actions        = $header['actions'];
+			$page['totals'] = isset( $actions['restore'], $actions['remove'], $actions['keep'] ) ? [
+				'restore' => $actions['restore'],
+				'remove'  => $actions['remove'],
+				'keep'    => $actions['keep'],
+			] : null;
+		}
+		return $page;
+	}
+
+
+	/**
+	 * The number of entries that a completed undo review kept with nothing left to revert.
+	 *
+	 * @param string $plan_job Undo review whose page was just read.
+	 * @return int|null Count, or null for a review sealed before it was counted.
+	 */
+	public function settled( string $plan_job ): ?int {
+		$settled = $this->jobs->get( $plan_job )?->result['settled'] ?? null;
+		return is_int( $settled ) && $settled >= 0 ? $settled : null;
 	}
 
 
@@ -218,8 +239,9 @@ final readonly class FilePlans {
 		$restore   = ApplyJournal::field( $job, 'restore' );
 		$disk      = $this->disk( $restore, $job->id, true );
 		$builder   = $this->builder( $job, $disk );
-		$spellings = new DirectorySpellings( $this->journal->verification( $job ), $deadline );
-		if ( true === ( $job->data['undo'] ?? false ) ) {
+		$undo      = true === ( $job->data['undo'] ?? false );
+		$spellings = new DirectorySpellings( $this->journal->verification( $job ), $deadline, $undo );
+		if ( $undo ) {
 			$original = $this->journal->original( ApplyJournal::field( $job, 'subject' ), true );
 			$forward  = $this->approved( $original );
 			$done     = $builder->undo( $forward, $this->journal->attempted( $original ), $this->journal->workspace( $original ), $job->id, $deadline, $spellings );
@@ -274,13 +296,22 @@ final readonly class FilePlans {
 		$restore     = ApplyJournal::field( $job, 'restore' );
 		$disk        = $this->disk( $restore, $job->id, true );
 		$builder     = $this->builder( $job, $disk );
-		$digest      = $disk->seal( ApplyJournal::field( $job, 'subject' ), $restore, true === ( $job->data['undo'] ?? false ), true === ( $job->data['include_config'] ?? false ), $builder->counts, $builder->changes, $builder->refused, $builder->required_bytes );
+		$undo        = true === ( $job->data['undo'] ?? null );
+		$actions     = [
+			'restore' => $builder->actions['restore'] ?? 0,
+			'remove'  => $builder->actions['remove'] ?? 0,
+			'keep'    => $builder->actions['keep'] ?? 0,
+		];
+		$digest      = $disk->seal( ApplyJournal::field( $job, 'subject' ), $restore, $undo, true === ( $job->data['include_config'] ?? null ), $builder->counts, $builder->changes, $builder->refused, $builder->required_bytes, $undo ? $actions : null );
 		$job->result = [
 			'digest'  => $digest,
 			'entries' => $builder->counts['rows'] ?? 0,
 			'changes' => $builder->changes,
 			'refused' => $builder->refused,
 		];
+		if ( $undo ) {
+			$job->result += $actions + [ 'settled' => $builder->settled ];
+		}
 		return true;
 	}
 

@@ -254,6 +254,23 @@ final class ApplyPlan {
 	}
 
 	/**
+	 * Whether the site maps a snapshot path to a live path now. A path that the site's layout
+	 * refuses to map, because the mapping would be ambiguous or the path is not a valid
+	 * snapshot path, maps to no live path; those are the only refusals of destination().
+	 *
+	 * @param string $path Absolute snapshot path.
+	 * @param string $target Live path.
+	 * @return bool Whether the path maps to the live path.
+	 */
+	public function maps( string $path, string $target ): bool {
+		try {
+			return $this->destination( $path ) === $target;
+		} catch ( InvalidArgument ) {
+			return false;
+		}
+	}
+
+	/**
 	 * Enumerates the directory without materializing the plan or following snapshot links.
 	 *
 	 * @param string                                     $files Canonical staging directory.
@@ -507,7 +524,7 @@ final class ApplyPlan {
 		if ( null !== $review && $review->known( $directory ) ) {
 			return $review->unique( $directory, $name );
 		}
-		$handle = opendir( $directory );
+		$handle = @opendir( $directory ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- A folder that cannot be read is answered by the return value.
 		if ( false === $handle ) {
 			return false;
 		}

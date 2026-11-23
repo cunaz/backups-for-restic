@@ -43,6 +43,7 @@ final class AccessTest extends TestCase {
 			[ 'GET', '/jobs/' . self::JOB ],
 			[ 'POST', '/jobs/' . self::JOB . '/cancel' ],
 			[ 'GET', '/jobs/' . self::JOB . '/log' ],
+			[ 'GET', '/jobs/' . self::JOB . '/kept-entries' ],
 			[ 'GET', '/snapshots' ],
 			[ 'GET', '/snapshots/' . self::SNAPSHOT ],
 			[ 'GET', '/snapshots/' . self::SNAPSHOT . '/tree' ],
@@ -319,6 +320,76 @@ final class AccessTest extends TestCase {
 			[ self::JOB ]
 		);
 		self::assertSame( [ '403', '403' ], explode( "\n", trim( $statuses ) ) );
+	}
+
+	public function test_kept_entries_are_served_only_for_an_ended_undo_and_a_page_of_its_list(): void {
+		$undo  = '20261121T120000Z-0c0d01';
+		$apply = '20261121T120000Z-0c0d10';
+		TestSite::ended_undo(
+			$undo,
+			'cancelled',
+			[
+				'restored'             => 0,
+				'removed'              => 1,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			[ [ TestSite::root() . '/wp-content/uploads/bfr-kept.txt', 'protected' ] ]
+		);
+		TestSite::undoable_apply( $apply, [ [ TestSite::root() . '/bfr-mapped.txt', TestSite::root() . '/bfr-elsewhere.txt', 'create' ] ] );
+		// An undo that kept an entry and could not seal the list of it.
+		$unsealed = '20261121T120000Z-0c0d02';
+		TestSite::ended_undo(
+			$unsealed,
+			'succeeded',
+			[
+				'restored'             => 1,
+				'removed'              => 0,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 0,
+				'apply_state'          => 'partly_undone',
+			],
+			[]
+		);
+		try {
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $unsealed . '/kept-entries' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_kept_list_unavailable', $error['code'] ?? null, $raw );
+			[ $status, $page, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries' );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( [ 1, 0, null, $undo ], [ $page['total'], $page['offset'], $page['next_offset'], $page['plan_job'] ] );
+			self::assertSame( [ 'keep', 'protected' ], [ $page['entries'][0]['action'] ?? null, $page['entries'][0]['reason'] ?? null ], $raw );
+			[ $status, $page, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries&offset=1' );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( [ [], 1, null ], [ $page['entries'], $page['offset'], $page['next_offset'] ] );
+			// An offset that is no number of up to seven digits, or that lies beyond the list.
+			foreach ( [ '2', 'x', '-1', '1.5', '12345678' ] as $offset ) {
+				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries&offset=' . rawurlencode( $offset ) );
+				self::assertSame( 400, $status, $offset . ': ' . $raw );
+				self::assertSame( 'backups_for_restic_invalid_plan_page', $error['code'] ?? null, $raw );
+			}
+			// A job that is no ended undo, or no job at all.
+			foreach ( [ $apply, '20261121T120000Z-0c0d99' ] as $id ) {
+				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $id . '/kept-entries' );
+				self::assertSame( 404, $status, $id . ': ' . $raw );
+				self::assertSame( 'backups_for_restic_not_found', $error['code'] ?? null, $raw );
+			}
+			// A sealed list whose page was changed since is unavailable too, not an entry that the undo never recorded.
+			$page = TestSite::private_dir() . '/jobs/' . $undo . '/kept/rows-0.1';
+			self::assertFileExists( $page );
+			file_put_contents( $page, str_replace( 'protected', 'changed_since_apply', (string) file_get_contents( $page ) ) );
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $undo . '/kept-entries' );
+			self::assertSame( 409, $status, $raw );
+			self::assertSame( 'backups_for_restic_kept_list_unavailable', $error['code'] ?? null, $raw );
+		} finally {
+			foreach ( [ $undo, $unsealed, $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
 	}
 
 	public function test_invalid_preview_page_identifiers_are_rejected_before_planning(): void {
