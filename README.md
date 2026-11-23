@@ -72,10 +72,13 @@ An unreadable job document also blocks new jobs and repository changes and is ke
 compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
 explains how to proceed.
 
-Database backups limit each encoded SQL statement to 16 MiB. A single row that exceeds
-that limit stops the backup with a database error; binary and escaped values can be larger
-in SQL than in the source table. Use an external database export for such tables rather
-than expecting an incomplete backup to count as successful.
+Database backups never leave out a row. A row too large to share an SQL statement is
+written as a statement of its own, whatever its size, and the database manifest records
+each table's largest statement; binary and escaped values can be larger in SQL than in the
+source table. The plugin's importer reads statements up to 16 MiB: restore a table with a
+larger one with a command-line client, as the [recovery guide](docs/06-disaster-recovery.md)
+describes. A row stops the backup, with `database_dump_row_memory` naming its table, only
+when the row and its SQL do not fit into the PHP memory limit.
 
 ## Documents
 

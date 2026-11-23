@@ -74,8 +74,8 @@ All notable changes are documented here. The format follows
 - Database rehearsal imports staged table data into separate InnoDB tables, with checked
   SQL and resumable transactions. The administrator can download its comparison report.
   It also handles tables containing only generated columns and fixed-format MyISAM
-  sources. Backups now refuse a row whose encoded SQL statement exceeds 16 MiB, so they
-  cannot report success with a row that the bounded importer cannot read.
+  sources. It reads SQL statements up to 16 MiB; a larger one, which a backup writes for a
+  row too large to share a statement, is restored with a command-line client.
 - The stored settings and every job carry a layout number, so that later versions can
   convert them. A version installed over a newer one stays inactive and says so instead of
   acting on settings it may misread. The plugin also stays inactive if the database refuses
