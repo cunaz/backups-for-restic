@@ -301,7 +301,7 @@ jobs:
       - uses: ./.github/actions/mutation-tmpdir
         if: steps.changes.outputs.run == 'true'
       # composer mutation passes --with-uncovered, so code that no test reaches counts too. The
-      # gates (covered MSI of at least 90 %, and the floor for the MSI) live in
+      # floors for the covered MSI (never below ADR 0024's 90 %) and the MSI live in
       # infection.json5.dist.
       - run: composer mutation -- --no-progress
         if: steps.changes.outputs.run == 'true'

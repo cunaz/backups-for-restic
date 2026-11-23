@@ -431,23 +431,23 @@ leaves or meets a server on which large statements fail whatever the mutation: o
 
 | Gate (Composer script, configuration) | Mutated code | Runs in | MSI floor | Covered MSI |
 | --- | --- | --- | ---: | ---: |
-| Core (`mutation`, `infection.json5.dist`) | `Crypto`, `Format`, `Engine\Forget` and `Database\Restore` without the ten classes whose tests need the database server | `ci.yml` | 89 % | 90 % |
+| Core (`mutation`, `infection.json5.dist`) | `Crypto`, `Format`, `Engine\Forget` and `Database\Restore` without the ten classes whose tests need the database server | `ci.yml` | 89 % | 92 % |
 | Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 87 % | 88 % |
 | File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 77 % | 81 % |
 | File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its database half: the three `Database*` classes and `ExchangeSite` | `ci.yml` | 79 % | 83 % |
 | ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 83 % | 84 % |
-| Database (`mutation:database`) | all of `Database\Restore` and the database half of `src/Jobs/Apply`, killed by `tests/Unit/Database`, the unit tests of `DatabaseChanges` and `DatabaseReview`, and `tests/Database` against MySQL | `database-mutation.yml` | 80.9 % | 84.8 % |
+| Database (`mutation:database`) | all of `Database\Restore` and the database half of `src/Jobs/Apply`, killed by `tests/Unit/Database`, the unit tests of `DatabaseChanges` and `DatabaseReview`, and `tests/Database` against MySQL | `database-mutation.yml` | 80 % | 84 % |
 
 Every script passes `--with-uncovered`. Without it Infection mutates only lines that a test
 covers, so code that no test reaches produced no mutant and counted nowhere: before
 2026-11-22 the core gate listed `Database\Restore`, but ten of its classes, reached only by
 the database suite, created no mutant at all. The MSI counts such code as not killed.
-The covered MSI of the core stays ADR 0024's merge gate at 90 %. The other thresholds are
-floors: the scores measured on 2026-11-23 with `main` at `e40ab18` (below), rounded down, and
-never above the score over the mutants that every run of the gate killed, hence the tenths of
-the database gate. Pull requests merged after that keep them: a floor may only rise, and the
-pull request that adds the tests raises it. The goal for every gate is ADR 0024's 90 %. The
-planner had a covered threshold of 90 % as well; it scores 88.99 % and has a floor like the
+Every threshold is a floor: the score measured on 2026-11-23 with `main` at `e40ab18` (below),
+rounded down, and never above the score over the mutants that every run of the gate killed.
+Pull requests merged after that keep them: a floor may only rise, and the pull request that
+adds the tests raises it. ADR 0024's 90 % is the minimum that the core's covered MSI may never
+fall below, and the goal for the other gates; the core's covered floor is its measured 92 %.
+The planner had a covered threshold of 90 % as well; it scores 88.99 % and has a floor like the
 others until tests raise it. Each gate's suite in `tests/Mutation` holds the unit tests of the
 classes it mutates, and a new one belongs there too: on 2026-11-23 three that `main` had gained
 since the gates were set up were missing (`PlanBuildTest`, `DatabaseChangesTest`,
@@ -520,12 +520,14 @@ killed either.
 The database gate's two final runs differ in 101 mutants that one run killed and the other
 did not, 100 of them through `DatabaseExchangeTest`: the exchange checks the other sessions of
 its account on the server, and Infection's processes share one server and account, so such a
-test can fail through another process whatever the mutation. CI's run on older code, with four
-processes instead of eight, killed fewer of these than either local run (76.57 % against
-77.37 % and 77.82 %), but more than the mutants that both local runs killed (76.41 %). The floors
-are the 80.97 % and 84.88 % over the mutants that both final runs killed, rounded down to a
-tenth; the true scores may be lower still. A database account per process, or serial runs of
-these tests, would settle that.
+test can fail through another process whatever the mutation. On the same code CI's four
+processes detected about a point less than eight did locally (76.57 % and 81.45 % against
+77.37 % to 77.82 % and 82.30 % to 82.78 %), and the gate compares one CI run with its floors,
+not the score over several runs. So its floors are whole numbers like the others, 80 % and
+84 %, within a point of the 80.97 % and 84.88 % over the mutants that both final runs killed.
+If CI's first run on this state lands below them after all, the floors follow it down by the
+same rule. The true scores may be lower still; a database account per process, or serial runs
+of these tests, would settle that.
 
 Infection gives each mutant a timeout of five seconds plus five times what its covering test
 classes took in the initial run, at most the configured timeout; a mutant that runs into it
@@ -1008,9 +1010,9 @@ for every point that applies, "not affected" for the others.
    the authorised, audited `recovery-kit` command. Redirected output requires `--force`.
 8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`
    or `Engine` the conformance run is green; for `Crypto`, `Format`, `Engine\Forget` and the
-   database import filter the
-   covered mutation score stays at or above 90 %, and no other mutation gate falls below its
-   floor (§5.6). Documents and decision records say what changed.
+   database import filter the covered mutation score stays at or above its floor, 92 % since
+   2026-11-23 and never below 90 %, and no mutation gate falls below its floors (§5.6).
+   Documents and decision records say what changed.
 9. **Cooling-off.** A change to `Crypto`, `Format` or `Engine` is merged no earlier than 24
    hours after the last commit that touches these namespaces, and the author reads the
    whole diff once more before merging.

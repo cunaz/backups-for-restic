@@ -117,10 +117,11 @@ can operate.
 - Point 3 is wider: six mutation gates count code that no test reaches (`--with-uncovered` and a
   minimum MSI), and besides `Crypto`, `Format`, `Engine\Forget` and the database import filter
   they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL, the import
-  and the atomic exchange. The covered score of the core stays the merge gate at 90 %; the
-  others have floors at the scores measured on 2026-11-23 with `main` at `e40ab18`, which later
-  pull requests keep and may only raise. 90 % is the goal for all of them. The database gate is
-  too slow for every pull request; the release gate requires it.
+  and the atomic exchange. Every gate has floors at the scores measured on 2026-11-23 with
+  `main` at `e40ab18`, which later pull requests keep and may only raise; the core's covered
+  floor is its measured 92 %. 90 % stays the minimum that the core's covered score may never
+  fall below, and the goal for the other gates. The database gate is too slow for every pull
+  request; the release gate requires it.
 - 2026-11-23: the mutation gates had counted mutants as killed that no test killed. Infection
   serves the mutated class through a `file://` wrapper of its own, and the tests ran under it:
   `fsync()` fails on that wrapper, and it reports unreadable files and links to removed files as
