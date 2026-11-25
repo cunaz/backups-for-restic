@@ -119,7 +119,11 @@ can operate.
   they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL, the import
   and the atomic exchange. Every gate has floors at the scores measured on 2026-11-23 with
   `main` at `e40ab18`, which later pull requests keep and may only raise; the core's covered
-  floor is its measured 92 %. 90 % stays the minimum that the core's covered score may never
+  floor is its measured 92 %. A gate that falls below a floor is a regression of the pull
+  request that brought it there, and is answered with tests. A floor is lowered only by a
+  change of its own that measures the same commit again and shows that the measurement was at
+  fault, as the database gate's kills through other processes on its server can be; that change
+  names the mutants that came out differently and is recorded here. 90 % stays the minimum that the core's covered score may never
   fall below, and the goal for the other gates. The database gate is too slow for every pull
   request; the release gate requires it.
 - 2026-11-23: the mutation gates had counted mutants as killed that no test killed. Infection

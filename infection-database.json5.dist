@@ -36,9 +36,10 @@
     // another process whatever the mutation. 101 mutants were killed in one local run and not
     // in the other, and the score over the mutants that all three runs killed is 80.67 % and
     // 84.56 %, 1.5 points below one run's. The floors are whole numbers within a point of that,
-    // because the gate compares one CI run with them; if a CI run lands below them, they follow
-    // it down by the same rule. composer mutation:database checks afterwards that the server's
-    // Performance Schema instrumented every thread, one cause of such kills
+    // because the gate compares one CI run with them. A run below them fails the gate; they are
+    // lowered only as ADR 0024 says, by a change of its own that measures the same commit again
+    // and shows a defect of the measurement. composer mutation:database checks afterwards that
+    // the server's Performance Schema instrumented every thread, one cause of such kills
     // (bin/check-performance-schema.php); one server per mutant process is the follow-up that
     // makes the floors true ones. Otherwise they may only rise; ADR 0024's 90 % is the goal.
     // The 73.75 % and 79.20 % of 2026-11-20 were measured on older code, under Infection's

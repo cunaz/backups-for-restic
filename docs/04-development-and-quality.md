@@ -553,8 +553,11 @@ that all three runs on this state killed, CI's included. On older code CI's four
 about a point less than eight did locally (76.57 % and 81.45 % against 77.37 % to 77.82 % and
 82.30 % to 82.78 %); on the final state CI scored 82.02 % and 85.98 %. The gate compares one CI
 run with its floors, not the score over several runs, so its floors are whole numbers like the
-others, 80 % and 84 %, within a point of the score over all three runs; if a CI run lands below
-them, they follow it down by the same rule.
+others, 80 % and 84 %, within a point of the score over all three runs. A run below a floor is
+a failed gate, here as for every gate: its cause is looked for in the tests of the pull request
+first. A floor is lowered only by a change of its own that measures the same commit again and
+shows that the measurement was at fault, not the tests, with the mutants that came out
+differently named ([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
 
 One cause of such kills is checked after every run. A server whose Performance Schema cannot
 instrument a thread leaves that connection out of `performance_schema.processlist` while
