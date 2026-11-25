@@ -85,8 +85,8 @@ Each gate's configuration holds its floors, measured with `main` at `e40ab18`: a
 keeps them, and one that adds tests may raise them. A new unit test of a class that a gate
 mutates goes into that gate's suite in `tests/Mutation`.
 The scripts run Infection through `bin/mutation-gate.sh`, which fails a gate when its mutant
-processes could not write durably or did not all report in; `.tools/bin/infection` alone does
-not check that.
+processes could not write durably or did not all state that they could; `.tools/bin/infection`
+alone does not check that.
 
 The package that would ship, and the translation template built from it:
 

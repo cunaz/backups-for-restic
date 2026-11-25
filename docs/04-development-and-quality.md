@@ -480,29 +480,42 @@ loads nothing there.
 The bootstrap never fails a mutant process, because Infection would count that as a kill.
 Silence fails the gate instead. Before it loads anything, every mutant process under Infection's
 interceptor reports in with a new file in a directory that `bin/mutation-gate.sh`, through which
-the Composer scripts and so CI run Infection, names in `BFR_MUTATION_REPORTS`. After the run the
-script counts the reports against the mutants that Infection ran a test process for, as its
-summary log counts them: killed, escaped, errored, timed out and syntax errors. Mutants that are
-not covered, skipped or ignored get no process, and Infection's initial test run has no
-interceptor and reports nothing. A test that PHPUnit runs in a process of its own
-(`#[RunInSeparateProcess]`, as in `IndexTest`, `IndexFilePacksTest` and `DumpLimitsTest`) loads
-the bootstrap again; it inherits the report of its mutant process from the environment and does
-not report again, because extra reports could stand in for missing ones (before that, the core
-gate counted 4,764 reports for 4,630 processes). The gate fails when a report is missing, when
-Infection wrote no summary (an old one is removed before the run) or a count is missing from it,
-and when the configuration names no summary log; more reports than processes pass. On 2026-11-25
-the planner gate had 736 reports for 736 processes, ZIP downloads 779 for 779, the apply gate
-1,657 for 1,657 and the core 4,630 for 4,630. When `fsync()` still fails after the restore, or
-the user-space wrapper is back when the process ends, the process appends a line to its report,
-or when that cannot take it to a marker file, the one next to the reports or else
+the Composer scripts and so CI run Infection, names in `BFR_MUTATION_REPORTS`, and each check
+then states there that it passed: "can write durably" after the restore, or "does not compile"
+when the mutated copy does not, also when it fails with a compile error that no catch sees and
+the process ends while the classes load; and "ended with PHP's own file wrapper" when the
+process ends. After the run the script compares these with Infection's summary log. Reports, and
+"can write durably" or "does not compile" lines, must each reach the mutants that Infection ran
+a test process for: killed, escaped, errored, timed out and syntax errors. Mutants that are not
+covered, skipped or ignored get no process, and Infection's initial test run has no interceptor
+and reports nothing. "Ended" lines must reach the killed and escaped mutants less those that did
+not compile: Infection 0.35.10 counts a process that exits above 100 as errored and one that it
+stopped as timed out, so killed processes (exit 1 to 100, or 0 without PHPUnit's "OK") and
+escaped ones (0 with it) ran their shutdown functions, and a copy that does not compile ends
+without that check, counted as killed or as a syntax error depending on which test meets it
+first. A test that PHPUnit runs in a process of its own (`#[RunInSeparateProcess]`, as in
+`IndexTest`, `IndexFilePacksTest` and `DumpLimitsTest`) inherits the report of its mutant
+process and states nothing; before that, the core gate counted 4,764 reports for 4,630
+processes, and extra reports could stand in for missing ones. Each short count fails the gate
+with its own message, and so do a missing or unreadable summary and a configuration that names
+none; more lines than needed pass. On 2026-11-25 the counts matched Infection's exactly: the
+planner gate had 736 reports and 736 statements that the process can write durably or does not
+compile for 736 processes, and 733 end statements for 733 killed and escaped mutants; ZIP
+downloads 779, 779 and 765; the apply gate 1,657, 1,657 and 1,655; the core 4,630, 4,630 and
+4,562. The planner's syntax error and the core's errored mutant of `ZstdFrame.php:72`, a compile
+error that no catch sees, stated that they do not compile. When `fsync()` still fails after the
+restore, or the user-space wrapper is back when the process ends, the process appends a line to
+its report, or when that cannot take it to a marker file, the one next to the reports or else
 `.tools/mutation-canary` on the disk of the checkout, and the script fails the gate on any such
-line whatever the score. A process whose report directory cannot take a new file is missing; one
-whose directory turns unwritable only after it reported in writes the line into its report,
-which exists. `tests/Unit/Tooling/MutationGatesTest.php` checks outside any mutant process that
-the bootstrap of every gate loads every directory the gate mutates, that loading them prints and
-defines nothing, that the canary fires under a user-space wrapper, that a mutant process reports
-in once and its isolated tests do not, and how the script decides on reports, summaries and
-markers, with a real process whose markers cannot be written.
+line whatever the score. A process whose report directory cannot take a new file is missing, and
+one whose check fails while neither its report nor a marker can take the line lacks the
+statement that the check passed. `tests/Unit/Tooling/MutationGatesTest.php` checks outside any
+mutant process that the bootstrap of every gate loads every directory the gate mutates, that
+loading them prints and defines nothing, that the canary fires under a user-space wrapper, what
+a mutant process states for a copy that compiles, one that does not parse and one that fails
+with a compile error, that its isolated tests state nothing, and how the script decides on
+reports, statements, summaries and markers, with a real process whose report and markers cannot
+be written.
 
 The jobs keep the tests' temporary files on tmpfs (`.github/actions/mutation-tmpdir`): a gate
 measures the tests, not the disk, and on the runner's ext4 every `fsync()` of a durable write
