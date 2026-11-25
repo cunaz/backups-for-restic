@@ -161,18 +161,38 @@ final class MutationGatesTest extends TestCase {
 		}
 	}
 
-	public function test_a_process_that_ends_with_a_fatal_error_does_not_state_the_end_line(): void {
+	public function test_a_process_that_ends_with_a_fatal_error_outside_a_test_says_so(): void {
 		$root    = (string) realpath( dirname( __DIR__, 3 ) );
 		$scratch = TempDir::create( 'mutation-process' );
 		try {
 			$original = $root . '/src/Restore/ChunkDigest.php';
 			$mutant   = $scratch . '/ChunkDigest.php';
 			copy( $original, $mutant );
-			// Infection counts a process that exits with 255 as errored, not among the killed and
-			// escaped mutants whose end line the gate counts.
-			$result = self::process( $scratch, $root, $original, $mutant, null, true, true );
+			// The process exits with 255, and Infection counts it as errored, not among the killed
+			// and escaped mutants whose end line the gate counts.
+			$result = self::process( $scratch, $root, $original, $mutant, null, true, 'outside' );
+			self::assertSame( 255, $result['status'] );
 			self::assertCount( 1, $result['reports'] );
-			self::assertMatchesRegularExpression( '/\AProcess ([0-9]+) reported in\.\nProcess \1 can write durably\.\nProcess \1 ended with a fatal error: Uncaught Error: Call to undefined function [^\n]*\n\z/', $result['reports'][0] );
+			self::assertMatchesRegularExpression( "/\\AProcess ([0-9]+) reported in\\.\\nProcess \\1 can write durably\\.\\nProcess \\1 ended with PHP's own file wrapper after a fatal error outside a test: Uncaught Error: Call to undefined function [^\\n]*\\n\\z/", $result['reports'][0] );
+		} finally {
+			TempDir::remove( $scratch );
+		}
+	}
+
+	public function test_a_process_that_ends_with_a_fatal_error_in_a_test_says_so(): void {
+		$root    = (string) realpath( dirname( __DIR__, 3 ) );
+		$scratch = TempDir::create( 'mutation-process' );
+		try {
+			$original = $root . '/src/Restore/ChunkDigest.php';
+			$mutant   = $scratch . '/ChunkDigest.php';
+			copy( $original, $mutant );
+			// As three killed mutants of the ZIP gate did: the memory ran out while PHPUnit ran a
+			// test, PHPUnit's shutdown function ended the process with status 2, and Infection
+			// counted the mutant as killed, so its end line counts.
+			$result = self::process( $scratch, $root, $original, $mutant, null, true, 'test' );
+			self::assertSame( 2, $result['status'] );
+			self::assertCount( 1, $result['reports'] );
+			self::assertMatchesRegularExpression( "/\\AProcess ([0-9]+) reported in\\.\\nProcess \\1 can write durably\\.\\nProcess \\1 ended with PHP's own file wrapper after a fatal error in a test: Allowed memory size of [0-9]+ bytes exhausted[^\\n]*\\n\\z/", $result['reports'][0] );
 		} finally {
 			TempDir::remove( $scratch );
 		}
@@ -290,7 +310,7 @@ final class MutationGatesTest extends TestCase {
 				'::error::Mutant processes that could not write durably: 2.',
 			],
 			'a process could write only the fallback'    => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
-			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4)." ],
+			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4), 0 of them after a fatal error in a test, and 0 more after a fatal error outside a test, which do not count." ],
 			'more reports than processes pass'           => [
 				[
 					'FAKE_REPORTS' => '7',
@@ -313,15 +333,20 @@ final class MutationGatesTest extends TestCase {
 			'a syntax error excuses no end line'         => self::statements( '1 0 1 0 0', 'pass;caught', 1, '::error::1 of the 1 mutant processes that ran to their end did not state' ),
 			'a caught compile error counted as killed'   => self::statements( '3 0 0 1 0', 'pass,end;pass,end;caught;pass,end', 0, "(1 caught, 0 counted as syntax errors, 0 ended while the classes loaded), 3 ended with PHP's own file wrapper (needed: 3)" ),
 			'a caught compile error counted as a syntax error' => self::statements( '2 0 1 1 0', 'pass,end;pass,end;caught;pass,end', 0, "(1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 3 ended with PHP's own file wrapper (needed: 3)" ),
-			'a fatal error at the end counts as no end line' => self::statements( '2 1 0 0 0', 'pass,end;pass;pass,fatal', 1, '::error::1 of the 2 mutant processes that ran to their end did not state' ),
-			'a fatal error at the end of an errored process' => self::statements( '2 1 0 0 0', 'pass,end;pass,end;pass,fatal', 0, "2 ended with PHP's own file wrapper (needed: 2)" ),
+			// A fatal error outside a test ends the process with 255, and Infection counts it as
+			// errored: its end line must not stand in for a killed mutant's.
+			'a fatal error outside a test excuses no end line' => self::statements( '2 1 0 0 0', 'pass,end;pass;pass,fatal-outside', 1, '::error::1 of the 2 mutant processes that ran to their end did not state' ),
+			'a fatal error outside a test, of an errored process' => self::statements( '2 1 0 0 0', 'pass,end;pass,end;pass,fatal-outside', 0, "2 ended with PHP's own file wrapper (needed: 2), 0 of them after a fatal error in a test, and 1 more after a fatal error outside a test" ),
+			// A fatal error in a test ends the process with PHPUnit's status 2, and Infection counts
+			// it as killed, as with three mutants of the ZIP gate whose memory ran out.
+			'a fatal error in a test is an end line'     => self::statements( '2 0 0 0 0', 'pass,end;pass,fatal-in-test', 0, "2 ended with PHP's own file wrapper (needed: 2), 1 of them after a fatal error in a test, and 0 more" ),
 			'a copy that does not compile, counted as killed' => [
 				[
 					'FAKE_SUMMARY' => 'killed-compile',
 					'FAKE_ENDS'    => '4',
 				],
 				0,
-				"Mutant processes: 6 ran tests, 5 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 0 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4).",
+				"Mutant processes: 6 ran tests, 5 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 0 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4), 0 of them after a fatal error in a test, and 0 more after a fatal error outside a test, which do not count.",
 			],
 			'the summary lacks a count'                  => [ [ 'FAKE_SUMMARY' => 'partial' ], 1, '::error::Infection\'s summary ./.tools/infection/summary.log has no line "Errored: N"' ],
 			'Infection wrote no summary'                 => [ [ 'FAKE_SUMMARY' => 'none' ], 1, '::error::Infection wrote no summary to ./.tools/infection/summary.log' ],
@@ -513,7 +538,8 @@ final class MutationGatesTest extends TestCase {
 	 * the summary that FAKE_SUMMARY names (full: 3 killed, 1 escaped, 1 timed out, 1 syntax error,
 	 * 3 not covered; killed-compile: the syntax error counted as killed; counts: FAKE_COUNTS, as
 	 * "killed errored syntax escaped timed-out"). FAKE_LINES adds reports whose statements it
-	 * names, one report per ";" (pass, caught, loading, end, fatal). The stand-in locks the
+	 * names, one report per ";" (pass, caught, loading, end, fatal-in-test, fatal-outside). The
+	 * stand-in locks the
 	 * reports and .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits with
 	 * FAKE_STATUS.
 	 */
@@ -561,7 +587,8 @@ final class MutationGatesTest extends TestCase {
 							caught) printf 'Process %d does not compile: syntax error, unexpected token "==="\n' "$((200 + n))" ;;
 							loading) printf 'Process %d ended while the classes loaded: Unparenthesized `a ? b : c ? d : e` is not supported\n' "$((200 + n))" ;;
 							end) printf "Process %d ended with PHP's own file wrapper.\n" "$((200 + n))" ;;
-							fatal) printf 'Process %d ended with a fatal error: Allowed memory size of 134217728 bytes exhausted\n' "$((200 + n))" ;;
+							fatal-in-test) printf "Process %d ended with PHP's own file wrapper after a fatal error in a test: Allowed memory size of 134217728 bytes exhausted\n" "$((200 + n))" ;;
+							fatal-outside) printf "Process %d ended with PHP's own file wrapper after a fatal error outside a test: Allowed memory size of 134217728 bytes exhausted\n" "$((200 + n))" ;;
 						esac
 					done
 				} > "$BFR_MUTATION_REPORTS/report-$((200 + n))-x"
@@ -620,7 +647,7 @@ final class MutationGatesTest extends TestCase {
 	 *
 	 * @return array<string, mixed>
 	 */
-	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null, bool $dies = false, bool $fatal = false ): array {
+	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null, bool $dies = false, string $fatal = '' ): array {
 		$script = $scratch . '/process.php';
 		file_put_contents(
 			$script,
@@ -662,8 +689,14 @@ final class MutationGatesTest extends TestCase {
 					echo json_encode( $result, JSON_THROW_ON_ERROR );
 				}
 			);
-			if ( '1' === getenv( 'BFR_TEST_FATAL_AT_END' ) ) {
+			if ( 'outside' === getenv( 'BFR_TEST_FATAL_AT_END' ) ) {
 				bfr_no_such_function_ends_this_process();
+			}
+			if ( 'test' === getenv( 'BFR_TEST_FATAL_AT_END' ) ) {
+				// As PHPUnit's TestCase::run() does around each test.
+				\PHPUnit\Runner\ShutdownHandler::setMessage( 'Fatal error: Premature end of PHP process when running a test.' );
+				ini_set( 'memory_limit', (string) ( memory_get_usage() + 4194304 ) );
+				$result['memory'] = str_repeat( 'x', 8388608 );
 			}
 			PHP
 		);
@@ -677,8 +710,8 @@ final class MutationGatesTest extends TestCase {
 		if ( null !== $inherited ) {
 			$variables[ MutationProcess::REPORTED_VARIABLE ] = $inherited;
 		}
-		if ( $fatal ) {
-			$variables['BFR_TEST_FATAL_AT_END'] = '1';
+		if ( '' !== $fatal ) {
+			$variables['BFR_TEST_FATAL_AT_END'] = $fatal;
 		}
 		$environment = getenv();
 		unset( $environment[ MutationProcess::REPORTED_VARIABLE ] );
@@ -699,7 +732,10 @@ final class MutationGatesTest extends TestCase {
 		$reports = array_map( static fn ( string $file ): string => (string) file_get_contents( $file ), (array) glob( $reports . '/report-*' ) );
 		if ( $dies ) {
 			self::assertNotSame( 0, $status, 'The process ended with an error.' );
-			return [ 'reports' => $reports ];
+			return [
+				'reports' => $reports,
+				'status'  => $status,
+			];
 		}
 		self::assertSame( 0, $status, $output . file_get_contents( $scratch . '/stderr' ) );
 		$result = json_decode( $output, true, 512, JSON_THROW_ON_ERROR );

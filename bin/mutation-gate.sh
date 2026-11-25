@@ -16,18 +16,20 @@
 #   passed: "can write durably" after the restore, or, when the mutated copy does not compile,
 #   "does not compile" (the bootstrap caught the error and the tests go on to meet it) or "ended
 #   while the classes loaded" (a compile error that no catch sees, exit 255); and when the process
-#   ends, "ended with PHP's own file wrapper", or "ended with a fatal error". After the run, with
-#   Infection's summary log:
+#   ends, "ended with PHP's own file wrapper", followed after a fatal error by whether PHPUnit ran
+#   a test then. After the run, with Infection's summary log:
 #   - reports, and lines that the process can write durably or that its copy does not compile,
 #     must each reach the mutants that Infection ran a test process for: killed, escaped,
 #     errored, timed out and syntax errors. Mutants that are not covered, skipped or ignored get
 #     no process, and Infection's initial test run has no interceptor and reports nothing;
-#   - "ended with PHP's own file wrapper" lines must reach the killed and escaped mutants: their
-#     process ended through PHPUnit's exit (Infection counts an exit above 100, as after a fatal
-#     error, as errored, and a process it stopped as timed out). Less those among them whose
-#     copy did not compile: only the caught kind can be, which Infection counts as killed or as a
-#     syntax error, depending on which test meets the copy first, so killed and escaped hold the
-#     caught ones less the syntax errors, which come only from such copies.
+#   - end lines must reach the killed and escaped mutants: their process ran its shutdown
+#     functions, as Infection counts an exit above 100 as errored and a process it stopped as
+#     timed out. A fatal error in a test counts, as PHPUnit then ends the process with status 2
+#     and Infection counts the mutant as killed; one outside a test does not, as the process exits
+#     with 255 and Infection counts it as errored. Less those among them whose copy did not
+#     compile: only the caught kind can be, which Infection counts as killed or as a syntax error,
+#     depending on which test meets the copy first, so killed and escaped hold the caught ones
+#     less the syntax errors, which come only from such copies.
 #   A test that PHPUnit runs in a process of its own inherits the report of its mutant process
 #   (BFR_MUTATION_REPORTED) and states nothing. A missing report or statement fails the gate.
 # - A process whose checks fail cannot report its result through the tests without counting the
@@ -88,7 +90,7 @@ status=0
 "$root/.tools/bin/infection" "$@" || status=$?
 
 # The lines that a report may hold besides those of a failed check.
-statement="Process [0-9]+ (reported in\\.|can write durably\\.|does not compile: .*|ended while the classes loaded: .*|ended with PHP's own file wrapper\\.|ended with a fatal error: .*)"
+statement="Process [0-9]+ (reported in\\.|can write durably\\.|does not compile: .*|ended while the classes loaded: .*|ended with PHP's own file wrapper(\\.| after a fatal error (in|outside) a test: .*))"
 lines="$({ find "$canary" -maxdepth 1 -type f -name 'report-*' -exec grep -h -v -x -E "$statement" {} + || true; } | grep -h . || true)"
 for marker in "$BFR_MUTATION_CANARY" "$fallback"; do
 	if [[ -e "$marker" ]]; then
@@ -135,12 +137,14 @@ reported="$(holding 'Process [0-9]+ reported in\.')"
 passed="$(holding 'Process [0-9]+ (can write durably\.|does not compile: .*|ended while the classes loaded: .*)')"
 caught="$(holding 'Process [0-9]+ does not compile: .*')"
 loading="$(holding 'Process [0-9]+ ended while the classes loaded: .*')"
-ended="$(holding "Process [0-9]+ ended with PHP's own file wrapper\\.")"
+ended="$(holding "Process [0-9]+ ended with PHP's own file wrapper(\\.| after a fatal error in a test: .*)")"
+intest="$(holding "Process [0-9]+ ended with PHP's own file wrapper after a fatal error in a test: .*")"
+outside="$(holding "Process [0-9]+ ended with PHP's own file wrapper after a fatal error outside a test: .*")"
 # The caught copies that Infection did not count as syntax errors are among the killed ones.
 among=$((caught - syntax))
 ((among > 0)) || among=0
 needed=$((finished - among))
-echo "Mutant processes: $processes ran tests, $finished of them to their end; $reported reported in, $passed could write durably or did not compile ($caught caught, $syntax counted as syntax errors, $loading ended while the classes loaded), $ended ended with PHP's own file wrapper (needed: $needed)."
+echo "Mutant processes: $processes ran tests, $finished of them to their end; $reported reported in, $passed could write durably or did not compile ($caught caught, $syntax counted as syntax errors, $loading ended while the classes loaded), $ended ended with PHP's own file wrapper (needed: $needed), $intest of them after a fatal error in a test, and $outside more after a fatal error outside a test, which do not count."
 short=0
 if ((reported < processes)); then
 	echo "::error::$((processes - reported)) of the $processes mutant processes that Infection ran did not report in: they did not run tests/Mutation/bootstrap.php or could not write their report, so the score above cannot be trusted."

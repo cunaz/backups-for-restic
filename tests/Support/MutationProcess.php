@@ -10,8 +10,11 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Support;
 
 use FilesystemIterator;
+use PHPUnit\Runner\ShutdownHandler;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
+use ReflectionException;
+use ReflectionProperty;
 use Throwable;
 
 /**
@@ -32,9 +35,10 @@ use Throwable;
  * a file of its own, and each check states in that file that it passed: "can write durably"
  * after the restore, or that the mutated copy does not compile (caught, and the tests go on to
  * meet it) or that the process ended while the classes loaded (a compile error that no catch
- * sees); and "ended with PHP's own file wrapper" when the process ends through PHPUnit's exit,
- * or "ended with a fatal error" otherwise. bin/mutation-gate.sh fails the gate when fewer
- * reports or statements exist than Infection's summary needs. When durable writes still fail
+ * sees); and "ended with PHP's own file wrapper" when the process ends, saying whether it ended
+ * after a fatal error in a test or outside one, which decides whether Infection counts the mutant
+ * as killed or as errored. bin/mutation-gate.sh fails the gate when fewer reports or statements
+ * exist than Infection's summary needs. When durable writes still fail
  * after the restore, or the user-space wrapper is back when the process ends, a line goes into
  * the process's report, or into a marker file when the report cannot take it, and the script
  * fails the gate on that too.
@@ -59,7 +63,7 @@ final class MutationProcess {
 	/** The environment variable that names the marker file; bin/mutation-gate.sh sets it. */
 	public const MARKER_VARIABLE = 'BFR_MUTATION_CANARY';
 
-	/** The errors that end a process: it exits with 255, which Infection counts as errored. */
+	/** The errors that end a process: with status 255, or with 2 when PHPUnit ran a test. */
 	private const FATAL = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
 
 	/** The variable that names the directory of the reports; bin/mutation-gate.sh sets it. */
@@ -256,15 +260,33 @@ final class MutationProcess {
 	public static function finish( array $markers, ?string $report = null ): bool {
 		if ( ! self::intercepted() ) {
 			if ( null !== $report ) {
-				// A process that ends with a fatal error exits above 100, and Infection counts it as
-				// errored, not among the killed and escaped mutants that owe the end line.
 				$error = error_get_last();
-				self::state( $report, null !== $error && 0 !== ( $error['type'] & self::FATAL ) ? 'ended with a fatal error: ' . $error['message'] : "ended with PHP's own file wrapper." );
+				if ( null === $error || 0 === ( $error['type'] & self::FATAL ) ) {
+					$statement = "ended with PHP's own file wrapper.";
+				} else {
+					$statement = "ended with PHP's own file wrapper after a fatal error " . ( self::in_test() ? 'in' : 'outside' ) . ' a test: ' . $error['message'];
+				}
+				self::state( $report, $statement );
 			}
 			return true;
 		}
 		self::leave( $markers, 'file:// was a user-space stream wrapper when the process ended.' );
 		return false;
+	}
+
+	/**
+	 * Whether PHPUnit was running a test when the process met its fatal error. A shutdown
+	 * function of PHPUnit's, which runs after this one, then ends the process with status 2, and
+	 * Infection counts the mutant as killed; after a fatal error outside a test the process exits
+	 * with 255, and Infection counts it as errored. PHPUnit keeps that state in a private property
+	 * of an internal class; should it not be there, the answer leans towards a passing gate.
+	 */
+	private static function in_test(): bool {
+		try {
+			return '' !== ( new ReflectionProperty( ShutdownHandler::class, 'message' ) )->getValue();
+		} catch ( ReflectionException ) {
+			return true;
+		}
 	}
 
 	/**
