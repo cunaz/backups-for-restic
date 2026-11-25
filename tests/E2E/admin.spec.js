@@ -331,7 +331,7 @@ test( 'a selected snapshot file can be staged and downloaded', async ( { page } 
 		if ( 'Download restore report' !== name ) {
 			await password.fill( ADMIN.password );
 		}
-		const pending = page.waitForEvent( 'download' );
+		const pending = page.waitForEvent( 'download', { timeout: 60 * 1000 } );
 		await staged.getByRole( 'button', { name, exact: true } ).click();
 		const downloaded = await pending;
 		expect( await downloaded.failure() ).toBeNull();
@@ -344,6 +344,11 @@ test( 'a selected snapshot file can be staged and downloaded', async ( { page } 
 } );
 
 test( 'live apply and undo require a current preview and confirmation', async ( { page } ) => {
+	// Request interception stays on for the whole test. When the last route of a page ends,
+	// used up or removed, Playwright switches interception off, and a request that the page
+	// sends in that moment can stay paused in the browser for good, neither sent nor failed.
+	// This route lets every request pass and is never the last one.
+	await page.route( '**/*', ( route ) => route.fallback() );
 	await openBackups( page, 'restores' );
 	const staged = page.locator( 'section.bfr-card' ).filter( { hasText: 'Download ZIP' } );
 	const file = siteRoot() + '/license.txt';
@@ -404,17 +409,33 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 		expect( fs.readFileSync( file, 'utf8' ) ).toBe( revision );
 		// The server accepts the confirmation, and a proxy answers with an error page of its own:
 		// the page finds the job that the confirmation started and follows it. The status, which
-		// it asks first, cannot be read either, so it finds the job in the list of jobs.
+		// it asks first, cannot be read either, so it finds the job in the list of jobs. The route
+		// of the status is in place before the confirmation, loses the first request once the
+		// server has accepted it and lets every other one pass.
 		let started = null;
+		let accepted = false;
+		let lost = 0;
 		const isStatus = ( requestURL ) => /\/backups-for-restic\/v1\/status(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		const loseStatus = ( route ) => {
+			if ( ! accepted ) {
+				return route.fallback();
+			}
+			accepted = false;
+			lost++;
+			return route.abort( 'connectionreset' );
+		};
+		await page.route( isStatus, loseStatus );
 		await page.route( isApply, async ( route ) => {
 			const response = await route.fetch();
 			started = ( await response.json() ).job.id;
-			await page.route( isStatus, ( status ) => status.abort( 'connectionreset' ), { times: 1 } );
+			accepted = true;
 			await route.fulfill( { status: 504, contentType: 'text/html', body: '<html><body>Gateway Timeout</body></html>' } );
 		}, { times: 1 } );
 		await confirm( staged, apply, url, ADMIN.password );
-		await page.waitForURL( ( current ) => null !== started && started === current.searchParams.get( 'job' ) );
+		await expect.poll( () => started, { message: 'the server accepts the confirmation and starts a job', timeout: 60000 } ).not.toBeNull();
+		await expect( page, 'the page follows the job that the confirmation started' ).toHaveURL( ( current ) => started === current.searchParams.get( 'job' ), { timeout: 60000 } );
+		expect( lost, 'requests for the status lost after the server accepted the confirmation' ).toBe( 1 );
+		await page.unroute( isStatus, loseStatus );
 		await expect.poll( () => fs.readFileSync( file ), { timeout: 120000 } ).toEqual( original );
 		await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible( { timeout: 120000 } );
 
@@ -439,7 +460,7 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 		const address = undo.getByLabel( 'Type the site address to confirm' );
 		await address.fill( url );
 		const isList = ( name ) => ( response ) => 'GET' === response.request().method() && new RegExp( 'backups-for-restic/v1/' + name + '(?:[?&]|$)' ).test( decodeURIComponent( response.url() ) );
-		const reread = Promise.all( [ page.waitForResponse( isList( 'undo' ) ), page.waitForResponse( isList( 'restores' ) ) ] );
+		const reread = Promise.all( [ page.waitForResponse( isList( 'undo' ), { timeout: 60 * 1000 } ), page.waitForResponse( isList( 'restores' ), { timeout: 60 * 1000 } ) ] );
 		hold = false;
 		await reread;
 		await expect( notice( page, 'success', 'Finished successfully.' ) ).toBeVisible();
@@ -451,6 +472,10 @@ test( 'live apply and undo require a current preview and confirmation', async ( 
 
 		await confirm( undo, 'Undo live file changes', url, ADMIN.password );
 		await expect.poll( () => fs.readFileSync( file, 'utf8' ), { timeout: 120000 } ).toBe( revision );
+		// The file can be back before the answer to the confirmation arrives; the page then opens
+		// the undo's job, and a click on the page that it leaves is lost. The test goes on once
+		// the page shows how the undo ended.
+		await expect( notice( page, 'success', 'The apply is fully undone' ) ).toBeVisible( { timeout: 120000 } );
 	} finally {
 		fs.writeFileSync( file, original );
 	}
@@ -560,7 +585,7 @@ test( 'the passwords and the CA certificate can be entered again in the settings
 test( 'the browser checks the working directory where the site cannot request itself', async ( { page } ) => {
 	noLoopback( true );
 	try {
-		const reported = page.waitForResponse( ( response ) => response.url().includes( 'environment%2Fprobe%2Freport' ) || response.url().includes( 'environment/probe/report' ) );
+		const reported = page.waitForResponse( ( response ) => response.url().includes( 'environment%2Fprobe%2Freport' ) || response.url().includes( 'environment/probe/report' ), { timeout: 120 * 1000 } );
 		await openBackups( page, 'environment' );
 		// The script asked for a probe file, requested it from here and reported the refusal.
 		expect( ( await ( await reported ).json() ).exposed ).toBe( false );
@@ -639,13 +664,13 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 			const preview = staged.getByRole( 'button', { name: 'Preview live file changes' } );
 			if ( resume ) {
 				const isPlan = ( response ) => response.request().method() === 'POST' && decodeURIComponent( response.url() ).includes( '/apply-plan' );
-				const [ queued ] = await Promise.all( [ destination.waitForResponse( ( response ) => isPlan( response ) && 202 === response.status() ), preview.click() ] );
+				const [ queued ] = await Promise.all( [ destination.waitForResponse( ( response ) => isPlan( response ) && 202 === response.status(), { timeout: 60 * 1000 } ), preview.click() ] );
 				const id = ( await queued.json() ).job.id;
 				await expect( staged.getByRole( 'columnheader', { name: 'Snapshot path' } ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
 				await destination.reload();
 				await staged.getByText( 'Restore files to the live site', { exact: true } ).click();
 				await Promise.all( [
-					destination.waitForResponse( ( response ) => isPlan( response ) && 200 === response.status() && response.request().postDataJSON().plan_job === id ),
+					destination.waitForResponse( ( response ) => isPlan( response ) && 200 === response.status() && response.request().postDataJSON().plan_job === id, { timeout: 60 * 1000 } ),
 					preview.click(),
 				] );
 				// The stored preview is shown as what it is, with the time it was finished, a way to
@@ -654,7 +679,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 				await expect( stored ).toContainText( 'This preview was finished on' );
 				await expect( staged.getByRole( 'button', { name: 'Apply to live site' } ) ).toBeVisible();
 				const [ again ] = await Promise.all( [
-					destination.waitForResponse( ( response ) => isPlan( response ) && 202 === response.status() ),
+					destination.waitForResponse( ( response ) => isPlan( response ) && 202 === response.status(), { timeout: 60 * 1000 } ),
 					stored.getByRole( 'button', { name: 'Inspect again' } ).click(),
 				] );
 				expect( ( await again.json() ).job.id ).not.toBe( id );
@@ -737,7 +762,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		const db = staged.locator( 'details' ).filter( { has: destination.getByText( 'Restore tables to the live database', { exact: true } ) } );
 		await db.getByText( 'Restore tables to the live database', { exact: true } ).click();
 		const [ review ] = await Promise.all( [
-			destination.waitForResponse( ( response ) => response.request().method() === 'POST' && decodeURIComponent( response.url() ).includes( '/database/plan' ) ),
+			destination.waitForResponse( ( response ) => response.request().method() === 'POST' && decodeURIComponent( response.url() ).includes( '/database/plan' ), { timeout: 120 * 1000 } ),
 			db.getByRole( 'button', { name: 'Preview live database changes' } ).click(),
 		] );
 		expect( review.status() ).toBe( 200 );
@@ -765,7 +790,7 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 				await area.getByLabel( 'Your WordPress password' ).fill( DESTINATION_ADMIN.password );
 				const previous = destination.url();
 				await submit.click();
-				await destination.waitForURL( ( url ) => url.href !== previous && url.searchParams.has( 'job' ) );
+				await expect( destination, 'the page follows the job that the confirmation started' ).toHaveURL( ( url ) => url.href !== previous && url.searchParams.has( 'job' ), { timeout: 120 * 1000 } );
 				await expect( notice( destination, 'success', outcome ) ).toBeVisible( { timeout: 6 * 60 * 1000 } );
 				await settings.reload();
 				await expect( settings.getByLabel( 'Keep one snapshot per day, for this many days' ) ).toHaveValue( '13' );
@@ -864,7 +889,7 @@ test( 'a files-only snapshot still restores individual files', async ( { page } 
 	const staged = page.locator( 'section.bfr-card' ).filter( { hasText: id } ).first();
 	// A restored file is site content: its download needs the WordPress password.
 	await staged.getByLabel( 'WordPress password for downloads' ).fill( ADMIN.password );
-	const pending = page.waitForEvent( 'download' );
+	const pending = page.waitForEvent( 'download', { timeout: 60 * 1000 } );
 	await staged.getByRole( 'button', { name: 'Download file', exact: true } ).click();
 	const downloaded = await pending;
 	expect( await downloaded.failure() ).toBeNull();

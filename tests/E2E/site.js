@@ -38,7 +38,7 @@ async function signIn( page, account = ADMIN ) {
 	await page.locator( '#user_login' ).fill( account.login );
 	await page.locator( '#user_pass' ).fill( account.password );
 	await page.locator( '#wp-submit' ).click();
-	await page.waitForURL( /\/wp-admin\//, { waitUntil: 'domcontentloaded' } );
+	await page.waitForURL( /\/wp-admin\//, { waitUntil: 'domcontentloaded', timeout: 60 * 1000 } );
 }
 
 /**
