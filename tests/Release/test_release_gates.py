@@ -252,7 +252,9 @@ class ReleaseGates(unittest.TestCase):
             self.refused(self.protections(responses), "no active tag ruleset stops refs/tags/v1.2.3 from being moved")
 
     def test_an_exclusion_that_may_reach_the_tag_in_any_reading_removes_the_ruleset(self):
-        for pattern in ("refs/*", "refs/tags/v1.*", "*", "~ALL"):
+        # refs/tags/**/v* reaches the tag only segment by segment, where **/ may stand for no
+        # segment at all; read with * across /, it needs one more slash and would not match.
+        for pattern in ("refs/*", "refs/tags/v1.*", "*", "~ALL", "refs/tags/**/v*", "**/v1.2.3"):
             responses = protections()
             responses[key("rulesets/2")]["body"]["conditions"]["ref_name"]["exclude"] = [pattern]
             self.refused(self.protections(responses), "no active tag ruleset stops refs/tags/v1.2.3 from being deleted")

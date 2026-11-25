@@ -205,8 +205,8 @@ def _bracket_end(pattern, start):
 def applies(conditions, ref):
     """Whether a ruleset's ref_name conditions certainly cover ref, failing closed both ways: an
     include pattern counts only when it matches segment by segment (within_segments), and an
-    exclude pattern removes the ruleset when it matches in the widest reading too, with * across
-    /, as fnmatch reads it."""
+    exclude pattern removes the ruleset when it matches in either reading: segment by segment,
+    where **/ may stand for no segment, or with * across /, as fnmatch reads it."""
     names = (conditions or {}).get("ref_name") or {}
 
     def special(pattern):
@@ -222,7 +222,7 @@ def applies(conditions, ref):
 
     def excluded(pattern):
         known = special(pattern)
-        return fnmatch.fnmatchcase(ref, pattern) if known is None else known
+        return fnmatch.fnmatchcase(ref, pattern) or within_segments(ref, pattern) if known is None else known
 
     return any(included(p) for p in names.get("include", [])) and not any(excluded(p) for p in names.get("exclude", []))
 
