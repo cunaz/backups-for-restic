@@ -136,6 +136,10 @@ final class MutationJobScopeTest extends TestCase {
 				}
 			}
 		}
+		foreach ( self::commands( $root, $job ) as $command ) {
+			preg_match_all( '#(?<![\w/])(bin/[\w.-]+)#', $command, $named );
+			array_push( $paths, ...$named[1] );
+		}
 		foreach ( MutationProcess::DIRECTORIES as $directory ) {
 			$paths[] = $directory . '/Any.php';
 		}
@@ -150,6 +154,20 @@ final class MutationJobScopeTest extends TestCase {
 	 * @return list<string>
 	 */
 	private static function gates( string $root, string $job ): array {
+		$gates = [];
+		foreach ( self::commands( $root, $job ) as $command ) {
+			self::assertStringContainsString( 'bin/mutation-gate.sh', $command );
+			$gates[] = 1 === preg_match( '/--configuration=(\S+)/', $command, $match ) ? $match[1] : 'infection.json5.dist';
+		}
+		return $gates;
+	}
+
+	/**
+	 * The commands of the Composer scripts that the job runs, one string per script.
+	 *
+	 * @return list<string>
+	 */
+	private static function commands( string $root, string $job ): array {
 		$composer = json_decode( (string) file_get_contents( $root . '/composer.json' ), true, 512, JSON_THROW_ON_ERROR );
 		self::assertIsArray( $composer );
 		$scripts = [];
@@ -166,13 +184,7 @@ final class MutationJobScopeTest extends TestCase {
 			}
 		}
 		self::assertNotEmpty( $scripts, 'The job runs no mutation gate.' );
-		$gates = [];
-		foreach ( $scripts as $script ) {
-			$command = implode( ' ', (array) ( $composer['scripts'][ $script ] ?? [] ) );
-			self::assertStringContainsString( 'bin/mutation-gate.sh', $command, $script );
-			$gates[] = 1 === preg_match( '/--configuration=(\S+)/', $command, $match ) ? $match[1] : 'infection.json5.dist';
-		}
-		return $gates;
+		return array_map( static fn ( string $script ): string => implode( ' ', (array) ( $composer['scripts'][ $script ] ?? [] ) ), $scripts );
 	}
 
 	/**

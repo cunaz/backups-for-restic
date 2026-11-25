@@ -107,7 +107,8 @@
         ],
         "mutation:database": [
             "Composer\\Config::disableProcessTimeout",
-            "bin/mutation-gate.sh --configuration=infection-database.json5.dist --threads=max --with-uncovered --only-covering-test-cases"
+            "bin/mutation-gate.sh --configuration=infection-database.json5.dist --threads=max --with-uncovered --only-covering-test-cases",
+            "@php bin/check-performance-schema.php"
         ],
         "fuzz": "php bin/fuzz.php --seconds=10",
         "bench": "php -d opcache.enable_cli=0 bin/bench.php",
