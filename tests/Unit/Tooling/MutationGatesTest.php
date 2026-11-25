@@ -143,7 +143,7 @@ final class MutationGatesTest extends TestCase {
 		}
 	}
 
-	public function test_a_copy_that_fails_with_a_compile_fatal_error_says_that_it_does_not_compile(): void {
+	public function test_a_copy_that_fails_with_a_compile_fatal_error_says_that_the_process_ended_while_loading(): void {
 		$root    = (string) realpath( dirname( __DIR__, 3 ) );
 		$scratch = TempDir::create( 'mutation-process' );
 		try {
@@ -155,7 +155,24 @@ final class MutationGatesTest extends TestCase {
 			file_put_contents( $mutant, str_replace( 'final class ChunkDigest {', 'final class ChunkDigest { public static function mutated( bool $a, bool $b ): int { return $a ? 1 : $b ? 2 : 3; }', (string) file_get_contents( $original ) ) );
 			$result = self::process( $scratch, $root, $original, $mutant, null, true );
 			self::assertCount( 1, $result['reports'] );
-			self::assertMatchesRegularExpression( '/\AProcess ([0-9]+) reported in\.\nProcess \1 does not compile: Unparenthesized `a \? b : c \? d : e` is not supported[^\n]*\n\z/', $result['reports'][0] );
+			self::assertMatchesRegularExpression( '/\AProcess ([0-9]+) reported in\.\nProcess \1 ended while the classes loaded: Unparenthesized `a \? b : c \? d : e` is not supported[^\n]*\n\z/', $result['reports'][0] );
+		} finally {
+			TempDir::remove( $scratch );
+		}
+	}
+
+	public function test_a_process_that_ends_with_a_fatal_error_does_not_state_the_end_line(): void {
+		$root    = (string) realpath( dirname( __DIR__, 3 ) );
+		$scratch = TempDir::create( 'mutation-process' );
+		try {
+			$original = $root . '/src/Restore/ChunkDigest.php';
+			$mutant   = $scratch . '/ChunkDigest.php';
+			copy( $original, $mutant );
+			// Infection counts a process that exits with 255 as errored, not among the killed and
+			// escaped mutants whose end line the gate counts.
+			$result = self::process( $scratch, $root, $original, $mutant, null, true, true );
+			self::assertCount( 1, $result['reports'] );
+			self::assertMatchesRegularExpression( '/\AProcess ([0-9]+) reported in\.\nProcess \1 can write durably\.\nProcess \1 ended with a fatal error: Uncaught Error: Call to undefined function [^\n]*\n\z/', $result['reports'][0] );
 		} finally {
 			TempDir::remove( $scratch );
 		}
@@ -273,7 +290,7 @@ final class MutationGatesTest extends TestCase {
 				'::error::Mutant processes that could not write durably: 2.',
 			],
 			'a process could write only the fallback'    => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
-			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 did not), 4 ended with PHP's own file wrapper (needed: 3)." ],
+			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4)." ],
 			'more reports than processes pass'           => [
 				[
 					'FAKE_REPORTS' => '7',
@@ -285,17 +302,27 @@ final class MutationGatesTest extends TestCase {
 			'one process did not report in'              => [ [ 'FAKE_REPORTS' => '5' ], 1, '::error::1 of the 6 mutant processes that Infection ran did not report in' ],
 			'no process reported in'                     => [ [ 'FAKE_REPORTS' => '0' ], 1, '::error::6 of the 6 mutant processes that Infection ran did not report in' ],
 			'a process did not say it can write durably' => [ [ 'FAKE_PASSES' => '4' ], 1, '::error::1 of the 6 mutant processes did not state that they could write durably' ],
-			'a killed mutant did not say how it ended'   => [ [ 'FAKE_ENDS' => '2' ], 1, "::error::1 of the 3 mutant processes that ran to their end did not state that PHP's own file wrapper was still in place" ],
-			'a timed-out mutant needs no end line'       => [ [ 'FAKE_ENDS' => '3' ], 0, "3 ended with PHP's own file wrapper (needed: 3)" ],
+			'a killed mutant did not say how it ended'   => [ [ 'FAKE_ENDS' => '3' ], 1, "::error::1 of the 4 mutant processes that ran to their end did not state that PHP's own file wrapper was still in place" ],
+			'a timed-out mutant needs no end line'       => self::statements( '1 0 0 0 1', 'pass,end;pass', 0, "1 ended with PHP's own file wrapper (needed: 1)" ),
+			// CodeRabbit's example: a copy that ends the process while the classes load is errored,
+			// and must not excuse a killed mutant that did not say how it ended.
+			'a fatal compile error excuses no end line'  => self::statements( '2 1 0 0 0', 'pass,end;pass;loading', 1, '::error::1 of the 2 mutant processes that ran to their end did not state' ),
+			// The mirror case: a syntax error, whose copy the bootstrap caught, excuses no killed
+			// mutant either. Here the killed one met an intercepted wrapper at its end while its
+			// report and both markers could not be written, so it left nothing at all.
+			'a syntax error excuses no end line'         => self::statements( '1 0 1 0 0', 'pass;caught', 1, '::error::1 of the 1 mutant processes that ran to their end did not state' ),
+			'a caught compile error counted as killed'   => self::statements( '3 0 0 1 0', 'pass,end;pass,end;caught;pass,end', 0, "(1 caught, 0 counted as syntax errors, 0 ended while the classes loaded), 3 ended with PHP's own file wrapper (needed: 3)" ),
+			'a caught compile error counted as a syntax error' => self::statements( '2 0 1 1 0', 'pass,end;pass,end;caught;pass,end', 0, "(1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 3 ended with PHP's own file wrapper (needed: 3)" ),
+			'a fatal error at the end counts as no end line' => self::statements( '2 1 0 0 0', 'pass,end;pass;pass,fatal', 1, '::error::1 of the 2 mutant processes that ran to their end did not state' ),
+			'a fatal error at the end of an errored process' => self::statements( '2 1 0 0 0', 'pass,end;pass,end;pass,fatal', 0, "2 ended with PHP's own file wrapper (needed: 2)" ),
 			'a copy that does not compile, counted as killed' => [
 				[
 					'FAKE_SUMMARY' => 'killed-compile',
 					'FAKE_ENDS'    => '4',
 				],
 				0,
-				"Mutant processes: 6 ran tests, 5 of them to their end; 6 reported in, 6 could write durably or did not compile (1 did not), 4 ended with PHP's own file wrapper (needed: 4).",
+				"Mutant processes: 6 ran tests, 5 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 0 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4).",
 			],
-			'a report holds a line of the canary'        => [ [ 'FAKE_MARK' => 'report' ], 1, 'Process 9: fsync() failed' ],
 			'the summary lacks a count'                  => [ [ 'FAKE_SUMMARY' => 'partial' ], 1, '::error::Infection\'s summary ./.tools/infection/summary.log has no line "Errored: N"' ],
 			'Infection wrote no summary'                 => [ [ 'FAKE_SUMMARY' => 'none' ], 1, '::error::Infection wrote no summary to ./.tools/infection/summary.log' ],
 			'Infection failed and wrote no summary'      => [
@@ -306,6 +333,25 @@ final class MutationGatesTest extends TestCase {
 				3,
 				'::error::Infection exited with 3 and wrote no summary',
 			],
+		];
+	}
+
+	/**
+	 * A run of the gate script with reports that hold the named statements and a summary with
+	 * the counts "killed errored syntax escaped timed-out".
+	 *
+	 * @return array{array<string, string>, int, string}
+	 */
+	private static function statements( string $counts, string $lines, int $status, string $printed ): array {
+		return [
+			[
+				'FAKE_REPORTS' => '0',
+				'FAKE_SUMMARY' => 'counts',
+				'FAKE_COUNTS'  => $counts,
+				'FAKE_LINES'   => $lines,
+			],
+			$status,
+			$printed,
 		];
 	}
 
@@ -465,8 +511,10 @@ final class MutationGatesTest extends TestCase {
 	 * reports (6): the first FAKE_PASSES (5) say they can write durably, the next FAKE_UNCOMPILED
 	 * (1) that their copy does not compile, and the first FAKE_ENDS (4) how they ended. It writes
 	 * the summary that FAKE_SUMMARY names (full: 3 killed, 1 escaped, 1 timed out, 1 syntax error,
-	 * 3 not covered; killed-compile: the syntax error counted as killed), locks the reports and
-	 * .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits with
+	 * 3 not covered; killed-compile: the syntax error counted as killed; counts: FAKE_COUNTS, as
+	 * "killed errored syntax escaped timed-out"). FAKE_LINES adds reports whose statements it
+	 * names, one report per ";" (pass, caught, loading, end, fatal). The stand-in locks the
+	 * reports and .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits with
 	 * FAKE_STATUS.
 	 */
 	private static function gate_checkout(): string {
@@ -500,11 +548,33 @@ final class MutationGatesTest extends TestCase {
 					fi
 				} > "$BFR_MUTATION_REPORTS/report-$((100 + n))-x"
 			done
+			n=0
+			IFS=';' read -ra specs <<< "${FAKE_LINES:-}"
+			for spec in "${specs[@]}"; do
+				n=$((n + 1))
+				{
+					printf 'Process %d reported in.\n' "$((200 + n))"
+					IFS=',' read -ra parts <<< "$spec"
+					for part in "${parts[@]}"; do
+						case "$part" in
+							pass) printf 'Process %d can write durably.\n' "$((200 + n))" ;;
+							caught) printf 'Process %d does not compile: syntax error, unexpected token "==="\n' "$((200 + n))" ;;
+							loading) printf 'Process %d ended while the classes loaded: Unparenthesized `a ? b : c ? d : e` is not supported\n' "$((200 + n))" ;;
+							end) printf "Process %d ended with PHP's own file wrapper.\n" "$((200 + n))" ;;
+							fatal) printf 'Process %d ended with a fatal error: Allowed memory size of 134217728 bytes exhausted\n' "$((200 + n))" ;;
+						esac
+					done
+				} > "$BFR_MUTATION_REPORTS/report-$((200 + n))-x"
+			done
 			mkdir -p "$tools/infection"
 			case "${FAKE_SUMMARY:-full}" in
 				full) printf 'Total: 9\n\nKilled by Test Framework: 3\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 1\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
 				killed-compile) printf 'Total: 9\n\nKilled by Test Framework: 4\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 0\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
 				partial) printf 'Total: 9\n\nKilled by Test Framework: 3\n' > "$tools/infection/summary.log" ;;
+				counts)
+					read -r killed errored syntax escaped timed <<< "$FAKE_COUNTS"
+					printf 'Total: %d\n\nKilled by Test Framework: %d\nKilled by Static Analysis: 0\nErrored: %d\nSyntax Errors: %d\nEscaped: %d\nTimed Out: %d\nSkipped: 0\nIgnored: 0\nNot Covered: 0\n' "$((killed + errored + syntax + escaped + timed))" "$killed" "$errored" "$syntax" "$escaped" "$timed" > "$tools/infection/summary.log"
+					;;
 			esac
 			if [[ "${FAKE_LOCK:-}" == before ]]; then
 				chmod 0500 "$BFR_MUTATION_REPORTS" "$tools"
@@ -550,7 +620,7 @@ final class MutationGatesTest extends TestCase {
 	 *
 	 * @return array<string, mixed>
 	 */
-	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null, bool $dies = false ): array {
+	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null, bool $dies = false, bool $fatal = false ): array {
 		$script = $scratch . '/process.php';
 		file_put_contents(
 			$script,
@@ -592,6 +662,9 @@ final class MutationGatesTest extends TestCase {
 					echo json_encode( $result, JSON_THROW_ON_ERROR );
 				}
 			);
+			if ( '1' === getenv( 'BFR_TEST_FATAL_AT_END' ) ) {
+				bfr_no_such_function_ends_this_process();
+			}
 			PHP
 		);
 		$marker  = $scratch . '/marker';
@@ -603,6 +676,9 @@ final class MutationGatesTest extends TestCase {
 		];
 		if ( null !== $inherited ) {
 			$variables[ MutationProcess::REPORTED_VARIABLE ] = $inherited;
+		}
+		if ( $fatal ) {
+			$variables['BFR_TEST_FATAL_AT_END'] = '1';
 		}
 		$environment = getenv();
 		unset( $environment[ MutationProcess::REPORTED_VARIABLE ] );

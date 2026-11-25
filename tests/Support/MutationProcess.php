@@ -30,8 +30,10 @@ use Throwable;
  *
  * Silence fails the gate instead. Before it loads anything, every mutant process reports in with
  * a file of its own, and each check states in that file that it passed: "can write durably"
- * after the restore, or "does not compile" when the mutated copy does not, and "ended with PHP's
- * own file wrapper" when the process ends. bin/mutation-gate.sh fails the gate when fewer
+ * after the restore, or that the mutated copy does not compile (caught, and the tests go on to
+ * meet it) or that the process ended while the classes loaded (a compile error that no catch
+ * sees); and "ended with PHP's own file wrapper" when the process ends through PHPUnit's exit,
+ * or "ended with a fatal error" otherwise. bin/mutation-gate.sh fails the gate when fewer
  * reports or statements exist than Infection's summary needs. When durable writes still fail
  * after the restore, or the user-space wrapper is back when the process ends, a line goes into
  * the process's report, or into a marker file when the report cannot take it, and the script
@@ -56,6 +58,9 @@ final class MutationProcess {
 
 	/** The environment variable that names the marker file; bin/mutation-gate.sh sets it. */
 	public const MARKER_VARIABLE = 'BFR_MUTATION_CANARY';
+
+	/** The errors that end a process: it exits with 255, which Infection counts as errored. */
+	private const FATAL = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR;
 
 	/** The variable that names the directory of the reports; bin/mutation-gate.sh sets it. */
 	public const REPORT_VARIABLE = 'BFR_MUTATION_REPORTS';
@@ -96,11 +101,11 @@ final class MutationProcess {
 			$loading = true;
 			if ( null !== $own ) {
 				// A mutated copy can fail to compile with a fatal error, which no catch sees; the
-				// process then ends here, and says so.
+				// process then ends here, Infection counts it as errored, and it says so.
 				register_shutdown_function(
 					static function () use ( &$loading, $own ): void {
 						if ( $loading ) {
-							self::state( $own, 'does not compile: ' . ( error_get_last()['message'] ?? 'the process ended while the classes under mutation loaded.' ) );
+							self::state( $own, 'ended while the classes loaded: ' . ( error_get_last()['message'] ?? 'no error was recorded.' ) );
 						}
 					}
 				);
@@ -251,7 +256,10 @@ final class MutationProcess {
 	public static function finish( array $markers, ?string $report = null ): bool {
 		if ( ! self::intercepted() ) {
 			if ( null !== $report ) {
-				self::state( $report, "ended with PHP's own file wrapper." );
+				// A process that ends with a fatal error exits above 100, and Infection counts it as
+				// errored, not among the killed and escaped mutants that owe the end line.
+				$error = error_get_last();
+				self::state( $report, null !== $error && 0 !== ( $error['type'] & self::FATAL ) ? 'ended with a fatal error: ' . $error['message'] : "ended with PHP's own file wrapper." );
 			}
 			return true;
 		}
