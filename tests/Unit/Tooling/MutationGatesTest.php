@@ -381,6 +381,60 @@ final class MutationGatesTest extends TestCase {
 	}
 
 	/**
+	 * Runs whose mutant processes timed out: "killed errored syntax escaped timed-out", Infection's
+	 * exit status, and whether the script warns.
+	 *
+	 * @return array<string, array{string, string, bool}>
+	 */
+	public static function timed_out_runs(): array {
+		return [
+			'2 of 20 timed out, a healthy run'     => [ '18 0 0 0 2', '0', true ],
+			'2 of 20 timed out, Infection failed'  => [ '18 0 0 0 2', '3', true ],
+			'1 of 20 timed out, exactly 5 percent' => [ '19 0 0 0 1', '0', false ],
+			'1 of 40 timed out'                    => [ '39 0 0 0 1', '0', false ],
+		];
+	}
+
+	/**
+	 * More than 5 percent of the mutant processes timed out draws a warning, and only a warning:
+	 * Infection counts a timeout as detected, so on a slow machine the score is higher than what
+	 * the tests kill, as for the database gate on a slow runner (414 of 4,081). Healthy runs of
+	 * the six gates timed out 0.1 to 1.8 percent.
+	 *
+	 * @param string $counts The summary's counts.
+	 * @param string $status Infection's exit status, which the script passes on.
+	 * @param bool   $warned Whether the script warns.
+	 */
+	#[DataProvider( 'timed_out_runs' )]
+	public function test_the_gate_script_warns_when_many_mutant_processes_timed_out( string $counts, string $status, bool $warned ): void {
+		$numbers = array_map( 'intval', explode( ' ', $counts ) );
+		$killed  = $numbers[0];
+		$timed   = $numbers[4];
+		$root    = self::gate_checkout();
+		try {
+			[ $exit, $output ] = self::gate(
+				$root,
+				[
+					'FAKE_REPORTS' => '0',
+					'FAKE_SUMMARY' => 'counts',
+					'FAKE_COUNTS'  => $counts,
+					'FAKE_LINES'   => implode( ';', array_merge( array_fill( 0, $killed, 'pass,end' ), array_fill( 0, $timed, 'pass' ) ) ),
+					'FAKE_STATUS'  => $status,
+				]
+			);
+			self::assertSame( (int) $status, $exit, $output );
+			self::assertStringContainsString( "$killed ended with PHP's own file wrapper (needed: $killed)", $output );
+			if ( $warned ) {
+				self::assertStringContainsString( "::warning::$timed of the " . ( $killed + $timed ) . ' mutant processes timed out, more than 5 percent. Infection counts a timed-out mutant as detected, so on a slow machine the score is higher than what the tests kill', $output );
+			} else {
+				self::assertStringNotContainsString( '::warning::', $output );
+			}
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	/**
 	 * Infection's exit status passes through, and a marker fails the gate after a failed run too.
 	 *
 	 * @param array<string, string> $environment What the stand-in for Infection does.

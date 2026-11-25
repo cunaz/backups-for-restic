@@ -621,9 +621,11 @@ differs: on 2026-11-20 a run of the database gate during other test runs counted
 instead of 8, and on 2026-11-25 CI's run on `662c8b1` counted 414 instead of 9 on a runner whose
 initial test run took 77.7 s instead of 46.6 s: the gate took 3 h 21 min instead of 1 h 47 min,
 218 mutants escaped instead of 572, and its 90.30 % and 94.66 % measured the runner, not the
-tests. One mutant of the ZIP writer writes its checkpoint files into the working directory, and
-so do mutants of the file restore gate; delete `.head`, `.names` and `.state` there after a
-local run.
+tests. So `bin/mutation-gate.sh` warns, without failing the gate, when more than 5 % of the
+mutant processes timed out: healthy runs of the six gates, locally and in CI, lay between 0.1 %
+and 1.8 %, that run at 10.1 %. One mutant of the ZIP writer writes its checkpoint files into the
+working directory, and so do mutants of the file restore gate; delete `.head`, `.names` and
+`.state` there after a local run.
 
 The escaped mutants by class with `main` at `e40ab18`, the work of a later package:
 

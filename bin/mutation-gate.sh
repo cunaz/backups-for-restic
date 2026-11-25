@@ -38,6 +38,10 @@
 #   disk of the checkout. Any such line fails the gate, whatever the score, so both markers must
 #   be writable before Infection starts.
 #
+# When more than 5 percent of the mutant processes timed out, the script warns and does not fail:
+# Infection counts a timed-out mutant as detected, so on a slow machine the score is higher than
+# what the tests kill.
+#
 # Infection's own exit status does not stop the script (|| status=$?): the reports and markers
 # are checked after a failed run as well, and their failure takes precedence.
 set -euo pipefail
@@ -117,6 +121,7 @@ fi
 processes=0
 finished=0
 syntax=0
+timed=0
 for counted in 'Killed by Test Framework' 'Errored' 'Syntax Errors' 'Escaped' 'Timed Out'; do
 	value="$(sed -n "s/^$counted: \([0-9][0-9]*\)\$/\1/p" "$summary" | head -n 1)"
 	if [[ -z "$value" ]]; then
@@ -127,6 +132,7 @@ for counted in 'Killed by Test Framework' 'Errored' 'Syntax Errors' 'Escaped' 'T
 	case "$counted" in
 		'Killed by Test Framework' | 'Escaped') finished=$((finished + value)) ;;
 		'Syntax Errors') syntax=$value ;;
+		'Timed Out') timed=$value ;;
 	esac
 done
 # How many reports hold a line that matches the pattern.
@@ -145,6 +151,12 @@ among=$((caught - syntax))
 ((among > 0)) || among=0
 needed=$((finished - among))
 echo "Mutant processes: $processes ran tests, $finished of them to their end; $reported reported in, $passed could write durably or did not compile ($caught caught, $syntax counted as syntax errors, $loading ended while the classes loaded), $ended ended with PHP's own file wrapper (needed: $needed), $intest of them after a fatal error in a test, and $outside more after a fatal error outside a test, which do not count."
+# Healthy runs of the six gates, locally and in CI, timed out 0.1 to 1.8 percent of their mutant
+# processes; the database gate on a slow runner 10.1 percent (414 of 4,081), at a score 8 points
+# above what its tests kill.
+if ((timed * 20 > processes)); then
+	echo "::warning::$timed of the $processes mutant processes timed out, more than 5 percent. Infection counts a timed-out mutant as detected, so on a slow machine the score is higher than what the tests kill: compare this run with one on a faster machine before trusting its score."
+fi
 short=0
 if ((reported < processes)); then
 	echo "::error::$((processes - reported)) of the $processes mutant processes that Infection ran did not report in: they did not run tests/Mutation/bootstrap.php or could not write their report, so the score above cannot be trusted."
