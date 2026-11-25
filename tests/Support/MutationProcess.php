@@ -26,10 +26,13 @@ use Throwable;
  * wrapper is in place, so that the mutated class is the one in memory. It then restores the
  * plain wrapper for everything the tests do. Errors lean towards a lower score: a class first
  * loaded after the restore is the original, and its mutants escape. Nothing here fails the
- * process, because Infection counts a process that fails as a detected mutant. When durable
- * writes still fail after the restore, or the user-space wrapper is back when the process ends,
- * a line is left in a marker file, the second one if the first cannot take it, and
- * bin/mutation-gate.sh fails the gate on it.
+ * process, because Infection counts a process that fails as a detected mutant.
+ *
+ * Silence fails the gate instead: before it loads anything, every mutant process reports in with
+ * a file of its own, and bin/mutation-gate.sh fails the gate when fewer processes reported in
+ * than Infection ran tests for. When durable writes still fail after the restore, or the
+ * user-space wrapper is back when the process ends, a line goes into the process's report, or
+ * into a marker file when the report cannot take it, and the script fails the gate on that too.
  */
 final class MutationProcess {
 
@@ -51,6 +54,9 @@ final class MutationProcess {
 	/** The environment variable that names the marker file; bin/mutation-gate.sh sets it. */
 	public const MARKER_VARIABLE = 'BFR_MUTATION_CANARY';
 
+	/** The variable that names the directory of the reports; bin/mutation-gate.sh sets it. */
+	public const REPORT_VARIABLE = 'BFR_MUTATION_REPORTS';
+
 	/**
 	 * Run by the bootstrap of the mutation suites, after tests/bootstrap.php. Throws nothing.
 	 *
@@ -59,6 +65,10 @@ final class MutationProcess {
 	public static function prepare( string $root ): void {
 		$markers = self::markers( $root );
 		if ( self::intercepted() ) {
+			$report = self::report_in( getenv( self::REPORT_VARIABLE ) );
+			if ( null !== $report ) {
+				array_unshift( $markers, $report );
+			}
 			try {
 				self::preload( $root, self::DIRECTORIES );
 			} catch ( \CompileError $error ) {
@@ -73,6 +83,30 @@ final class MutationProcess {
 		}
 		self::canary( $markers );
 		register_shutdown_function( [ self::class, 'finish' ], $markers );
+	}
+
+	/**
+	 * Leaves this process's report in the directory that bin/mutation-gate.sh names: a new file
+	 * whose one line says that the process ran this bootstrap under Infection's interceptor. The
+	 * file is new, so a directory that cannot take a file stops the report as it would stop a
+	 * marker, and the script then finds the process missing.
+	 *
+	 * @param string|false $directory The directory, or false when the variable is not set.
+	 * @return string|null The report, which then takes the canary's lines first, or null.
+	 */
+	public static function report_in( string|false $directory ): ?string {
+		if ( false === $directory || '' === $directory ) {
+			return null;
+		}
+		$path   = $directory . '/report-' . getmypid() . '-' . uniqid( '', true );
+		$handle = @fopen( $path, 'xb' );
+		if ( false === $handle ) {
+			return null;
+		}
+		$line    = 'Process ' . getmypid() . " reported in.\n";
+		$written = @fwrite( $handle, $line );
+		fclose( $handle );
+		return strlen( $line ) === $written ? $path : null;
 	}
 
 	/**
@@ -193,9 +227,9 @@ final class MutationProcess {
 	}
 
 	/**
-	 * Appends one line to the first marker file that takes it.
+	 * Appends one line to the first file that takes it: the process's report, then the markers.
 	 *
-	 * @param list<string> $markers The marker files, see markers().
+	 * @param list<string> $markers The process's report and the marker files, see markers().
 	 * @param string       $problem What went wrong.
 	 * @return bool Whether a marker took the line.
 	 */

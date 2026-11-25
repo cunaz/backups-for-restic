@@ -210,7 +210,7 @@ final class MutationGatesTest extends TestCase {
 	public static function gate_runs(): array {
 		return [
 			'a clean run passes and passes the arguments on' => [ [], 0, 'infection --threads=2 --no-progress' ],
-			'Infection fails and nothing was marked'  => [ [ 'FAKE_STATUS' => '3' ], 3, 'infection --threads=2' ],
+			'Infection fails and nothing was marked'   => [ [ 'FAKE_STATUS' => '3' ], 3, 'infection --threads=2' ],
 			'Infection fails and a process marked the variable' => [
 				[
 					'FAKE_STATUS' => '3',
@@ -219,7 +219,22 @@ final class MutationGatesTest extends TestCase {
 				1,
 				'::error::Mutant processes that could not write durably: 2.',
 			],
-			'a process could write only the fallback' => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
+			'a process could write only the fallback'  => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
+			'every process that ran tests reported in' => [ [], 0, 'Mutant processes that reported in: 6 of the 6 that Infection ran tests for.' ],
+			'more reports than processes pass'         => [ [ 'FAKE_REPORTS' => '7' ], 0, 'reported in: 7 of the 6' ],
+			'one process did not report in'            => [ [ 'FAKE_REPORTS' => '5' ], 1, '::error::Only 5 of the 6 mutant processes that Infection ran reported in; 1 did not run' ],
+			'no process reported in'                   => [ [ 'FAKE_REPORTS' => '0' ], 1, '::error::Only 0 of the 6 mutant processes' ],
+			'a report holds a line of the canary'      => [ [ 'FAKE_MARK' => 'report' ], 1, 'Process 9: fsync() failed' ],
+			'the summary lacks a count'                => [ [ 'FAKE_SUMMARY' => 'partial' ], 1, '::error::Infection\'s summary ./.tools/infection/summary.log has no line "Errored: N"' ],
+			'Infection wrote no summary'               => [ [ 'FAKE_SUMMARY' => 'none' ], 1, '::error::Infection wrote no summary to ./.tools/infection/summary.log' ],
+			'Infection failed and wrote no summary'    => [
+				[
+					'FAKE_SUMMARY' => 'none',
+					'FAKE_STATUS'  => '3',
+				],
+				3,
+				'::error::Infection exited with 3 and wrote no summary',
+			],
 		];
 	}
 
@@ -261,24 +276,150 @@ final class MutationGatesTest extends TestCase {
 		}
 	}
 
+	public function test_a_summary_left_by_an_earlier_run_is_not_read(): void {
+		$root = self::gate_checkout();
+		try {
+			mkdir( $root . '/.tools/infection' );
+			file_put_contents( $root . '/.tools/infection/summary.log', "Killed by Test Framework: 0\nErrored: 0\nSyntax Errors: 0\nEscaped: 0\nTimed Out: 0\n" );
+			[ $status, $output ] = self::gate( $root, [ 'FAKE_SUMMARY' => 'none' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( '::error::Infection wrote no summary', $output );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	public function test_the_gate_reads_the_summary_of_the_configuration_it_is_given(): void {
+		$root = self::gate_checkout();
+		try {
+			file_put_contents( $root . '/infection-other.json5.dist', "{\n    // \"summary\": \"commented/out.log\"\n    \"logs\": {\n        \"summary\": \".tools/infection/summary.log\"\n    }\n}\n" );
+			unlink( $root . '/infection.json5.dist' );
+			[ $status, $output ] = self::gate( $root, [], [ '--configuration=infection-other.json5.dist' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'reported in: 6 of the 6', $output );
+
+			file_put_contents( $root . '/infection-other.json5.dist', "{\n    \"logs\": {\n        \"text\": \"x.log\"\n    }\n}\n" );
+			[ $status, $output ] = self::gate( $root, [], [ '--configuration', 'infection-other.json5.dist' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( '::error::The Infection configuration infection-other.json5.dist names no summary log', $output );
+			self::assertStringNotContainsString( 'infection --threads=2', $output, 'Infection did not start.' );
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	/**
+	 * A real process whose canary fires while both markers cannot be written: when its report
+	 * cannot be written either, it is missing; when the place turned unwritable only after it
+	 * reported in, its report holds the canary's line. Either fails the gate.
+	 *
+	 * @return array<string, array{string, string}>
+	 */
+	public static function unwritable_markers(): array {
+		return [
+			'unwritable before the process reported in' => [ 'before', '::error::Only 5 of the 6 mutant processes that Infection ran reported in' ],
+			'unwritable after the process reported in'  => [ 'after', 'Files still open through the user-space stream wrapper after the restore.' ],
+		];
+	}
+
+	#[DataProvider( 'unwritable_markers' )]
+	public function test_a_process_whose_markers_cannot_be_written_still_fails_the_gate( string $lock, string $printed ): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'File permissions do not bind root.' );
+		}
+		$root  = self::gate_checkout();
+		$child = $root . '/child.php';
+		file_put_contents(
+			$child,
+			'<?php
+			require ' . var_export( dirname( __DIR__, 3 ) . '/vendor/autoload.php', true ) . ';
+			use BackupsForRestic\Tests\Support\MutationProcess;
+			use BackupsForRestic\Tests\Support\UserSpaceFiles;
+			$root    = (string) getenv( "FAKE_ROOT" );
+			$markers = MutationProcess::markers( $root );
+			$report  = MutationProcess::report_in( getenv( MutationProcess::REPORT_VARIABLE ) );
+			if ( null !== $report ) {
+				array_unshift( $markers, $report );
+			}
+			if ( "after" === getenv( "FAKE_LOCK" ) ) {
+				chmod( (string) getenv( MutationProcess::REPORT_VARIABLE ), 0500 );
+				chmod( $root . "/.tools", 0500 );
+			}
+			UserSpaceFiles::enable();
+			MutationProcess::canary( $markers );
+			UserSpaceFiles::disable();
+			'
+		);
+		try {
+			[ $status, $output ] = self::gate(
+				$root,
+				[
+					'FAKE_REPORTS' => '5',
+					'FAKE_CHILD'   => $child,
+					'FAKE_PHP'     => PHP_BINARY,
+					'FAKE_ROOT'    => $root,
+					'FAKE_LOCK'    => $lock,
+				]
+			);
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( $printed, $output );
+			self::assertFileDoesNotExist( $root . '/.tools/mutation-canary' );
+		} finally {
+			self::writable( $root );
+			TempDir::remove( $root );
+		}
+	}
+
+	/**
+	 * Makes every directory below the root writable again, so that it can be removed.
+	 */
+	private static function writable( string $root ): void {
+		chmod( $root, 0700 );
+		foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $root, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $entry ) {
+			if ( $entry->isDir() && ! $entry->isLink() ) {
+				chmod( $entry->getPathname(), 0700 );
+			}
+		}
+	}
+
 	/**
 	 * A copy of bin/mutation-gate.sh in a temporary checkout, with a stand-in for Infection that
-	 * prints its arguments, writes the markers that FAKE_MARK names, and exits with FAKE_STATUS.
+	 * prints its arguments, writes the markers that FAKE_MARK names, leaves FAKE_REPORTS reports
+	 * (6), writes the summary that FAKE_SUMMARY names (6 processes, 3 mutants not covered), locks
+	 * the reports and .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits
+	 * with FAKE_STATUS.
 	 */
 	private static function gate_checkout(): string {
 		$root = TempDir::create( 'mutation-gate' );
 		mkdir( $root . '/bin' );
 		mkdir( $root . '/.tools/bin', 0700, true );
 		copy( dirname( __DIR__, 3 ) . '/bin/mutation-gate.sh', $root . '/bin/mutation-gate.sh' );
+		file_put_contents( $root . '/infection.json5.dist', "{\n    \"logs\": {\n        \"text\": \".tools/infection/infection.log\",\n        \"summary\": \".tools/infection/summary.log\"\n    }\n}\n" );
 		file_put_contents(
 			$root . '/.tools/bin/infection',
 			<<<'BASH'
 			#!/usr/bin/env bash
 			echo "infection $*"
+			tools="$(dirname "$0")/.."
 			case "${FAKE_MARK:-}" in
 				variable) printf 'Process 7: fsync() failed\nProcess 7: still user-space\nProcess 8: fsync() failed\n' >> "$BFR_MUTATION_CANARY" ;;
-				fallback) printf 'Process 7: fsync() failed\n' >> "$(dirname "$0")/../mutation-canary" ;;
+				fallback) printf 'Process 7: fsync() failed\n' >> "$tools/mutation-canary" ;;
+				report) printf 'Process 9 reported in.\nProcess 9: fsync() failed\n' > "$BFR_MUTATION_REPORTS/report-9-x" ;;
 			esac
+			for ((n = 0; n < ${FAKE_REPORTS:-6}; n++)); do
+				printf 'Process %d reported in.\n' "$((100 + n))" > "$BFR_MUTATION_REPORTS/report-$((100 + n))-x"
+			done
+			mkdir -p "$tools/infection"
+			case "${FAKE_SUMMARY:-full}" in
+				full) printf 'Total: 9\n\nKilled by Test Framework: 3\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 1\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
+				partial) printf 'Total: 9\n\nKilled by Test Framework: 3\n' > "$tools/infection/summary.log" ;;
+			esac
+			if [[ "${FAKE_LOCK:-}" == before ]]; then
+				chmod 0500 "$BFR_MUTATION_REPORTS" "$tools"
+			fi
+			if [[ -n "${FAKE_CHILD:-}" ]]; then
+				"$FAKE_PHP" "$FAKE_CHILD"
+			fi
 			exit "${FAKE_STATUS:-0}"
 			BASH
 		);
@@ -288,14 +429,15 @@ final class MutationGatesTest extends TestCase {
 	}
 
 	/**
-	 * Runs the copied script with --threads=2 --no-progress.
+	 * Runs the copied script with the arguments and --threads=2 --no-progress.
 	 *
 	 * @param array<string, string> $environment Variables for the stand-in.
+	 * @param list<string>          $arguments   Arguments before the others.
 	 * @return array{int, string} The exit status and the output.
 	 */
-	private static function gate( string $root, array $environment ): array {
+	private static function gate( string $root, array $environment, array $arguments = [] ): array {
 		$process = proc_open(
-			[ 'bash', $root . '/bin/mutation-gate.sh', '--threads=2', '--no-progress' ],
+			array_merge( [ 'bash', $root . '/bin/mutation-gate.sh' ], $arguments, [ '--threads=2', '--no-progress' ] ),
 			[
 				1 => [ 'pipe', 'w' ],
 				2 => [ 'redirect', 1 ],
