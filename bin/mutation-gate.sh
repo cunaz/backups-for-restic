@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs Infection for one mutation gate and fails when a mutant process could not write durably,
-# or did not report in at all. The composer scripts mutation, mutation:planner, mutation:restore,
-# mutation:apply, mutation:zip and mutation:database call it; the arguments go to
-# .tools/bin/infection unchanged.
+# or did not say that it could. The composer scripts mutation, mutation:planner,
+# mutation:restore, mutation:apply, mutation:zip and mutation:database call it; the arguments go
+# to .tools/bin/infection unchanged.
 #
 # Usage: bin/mutation-gate.sh [infection options and filters]
 #
@@ -12,13 +12,20 @@
 # (tests/Support/MutationProcess.php). Silence fails the gate:
 #
 # - Before it loads anything, every mutant process reports in with a new file in the directory
-#   named by BFR_MUTATION_REPORTS, under TMPDIR. After the run the number of reports must reach
-#   the number of mutants that Infection ran a test process for, as its summary log counts them:
-#   killed, escaped, errored, timed out and syntax errors. Mutants that are not covered, skipped
-#   or ignored get no process, and Infection's initial test run has no interceptor and reports
-#   nothing. A test that PHPUnit runs in a process of its own inherits the report of its mutant
-#   process (BFR_MUTATION_REPORTED) and does not report again. A process that never ran the
-#   bootstrap, or could not write there, is missing.
+#   named by BFR_MUTATION_REPORTS, under TMPDIR, and each check then states there that it
+#   passed: "can write durably" after the restore, or "does not compile" when the mutated copy
+#   does not, and "ended with PHP's own file wrapper" when the process ends. After the run, with
+#   Infection's summary log:
+#   - reports, and "can write durably" or "does not compile" lines, must each reach the mutants
+#     that Infection ran a test process for: killed, escaped, errored, timed out and syntax
+#     errors. Mutants that are not covered, skipped or ignored get no process, and Infection's
+#     initial test run has no interceptor and reports nothing;
+#   - "ended" lines must reach the killed and escaped mutants, whose process ran to its end
+#     (Infection counts a process that exits above 100 as errored, one it stopped as timed out),
+#     less those that did not compile, which end without the check: Infection counts them as
+#     killed or as syntax errors, depending on which test meets the broken copy first.
+#   A test that PHPUnit runs in a process of its own inherits the report of its mutant process
+#   (BFR_MUTATION_REPORTED) and states nothing. A missing report or statement fails the gate.
 # - A process whose checks fail cannot report its result through the tests without counting the
 #   mutant as killed, so it appends a line to its report, or when that cannot take it to the
 #   marker named by BFR_MUTATION_CANARY, next to the reports, or to .tools/mutation-canary on the
@@ -76,8 +83,9 @@ done
 status=0
 "$root/.tools/bin/infection" "$@" || status=$?
 
-reported_in='Process [0-9]* reported in\.'
-lines="$({ find "$canary" -maxdepth 1 -type f -name 'report-*' -exec grep -h -v -x "$reported_in" {} + || true; } | grep -h . || true)"
+# The lines that a report may hold besides those of a failed check.
+statement="Process [0-9]+ (reported in\\.|can write durably\\.|does not compile: .*|ended with PHP's own file wrapper\\.)"
+lines="$({ find "$canary" -maxdepth 1 -type f -name 'report-*' -exec grep -h -v -x -E "$statement" {} + || true; } | grep -h . || true)"
 for marker in "$BFR_MUTATION_CANARY" "$fallback"; do
 	if [[ -e "$marker" ]]; then
 		lines="$lines"$'\n'"$(cat "$marker")"
@@ -100,19 +108,42 @@ if [[ ! -f "$summary" ]]; then
 	echo "::error::Infection wrote no summary to $summary, so it is unknown how many mutant processes should have reported in: the score cannot be trusted."
 	exit 1
 fi
-expected=0
+processes=0
+finished=0
 for counted in 'Killed by Test Framework' 'Errored' 'Syntax Errors' 'Escaped' 'Timed Out'; do
 	value="$(sed -n "s/^$counted: \([0-9][0-9]*\)\$/\1/p" "$summary" | head -n 1)"
 	if [[ -z "$value" ]]; then
 		echo "::error::Infection's summary $summary has no line \"$counted: N\", so it is unknown how many mutant processes should have reported in: the score cannot be trusted."
 		exit 1
 	fi
-	expected=$((expected + value))
+	processes=$((processes + value))
+	case "$counted" in 'Killed by Test Framework' | 'Escaped') finished=$((finished + value)) ;; esac
 done
-reported="$({ find "$canary" -maxdepth 1 -type f -name 'report-*' -exec grep -l -x "$reported_in" {} + || true; } | wc -l)"
-echo "Mutant processes that reported in: $reported of the $expected that Infection ran tests for."
-if ((reported < expected)); then
-	echo "::error::Only $reported of the $expected mutant processes that Infection ran reported in; $((expected - reported)) did not run tests/Mutation/bootstrap.php or could not write their report, so the score above cannot be trusted."
+# How many reports hold a line that matches the pattern.
+holding() {
+	{ find "$canary" -maxdepth 1 -type f -name 'report-*' -exec grep -l -x -E "$1" {} + || true; } | wc -l
+}
+reported="$(holding 'Process [0-9]+ reported in\.')"
+passed="$(holding 'Process [0-9]+ (can write durably\.|does not compile: .*)')"
+uncompiled="$(holding 'Process [0-9]+ does not compile: .*')"
+ended="$(holding "Process [0-9]+ ended with PHP's own file wrapper\\.")"
+needed=$((finished - uncompiled))
+((needed > 0)) || needed=0
+echo "Mutant processes: $processes ran tests, $finished of them to their end; $reported reported in, $passed could write durably or did not compile ($uncompiled did not), $ended ended with PHP's own file wrapper (needed: $needed)."
+short=0
+if ((reported < processes)); then
+	echo "::error::$((processes - reported)) of the $processes mutant processes that Infection ran did not report in: they did not run tests/Mutation/bootstrap.php or could not write their report, so the score above cannot be trusted."
+	short=1
+fi
+if ((passed < processes)); then
+	echo "::error::$((processes - passed)) of the $processes mutant processes did not state that they could write durably (or that their mutated copy does not compile): their check failed and could not say so, or never ran, so the score above cannot be trusted."
+	short=1
+fi
+if ((ended < needed)); then
+	echo "::error::$((needed - ended)) of the $needed mutant processes that ran to their end did not state that PHP's own file wrapper was still in place, so the score above cannot be trusted."
+	short=1
+fi
+if ((short != 0)); then
 	exit 1
 fi
 exit "$status"

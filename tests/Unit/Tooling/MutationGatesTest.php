@@ -121,19 +121,41 @@ final class MutationGatesTest extends TestCase {
 			$result = self::process( $scratch, $root, $original, $mutant );
 
 			self::assertNull( $result['marker'], 'The canary fired.' );
+			self::assertCount( 1, $result['reports'] );
+			$statements = preg_replace( '/^Process [0-9]+ /m', '', $result['reports'][0] );
 			if ( ! $compiles ) {
 				// As without the bootstrap: the wrapper stays, and a test that loads the class meets
-				// the ParseError that Infection reports as a syntax error.
+				// the ParseError that Infection reports as a syntax error. The report says so.
 				self::assertTrue( $result['intercepted'] );
 				self::assertSame( 'ParseError', $result['loaded'] );
+				self::assertMatchesRegularExpression( '/\Areported in\.\ndoes not compile: syntax error, [^\n]+\n\z/', (string) $statements );
 				return;
 			}
+			self::assertSame( "reported in.\ncan write durably.\nended with PHP's own file wrapper.\n", $statements );
 			self::assertFalse( $result['intercepted'], 'The plain file wrapper is back.' );
 			self::assertSame( 'mutated', $result['loaded'], 'The class in memory is the mutated copy.' );
 			self::assertTrue( $result['synced'], 'fsync() works in the tests.' );
 			self::assertSame( [], $result['missing'], 'A file below MutationProcess::DIRECTORIES declares nothing of its PSR-4 name.' );
 			self::assertSame( '', $result['output'], 'Loading the classes printed something.' );
 			self::assertSame( [ [], [], [] ], [ $result['constants'], $result['functions'], $result['globals'] ], 'Loading the classes defined constants, functions or global variables.' );
+		} finally {
+			TempDir::remove( $scratch );
+		}
+	}
+
+	public function test_a_copy_that_fails_with_a_compile_fatal_error_says_that_it_does_not_compile(): void {
+		$root    = (string) realpath( dirname( __DIR__, 3 ) );
+		$scratch = TempDir::create( 'mutation-process' );
+		try {
+			$original = $root . '/src/Restore/ChunkDigest.php';
+			$mutant   = $scratch . '/ChunkDigest.php';
+			// As the mutant of ZstdFrame.php:72 that the core gate counts as errored: PHP refuses
+			// an unparenthesized nested ternary in a function with a fatal error, not with a
+			// ParseError, and the process ends while the classes load.
+			file_put_contents( $mutant, str_replace( 'final class ChunkDigest {', 'final class ChunkDigest { public static function mutated( bool $a, bool $b ): int { return $a ? 1 : $b ? 2 : 3; }', (string) file_get_contents( $original ) ) );
+			$result = self::process( $scratch, $root, $original, $mutant, null, true );
+			self::assertCount( 1, $result['reports'] );
+			self::assertMatchesRegularExpression( '/\AProcess ([0-9]+) reported in\.\nProcess \1 does not compile: Unparenthesized `a \? b : c \? d : e` is not supported[^\n]*\n\z/', $result['reports'][0] );
 		} finally {
 			TempDir::remove( $scratch );
 		}
@@ -154,12 +176,13 @@ final class MutationGatesTest extends TestCase {
 
 			$parent = self::process( $scratch, $root, $original, $mutant );
 			self::assertCount( 1, $parent['reports'] );
-			self::assertMatchesRegularExpression( '/\AProcess [0-9]+ reported in\.\n\z/', $parent['reports'][0] );
+			self::assertMatchesRegularExpression( "/\\AProcess ([0-9]+) reported in\\.\\nProcess \\1 can write durably\\.\\nProcess \\1 ended with PHP's own file wrapper\\.\\n\\z/", $parent['reports'][0] );
 			self::assertIsString( $parent['reported'] );
 			self::assertStringStartsWith( $scratch . '/reports/report-', $parent['reported'], 'The process passes its report on.' );
 
 			$child = self::process( $scratch, $root, $original, $mutant, $parent['reported'] );
 			self::assertCount( 1, $child['reports'], 'The isolated test did not report again.' );
+			self::assertSame( $parent['reports'], $child['reports'], 'Nor did it state anything in its mutant process\'s report.' );
 			self::assertSame( $parent['reported'], $child['reported'] );
 
 			$orphan = self::process( $scratch, $root, $original, $mutant, '-' );
@@ -240,7 +263,7 @@ final class MutationGatesTest extends TestCase {
 	public static function gate_runs(): array {
 		return [
 			'a clean run passes and passes the arguments on' => [ [], 0, 'infection --threads=2 --no-progress' ],
-			'Infection fails and nothing was marked'   => [ [ 'FAKE_STATUS' => '3' ], 3, 'infection --threads=2' ],
+			'Infection fails and nothing was marked'     => [ [ 'FAKE_STATUS' => '3' ], 3, 'infection --threads=2' ],
 			'Infection fails and a process marked the variable' => [
 				[
 					'FAKE_STATUS' => '3',
@@ -249,15 +272,33 @@ final class MutationGatesTest extends TestCase {
 				1,
 				'::error::Mutant processes that could not write durably: 2.',
 			],
-			'a process could write only the fallback'  => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
-			'every process that ran tests reported in' => [ [], 0, 'Mutant processes that reported in: 6 of the 6 that Infection ran tests for.' ],
-			'more reports than processes pass'         => [ [ 'FAKE_REPORTS' => '7' ], 0, 'reported in: 7 of the 6' ],
-			'one process did not report in'            => [ [ 'FAKE_REPORTS' => '5' ], 1, '::error::Only 5 of the 6 mutant processes that Infection ran reported in; 1 did not run' ],
-			'no process reported in'                   => [ [ 'FAKE_REPORTS' => '0' ], 1, '::error::Only 0 of the 6 mutant processes' ],
-			'a report holds a line of the canary'      => [ [ 'FAKE_MARK' => 'report' ], 1, 'Process 9: fsync() failed' ],
-			'the summary lacks a count'                => [ [ 'FAKE_SUMMARY' => 'partial' ], 1, '::error::Infection\'s summary ./.tools/infection/summary.log has no line "Errored: N"' ],
-			'Infection wrote no summary'               => [ [ 'FAKE_SUMMARY' => 'none' ], 1, '::error::Infection wrote no summary to ./.tools/infection/summary.log' ],
-			'Infection failed and wrote no summary'    => [
+			'a process could write only the fallback'    => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
+			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 did not), 4 ended with PHP's own file wrapper (needed: 3)." ],
+			'more reports than processes pass'           => [
+				[
+					'FAKE_REPORTS' => '7',
+					'FAKE_PASSES'  => '6',
+				],
+				0,
+				'7 reported in, 7 could write durably',
+			],
+			'one process did not report in'              => [ [ 'FAKE_REPORTS' => '5' ], 1, '::error::1 of the 6 mutant processes that Infection ran did not report in' ],
+			'no process reported in'                     => [ [ 'FAKE_REPORTS' => '0' ], 1, '::error::6 of the 6 mutant processes that Infection ran did not report in' ],
+			'a process did not say it can write durably' => [ [ 'FAKE_PASSES' => '4' ], 1, '::error::1 of the 6 mutant processes did not state that they could write durably' ],
+			'a killed mutant did not say how it ended'   => [ [ 'FAKE_ENDS' => '2' ], 1, "::error::1 of the 3 mutant processes that ran to their end did not state that PHP's own file wrapper was still in place" ],
+			'a timed-out mutant needs no end line'       => [ [ 'FAKE_ENDS' => '3' ], 0, "3 ended with PHP's own file wrapper (needed: 3)" ],
+			'a copy that does not compile, counted as killed' => [
+				[
+					'FAKE_SUMMARY' => 'killed-compile',
+					'FAKE_ENDS'    => '4',
+				],
+				0,
+				"Mutant processes: 6 ran tests, 5 of them to their end; 6 reported in, 6 could write durably or did not compile (1 did not), 4 ended with PHP's own file wrapper (needed: 4).",
+			],
+			'a report holds a line of the canary'        => [ [ 'FAKE_MARK' => 'report' ], 1, 'Process 9: fsync() failed' ],
+			'the summary lacks a count'                  => [ [ 'FAKE_SUMMARY' => 'partial' ], 1, '::error::Infection\'s summary ./.tools/infection/summary.log has no line "Errored: N"' ],
+			'Infection wrote no summary'                 => [ [ 'FAKE_SUMMARY' => 'none' ], 1, '::error::Infection wrote no summary to ./.tools/infection/summary.log' ],
+			'Infection failed and wrote no summary'      => [
 				[
 					'FAKE_SUMMARY' => 'none',
 					'FAKE_STATUS'  => '3',
@@ -326,7 +367,7 @@ final class MutationGatesTest extends TestCase {
 			unlink( $root . '/infection.json5.dist' );
 			[ $status, $output ] = self::gate( $root, [], [ '--configuration=infection-other.json5.dist' ] );
 			self::assertSame( 0, $status, $output );
-			self::assertStringContainsString( 'reported in: 6 of the 6', $output );
+			self::assertStringContainsString( '6 reported in, 6 could write durably', $output );
 
 			file_put_contents( $root . '/infection-other.json5.dist', "{\n    \"logs\": {\n        \"text\": \"x.log\"\n    }\n}\n" );
 			[ $status, $output ] = self::gate( $root, [], [ '--configuration', 'infection-other.json5.dist' ] );
@@ -341,14 +382,16 @@ final class MutationGatesTest extends TestCase {
 	/**
 	 * A real process whose canary fires while both markers cannot be written: when its report
 	 * cannot be written either, it is missing; when the place turned unwritable only after it
-	 * reported in, its report holds the canary's line. Either fails the gate.
+	 * reported in, its report holds the canary's line; and when the report turned unwritable as
+	 * well, it lacks the line that says the process can write durably. Each fails the gate.
 	 *
 	 * @return array<string, array{string, string}>
 	 */
 	public static function unwritable_markers(): array {
 		return [
-			'unwritable before the process reported in' => [ 'before', '::error::Only 5 of the 6 mutant processes that Infection ran reported in' ],
+			'unwritable before the process reported in' => [ 'before', '::error::1 of the 6 mutant processes that Infection ran did not report in' ],
 			'unwritable after the process reported in'  => [ 'after', 'Files still open through the user-space stream wrapper after the restore.' ],
+			'the report unwritable too after that'      => [ 'after-report', '::error::1 of the 6 mutant processes did not state that they could write durably' ],
 		];
 	}
 
@@ -371,9 +414,12 @@ final class MutationGatesTest extends TestCase {
 			if ( null !== $report ) {
 				array_unshift( $markers, $report );
 			}
-			if ( "after" === getenv( "FAKE_LOCK" ) ) {
+			if ( str_starts_with( (string) getenv( "FAKE_LOCK" ), "after" ) ) {
 				chmod( (string) getenv( MutationProcess::REPORT_VARIABLE ), 0500 );
 				chmod( $root . "/.tools", 0500 );
+			}
+			if ( "after-report" === getenv( "FAKE_LOCK" ) && null !== $report ) {
+				chmod( $report, 0400 );
 			}
 			UserSpaceFiles::enable();
 			MutationProcess::canary( $markers );
@@ -385,6 +431,7 @@ final class MutationGatesTest extends TestCase {
 				$root,
 				[
 					'FAKE_REPORTS' => '5',
+					'FAKE_PASSES'  => '4',
 					'FAKE_CHILD'   => $child,
 					'FAKE_PHP'     => PHP_BINARY,
 					'FAKE_ROOT'    => $root,
@@ -414,10 +461,13 @@ final class MutationGatesTest extends TestCase {
 
 	/**
 	 * A copy of bin/mutation-gate.sh in a temporary checkout, with a stand-in for Infection that
-	 * prints its arguments, writes the markers that FAKE_MARK names, leaves FAKE_REPORTS reports
-	 * (6), writes the summary that FAKE_SUMMARY names (6 processes, 3 mutants not covered), locks
-	 * the reports and .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits
-	 * with FAKE_STATUS.
+	 * prints its arguments, writes the markers that FAKE_MARK names, and leaves FAKE_REPORTS
+	 * reports (6): the first FAKE_PASSES (5) say they can write durably, the next FAKE_UNCOMPILED
+	 * (1) that their copy does not compile, and the first FAKE_ENDS (4) how they ended. It writes
+	 * the summary that FAKE_SUMMARY names (full: 3 killed, 1 escaped, 1 timed out, 1 syntax error,
+	 * 3 not covered; killed-compile: the syntax error counted as killed), locks the reports and
+	 * .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits with
+	 * FAKE_STATUS.
 	 */
 	private static function gate_checkout(): string {
 		$root = TempDir::create( 'mutation-gate' );
@@ -436,12 +486,24 @@ final class MutationGatesTest extends TestCase {
 				fallback) printf 'Process 7: fsync() failed\n' >> "$tools/mutation-canary" ;;
 				report) printf 'Process 9 reported in.\nProcess 9: fsync() failed\n' > "$BFR_MUTATION_REPORTS/report-9-x" ;;
 			esac
+			passes=${FAKE_PASSES:-5}
 			for ((n = 0; n < ${FAKE_REPORTS:-6}; n++)); do
-				printf 'Process %d reported in.\n' "$((100 + n))" > "$BFR_MUTATION_REPORTS/report-$((100 + n))-x"
+				{
+					printf 'Process %d reported in.\n' "$((100 + n))"
+					if ((n < passes)); then
+						printf 'Process %d can write durably.\n' "$((100 + n))"
+					elif ((n < passes + ${FAKE_UNCOMPILED:-1})); then
+						printf 'Process %d does not compile: syntax error, unexpected token ";"\n' "$((100 + n))"
+					fi
+					if ((n < ${FAKE_ENDS:-4})); then
+						printf "Process %d ended with PHP's own file wrapper.\n" "$((100 + n))"
+					fi
+				} > "$BFR_MUTATION_REPORTS/report-$((100 + n))-x"
 			done
 			mkdir -p "$tools/infection"
 			case "${FAKE_SUMMARY:-full}" in
 				full) printf 'Total: 9\n\nKilled by Test Framework: 3\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 1\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
+				killed-compile) printf 'Total: 9\n\nKilled by Test Framework: 4\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 0\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
 				partial) printf 'Total: 9\n\nKilled by Test Framework: 3\n' > "$tools/infection/summary.log" ;;
 			esac
 			if [[ "${FAKE_LOCK:-}" == before ]]; then
@@ -488,7 +550,7 @@ final class MutationGatesTest extends TestCase {
 	 *
 	 * @return array<string, mixed>
 	 */
-	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null ): array {
+	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null, bool $dies = false ): array {
 		$script = $scratch . '/process.php';
 		file_put_contents(
 			$script,
@@ -557,11 +619,16 @@ final class MutationGatesTest extends TestCase {
 		self::assertIsResource( $process );
 		$output = (string) stream_get_contents( $pipes[1] );
 		fclose( $pipes[1] );
-		$status = proc_close( $process );
+		$status  = proc_close( $process );
+		$reports = array_map( static fn ( string $file ): string => (string) file_get_contents( $file ), (array) glob( $reports . '/report-*' ) );
+		if ( $dies ) {
+			self::assertNotSame( 0, $status, 'The process ended with an error.' );
+			return [ 'reports' => $reports ];
+		}
 		self::assertSame( 0, $status, $output . file_get_contents( $scratch . '/stderr' ) );
 		$result = json_decode( $output, true, 512, JSON_THROW_ON_ERROR );
 		self::assertIsArray( $result );
-		$result['reports'] = array_map( static fn ( string $file ): string => (string) file_get_contents( $file ), (array) glob( $reports . '/report-*' ) );
+		$result['reports'] = $reports;
 		return $result;
 	}
 

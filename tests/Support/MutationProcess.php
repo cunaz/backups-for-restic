@@ -28,11 +28,14 @@ use Throwable;
  * loaded after the restore is the original, and its mutants escape. Nothing here fails the
  * process, because Infection counts a process that fails as a detected mutant.
  *
- * Silence fails the gate instead: before it loads anything, every mutant process reports in with
- * a file of its own, and bin/mutation-gate.sh fails the gate when fewer processes reported in
- * than Infection ran tests for. When durable writes still fail after the restore, or the
- * user-space wrapper is back when the process ends, a line goes into the process's report, or
- * into a marker file when the report cannot take it, and the script fails the gate on that too.
+ * Silence fails the gate instead. Before it loads anything, every mutant process reports in with
+ * a file of its own, and each check states in that file that it passed: "can write durably"
+ * after the restore, or "does not compile" when the mutated copy does not, and "ended with PHP's
+ * own file wrapper" when the process ends. bin/mutation-gate.sh fails the gate when fewer
+ * reports or statements exist than Infection's summary needs. When durable writes still fail
+ * after the restore, or the user-space wrapper is back when the process ends, a line goes into
+ * the process's report, or into a marker file when the report cannot take it, and the script
+ * fails the gate on that too.
  */
 final class MutationProcess {
 
@@ -72,20 +75,35 @@ final class MutationProcess {
 	 */
 	public static function prepare( string $root ): void {
 		$markers = self::markers( $root );
+		$own     = null;
 		if ( self::intercepted() ) {
 			$inherited = getenv( self::REPORTED_VARIABLE );
 			if ( false === $inherited || '' === $inherited ) {
 				$report = self::report_in( getenv( self::REPORT_VARIABLE ) );
+				$own    = $report;
 				// PHPUnit hands an isolated test either this process's environment or one built
 				// from $_SERVER, and proc_open() drops empty values: so both, and "-" when no
 				// report could be written.
 				$_SERVER[ self::REPORTED_VARIABLE ] = $report ?? '-';
 				putenv( self::REPORTED_VARIABLE . '=' . ( $report ?? '-' ) );
 			} else {
+				// An isolated test of the mutant process: it writes only what fails.
 				$report = '-' === $inherited ? null : $inherited;
 			}
 			if ( null !== $report ) {
 				array_unshift( $markers, $report );
+			}
+			$loading = true;
+			if ( null !== $own ) {
+				// A mutated copy can fail to compile with a fatal error, which no catch sees; the
+				// process then ends here, and says so.
+				register_shutdown_function(
+					static function () use ( &$loading, $own ): void {
+						if ( $loading ) {
+							self::state( $own, 'does not compile: ' . ( error_get_last()['message'] ?? 'the process ended while the classes under mutation loaded.' ) );
+						}
+					}
+				);
 			}
 			try {
 				self::preload( $root, self::DIRECTORIES );
@@ -93,14 +111,21 @@ final class MutationProcess {
 				// The mutated copy does not compile. Keep the wrapper, as without this bootstrap:
 				// each test that reaches the class meets the same error when the autoloader
 				// includes the file again, and Infection reports a syntax error.
+				$loading = false;
+				if ( null !== $own ) {
+					self::state( $own, 'does not compile: ' . $error->getMessage() );
+				}
 				return;
 			} catch ( Throwable $error ) {
 				self::leave( $markers, 'The classes under mutation could not be loaded: ' . $error->getMessage() );
 			}
+			$loading = false;
 			stream_wrapper_restore( 'file' );
 		}
-		self::canary( $markers );
-		register_shutdown_function( [ self::class, 'finish' ], $markers );
+		if ( null === self::canary( $markers ) && null !== $own ) {
+			self::state( $own, 'can write durably.' );
+		}
+		register_shutdown_function( [ self::class, 'finish' ], $markers, $own );
 	}
 
 	/**
@@ -216,17 +241,34 @@ final class MutationProcess {
 
 	/**
 	 * Run when the process ends: leaves a marker when file:// is a user-space wrapper again, for
-	 * example because the interceptor was enabled after this bootstrap.
+	 * example because the interceptor was enabled after this bootstrap, and otherwise states in
+	 * the mutant process's own report that it ended with PHP's own wrapper.
 	 *
 	 * @param list<string> $markers The marker files, see markers().
+	 * @param string|null  $report  The report of the mutant process; null in an isolated test.
 	 * @return bool Whether the plain wrapper was still in place.
 	 */
-	public static function finish( array $markers ): bool {
+	public static function finish( array $markers, ?string $report = null ): bool {
 		if ( ! self::intercepted() ) {
+			if ( null !== $report ) {
+				self::state( $report, "ended with PHP's own file wrapper." );
+			}
 			return true;
 		}
 		self::leave( $markers, 'file:// was a user-space stream wrapper when the process ended.' );
 		return false;
+	}
+
+	/**
+	 * Appends what a check of this process found to its own report, as one line.
+	 *
+	 * @param string $report    The report, see report_in().
+	 * @param string $statement What the check found.
+	 * @return bool Whether the report took the line.
+	 */
+	private static function state( string $report, string $statement ): bool {
+		$line = 'Process ' . getmypid() . ' ' . str_replace( [ "\r", "\n" ], ' ', $statement ) . "\n";
+		return false !== @file_put_contents( $report, $line, FILE_APPEND );
 	}
 
 	/**
