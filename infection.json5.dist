@@ -43,12 +43,11 @@
         "github": true
     },
     // Floors at the scores measured on 2026-11-23 with ext-zstd and main at e40ab18 (89.93 %,
-    // 92.22 % covered, the same in two runs; 87.99 % and 90.48 % before the compressed index
-    // files of #52, locally and in CI), rounded down; raise them as tests are added, never
-    // lower them. ADR 0024's 90 % is the minimum that the covered score may never fall below,
-    // and the goal for the score with uncovered code. Unlike the other gates' scores, this one
-    // barely moved when the tests stopped running under Infection's file wrapper
-    // (docs/04 §5.6).
+    // 92.22 % covered, the same in two runs and in CI's; 87.99 % and 90.48 % before the compressed
+    // index files of #52, locally and in CI), rounded down; raise them as tests are added, never
+    // lower them. ADR 0024's 90 % is the minimum that the covered score may never fall below, and
+    // the goal for the score with uncovered code. Unlike the other gates' scores, this one barely
+    // moved when the tests stopped running under Infection's file wrapper (docs/04 §5.6).
     "minCoveredMsi": 92,
     "minMsi": 89,
     "mutators": {

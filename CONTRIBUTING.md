@@ -76,15 +76,17 @@ composer mutation
 `tests/Fixtures/fuzz/<target>/` so the unit suite replays it forever. `composer mutation`
 needs pcov or Xdebug. It requires a covered mutation score of at least 92 % across
 `Crypto`, `Format`, `Engine\Forget` and the database import filter, its floor (90 % is the
-minimum it may never fall below), and counts code that no test reaches against a floor too. `composer mutation:planner`, `mutation:restore`,
-`mutation:apply`, `mutation:zip` and, with a database server, `mutation:database` are the
-other gates. In CI they run on `main` and on pull requests that change the code they depend
-on ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
+minimum it may never fall below), and counts code that no test reaches against a floor too.
+`composer mutation:planner`, `mutation:restore`, `mutation:apply`, `mutation:zip` and, with a
+database server, `mutation:database` are the other gates. In CI they run on `main` and on pull
+requests that change the code they depend on
+([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
 Each gate's configuration holds its floors, measured with `main` at `e40ab18`: a pull request
 keeps them, and one that adds tests may raise them. A new unit test of a class that a gate
 mutates goes into that gate's suite in `tests/Mutation`.
 The scripts run Infection through `bin/mutation-gate.sh`, which fails a gate when its mutant
-processes could not write durably; `.tools/bin/infection` alone does not check that.
+processes could not write durably or did not all report in; `.tools/bin/infection` alone does
+not check that.
 
 The package that would ship, and the translation template built from it:
 

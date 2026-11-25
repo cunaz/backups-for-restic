@@ -29,18 +29,20 @@
     },
     // Floors at the scores measured on 2026-11-23 with main at e40ab18 and the tests'
     // temporary files on tmpfs, as in CI (docs/04 §5.6): 82.16 % and 86.13 % covered, and
-    // 82.14 % and 86.11 %, in two runs with 8 processes against MySQL 8.4.11; 80.97 % and
-    // 84.88 % over the mutants that both runs killed. 101 mutants were killed in one run and
-    // not the other, 100 of them by DatabaseExchangeTest, whose exchange checks the other
-    // sessions of its account, and Infection's processes share one server and account. On the
-    // same code CI's four processes detected about a point less than eight did locally
-    // (76.57 % and 81.45 % against 77.37 % to 77.82 % and 82.30 % to 82.78 %), and the gate
-    // compares one CI run with the floors, not the score over several runs: hence whole
-    // numbers, within a point of the score over both runs. If CI's first run on this state
-    // lands below them after all, the floors follow it down by the same rule; otherwise they
-    // may only rise. ADR 0024's 90 % is the goal. The 73.75 % and 79.20 % of 2026-11-20 were
-    // measured on older code, under Infection's file wrapper, on which every durable write
-    // of a job document failed.
+    // 82.14 % and 86.11 %, in two runs with 8 processes against MySQL 8.4.11; 82.02 % and
+    // 85.98 % in CI's run on the same state with 4. These scores, and so the floors, can be
+    // above what the tests alone kill: DatabaseExchangeTest checks the other sessions of its
+    // account, and Infection's processes share one server and account, so it can fail through
+    // another process whatever the mutation. 101 mutants were killed in one local run and not
+    // in the other, and the score over the mutants that all three runs killed is 80.67 % and
+    // 84.56 %, 1.5 points below one run's. The floors are whole numbers within a point of that,
+    // because the gate compares one CI run with them; if a CI run lands below them, they follow
+    // it down by the same rule. composer mutation:database checks afterwards that the server's
+    // Performance Schema instrumented every thread, one cause of such kills
+    // (bin/check-performance-schema.php); one server per mutant process is the follow-up that
+    // makes the floors true ones. Otherwise they may only rise; ADR 0024's 90 % is the goal.
+    // The 73.75 % and 79.20 % of 2026-11-20 were measured on older code, under Infection's
+    // file wrapper, on which every durable write of a job document failed.
     "minMsi": 80,
     "minCoveredMsi": 84,
     "mutators": {

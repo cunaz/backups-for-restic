@@ -16,7 +16,9 @@
 #   the number of mutants that Infection ran a test process for, as its summary log counts them:
 #   killed, escaped, errored, timed out and syntax errors. Mutants that are not covered, skipped
 #   or ignored get no process, and Infection's initial test run has no interceptor and reports
-#   nothing. A process that never ran the bootstrap, or could not write there, is missing.
+#   nothing. A test that PHPUnit runs in a process of its own inherits the report of its mutant
+#   process (BFR_MUTATION_REPORTED) and does not report again. A process that never ran the
+#   bootstrap, or could not write there, is missing.
 # - A process whose checks fail cannot report its result through the tests without counting the
 #   mutant as killed, so it appends a line to its report, or when that cannot take it to the
 #   marker named by BFR_MUTATION_CANARY, next to the reports, or to .tools/mutation-canary on the

@@ -24,14 +24,14 @@
         "summary": ".tools/infection-restore/summary.log",
         "github": true
     },
-    // Floors at the scores measured on 2026-11-23 with the tests' temporary files on tmpfs, as
-    // in CI (docs/04 §5.6): 77.79 % and 81.66 % covered in one run, 77.81 % and 81.69 % in
-    // another, which killed one more mutant of ApplyManifest; rounded down. They may only
-    // rise; ADR 0024's 90 % is the goal. The gate's true score is below the 80 % and 85 % that
-    // its floors promised before: since job documents and journal records are written durably
-    // (2026-11-22), fsync() failed under Infection's file wrapper in every test that writes
-    // one, and the gate counted their mutants as killed (98 % covered); and the mutants of
-    // SnapshotBrowser were never run (see the timeout above).
+    // Floors at the scores measured on 2026-11-23 with main at e40ab18 and the tests' temporary
+    // files on tmpfs, as in CI (docs/04 §5.6): 77.91 % and 81.84 % covered locally, 77.88 % and
+    // 81.81 % in CI's run on the same state, where one more mutant of DirectorySpellings escaped;
+    // rounded down. They may only rise; ADR 0024's 90 % is the goal. The gate's true score is
+    // below the 80 % and 85 % that its floors promised before: since job documents and journal
+    // records are written durably (2026-11-22), fsync() failed under Infection's file wrapper in
+    // every test that writes one, and the gate counted their mutants as killed (98 % covered); and
+    // the mutants of SnapshotBrowser were never run (see the timeout above).
     "minMsi": 77,
     "minCoveredMsi": 81,
     "mutators": {
