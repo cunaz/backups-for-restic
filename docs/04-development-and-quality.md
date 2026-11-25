@@ -478,12 +478,31 @@ meet its syntax error as before. The initial test run has no such wrapper, and t
 loads nothing there.
 
 The bootstrap never fails a mutant process, because Infection would count that as a kill.
-When `fsync()` still fails after the restore, or the user-space wrapper is back when the
-process ends, it appends a line to a marker file instead. `bin/mutation-gate.sh`, through
-which the Composer scripts and so CI run Infection, fails the gate on that whatever the score.
-`tests/Unit/Tooling/MutationGatesTest.php` checks outside any mutant process that the
-bootstrap of every gate loads every directory the gate mutates, that loading them prints and
-defines nothing, and that the canary fires under a user-space wrapper.
+Silence fails the gate instead. Before it loads anything, every mutant process under Infection's
+interceptor reports in with a new file in a directory that `bin/mutation-gate.sh`, through which
+the Composer scripts and so CI run Infection, names in `BFR_MUTATION_REPORTS`. After the run the
+script counts the reports against the mutants that Infection ran a test process for, as its
+summary log counts them: killed, escaped, errored, timed out and syntax errors. Mutants that are
+not covered, skipped or ignored get no process, and Infection's initial test run has no
+interceptor and reports nothing. A test that PHPUnit runs in a process of its own
+(`#[RunInSeparateProcess]`, as in `IndexTest`, `IndexFilePacksTest` and `DumpLimitsTest`) loads
+the bootstrap again; it inherits the report of its mutant process from the environment and does
+not report again, because extra reports could stand in for missing ones (before that, the core
+gate counted 4,764 reports for 4,630 processes). The gate fails when a report is missing, when
+Infection wrote no summary (an old one is removed before the run) or a count is missing from it,
+and when the configuration names no summary log; more reports than processes pass. On 2026-11-25
+the planner gate had 736 reports for 736 processes, ZIP downloads 779 for 779, the apply gate
+1,657 for 1,657 and the core 4,630 for 4,630. When `fsync()` still fails after the restore, or
+the user-space wrapper is back when the process ends, the process appends a line to its report,
+or when that cannot take it to a marker file, the one next to the reports or else
+`.tools/mutation-canary` on the disk of the checkout, and the script fails the gate on any such
+line whatever the score. A process whose report directory cannot take a new file is missing; one
+whose directory turns unwritable only after it reported in writes the line into its report,
+which exists. `tests/Unit/Tooling/MutationGatesTest.php` checks outside any mutant process that
+the bootstrap of every gate loads every directory the gate mutates, that loading them prints and
+defines nothing, that the canary fires under a user-space wrapper, that a mutant process reports
+in once and its isolated tests do not, and how the script decides on reports, summaries and
+markers, with a real process whose markers cannot be written.
 
 The jobs keep the tests' temporary files on tmpfs (`.github/actions/mutation-tmpdir`): a gate
 measures the tests, not the disk, and on the runner's ext4 every `fsync()` of a durable write
@@ -492,42 +511,62 @@ took 55.5 minutes on ext4 against 15.0 on tmpfs, on the code of 2026-11-22.
 
 Measured on 2026-11-23 with `main` at `e40ab18` merged into the pull request that set these
 floors: PHP 8.3.37 with ext-zstd and pcov, 8 threads, the tests' temporary files on tmpfs as in
-CI, and MySQL 8.4.11 for the database gate. CI ran every gate for `9275794` on four cores, with
-`main` at `f0ea681`, before #52, #53, #58 and #59; its minutes are those of the Infection step.
+CI, and MySQL 8.4.11 for the database gate. CI ran every gate on the same state (`210629e`) on
+four cores; its minutes are those of the Infection step.
 
 | Gate | Runs | Mutants | Not covered | Escaped | Timed out | MSI | Covered MSI | Minutes | CI: covered MSI, minutes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Core | 2 | 4,748 | 118 | 360 | 65 | 89.93 % | 92.22 % | 15.4, 15.7 | 90.48 %, 39.9 |
-| Planner | 1 | 749 | 13 | 81 | 2 | 87.45 % | 88.99 % | 1.1 | 88.99 %, 2.0 |
-| File restore | 1 | 3,707 | 178 | 641 | 27 | 77.91 % | 81.84 % | 28.4 | 81.48 %, 70.7 |
-| File apply jobs | 2 | 1,745 | 88 | 272 | 2 | 79.37 % | 83.58 % | 7.1, 7.1 | 83.13 %, 14.6 |
-| ZIP downloads | 1 | 794 | 15 | 117 | 14 | 83.38 % | 84.98 % | 0.5 | 84.98 %, 1.1 |
-| Database | 2 | 4,278 | 197 | 566, 567 | 9 | 82.16 %, 82.14 % | 86.13 %, 86.11 % | 52.5, 48.5 | 81.45 %, 110.6 |
+| Core | 2 | 4,748 | 118 | 360 | 65 | 89.93 % | 92.22 % | 15.4, 15.7 | 92.22 %, 62.9 |
+| Planner | 1 | 749 | 13 | 81 | 2 | 87.45 % | 88.99 % | 1.1 | 88.99 %, 2.4 |
+| File restore | 1 | 3,707 | 178 | 641 | 27 | 77.91 % | 81.84 % | 28.4 | 81.81 %, 71.7 |
+| File apply jobs | 2 | 1,745 | 88 | 272 | 2 | 79.37 % | 83.58 % | 7.1, 7.1 | 83.52 %, 15.7 |
+| ZIP downloads | 1 | 794 | 15 | 117 | 14 | 83.38 % | 84.98 % | 0.5 | 84.98 %, 1.7 |
+| Database | 2 | 4,278 | 197 | 566, 567 | 9 | 82.16 %, 82.14 % | 86.13 %, 86.11 % | 52.5, 48.5 | 85.98 %, 107.3 |
 
 Under Infection's wrapper the gates had reported 90.39 % covered for the core and 79.20 % for
 the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore, 100 % for
 the apply jobs and 99.87 % for ZIP downloads on 2026-11-22.
 
-The planner and ZIP gates gave the same figures in all four runs on their current code, three
-local ones on three states of `main` and CI's, mutant for mutant. The core and the apply gate
-gave the same figures in their two final runs. On earlier states two mutants of `PlanBuild`
-(the `0` of `$this->counts['rows'] ?? 0`, lowered) were killed in some runs and not in others,
-CI's included, and so was one mutant of `ApplyManifest` in two runs of the file restore gate.
-The floors are the final figures rounded down. The file restore gate ran once on the final
-state; its floors are not above the 77.79 % and 81.66 % that both of its runs before #58
-killed either.
+The planner and ZIP gates gave the same figures in every run on their current code, the local
+ones on three states of `main` and CI's two, mutant for mutant. The core and the apply gate gave
+the same figures in their two final runs, and CI's run on the final state gave the core's too,
+with five mutants of `Polynomial` timed out instead of killed. Two mutants of `PlanBuild` (the
+`0` of `$this->counts['rows'] ?? 0`, lowered) were killed in some runs and not in others, CI's
+included, and so were one mutant of `ApplyManifest` between two local runs of the file restore
+gate and one of `DirectorySpellings` (line 304) in CI's. So CI scored 79.31 % and 83.52 % for
+the apply gate and 77.88 % and 81.81 % for file restore, which are also the scores over the
+mutants that every run on the same code killed. The floors are the final figures rounded down,
+and none is above those.
 
-The database gate's two final runs differ in 101 mutants that one run killed and the other
-did not, 100 of them through `DatabaseExchangeTest`: the exchange checks the other sessions of
-its account on the server, and Infection's processes share one server and account, so such a
-test can fail through another process whatever the mutation. On the same code CI's four
-processes detected about a point less than eight did locally (76.57 % and 81.45 % against
-77.37 % to 77.82 % and 82.30 % to 82.78 %), and the gate compares one CI run with its floors,
-not the score over several runs. So its floors are whole numbers like the others, 80 % and
-84 %, within a point of the 80.97 % and 84.88 % over the mutants that both final runs killed.
-If CI's first run on this state lands below them after all, the floors follow it down by the
-same rule. The true scores may be lower still; a database account per process, or serial runs
-of these tests, would settle that.
+**The database scores are an upper bound.** The two final runs differ in 101 mutants that one
+run killed and the other did not, 100 of them through `DatabaseExchangeTest`. The exchange
+checks the other sessions of its account on the server, and Infection's processes share one
+server and account, so such a test can fail through another process whatever the mutation. In
+the run that killed them the tests failed on the session list (`performance_schema`, 14
+mutants), a dependency or grant refusal (17), a reviewed plan that changed or kept blockers
+(20), a table definition or identity that changed after the review (7), the exchange's check of
+the reviewed database (5), `database_exchange_changed` (4) and other assertions (34). So the
+scores, and with them the floors, can be above what the tests alone kill: one run's score lay
+1.2 points above the score over the mutants that both final runs killed (82.14 % against
+80.97 %, covered 86.11 % against 84.88 %), and about 1.5 points above the 80.67 % and 84.56 %
+that all three runs on this state killed, CI's included. On older code CI's four processes detected
+about a point less than eight did locally (76.57 % and 81.45 % against 77.37 % to 77.82 % and
+82.30 % to 82.78 %); on the final state CI scored 82.02 % and 85.98 %. The gate compares one CI
+run with its floors, not the score over several runs, so its floors are whole numbers like the
+others, 80 % and 84 %, within a point of the score over all three runs; if a CI run lands below
+them, they follow it down by the same rule.
+
+One cause of such kills is checked after every run. A server whose Performance Schema cannot
+instrument a thread leaves that connection out of `performance_schema.processlist` while
+`Threads_connected` counts it, so the exchange's session check (`SwapCatalog::complete()`)
+fails whatever the mutation and the mutant counts as killed. `composer mutation:database`
+therefore asks the server that the gate used, after the gate, for
+`Performance_schema_thread_instances_lost` and `Performance_schema_thread_classes_lost`
+(`bin/check-performance-schema.php`) and fails when either is above zero, the Performance Schema
+is off or the server cannot be asked. Both counters start at zero with the server, so the check
+must ask the gate's own server, and `FLUSH STATUS` would reset them; no test runs it. The other
+causes stay: one database server, or at least one account, per mutant process is the follow-up
+that makes the floors true ones.
 
 Infection gives each mutant a timeout of five seconds plus five times what its covering test
 classes took in the initial run, at most the configured timeout; a mutant that runs into it
