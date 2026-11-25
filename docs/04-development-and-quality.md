@@ -481,29 +481,54 @@ The bootstrap never fails a mutant process, because Infection would count that a
 Silence fails the gate instead. Before it loads anything, every mutant process under Infection's
 interceptor reports in with a new file in a directory that `bin/mutation-gate.sh`, through which
 the Composer scripts and so CI run Infection, names in `BFR_MUTATION_REPORTS`, and each check
-then states there that it passed: "can write durably" after the restore, or "does not compile"
-when the mutated copy does not, also when it fails with a compile error that no catch sees and
-the process ends while the classes load; and "ended with PHP's own file wrapper" when the
-process ends. After the run the script compares these with Infection's summary log. Reports, and
-"can write durably" or "does not compile" lines, must each reach the mutants that Infection ran
-a test process for: killed, escaped, errored, timed out and syntax errors. Mutants that are not
-covered, skipped or ignored get no process, and Infection's initial test run has no interceptor
-and reports nothing. "Ended" lines must reach the killed and escaped mutants less those that did
-not compile: Infection 0.35.10 counts a process that exits above 100 as errored and one that it
-stopped as timed out, so killed processes (exit 1 to 100, or 0 without PHPUnit's "OK") and
-escaped ones (0 with it) ran their shutdown functions, and a copy that does not compile ends
-without that check, counted as killed or as a syntax error depending on which test meets it
-first. A test that PHPUnit runs in a process of its own (`#[RunInSeparateProcess]`, as in
-`IndexTest`, `IndexFilePacksTest` and `DumpLimitsTest`) inherits the report of its mutant
+then states there that it passed. After the restore the process states that it can write
+durably. When the mutated copy does not compile, it states which way: "does not compile" when
+the bootstrap caught the error and the tests go on to meet it, which Infection counts as killed
+or as a syntax error depending on which test meets it first; or "ended while the classes loaded"
+when a compile error that no catch sees ends the process with 255, which Infection counts as
+errored. When the process ends, its shutdown function states that it ended with PHP's own file
+wrapper, and after a fatal error whether PHPUnit was running a test: if it was, a shutdown
+function of PHPUnit's ends the process with status 2 and Infection counts the mutant as killed,
+as it did for three mutants of the ZIP gate whose tests ran out of memory; if not, the process
+exits with 255 and Infection counts it as errored. The bootstrap reads that from PHPUnit's own
+record of the running test, a private property of `PHPUnit\Runner\ShutdownHandler`; should that
+change, a fatal error counts as one in a test, the direction that passes, and the bootstrap's
+tests fail. After the run the script compares these with Infection's summary log. Reports, and
+lines that the process can write durably or that its copy does not compile, must each reach the
+mutants that Infection ran a test process for: killed, escaped, errored, timed out and syntax
+errors. Mutants that are not covered, skipped or ignored get no process, and Infection's initial
+test run has no interceptor and reports nothing. End lines, plain or after a fatal error in a
+test, must reach the killed and escaped mutants less the caught compile errors among them:
+Infection 0.35.10 counts a process that exits above 100 as errored and one that it stopped as
+timed out, so killed processes (exit 1 to 100, or 0 without PHPUnit's "OK") and escaped ones (0
+with it) ran their shutdown functions, while an end line after a fatal error outside a test
+comes from an errored process and does not count; and every syntax error comes from a caught
+copy, since no test of the gates prints a ParseError of its own, so the caught copies among the
+killed and escaped are the caught ones less the syntax errors:
+`needed = killed + escaped - max(0, caught - syntax errors)`. An errored process and a syntax
+error can therefore excuse no killed mutant without its end line, which the first version of the
+count let them do. A test that PHPUnit runs in a process of its own (`#[RunInSeparateProcess]`,
+as in `IndexTest`, `IndexFilePacksTest` and `DumpLimitsTest`) inherits the report of its mutant
 process and states nothing; before that, the core gate counted 4,764 reports for 4,630
 processes, and extra reports could stand in for missing ones. Each short count fails the gate
 with its own message, and so do a missing or unreadable summary and a configuration that names
-none; more lines than needed pass. On 2026-11-25 the counts matched Infection's exactly: the
-planner gate had 736 reports and 736 statements that the process can write durably or does not
-compile for 736 processes, and 733 end statements for 733 killed and escaped mutants; ZIP
-downloads 779, 779 and 765; the apply gate 1,657, 1,657 and 1,655; the core 4,630, 4,630 and
-4,562. The planner's syntax error and the core's errored mutant of `ZstdFrame.php:72`, a compile
-error that no catch sees, stated that they do not compile. When `fsync()` still fails after the
+none; more lines than needed pass. On 2026-11-25 the counts matched Infection's exactly, and the
+end lines equalled what was needed: the planner gate had 736 reports and 736 statements that the
+process can write durably or that its copy does not compile, for 736 processes, and 733 end
+lines for 733 needed, its syntax error a caught copy; ZIP downloads 779, 779 and 765 for 765,
+three of them after a fatal error in a test; the apply gate 1,657, 1,657 and 1,655 for 1,655;
+file restore 3,529, 3,529 and 3,498 for 3,498, with three caught copies, two of them syntax
+errors, its errored mutant of `FileChange.php:427` ending while the classes loaded and three end
+lines after a fatal error in a test; the core 4,630, 4,630 and 4,561 for 4,561, with its errored
+mutant of `ZstdFrame.php:72` ending while the classes loaded and 19 end lines after a fatal
+error in a test. In CI the same day, under the first version of the count, the reports and
+statements of all six gates matched Infection's summary too, among them the first runs of the
+file restore gate (3,529 reports and 3,529 statements for 3,529 processes) and the database gate
+(4,081 reports and 4,081 statements for 4,081 processes) with these statements, and the end
+lines exceeded what that version needed by exactly the copies it deducted wrongly: the core had
+4,563 for 4,562, the planner 733 for 732 and file restore 3,498 for 3,495, while the database
+gate, with neither an errored mutant nor a syntax error, had 3,665 for 3,665. Under the present
+count each of them needs exactly the end lines it had. When `fsync()` still fails after the
 restore, or the user-space wrapper is back when the process ends, the process appends a line to
 its report, or when that cannot take it to a marker file, the one next to the reports or else
 `.tools/mutation-canary` on the disk of the checkout, and the script fails the gate on any such
@@ -512,10 +537,10 @@ one whose check fails while neither its report nor a marker can take the line la
 statement that the check passed. `tests/Unit/Tooling/MutationGatesTest.php` checks outside any
 mutant process that the bootstrap of every gate loads every directory the gate mutates, that
 loading them prints and defines nothing, that the canary fires under a user-space wrapper, what
-a mutant process states for a copy that compiles, one that does not parse and one that fails
-with a compile error, that its isolated tests state nothing, and how the script decides on
-reports, statements, summaries and markers, with a real process whose report and markers cannot
-be written.
+a mutant process states for a copy that compiles, one that does not parse, one that fails with a
+compile error that no catch sees, and one that ends with a fatal error in a test or outside one,
+that its isolated tests state nothing, and how the script decides on reports, statements,
+summaries and markers, with a real process whose report and markers cannot be written.
 
 The jobs keep the tests' temporary files on tmpfs (`.github/actions/mutation-tmpdir`): a gate
 measures the tests, not the disk, and on the runner's ext4 every `fsync()` of a durable write
@@ -548,8 +573,9 @@ with five mutants of `Polynomial` timed out instead of killed. Two mutants of `P
 included, and so were one mutant of `ApplyManifest` between two local runs of the file restore
 gate and one of `DirectorySpellings` (line 304) in CI's. So CI scored 79.31 % and 83.52 % for
 the apply gate and 77.88 % and 81.81 % for file restore, which are also the scores over the
-mutants that every run on the same code killed. The floors are the final figures rounded down,
-and none is above those.
+mutants that every run on the same code killed. On `662c8b1` CI scored the same for the planner,
+ZIP and core gates, 79.37 % and 83.58 % for the apply gate and 77.93 % and 81.86 % for file
+restore. The floors are the final figures rounded down, and none is above those.
 
 **The database scores are an upper bound.** The two final runs differ in 101 mutants that one
 run killed and the other did not, 100 of them through `DatabaseExchangeTest`. The exchange
@@ -586,15 +612,18 @@ that makes the floors true ones.
 
 Infection gives each mutant a timeout of five seconds plus five times what its covering test
 classes took in the initial run, at most the configured timeout; a mutant that runs into it
-counts as killed. It skips a mutant without running it when the quickest test class that
-covers it took at least the configured timeout in the initial run, which collects coverage and
-is slower. With 30 s that left all 255 mutants of `Restore\SnapshotBrowser` unmeasured: its
-tests take about 45 s with coverage and 6 s without. The file restore gate now allows 120 s
-and the apply gate 60 s, and no gate skipped a mutant on 2026-11-23. A run on a loaded machine
-still differs: on 2026-11-20 a run of the database gate during other test runs counted 530
-timeouts instead of 8. One mutant of the ZIP writer writes its checkpoint files into the
-working directory, and so do mutants of the file restore gate; delete `.head`, `.names` and
-`.state` there after a local run.
+counts as killed. It skips a mutant without running it when the quickest test class that covers
+it took at least the configured timeout in the initial run, which collects coverage and is
+slower. With 30 s that left all 255 mutants of `Restore\SnapshotBrowser` unmeasured: its tests
+take about 45 s with coverage and 6 s without. The file restore gate now allows 120 s and the
+apply gate 60 s, and no gate skipped a mutant on 2026-11-23. A run on a loaded machine still
+differs: on 2026-11-20 a run of the database gate during other test runs counted 530 timeouts
+instead of 8, and on 2026-11-25 CI's run on `662c8b1` counted 414 instead of 9 on a runner whose
+initial test run took 77.7 s instead of 46.6 s: the gate took 3 h 21 min instead of 1 h 47 min,
+218 mutants escaped instead of 572, and its 90.30 % and 94.66 % measured the runner, not the
+tests. One mutant of the ZIP writer writes its checkpoint files into the working directory, and
+so do mutants of the file restore gate; delete `.head`, `.names` and `.state` there after a
+local run.
 
 The escaped mutants by class with `main` at `e40ab18`, the work of a later package:
 
