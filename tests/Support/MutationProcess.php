@@ -58,6 +58,14 @@ final class MutationProcess {
 	public const REPORT_VARIABLE = 'BFR_MUTATION_REPORTS';
 
 	/**
+	 * Set by a mutant process once it has tried to report in, to its report or to "-". A test
+	 * that PHPUnit runs in a process of its own (#[RunInSeparateProcess]) inherits it and does
+	 * not report again: Infection counts one process per mutant, and extra reports could hide
+	 * missing ones.
+	 */
+	public const REPORTED_VARIABLE = 'BFR_MUTATION_REPORTED';
+
+	/**
 	 * Run by the bootstrap of the mutation suites, after tests/bootstrap.php. Throws nothing.
 	 *
 	 * @param string $root The repository's root directory.
@@ -65,7 +73,17 @@ final class MutationProcess {
 	public static function prepare( string $root ): void {
 		$markers = self::markers( $root );
 		if ( self::intercepted() ) {
-			$report = self::report_in( getenv( self::REPORT_VARIABLE ) );
+			$inherited = getenv( self::REPORTED_VARIABLE );
+			if ( false === $inherited || '' === $inherited ) {
+				$report = self::report_in( getenv( self::REPORT_VARIABLE ) );
+				// PHPUnit hands an isolated test either this process's environment or one built
+				// from $_SERVER, and proc_open() drops empty values: so both, and "-" when no
+				// report could be written.
+				$_SERVER[ self::REPORTED_VARIABLE ] = $report ?? '-';
+				putenv( self::REPORTED_VARIABLE . '=' . ( $report ?? '-' ) );
+			} else {
+				$report = '-' === $inherited ? null : $inherited;
+			}
 			if ( null !== $report ) {
 				array_unshift( $markers, $report );
 			}

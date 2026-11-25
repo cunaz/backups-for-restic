@@ -139,6 +139,36 @@ final class MutationGatesTest extends TestCase {
 		}
 	}
 
+	/**
+	 * A mutant process reports in once and passes its report on; a test that PHPUnit runs in a
+	 * process of its own inherits that and reports nothing, so that its report could not stand
+	 * in for one that is missing.
+	 */
+	public function test_a_mutant_process_reports_in_once_and_its_isolated_tests_do_not(): void {
+		$root    = (string) realpath( dirname( __DIR__, 3 ) );
+		$scratch = TempDir::create( 'mutation-process' );
+		try {
+			$original = $root . '/src/Restore/ChunkDigest.php';
+			$mutant   = $scratch . '/ChunkDigest.php';
+			copy( $original, $mutant );
+
+			$parent = self::process( $scratch, $root, $original, $mutant );
+			self::assertCount( 1, $parent['reports'] );
+			self::assertMatchesRegularExpression( '/\AProcess [0-9]+ reported in\.\n\z/', $parent['reports'][0] );
+			self::assertIsString( $parent['reported'] );
+			self::assertStringStartsWith( $scratch . '/reports/report-', $parent['reported'], 'The process passes its report on.' );
+
+			$child = self::process( $scratch, $root, $original, $mutant, $parent['reported'] );
+			self::assertCount( 1, $child['reports'], 'The isolated test did not report again.' );
+			self::assertSame( $parent['reported'], $child['reported'] );
+
+			$orphan = self::process( $scratch, $root, $original, $mutant, '-' );
+			self::assertCount( 1, $orphan['reports'], 'Nor does it when its mutant process could not report.' );
+		} finally {
+			TempDir::remove( $scratch );
+		}
+	}
+
 	public function test_the_canary_fires_when_files_still_open_through_a_user_space_wrapper(): void {
 		$scratch = TempDir::create( 'mutation-canary' );
 		$marker  = $scratch . '/marker';
@@ -458,7 +488,7 @@ final class MutationGatesTest extends TestCase {
 	 *
 	 * @return array<string, mixed>
 	 */
-	private static function process( string $scratch, string $root, string $original, string $mutant ): array {
+	private static function process( string $scratch, string $root, string $original, string $mutant, ?string $inherited = null ): array {
 		$script = $scratch . '/process.php';
 		file_put_contents(
 			$script,
@@ -476,6 +506,7 @@ final class MutationGatesTest extends TestCase {
 			require $root . '/tests/Mutation/bootstrap.php';
 			$output = (string) ob_get_clean();
 			$result = [
+				'reported'    => getenv( \BackupsForRestic\Tests\Support\MutationProcess::REPORTED_VARIABLE ),
 				'intercepted' => \BackupsForRestic\Tests\Support\MutationProcess::intercepted(),
 				'output'      => $output,
 				'constants'   => array_values( array_diff( array_keys( get_defined_constants( true )['user'] ?? [] ), $constants ) ),
@@ -502,6 +533,17 @@ final class MutationGatesTest extends TestCase {
 			PHP
 		);
 		$marker  = $scratch . '/marker';
+		$reports = $scratch . '/reports';
+		is_dir( $reports ) || mkdir( $reports );
+		$variables = [
+			MutationProcess::MARKER_VARIABLE => $marker,
+			MutationProcess::REPORT_VARIABLE => $reports,
+		];
+		if ( null !== $inherited ) {
+			$variables[ MutationProcess::REPORTED_VARIABLE ] = $inherited;
+		}
+		$environment = getenv();
+		unset( $environment[ MutationProcess::REPORTED_VARIABLE ] );
 		$process = proc_open(
 			[ PHP_BINARY, $script, $root, $original, $mutant, $marker ],
 			[
@@ -510,7 +552,7 @@ final class MutationGatesTest extends TestCase {
 			],
 			$pipes,
 			null,
-			[ MutationProcess::MARKER_VARIABLE => $marker ] + getenv()
+			$variables + $environment
 		);
 		self::assertIsResource( $process );
 		$output = (string) stream_get_contents( $pipes[1] );
@@ -519,6 +561,7 @@ final class MutationGatesTest extends TestCase {
 		self::assertSame( 0, $status, $output . file_get_contents( $scratch . '/stderr' ) );
 		$result = json_decode( $output, true, 512, JSON_THROW_ON_ERROR );
 		self::assertIsArray( $result );
+		$result['reports'] = array_map( static fn ( string $file ): string => (string) file_get_contents( $file ), (array) glob( $reports . '/report-*' ) );
 		return $result;
 	}
 
