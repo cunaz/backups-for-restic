@@ -211,7 +211,8 @@ final class Staging {
 
 	/**
 	 * How many directories are on their way out: due and not yet set aside, or set aside and
-	 * not yet deleted completely.
+	 * not yet deleted completely. While a stored job cannot be read, what is due stays
+	 * (expire()), so only what was set aside is on its way out.
 	 *
 	 * @param int $hours Hours a staging directory is kept after its job finished.
 	 * @return int Number of directories.
@@ -219,7 +220,7 @@ final class Staging {
 	 */
 	public function removing( int $hours ): int {
 		$survey = $this->survey( $hours );
-		return count( $survey['due'] ) + count( $survey['removing'] );
+		return ( null === $this->jobs->unreadable() ? count( $survey['due'] ) : 0 ) + count( $survey['removing'] );
 	}
 
 	/**

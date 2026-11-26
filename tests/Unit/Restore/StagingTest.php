@@ -491,11 +491,14 @@ final class StagingTest extends TestCase {
 		$unreadable = $this->job( JobState::Succeeded, $this->clock->seconds );
 		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
 		self::assertSame( $unreadable->id, $this->jobs->unreadable() );
+		// Only what was set aside is on its way out.
+		self::assertSame( 1, $this->staging->removing( 24 ) );
 		// Before, both expired with their own hours.
 		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
 		self::assertEqualsCanonicalizing( [ $expired->id, $leftover ], $this->names(), 'What was set aside before goes on being deleted.' );
 		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
 		self::assertNull( $this->jobs->unreadable() );
+		self::assertSame( 2, $this->staging->removing( 24 ) );
 		self::assertSame( 2, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
 		self::assertSame( [], $this->names() );
 	}
