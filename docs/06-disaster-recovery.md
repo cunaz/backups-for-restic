@@ -107,6 +107,9 @@ The site records each delivery. Store the file with the other offline recovery m
    confirm to revert the listed entries. The undo checks every entry again just before it
    changes it and keeps one that changed after your review. Its result counts what it did
    and lists every kept entry with its reason, also when the undo was cancelled or failed.
+   An undo that was cancelled or failed after it had gone through every entry is recorded
+   as one that finished. One that stopped earlier leaves the apply listed, as partly undone
+   once it reverted an entry: preview the undo again to revert the rest.
    Kept entries stay undoable until the expiry time, and the apply stays listed as partly
    undone: if a kept entry is put back as the apply left it, for example by undoing a later
    apply over the same files, preview the undo again. When nothing is left to revert, the
