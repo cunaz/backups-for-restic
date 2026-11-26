@@ -11,6 +11,7 @@ namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Doctor\Check;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 
 defined( 'ABSPATH' ) || exit;
@@ -335,7 +336,8 @@ final class Messages {
 			],
 			'database_binding_discarded' => [
 				'message' => __( 'The binding of this database restore was discarded already.', 'backups-for-restic' ),
-				'hint'    => __( 'Nothing is left to discard. The warnings of that database restore job on the Logs tab name the private tables to remove by hand where they are.', 'backups-for-restic' ),
+				/* translators: %d: number of days. */
+				'hint'    => sprintf( __( 'Nothing is left to discard. For %d days after the discard, or until they are marked as taken care of, the Restores tab lists its private tables under “Discarded bindings”, and "wp backups-for-restic database-discarded" prints them.', 'backups-for-restic' ), JobStore::DISCARD_LISTED_DAYS ),
 			],
 			'database_binding_busy' => [
 				'message' => __( 'The database restore that holds this binding, or an undo of it, has not ended yet.', 'backups-for-restic' ),
@@ -355,11 +357,16 @@ final class Messages {
 			],
 			'database_discard_failed' => [
 				'message' => __( 'The plugin could not ask the database server whether it holds the private tables of this database restore.', 'backups-for-restic' ),
-				'hint'    => __( 'Nothing was discarded. The log of that database restore job, on the Logs tab, names the database error. Once the site reaches its database server again, open the review of the discard again.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was discarded. The log of that database restore job names the database error: “Show the log of this job” beside the review of the discard opens it, and so does "wp backups-for-restic logs" with the ID of the job. Once the site reaches its database server again, open the review of the discard again.', 'backups-for-restic' ),
 			],
 			'database_discard_storage' => [
 				'message' => __( 'The plugin could not read or write its private working directory, so the binding was not discarded.', 'backups-for-restic' ),
 				'hint'    => __( 'Check the free disk space and the working directory on the Environment tab, then open the review of the discard again.', 'backups-for-restic' ),
+			],
+			'database_discarded_missing' => [
+				'message' => __( 'This database restore lists no private tables of a discarded binding.', 'backups-for-restic' ),
+				/* translators: %d: number of days. */
+				'hint'    => sprintf( __( 'Its tables were marked as taken care of already, %d days have passed since the discard, or its binding was not discarded.', 'backups-for-restic' ), JobStore::DISCARD_LISTED_DAYS ),
 			],
 			'database_discard_unexpected' => [
 				'message' => __( 'An unexpected error stopped the review or the discard of this binding, so the binding was not discarded.', 'backups-for-restic' ),
@@ -569,7 +576,8 @@ final class Messages {
 		return match ( $code ) {
 			'live_database'  => __( 'The database that this site uses now: the discard changes none of its tables.', 'backups-for-restic' ),
 			'private_tables' => __( 'The private tables, wherever they are: the plugin drops none of them, now or later.', 'backups-for-restic' ),
-			'job_record'     => __( 'The database restore job and its log, which record the discard, who confirmed it and these table names.', 'backups-for-restic' ),
+			/* translators: %d: number of days. */
+			'job_record'     => sprintf( __( 'The database restore job and its log, which record the discard, who confirmed it and these table names. For %d days after the discard, or until you mark the tables as taken care of, the job history keeps them, and the Restores tab and "wp backups-for-restic database-discarded" list these table names.', 'backups-for-restic' ), JobStore::DISCARD_LISTED_DAYS ),
 			default          => $code,
 		};
 	}

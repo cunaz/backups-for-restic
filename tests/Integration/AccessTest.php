@@ -61,6 +61,7 @@ final class AccessTest extends TestCase {
 			[ 'POST', '/database-changes/' . self::JOB . '/undo' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/discard-review' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/discard' ],
+			[ 'POST', '/database-changes/' . self::JOB . '/discarded-done' ],
 			[ 'GET', '/undo' ],
 			[ 'POST', '/undo/' . self::JOB . '/plan' ],
 			[ 'POST', '/undo/' . self::JOB ],
@@ -155,13 +156,13 @@ final class AccessTest extends TestCase {
 				$caps["update_core"] = false;
 				return $caps;
 			} );
-			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo", "/database-changes/" . $arguments[0] . "/discard" ] as $route ) {
+			foreach ( [ "/restores/" . $arguments[0] . "/database/apply", "/database-changes/" . $arguments[0] . "/undo", "/database-changes/" . $arguments[0] . "/discard", "/database-changes/" . $arguments[0] . "/discarded-done" ] as $route ) {
 				echo rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1" . $route ) )->get_status(), "\n";
 			}
 			',
 			[ self::JOB ]
 		);
-		self::assertSame( [ '403', '403', '403' ], explode( "\n", trim( $output ) ) );
+		self::assertSame( [ '403', '403', '403', '403' ], explode( "\n", trim( $output ) ) );
 	}
 
 	public function test_database_writes_require_explicit_confirmation_in_the_json_body(): void {
@@ -332,6 +333,22 @@ final class AccessTest extends TestCase {
 			self::assertSame( [ 409, 'backups_for_restic_database_binding_discarded' ], $refused( [] ) );
 			[ $status, $error ] = TestSite::api( 'POST', $route . '/discard-review', [] );
 			self::assertSame( [ 409, 'backups_for_restic_database_binding_discarded' ], [ $status, $error['code'] ?? null ] );
+			self::assertStringContainsString( '“Discarded bindings”', $error['data']['hint'] ?? '' );
+			// The Restores tab lists the tables, whatever the job history does, until they are taken care of.
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
+			self::assertSame( 200, $status, $raw );
+			self::assertTrue( $listed['write_allowed'] ?? null, $raw );
+			$entry = array_values( array_filter( $listed['discarded'] ?? [], static fn ( array $entry ): bool => $job === ( $entry['job'] ?? null ) ) );
+			self::assertCount( 1, $entry, $raw );
+			self::assertSame( [ $review['tables'], $answer['discarded']['until'] ?? null ], [ $entry[0]['tables'] ?? null, $entry[0]['until'] ?? null ] );
+			[ $status, $done, $raw ] = TestSite::api( 'POST', $route . '/discarded-done', [] );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( $review['tables'], $done['done']['tables'] ?? null );
+			self::assertSame( 1, TestSite::job_document( $job )['data']['database_discarded']['done']['user'] ?? null );
+			[ $status, $error ] = TestSite::api( 'POST', $route . '/discarded-done', [] );
+			self::assertSame( [ 409, 'backups_for_restic_database_discarded_missing' ], [ $status, $error['code'] ?? null ] );
+			[ , $listed ] = TestSite::api( 'GET', '/database-changes/foreign' );
+			self::assertNotContains( $job, array_column( $listed['discarded'] ?? [], 'job' ) );
 		} finally {
 			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
 		}
@@ -383,7 +400,7 @@ final class AccessTest extends TestCase {
 			self::assertSame( 200, $first, $output );
 			self::assertSame( [ 500, 'backups_for_restic_database_discard_failed' ], [ $status, $code ], $output );
 			self::assertSame( 'The plugin could not ask the database server whether it holds the private tables of this database restore.', $message );
-			self::assertStringContainsString( 'Nothing was discarded. The log of that database restore job, on the Logs tab, names the database error.', $hint );
+			self::assertStringContainsString( 'Nothing was discarded. The log of that database restore job names the database error: “Show the log of this job” beside the review of the discard opens it', $hint );
 			self::assertStringNotContainsString( 'The log of the job contains', $message . ' ' . $hint );
 			// The log of that job names what the database raised, whichever PHP's mysqli raises for the handle.
 			$entries = array_map( static fn ( string $line ): mixed => json_decode( $line, true ), array_filter( explode( "\n", TestSite::job_log( $failing ) ) ) );

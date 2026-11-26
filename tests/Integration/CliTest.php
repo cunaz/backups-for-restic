@@ -750,4 +750,46 @@ final class CliTest extends TestCase {
 			TestSite::wp( [ 'user', 'delete', 'bfr-cli-editor', '--yes' ] );
 		}
 	}
+
+	public function test_database_discarded_lists_the_tables_of_a_discarded_binding_until_they_are_taken_care_of(): void {
+		$job = '20261126T130000Z-0d1604';
+		TestSite::database_binding( $job, true );
+		try {
+			[ $status, $output ] = self::command( [ 'database-discarded' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringNotContainsString( $job, $output );
+			[ , $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $job ], '' );
+			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $digest ), $output );
+			[ $status, $output ] = self::command( [ 'database-discard', $job, '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( '"wp backups-for-restic database-discarded" lists them.', $output );
+			// Before, the warnings of the job were the only place of the names, and the job history pruned the job.
+			foreach ( [ [ 'database-discarded' ], [ 'database-discarded', $job ] ] as $arguments ) {
+				[ $status, $output ] = self::command( $arguments );
+				self::assertSame( 0, $status, $output );
+				foreach ( [ 'Database restore ' . $job . ', discarded on ', ' on the server 7c4dd2a2-d1b4-11f1-9b6f-0242ac120002 (listed until ', '  _bfr_r_' . str_repeat( 'c', 32 ) . '_b1' ] as $part ) {
+					self::assertStringContainsString( $part, $output );
+				}
+			}
+			[ $status, $output ] = self::command( [ 'database-discarded', '--done' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: --done needs the ID of the database apply job whose tables are taken care of. Nothing was changed.', $output );
+			TestSite::user( 'bfr-cli-editor', 'editor' );
+			[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done', '--user=bfr-cli-editor' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The selected WordPress user may not change the database of this site.', $output );
+			[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Success: The 7 private tables of the discarded binding of ' . $job . ' are no longer listed.', $output );
+			self::assertSame( [ 0, 'wp-cli' ], [ TestSite::job_document( $job )['data']['database_discarded']['done']['user'] ?? null, TestSite::job_document( $job )['data']['database_discarded']['done']['via'] ?? null ] );
+			foreach ( [ [ 'database-discarded', $job ], [ 'database-discarded', $job, '--done' ] ] as $arguments ) {
+				[ $status, $output ] = self::command( $arguments );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( 'Error: This database restore lists no private tables of a discarded binding.', $output );
+			}
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+			TestSite::wp( [ 'user', 'delete', 'bfr-cli-editor', '--yes' ] );
+		}
+	}
 }

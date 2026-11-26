@@ -43,6 +43,12 @@ final class JobStore {
 	public const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
 
 	/**
+	 * Days for which a database apply lists the private tables of its discarded binding, unless
+	 * the administrator marks them as taken care of before (ADR 0043).
+	 */
+	public const int DISCARD_LISTED_DAYS = 90;
+
+	/**
 	 * Whether while_idle() holds the lock of create() in this process.
 	 *
 	 * @var bool
@@ -461,19 +467,38 @@ final class JobStore {
 	}
 
 	/**
+	 * Until when a database apply lists the private tables of its discarded binding, which a
+	 * database administrator removes by hand where they are: DISCARD_LISTED_DAYS after the
+	 * discard, unless the administrator marked them as taken care of. prune() keeps the job, its
+	 * record of the discard and its log until then.
+	 *
+	 * @param Job $job Job.
+	 * @return int|null Unix time, or null if the job lists no such tables.
+	 */
+	public static function discard_listed_until( Job $job ): ?int {
+		$discarded = $job->data['database_discarded'] ?? null;
+		if ( JobType::DatabaseApply !== $job->type || ! is_array( $discarded ) || isset( $discarded['done'] ) || ! is_int( $discarded['at'] ?? null ) ) {
+			return null;
+		}
+		return $discarded['at'] + self::DISCARD_LISTED_DAYS * 86400;
+	}
+
+	/**
 	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
-	 * know whether its job has finished.
+	 * know whether its job has finished. So is a job that something still needs, such as the
+	 * tables of a discarded database binding that it lists (discard_listed_until()).
 	 *
 	 * @param int      $keep Number of jobs to keep.
 	 * @param int|null $now Current Unix time.
 	 * @return int Number of deleted jobs.
 	 */
 	public function prune( int $keep, ?int $now = null ): int {
+		$now   ??= time();
 		$deleted = 0;
-		$pins    = $this->pinned_restores( $now ?? time() );
+		$pins    = $this->pinned_restores( $now );
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
+			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( self::discard_listed_until( $job ) ?? 0 ) <= $now && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}

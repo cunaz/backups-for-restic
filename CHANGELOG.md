@@ -151,7 +151,12 @@ All notable changes are documented here. The format follows
   server or in another database (`GET /database-changes/foreign`) and offers the review and
   discard of their binding, also from the undo of such a restore, so that a site that moved to
   another database can start a database restore again without shell access. Every name is
-  shown as text, escaped where it does not print.
+  shown as text, escaped where it does not print. After a discard, the Restores tab lists the
+  binding under "Discarded bindings" with the private tables that are left to remove by hand,
+  and `wp backups-for-restic database-discarded` prints them, for 90 days or until they are
+  marked as taken care of; until then the job history keeps that job and its log, which its
+  card opens. After a lost answer to the confirmation, the page shows the result of a discard
+  that the server recorded.
 - Backups for restic requires 64-bit PHP. On 32-bit PHP, activation stops before the
   first backup. Existing installations retain their settings and local restore data.
 - The snapshot list of the admin page shows the snapshots of this site; those of other

@@ -495,14 +495,27 @@ once the site uses the old database again, and what stays. Confirm it as an undo
 site address and your WordPress password. On the command line,
 `wp backups-for-restic database-discard <apply-job-id>` prints the same review with its
 digest and asks you to type the site address; a script passes `--site-url` and the
-`--digest` that an earlier run printed. The discard drops nothing, and the job of the restore
-keeps the table names in its warnings on the Logs tab. Drop the tables by hand only on the
-server and in the database where you can verify them: tables with these names in the database
-that the site uses now, for example after its data directory was copied to a new server,
-cannot be proven to be the restore's copies. If the review or the discard says that the
-database server could not be asked, the log of that restore job names the database error.
-Deleting the plugin forgets such a binding as well, without dropping anything; the leftover
-tables have names that begin with `_bfr_r_` or `bfr_r_`.
+`--digest` that an earlier run printed. The discard drops nothing.
+
+**Where the names of those tables are afterwards.** For 90 days after the discard, the
+Restores tab lists the binding under **Discarded bindings** with the database, the server UUID
+and the table names, and `wp backups-for-restic database-discarded` prints them. Until then the
+job history keeps the job of that restore, with its record of the discard and its log, however
+many newer jobs there are; **Show the log of this job** on its card opens the log, and so does
+`wp backups-for-restic logs <apply-job-id>`. When the tables are taken care of, choose **Mark
+these tables as taken care of**, or run
+`wp backups-for-restic database-discarded <apply-job-id> --done`: the binding is no longer
+listed, and the job history prunes its job as any other. After 90 days the listing ends by
+itself. If you have not removed the tables by then, note their names before that date.
+Deleting the plugin forgets the listing with everything else.
+
+Drop the tables by hand only on the server and in the database where you can verify them:
+tables with these names in the database that the site uses now, for example after its data
+directory was copied to a new server, cannot be proven to be the restore's copies. If the
+review or the discard says that the database server could not be asked, the log of that
+restore job names the database error. Deleting the plugin forgets such a binding as well,
+without dropping anything; the leftover tables have names that begin with `_bfr_r_` or
+`bfr_r_`.
 
 **Selective recovery by a database administrator.** Use the original database apply job
 ID to open its private `jobs/<apply-job-id>/job.json`. The following command prints the

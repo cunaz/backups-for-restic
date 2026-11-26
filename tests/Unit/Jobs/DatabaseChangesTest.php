@@ -260,7 +260,7 @@ final class DatabaseChangesTest extends TestCase {
 		$owner     = $this->stranded();
 		$preview   = $this->changes( $this->server() )->discard_review( $owner->id, 7 );
 		$discarded = $this->changes( $this->server() )->discard( $owner->id, 7, 'rest', $preview['digest'] );
-		self::assertSame( array_intersect_key( $preview, $discarded ), $discarded );
+		self::assertSame( array_intersect_key( $preview, $discarded ) + [ 'until' => $this->clock->seconds + JobStore::DISCARD_LISTED_DAYS * 86400 ], $discarded );
 		$base = '_bfr_r_' . str_repeat( 'c', 32 );
 		self::assertSame(
 			[
@@ -268,6 +268,8 @@ final class DatabaseChangesTest extends TestCase {
 				'database' => 'site',
 				'server'   => self::OTHER,
 				'tables'   => [ $base . '_p', $base . '_a', $base . '_u', $base . '_t0', $base . '_b0', $base . '_t1', $base . '_b1' ],
+				// The Restores tab and WP-CLI list them until then.
+				'until'    => $this->clock->seconds + JobStore::DISCARD_LISTED_DAYS * 86400,
 			],
 			$discarded
 		);
@@ -279,7 +281,7 @@ final class DatabaseChangesTest extends TestCase {
 				'at'   => $this->clock->seconds,
 				'user' => 7,
 				'via'  => 'rest',
-			] + $discarded,
+			] + array_diff_key( $discarded, [ 'until' => true ] ),
 			$saved->data['database_discarded'] ?? null
 		);
 		self::assertStringContainsString( 'Nothing was dropped', $saved->warnings[0] ?? '' );
@@ -600,7 +602,7 @@ final class DatabaseChangesTest extends TestCase {
 		$this->clock->seconds = $until - 3600;
 		$kept();
 		$discarded = $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
-		self::assertSame( array_intersect_key( $review, $discarded ), $discarded );
+		self::assertSame( array_intersect_key( $review, $discarded ) + [ 'until' => $this->clock->seconds + JobStore::DISCARD_LISTED_DAYS * 86400 ], $discarded );
 		$saved = $this->jobs->get( $job->id );
 		self::assertNotNull( $saved );
 		foreach ( [ 'database_owner', 'database_generation', 'retained_until' ] as $forgotten ) {
@@ -917,5 +919,85 @@ final class DatabaseChangesTest extends TestCase {
 		}
 		self::assertSame( [], $this->jobs->log( $job )->read(), 'Nothing was written to a log, and no answer points to one.' );
 		self::assertSame( $job->data, $this->jobs->get( $job->id )?->data, 'The binding stays.' );
+	}
+
+	public function test_the_tables_of_a_discarded_binding_stay_listed_and_its_job_kept_until_they_are_taken_care_of(): void {
+		$job   = $this->stranded();
+		$older = $this->stranded( '20251201T000001Z-aaaaab' );
+		// 30 later jobs, as backups leave them: advanced.keep_jobs is 30 by default.
+		for ( $number = 0; $number < 30; ++$number ) {
+			$backup        = new Job( sprintf( '20260102T0000%02dZ-bbbb%02d', $number, $number ), JobType::Backup, 'schedule', $this->clock->seconds );
+			$backup->state = JobState::Succeeded;
+			$this->jobs->save( $backup );
+		}
+		$changes = $this->changes( $this->server() );
+		self::assertSame( [], $changes->discarded_bindings() );
+		$review    = $changes->discard_review( $job->id, 7 );
+		$at        = $this->clock->seconds;
+		$discarded = $changes->discard( $job->id, 7, 'rest', $review['digest'] );
+		$until     = $at + JobStore::DISCARD_LISTED_DAYS * 86400;
+		self::assertSame( $until, $discarded['until'] );
+		$this->clock->advance( 86400 );
+		$changes->discard( $older->id, 7, 'wp-cli', $changes->discard_review( $older->id, 7 )['digest'] );
+		$entry = [
+			'job'      => $job->id,
+			'restore'  => '20251231T000000Z-000000',
+			'at'       => $at,
+			'via'      => 'rest',
+			'database' => $review['database'],
+			'server'   => $review['server'],
+			'tables'   => $review['tables'],
+			'until'    => $until,
+		];
+		self::assertSame( [ $entry, $older->id ], [ $changes->discarded_bindings()[0], $changes->discarded_bindings()[1]['job'] ] );
+		// Before, the next backup's cleanup deleted the job with its record of the discard and its log.
+		self::assertSame( 0, $this->jobs->prune( 30, $this->clock->seconds ), 'The job history keeps both jobs while they list their tables.' );
+		self::refused( 'database_binding_discarded', fn () => $changes->discard_review( $job->id, 7 ) );
+		// The administrator says that the tables of one are taken care of.
+		self::assertSame( $entry, $changes->discarded_done( $job->id, 9, 'rest' ) );
+		self::assertSame(
+			[
+				'at'   => $this->clock->seconds,
+				'user' => 9,
+				'via'  => 'rest',
+			],
+			$this->jobs->get( $job->id )?->data['database_discarded']['done'] ?? null
+		);
+		self::assertSame( [ $older->id ], array_column( $changes->discarded_bindings(), 'job' ) );
+		self::assertStringContainsString( 'marked as taken care of', implode( "\n", array_column( $this->jobs->log( $job )->read(), 'message' ) ) );
+		self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( $job->id, 9, 'rest' ) );
+		self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( '20991231T235959Z-ffffff', 9, 'rest' ) );
+		self::assertSame( 1, $this->jobs->prune( 30, $this->clock->seconds ), 'Then the job history prunes it as any other.' );
+		self::assertNull( $this->jobs->get( $job->id ) );
+		// The other is listed until its stated time has passed.
+		$this->clock->advance( JobStore::DISCARD_LISTED_DAYS * 86400 - 1 );
+		self::assertSame( [ $older->id ], array_column( $changes->discarded_bindings(), 'job' ) );
+		self::assertSame( 0, $this->jobs->prune( 30, $this->clock->seconds ) );
+		$this->clock->advance( 1 );
+		self::assertSame( [], $changes->discarded_bindings() );
+		self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( $older->id, 9, 'rest' ) );
+		self::assertSame( 1, $this->jobs->prune( 30, $this->clock->seconds ) );
+	}
+
+	public function test_a_discard_recorded_without_its_listing_time_is_listed_from_the_time_it_records(): void {
+		// The record as a discard wrote it before the listing existed: no time of its own for the list.
+		$job                             = $this->stranded();
+		$job->data['database_discarded'] = [
+			'at'       => $this->clock->seconds - 86400,
+			'user'     => 1,
+			'via'      => 'rest',
+			'job'      => $job->id,
+			'database' => 'site',
+			'server'   => self::OTHER,
+			'tables'   => [ 'bfr_r_x', 'bfr_r_y' ],
+		];
+		unset( $job->data['database_owner'] );
+		$this->jobs->save( $job );
+		self::assertSame( [ [ $job->id, $this->clock->seconds - 86400 + JobStore::DISCARD_LISTED_DAYS * 86400, [ 'bfr_r_x', 'bfr_r_y' ] ] ], array_map( static fn ( array $entry ): array => [ $entry['job'], $entry['until'], $entry['tables'] ], $this->changes( $this->server() )->discarded_bindings() ) );
+		// A record without its time or names lists nothing and keeps nothing.
+		$job->data['database_discarded'] = [ 'tables' => [ 'bfr_r_x' ] ];
+		$this->jobs->save( $job );
+		self::assertSame( [], $this->changes( $this->server() )->discarded_bindings() );
+		self::assertNull( JobStore::discard_listed_until( $job ) );
 	}
 }

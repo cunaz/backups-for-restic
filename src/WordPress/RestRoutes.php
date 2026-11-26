@@ -97,6 +97,7 @@ final class RestRoutes {
 			'/database-changes/(?P<id>[^/]+)/undo'       => [ 'POST', 'undo_database' ],
 			'/database-changes/(?P<id>[^/]+)/discard-review' => [ 'POST', 'database_discard_preview' ],
 			'/database-changes/(?P<id>[^/]+)/discard'    => [ 'POST', 'discard_database' ],
+			'/database-changes/(?P<id>[^/]+)/discarded-done' => [ 'POST', 'discarded_done' ],
 			'/undo'                                      => [ 'GET', 'undoable' ],
 			'/undo/(?P<id>[^/]+)/plan'                   => [ 'POST', 'undo_preview' ],
 			'/undo/(?P<id>[^/]+)'                        => [ 'POST', 'undo_files' ],
@@ -120,7 +121,7 @@ final class RestRoutes {
 						self::class,
 						match ( $callback ) {
 								'apply_files', 'undo_files'       => 'live_writes_allowed',
-								'apply_database', 'undo_database', 'discard_database' => 'database_writes_allowed',
+								'apply_database', 'undo_database', 'discard_database', 'discarded_done' => 'database_writes_allowed',
 								default                           => 'allowed',
 						},
 					],
@@ -845,11 +846,42 @@ final class RestRoutes {
 	 * Lists the finished database restores whose private tables the connected server positively
 	 * places on another server or in another database: the bindings that the Restores tab offers
 	 * to discard. `complete` is false where a server could not be asked or identified.
+	 * `discarded` lists the bindings discarded before whose tables are still to be removed by
+	 * hand, with their names, and `write_allowed` whether this account may discard a binding and
+	 * mark such tables as taken care of.
 	 *
-	 * @return \WP_REST_Response The bindings.
+	 * @return \WP_REST_Response|\WP_Error The bindings, or the failure to read the jobs.
 	 */
-	public function database_foreign(): \WP_REST_Response {
-		return $this->respond( $this->container->database_changes()->foreign_bindings() );
+	public function database_foreign(): \WP_REST_Response|\WP_Error {
+		$changes = $this->container->database_changes();
+		try {
+			$discarded = $changes->discarded_bindings();
+		} catch ( PluginException $refused ) {
+			return $this->discard_error( $refused );
+		}
+		return $this->respond(
+			$changes->foreign_bindings() + [
+				'discarded'     => $discarded,
+				'write_allowed' => self::database_writes_allowed(),
+			]
+		);
+	}
+
+	/**
+	 * Ends the listing of the private tables of a discarded binding: the administrator says that
+	 * they are taken care of. Afterwards the job history prunes that job as any other.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error The entry that is no longer listed, or a refusal.
+	 */
+	public function discarded_done( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$id = Decoded::string( $request->get_url_params()['id'] ?? null );
+		try {
+			$entry = $this->container->database_changes()->discarded_done( $id, get_current_user_id(), 'rest' );
+		} catch ( PluginException $refused ) {
+			return $this->discard_error( $refused );
+		}
+		return $this->respond( [ 'done' => $entry ], 200, true );
 	}
 
 	/**

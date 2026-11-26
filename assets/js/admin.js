@@ -1632,10 +1632,13 @@
 			} ).catch( function ( error ) {
 				password.value = '';
 				if ( ( ! error || ! error.data || 'number' !== typeof error.data.status ) && options.lost ) {
-					// No answer of the REST API, and no job to look for.
+					// No answer of the REST API, and no job to look for: the page asks again what is the case.
 					options.busy( false );
 					submit.disabled = false;
 					replace( message, [ notice( 'warning', options.lost, false ) ] );
+					if ( options.recheck ) {
+						options.recheck();
+					}
 					return;
 				}
 				if ( ! error || ! error.data || 'number' !== typeof error.data.status ) {
@@ -2180,9 +2183,10 @@
 	 * @param {string}                    id        Restore or original database apply.
 	 * @param {boolean}                   undo      Whether to bring back retained originals.
 	 * @param {(binding: Object) => void} [discard] For an undo: called with the binding that a discard of its binding forgot.
+	 * @param {(id: string) => void}      [lost]    For an undo: called with the job ID when the answer to the confirmation of that discard is lost.
 	 * @return {Element} Reviewed exchange.
 	 */
-	function databaseChange( id, undo, discard ) {
+	function databaseChange( id, undo, discard, lost ) {
 		const base = ( undo ? '/database-changes/' : '/restores/' ) + encodeURIComponent( id );
 		const body = el( 'div' );
 		const status = el( 'p', { role: 'status', className: 'screen-reader-text' } );
@@ -2228,7 +2232,7 @@
 		}
 		function showError( error ) {
 			const elsewhere = undo && discard && error && 'backups_for_restic_database_exchange_foreign' === error.code;
-			replace( body, [ notice( 'error', errorText( error ), false ), elsewhere ? databaseDiscard( id, discard ) : null ] );
+			replace( body, [ notice( 'error', errorText( error ), false ), elsewhere ? databaseDiscard( id, discard, lost ) : null ] );
 			status.textContent = errorText( error );
 		}
 		return el( 'div', {}, [ preview, status, body ] );
@@ -2242,16 +2246,21 @@
 	 *
 	 * @param {string}                    id       Database apply job that holds the binding.
 	 * @param {(binding: Object) => void} finished Called with the binding that a confirmed discard forgot.
+	 * @param {(id: string) => void}      recheck  Called with the job ID when the answer to a confirmation is lost: the page reads the lists again.
 	 * @return {Element} Review.
 	 */
-	function databaseDiscard( id, finished ) {
+	function databaseDiscard( id, finished, recheck ) {
 		const base = '/database-changes/' + encodeURIComponent( id );
 		const body = el( 'div' );
 		const status = el( 'p', { role: 'status', className: 'screen-reader-text' } );
 		const kept = {
 			live_database: __( 'The database that this site uses now: the discard changes none of its tables.', 'backups-for-restic' ),
 			private_tables: __( 'The private tables, wherever they are: the plugin drops none of them, now or later.', 'backups-for-restic' ),
-			job_record: __( 'The database restore job and its log, which record the discard, who confirmed it and these table names.', 'backups-for-restic' ),
+			job_record: sprintf(
+				/* translators: %d: number of days. */
+				__( 'The database restore job and its log, which record the discard, who confirmed it and these table names. For %d days after the discard, or until you mark the tables as taken care of, the job history keeps them, and the Restores tab and "wp backups-for-restic database-discarded" list these table names.', 'backups-for-restic' ),
+				config.discardListedDays,
+			),
 		};
 		const review = button( __( 'Review the discard of this binding', 'backups-for-restic' ), function () {
 			if ( 'true' === review.getAttribute( 'aria-disabled' ) ) {
@@ -2271,7 +2280,10 @@
 						status.textContent = '';
 						finished( response.discarded );
 					},
-					lost: __( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded. Review the discard again: if it was discarded, the review says so and the warnings of the database restore job on the Logs tab name the tables; if not, the review shows them again.', 'backups-for-restic' ),
+					lost: __( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded. This tab asks the server again: if it was discarded, “Discarded bindings” lists it with its tables; if not, this binding stays listed and its review can be opened again.', 'backups-for-restic' ),
+					recheck() {
+						recheck( id );
+					},
 					stale( error ) {
 						showError( error );
 						review.focus();
@@ -2321,25 +2333,72 @@
 			}
 			return null === plan.generation ? __( 'This database restore recorded no completed exchange.', 'backups-for-restic' ) : null;
 		}
-		return el( 'div', { className: 'bfr-database-discard-review' }, [ review, status, body ] );
+		return el( 'div', { className: 'bfr-database-discard-review' }, [ review, status, body, jobLogButton( id ) ] );
 	}
 
 	/**
 	 * What a confirmed discard forgot, and the tables to remove by hand.
 	 *
-	 * @param {Object} binding The answer's `discarded`: job, database, server and tables.
+	 * @param {Object}  binding   The answer's `discarded`, or an entry of the list of discarded bindings: job, database, server, tables and until.
+	 * @param {boolean} recovered Whether the answer to the confirmation was lost and the list shows that the discard was recorded.
 	 * @return {Element} Result, focusable.
 	 */
-	function discardedBinding( binding ) {
+	function discardedBinding( binding, recovered = false ) {
 		return el( 'div', { className: 'bfr-discarded', tabIndex: -1 }, [
-			notice( 'success', __( 'The binding was discarded. Nothing was dropped.', 'backups-for-restic' ) ),
+			notice( 'success', recovered
+				? __( 'The answer to the confirmation was lost, but the binding was discarded. Nothing was dropped.', 'backups-for-restic' )
+				: __( 'The binding was discarded. Nothing was dropped.', 'backups-for-restic' ) ),
 			detailTable( 'bfr-database-discarded', [
 				[ __( 'Database restore', 'backups-for-restic' ), binding.job ],
 				[ __( 'Database of the private tables', 'backups-for-restic' ), untrusted( binding.database ) ],
 				[ __( 'Server of the private tables (UUID)', 'backups-for-restic' ), binding.server ? untrusted( binding.server ) : '–' ],
 			] ),
-			el( 'p', {}, [ __( 'Remove those of these tables that exist there by hand, where you can verify them. The warnings of the database restore job on the Logs tab name them as well.', 'backups-for-restic' ) ] ),
+			el( 'p', {}, [
+				sprintf(
+					/* translators: %s: date and time until which the tables are listed. */
+					__( 'Remove those of these tables that exist there by hand, where you can verify them. Until %s, or until you mark them as taken care of, “Discarded bindings” on this tab lists them.', 'backups-for-restic' ),
+					formatTime( binding.until ),
+				),
+			] ),
 			databaseTables( 'bfr-database-discarded-tables', [ __( 'Private table to remove by hand', 'backups-for-restic' ) ], binding.tables, ( name ) => [ el( 'code', {}, [ untrusted( name ) ] ) ] ),
+		] );
+	}
+
+	/**
+	 * The card of a discarded binding whose private tables are still to be removed by hand: the
+	 * names, until when they are listed, the log of the job and the control that ends the listing.
+	 *
+	 * @param {Object}     entry    Entry of the list of discarded bindings.
+	 * @param {boolean}    allowed  Whether this account may mark the tables as taken care of.
+	 * @param {() => void} reloaded Called when the listing ended.
+	 * @return {Element} Card.
+	 */
+	function discardedCard( entry, allowed, reloaded ) {
+		const message = el( 'div', { role: 'status' } );
+		const done = allowed ? button( __( 'Mark these tables as taken care of', 'backups-for-restic' ), function () {
+			done.disabled = true;
+			api( '/database-changes/' + encodeURIComponent( entry.job ) + '/discarded-done', { method: 'POST' } ).then( reloaded ).catch( function ( error ) {
+				done.disabled = false;
+				replace( message, [ notice( 'error', errorText( error ), false ) ] );
+			} );
+		} ) : null;
+		return el( 'section', { className: 'bfr-card bfr-discarded-binding' }, [
+			el( 'h3', {}, [ entry.job ] ),
+			el( 'p', {}, [
+				sprintf(
+					/* translators: 1: date and time of the discard, 2: date and time until which the tables are listed. */
+					__( 'Its binding was discarded on %1$s. The tables are listed until %2$s, or until they are marked as taken care of; the plugin drops none of them.', 'backups-for-restic' ),
+					formatTime( entry.at ),
+					formatTime( entry.until ),
+				),
+			] ),
+			detailTable( 'bfr-discarded-binding', [
+				[ __( 'Database of the private tables', 'backups-for-restic' ), untrusted( entry.database ) ],
+				[ __( 'Server of the private tables (UUID)', 'backups-for-restic' ), entry.server ? untrusted( entry.server ) : '–' ],
+			] ),
+			databaseTables( 'bfr-discarded-binding-tables', [ __( 'Private table to remove by hand', 'backups-for-restic' ) ], entry.tables, ( name ) => [ el( 'code', {}, [ untrusted( name ) ] ) ] ),
+			jobLogButton( entry.job ),
+			done, message,
 		] );
 	}
 
@@ -2445,11 +2504,22 @@
 		const undoCards = new Map();
 		const databaseCards = new Map();
 		const foreignCards = new Map();
+		const discardedCards = new Map();
+		// The binding whose discard lost its answer: the next list says whether it was discarded.
+		let pendingDiscard = null;
 		const noStaged = el( 'p', {}, [ __( 'No staged files. Open a snapshot to restore files or directories.', 'backups-for-restic' ) ] );
 		const undoHeading = el( 'h2', {}, [ __( 'Undo live file changes', 'backups-for-restic' ) ] );
 		const databaseHeading = el( 'h2', {}, [ __( 'Undo live database changes', 'backups-for-restic' ) ] );
 		const foreignHeading = el( 'h2', {}, [ __( 'Private tables on another database server', 'backups-for-restic' ) ] );
 		const foreignIntro = el( 'p', {}, [ __( 'These database restores keep private tables on a database server or in a database that this site does not use now, for example after a migration or a failover. Backups go on, but no other database restore can start until each binding is discarded.', 'backups-for-restic' ) ] );
+		const discardedHeading = el( 'h3', {}, [ __( 'Discarded bindings', 'backups-for-restic' ) ] );
+		const discardedIntro = el( 'p', {}, [
+			sprintf(
+				/* translators: %d: number of days. */
+				__( 'The private tables of these discarded bindings are left to remove by hand where they exist. Each binding is listed for %d days after its discard, or until you mark its tables as taken care of.', 'backups-for-restic' ),
+				config.discardListedDays,
+			),
+		] );
 		function render( response ) {
 			const cards = keyedCards( stagedCards, response.restores, ( staged ) => stagedRestore( staged, render ) );
 			place( list, cards.length ? cards : [ noStaged ] );
@@ -2472,7 +2542,7 @@
 					/* translators: %s: date and time when the previous live database tables expire. */
 					sprintf( __( 'Previous database tables available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
 				] ),
-				databaseChange( job.job, true, discardDone ),
+				databaseChange( job.job, true, discardDone, discardLost ),
 			] );
 		}
 		// What a confirmed discard forgot stays on the page after its card has left the lists.
@@ -2482,6 +2552,10 @@
 			result.focus();
 			load();
 		}
+		function discardLost( id ) {
+			pendingDiscard = id;
+			load();
+		}
 		function foreignCard( job ) {
 			return el( 'section', { className: 'bfr-card' }, [
 				el( 'h3', {}, [ job.job ] ),
@@ -2489,7 +2563,7 @@
 					/* translators: %s: ID of the restore job whose staged database was applied. */
 					sprintf( __( 'Database restore of the staged restore %s.', 'backups-for-restic' ), job.restore ),
 				] ) : null,
-				databaseDiscard( job.job, discardDone ),
+				databaseDiscard( job.job, discardDone, discardLost ),
 			] );
 		}
 		function load() {
@@ -2508,7 +2582,19 @@
 			api( '/database-changes/foreign' ).then( function ( response ) {
 				const cards = keyedCards( foreignCards, response.jobs, foreignCard );
 				const partial = response.complete ? [] : [ notice( 'warning', __( 'The database server could not be asked about every database restore that keeps private tables, so this list may be incomplete. Reload the page to ask again.', 'backups-for-restic' ), false ) ];
-				place( foreignHistory, cards.length || partial.length ? [ foreignHeading, foreignIntro, ...partial, ...cards ] : [] );
+				const forgotten = keyedCards( discardedCards, response.discarded, ( entry ) => discardedCard( entry, response.write_allowed, load ) );
+				const recovered = pendingDiscard ? response.discarded.find( ( entry ) => entry.job === pendingDiscard ) : null;
+				pendingDiscard = null;
+				place( foreignHistory, cards.length || partial.length || forgotten.length ? [
+					foreignHeading,
+					...( cards.length || partial.length ? [ foreignIntro, ...partial, ...cards ] : [] ),
+					...( forgotten.length ? [ discardedHeading, discardedIntro, ...forgotten ] : [] ),
+				] : [] );
+				if ( recovered ) {
+					const result = discardedBinding( recovered, true );
+					replace( discarded, [ result ] );
+					result.focus();
+				}
 			} ).catch( function ( error ) {
 				place( foreignHistory, [ notice( 'error', errorText( error ) ) ] );
 			} );
@@ -3293,6 +3379,58 @@
 
 	/* ------------------------------------------------------------------ Logs */
 
+	/**
+	 * The log of a job as the REST API answers it (GET /jobs/{id}/log): who started the job,
+	 * its entries and its warnings.
+	 *
+	 * @param {Object} log The answer.
+	 * @return {Array} Elements.
+	 */
+	function jobLogDetail( log ) {
+		const user = log.job.user;
+		return [
+			user ? el( 'p', {}, [
+				/* translators: %s: user name, or the number of a deleted user account. */
+				sprintf( __( 'Started by %s.', 'backups-for-restic' ), user.login || '#' + user.id ),
+			] ) : null,
+			el(
+				'table',
+				{ className: 'widefat striped bfr-log' },
+				log.entries.map( function ( entry ) {
+					return el( 'tr', {}, [
+						el( 'td', {}, [ formatTime( entry.time ) ] ),
+						el( 'td', {}, [ entry.level ] ),
+						el( 'td', {}, [ entry.message, entry.context && Object.keys( entry.context ).length ? ' ' + printableJson( entry.context ) : '' ] ),
+					] );
+				} ),
+			),
+			( log.job.warnings || [] ).length
+				? el( 'ul', {}, log.job.warnings.map( function ( warning ) {
+					return el( 'li', {}, [ warning ] );
+				} ) )
+				: null,
+		];
+	}
+
+	/**
+	 * A control that shows the log of a job below it, also of a job that the Logs tab no longer
+	 * lists among the latest ones.
+	 *
+	 * @param {string} id Job ID.
+	 * @return {Element} Control and the place of the log.
+	 */
+	function jobLogButton( id ) {
+		const detail = el( 'div', { className: 'bfr-job-log' } );
+		const show = button( __( 'Show the log of this job', 'backups-for-restic' ), function () {
+			api( '/jobs/' + encodeURIComponent( id ) + '/log' ).then( function ( log ) {
+				replace( detail, jobLogDetail( log ) );
+			} ).catch( function ( error ) {
+				replace( detail, [ notice( 'error', errorText( error ), false ) ] );
+			} );
+		} );
+		return el( 'div', {}, [ show, detail ] );
+	}
+
 	function logs( root ) {
 		const detail = el( 'div' );
 		api( '/jobs' )
@@ -3300,29 +3438,9 @@
 				replace( root, [
 					jobTable( response.jobs, function ( job ) {
 						api( '/jobs/' + job.id + '/log' ).then( function ( log ) {
-							const user = log.job.user;
 							replace( detail, [
 								el( 'h2', {}, [ formatTime( job.created_at ) + ' – ' + job.state_label ] ),
-								user ? el( 'p', {}, [
-									/* translators: %s: user name, or the number of a deleted user account. */
-									sprintf( __( 'Started by %s.', 'backups-for-restic' ), user.login || '#' + user.id ),
-								] ) : null,
-								el(
-									'table',
-									{ className: 'widefat striped bfr-log' },
-									log.entries.map( function ( entry ) {
-										return el( 'tr', {}, [
-											el( 'td', {}, [ formatTime( entry.time ) ] ),
-											el( 'td', {}, [ entry.level ] ),
-											el( 'td', {}, [ entry.message, entry.context && Object.keys( entry.context ).length ? ' ' + printableJson( entry.context ) : '' ] ),
-										] );
-									} ),
-								),
-								( log.job.warnings || [] ).length
-									? el( 'ul', {}, log.job.warnings.map( function ( warning ) {
-										return el( 'li', {}, [ warning ] );
-									} ) )
-									: null,
+								...jobLogDetail( log ),
 							] );
 						} );
 					} ),

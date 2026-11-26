@@ -47,6 +47,8 @@ defined( 'ABSPATH' ) || exit;
  * @phpstan-import-type Preview from DatabaseReview
  * @phpstan-import-type Facts from SwapCatalog
  * @phpstan-type Binding array{job:string,database:string,server:string,tables:list<string>}
+ * @phpstan-type Forgotten array{job:string,database:string,server:string,tables:list<string>,until:int}
+ * @phpstan-type Discarded array{job:string,restore:string,at:int,via:string,database:string,server:string,tables:list<string>,until:int}
  * @phpstan-type Foreign array{job:string,restore:string,generation:'applied'|'undone'|null,retained_until:int|null}
  * @phpstan-type DiscardReview array{job:string,restore:string,database:string,server:string,connected:array{database:string,server:string},tables:list<string>,generation:'applied'|'undone'|null,retained_until:int|null,undo_until:int|null,kept:list<string>,digest:string,applicable:true}
  */
@@ -59,8 +61,8 @@ final readonly class DatabaseChanges implements StepProvider {
 	 */
 	public const array DISCARD_KEPT = [ 'live_database', 'private_tables', 'job_record' ];
 
-	/** Codes of a refused review or discard of a binding, which say what is the case. */
-	public const array DISCARD_REFUSALS = [ 'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'job_unreadable' ];
+	/** Codes of a refused review or discard of a binding, or of the end of its listing, which say what is the case. */
+	public const array DISCARD_REFUSALS = [ 'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'database_discarded_missing', 'job_unreadable' ];
 
 	/**
 	 * Codes of a review or discard of a binding that failed, which say what failed: any other
@@ -362,7 +364,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.
 	 * @param string $via Where it was confirmed: rest or wp-cli.
 	 * @param string $digest Digest of the confirmed review (discard_review()).
-	 * @return Binding The discarded binding.
+	 * @return Forgotten The discarded binding, and until when the Restores tab and WP-CLI list its tables (JobStore::discard_listed_until()).
 	 * @throws JobConflict With the codes of discard_review(), and database_discard_changed if the binding is no longer as the confirmed review showed it.
 	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
 	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read or the decision could not be recorded; the binding stays.
@@ -382,8 +384,9 @@ final readonly class DatabaseChanges implements StepProvider {
 						'tables'   => $review['tables'],
 					];
 					DatabaseGeneration::forget( $owner );
+					$at                                = $this->clock->now()[0];
 					$owner->data['database_discarded'] = [
-						'at'   => $this->clock->now()[0],
+						'at'   => $at,
 						'user' => $user,
 						'via'  => $via,
 					] + $binding;
@@ -400,7 +403,7 @@ final readonly class DatabaseChanges implements StepProvider {
 							'code'   => 'database_exchange_foreign',
 						]
 					);
-					return $binding;
+					return $binding + [ 'until' => $at + JobStore::DISCARD_LISTED_DAYS * 86400 ];
 				}
 			);
 		} catch ( StorageFailed $error ) {
@@ -419,6 +422,100 @@ final readonly class DatabaseChanges implements StepProvider {
 	 */
 	private static function storage_failed( StorageFailed $error ): never {
 		StorageFailed::raise( 'The private directory could not be read or written, so the binding was not discarded.', [ 'code' => 'database_discard_storage' ], $error );
+	}
+
+	/**
+	 * The discarded bindings whose private tables are still listed for removal by hand, newest
+	 * first: for JobStore::DISCARD_LISTED_DAYS after each discard, unless the administrator
+	 * marked them as taken care of (discarded_done()). The job history keeps their jobs until
+	 * then, whatever else it prunes; the Restores tab and WP-CLI read them here.
+	 *
+	 * @return list<Discarded> The discarded bindings with their table names.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read.
+	 */
+	public function discarded_bindings(): array {
+		$now    = $this->clock->now()[0];
+		$listed = [];
+		try {
+			foreach ( $this->jobs->file_changes() as $job ) {
+				$until = JobStore::discard_listed_until( $job );
+				$entry = self::discarded( $job );
+				if ( null !== $until && $until > $now && null !== $entry ) {
+					$listed[] = $entry + [ 'until' => $until ];
+				}
+			}
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
+		return $listed;
+	}
+
+	/**
+	 * Ends the listing of the private tables of a discarded binding: the administrator says
+	 * that they are taken care of. The job records who said so and when; after that the job
+	 * history prunes the job as any other, with its record of the discard and its log.
+	 *
+	 * @param string $apply Database apply whose binding was discarded.
+	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.
+	 * @param string $via Where it was confirmed: rest or wp-cli.
+	 * @return Discarded The entry that is no longer listed.
+	 * @throws JobConflict With the code database_discarded_missing if the job lists no such tables.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read or the decision could not be recorded.
+	 */
+	public function discarded_done( string $apply, int $user, string $via ): array {
+		try {
+			return $this->staging->guard(
+				function () use ( $apply, $user, $via ): array {
+					$job    = $this->jobs->get( $apply );
+					$until  = null === $job ? null : JobStore::discard_listed_until( $job );
+					$entry  = null === $job ? null : self::discarded( $job );
+					$record = $job?->data['database_discarded'] ?? null;
+					if ( null === $job || null === $until || $until <= $this->clock->now()[0] || null === $entry || ! is_array( $record ) ) {
+						JobConflict::raise( 'This job lists no private tables of a discarded binding.', [ 'code' => 'database_discarded_missing' ] );
+					}
+					$record['done']                  = [
+						'at'   => $this->clock->now()[0],
+						'user' => $user,
+						'via'  => $via,
+					];
+					$job->data['database_discarded'] = $record;
+					$this->jobs->save( $job );
+					$this->jobs->log( $job )->write(
+						'info',
+						'The private tables of the discarded binding were marked as taken care of.',
+						[
+							'user' => $user,
+							'via'  => $via,
+						]
+					);
+					return $entry + [ 'until' => $until ];
+				}
+			);
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
+	}
+
+	/**
+	 * What a database apply recorded about the discard of its binding.
+	 *
+	 * @param Job $job Database apply.
+	 * @return array{job:string,restore:string,at:int,via:string,database:string,server:string,tables:list<string>}|null The record, or null without a complete one.
+	 */
+	private static function discarded( Job $job ): ?array {
+		$record = $job->data['database_discarded'] ?? null;
+		if ( ! is_array( $record ) || ! is_int( $record['at'] ?? null ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
+			return null;
+		}
+		return [
+			'job'      => $job->id,
+			'restore'  => self::text( $job, 'restore' ),
+			'at'       => $record['at'],
+			'via'      => is_string( $record['via'] ?? null ) ? $record['via'] : '',
+			'database' => $record['database'],
+			'server'   => $record['server'],
+			'tables'   => array_values( array_filter( $record['tables'], 'is_string' ) ),
+		];
 	}
 
 	/**

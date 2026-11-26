@@ -255,6 +255,23 @@ database could not get rid of the binding. Since then:
   ended or a review of another user is not discarded. The job records who confirmed it and
   how (`database_discarded`), its log line names the digest, and its warning the tables; the
   limit of a job's warnings does not drop that warning.
+- The names of the tables that are left to remove by hand stay available to the
+  administrator after the discard, whatever the job history does: for 90 days
+  (`JobStore::DISCARD_LISTED_DAYS`, counted from the discard's own time) or until the
+  administrator marks them as taken care of (`POST /database-changes/{id}/discarded-done`,
+  `wp backups-for-restic database-discarded <apply-job> --done`, which record who did and when
+  under `database_discarded.done`). Until then `JobStore::prune()` keeps the job, and the
+  Restores tab lists the binding under "Discarded bindings" with its names, from the answer of
+  `GET /database-changes/foreign` (`discarded`), as `wp backups-for-restic database-discarded`
+  prints them. The job is kept rather than the names copied into a record of their own,
+  because the discard then stays one atomic write of one document: a second record could be
+  lost after the binding was forgotten, or written for a discard that did not happen, and it
+  would need a cleanup of its own. The texts that send the administrator to that job's log
+  point to something that can be opened: its card, and the card of the review, have "Show the
+  log of this job", and WP-CLI names `wp backups-for-restic logs`; the Logs tab lists only the
+  latest jobs. After a lost answer to a confirmation the page reads the lists again and shows
+  the result of a discard that the server recorded. Uninstall forgets the listing with every
+  job.
 - A binding that cannot be discarded is answered with what is the case:
   `database_binding_missing` (no database apply with a binding of this ID), `job_unreadable`,
   `database_binding_discarded`, `database_binding_busy` (the job or an undo of it has not

@@ -552,8 +552,80 @@ final class CliCommand {
 		} finally {
 			$lock->release();
 		}
-		/* translators: 1: number of private table names, 2: database name, 3: MySQL server UUID. */
-		\WP_CLI::success( sprintf( __( 'The binding was discarded and nothing was dropped. Remove those of the %1$d tables listed above that exist in the database %2$s on the server %3$s by hand, where you can verify them.', 'backups-for-restic' ), count( $discarded['tables'] ), SnapshotBrowser::printable( $discarded['database'] ), SnapshotBrowser::printable( $discarded['server'] ) ) );
+		/* translators: 1: number of private table names, 2: database name, 3: MySQL server UUID, 4: date and time until which the tables are listed. */
+		\WP_CLI::success( sprintf( __( 'The binding was discarded and nothing was dropped. Remove those of the %1$d tables listed above that exist in the database %2$s on the server %3$s by hand, where you can verify them. Until %4$s, or until you mark them as taken care of, "wp backups-for-restic database-discarded" lists them.', 'backups-for-restic' ), count( $discarded['tables'] ), SnapshotBrowser::printable( $discarded['database'] ), SnapshotBrowser::printable( $discarded['server'] ), gmdate( 'Y-m-d H:i:s', $discarded['until'] ) . ' UTC' ) );
+	}
+
+	/**
+	 * Lists the private tables of discarded database restore bindings, which a database
+	 * administrator removes by hand where they are, or marks those of one binding as taken care
+	 * of. The tables of a binding are listed for 90 days after its discard, or until they are
+	 * marked so; the job history keeps its job and log until then.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<apply-job>]
+	 * : ID of the database apply job whose binding was discarded. Without it, every binding that
+	 * lists tables is printed.
+	 *
+	 * [--done]
+	 * : Mark the tables of this binding as taken care of. They are no longer listed, and the job
+	 * history prunes the job as any other, with its record of the discard and its log.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp backups-for-restic database-discarded
+	 *     wp backups-for-restic database-discarded 20261120T000000Z-0a0b0c --done
+	 *
+	 * @subcommand database-discarded
+	 * @param list<string>              $args Apply job.
+	 * @param array<string,string|bool> $assoc_args Options.
+	 */
+	public function database_discarded( array $args, array $assoc_args ): void {
+		$service = $this->container->database_changes();
+		$id      = $args[0] ?? null;
+		if ( isset( $assoc_args['done'] ) ) {
+			if ( null === $id ) {
+				\WP_CLI::error( __( '--done needs the ID of the database apply job whose tables are taken care of. Nothing was changed.', 'backups-for-restic' ) );
+			}
+			$user = get_current_user_id();
+			if ( $user > 0 && ! RestRoutes::database_writes_allowed() ) {
+				\WP_CLI::error( __( 'The selected WordPress user may not change the database of this site.', 'backups-for-restic' ) );
+			}
+			try {
+				$entry = $service->discarded_done( $id, $user, 'wp-cli' );
+			} catch ( PluginException $refused ) {
+				self::discard_refused( $refused );
+			}
+			/* translators: 1: number of private table names, 2: ID of the database apply job. */
+			\WP_CLI::success( sprintf( __( 'The %1$d private tables of the discarded binding of %2$s are no longer listed.', 'backups-for-restic' ), count( $entry['tables'] ), $entry['job'] ) );
+			return;
+		}
+		try {
+			$listed = $service->discarded_bindings();
+		} catch ( PluginException $refused ) {
+			self::discard_refused( $refused );
+		}
+		if ( null !== $id ) {
+			$listed = array_values( array_filter( $listed, static fn ( array $entry ): bool => $id === $entry['job'] ) );
+			if ( [] === $listed ) {
+				$texts = Messages::job_error( 'database_discarded_missing' );
+				\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
+			}
+		}
+		if ( [] === $listed ) {
+			\WP_CLI::line( __( 'No discarded binding lists private tables to remove by hand.', 'backups-for-restic' ) );
+			return;
+		}
+		foreach ( $listed as $entry ) {
+			/* translators: 1: ID of the database apply job, 2: date and time of the discard. */
+			\WP_CLI::line( sprintf( __( 'Database restore %1$s, discarded on %2$s', 'backups-for-restic' ), $entry['job'], gmdate( 'Y-m-d H:i:s', $entry['at'] ) . ' UTC' ) );
+			/* translators: 1: database name, 2: MySQL server UUID, 3: date and time until which the tables are listed. */
+			\WP_CLI::line( sprintf( __( 'Private tables to remove by hand where they exist, in the database %1$s on the server %2$s (listed until %3$s):', 'backups-for-restic' ), SnapshotBrowser::printable( $entry['database'] ), '' === $entry['server'] ? '–' : SnapshotBrowser::printable( $entry['server'] ), gmdate( 'Y-m-d H:i:s', $entry['until'] ) . ' UTC' ) );
+			foreach ( $entry['tables'] as $table ) {
+				\WP_CLI::line( '  ' . SnapshotBrowser::printable( $table ) );
+			}
+		}
 	}
 
 	/**
