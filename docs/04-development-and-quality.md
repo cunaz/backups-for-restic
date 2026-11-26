@@ -704,7 +704,29 @@ core gates (81.61 % against 83 %, 88.50 % against 89 %). The slow run of `662c8b
 10.1 %, and its bounds, 80.62 % to 90.30 % and 84.51 % to 94.66 % covered, meet the database
 gate's floors of 80 % and 84 %: it would have counted on the mutants that its tests killed. On
 the last runs of the six gates, locally and in CI on `662c8b1`, the script's arithmetic gave
-Infection's scores to the hundredth. One mutant of the ZIP writer writes its checkpoint files
+Infection's scores to the hundredth.
+
+A skipped mutant lifts a score as well, and since 2026-11-26 the script holds a run with one to
+the same bound: Infection leaves out of both scores a mutant whose quickest covering class took
+at least the configured timeout in the initial run, and one that ran into a timeout which its
+covering classes' time already reached. Healthy runs of the six gates skip none. With the
+database gate's former 60 s on a machine twice as slow as a runner, at the load of that evening,
+the 423 mutants of `SwapCatalog`, `WriteBarrier` and `SessionDrain` came out so, where the run
+with servers of their own and 600 s kills 82.27 % and 84.47 % covered with 5 timeouts:
+
+| Run | Servers | Killed | Escaped | Timed out | Skipped | MSI | Covered MSI | Bound of the script |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 60 s | one per process | 280 | 1 | 0 | 131 | 95.89 % | 99.64 % | 66.19 %, 67.96 %: fails |
+| 60 s, `main` | one shared | 348 | 8 | 22 | 34 | 95.12 % | 97.88 % | 82.27 %, 84.47 %: counts |
+
+The first run did not time out a single mutant, so the 5 % rule alone would have passed its
+95.89 %. When a run has a skipped mutant, the script therefore computes the lower bound with the
+skipped mutants counted as tested and not detected, beside the timed-out ones beyond 5 %, and the
+run counts only if that bound meets both floors too. Separate servers did not remove these
+timeouts and skips, nor reliably reduce them: which mutants a fixed limit times out or skips
+follows the speed of the machine. The exchange's class took 69.0 s in the first run's initial
+run and 58.3 s in the second's, so the first skipped 94 mutants without running them and 37
+after they ran into the limit, and the second none without running them and 34 after it. One mutant of the ZIP writer writes its checkpoint files
 into the working directory, and so do mutants of the file restore gate; delete `.head`, `.names`
 and `.state` there after a local run.
 

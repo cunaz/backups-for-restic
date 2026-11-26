@@ -123,8 +123,10 @@ can operate.
   its measured 92 %. A gate that falls below a floor is a regression of the pull
   request that brought it there, and is answered with tests. A run in which more than 5 % of the
   mutant processes timed out meets a floor only if it does so with its timed-out mutants counted
-  as not detected as well: Infection counts a timeout as detected, so a slow machine lifts the
-  score above what the tests kill ([development guide](../04-development-and-quality.md) §5.6).
+  as not detected as well, and a run in which Infection skipped a mutant only if it does so with
+  the skipped mutants counted as tested and not detected: Infection counts a timeout as detected
+  and leaves a skipped mutant out of the score, so a slow machine lifts the score above what the
+  tests kill ([development guide](../04-development-and-quality.md) §5.6).
   A floor is lowered only by a change of its own that measures the same commit again and shows
   that the measurement was at fault, as the database gate's kills through other processes on one
   shared server were until 2026-11-26; that change names the mutants that came out differently
