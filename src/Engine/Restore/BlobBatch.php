@@ -15,6 +15,7 @@ use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Compression;
@@ -61,7 +62,7 @@ final class BlobBatch {
 	 * @param int                         $first First uncommitted blob ordinal.
 	 * @param \Closure(int, string): void $write Takes the blob's ordinal and its authenticated bytes, in file order; keeps no reference to them.
 	 * @throws FormatException If a location, size, response or content hash is invalid.
-	 * @throws IndexTooLarge With the code restore_blob_memory if the first blob does not fit into the memory left.
+	 * @throws IndexTooLarge With the code restore_blob_memory if the first blob does not fit into the memory left, or the decoder finds that a blob does not.
 	 */
 	public static function read( Repository $repository, IndexSet $index, array $content, int $first, \Closure $write ): void {
 		if ( $first < 0 || ! isset( $content[ $first ] ) ) {
@@ -105,7 +106,13 @@ final class BlobBatch {
 		}
 		$final = array_key_last( $locations );
 		foreach ( $locations as $number => $entry ) {
-			$plain = PackReader::open_blob( $repository->cipher(), $entry, MemoryBudget::slice( $sealed, $entry->offset - $offset, $entry->length, $number === $final ) );
+			try {
+				$plain = PackReader::open_blob( $repository->cipher(), $entry, MemoryBudget::slice( $sealed, $entry->offset - $offset, $entry->length, $number === $final ) );
+			} catch ( InsufficientDecodingMemory $error ) {
+				// Not damage: decoding takes more than the budget counted for the blob's entry, as for
+				// a frame without a declared size and with a large window, or other code took memory.
+				MemoryBudget::refuse_blob( [ 'blob_bytes' => MemoryBudget::opening( $entry ) ], $error );
+			}
 			if ( strlen( $plain ) > RabinChunker::MAX_SIZE ) {
 				throw new FormatException( 'A restored data blob exceeds the chunk size limit.' );
 			}

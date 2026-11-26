@@ -10,6 +10,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Format;
 
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Exception\UnsupportedRepository;
 
 defined( 'ABSPATH' ) || exit;
@@ -25,6 +26,10 @@ defined( 'ABSPATH' ) || exit;
  * goes through a small buffer into a string that grows by reallocation, and libzstd allocates
  * its window outside PHP's limit; such a frame keeps a bound of four times the larger of its
  * window and the output its blocks allow.
+ *
+ * A frame that does not fit is refused with InsufficientDecodingMemory: a capacity limit, which
+ * its callers keep apart from damage. Data that exceeds the absolute limit, or a frame that
+ * declares more, is a FormatException. Both carry the code decompression_limit.
  */
 final class Compression {
 
@@ -63,14 +68,18 @@ final class Compression {
 	 * @param (\Closure(int): void)|null $reserve  Told, before each frame is decoded, how many bytes its decoding takes beside the memory in use; may refuse.
 	 * @return string Decompressed bytes.
 	 * @throws UnsupportedRepository If zstd is unavailable.
+	 * @throws InsufficientDecodingMemory If decoding does not fit into the memory that PHP's limit leaves.
 	 * @throws FormatException If the data is not valid zstd or too large.
 	 */
 	public static function decompress( string $data, ?int $expected = null, ?\Closure $reserve = null ): string {
 		if ( ! self::available() ) {
 			throw new UnsupportedRepository( 'The repository contains compressed data and PHP lacks the zstd extension.' );
 		}
-		if ( null !== $expected && ( $expected > self::MAX_DECOMPRESSED_SIZE || $expected > intdiv( self::free_memory(), 2 ) ) ) {
+		if ( null !== $expected && $expected > self::MAX_DECOMPRESSED_SIZE ) {
 			FormatException::raise( 'The uncompressed blob exceeds the decompression limit.', [ 'code' => 'decompression_limit' ] );
+		}
+		if ( null !== $expected && $expected > intdiv( self::free_memory(), 2 ) ) {
+			InsufficientDecodingMemory::raise( 'The uncompressed blob exceeds the decompression limit.', [ 'code' => 'decompression_limit' ] );
 		}
 		$output = '';
 		$start  = 0;
@@ -87,7 +96,7 @@ final class Compression {
 					$reserve( $needed );
 				}
 				if ( $needed > self::free_memory() ) {
-					FormatException::raise( 'The compressed frame exceeds the available decoding memory.', [ 'code' => 'decompression_limit' ] );
+					InsufficientDecodingMemory::raise( 'The compressed frame exceeds the available decoding memory.', [ 'code' => 'decompression_limit' ] );
 				}
 				$bytes = $whole ? $data : substr( $data, $start, $frame->end - $start );
 				$part  = self::decode_frame( $bytes );

@@ -11,6 +11,7 @@ namespace BackupsForRestic\Format\Pack;
 
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
@@ -89,12 +90,16 @@ final class PackReader {
 	 *
 	 * The stored bytes are let go once they are decrypted: when the caller passes them as a
 	 * temporary value, such as a slice of a downloaded range, a compressed blob is decoded
-	 * beside its plaintext alone.
+	 * beside its plaintext alone. Before the decoder measures the memory left, PHP gives back
+	 * the pages that strings freed since keep for reuse, as it does before it refuses an
+	 * allocation; the decoder then measures what the job's memory budget measured before the
+	 * download (Engine\MemoryBudget), less what is alive now.
 	 *
 	 * @param Cipher    $cipher Cipher with the master key.
 	 * @param PackEntry $entry  Header entry.
 	 * @param string    $sealed Stored bytes of the blob.
 	 * @return string Plaintext.
+	 * @throws InsufficientDecodingMemory If decoding the blob does not fit into the memory left.
 	 * @throws FormatException If the content does not match the ID.
 	 */
 	public static function open_blob( Cipher $cipher, PackEntry $entry, string $sealed ): string {
@@ -105,6 +110,7 @@ final class PackReader {
 		$plaintext = $cipher->open( $sealed );
 		unset( $sealed );
 		if ( $entry->uncompressed_length > 0 ) {
+			gc_mem_caches();
 			$plaintext = Compression::decompress( $plaintext, $entry->uncompressed_length );
 		}
 

@@ -14,6 +14,7 @@ use BackupsForRestic\Engine\Restore\BlobBatch;
 use BackupsForRestic\Exception\AuthenticationFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Compression;
@@ -28,6 +29,8 @@ use PHPUnit\Framework\TestCase;
 
 final class RestoreBlobBatchTest extends TestCase {
 
+	private const int MIB = 1048576;
+
 	private InMemoryBackend $backend;
 	private CountingBackend $counted;
 	private Repository $repository;
@@ -38,6 +41,11 @@ final class RestoreBlobBatchTest extends TestCase {
 		$this->counted    = new CountingBackend( $this->backend );
 		$this->repository = Repository::initialize( $this->counted, 'test password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
 		$this->index      = new IndexSet();
+	}
+
+	protected function tearDown(): void {
+		// PHPUnit keeps each test object to the end of the run; its packs go with the test.
+		unset( $this->backend, $this->counted, $this->repository, $this->index );
 	}
 
 	/** @param list<string> $values @return list<Id> */
@@ -207,12 +215,13 @@ final class RestoreBlobBatchTest extends TestCase {
 	}
 
 	public function test_a_group_ends_before_a_blob_whose_response_would_not_fit_the_memory_left(): void {
-		$values  = [ random_bytes( 70000 ), random_bytes( 50000 ), random_bytes( 60000 ) ];
+		$values  = [ random_bytes( 3 * self::MIB ), random_bytes( 3 * self::MIB ), random_bytes( self::MIB ) ];
 		$ids     = $this->pack( $values );
 		$entries = $this->entries( $ids );
-		// Two uncompressed blobs: their response, three times their stored bytes, is the most.
+		// Two uncompressed blobs of 3 MiB: their response, of 97 pages of 64 KiB with its
+		// headers, held three times, takes more than opening the first one beside it.
 		$two = MemoryBudget::range( $entries[0]->length + $entries[1]->length, MemoryBudget::opening( $entries[0] ), MemoryBudget::opening( $entries[1] ) );
-		self::assertSame( 3 * ( $entries[0]->length + $entries[1]->length ), $two );
+		self::assertSame( 3 * 97 * 65536 + MemoryBudget::BLOCK, $two );
 
 		$this->leave( $two );
 		self::assertSame( [ $values[0], $values[1] ], $this->read( $ids, 0 ), 'Exactly the two blobs fit.' );
@@ -225,22 +234,23 @@ final class RestoreBlobBatchTest extends TestCase {
 		if ( ! Compression::available() ) {
 			self::markTestSkipped( 'Needs the zstd extension.' );
 		}
-		$values  = [ str_repeat( 'first ', 50000 ), str_repeat( 'second ', 40000 ), str_repeat( 'third ', 30000 ) ];
+		$values  = [ str_repeat( 'first ', intdiv( 3 * self::MIB, 6 ) ), str_repeat( 'second ', 40000 ), str_repeat( 'third ', intdiv( 5 * self::MIB, 6 ) ) ];
 		$ids     = $this->compressed_pack( $values );
 		$entries = $this->entries( $ids );
 		// Compressed blobs open into twice their content: the first one, opened beside the whole
 		// group of two, is the most that reading the two takes.
-		$first = $entries[0]->length - Cipher::OVERHEAD + 2 * strlen( $values[0] );
+		$first = MemoryBudget::footprint( $entries[0]->length - Cipher::OVERHEAD ) + 2 * MemoryBudget::footprint( strlen( $values[0] ) ) + MemoryBudget::BLOCK;
 		self::assertSame( $first, MemoryBudget::opening( $entries[0] ) );
 		$two = MemoryBudget::range( $entries[0]->length + $entries[1]->length, $first, MemoryBudget::opening( $entries[1] ) );
-		self::assertSame( $entries[0]->length + $entries[1]->length + $first, $two );
+		self::assertSame( MemoryBudget::footprint( $entries[0]->length + $entries[1]->length ) + $first, $two );
 
 		$this->leave( $two );
 		self::assertSame( [ $values[0], $values[1] ], $this->read( $ids, 0 ) );
 		$this->leave( $two - 1 );
 		self::assertSame( [ $values[0] ], $this->read( $ids, 0 ) );
-		// The group of the last two: the second blob is now the one opened beside the group.
+		// The group of the last two: the last blob, opened by itself, takes the most.
 		$last = MemoryBudget::range( $entries[1]->length + $entries[2]->length, MemoryBudget::opening( $entries[1] ), MemoryBudget::opening( $entries[2] ) );
+		self::assertSame( MemoryBudget::opening( $entries[2] ), $last );
 		$this->leave( $last );
 		self::assertSame(
 			[
@@ -258,8 +268,10 @@ final class RestoreBlobBatchTest extends TestCase {
 		$values  = [ random_bytes( 70000 ), random_bytes( 50000 ) ];
 		$ids     = $this->pack( $values );
 		$entries = $this->entries( $ids );
-		$alone   = MemoryBudget::range( $entries[0]->length, 0, MemoryBudget::opening( $entries[0] ) );
-		self::assertSame( 3 * $entries[0]->length, $alone );
+		// A small blob: its response and its copies in blocks of their own, and one block for the
+		// small allocations of the read.
+		$alone = MemoryBudget::range( $entries[0]->length, 0, MemoryBudget::opening( $entries[0] ) );
+		self::assertSame( 4 * MemoryBudget::BLOCK, $alone );
 
 		$this->leave( $alone );
 		self::assertSame( [ $values[0] ], $this->read( $ids, 0 ), 'With exactly its need left, the blob is read by itself.' );
@@ -285,6 +297,46 @@ final class RestoreBlobBatchTest extends TestCase {
 		}
 		self::assertSame( [], $written );
 		self::assertSame( 1, $this->counted->loads['data'], 'Nothing more was downloaded.' );
+	}
+
+	/**
+	 * A frame without a declared size and with a window of 64 MiB, as a streaming encoder may
+	 * write it: the decoder counts four times its window (Format\Compression), which the budget
+	 * does not count for a blob of 1000 bytes and PHP's limit does not leave. That is a limit of
+	 * the host, not damage, and the restore says so.
+	 */
+	public function test_a_blob_that_the_decoder_finds_too_large_for_the_memory_left_is_refused_as_restore_blob_memory(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$content = random_bytes( 1000 );
+		$sealed  = $this->repository->cipher()->seal( "\x28\xb5\x2f\xfd\x00\x80" . substr( pack( 'V', strlen( $content ) << 3 | 1 ), 0, 3 ) . $content );
+		$entry   = new PackEntry( BlobType::Data, Id::of( $content ), 0, strlen( $sealed ), strlen( $content ) );
+		$pack    = Id::of( $sealed );
+		$this->backend->save( ObjectType::Data, $pack->hex(), $sealed );
+		$this->index->add_pack( $pack, [ $entry ] );
+		$limit = (string) ini_get( 'memory_limit' );
+		try {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The decoder reads PHP's own limit; this test without WordPress sets it as a host would.
+			self::assertNotFalse( ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 64 * self::MIB ) ) );
+			$this->leave( MemoryBudget::range( $entry->length, 0, MemoryBudget::opening( $entry ) ) );
+			$this->read( [ $entry->id ], 0 );
+			self::fail( 'The decoder refuses the frame.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertSame( 'The next blob of the restore does not fit beside the memory already in use.', $error->getMessage() );
+			self::assertSame(
+				[
+					'blob_bytes' => MemoryBudget::opening( $entry ),
+					'code'       => 'restore_blob_memory',
+				],
+				$error->context()
+			);
+			self::assertInstanceOf( InsufficientDecodingMemory::class, $error->getPrevious() );
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+			ini_set( 'memory_limit', $limit );
+		}
+		self::assertSame( 1, $this->counted->loads['data'], 'The decoder measures once the blob is downloaded.' );
 	}
 
 	public function test_with_memory_enough_a_group_is_as_large_as_without_a_budget(): void {

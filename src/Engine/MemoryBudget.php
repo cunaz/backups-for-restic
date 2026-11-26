@@ -41,6 +41,15 @@ defined( 'ABSPATH' ) || exit;
  * arrives, and then, blob by blob, the range beside what opening the blob takes. The range is
  * let go when its last blob is taken out of it. A reader asks blob_room() before a download
  * and makes its range smaller when it does not fit, down to one blob.
+ *
+ * Each copy is counted as what PHP reserves for it at most, not by its length (footprint()):
+ * a string smaller than a block is put into one of PHP's blocks of 2 MiB, which in a process
+ * whose blocks are full or cut up takes a new block; a larger one gets memory of its own,
+ * rounded up to whole pages. Every step also counts one block for the small allocations of
+ * the read, or for the empty block that PHP keeps for reuse after a request let go of many
+ * small strings and that a string with memory of its own cannot use. So what the budget lets
+ * through fits whatever state PHP's allocator is in, and the decoder, which measures the
+ * memory left once more before it decodes, finds what the budget left for it.
  */
 final readonly class MemoryBudget {
 
@@ -60,11 +69,23 @@ final readonly class MemoryBudget {
 	 */
 	public const int RESPONSE_COPIES = 3;
 
+	/** A block of PHP's memory manager: what it reserves at once for its smaller allocations. */
+	public const int BLOCK = 2097152;
+
+	/** The largest allocation that PHP puts into a block; a larger one gets memory of its own. */
+	private const int LARGEST_IN_BLOCK = self::BLOCK - 4096;
+
 	/**
-	 * How many times its stored length a blob takes while it is decrypted: the stored bytes,
-	 * the ciphertext without nonce and tag, and the plaintext.
+	 * What PHP rounds memory of its own up to: the system's page outside Windows, of at most
+	 * 64 KiB, and a whole block on Windows.
 	 */
-	public const int OPENING_COPIES = 3;
+	private const int PAGE = 'Windows' === PHP_OS_FAMILY ? self::BLOCK : 65536;
+
+	/** What a string takes beyond its bytes: its header and closing byte, aligned. */
+	private const int STRING_OVERHEAD = 32;
+
+	/** What a response holds beyond its body at most: the status line and the headers. */
+	private const int RESPONSE_HEAD = 16384;
 
 	/** Memory that stays free beside a read, for allocation rounding and reporting a refusal. */
 	private const int RESERVE = 2097152;
@@ -166,22 +187,37 @@ final readonly class MemoryBudget {
 	}
 
 	/**
-	 * What opening one stored blob takes beside the range it was read in: three times its
-	 * stored length while it is decrypted, and for a compressed blob at least the decrypted
-	 * frame and twice its content while it is decoded (Format\Compression). The stored bytes
+	 * What a string of the given length takes of the memory that PHP reserves, at most: memory
+	 * of its own rounded up to pages, for a string too large for a block; otherwise a whole
+	 * block, since none of the blocks there are may have room left for it.
+	 *
+	 * @param int $bytes Length of the string.
+	 * @return int Bytes.
+	 */
+	public static function footprint( int $bytes ): int {
+		$size = $bytes + self::STRING_OVERHEAD;
+		return $size > self::LARGEST_IN_BLOCK ? intdiv( $size + self::PAGE - 1, self::PAGE ) * self::PAGE : self::BLOCK;
+	}
+
+	/**
+	 * What opening one stored blob takes beside the range it was read in, counted by
+	 * footprint(): while it is decrypted, its stored bytes, the ciphertext without nonce and tag,
+	 * and the plaintext; for a compressed blob then, while it is decoded, the decrypted frame
+	 * and the decoder's buffer and output for its content (Format\Compression). The stored bytes
 	 * are let go before the frame is decoded (Format\Pack\PackReader::open_blob()). A blob that
 	 * claims more content than Compression decodes at all is refused before its frame is
-	 * decoded, so only its decryption counts.
+	 * decoded, so only its decryption counts. One block for the small allocations of each step.
 	 *
 	 * @param PackEntry $entry Index or header entry of the blob.
 	 * @return int Bytes.
 	 */
 	public static function opening( PackEntry $entry ): int {
-		$decrypting = self::OPENING_COPIES * $entry->length;
+		$frame      = self::footprint( $entry->length - Cipher::OVERHEAD );
+		$decrypting = self::footprint( $entry->length ) + 2 * $frame;
 		if ( 0 === $entry->uncompressed_length || $entry->uncompressed_length > Compression::MAX_DECOMPRESSED_SIZE ) {
-			return $decrypting;
+			return $decrypting + self::BLOCK;
 		}
-		return max( $decrypting, $entry->length - Cipher::OVERHEAD + 2 * $entry->uncompressed_length );
+		return max( $decrypting, $frame + 2 * self::footprint( $entry->uncompressed_length ) ) + self::BLOCK;
 	}
 
 	/**
@@ -205,16 +241,17 @@ final readonly class MemoryBudget {
 
 	/**
 	 * What reading a range of stored blobs takes beside the memory in use: the response while it
-	 * arrives; then each blob but the last beside the whole range; then the last one alone,
-	 * because the range is let go when it is taken out.
+	 * arrives, with its headers and one block for the small allocations of the request; then
+	 * each blob but the last beside the whole range; then the last one alone, because the range
+	 * is let go when it is taken out.
 	 *
 	 * @param int $range  Bytes of the range.
-	 * @param int $before The most that opening one of its blobs takes, of all but the last; 0 for one blob.
-	 * @param int $last   What opening its last blob takes.
+	 * @param int $before The most that opening one of its blobs takes (opening()), of all but the last; 0 for one blob.
+	 * @param int $last   What opening its last blob takes; 0 for a range without one.
 	 * @return int Bytes.
 	 */
 	public static function range( int $range, int $before, int $last ): int {
-		return max( self::RESPONSE_COPIES * $range, $range + $before, $last );
+		return max( self::RESPONSE_COPIES * self::footprint( $range + self::RESPONSE_HEAD ) + self::BLOCK, self::footprint( $range ) + $before, $last );
 	}
 
 	/**
@@ -238,17 +275,28 @@ final readonly class MemoryBudget {
 	public function blob_room( int $first ): int {
 		$available = $this->available();
 		if ( $first > $available ) {
-			IndexTooLarge::raise(
-				'The next blob of the restore does not fit beside the memory already in use.',
+			self::refuse_blob(
 				[
 					'memory_limit' => $this->limit,
 					'available'    => $available,
 					'blob_bytes'   => $first,
-					'code'         => 'restore_blob_memory',
 				]
 			);
 		}
 		return $available;
+	}
+
+	/**
+	 * Refuses the next blob of a restore: it does not fit beside the memory in use. Raised
+	 * before the download (blob_room()), or for a blob whose decoding the decoder found more
+	 * than the memory left, as a frame without a declared size and with a large window can be.
+	 *
+	 * @param array<string, int> $context  What was measured.
+	 * @param \Throwable|null    $previous The decoder's refusal, if it refused.
+	 * @throws IndexTooLarge With the code restore_blob_memory, always.
+	 */
+	public static function refuse_blob( array $context, ?\Throwable $previous = null ): never {
+		IndexTooLarge::raise( 'The next blob of the restore does not fit beside the memory already in use.', $context + [ 'code' => 'restore_blob_memory' ], $previous );
 	}
 
 	/**

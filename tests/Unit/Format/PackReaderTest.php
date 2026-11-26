@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Format;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Crypto\Cipher;
@@ -165,5 +166,45 @@ final class PackReaderTest extends TestCase {
 		// ciphertext and the stored bytes are gone. Twice the chunk; three times if the stored
 		// bytes stayed.
 		self::assertLessThan( 2 * RabinChunker::MAX_SIZE + self::MIB, $peak );
+	}
+
+	/**
+	 * In a process of its own: in one that earlier tests left with free pages in many blocks, the
+	 * small strings below would fill those pages instead of blocks of their own.
+	 */
+	#[RunInSeparateProcess]
+	public function test_the_pages_that_let_go_strings_keep_are_given_back_before_a_blob_is_decoded(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$cipher  = Vectors::cipher();
+		$content = str_repeat( 'a text that compresses ', 200000 );
+		$id      = Id::of( $content );
+		$sealed  = $cipher->seal( (string) zstd_compress( $content, 3 ) );
+		$entry   = new PackEntry( BlobType::Data, $id, 0, strlen( $sealed ), strlen( $content ) );
+		unset( $content );
+		gc_mem_caches();
+		$before = memory_get_usage( true );
+		// Small strings that were made and let go, as a request makes them: PHP keeps their
+		// pages for reuse, and they count against its limit until it gives them back.
+		$small = [];
+		for ( $i = 0; $i < 200000; ++$i ) {
+			$small[] = str_repeat( 's', 40 ) . $i;
+		}
+		unset( $small );
+		$kept = memory_get_usage( true ) - $before;
+		self::assertGreaterThanOrEqual( 4 * 2097152, $kept, 'The strings took blocks of their own.' );
+		// The decoder needs twice the content free, and half of what is kept is missing for it.
+		// PHP may keep one of the empty blocks, and a temporary of the decryption may go into
+		// another one: what is given back covers the half.
+		$limit = (string) ini_get( 'memory_limit' );
+		try {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The decoder reads PHP's own limit; this test without WordPress sets it as a host would.
+			self::assertNotFalse( ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + Compression::RESERVE + 2 * $entry->uncompressed_length - intdiv( $kept, 2 ) ) ) );
+			self::assertTrue( Id::of( PackReader::open_blob( $cipher, $entry, $sealed ) )->equals( $id ) );
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+			ini_set( 'memory_limit', $limit );
+		}
 	}
 }

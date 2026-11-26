@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Unit\Engine;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
@@ -20,7 +21,9 @@ use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Compression;
@@ -33,6 +36,10 @@ use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Format\Pack\PackReader;
 use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Format\Snapshot;
+use BackupsForRestic\Format\Tree\Node;
+use BackupsForRestic\Format\Tree\NodeType;
+use BackupsForRestic\Format\Tree\TreeCodec;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Support\SystemClock;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\HookedBackend;
@@ -57,9 +64,13 @@ final class CheckTest extends TestCase {
 	/** @var list<string> */
 	private array $cleanup = [];
 
+	/** PHP's memory limit when the test started; a test that sets it gets it back. */
+	private string $memory_limit = '';
+
 	protected function setUp(): void {
-		$this->site      = TempDir::create( 'site' );
-		$this->cleanup[] = $this->site;
+		$this->memory_limit = (string) ini_get( 'memory_limit' );
+		$this->site         = TempDir::create( 'site' );
+		$this->cleanup[]    = $this->site;
 		TempDir::fixture( $this->site, 1048576 );
 		$this->identity   = new Identity( 'example.com', 'www-data' );
 		$this->backend    = new InMemoryBackend();
@@ -70,9 +81,59 @@ final class CheckTest extends TestCase {
 	}
 
 	protected function tearDown(): void {
+		self::limit_php( $this->memory_limit );
 		foreach ( $this->cleanup as $path ) {
 			TempDir::remove( $path );
 		}
+	}
+
+	/**
+	 * Sets PHP's memory limit, which the decoder reads; tearDown() restores it.
+	 */
+	private static function limit_php( string $limit ): void {
+		// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The decoder reads PHP's own limit; this test without WordPress sets it as a host would.
+		self::assertNotFalse( ini_set( 'memory_limit', $limit ) );
+	}
+
+	/**
+	 * Leaves 64 MiB beside the memory that PHP has reserved.
+	 */
+	private static function leave_64_mib(): void {
+		self::limit_php( (string) ( memory_get_usage( true ) + 64 * 1048576 ) );
+	}
+
+	/**
+	 * A zstd frame of one raw block, without a declared size and with a window of 64 MiB, as a
+	 * streaming encoder may write it: the decoder counts four times its window
+	 * (Format\Compression), 256 MiB, more than PHP's limit leaves.
+	 */
+	private static function wide_frame( string $content ): string {
+		self::assertLessThanOrEqual( 131072, strlen( $content ), 'One raw block holds at most 128 KiB.' );
+		return "\x28\xb5\x2f\xfd\x00\x80" . substr( pack( 'V', strlen( $content ) << 3 | 1 ), 0, 3 ) . $content;
+	}
+
+	/**
+	 * Stores a pack of one blob in a wide frame (wide_frame()), indexed, and gives its name.
+	 */
+	private function wide_pack( BlobType $type, string $content ): string {
+		$cipher                                  = $this->repository->cipher();
+		$id                                      = Id::of( $content );
+		$sealed                                  = $cipher->seal( self::wide_frame( $content ) );
+		$header                                  = $cipher->seal( chr( BlobType::Tree === $type ? 3 : 2 ) . pack( 'VV', strlen( $sealed ), strlen( $content ) ) . $id->bytes() );
+		$body                                    = $sealed . $header . pack( 'V', strlen( $header ) );
+		$name                                    = hash( 'sha256', $body );
+		$this->backend->objects['data'][ $name ] = $body;
+		$this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( [ $name => [ new PackEntry( $type, $id, 0, strlen( $sealed ), strlen( $content ) ) ] ] ) );
+		return $name;
+	}
+
+	/**
+	 * The repository of the fixture as one of format 2, whose files may be compressed.
+	 */
+	private function format_2( ?Backend $backend = null ): Repository {
+		$config = $this->repository->config();
+		$this->backend->objects[ ObjectType::Config->value ]['config'] = $this->repository->cipher()->seal( ( new Config( Config::VERSION_2, $config->id, $config->chunker_polynomial ) )->to_json() );
+		return Repository::open( $backend ?? $this->backend, $this->repository->master_key(), new SystemRandom() );
 	}
 
 	private function work_dir(): string {
@@ -347,6 +408,111 @@ final class CheckTest extends TestCase {
 		self::assertContains( 'error:index_unreadable', self::codes( $result ) );
 		self::assertSame( 1, $result['counts']['error:index_unreadable'] );
 		self::assertGreaterThan( 0, $result['stats']['packs_read'] ?? 0, 'The packs listed in readable index files were still read.' );
+	}
+
+	public function test_a_damaged_index_file_that_the_cache_meets_is_a_finding_and_the_check_goes_on(): void {
+		$name                                     = array_key_first( $this->backend->list( ObjectType::Index ) );
+		$this->backend->objects['index'][ $name ] = 'not an encrypted index file';
+
+		$run = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 100, new IndexCache( $this->work_dir() ) );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		$result = $run->result();
+		self::assertSame( 1, $result['counts']['error:index_unreadable'] );
+		self::assertGreaterThan( 0, $result['stats']['packs_read'] ?? 0, 'The cache gave way to the readable index files.' );
+	}
+
+	/**
+	 * A file that disappears from the server while the check runs, at the given load of it.
+	 *
+	 * @return iterable<string, array{ObjectType, int, list<string>}>
+	 */
+	public static function disappearing_files(): iterable {
+		yield 'an index file, before the check reads it' => [ ObjectType::Index, 1, [ 'error:index_unreadable' ] ];
+		yield 'a snapshot, before the check reads it' => [ ObjectType::Snapshots, 1, [ 'error:snapshot_unreadable' ] ];
+		// Read and checked once, the file is left out of the index for the trees.
+		yield 'an index file, before the index for the trees is loaded' => [ ObjectType::Index, 2, [] ];
+	}
+
+	/**
+	 * @param list<string> $codes Findings that the file's loss leaves.
+	 */
+	#[DataProvider( 'disappearing_files' )]
+	public function test_a_file_that_disappears_during_the_check_does_not_stop_it( ObjectType $type, int $load, array $codes ): void {
+		$name    = (string) array_key_first( $this->backend->list( $type ) );
+		$loads   = 0;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $kind, string $requested = '' ) use ( $type, $name, $load, &$loads ): void {
+				if ( 'load' === $method && $type === $kind && $name === $requested && $load === ++$loads ) {
+					throw new NotFound( 'The file is gone.' );
+				}
+			}
+		);
+		$run     = CheckRun::start( Repository::open( $backend, $this->repository->master_key(), new SystemRandom() ), $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		while ( ! $run->advance( INF ) ) {
+			continue;
+		}
+
+		self::assertGreaterThanOrEqual( $load, $loads );
+		foreach ( $codes as $code ) {
+			self::assertContains( $code, self::codes( $run->result() ) );
+		}
+	}
+
+	/**
+	 * A server that fails while the check reads a file, at the given load of it.
+	 *
+	 * @return iterable<string, array{ObjectType, int, bool}>
+	 */
+	public static function failing_loads(): iterable {
+		yield 'a snapshot' => [ ObjectType::Snapshots, 1, false ];
+		yield 'an index file, for the trees' => [ ObjectType::Index, 2, false ];
+		yield 'an index file, for the trees through the cache' => [ ObjectType::Index, 2, true ];
+	}
+
+	#[DataProvider( 'failing_loads' )]
+	public function test_a_server_failure_while_a_file_is_read_stops_the_check_and_is_no_damage( ObjectType $type, int $load, bool $cached ): void {
+		$name    = (string) array_key_first( $this->backend->list( $type ) );
+		$loads   = 0;
+		$backend = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $kind, string $requested = '' ) use ( $type, $name, $load, &$loads ): void {
+				if ( 'load' === $method && $type === $kind && $name === $requested && $load === ++$loads ) {
+					throw new BackendException( 'The server failed.' );
+				}
+			}
+		);
+		$run     = CheckRun::start( Repository::open( $backend, $this->repository->master_key(), new SystemRandom() ), $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0, $cached ? new IndexCache( $this->work_dir() ) : null );
+		try {
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+			self::fail( 'A transport error stops the check.' );
+		} catch ( BackendException $error ) {
+			self::assertSame( 'The server failed.', $error->getMessage() );
+			self::assertSame( [], $run->result()['findings'], 'A transport error is no damage.' );
+		} finally {
+			$run->abort();
+		}
+	}
+
+	public function test_an_index_file_that_does_not_fit_the_memory_budget_is_no_damage(): void {
+		$this->repository->limit_memory( new MemoryBudget( 1 ) );
+		$run = CheckRun::start( $this->repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		try {
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+			self::fail( 'A check must refuse an index that does not fit.' );
+		} catch ( IndexTooLarge ) {
+			self::assertSame( 'index', $run->progress()['phase'] );
+			self::assertSame( [], $run->result()['findings'], 'Insufficient memory is not repository damage.' );
+		} finally {
+			$run->abort();
+		}
 	}
 
 	public function test_reads_one_snapshot_per_unit_of_work(): void {
@@ -1074,21 +1240,28 @@ final class CheckTest extends TestCase {
 	}
 
 	public function test_a_pack_whose_largest_blob_does_not_fit_the_memory_left_is_a_warning_before_it_is_read(): void {
-		$packs               = count( $this->backend->list( ObjectType::Data ) );
-		$largest             = $this->largest_blob();
-		[ $result, $ranges ] = $this->check_with_budget( static fn (): MemoryBudget => self::leaving( $largest - 1 ) );
-		$unverified          = array_values( array_filter( $result['findings'], static fn ( array $finding ): bool => 'pack_memory' === $finding['code'] ) );
-		self::assertSame( 0, $result['errors'], 'Memory that is short is no damage.' );
-		self::assertNotSame( [], $unverified, 'The pack of the largest blob is not verified.' );
-		self::assertSame( count( $unverified ), $result['warnings'] );
-		self::assertSame( 'warning', $unverified[0]['severity'] );
-		self::assertSame( 'A blob of the pack does not fit into the memory that PHP has left; run restic check --read-data from another computer to verify it.', $unverified[0]['message'] );
-		self::assertSame( $packs - count( $unverified ), $result['stats']['packs_read'], 'The other packs are read and verified.' );
+		// The blobs of the fixture, of at most 1 MiB, each take what a block of PHP's takes; a
+		// blob of 3 MiB takes more.
+		$large = $this->add_pack( [ 3 * 1048576 ] );
+		try {
+			$packs               = count( $this->backend->list( ObjectType::Data ) );
+			$largest             = $this->largest_blob();
+			[ $result, $ranges ] = $this->check_with_budget( static fn (): MemoryBudget => self::leaving( $largest - 1 ) );
+			$unverified          = array_values( array_filter( $result['findings'], static fn ( array $finding ): bool => 'pack_memory' === $finding['code'] ) );
+			self::assertSame( 0, $result['errors'], 'Memory that is short is no damage.' );
+			self::assertSame( [ $large ], array_column( $unverified, 'object' ), 'The pack of the largest blob is not verified.' );
+			self::assertSame( 1, $result['warnings'] );
+			self::assertSame( 'warning', $unverified[0]['severity'] );
+			self::assertSame( 'A blob of the pack does not fit into the memory that PHP has left; run restic check --read-data from another computer to verify it.', $unverified[0]['message'] );
+			self::assertSame( $packs - 1, $result['stats']['packs_read'], 'The other packs are read and verified.' );
 
-		[ $none, $headers ] = $this->check_with_budget( static fn (): MemoryBudget => self::leaving( 0 ) );
-		self::assertSame( $packs, $none['warnings'] );
-		self::assertSame( 0, $none['stats']['packs_read'] ?? 0 );
-		self::assertSame( 2 * $packs, $headers, 'Of each pack only the length of its header and the header are read.' );
+			[ $none, $headers ] = $this->check_with_budget( static fn (): MemoryBudget => self::leaving( 0 ) );
+			self::assertSame( $packs, $none['warnings'] );
+			self::assertSame( 0, $none['stats']['packs_read'] ?? 0 );
+			self::assertSame( 2 * $packs, $headers, 'Of each pack only the length of its header and the header are read.' );
+		} finally {
+			unset( $this->backend->objects['data'][ $large ] );
+		}
 	}
 
 	/**
@@ -1204,7 +1377,7 @@ final class CheckTest extends TestCase {
 		$this->backend->objects['data'][ $name ] = $damaged;
 		try {
 			// Without a header it is read in pieces of 8 MiB after its blobs, of which it has none.
-			$whole        = MemoryBudget::RESPONSE_COPIES * strlen( $damaged );
+			$whole        = MemoryBudget::range( strlen( $damaged ), 0, 0 );
 			[ $findings ] = $this->read_one_pack( $name, static fn (): MemoryBudget => self::leaving( $whole ) );
 			self::assertSame( [ 'error:pack_hash' ], $findings );
 			[ $findings, $ranges ] = $this->read_one_pack( $name, static fn (): MemoryBudget => self::leaving( $whole - 1 ) );
@@ -1231,16 +1404,19 @@ final class CheckTest extends TestCase {
 	}
 
 	public function test_a_piece_holds_whole_blobs_up_to_its_size_and_up_to_what_the_memory_left_takes(): void {
-		$name   = $this->add_pack( array_fill( 0, 4, 100000 ) );
-		$stored = 100000 + 32;
+		$name   = $this->add_pack( array_fill( 0, 4, 1048576 ) );
+		$stored = 1048576 + 32;
 		try {
 			// Two header reads, the blobs in pieces, and the header as the rest of the pack.
 			[ , $ranges ] = $this->read_one_pack( $name, null, 2 * $stored );
 			self::assertSame( 2 + 2 + 1, $ranges, 'Two blobs fill a piece exactly.' );
 			[ , $ranges ] = $this->read_one_pack( $name, null, 2 * $stored - 1 );
 			self::assertSame( 2 + 4 + 1, $ranges );
-			$two = MemoryBudget::range( 2 * $stored, 3 * $stored, 3 * $stored );
-			self::assertSame( 6 * $stored, $two );
+			// Each blob of 1 MiB takes four blocks to be opened, beside the piece of two, of 33 pages
+			// of 64 KiB, for the first.
+			$opening = MemoryBudget::opening( new PackEntry( BlobType::Data, Id::of( 'blob' ), 0, $stored ) );
+			$two     = MemoryBudget::range( 2 * $stored, $opening, $opening );
+			self::assertSame( 33 * 65536 + 4 * MemoryBudget::BLOCK, $two );
 			[ $findings, $ranges ] = $this->read_one_pack( $name, static fn (): MemoryBudget => self::leaving( $two ) );
 			self::assertSame( [], $findings );
 			self::assertSame( 2 + 2 + 1, $ranges, 'Exactly what two blobs take is left.' );
@@ -1256,11 +1432,13 @@ final class CheckTest extends TestCase {
 		if ( ! Compression::available() ) {
 			self::markTestSkipped( 'Needs the zstd extension.' );
 		}
-		$name = $this->add_pack( [ 524288, 524288 ], true );
+		$name = $this->add_pack( [ 3 * 1048576, 3 * 1048576 ], true );
 		try {
 			$entries = PackReader::read_header( $this->repository->cipher(), substr( $this->backend->objects['data'][ $name ], -4 - unpack( 'V', substr( $this->backend->objects['data'][ $name ], -4 ) )[1], -4 ), strlen( $this->backend->objects['data'][ $name ] ) );
 			$largest = max( array_map( static fn ( PackEntry $entry ): int => MemoryBudget::range( $entry->length, 0, MemoryBudget::opening( $entry ) ), $entries ) );
-			self::assertGreaterThan( 2 * 524288, $largest, 'Decoding takes twice the content, far more than the stored bytes.' );
+			// The frame of a few KiB in a block, the decoder's buffer and its output of 49 pages
+			// of 64 KiB each, and a block for the small allocations; far more than the stored bytes.
+			self::assertSame( 2 * MemoryBudget::footprint( 3 * 1048576 ) + 2 * MemoryBudget::BLOCK, $largest, 'Decoding takes twice the content.' );
 			[ $findings ] = $this->read_one_pack( $name, static fn (): MemoryBudget => self::leaving( $largest ) );
 			self::assertSame( [], $findings );
 			[ $findings, $ranges ] = $this->read_one_pack( $name, static fn (): MemoryBudget => self::leaving( $largest - 1 ) );
@@ -1269,5 +1447,121 @@ final class CheckTest extends TestCase {
 		} finally {
 			unset( $this->backend->objects['data'][ $name ] );
 		}
+	}
+
+	public function test_a_blob_that_the_decoder_cannot_decode_in_the_memory_left_is_a_warning_and_no_damage(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$name = $this->wide_pack( BlobType::Data, random_bytes( 1000 ) );
+		try {
+			self::leave_64_mib();
+			// The budget does not count the window of a frame; the decoder refuses it after the download.
+			[ $findings, $ranges ] = $this->read_one_pack( $name, static fn (): MemoryBudget => self::leaving( 16 * 1048576 ) );
+			self::assertSame( [ 'warning:pack_memory' ], $findings, 'A refusal for memory is no damage.' );
+			self::assertSame( 3, $ranges, 'The length of the header, the header and the blob were read.' );
+		} finally {
+			unset( $this->backend->objects['data'][ $name ] );
+		}
+	}
+
+	/**
+	 * What the check cannot go on without.
+	 *
+	 * @return iterable<string, array{string}>
+	 */
+	public static function undecodable(): iterable {
+		yield 'an index file' => [ 'index' ];
+		yield 'a snapshot' => [ 'snapshot' ];
+		yield 'a tree' => [ 'tree' ];
+	}
+
+	/**
+	 * An index file, a snapshot or a tree that the decoder cannot decode in the memory that PHP's
+	 * limit leaves ends the check, as an index that does not fit does: it is no damage, and a
+	 * job reports the decoder's refusal as decompression_limit.
+	 */
+	#[DataProvider( 'undecodable' )]
+	public function test_what_the_check_cannot_decode_in_the_memory_left_ends_it_and_is_no_damage( string $kind ): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$repository = $this->format_2();
+		$snapshot   = static fn ( Id $tree ): string => ( new Snapshot( '2026-01-01T00:00:00Z', $tree, [ '/' ] ) )->to_json();
+		// A tree that the fixture does not have, so that the check walks it.
+		$tree = TreeCodec::encode( [ new Node( 'wide.txt', NodeType::File, 0644, '2026-01-01T00:00:00Z', size: 0, content: [] ) ] );
+		$pack = '';
+		if ( 'index' === $kind ) {
+			$repository->save_unpacked( ObjectType::Index, "\x02" . self::wide_frame( IndexFile::encode( [] ) ) );
+		} elseif ( 'snapshot' === $kind ) {
+			$repository->save_unpacked( ObjectType::Snapshots, "\x02" . self::wide_frame( $snapshot( Id::of( $tree ) ) ) );
+		} else {
+			$pack = $this->wide_pack( BlobType::Tree, $tree );
+			$repository->save_unpacked( ObjectType::Snapshots, $snapshot( Id::of( $tree ) ) );
+		}
+		self::leave_64_mib();
+		$run = CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0 );
+		try {
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+			self::fail( 'The check cannot go on without it.' );
+		} catch ( InsufficientDecodingMemory $refusal ) {
+			self::assertSame( 'decompression_limit', JobError::from_throwable( $refusal )->code );
+			self::assertSame( [], $run->result()['findings'], 'Nothing was reported as damage.' );
+		} finally {
+			unset( $this->backend->objects['data'][ $pack ] );
+		}
+		$run->abort();
+	}
+
+	/**
+	 * @return iterable<string, array{bool}>
+	 */
+	public static function index_loads(): iterable {
+		yield 'from the index files' => [ false ];
+		yield 'through the cache' => [ true ];
+	}
+
+	/**
+	 * The check loads the index once more for the trees, from the index files or through the
+	 * cache. An index file that decodes when the check reads it, but not then, ends the check as
+	 * well: left out, its blobs would be reported as missing.
+	 */
+	#[DataProvider( 'index_loads' )]
+	public function test_an_index_file_that_cannot_be_decoded_when_the_index_is_loaded_ends_the_check( bool $cached ): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		// The whole index of the fixture in one compressed index file.
+		$packs = [];
+		foreach ( array_keys( $this->backend->list( ObjectType::Index ) ) as $name ) {
+			$packs += IndexFile::decode( $this->repository->load_unpacked( ObjectType::Index, Id::from_hex( (string) $name ) ) );
+			$this->backend->delete( ObjectType::Index, (string) $name );
+		}
+		$loads      = 0;
+		$backend    = new HookedBackend(
+			$this->backend,
+			static function ( string $method, ?ObjectType $type ) use ( &$loads ): void {
+				if ( 'load' === $method && ObjectType::Index === $type ) {
+					// The check of the file reads it first; the index for the trees reads it next.
+					2 === ++$loads ? self::leave_64_mib() : self::limit_php( '-1' );
+				}
+			}
+		);
+		$repository = $this->format_2( $backend );
+		$repository->save_unpacked( ObjectType::Index, "\x02" . self::wide_frame( IndexFile::encode( $packs ) ) );
+		$this->cleanup[] = $cache = TempDir::create( 'cache' );
+		$run             = CheckRun::start( $repository, $this->work_dir(), $this->identity, new SystemClock(), new SystemRandom(), 0, $cached ? new IndexCache( $cache ) : null );
+		try {
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+			self::fail( 'The check cannot go on without the index.' );
+		} catch ( InsufficientDecodingMemory ) {
+			self::assertSame( 2, $loads );
+			self::assertSame( [], $run->result()['findings'], 'No blob was reported as missing.' );
+		}
+		$run->abort();
 	}
 }

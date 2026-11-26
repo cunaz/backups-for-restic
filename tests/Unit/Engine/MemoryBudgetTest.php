@@ -48,6 +48,12 @@ final class MemoryBudgetTest extends TestCase {
 	private const int BLOCK = 2 * self::MIB;
 
 	/**
+	 * The pages that MemoryBudget rounds a large string to outside Windows, where PHP gives it
+	 * memory of its own in the system's pages: 64 KiB, the largest of them.
+	 */
+	private const int PAGE = 65536;
+
+	/**
 	 * What WordPress 7.1.5 on PHP 8.3 had reserved once it was loaded, in every tick of the CI
 	 * memory runs (ADR 0019).
 	 */
@@ -471,32 +477,56 @@ final class MemoryBudgetTest extends TestCase {
 		self::assertCount( 2, $backend->list( ObjectType::Data ) );
 	}
 
+	public function test_a_string_takes_a_block_of_its_own_or_memory_of_its_own_in_whole_pages(): void {
+		self::assertSame( self::BLOCK, MemoryBudget::footprint( 0 ), 'In a process whose blocks are full, even a small string takes a new block.' );
+		self::assertSame( self::BLOCK, MemoryBudget::footprint( 1572864 ) );
+		self::assertSame( self::BLOCK, MemoryBudget::footprint( self::BLOCK - 4096 - 32 ), 'The largest string that PHP puts into a block.' );
+		// With its header, a string of 2 MiB does not fit into 32 pages.
+		self::assertSame( 33 * self::PAGE, MemoryBudget::footprint( self::BLOCK - 31 ) );
+		self::assertSame( 33 * self::PAGE, MemoryBudget::footprint( self::BLOCK ) );
+		self::assertSame( 64 * self::PAGE, MemoryBudget::footprint( 64 * self::PAGE - 32 ) );
+		self::assertSame( 65 * self::PAGE, MemoryBudget::footprint( 64 * self::PAGE - 31 ) );
+		self::assertSame( 129 * self::PAGE, MemoryBudget::footprint( 8 * self::MIB ) );
+	}
+
 	/**
-	 * What opening a blob takes, for blobs of each kind.
+	 * What opening a blob takes, for blobs of each kind: three strings while it is decrypted,
+	 * the frame and two strings of its content while a compressed one is decoded, each as PHP
+	 * reserves it (MemoryBudget::footprint()), and a block for the small allocations.
 	 *
 	 * @return iterable<string, array{PackEntry, int}>
 	 */
 	public static function openings(): iterable {
 		$id = Id::of( 'blob' );
-		yield 'a full chunk, uncompressed' => [ new PackEntry( BlobType::Data, $id, 0, 8388640 ), 3 * 8388640 ];
+		// The stored bytes, the ciphertext and the plaintext of 8 MiB take 129 pages each.
+		yield 'a full chunk, uncompressed' => [ new PackEntry( BlobType::Data, $id, 0, 8388640 ), 3 * 129 * self::PAGE + self::BLOCK ];
 		// restic stores a full chunk that does not compress 202 bytes longer than the chunk.
-		yield 'a full chunk in raw zstd blocks' => [ new PackEntry( BlobType::Data, $id, 0, 8388842, 8388608 ), 3 * 8388842 ];
-		yield 'a full chunk that compresses' => [ new PackEntry( BlobType::Data, $id, 0, 2654000, 8388608 ), 2654000 - 32 + 2 * 8388608 ];
-		yield 'where decrypting and decoding take the same' => [ new PackEntry( BlobType::Data, $id, 0, 100, 116 ), 300 ];
-		yield 'a blob that claims more than Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE + 1 ), 3000 ];
-		yield 'a blob that claims exactly what Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE ), 1000 - 32 + 2 * Compression::MAX_DECOMPRESSED_SIZE ];
+		yield 'a full chunk in raw zstd blocks' => [ new PackEntry( BlobType::Data, $id, 0, 8388842, 8388608 ), 3 * 129 * self::PAGE + self::BLOCK ];
+		// A frame of 2.5 MiB, then the decoder's buffer and its output.
+		yield 'a full chunk that compresses' => [ new PackEntry( BlobType::Data, $id, 0, 2654000, 8388608 ), 41 * self::PAGE + 2 * 129 * self::PAGE + self::BLOCK ];
+		yield 'a small blob, where decrypting and decoding take the same' => [ new PackEntry( BlobType::Data, $id, 0, 100, 116 ), 4 * self::BLOCK ];
+		// Decrypting 4 MiB takes three times 65 pages, decoding the frame into 3 MiB 65 and twice 49.
+		yield 'a blob that compresses little' => [ new PackEntry( BlobType::Data, $id, 0, 4194336, 3145728 ), 3 * 65 * self::PAGE + self::BLOCK ];
+		// Its ciphertext without nonce and tag fills 64 pages exactly; the stored bytes take 65.
+		yield 'a blob whose ciphertext fills whole pages' => [ new PackEntry( BlobType::Data, $id, 0, 4194304, 3145728 ), ( 65 + 2 * 64 ) * self::PAGE + self::BLOCK ];
+		yield 'a blob that claims more than Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE + 1 ), 4 * self::BLOCK ];
+		yield 'a blob that claims exactly what Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE ), self::BLOCK + 2 * 2049 * self::PAGE + self::BLOCK ];
 	}
 
 	#[DataProvider( 'openings' )]
-	public function test_opening_a_blob_takes_three_times_its_stored_length_and_a_compressed_one_twice_its_content( PackEntry $entry, int $bytes ): void {
+	public function test_opening_a_blob_takes_three_copies_of_it_and_a_compressed_one_two_of_its_content( PackEntry $entry, int $bytes ): void {
 		self::assertSame( $bytes, MemoryBudget::opening( $entry ) );
 	}
 
 	public function test_reading_a_range_takes_its_response_then_each_blob_beside_the_range_and_the_last_alone(): void {
-		self::assertSame( 3 * 16 * self::MIB, MemoryBudget::range( 16 * self::MIB, 24 * self::MIB, 24 * self::MIB ), 'The response is held three times while it arrives.' );
-		self::assertSame( 8 * self::MIB + 20 * self::MIB, MemoryBudget::range( 8 * self::MIB, 20 * self::MIB, 16 * self::MIB ), 'A blob before the last is opened beside the whole range.' );
+		// A response of 16 MiB and its headers: 257 pages, three times, and a block for the request.
+		self::assertSame( 3 * 257 * self::PAGE + self::BLOCK, MemoryBudget::range( 16 * self::MIB, 24 * self::MIB, 24 * self::MIB ), 'The response is held three times while it arrives.' );
+		self::assertSame( 129 * self::PAGE + 20 * self::MIB, MemoryBudget::range( 8 * self::MIB, 20 * self::MIB, 16 * self::MIB ), 'A blob before the last is opened beside the whole range.' );
 		self::assertSame( 30 * self::MIB, MemoryBudget::range( 8 * self::MIB, 0, 30 * self::MIB ), 'The last blob is opened by itself.' );
-		self::assertSame( 3 * self::MIB, MemoryBudget::range( self::MIB, 0, 0 ) );
+		self::assertSame( 4 * self::BLOCK, MemoryBudget::range( self::MIB, 0, 0 ), 'A small response takes a block for each copy.' );
+		// Beside its body a response holds up to 16 KiB of status line and headers.
+		self::assertSame( 3 * 128 * self::PAGE + self::BLOCK, MemoryBudget::range( 128 * self::PAGE - 16384 - 32, 0, 0 ) );
+		self::assertSame( 3 * 129 * self::PAGE + self::BLOCK, MemoryBudget::range( 128 * self::PAGE - 16384 - 31, 0, 0 ) );
 	}
 
 	public function test_a_blob_is_taken_out_of_its_range_and_the_last_takes_the_range_with_it(): void {

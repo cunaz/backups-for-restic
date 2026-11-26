@@ -204,8 +204,8 @@ final class ReadMemoryTest extends TestCase {
 
 	/**
 	 * The report of #52: 104.5 MiB reserved before a full chunk is read. One chunk takes three
-	 * times its size while it arrives and while it is decrypted, 24 MiB, and 21.5 MiB are left
-	 * beside the 2 MiB that the budget keeps free.
+	 * times its size while it arrives and while it is decrypted, 26.2 MiB as PHP reserves it, and
+	 * 21.5 MiB are left beside the 2 MiB that the budget keeps free.
 	 */
 	public function test_a_chunk_that_does_not_fit_beside_the_memory_in_use_is_refused_before_it_is_downloaded(): void {
 		$repository = self::repository( 1 );
@@ -248,5 +248,74 @@ final class ReadMemoryTest extends TestCase {
 		self::assertSame( 'complete', $result['outcome'], json_encode( $result, JSON_THROW_ON_ERROR ) );
 		self::assertSame( [], $result['findings'] ?? null, 'Every blob was verified, and none is reported as damaged.' );
 		self::assertLessThanOrEqual( self::LIMIT - self::MARGIN, $result['peak'], sprintf( 'The peak of %.2f MiB stays 2 MiB below the limit.', $result['peak'] / self::MIB ) );
+	}
+
+	/**
+	 * Blobs that the budget lets through with exactly what it says they take
+	 * (tests/Fixtures/memory/boundary.php), as a restore reads them and as a check does, in the
+	 * states of PHP's allocator that a request can leave: small strings made and let go while
+	 * the blob arrives, whose pages PHP keeps, or blocks of 2 MiB cut up by strings of 1 MiB.
+	 * Before the budget counted what PHP reserves, a restore refused such a blob after it was
+	 * downloaded (decompression_limit) or ended with PHP's fatal error, and a check reported it
+	 * as damaged (blob_corrupt).
+	 *
+	 * @return iterable<string, array{string, string, string}>
+	 */
+	public static function boundaries(): iterable {
+		foreach ( [ 'restore', 'check' ] as $job ) {
+			yield $job . ': full chunk in raw blocks' => [ $job, 'chunk', 'quiet' ];
+			yield $job . ': full chunk in raw blocks, small strings while it arrives' => [ $job, 'chunk', 'churn' ];
+			yield $job . ': full chunk that compresses' => [ $job, 'text', 'quiet' ];
+			yield $job . ': full chunk that compresses, small strings while it arrives' => [ $job, 'text', 'churn' ];
+			yield $job . ': chunk of 1.5 MiB that compresses, small strings while it arrives' => [ $job, 'part', 'churn' ];
+			yield $job . ': chunk of 1.5 MiB that compresses, blocks cut up' => [ $job, 'part', 'fragmented' ];
+			yield $job . ': uncompressed chunk of 1.1 MiB, blocks cut up' => [ $job, 'plain', 'fragmented' ];
+			yield $job . ': blob of 200 bytes without a declared size' => [ $job, 'tiny', 'quiet' ];
+		}
+	}
+
+	#[DataProvider( 'boundaries' )]
+	public function test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded( string $job, string $blob, string $state ): void {
+		if ( 'plain' !== $blob && ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$directory = TempDir::create( 'read-memory-boundary' );
+		try {
+			$file = $directory . '/request.json';
+			file_put_contents(
+				$file,
+				json_encode(
+					[
+						'root'  => dirname( __DIR__, 3 ),
+						'job'   => $job,
+						'blob'  => $blob,
+						'state' => $state,
+						'work'  => $directory . '/work',
+					],
+					JSON_THROW_ON_ERROR
+				)
+			);
+			$process = proc_open(
+				[ PHP_BINARY, '-d', 'memory_limit=512M', '-d', 'opcache.enable_cli=0', '-d', 'display_errors=stderr', dirname( __DIR__, 2 ) . '/Fixtures/memory/boundary.php', $file ],
+				[
+					1 => [ 'pipe', 'w' ],
+					2 => [ 'pipe', 'w' ],
+				],
+				$pipes
+			);
+			self::assertIsResource( $process );
+			$output = (string) stream_get_contents( $pipes[1] );
+			$errors = (string) stream_get_contents( $pipes[2] );
+			proc_close( $process );
+			$result = json_decode( $output, true );
+			self::assertIsArray( $result, $output . $errors );
+			self::assertSame( 'read', $result['outcome'], $output . $errors );
+			if ( 'check' === $job ) {
+				self::assertSame( [], $result['findings'], 'Nothing is reported as damaged.' );
+				self::assertSame( 2, $result['verified'], 'The tree and the blob were verified.' );
+			}
+		} finally {
+			TempDir::remove( $directory );
+		}
 	}
 }

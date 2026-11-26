@@ -23,6 +23,7 @@ use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\RepositoryChanged;
@@ -99,6 +100,9 @@ final class CheckRun {
 	 * so only a marker written before the read tells the next request what happened.
 	 */
 	public const int READ_ATTEMPTS = 3;
+
+	/** What the finding pack_memory says. */
+	private const string PACK_MEMORY = 'A blob of the pack does not fit into the memory that PHP has left; run restic check --read-data from another computer to verify it.';
 
 	/** Within a call, the checkpoint is written again once it is this many seconds old. */
 	private const int CHECKPOINT_SECONDS = 5;
@@ -440,6 +444,7 @@ final class CheckRun {
 	 * Reads one index file and records the expected size and blob count of its packs.
 	 *
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If the file cannot be decoded in the memory left, which is no damage.
 	 */
 	private function check_index_file(): void {
 		$name = $this->state['index_files'][ $this->state['position'] ] ?? null;
@@ -453,7 +458,7 @@ final class CheckRun {
 		} catch ( NotFound ) {
 			$this->find( 'error', 'index_unreadable', $name, 'The index file disappeared from the server.' );
 			$packs = [];
-		} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+		} catch ( BackendException | UnsupportedRepository | IndexTooLarge | InsufficientDecodingMemory $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'index_unreadable', $name, $exception->getMessage() );
@@ -610,6 +615,7 @@ final class CheckRun {
 	 * hundreds of snapshots still advances in short ticks.
 	 *
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If the snapshot cannot be decoded in the memory left, which is no damage.
 	 */
 	private function check_snapshot(): void {
 		$name = $this->state['snapshot_names'][ $this->state['position'] ] ?? null;
@@ -625,7 +631,7 @@ final class CheckRun {
 			$this->state['roots'][ Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) )->tree->hex() ] = true;
 		} catch ( NotFound ) {
 			$this->find( 'error', 'snapshot_unreadable', $name, 'The snapshot disappeared from the server.' );
-		} catch ( BackendException | UnsupportedRepository $exception ) {
+		} catch ( BackendException | UnsupportedRepository | InsufficientDecodingMemory $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'snapshot_unreadable', $name, $exception->getMessage() );
@@ -636,6 +642,7 @@ final class CheckRun {
 	 * Walks one tree.
 	 *
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If the tree cannot be decoded in the memory left, which is no damage.
 	 */
 	private function check_tree(): void {
 		$hex = array_pop( $this->state['frontier'] );
@@ -661,7 +668,8 @@ final class CheckRun {
 			// Damage, not a transport error: the pack that holds the tree is gone.
 			$this->find( 'error', 'tree_unreadable', $hex, 'The pack that holds the tree is missing on the server.' );
 			return;
-		} catch ( BackendException | UnsupportedRepository $exception ) {
+		} catch ( BackendException | UnsupportedRepository | InsufficientDecodingMemory $exception ) {
+			// Too little memory to decode the tree is no damage, and the walk cannot go on without it.
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'tree_unreadable', $hex, $exception->getMessage() );
@@ -748,7 +756,9 @@ final class CheckRun {
 	 * With a memory budget a piece is also no larger than the memory left can take
 	 * (MemoryBudget::range()). A pack with a blob that does not fit by itself becomes the warning
 	 * pack_memory before any of it is downloaded, as a pack that cannot be read within a request
-	 * becomes pack_unverified.
+	 * becomes pack_unverified. So does a pack with a blob that the decoder finds too large for
+	 * the memory left once it is downloaded, as a frame without a declared size can be: that is
+	 * a limit of the host, not damage (blob_corrupt).
 	 *
 	 * @param string $pack Pack ID (hex).
 	 * @throws BackendException If the server cannot be reached.
@@ -776,10 +786,10 @@ final class CheckRun {
 				$blobs                 = $entry->offset + $entry->length;
 			}
 			// After the blobs, the rest of the pack is read in pieces of the configured size.
-			$largest = max( $largest, MemoryBudget::RESPONSE_COPIES * min( $this->state['piece'], $size - $blobs ) );
+			$largest = max( $largest, MemoryBudget::range( min( $this->state['piece'], $size - $blobs ), 0, 0 ) );
 			$room    = $this->repository->memory()?->available() ?? PHP_INT_MAX;
 			if ( $largest > $room ) {
-				$this->find( 'warning', 'pack_memory', $pack, 'A blob of the pack does not fit into the memory that PHP has left; run restic check --read-data from another computer to verify it.' );
+				$this->find( 'warning', 'pack_memory', $pack, self::PACK_MEMORY );
 				return;
 			}
 			$context  = hash_init( 'sha256' );
@@ -811,6 +821,11 @@ final class CheckRun {
 						++$verified;
 					} catch ( UnsupportedRepository $exception ) {
 						throw $exception;
+					} catch ( InsufficientDecodingMemory ) {
+						// Not damage: decoding the blob takes more than the memory left, as for a
+						// frame without a declared size and with a large window.
+						$this->find( 'warning', 'pack_memory', $pack, self::PACK_MEMORY );
+						return;
 					} catch ( PluginException $exception ) {
 						$failed[ $position ] = $exception->getMessage();
 					}
@@ -1035,16 +1050,18 @@ final class CheckRun {
 	/**
 	 * Returns the index, loading it on first use: through the cache if there is one, and from
 	 * the index files that can be read if the cache meets a damaged one. A damaged index file
-	 * is a finding of the index phase; it must not stop the check that is to find it.
+	 * is a finding of the index phase; it must not stop the check that is to find it. A file
+	 * that cannot be decoded in the memory left is no damage and stops the check.
 	 *
 	 * @return IndexSet Index.
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If an index file cannot be decoded in the memory left.
 	 */
 	private function index(): IndexSet {
 		if ( null === $this->index ) {
 			try {
 				$this->index = null === $this->cache ? $this->readable_index() : $this->cache->load( $this->repository );
-			} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+			} catch ( BackendException | UnsupportedRepository | IndexTooLarge | InsufficientDecodingMemory $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				$this->index = $this->readable_index();
@@ -1055,10 +1072,12 @@ final class CheckRun {
 
 	/**
 	 * The index from every index file that can be read. A damaged index file is a finding of
-	 * the index phase; it must not stop the rest of the check.
+	 * the index phase; it must not stop the rest of the check. One that cannot be decoded in the
+	 * memory left is not left out, which would report its blobs as missing: it stops the check.
 	 *
 	 * @return IndexSet Index.
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If an index file cannot be decoded in the memory left.
 	 */
 	private function readable_index(): IndexSet {
 		$index = new IndexSet();
@@ -1072,7 +1091,7 @@ final class CheckRun {
 				}
 			} catch ( NotFound ) {
 				continue;
-			} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+			} catch ( BackendException | UnsupportedRepository | IndexTooLarge | InsufficientDecodingMemory $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				continue;
