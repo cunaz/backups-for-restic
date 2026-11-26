@@ -349,8 +349,20 @@ final class DirectorySpellingsTest extends TestCase {
 
 	public function test_a_folder_that_settles_once_and_changes_again_gets_five_readings_again(): void {
 		$this->photos();
+		// Two readings that changes cut short, so that the count is not zero when one completes.
+		for ( $tick = 0; $tick < 2; ++$tick ) {
+			try {
+				( new DirectorySpellings( $this->workspace, 0 ) )->unique( $this->folder, 'photo-1' );
+				self::fail( 'A reading without time completed.' );
+			} catch ( FileWorkPending ) {
+				$this->upload( 200 + $tick );
+			}
+		}
+		$this->stable();
 		self::assertTrue( ( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' ) );
-		// A complete reading cut nothing short: the five readings count from the next change.
+		self::assertSame( 2, ord( substr( (string) file_get_contents( $this->checkpoint() ), -1 ) ), 'The complete reading began after two that were cut short.' );
+		// A complete reading clears the count: the five readings count from the next change, not
+		// from the two before it.
 		$this->upload( 100 );
 		self::assertSame( 5, $this->ticks_until_refused( 0 ) );
 	}
