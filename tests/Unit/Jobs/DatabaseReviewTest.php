@@ -510,6 +510,13 @@ final class DatabaseReviewTest extends TestCase {
 		// A key of such bytes, and the same facts with the hexadecimal as their text, which an encodable review could show.
 		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', DatabaseReview::digest( 1, [ [ "m\xF6bel" => 'x' ] ] ) );
 		self::assertNotSame( DatabaseReview::digest( 1, [ [ "m\xF6bel" => 'x' ] ] ), DatabaseReview::digest( 1, [ [ 'h' . bin2hex( "m\xF6bel" ) => bin2hex( 'x' ) ] ] ) );
+		// Facts that JSON cannot encode for another reason cannot be encoded in the other form either.
+		try {
+			DatabaseReview::digest( 1, [ "m\xF6bel", NAN ] );
+			self::fail( 'A digest of facts that JSON cannot encode.' );
+		} catch ( \JsonException $error ) {
+			self::assertSame( JSON_ERROR_INF_OR_NAN, $error->getCode() );
+		}
 		// Facts that can be encoded keep the bytes of the expression before.
 		$encodable = [ 'discard', 7, [ 'database' => 'site' ] ];
 		self::assertSame( hash( 'sha256', json_encode( [ 1, ...$encodable ], JSON_THROW_ON_ERROR ) ), DatabaseReview::digest( 1, $encodable ) );

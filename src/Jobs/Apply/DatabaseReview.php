@@ -350,7 +350,8 @@ final readonly class DatabaseReview {
 	 * Facts with bytes that are not UTF-8, such as the name of a database that a connection in
 	 * latin1 reports, cannot be encoded as JSON. They are hashed with every key and string
 	 * given as hexadecimal, after the version followed by ":hex": no encodable facts have that
-	 * form, and the digest of every fact that can be encoded stays the same.
+	 * form, and the digest of every fact that can be encoded stays the same. Facts that JSON
+	 * cannot encode for another reason cannot be encoded in that form either.
 	 *
 	 * @param int         $version What this kind of review shows, counted up when that changes.
 	 * @param list<mixed> $facts What the review shows and binds, in a fixed order.
@@ -360,10 +361,7 @@ final readonly class DatabaseReview {
 	public static function digest( int $version, array $facts ): string {
 		try {
 			return hash( 'sha256', json_encode( [ $version, ...$facts ], JSON_THROW_ON_ERROR ) );
-		} catch ( \JsonException $error ) {
-			if ( JSON_ERROR_UTF8 !== $error->getCode() ) {
-				throw $error;
-			}
+		} catch ( \JsonException ) {
 			return hash( 'sha256', json_encode( [ $version . ':hex', ...self::hex( $facts ) ], JSON_THROW_ON_ERROR ) );
 		}
 	}
