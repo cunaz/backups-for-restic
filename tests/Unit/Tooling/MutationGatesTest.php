@@ -436,8 +436,9 @@ final class MutationGatesTest extends TestCase {
 
 	/**
 	 * Floors as the script reads them: the configuration's lines, the arguments, what the script
-	 * prints, and whether Infection started. The run has 10 timed-out mutants of 100, so both
-	 * scores lie between 85 % and 95 %.
+	 * prints (of PHP's reason for a file that is not JSON only the start, as PHP 8.6 adds the
+	 * place to it), and whether Infection started. The run has 10 timed-out mutants of 100, so
+	 * both scores lie between 85 % and 95 %.
 	 *
 	 * @return array<string, array{string, list<string>, string, bool}>
 	 */
@@ -449,8 +450,8 @@ final class MutationGatesTest extends TestCase {
 			'a floor in a comment'             => [ "    // \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "", minCoveredMsi "84")', false ],
 			'a floor in exponent notation'     => [ "    \"minMsi\": 8.6e1,\n    \"minCoveredMsi\": 84,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
 			'a floor in hexadecimal'           => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 0x54,\n", [], '::error::The floors of infection.json5.dist cannot be read (minMsi "", minCoveredMsi "")', false ],
-			'a floor with a sign'              => [ "    \"minMsi\": +80,\n    \"minCoveredMsi\": 84,\n", [], 'infection.json5.dist is not JSON once its comments are taken out (Syntax error), so its minMsi cannot be read.', false ],
-			'a floor without quotes'           => [ "    minMsi: 80,\n    \"minCoveredMsi\": 84,\n", [], 'infection.json5.dist is not JSON once its comments are taken out (Syntax error), so its minCoveredMsi cannot be read.', false ],
+			'a floor with a sign'              => [ "    \"minMsi\": +80,\n    \"minCoveredMsi\": 84,\n", [], 'The minMsi of infection.json5.dist cannot be read: the file is not JSON once its comments are taken out (Syntax error', false ],
+			'a floor without quotes'           => [ "    minMsi: 80,\n    \"minCoveredMsi\": 84,\n", [], 'The minCoveredMsi of infection.json5.dist cannot be read: the file is not JSON once its comments are taken out (Syntax error', false ],
 			'a floor as a string'              => [ "    \"minMsi\": \"80\",\n    \"minCoveredMsi\": 84,\n", [], '(minMsi ""80"", minCoveredMsi "84")', false ],
 			'a floor that is no number'        => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": null,\n", [], '(minMsi "80", minCoveredMsi "null")', false ],
 			'a floor below zero'               => [ "    \"minMsi\": -1,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "-1", minCoveredMsi "84")', false ],

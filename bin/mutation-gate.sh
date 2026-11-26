@@ -111,7 +111,7 @@ $plain = (string) preg_replace_callback(
 );
 $read = json_decode( $plain, true );
 if ( ! is_array( $read ) ) {
-	fwrite( STDERR, "$file is not JSON once its comments are taken out (" . json_last_error_msg() . "), so its $name cannot be read.\n" );
+	fwrite( STDERR, "The $name of $file cannot be read: the file is not JSON once its comments are taken out (" . json_last_error_msg() . ").\n" );
 	exit( 1 );
 }
 // In JSON only the name of a member stands before a colon, so these are the names, at any depth.
