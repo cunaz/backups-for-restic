@@ -351,6 +351,10 @@ All notable changes are documented here. The format follows
   tmpfs, which lists the newest entry first, a deadline between the undone marker and the
   count left an attempted change that no undo had reverted: the apply was listed for undo
   again until its 24 hours ended.
+- A cancelled apply or undo whose cleanup failed afterwards, for example because the site
+  could not leave maintenance mode, shows that failure on the admin page beside its state and
+  its counts, and WP-CLI's report of a cancelled undo names it too. Before, only a failed job
+  showed its error, and the page said "Cancelled" while the maintenance page stayed up.
 - While a stored job cannot be read, no staging and no sealed review expires. Such a job may
   be an apply within its recovery window: before, the staging of its restore expired with its
   own hours and its sealed review after one, while its journal stayed, so that once the job

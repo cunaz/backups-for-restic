@@ -339,24 +339,35 @@
 		return lines;
 	}
 
+	/**
+	 * How a job that did not succeed ended: its error, where it has one, and the state of a job
+	 * that did not fail, such as a cancelled job whose cleanup failed afterwards, for example
+	 * when the site could not leave maintenance mode. A cancelled job without an error shows its
+	 * state alone.
+	 *
+	 * @param {Object} job Ended job.
+	 * @return {Array<Element>} Notices.
+	 */
+	function stopped( job ) {
+		const failure = job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : null;
+		if ( failure && 'failed' === job.state ) {
+			return [ failure ];
+		}
+		return [ notice( 'info', job.state_label ), failure ];
+	}
+
 	function jobOutcome( job ) {
 		const result = job.result || {};
 		if ( 'undo' === job.type && 'succeeded' !== job.state && 'number' === typeof result.kept ) {
 			// A stopped undo still says what it did before it stopped, and what it kept.
-			return el( 'div', {}, [
-				'failed' === job.state && job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : notice( 'info', job.state_label ),
-				undoOutcome( job ),
-			] );
+			return el( 'div', {}, [ ...stopped( job ), undoOutcome( job ) ] );
 		}
 		if ( 'apply' === job.type && 'succeeded' !== job.state && 'number' === typeof result.entries_attempted ) {
 			// A stopped apply says how far it got: what it changed can be undone.
-			return el( 'div', {}, [
-				'failed' === job.state && job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : notice( 'info', job.state_label ),
-				applyStopped( result ),
-			] );
+			return el( 'div', {}, [ ...stopped( job ), applyStopped( result ) ] );
 		}
-		if ( 'failed' === job.state && job.error ) {
-			return notice( 'error', job.error.message + ' ' + job.error.hint );
+		if ( 'succeeded' !== job.state && job.error ) {
+			return el( 'div', {}, stopped( job ) );
 		}
 		if ( 'succeeded' === job.state && 'restore' === job.type ) {
 			return el( 'div', {}, [

@@ -1502,7 +1502,10 @@ translated message and a hint. The codes:
 file preview, apply or undo it gives the job's own code where the exception carries none
 in its context (`JobError::FILE_JOB_CODES`). Whether a code is retried still follows the
 exception, so this changes no retry. A failed or cancelled apply records
-`entries_completed` and `entries_attempted`, which the admin page shows with the error.
+`entries_completed` and `entries_attempted`, which the admin page shows with the error. A
+cancelled job whose cleanup failed afterwards, for example because the site could not leave
+maintenance mode, stays cancelled and has that failure as its error: the admin page shows the
+error beside the state and the counts, and so does WP-CLI's report of a cancelled undo.
 
 The texts of a job's error code are those of the kind of job that ended with it
 (`Messages::job_failure()`; the kind is the job's type, and `undo_review` for the file preview

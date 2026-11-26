@@ -501,6 +501,62 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_a_cancelled_job_whose_cleanup_failed_is_answered_with_its_state_its_counts_and_its_error(): void {
+		$undo   = '20261126T160000Z-0c4001';
+		$apply  = '20261126T160000Z-0c4002';
+		$backup = '20261126T160000Z-0c4003';
+		// Cancelled, and then the site could not leave maintenance mode: the runner keeps the
+		// state cancelled and records the cleanup's failure as the job's error.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$stuck = new BackupsForRestic\Jobs\JobError( "maintenance_stuck", "The maintenance marker could not be removed.", false );
+			$jobs  = [
+				[ $arguments[0], BackupsForRestic\Jobs\JobType::Undo, [ "restored" => 1, "removed" => 2, "kept" => 0, "unchanged" => 0, "apply_state" => "partly_undone" ], $stuck ],
+				[ $arguments[1], BackupsForRestic\Jobs\JobType::Apply, [ "entries_completed" => 2, "entries_attempted" => 3 ], $stuck ],
+				[ $arguments[2], BackupsForRestic\Jobs\JobType::Backup, [], null ],
+			];
+			foreach ( $jobs as [ $id, $type, $result, $error ] ) {
+				$job              = new BackupsForRestic\Jobs\Job( $id, $type, "manual", time() - 120 );
+				$job->state       = BackupsForRestic\Jobs\JobState::Cancelled;
+				$job->finished_at = time() - 60;
+				$job->data        = [ "apply" => "20261120T000000Z-0a0b05", "restore" => "20261120T000000Z-0a0b06" ];
+				$job->result      = $result;
+				$job->error       = $error;
+				$container->jobs()->save( $job );
+			}
+			',
+			[ $undo, $apply, $backup ]
+		);
+		try {
+			$answers = [];
+			foreach ( [ $undo, $apply, $backup ] as $id ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', '/jobs/' . $id );
+				self::assertSame( 200, $status, $raw );
+				$answers[ $id ] = [ $answer['job']['state'] ?? null, $answer['job']['error']['code'] ?? null, $answer['job']['error']['message'] ?? null ];
+			}
+			// What the admin page shows a stopped apply or undo from: the state, the counts and the error.
+			self::assertSame(
+				[
+					$undo   => [ 'cancelled', 'maintenance_stuck', 'The site could not leave maintenance mode.' ],
+					$apply  => [ 'cancelled', 'maintenance_stuck', 'The site could not leave maintenance mode.' ],
+					$backup => [ 'cancelled', null, null ],
+				],
+				$answers
+			);
+			// WP-CLI's report after an undo. Before: "The undo was cancelled.", without the failure.
+			$report              = '( new ReflectionMethod( BackupsForRestic\WordPress\CliCommand::class, "report" ) )->invoke( new BackupsForRestic\WordPress\CliCommand( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) ), "' . $undo . '" );';
+			[ $status, $output ] = TestSite::wp( [ 'eval', $report ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The undo was cancelled. The site could not leave maintenance mode. Before it stopped, it did this: 1 restored, 2 removed, 0 kept, 0 unchanged.', $output );
+		} finally {
+			foreach ( [ $undo, $apply, $backup ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
 	public function test_an_undo_cancelled_after_it_counted_every_entry_records_its_apply_as_undone(): void {
 		$site  = TestSite::root();
 		$apply = '20261126T140000Z-0c1010';

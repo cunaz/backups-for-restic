@@ -205,6 +205,47 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	await expect( rows.first().locator( 'code' ) ).toHaveText( snapshot );
 } );
 
+test( 'a cancelled apply or undo whose cleanup failed shows the failure beside its state and counts', async ( { page } ) => {
+	// Ended jobs, written as the runner leaves them: cancelled, and then the site could not leave
+	// maintenance mode, which the runner records as the job's error. Nothing ticks an ended job.
+	const jobs = [
+		[ '20261126T170000Z-0c5001', 'undo', { restored: 1, removed: 2, kept: 0, unchanged: 0, apply_state: 'partly_undone' }, true ],
+		[ '20261126T170000Z-0c5002', 'apply', { entries_completed: 2, entries_attempted: 3 }, true ],
+		[ '20261126T170000Z-0c5003', 'apply', { entries_completed: 0, entries_attempted: 0 }, false ],
+	];
+	const container = '$container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); ';
+	wordpress(
+		siteRoot(),
+		container + 'foreach ( json_decode( $argv[2], true ) as [ $id, $type, $result, $failed ] ) {' +
+			' $job = new BackupsForRestic\\Jobs\\Job( $id, BackupsForRestic\\Jobs\\JobType::from( $type ), "manual", time() - 120 );' +
+			' $job->state = BackupsForRestic\\Jobs\\JobState::Cancelled; $job->finished_at = time() - 60; $job->result = $result;' +
+			' $job->data = [ "apply" => "20261120T000000Z-0a0b07", "restore" => "20261120T000000Z-0a0b08" ];' +
+			' $job->error = $failed ? new BackupsForRestic\\Jobs\\JobError( "maintenance_stuck", "The maintenance marker could not be removed.", false ) : null;' +
+			' $container->jobs()->save( $job ); }',
+		[ JSON.stringify( jobs ) ],
+	);
+	try {
+		const open = ( id ) => page.goto( '/wp-admin/admin.php?page=backups-for-restic&tab=restores&job=' + id );
+		// Before, a job that was not "failed" showed its state alone, and the failure was hidden.
+		await open( jobs[ 0 ][ 0 ] );
+		await expect( notice( page, 'error', 'The site could not leave maintenance mode.' ) ).toBeVisible();
+		await expect( notice( page, 'error', 'The site could not leave maintenance mode.' ) ).toContainText( 'Delete that file if no update is running.' );
+		await expect( notice( page, 'info', 'Cancelled' ) ).toBeVisible();
+		await expect( notice( page, 'warning', 'The apply is partly undone: 1 restored, 2 removed, 0 kept.' ) ).toBeVisible();
+		await open( jobs[ 1 ][ 0 ] );
+		await expect( notice( page, 'error', 'The site could not leave maintenance mode.' ) ).toBeVisible();
+		await expect( notice( page, 'info', 'Cancelled' ) ).toBeVisible();
+		await expect( page.locator( '.bfr-apply-stopped' ) ).toContainText( 'The apply completed 2 of the 3 file changes that it attempted before it stopped.' );
+		// A cancelled job without an error shows its state, as before.
+		await open( jobs[ 2 ][ 0 ] );
+		await expect( page.locator( '.bfr-apply-stopped' ) ).toContainText( 'The apply stopped before it changed any live file.' );
+		await expect( notice( page, 'info', 'Cancelled' ) ).toBeVisible();
+		await expect( page.locator( '#backups-for-restic-app .notice-error' ) ).toHaveCount( 0 );
+	} finally {
+		wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $id ); }', jobs.map( ( job ) => job[ 0 ] ) );
+	}
+} );
+
 test( 'a selected snapshot file can be staged and downloaded', async ( { page } ) => {
 	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
 	// The cleanup after the first backup holds the repository for a moment; an administrator
