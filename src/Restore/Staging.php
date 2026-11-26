@@ -375,6 +375,13 @@ final class Staging {
 	 * failed and tried again by the next call; it never keeps the staging of other restores
 	 * from expiring.
 	 *
+	 * While a stored job cannot be read (JobStore::unreadable()), no staging is set aside and no
+	 * sealed review is removed: that job may be an apply within its recovery window whose undo
+	 * needs them. Before, the staging of its restore expired with its own hours and the sealed
+	 * review after one, while the apply's journal stayed, so that the undo offered once the
+	 * document could be read again was refused with file_staging_gone. Undo workspaces are
+	 * decided by their own apply's records, as before, and what was set aside is deleted.
+	 *
 	 * @param int   $hours Staging lifetime.
 	 * @param float $deadline Deletion deadline.
 	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
@@ -383,13 +390,14 @@ final class Staging {
 		$active       = $this->jobs->active();
 		$now          = $this->clock->now()[0];
 		$pinned_plans = $this->jobs->pinned_file_plans( $now );
+		$held         = null !== $this->jobs->unreadable();
 		$failed       = 0;
 		foreach ( $this->jobs->file_changes() as $job ) {
 			if ( $this->late( $deadline ) ) {
 				break;
 			}
 			try {
-				if ( JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
+				if ( ! $held && JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
 					if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
 						unset( $job->data['plan_retained'] );
 						$this->jobs->save( $job );
@@ -415,7 +423,7 @@ final class Staging {
 		$removed = 0;
 		$pending = 0;
 		$aside   = $survey['removing'];
-		foreach ( $survey['due'] as $id ) {
+		foreach ( $held ? [] : $survey['due'] as $id ) {
 			if ( in_array( self::REMOVING . $id, $aside, true ) ) {
 				// An earlier removal under this name is deleted below; then this one can follow.
 				++$pending;

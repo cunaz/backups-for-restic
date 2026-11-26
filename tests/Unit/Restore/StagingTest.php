@@ -481,6 +481,25 @@ final class StagingTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->restores . '/' . $job->id );
 	}
 
+	public function test_no_staging_expires_while_a_stored_job_cannot_be_read(): void {
+		$expired  = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$leftover = '20251230T000000Z-0a1b2c';
+		$this->stage( $leftover );
+		$aside = $this->restores . '/' . Staging::REMOVING . '20251229T000000Z-0d0e0f';
+		mkdir( $aside . '/files', 0700, true );
+		// Any job: what it is cannot be read, so it may be an apply whose undo needs a staging.
+		$unreadable = $this->job( JobState::Succeeded, $this->clock->seconds );
+		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
+		self::assertSame( $unreadable->id, $this->jobs->unreadable() );
+		// Before, both expired with their own hours.
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertEqualsCanonicalizing( [ $expired->id, $leftover ], $this->names(), 'What was set aside before goes on being deleted.' );
+		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
+		self::assertNull( $this->jobs->unreadable() );
+		self::assertSame( 2, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
 	public function test_a_staging_whose_job_document_is_gone_is_no_leftover_while_its_report_cannot_be_looked_up(): void {
 		$job = $this->restored( $this->clock->seconds - 60 );
 		// Pruned with the old jobs: the job's directory is gone, so it is established that no document is.

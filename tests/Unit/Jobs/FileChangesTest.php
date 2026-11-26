@@ -1754,6 +1754,94 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryExists( $this->files );
 	}
 
+	/**
+	 * How the document of an ended apply comes to be one that this process cannot read.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function apply_documents_that_cannot_be_read(): array {
+		return [
+			'below a job directory that cannot be searched' => [ 'unsearchable' ],
+			'written by a newer version of the plugin' => [ 'newer' ],
+		];
+	}
+
+	/**
+	 * Makes the document of a job one that get() does not load, and returns what makes it
+	 * readable again.
+	 *
+	 * @param Job    $job Job.
+	 * @param string $how unsearchable or newer.
+	 * @return \Closure(): void Undoes it.
+	 */
+	private function unreadable_document( Job $job, string $how ): \Closure {
+		$folder = $this->jobs->directory( $job );
+		if ( 'newer' === $how ) {
+			$saved = (string) file_get_contents( $folder . '/job.json' );
+			file_put_contents( $folder . '/job.json', (string) json_encode( [ 'schema' => Job::SCHEMA + 1 ] + (array) json_decode( $saved, true ) ) );
+			$readable = static function () use ( $folder, $saved ): void {
+				file_put_contents( $folder . '/job.json', $saved );
+			};
+		} else {
+			chmod( $folder, 0600 );
+			$readable = static function () use ( $folder ): void {
+				chmod( $folder, 0700 );
+			};
+			if ( is_executable( $folder ) ) {
+				$readable();
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+		}
+		self::assertNull( $this->jobs->get( $job->id ) );
+		self::assertSame( $job->id, $this->jobs->unreadable() );
+		return $readable;
+	}
+
+	#[DataProvider( 'apply_documents_that_cannot_be_read' )]
+	public function test_an_apply_whose_document_cannot_be_read_keeps_the_staged_files_that_its_undo_needs( string $how ): void {
+		$apply    = $this->run_job( $this->start() );
+		$readable = $this->unreadable_document( $apply, $how );
+		try {
+			// Past the staging's own hour, well within the apply's window of 24 hours.
+			$this->clock->advance( 3601 );
+			$this->staging->remove_due( 1, PHP_FLOAT_MAX );
+		} finally {
+			$readable();
+		}
+		// Before, the staging expired with its own hour while the journal stayed: the apply was
+		// listed as undoable again, and its undo was refused with file_staging_gone.
+		self::assertDirectoryExists( $this->files );
+		self::assertSame( [ [ $apply->id, 'applied' ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'] ], $this->changes->undoable() ) );
+		$this->undo( $apply );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		// With every document readable, the staging expires as before once nothing needs it.
+		$this->staging->remove_due( 1, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( $this->files );
+	}
+
+	#[DataProvider( 'apply_documents_that_cannot_be_read' )]
+	public function test_a_background_apply_whose_document_cannot_be_read_keeps_its_sealed_review_and_staged_files( string $how ): void {
+		$plan     = $this->run_job( $this->queue_large_preview() );
+		$apply    = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		$sealed   = dirname( $this->files ) . '/plans/' . $plan->id;
+		$readable = $this->unreadable_document( $apply, $how );
+		try {
+			$this->clock->advance( 3601 );
+			$this->staging->remove_due( 1, PHP_FLOAT_MAX );
+		} finally {
+			$readable();
+		}
+		// Before, the sealed review went after its hour and the staging after its own, as for an
+		// apply whose window had ended.
+		self::assertDirectoryExists( $sealed );
+		self::assertDirectoryExists( $this->files );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		$this->run_job( $this->changes->start_undo( $apply->id, $review->result['digest'], '', $review->id ) );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
 	public function test_a_stopped_apply_records_no_count_of_attempted_entries_that_cannot_be_established(): void {
 		$job = $this->start();
 		$this->runner->tick( 0.0 ); // Preflight.

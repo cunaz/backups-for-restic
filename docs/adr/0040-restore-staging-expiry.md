@@ -86,7 +86,8 @@ packages must never be offered a tree that is half gone.
 - "A job whose document this version cannot read" includes one whose document cannot be
   looked up, below a job directory that the PHP user cannot search, or that is something
   other than a file (`JobStore::has_document()`): its staging is neither listed nor removed,
-  and `DELETE /restores/{id}` answers `job_unreadable`. A directory whose job document is gone,
+  and `DELETE /restores/{id}` answers `job_inaccessible` or `job_unreadable`, which name the
+  job. A directory whose job document is gone,
   which is established only where the job's directory or its document is missing, and whose
   report cannot be looked up is not touched either: it is neither staging with a report nor a
   leftover without one. Before (until 2026-11-26), both counted as gone, so that the staging
@@ -95,3 +96,16 @@ packages must never be offered a tree that is half gone.
 - The undo workspace of an apply is removed once its window of 24 hours is over or its records
   establish that no window is open; records that cannot be established keep it, and the
   staging and the sealed review of the apply, for the window, as an open window does.
+- While any stored job cannot be read (`JobStore::unreadable()`), the heartbeat sets no
+  staging aside and removes no sealed review, whatever their own hours say; what was set aside
+  before goes on being deleted, and the undo workspaces of applies that can be read are decided
+  as before. Such a job may be an apply within its window whose undo needs the staging of its
+  restore and its sealed review, and its document cannot say which. Before (until 2026-11-26),
+  they expired with their own hours while the apply's journal stayed, so that once the document
+  could be read again the apply was offered for undo and the undo refused with
+  `file_staging_gone`. A hold of 24 hours from the time in the job's ID was not chosen: the
+  window ends 24 hours after the apply ended, which the ID does not give, so it would end early
+  for an apply that ran long, and for a document of a newer version the meaning of its window is
+  not known. The hold lasts only as long as a state that blocks every new job, backups
+  included, and whose refusal names the job; staged files past their hours stay meanwhile, and
+  `DELETE /restores/{id}` still removes one on request.

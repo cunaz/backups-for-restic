@@ -411,7 +411,9 @@ Every route that asks for the WordPress password asks through one check
   removed, because nothing proves that its job has ended; it goes with a version that can
   read the document, or with the uninstall. A document that cannot be looked up, below a job
   directory that the PHP user cannot search, counts as one that cannot be read, and the
-  staging of a pruned job whose report cannot be looked up is not touched either.
+  staging of a pruned job whose report cannot be looked up is not touched either. While any
+  stored job cannot be read, no staging and no sealed review expires: that job may be an apply
+  whose undo needs them. Every new job is refused meanwhile with a code that names the job.
   Active review, apply and undo jobs can pin their source while they run. An apply keeps
   its staging, its sealed review and its undo journal for its 24-hour recovery window, also
   while the records of its undo (`undo/attempted`, `undo/reverted`) cannot be looked up or are

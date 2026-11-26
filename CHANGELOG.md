@@ -343,6 +343,11 @@ All notable changes are documented here. The format follows
   REST API returns as `job`, and `GET /jobs/{id}`, its log, its cancellation and the
   WP-CLI commands `logs` and `cancel` answer for that job as the refusal does, where they
   said that it did not exist.
+- While a stored job cannot be read, no staging and no sealed review expires. Such a job may
+  be an apply within its recovery window: before, the staging of its restore expired with its
+  own hours and its sealed review after one, while its journal stayed, so that once the job
+  could be read again the apply was offered for undo and the undo refused with
+  `file_staging_gone`.
 - A stopped apply or undo records what it did also when another part of its cleanup fails:
   when the site cannot leave maintenance mode, when its verification data cannot be removed,
   and when that removal has to wait for a later tick, which a deactivation may never give.

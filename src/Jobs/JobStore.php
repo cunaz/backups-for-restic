@@ -498,6 +498,26 @@ final class JobStore {
 	}
 
 	/**
+	 * The newest stored job that get() does not load although has_document() counts its
+	 * document. Its type and state are unknown, so it may be an apply within its recovery
+	 * window, whose undo needs the staging of its restore and its sealed review; neither
+	 * restore_pins() nor pinned_file_plans() can name them. The window of an apply ends 24 hours
+	 * after the apply ended, a time that its ID does not give, so a time-bound hold would end
+	 * early for an apply that ran long. Staging::expire() therefore removes no staging and no
+	 * sealed review while there is such a job. It blocks every new job too (require_idle()).
+	 *
+	 * @return string|null Job ID, or null if every stored document can be read.
+	 */
+	public function unreadable(): ?string {
+		foreach ( $this->ids() as $id ) {
+			if ( null === $this->get( $id ) && $this->has_document( $id ) ) {
+				return $id;
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * Sealed disk plans in use by an active apply, its undo preview or the undo window, also
 	 * that of an apply whose undo records cannot be established (undo_open()).
 	 *
