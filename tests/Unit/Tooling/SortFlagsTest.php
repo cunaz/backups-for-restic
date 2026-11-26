@@ -40,7 +40,10 @@ final class SortFlagsTest extends TestCase {
 	/** The flags that say how array_multisort() compares the array before them. */
 	private const array TYPE_FLAGS = [ 'SORT_REGULAR', 'SORT_NUMERIC', 'SORT_STRING', 'SORT_LOCALE_STRING', 'SORT_NATURAL' ];
 
-	/** The flags of array_multisort() that say only in which direction it sorts. */
+	/**
+	 * The flags of array_multisort() that do not say how it compares: the direction, and
+	 * SORT_FLAG_CASE, which changes a type flag beside it and alone means SORT_REGULAR.
+	 */
 	private const array ORDER_FLAGS = [ 'SORT_ASC', 'SORT_DESC', 'SORT_FLAG_CASE' ];
 
 	/** The escapes of a single-quoted string. */
