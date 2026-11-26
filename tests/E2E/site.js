@@ -11,6 +11,30 @@ const net = require( 'node:net' );
 const ROOT = path.resolve( __dirname, '../..' );
 const UPLOADS = path.join( ROOT, '.tools/site/wp-content/uploads/e2e' );
 
+/**
+ * Runs a command to its end, for at most the given time. The worker waits for it
+ * synchronously, and while it waits, no timer of Playwright's fires in this process, not even
+ * the test's timeout: a command that hangs would block the run until CI's job limit. After the
+ * bound the command is killed, and the test fails with an error that names it.
+ *
+ * @param {string}   name    The command as the error names it.
+ * @param {string}   file    Program.
+ * @param {string[]} args    Arguments.
+ * @param {number}   seconds The bound.
+ * @param {Object}   options Further options of execFileSync().
+ * @return {string|import('node:buffer').Buffer} What the command printed.
+ */
+function runCommand( name, file, args, seconds, options = {} ) {
+	try {
+		return execFileSync( file, args, { ...options, timeout: seconds * 1000, killSignal: 'SIGKILL' } );
+	} catch ( error ) {
+		if ( 'ETIMEDOUT' === error.code ) {
+			throw new Error( name + ' did not finish within ' + seconds + ' seconds and was stopped.' );
+		}
+		throw error;
+	}
+}
+
 function freePort() {
 	return new Promise( function ( resolve, reject ) {
 		const server = net.createServer();
@@ -70,7 +94,8 @@ function siteRoot() {
 }
 
 /**
- * Seeds WordPress content for the migration or reads a stored value for verification.
+ * Seeds WordPress content for the migration or reads a stored value for verification. Each
+ * script loads WordPress and does one small thing; a minute is the bound.
  *
  * @param {string} root   Disposable site's installation directory.
  * @param {string} script PHP fixture operation.
@@ -78,7 +103,8 @@ function siteRoot() {
  * @return {string} Fixture response.
  */
 function wordpress( root, script, args = [] ) {
-	return execFileSync( 'php', [ '-r', '$_SERVER["HTTP_HOST"] = "127.0.0.1"; require $argv[1] . "/wp-load.php"; ' + script, root, ...args ], { encoding: 'utf8' } ).trim();
+	const name = 'php -r \'' + ( script.length > 60 ? script.slice( 0, 60 ) + '…' : script ) + '\' for ' + root;
+	return runCommand( name, 'php', [ '-r', '$_SERVER["HTTP_HOST"] = "127.0.0.1"; require $argv[1] . "/wp-load.php"; ' + script, root, ...args ], 60, { encoding: 'utf8' } ).trim();
 }
 
 /**
@@ -136,8 +162,10 @@ async function freshSite() {
 	const tools = fs.mkdtempSync( path.join( ROOT, '.tools/e2e-destination-' ) );
 	const env = { ...process.env, BFR_TEST_PLUGIN_DIR: plugin, BFR_SITE_TOOLS_DIR: tools, BFR_DISABLE_WP_CRON: '1',
 		BFR_SITE_PORT: String( port ), BFR_DB_NAME: 'bfr_import_' + crypto.randomBytes( 8 ).toString( 'hex' ) };
+	// In CI the installation takes about two seconds, with WordPress already downloaded by the
+	// first site, and starting and resetting a second each; two minutes is the bound of each.
 	function run( command ) {
-		execFileSync( path.join( ROOT, 'bin/test-site.sh' ), [ command ], { env } );
+		runCommand( 'bin/test-site.sh ' + command, path.join( ROOT, 'bin/test-site.sh' ), [ command ], 120, { env } );
 	}
 	function remove() {
 		run( 'reset' );
@@ -153,4 +181,4 @@ async function freshSite() {
 	}
 }
 
-module.exports = { ADMIN, freePort, freshSite, signIn, openBackups, repositoryServer, siteRoot, wordpress, addUpload, removeUpload, noLoopback };
+module.exports = { ADMIN, freePort, freshSite, runCommand, signIn, openBackups, repositoryServer, siteRoot, wordpress, addUpload, removeUpload, noLoopback };

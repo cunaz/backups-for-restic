@@ -3,11 +3,11 @@
  * of its own and one account, as tests/Support/RestServer.php does for the PHP suites. What
  * the tests need to reach it is written to .tools/e2e-server.json.
  */
-const { execFileSync, spawn } = require( 'node:child_process' );
+const { spawn } = require( 'node:child_process' );
 const fs = require( 'node:fs' );
 const net = require( 'node:net' );
 const path = require( 'node:path' );
-const { freePort } = require( './site' );
+const { freePort, runCommand } = require( './site' );
 
 const USERNAME = 'plugin';
 const PASSWORD = "rest user's password";
@@ -37,12 +37,15 @@ module.exports = async function globalSetup() {
 	const data = path.join( directory, 'data' );
 	fs.mkdirSync( data );
 
-	execFileSync(
+	// Both take a fraction of a second; half a minute is the bound.
+	runCommand(
+		'openssl req',
 		'openssl',
 		[ 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '2', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', key, '-out', certificate ],
+		30,
 		{ stdio: 'ignore' },
 	);
-	const hash = execFileSync( 'php', [ '-r', 'echo password_hash( $argv[1], PASSWORD_BCRYPT );', PASSWORD ] ).toString();
+	const hash = runCommand( 'php -r password_hash()', 'php', [ '-r', 'echo password_hash( $argv[1], PASSWORD_BCRYPT );', PASSWORD ], 30 ).toString();
 	fs.writeFileSync( path.join( data, '.htpasswd' ), USERNAME + ':' + hash + '\n' );
 
 	const port = await freePort();
