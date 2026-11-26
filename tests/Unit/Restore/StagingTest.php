@@ -506,6 +506,30 @@ final class StagingTest extends TestCase {
 		self::assertSame( [ $job->id ], $this->listed( 48 ) );
 	}
 
+	public function test_the_undo_workspace_of_an_apply_stays_until_the_last_second_of_its_window(): void {
+		// An apply that attempted a change, which no undo reverted, and whose window ends in a second.
+		$apply = $this->job( JobState::Succeeded, $this->clock->seconds - 86399, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryExists( $undo );
+		$this->clock->advance( 1 );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryDoesNotExist( $undo );
+	}
+
+	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
+		$target = $this->directory . '/elsewhere';
+		mkdir( $target . '/files', 0700, true );
+		file_put_contents( $target . '/entries.jsonl', "{}\n" );
+		// A job ID that no job directory has: its document is gone, and the link is no staging.
+		symlink( $target, $this->restores . '/20251230T000000Z-0a1b2c' );
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+		self::assertFileExists( $target . '/entries.jsonl', 'Nothing is deleted through the link.' );
+	}
+
 	public function test_a_symbolic_link_inside_staging_is_removed_as_a_link_and_its_target_stays(): void {
 		$outside = $this->directory . '/outside';
 		mkdir( $outside . '/directory', 0700, true );
