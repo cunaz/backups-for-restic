@@ -287,12 +287,36 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   over the same files was undone; what an earlier undo reverted is `already_undone`. The
   apply's document records `undo_state` (`undone` or `partly_undone`), `undo_kept` (the
   number of entries the last finished undo kept, null after an undo that stopped after a
-  revert) and `undo_job`; the undo list shows this state.
+  revert before its document counted every entry) and `undo_job`; the undo list shows this
+  state. An undo that is stopped once its document counts every attempted entry of its
+  apply, by a request to cancel that comes after the worker counted the last entry and
+  before the runner saved the step after it, or by a failure of its recording, is recorded
+  as a finished undo is: undone, with the `reverted` marker, when it kept nothing, and
+  partly undone with the number of kept entries otherwise (2026-11-26). Before, its cleanup
+  recorded it as partly undone without a number, also when it had reverted everything, and
+  the undo list offered to revert the rest until a review found nothing left and retired
+  the apply. The cleanup decides from the document alone and changes no live file: a
+  cursor short of the apply's attempted entries, counts by outcome that do not add up to
+  it, or a journal whose count cannot be read leave the apply as a stopped undo leaves it,
+  as does an undo that stopped before it counted its last entry, whose entry at the cursor
+  no record proves reverted: partly undone without a number once the undo's document
+  counts a reverted entry, and otherwise in the state it had, which is `applied` for a
+  first undo that only kept entries or reached none. A review decides those against the
+  live files. If the `reverted` marker of an apply that a stopped undo reverted completely
+  cannot be written, the cleanup records the apply the same way and says so in the job's
+  log: without its marker the apply is not undone, and an undo that reverted files does
+  not leave it without a record.
 - An undo's result counts the entries by outcome, `restored`, `removed`, `unchanged`, `kept`
   and `changed_after_review`, and names `apply_state`. The kept entries with their reasons
   are written to a paged list in the undo job's directory, in pages of 100 that a sealed
   summary authenticates as a background review's pages are, and served by
-  `GET /jobs/{id}/kept-entries`. WP-CLI `undo` prints the totals of its review, refuses an
+  `GET /jobs/{id}/kept-entries`. The route answers `not_found` only for an ID that no job
+  has; for a job that exists it says why there is no list: `not_an_undo` for a job of
+  another type, `undo_not_ended` for an undo that is queued or running, and `job_unreadable`
+  for a document that this version cannot read (2026-11-26; before, each of them was "The
+  job does not exist."). The admin page asks only for the list of an undo that has ended,
+  and WP-CLI only for the undo that it has just run and waited for, so neither meets these
+  answers in its own course. WP-CLI `undo` prints the totals of its review, refuses an
   undo with nothing to revert, and afterwards prints the kept entries and the counts, as the
   admin page shows them, also for an undo that was cancelled or failed. Neither says that a
   kept entry changed after the apply unless its reason is `changed_since_apply`. Each

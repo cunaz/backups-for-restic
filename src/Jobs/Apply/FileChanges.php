@@ -399,19 +399,33 @@ final readonly class FileChanges implements StepProvider {
 
 	/**
 	 * Reads one page of the entries that a finished or stopped undo kept, with their reasons.
+	 * A job that exists is never answered as one that does not: the code names why it has no
+	 * list to show.
 	 *
 	 * @param string $undo_job Undo job.
 	 * @param int    $offset First kept entry.
 	 * @return KeptPage Page.
-	 * @throws JobConflict If the job is not an undo that has ended, or kept entries whose list it
-	 *                     could not seal (`kept_list_unavailable`).
+	 * @throws JobConflict With the code `not_found` if no job has this ID, `job_unreadable` if
+	 *                     its document cannot be read, `not_an_undo` for a job of another type,
+	 *                     `undo_not_ended` for an undo that is queued or running, and
+	 *                     `kept_list_unavailable` for kept entries whose list it could not seal.
 	 * @throws InvalidArgument If the page is outside the list.
 	 * @throws StorageFailed If the sealed list does not belong to this undo, or a page of it changed.
 	 */
 	public function kept_page( string $undo_job, int $offset ): array {
 		$job = $this->jobs->get( $undo_job );
-		if ( null === $job || JobType::Undo !== $job->type || ! $job->state->is_terminal() ) {
-			throw new JobConflict( 'Kept entries are listed only for an undo that has ended.' );
+		if ( null === $job ) {
+			// A document that this version cannot read is a job all the same.
+			if ( $this->jobs->has_document( $undo_job ) ) {
+				JobConflict::raise( 'A stored job cannot be read by this version of the plugin.', [ 'code' => 'job_unreadable' ] );
+			}
+			JobConflict::raise( 'No job has this ID.', [ 'code' => 'not_found' ] );
+		}
+		if ( JobType::Undo !== $job->type ) {
+			JobConflict::raise( 'Only an undo of live file changes keeps entries.', [ 'code' => 'not_an_undo' ] );
+		}
+		if ( ! $job->state->is_terminal() ) {
+			JobConflict::raise( 'An undo lists the entries it kept once it has ended.', [ 'code' => 'undo_not_ended' ] );
 		}
 		$digest = $job->data['kept_digest'] ?? null;
 		$kept   = $job->result['kept'] ?? 0;
@@ -892,7 +906,9 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * Records what an undo did, in its result and in the document of its apply: fully undone
 	 * when a finished undo kept no entry, partly undone with the number of kept entries when
-	 * it kept some, and partly undone without a number when it stopped after a revert. Only
+	 * it kept some, and partly undone without a number when it stopped after a revert before
+	 * its document counted every entry. A stopped undo whose document counts every entry is
+	 * finished in this sense (counted_all()). Only
 	 * a fully undone apply is marked reverted, which ends its undo window early; kept entries
 	 * keep their journal and saved copies for a later undo within the window. A list of kept
 	 * entries that cannot be sealed, for example because a counted page changed on disk, is
@@ -953,11 +969,16 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * A partial apply keeps all its journals. An interrupted maintenance marker is cleared. A
 	 * stopped undo records what it did before it stopped, with the entry at its cursor when a
-	 * record proves that the worker reverted it before the job document counted it.
+	 * record proves that the worker reverted it before the job document counted it, and as a
+	 * finished undo when its document then counts every entry. If the marker of a fully undone
+	 * apply cannot be written then, the apply is recorded as that of a stopped undo, as it was
+	 * before the count decided: an undo that reverted files never leaves its apply without a
+	 * record.
 	 *
 	 * @param Job   $job Current job.
 	 * @param float $deadline Worker cleanup deadline.
 	 * @return bool True.
+	 * @throws PluginException If what a stopped undo did cannot be recorded.
 	 */
 	private function cleanup( Job $job, float $deadline ): bool {
 		$this->maintenance->release( $job->id, $this->jobs->directory( $job ) );
@@ -974,10 +995,59 @@ final readonly class FileChanges implements StepProvider {
 			$this->reconcile( $job );
 			$apply = isset( $job->data['undo_counts'] ) ? $this->jobs->get( ApplyJournal::field( $job, 'apply' ) ) : null;
 			if ( null !== $apply ) {
-				$this->conclude( $job, $apply, false );
+				$finished = $this->counted_all( $job, $apply );
+				try {
+					$this->conclude( $job, $apply, $finished );
+				} catch ( PluginException $failure ) {
+					// Only the record of a fully undone apply needs more than the documents: its
+					// marker. With the marker the apply is undone; with entries kept, a stopped
+					// undo is recorded through the same documents as a finished one.
+					if ( ! $finished || self::counts( $job )['kept'] > 0 || is_file( $this->journal->workspace( $apply ) . '/reverted' ) ) {
+						throw $failure;
+					}
+					// Without its marker the apply is not undone, whatever the undo counted. It is
+					// recorded as the apply of a stopped undo: partly undone without a number if the
+					// undo reverted an entry, and as it was otherwise.
+					$this->jobs->log( $job )->write(
+						'warning',
+						'The undo counted every entry, but its apply could not be marked as undone; the apply stays open for a later undo.',
+						[
+							'code'   => JobError::from_throwable( $failure )->code,
+							'reason' => $failure->getMessage(),
+						]
+					);
+					$this->conclude( $job, $apply, false );
+				}
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Whether the document of a stopped undo counts every entry of its apply, as the document
+	 * of a finished undo does. A request to cancel that comes after the worker counted the last
+	 * entry, but before the runner saved the step after it, stops the undo before a step that
+	 * has nothing left to do; and the recording of a finished undo can fail. Such an undo is
+	 * recorded as a finished one is: undone when it kept nothing, partly undone with the
+	 * number of entries it kept otherwise. Anything that the document does not establish, a
+	 * cursor short of the apply's attempted entries, counts that do not add up to it, a journal
+	 * that cannot be read, leaves the apply partly undone without a number (fail closed).
+	 *
+	 * @param Job $job Stopped undo, after reconcile().
+	 * @param Job $apply Its apply.
+	 * @return bool Whether every attempted entry of the apply is counted.
+	 */
+	private function counted_all( Job $job, Job $apply ): bool {
+		$total = $job->progress['total'] ?? null;
+		if ( ! is_int( $total ) || $total < 1 || ( $job->progress['done'] ?? null ) !== $total ) {
+			return false;
+		}
+		try {
+			$counts = self::counts( $job );
+			return $this->journal->attempted( $apply ) === $total && $counts['restored'] + $counts['removed'] + $counts['unchanged'] + $counts['kept'] === $total;
+		} catch ( PluginException ) {
+			return false;
+		}
 	}
 
 	/**

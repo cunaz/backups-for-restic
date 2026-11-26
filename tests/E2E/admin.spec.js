@@ -895,3 +895,37 @@ test( 'a files-only snapshot still restores individual files', async ( { page } 
 	expect( await downloaded.failure() ).toBeNull();
 	expect( fs.readFileSync( await downloaded.path() ) ).toEqual( fs.readFileSync( path.join( siteRoot(), 'license.txt' ) ) );
 } );
+
+test( 'a restore of a snapshot that another client forgot says so', async ( { page } ) => {
+	await openBackups( page );
+	const id = ( await card( page, 'Last backup' ).innerText() ).match( /Snapshot ([0-9a-f]{8})/ )[ 1 ];
+	await openBackups( page, 'snapshots' );
+	const open = page.getByRole( 'button', { name: 'Open snapshot ' + id } );
+	await unlocked( page, open );
+	await open.click();
+	await unlocked( page, page.locator( '.bfr-manifest' ) );
+	for ( const name of siteRoot().split( '/' ).filter( Boolean ) ) {
+		const directory = page.locator( '.bfr-entries' ).getByRole( 'button', { name, exact: true } );
+		await unlocked( page, directory );
+		await directory.click();
+	}
+	const license = page.getByLabel( 'Select license.txt', { exact: true } );
+	await unlocked( page, license );
+	await license.check();
+	// After the page listed it, another client forgets the snapshot. It is put back afterwards.
+	const snapshots = path.join( repositoryServer().directory, 'data', 'site', 'snapshots' );
+	const file = fs.readdirSync( snapshots ).find( ( name ) => name.startsWith( id ) );
+	const aside = path.join( repositoryServer().directory, 'forgotten-' + file );
+	fs.renameSync( path.join( snapshots, file ), aside );
+	try {
+		await page.getByRole( 'button', { name: 'Restore to staging' } ).click();
+		// Before: "Another program kept changing the repository while this job worked on it.
+		// The job started over three times and then stopped."
+		const failed = notice( page, 'error', 'The snapshot of this restore is not in the repository.' );
+		await expect( failed ).toBeVisible( { timeout: 2 * 60 * 1000 } );
+		await expect( failed ).toContainText( 'The restore stopped and kept no files.' );
+		await expect( failed ).not.toContainText( 'started over' );
+	} finally {
+		fs.renameSync( aside, path.join( snapshots, file ) );
+	}
+} );

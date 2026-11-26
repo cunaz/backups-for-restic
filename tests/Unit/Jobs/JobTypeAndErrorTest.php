@@ -14,6 +14,7 @@ use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\PluginException;
+use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobType;
@@ -177,6 +178,33 @@ final class JobTypeAndErrorTest extends TestCase {
 			self::assertSame( $plain->retryable, $file->retryable, $error::class );
 			self::assertSame( 'file_apply_failed', $file->code );
 		}
+	}
+
+	/**
+	 * Refusals that carry a code of their own, the job that raises each and the code of their
+	 * class, which they were reported with before.
+	 *
+	 * @return iterable<string, array{PluginException, JobType, string, string}>
+	 */
+	public static function own_codes(): iterable {
+		yield 'a restore whose key is gone' => [ new InvalidArgument( 'The repository key is no longer available; the restore must unlock again.', [ 'code' => 'key_missing' ] ), JobType::Restore, 'key_missing', 'configuration' ];
+		yield 'a prune whose key is gone' => [ new InvalidArgument( 'The repository key is no longer available; the job must unlock again.', [ 'code' => 'key_missing' ] ), JobType::Prune, 'key_missing', 'configuration' ];
+		yield 'a backup whose key is gone' => [ new InvalidArgument( 'The repository key is no longer available; the backup must unlock again.', [ 'code' => 'key_missing' ] ), JobType::Backup, 'key_missing', 'configuration' ];
+		yield 'a restore before the setup is completed' => [ new InvalidArgument( 'The setup is not completed.', [ 'code' => 'setup_incomplete' ] ), JobType::Restore, 'setup_incomplete', 'configuration' ];
+		yield 'a restore whose snapshot is gone' => [ new RepositoryChanged( 'The selected snapshot no longer exists.', [ 'code' => 'restore_snapshot_missing' ] ), JobType::Restore, 'restore_snapshot_missing', 'repository_changed' ];
+	}
+
+	#[DataProvider( 'own_codes' )]
+	public function test_a_refusal_with_a_code_of_its_own_is_reported_with_it_and_tried_again_as_before( PluginException $error, JobType $type, string $code, string $class_code ): void {
+		$classified = JobError::from_throwable( $error, $type );
+		self::assertSame( $code, $classified->code );
+		self::assertSame( $error->getMessage(), $classified->message );
+		// Without its code the class decides, as it did for these before: the runner tries again
+		// exactly as often either way.
+		$plain = JobError::from_throwable( new ( $error::class )( 'The same failure.' ), $type );
+		self::assertSame( $class_code, $plain->code );
+		self::assertSame( $plain->retryable, $classified->retryable );
+		self::assertFalse( $classified->retryable );
 	}
 
 	public function test_sessions_that_outlast_maintenance_are_retried_but_a_hidden_session_list_is_not(): void {
