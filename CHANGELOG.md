@@ -147,6 +147,11 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Changed
+- The Restores tab lists the database restores whose private tables are on another database
+  server or in another database (`GET /database-changes/foreign`) and offers the review and
+  discard of their binding, also from the undo of such a restore, so that a site that moved to
+  another database can start a database restore again without shell access. Every name is
+  shown as text, escaped where it does not print.
 - Backups for restic requires 64-bit PHP. On 32-bit PHP, activation stops before the
   first backup. Existing installations retain their settings and local restore data.
 - The snapshot list of the admin page shows the snapshots of this site; those of other
@@ -189,6 +194,19 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- The discard of a database restore binding whose private tables are on another database
+  server or in another database is reviewed and confirmed as an undo is. Before, the REST
+  route forgot the binding, and with it the undo of that restore, after the WordPress password
+  alone, and WP-CLI after a prompt or `--yes`: nothing bound the decision to what the
+  administrator had seen, and no site address was typed. Now
+  `POST /database-changes/<id>/discard-review` says what the discard forgets and what stays:
+  the database and server of the private tables and those that the site uses now, the table
+  names, and whether the undo ends with it. Its digest and review token have to be confirmed
+  with the typed site address and the WordPress password, and a binding that changed after the
+  review is not discarded. `wp backups-for-restic database-discard` prints the same review and
+  asks for the site address, or takes `--site-url` and `--digest`; `--yes` is refused, so a
+  script of the earlier form stops with an error and discards nothing. The discard still drops
+  nothing.
 - A live database restore brings back the roles, the active plugins and the scheduled events
   of the backup. Before, it kept those of the running site, so a change made after the
   backup survived the restore: a capability given to a role reached every restored account,
@@ -292,6 +310,12 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- The review and the discard of a database binding answer what is the case: a binding that was
+  discarded already, one whose job or undo has not ended, a server that reports no server UUID,
+  a damaged record and an unreadable job document each have a code and text of their own, and a
+  database failure says that nothing was discarded and that the log of that database restore
+  job names the error, where it is written. Before, the route answered with a backup's text
+  that pointed to "the log of the job", which a discard does not have.
 - A failed job is described as the kind of job it is, on the admin page, in the job list, in
   WP-CLI and in the failure e-mail. Before, every job got the texts of a backup: a restore
   that lost its repository key, or found the setup incomplete, said "The backup is not

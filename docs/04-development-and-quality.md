@@ -235,8 +235,9 @@ the database.
 
 The CI database matrix uses MySQL 8.4.13 and MariaDB 11.4.13, pinned by image digest. Every
 test of the suite skips when no server answers, so CI compares the skipped tests with
-`tests/Skips` (§6): none may skip on MySQL, and on MariaDB exactly the eight cases of the
-atomic exchange, which is MySQL-only by design. Shadow-import tests compare table
+`tests/Skips` (§6): none may skip on MySQL, and on MariaDB exactly the cases that
+`tests/Skips/database-mariadb.txt` lists, which need the atomic exchange, MySQL-only by
+design. Shadow-import tests compare table
 checksums, including invisible columns and expression defaults, and check that live tables
 stay unchanged. A parent sends SIGKILL at six DDL/transaction boundaries, then resumes the
 import and verifies duplicate rows exactly once. Foreign table collisions, an active
@@ -283,7 +284,11 @@ warning or deprecation reaches neither a response nor a test, only these logs. T
   of the private directory are not served. The download of restored content needs the
   WordPress password in the JSON body and the reports do not; wrong passwords of one user
   are counted, slowed down, locked and reported to `wp_login_failed` while another user is
-  unaffected.
+  unaffected. The discard of a database binding is refused without the acknowledgement, the
+  exact site address, a review token and digest of its own review or the right password,
+  while another request holds the runner lock and after the binding changed; its review names
+  a binding of this database, a damaged record and a database failure with codes of their own,
+  and the failure's error in the log of the job that holds the binding.
 - **`WordPressSiteTest`**: the wizard through the REST API against a TLS rest-server with its
   CA certificate, then a backup driven only by requests to `wp-cron.php`, `restic check
   --read-data`, a restore of the fixture's uploads directory, a database import with
@@ -327,7 +332,10 @@ warning or deprecation reaches neither a response nor a test, only these logs. T
   control characters, which it quotes), `backup`, `forget`,
   `prune` and `check` with `--wait`, `tick --until-idle`, a second job that is refused,
   forget and prune that are refused in retention mode external, `settings` with the
-  refusals of the settings page, and `cancel` and `logs` on a backup that is at work.
+  refusals of the settings page, and `cancel` and `logs` on a backup that is at work;
+  `database-discard`, which prints its review and digest, refuses `--yes`, a missing or wrong
+  site address and a digest of another review, and discards once the address is typed at the
+  prompt or passed with `--site-url`.
 - **`MultisiteTest`**: on a second WordPress that is a multisite network
   (`bin/test-site.sh install-multisite`, never served, reached through WP-CLI): activation
   is refused for the network and for one site, and a plugin that is active all the same
@@ -407,7 +415,11 @@ on one site, without retries:
   repository password, each with the refusal of a wrong value;
 - the Environment tab on a site that cannot request itself: the browser makes the probe
   of the working directory, and the check says "protected";
-- a backup of 1 GiB of new data that is cancelled from the dashboard while it runs.
+- a backup of 1 GiB of new data that is cancelled from the dashboard while it runs;
+- a database restore whose private tables are on another database server: the undo card and
+  the list on the Restores tab offer the review of its discard, which shows a database name
+  with a right-to-left override escaped and the table names; a wrong site address, a wrong
+  password and a lost answer discard nothing, and the confirmed discard says what it forgot.
 
 The restore tests download the selected file, ZIP and report, and a restore of a snapshot
 that another client forgot after the page listed it says so in the restore's own words. On a

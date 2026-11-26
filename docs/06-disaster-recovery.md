@@ -483,14 +483,26 @@ table, and expiry keeps that table and names it on the apply job. Check it and d
 hand when you no longer need it.
 
 **After the database moved to another server.** A migration, a failover to a replica or a
-restore of the database server's data directory gives the server a new identity. A database
-restore that still keeps private tables then reports on its job that they are on another
-server. Backups go on. Another database restore waits until you decide. Run
-`wp backups-for-restic database-discard <apply-job-id>`: the command lists the database,
-the old server's UUID and the table names, and forgets the binding after you confirm. It
-drops nothing, and the names are not shown again afterwards, so note them first. Drop the
-tables by hand only on the server and in the database where you can verify them. Deleting the plugin forgets such a binding as well, without dropping
-anything; the leftover tables have names that begin with `_bfr_r_` or `bfr_r_`.
+restore of the database server's data directory gives the server a new identity, and a site
+that was pointed at another database has moved as well. A database restore that still keeps
+private tables then reports on its job that they are on another server or in another database.
+Backups go on. Another database restore waits until you decide, and the undo of that restore
+cannot be reviewed while the site uses the other database. On the Restores tab, under
+**Private tables on another database server**, review the discard of its binding. The review
+names the database and the server UUID of the private tables, the database and server that the
+site uses now, the table names, whether the discard ends an undo that would still be possible
+once the site uses the old database again, and what stays. Confirm it as an undo, with the
+site address and your WordPress password. On the command line,
+`wp backups-for-restic database-discard <apply-job-id>` prints the same review with its
+digest and asks you to type the site address; a script passes `--site-url` and the
+`--digest` that an earlier run printed. The discard drops nothing, and the job of the restore
+keeps the table names in its warnings on the Logs tab. Drop the tables by hand only on the
+server and in the database where you can verify them: tables with these names in the database
+that the site uses now, for example after its data directory was copied to a new server,
+cannot be proven to be the restore's copies. If the review or the discard says that the
+database server could not be asked, the log of that restore job names the database error.
+Deleting the plugin forgets such a binding as well, without dropping anything; the leftover
+tables have names that begin with `_bfr_r_` or `bfr_r_`.
 
 **Selective recovery by a database administrator.** Use the original database apply job
 ID to open its private `jobs/<apply-job-id>/job.json`. The following command prints the
