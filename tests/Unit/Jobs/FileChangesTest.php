@@ -1976,8 +1976,9 @@ final class FileChangesTest extends TestCase {
 		$reviewed = $this->tick_while_uploading( $review, $wide );
 		// The rest of the review does not read the folder. Its check of the folder that the apply
 		// created, once a tick without time ended in it, waits for the second of that folder's
-		// last change, which ticks that end at once can all fall into: they are bounded by time.
-		$until = microtime( true ) + 10.0;
+		// last change, which ticks that end at once can all fall into: they are bounded by time,
+		// with room for a slow runner, since the loop ends as soon as the review does.
+		$until = microtime( true ) + 30.0;
 		while ( ! $reviewed->state->is_terminal() && microtime( true ) < $until ) {
 			usleep( 20000 );
 			$reviewed = $this->runner->tick( 2.0 )->job ?? self::fail( 'The review is gone.' );
