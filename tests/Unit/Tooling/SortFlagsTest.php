@@ -80,7 +80,7 @@ final class SortFlagsTest extends TestCase {
 
 		$calls = (string) file_get_contents( dirname( __DIR__, 2 ) . '/Fixtures/sort-flags/calls.php' );
 		$lines = array_keys( array_filter( explode( "\n", $calls ), static fn ( string $line ): bool => str_ends_with( $line, '// unflagged' ) ) );
-		self::assertCount( 20, $lines, 'The fixture still has its calls.' );
+		self::assertCount( 22, $lines, 'The fixture still has its calls.' );
 		self::assertSame( array_map( static fn ( int $index ): int => $index + 1, $lines ), self::unflagged( $calls ) );
 	}
 
@@ -203,10 +203,12 @@ final class SortFlagsTest extends TestCase {
 	private static function each_array_flagged( array $arguments ): bool {
 		$flagged = true;
 		foreach ( $arguments as $argument ) {
-			$names = array_map( static fn ( PhpToken $token ): string => ltrim( $token->text, '\\' ), array_filter( $argument, static fn ( PhpToken $token ): bool => ! in_array( $token->text, [ '|', '(', ')' ], true ) ) );
-			// An argument is a flag when it names flags and nothing else: $groups[ SORT_STRING ]
-			// names one too, and is an array to sort.
-			$flags = [] === array_diff( $names, self::TYPE_FLAGS, self::ORDER_FLAGS );
+			$names = array_map( static fn ( PhpToken $token ): string => ltrim( $token->text, '\\' ), $argument );
+			// An argument is a flag when it is flags joined by "|", in parentheses or not, and
+			// nothing else: $groups[ SORT_STRING ] and SORT_STRING() name one too, and are
+			// arrays to sort.
+			$shape = implode( '', array_map( static fn ( string $name ): string => in_array( $name, [ '|', '(', ')' ], true ) ? $name : ( in_array( $name, [ ...self::TYPE_FLAGS, ...self::ORDER_FLAGS ], true ) ? 'F' : 'X' ), $names ) );
+			$flags = 1 === preg_match( '/^\(*F\)*(?:\|\(*F\)*)*$/', $shape );
 			if ( $flags && [] !== array_intersect( $names, self::TYPE_FLAGS ) ) {
 				$flagged = true;
 			} elseif ( $flags ) {
