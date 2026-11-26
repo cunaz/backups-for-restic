@@ -432,9 +432,11 @@ test 20, an expectation and an action 30 seconds, a navigation 60, and the whole
 minutes, so that it ends before the 45 minutes of the CI job and the job still collects its
 logs. A step that waits for a backup, a restore or an exchange names a longer timeout of its
 own. A command that a test or the global setup runs (PHP, `bin/test-site.sh`, `openssl`) is
-killed after a bound of its own and fails the test with an error that names it
-(`runCommand()` in `tests/E2E/site.js`): while the worker waits for it, not even the test's
-timeout fires.
+stopped after a bound of its own, together with what it started and still waits for, and
+fails the test with an error that names it (`runCommand()` in `tests/E2E/site.js`, which runs
+the command in a process group of its own through `tests/E2E/bounded-command.js`): while the
+worker waits for it, not even the test's timeout fires. What a command leaves in the
+background when it ends in time, the site's server, keeps running.
 
 ### 5.6 Mutation testing and fuzzing
 

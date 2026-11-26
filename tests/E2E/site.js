@@ -11,11 +11,17 @@ const net = require( 'node:net' );
 const ROOT = path.resolve( __dirname, '../..' );
 const UPLOADS = path.join( ROOT, '.tools/site/wp-content/uploads/e2e' );
 
+/** The program that runs a command in a process group of its own and stops the group after the bound. */
+const BOUNDED = path.join( __dirname, 'bounded-command.js' );
+
 /**
  * Runs a command to its end, for at most the given time. The worker waits for it
  * synchronously, and while it waits, no timer of Playwright's fires in this process, not even
  * the test's timeout: a command that hangs would block the run until CI's job limit. After the
- * bound the command is killed, and the test fails with an error that names it.
+ * bound the command is stopped together with everything it started and still waits for
+ * (bounded-command.js), and the test fails with an error that names it. Stopping the command
+ * alone would leave, for example, the database client of an installation that hangs running
+ * beside the clean-up that follows.
  *
  * @param {string}   name    The command as the error names it.
  * @param {string}   file    Program.
@@ -26,9 +32,10 @@ const UPLOADS = path.join( ROOT, '.tools/site/wp-content/uploads/e2e' );
  */
 function runCommand( name, file, args, seconds, options = {} ) {
 	try {
-		return execFileSync( file, args, { ...options, timeout: seconds * 1000, killSignal: 'SIGKILL' } );
+		// The second bound, five seconds later, is for a wrapper that does not end by itself.
+		return execFileSync( process.execPath, [ BOUNDED, String( seconds ), file, ...args ], { ...options, timeout: ( seconds + 5 ) * 1000, killSignal: 'SIGKILL' } );
 	} catch ( error ) {
-		if ( 'ETIMEDOUT' === error.code ) {
+		if ( 124 === error.status || 'ETIMEDOUT' === error.code ) {
 			throw new Error( name + ' did not finish within ' + seconds + ' seconds and was stopped.' );
 		}
 		throw error;
