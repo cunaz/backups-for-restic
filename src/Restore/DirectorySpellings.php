@@ -245,7 +245,7 @@ final class DirectorySpellings {
 	 *
 	 * @param string $directory Indexed folder.
 	 * @param Table  $table Open table.
-	 * @throws FileWorkPending If this tick reaches its deadline.
+	 * @throws FileWorkPending If this tick reaches its deadline, or the folder changed since the reading began.
 	 * @throws StorageFailed If the folder or bounded table is invalid.
 	 */
 	private function advance( string $directory, array &$table ): void {
@@ -274,10 +274,12 @@ final class DirectorySpellings {
 			try {
 				$entries->seek( $last );
 			} catch ( \OutOfBoundsException $shorter ) {
+				$this->interrupted( $directory, $table );
 				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', self::UNSETTLED, $shorter );
 			}
 			$table['records']->seek( $last * self::RECORD_BYTES + 32 );
 			if ( ! $entries->valid() || $table['records']->read( 32 ) !== hash( 'sha256', $entries->getFilename(), true ) ) {
+				$this->interrupted( $directory, $table );
 				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', self::UNSETTLED );
 			}
 			$entries->next();
@@ -300,16 +302,32 @@ final class DirectorySpellings {
 				break;
 			}
 		}
-		if ( hash( 'sha256', self::identity( $directory ), true ) !== $table['identity'] ) {
-			// What this tick read is not saved: the next lookup finds the folder's new identity,
-			// counts this reading as cut short and begins another one.
-			unset( $this->tables[ $directory ] );
-			throw new FileWorkPending();
-		}
+		$this->interrupted( $directory, $table );
 		$table['complete'] = ! $entries->valid();
 		$table['records']->flush();
 		$this->save( $directory, $table );
 		if ( ! $table['complete'] ) {
+			throw new FileWorkPending();
+		}
+	}
+
+	/**
+	 * Ends this tick's part of a reading if the folder changed since the reading began, also
+	 * after this tick looked at it: at the end of the part, and where the iterator no longer
+	 * reaches the last name that the checkpoint holds, because names were removed or renamed in
+	 * the meantime. What this tick read is not saved: the next lookup finds the folder's new
+	 * identity, counts this reading as cut short and begins another one. Before, such a change
+	 * at the boundary failed the review at once. A boundary that does not match a folder whose
+	 * identity is unchanged is a damaged index, which the caller reports.
+	 *
+	 * @param string $directory Indexed folder.
+	 * @param Table  $table Open table.
+	 * @throws FileWorkPending If the folder's identity is no longer the reading's.
+	 * @throws StorageFailed If the folder is gone.
+	 */
+	private function interrupted( string $directory, array $table ): void {
+		if ( hash( 'sha256', self::identity( $directory ), true ) !== $table['identity'] ) {
+			unset( $this->tables[ $directory ] );
 			throw new FileWorkPending();
 		}
 	}

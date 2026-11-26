@@ -322,7 +322,8 @@ All notable changes are documented here. The format follows
   of that folder as it keeps those of a folder it cannot read (`ambiguous_destination`) and
   goes on. Before, the reading began again at every tick for as long as the folder changed
   between ticks, so that such a review never ended, and a change during a tick failed a
-  preview at once.
+  preview at once, as did a change that removed or renamed names after a tick looked at the
+  folder and before it resumed its reading.
 - The recovery window of an apply is decided only from undo records that can be
   established. A count of attempted changes or an undone marker that cannot be looked up,
   below a folder that the PHP user cannot search, or that is not a regular file, such as a

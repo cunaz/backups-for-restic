@@ -430,7 +430,10 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   after a complete reading is read again, as before. A reading that a change cuts short,
   between two ticks or within one, which the end of each tick's part of the reading compares
   too, is begun again and counted in the index's checkpoint, and a complete reading clears
-  the count. After five readings in a row that changes cut short the folder keeps changing:
+  the count. So is one that a change cuts short after the tick looked at the folder and before
+  it resumed the reading, where the folder no longer reaches the last name of the checkpoint
+  in the same place; with the folder's identity unchanged, such a boundary is a damaged index,
+  as before. Before, that change failed the review at once. After five readings in a row that changes cut short the folder keeps changing:
   a preview and the apply's check stop with `file_folder_changing` (the job's log names the
   folder in `folder`), before maintenance and without a change, and an undo review answers
   as for a folder that cannot be read, so that it keeps the folder's entries as

@@ -12,8 +12,9 @@ namespace BackupsForRestic\Tests\Support;
 /**
  * Serves a real path under a scheme of its own (`bfr-watched://` followed by the absolute path)
  * and runs a change once a given number of names has been read from a folder, so that a test
- * can change the folder in the middle of a reading. Every other operation is the one of PHP's
- * own wrapper on the real path.
+ * can change the folder in the middle of a reading, or when a folder is next opened for
+ * reading, before its first name is read: after the code looked at the folder and before it
+ * reads it. Every other operation is the one of PHP's own wrapper on the real path.
  */
 final class WatchedFolder {
 
@@ -44,6 +45,13 @@ final class WatchedFolder {
 	private static ?\Closure $change = null;
 
 	/**
+	 * The change that runs when a folder is next opened for reading, once.
+	 *
+	 * @var (\Closure(): void)|null
+	 */
+	private static ?\Closure $opening = null;
+
+	/**
 	 * Registers the scheme and the change that runs after a number of names was read.
 	 *
 	 * @param int      $names  Names read before the change.
@@ -52,6 +60,22 @@ final class WatchedFolder {
 	public static function watch( int $names, \Closure $change ): void {
 		self::$names  = $names;
 		self::$change = $change;
+		self::register();
+	}
+
+	/**
+	 * Registers the scheme and a change that runs when a folder is next opened for reading,
+	 * before the real folder is opened.
+	 *
+	 * @param \Closure $change The change.
+	 */
+	public static function before_reading( \Closure $change ): void {
+		self::$opening = $change;
+		self::register();
+	}
+
+	/** Registers the scheme once. */
+	private static function register(): void {
 		if ( ! in_array( self::SCHEME, stream_get_wrappers(), true ) ) {
 			stream_wrapper_register( self::SCHEME, self::class );
 		}
@@ -59,15 +83,16 @@ final class WatchedFolder {
 
 	/** Removes the scheme and a change that did not run. */
 	public static function stop(): void {
-		self::$change = null;
+		self::$change  = null;
+		self::$opening = null;
 		if ( in_array( self::SCHEME, stream_get_wrappers(), true ) ) {
 			stream_wrapper_unregister( self::SCHEME );
 		}
 	}
 
-	/** Whether the change has run. */
+	/** Whether the changes have run. */
 	public static function changed(): bool {
-		return null === self::$change;
+		return null === self::$change && null === self::$opening;
 	}
 
 	/**
@@ -89,6 +114,11 @@ final class WatchedFolder {
 	}
 
 	public function dir_opendir( string $url ): bool {
+		if ( null !== self::$opening ) {
+			$change        = self::$opening;
+			self::$opening = null;
+			$change();
+		}
 		$this->directory = @opendir( self::path( $url ) );
 		return false !== $this->directory;
 	}

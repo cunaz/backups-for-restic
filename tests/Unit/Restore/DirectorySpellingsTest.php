@@ -227,6 +227,66 @@ final class DirectorySpellingsTest extends TestCase {
 		}
 	}
 
+	public function test_a_change_after_the_folder_was_looked_at_cuts_the_resumed_reading_short_at_its_boundary_too(): void {
+		$this->photos();
+		$folder = WatchedFolder::url( $this->folder );
+		WatchedFolder::before_reading( static function (): void {} );
+		try {
+			try {
+				( new DirectorySpellings( $this->workspace, 0 ) )->unique( $folder, 'photo-1' );
+				self::fail( 'The bounded first slice scanned the entire directory.' );
+			} catch ( FileWorkPending ) {
+				// A checkpoint of the first 64 names.
+				self::assertSame( 64, unpack( 'V', (string) file_get_contents( $this->checkpoint() ), strlen( "BFRNAMES1\0" ) + 48 )[1] ?? null );
+			}
+			// The next tick finds the folder as the checkpoint has it and waits for no change
+			// second; then names are removed and one is added before the reading resumes, so that
+			// the folder no longer reaches the last name of the checkpoint.
+			WatchedFolder::before_reading(
+				function (): void {
+					for ( $i = 0; $i < 175; ++$i ) {
+						unlink( $this->folder . '/photo-' . $i );
+					}
+					touch( $this->folder . '/Late' );
+				}
+			);
+			try {
+				( new DirectorySpellings( $this->workspace, INF ) )->unique( $folder, 'photo-178' );
+				self::fail( 'A reading during which the folder changed was used.' );
+			} catch ( FileWorkPending ) {
+				// Before, the preview failed at once: "A directory enumeration changed between file
+				// preview workers."
+				self::assertTrue( WatchedFolder::changed() );
+			}
+			$resumed = new DirectorySpellings( $this->workspace, INF );
+			self::assertFalse( $resumed->unique( $folder, 'late' ) );
+			self::assertTrue( $resumed->unique( $folder, 'photo-178' ) );
+			// The reading that the change cut short is counted, as one cut short within a tick.
+			self::assertSame( 1, ord( substr( (string) file_get_contents( $this->checkpoint() ), -1 ) ) );
+		} finally {
+			WatchedFolder::stop();
+		}
+	}
+
+	public function test_a_damaged_boundary_record_of_an_unchanged_folder_stays_a_damaged_index(): void {
+		$this->photos();
+		try {
+			( new DirectorySpellings( $this->workspace, 0 ) )->unique( $this->folder, 'photo-1' );
+			self::fail( 'The bounded first slice scanned the entire directory.' );
+		} catch ( FileWorkPending ) {
+			$names   = substr( $this->checkpoint(), 0, -strlen( '.head' ) ) . '.names';
+			$records = fopen( $names, 'r+b' );
+			self::assertIsResource( $records );
+			// The name digest of the last record that the checkpoint counts.
+			fseek( $records, 63 * 68 + 32 );
+			fwrite( $records, str_repeat( "\0", 32 ) );
+			fclose( $records );
+		}
+		$this->expectException( StorageFailed::class );
+		$this->expectExceptionMessage( 'A directory enumeration changed between file preview workers.' );
+		( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' );
+	}
+
 	public function test_a_checkpoint_that_an_earlier_version_wrote_is_resumed(): void {
 		$this->photos();
 		try {
