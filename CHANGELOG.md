@@ -209,9 +209,10 @@ All notable changes are documented here. The format follows
   names, and whether the undo ends with it. Its digest and review token have to be confirmed
   with the typed site address and the WordPress password, and a binding that changed after the
   review is not discarded. `wp backups-for-restic database-discard` prints the same review and
-  asks for the site address, or takes `--site-url` and `--digest`; `--yes` is refused, so a
-  script of the earlier form stops with an error and discards nothing. The discard still drops
-  nothing.
+  asks for the site address on a terminal; a script passes both `--site-url` and the `--digest`
+  of a review that an earlier run printed, and one without the other, or a digest without a
+  value, is refused. `--yes` is refused, so a script of the earlier form stops with an error and
+  discards nothing. The discard still drops nothing.
 - A live database restore brings back the roles, the active plugins and the scheduled events
   of the backup. Before, it kept those of the running site, so a change made after the
   backup survived the restore: a capability given to a role reached every restored account,

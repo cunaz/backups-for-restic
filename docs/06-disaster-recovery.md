@@ -494,8 +494,9 @@ site uses now, the table names, whether the discard ends an undo that would stil
 once the site uses the old database again, and what stays. Confirm it as an undo, with the
 site address and your WordPress password. On the command line,
 `wp backups-for-restic database-discard <apply-job-id>` prints the same review with its
-digest and asks you to type the site address; a script passes `--site-url` and the
-`--digest` that an earlier run printed. The discard drops nothing.
+digest and asks you to type the site address on a terminal. A script runs it once to read the
+digest, which that run prints before it stops for want of a terminal, and again with both
+`--site-url` and that `--digest`; it refuses one without the other. The discard drops nothing.
 
 **Where the names of those tables are afterwards.** For 90 days after the discard, the
 Restores tab lists the binding under **Discarded bindings** with the database, the server UUID

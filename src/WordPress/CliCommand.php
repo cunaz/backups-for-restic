@@ -485,20 +485,22 @@ final class CliCommand {
 	 * Reviews and forgets a database restore binding whose private tables are on another
 	 * database server or in another database, as the Restores tab does: the command prints what
 	 * the discard forgets, what stays and the digest of that review, and the site address has to
-	 * be typed to confirm it. Nothing is dropped: the command lists the tables that a database
-	 * administrator removes by hand where they are.
+	 * be typed on a terminal to confirm it. A script confirms a review that an earlier run printed,
+	 * with the site address and that review's digest. Nothing is dropped: the command lists the
+	 * tables that a database administrator removes by hand where they are.
 	 *
 	 * ## OPTIONS
 	 *
 	 * <apply-job>
 	 * : ID of the database apply job that holds the binding.
 	 *
-	 * [--site-url=<url>]
-	 * : The site address, typed to confirm the discard. Without it, the command asks for it.
+	 * [--site-url[=<url>]]
+	 * : The site address, which confirms the discard without a prompt, together with --digest.
+	 * Without it, the command asks for the address on a terminal, and refuses where there is none.
 	 *
-	 * [--digest=<digest>]
-	 * : The digest that an earlier run printed for the review that you confirm. The binding must
-	 * still be as that review showed it. Without it, the review that this run prints is confirmed.
+	 * [--digest[=<digest>]]
+	 * : The digest that an earlier run printed for the review that you confirm; required with
+	 * --site-url. The binding must still be as that review showed it.
 	 *
 	 * [--yes]
 	 * : Not accepted: the discard is confirmed with the typed site address. A script that passes
@@ -510,12 +512,21 @@ final class CliCommand {
 	 *     wp backups-for-restic database-discard 20261120T000000Z-0a0b0c --site-url=https://example.com --digest=<digest>
 	 *
 	 * @subcommand database-discard
-	 * @param list<string>         $args Apply job.
-	 * @param array<string,string> $assoc_args Confirmation options.
+	 * @param list<string>              $args Apply job.
+	 * @param array<string,string|bool> $assoc_args Confirmation options; a flag without a value is true.
 	 */
 	public function database_discard( array $args, array $assoc_args ): void {
 		if ( isset( $assoc_args['yes'] ) ) {
 			\WP_CLI::error( __( 'database-discard no longer takes --yes, and nothing was discarded. Run it without --yes to see its review, then confirm by typing the site address, or pass --site-url with the site address and --digest with the digest that the review printed.', 'backups-for-restic' ) );
+		}
+		// A script binds to a review that it was shown: an empty or missing digest is no confirmation.
+		$given = $assoc_args['digest'] ?? null;
+		if ( null !== $given && ( ! is_string( $given ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $given ) ) ) {
+			\WP_CLI::error( __( '--digest needs the digest that an earlier run of this command printed: 64 characters, the digits 0 to 9 and the letters a to f. Nothing was discarded.', 'backups-for-restic' ) );
+		}
+		$scripted = array_key_exists( 'site-url', $assoc_args );
+		if ( $scripted && null === $given ) {
+			\WP_CLI::error( __( '--site-url needs --digest with the digest that an earlier run of this command printed for the review that you confirm. Nothing was discarded.', 'backups-for-restic' ) );
 		}
 		$user = get_current_user_id();
 		if ( $user > 0 && ! RestRoutes::database_writes_allowed() ) {
@@ -529,13 +540,16 @@ final class CliCommand {
 			self::discard_refused( $refused );
 		}
 		self::discard_review( $review );
-		$digest = $assoc_args['digest'] ?? $review['digest'];
+		$digest = $given ?? $review['digest'];
 		if ( ! hash_equals( $review['digest'], $digest ) ) {
 			$texts = Messages::job_error( 'database_discard_changed' );
 			\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
 		}
+		if ( ! $scripted && ! stream_isatty( STDIN ) ) {
+			\WP_CLI::error( __( 'There is no terminal to ask for the site address, so nothing was discarded. Run the command on a terminal, or pass --site-url with the site address and --digest with the digest that this review printed.', 'backups-for-restic' ) );
+		}
 		/* translators: %s: the site address. */
-		$typed = $assoc_args['site-url'] ?? self::typed( sprintf( __( 'Type the site address, %s, to discard this binding, or press Enter to keep it:', 'backups-for-restic' ), home_url() ) );
+		$typed = $scripted ? $assoc_args['site-url'] : self::typed( sprintf( __( 'Type the site address, %s, to discard this binding, or press Enter to keep it:', 'backups-for-restic' ), home_url() ) );
 		if ( home_url() !== $typed ) {
 			/* translators: %s: the site address. */
 			\WP_CLI::error( sprintf( __( 'The typed address is not the site address, %s. Nothing was discarded.', 'backups-for-restic' ), home_url() ) );

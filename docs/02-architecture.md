@@ -1395,11 +1395,12 @@ page shows it (§14). `status` prints the last backup and the active job only.
 private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
 records. Configuration and startup files require offline recovery. `undo <apply-job>`
 reviews and confirms reversal of live file changes, entry by entry, and lists the entries
-it kept. `database-discard <apply-job> [--site-url=<url>] [--digest=<digest>]` prints the review of
+it kept. `database-discard <apply-job> [--site-url=<url> --digest=<digest>]` prints the review of
 the discard of a binding whose private tables are on another database server or in another
 database, as the Restores tab shows it, with its digest, and forgets the binding once the site
-address is typed, at its prompt or with `--site-url`; `--digest` confirms a review that an
-earlier run printed. It drops nothing. A user selected with `--user` needs the capabilities of a
+address is typed at its prompt, which needs a terminal. A script passes `--site-url` together
+with `--digest`, the digest of a review that an earlier run printed; one without the other, and
+a digest without a value or an empty one, are refused. It drops nothing. A user selected with `--user` needs the capabilities of a
 database restore. `--yes`, which skipped the only confirmation until 2026-11-26, is refused.
 `database-discarded [<apply-job>] [--done]` prints the discarded bindings whose private tables
 are still to be removed by hand, with their database, server UUID and table names, for 90 days

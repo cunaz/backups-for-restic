@@ -287,11 +287,17 @@ database could not get rid of the binding. Since then:
   `database_discard_busy`. Any other failure is unexpected: nothing records it, and
   `database_discard_unexpected` says so and that WP-CLI prints its details, where it is
   appended to the text.
-- WP-CLI prints the same review with its digest and asks for the site address, or takes
-  `--site-url`, and `--digest` for a review that an earlier run printed. It does not ask for the
-  WordPress password: whoever runs it can read and change the site's files. A WordPress user
-  selected with `--user` needs the capabilities of `database_writes_allowed`. `--yes`, which
-  skipped the only confirmation before, is refused with an error that says so.
+- WP-CLI prints the same review with its digest and asks for the site address on a terminal; it
+  refuses where there is no terminal to ask, after the review, which gives a script its digest.
+  A script confirms with both `--site-url` and `--digest`, the digest of a review that an
+  earlier run printed: `--site-url` without `--digest`, and a `--digest` without a value, empty
+  or not 64 lower-case hexadecimal characters, are refused before the review, so a script whose
+  digest variable came out empty does not confirm the review of the same run. Both are declared
+  with an optional value, so that WP-CLI hands over a bare flag instead of dropping it with a
+  warning. It does not ask for the WordPress password: whoever runs it can read and change the
+  site's files. A WordPress user selected with `--user` needs the capabilities of
+  `database_writes_allowed`. `--yes`, which skipped the only confirmation before, is refused with
+  an error that says so.
 - The admin page lists these bindings on the Restores tab under "Private tables on another
   database server", and the card of an undo whose review answers `database_exchange_foreign`
   offers the same review. Every name is shown as text, escaped where it does not print.

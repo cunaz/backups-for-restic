@@ -741,4 +741,35 @@ final class TestSite {
 		fclose( $pipes[1] );
 		return [ proc_close( $process ), rtrim( $output, "\n" ) ];
 	}
+
+	/**
+	 * Runs a WP-CLI command as wp_input() does, but on a terminal of its own: script(1) gives it
+	 * a pseudo-terminal, which forwards what an administrator types and ends with the input.
+	 * The output has the terminal's line ends and the echo of the input.
+	 *
+	 * @param list<string> $arguments Command and arguments.
+	 * @param string       $input     What is typed.
+	 * @return array{int, string} Exit status and everything the command printed, with "\n" line ends.
+	 */
+	public static function wp_terminal( array $arguments, string $input ): array {
+		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( self::wp_cli() ) . ' --no-color --path=' . escapeshellarg( self::root() );
+		foreach ( $arguments as $argument ) {
+			$command .= ' ' . escapeshellarg( $argument );
+		}
+		$process = proc_open(
+			[ 'script', '--quiet', '--return', '--command', $command, '/dev/null' ],
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'redirect', 1 ],
+			],
+			$pipes
+		);
+		Assert::assertIsResource( $process );
+		fwrite( $pipes[0], $input );
+		fclose( $pipes[0] );
+		$output = (string) stream_get_contents( $pipes[1] );
+		fclose( $pipes[1] );
+		return [ proc_close( $process ), rtrim( str_replace( "\r\n", "\n", $output ), "\n" ) ];
+	}
 }

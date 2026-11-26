@@ -345,8 +345,11 @@ warning or deprecation reaches neither a response nor a test, only these logs. T
   forget and prune that are refused in retention mode external, `settings` with the
   refusals of the settings page, and `cancel` and `logs` on a backup that is at work;
   `database-discard`, which prints its review and digest, refuses `--yes`, a missing or wrong
-  site address and a digest of another review, and discards once the address is typed at the
-  prompt or passed with `--site-url`.
+  site address, a digest of another review, `--site-url` without `--digest`, a `--digest`
+  without a value or an empty one, and a prompt without a terminal, and discards once the
+  address is typed on a terminal (`TestSite::wp_terminal()`, through script(1)) or passed with
+  `--site-url` and the digest of an earlier run; `database-discarded`, which lists the tables
+  of a discarded binding and ends that listing with `--done`.
 - **`MultisiteTest`**: on a second WordPress that is a multisite network
   (`bin/test-site.sh install-multisite`, never served, reached through WP-CLI): activation
   is refused for the network and for one site, and a plugin that is active all the same
