@@ -192,6 +192,21 @@ final class JobMessagesTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_undo_records_that_cannot_be_read_name_both_causes_and_what_to_do_about_each(): void {
+		self::text( 'internal' );
+		$hint = Messages::job_error( 'undo_records_unreadable' )['hint'];
+		// A record below a folder that the PHP user cannot search: ownership and permissions.
+		self::assertStringContainsString( 'If the PHP user does not own the private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions.', $hint );
+		// A link or a folder at the record's name, where ownership is in order: before, the hint said
+		// only to check ownership, which does not help there.
+		self::assertStringContainsString( 'If they are in order, a link or a folder is in the place of a record in the folder undo/ of the apply', $hint );
+		self::assertStringContainsString( 'leave the apply\'s files as they are, since they hold the saved original files', $hint );
+		self::assertStringContainsString( 'restore what the apply changed from a backup', $hint );
+		// The check is one of the lookup and the file type, not of who wrote the file.
+		self::assertStringNotContainsString( 'that the plugin wrote', $hint );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_a_stored_job_that_the_php_user_cannot_open_is_named_with_its_cause_and_way_out(): void {
 		self::text( 'internal' );
 		$id    = '20260101T000000Z-0a1b2c';

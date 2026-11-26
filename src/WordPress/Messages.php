@@ -197,7 +197,7 @@ final class Messages {
 			],
 			'undo_records_unreadable'        => [
 				'message' => __( 'The plugin cannot tell whether this apply can still be undone.', 'backups-for-restic' ),
-				'hint'    => __( 'A record of its undo in the plugin\'s private working directory cannot be looked up, or is not a file that the plugin wrote. Until the 24 hours of its recovery window are over, the plugin keeps the saved original files and the staged files, and it offers the undo again once it can read the records. Check that the PHP user owns the private working directory and can read and open every folder in it.', 'backups-for-restic' ),
+				'hint'    => __( 'A record of its undo in the plugin\'s private working directory cannot be looked up, or something other than a regular file is at its name. Until the 24 hours of its recovery window are over, the plugin keeps the saved original files and the staged files, and it offers the undo again once it can read the records. If the PHP user does not own the private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions. If they are in order, a link or a folder is in the place of a record in the folder undo/ of the apply, which the plugin does not follow: leave the apply\'s files as they are, since they hold the saved original files, and restore what the apply changed from a backup if it has to be undone before the 24 hours are over.', 'backups-for-restic' ),
 			],
 			'maintenance_busy'               => [
 				'message' => __( 'WordPress is in maintenance mode for another update, so the file changes did not start.', 'backups-for-restic' ),

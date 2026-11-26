@@ -496,7 +496,7 @@
 	 */
 	function undoState( job ) {
 		if ( 'unreadable' === job.state ) {
-			return notice( 'error', __( 'The plugin cannot read the records of this apply\'s undo, so it does not offer the undo now. It keeps the saved original files and the staged files until the time above, and offers the undo again once it can read the records. Check that the PHP user owns the plugin\'s private working directory and can read and open every folder in it.', 'backups-for-restic' ) );
+			return notice( 'error', __( 'The plugin cannot read the records of this apply\'s undo, so it does not offer the undo now. It keeps the saved original files and the staged files until the time above, and offers the undo again once it can read the records. If the PHP user does not own the plugin\'s private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions, then reload this page. If they are in order, a link or a folder is in the place of a record of the undo, which the plugin does not follow: leave the apply\'s files as they are, since they hold the saved original files, and restore what the apply changed from a backup if it has to be undone before the time above.', 'backups-for-restic' ) );
 		}
 		if ( 'partly_undone' !== job.state ) {
 			return null;
