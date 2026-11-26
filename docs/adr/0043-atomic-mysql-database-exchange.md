@@ -208,7 +208,8 @@ from the original one and counts as unreachable, as before.
   `POST /database-changes/{id}/discard` or with `wp backups-for-restic database-discard
   <apply-job>`. The review names the database, the server UUID and every private table name
   the binding can own (`_p`, `_a`, `_u`, and `_t<n>` and `_b<n>` per table); the discard
-  records the decision in the job (`database_discarded`, and the table names in its warning)
+  records the decision in the job (`database_discarded`, and the table names in its warning,
+  which takes the place of the last warning in a job that already holds the 50 it keeps)
   and drops nothing. None of these names starts with the site's prefix; a database
   administrator drops those that exist on the server that holds them.
 - Uninstall forgets such a binding without dropping anything: its tables are not on this
@@ -252,7 +253,8 @@ database could not get rid of the binding. Since then:
   digest that is not the current review's is refused with `database_discard_changed`: a
   binding whose record changed, a site that moved on to another database, an undo window that
   ended or a review of another user is not discarded. The job records who confirmed it and
-  how (`database_discarded`), its log line names the digest, and its warning the tables.
+  how (`database_discarded`), its log line names the digest, and its warning the tables; the
+  limit of a job's warnings does not drop that warning.
 - A binding that cannot be discarded is answered with what is the case:
   `database_binding_missing` (no database apply with a binding of this ID), `job_unreadable`,
   `database_binding_discarded`, `database_binding_busy` (the job or an undo of it has not

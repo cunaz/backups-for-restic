@@ -21,6 +21,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Job {
 
+	/** The warnings that a job keeps. */
+	public const int MAX_WARNINGS = 50;
+
 	/**
 	 * The layout of job.json that this version reads and writes. It is raised with every
 	 * change that a version without the change would misread; a document with a higher number
@@ -148,7 +151,7 @@ final class Job {
 	public array $data = [];
 
 	/**
-	 * Warnings for the administrator, at most 50.
+	 * Warnings for the administrator, at most MAX_WARNINGS.
 	 *
 	 * @var list<string>
 	 */
@@ -172,14 +175,27 @@ final class Job {
 	}
 
 	/**
-	 * Adds a warning, keeping the first 50.
+	 * Adds a warning, keeping the first MAX_WARNINGS.
 	 *
 	 * @param string $warning Text without secrets.
 	 */
 	public function warn( string $warning ): void {
-		if ( count( $this->warnings ) < 50 ) {
+		if ( count( $this->warnings ) < self::MAX_WARNINGS ) {
 			$this->warnings[] = $warning;
 		}
+	}
+
+	/**
+	 * Adds a warning that the limit must not drop, because it tells the administrator what is
+	 * left to do by hand: among MAX_WARNINGS warnings it takes the place of the last one.
+	 *
+	 * @param string $warning Text without secrets.
+	 */
+	public function warn_kept( string $warning ): void {
+		if ( count( $this->warnings ) >= self::MAX_WARNINGS ) {
+			array_splice( $this->warnings, self::MAX_WARNINGS - 1 );
+		}
+		$this->warnings[] = $warning;
 	}
 
 	/**

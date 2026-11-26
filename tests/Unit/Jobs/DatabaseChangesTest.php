@@ -825,4 +825,20 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertStringContainsString( 'in the database "bfr_\u202esite" on the server ' . self::OTHER . ' was discarded.', $warning );
 		self::assertStringNotContainsString( "\u{202E}", $warning );
 	}
+
+	public function test_the_warning_of_a_discard_is_kept_in_a_job_that_holds_as_many_warnings_as_it_keeps(): void {
+		$job = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ), self::OTHER ) ] );
+		for ( $number = 1; $number <= Job::MAX_WARNINGS + 1; ++$number ) {
+			$job->warn( 'Warning ' . $number );
+		}
+		self::assertCount( Job::MAX_WARNINGS, $job->warnings );
+		$this->jobs->save( $job );
+		$review = $this->changes( $this->server() )->discard_review( $job->id, 7 );
+		$this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
+		$warnings = $this->jobs->get( $job->id )?->warnings ?? [];
+		// Before, the limit dropped the one warning that names what is left to remove by hand.
+		self::assertCount( Job::MAX_WARNINGS, $warnings );
+		self::assertSame( 'Warning ' . ( Job::MAX_WARNINGS - 1 ), $warnings[ Job::MAX_WARNINGS - 2 ] );
+		self::assertStringContainsString( ' was discarded. Nothing was dropped; remove those that exist there by hand: ' . implode( ', ', $review['tables'] ), $warnings[ Job::MAX_WARNINGS - 1 ] );
+	}
 }
