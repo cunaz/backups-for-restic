@@ -340,6 +340,10 @@ final class DatabaseServersTest extends TestCase {
 		$answers = self::answers();
 		unset( $answers['b.example.com:3306']['Performance_schema_thread_classes_lost'] );
 		self::assertSame( [ 'b.example.com:3306: The database server reports no readable Performance_schema_thread_classes_lost, so it is unknown whether its Performance Schema listed every session: the database scores cannot be trusted.' ], DatabaseServers::after( array_keys( $answers ), $answers, 3600 ) );
+		// A server that answered the other questions but not those about its Performance Schema.
+		$answers                       = self::answers();
+		$answers['c.example.com:3306'] = array_diff_key( (array) $answers['c.example.com:3306'], array_flip( [ 'performance_schema', 'Performance_schema_thread_instances_lost', 'Performance_schema_thread_classes_lost' ] ) );
+		self::assertSame( [ 'c.example.com:3306: The database server cannot be asked about its Performance Schema, so it is unknown whether that listed every session: the database scores cannot be trusted.' ], DatabaseServers::after( array_keys( $answers ), $answers, 3600 ) );
 	}
 
 	/**
@@ -415,6 +419,8 @@ final class DatabaseServersTest extends TestCase {
 				1,
 				[ $before, $ran, $after ],
 			],
+			// The list as DatabaseServers reads it: every word, across lines too.
+			'servers named on several lines'               => [ [ DatabaseServers::VARIABLE => "a.example.com:3306\n\tb.example.com:3306 \nc.example.com:3306\n" ], [ '--no-progress' ], 0, [ $before, $ran, $after ] ],
 			'threads as an argument'                       => [ [], [ '--threads=4' ], 1, [] ],
 			'threads as a short option'                    => [ [], [ '-j4' ], 1, [] ],
 			'threads as a separate value'                  => [ [], [ '--threads', '4' ], 1, [] ],
@@ -437,7 +443,7 @@ final class DatabaseServersTest extends TestCase {
 		try {
 			mkdir( $root . '/bin' );
 			copy( dirname( __DIR__, 3 ) . '/bin/database-servers.sh', $root . '/bin/database-servers.sh' );
-			file_put_contents( $root . '/bin/check-database-servers.php', '<?php file_put_contents( (string) getenv( "FAKE_LOG" ), "check " . implode( " ", array_slice( $argv, 1 ) ) . " hosts=" . getenv( "BFR_TEST_MYSQL_HOSTS" ) . "\n", FILE_APPEND ); exit( (int) getenv( "before" === ( $argv[1] ?? "" ) ? "FAKE_BEFORE" : "FAKE_AFTER" ) );' );
+			file_put_contents( $root . '/bin/check-database-servers.php', '<?php file_put_contents( (string) getenv( "FAKE_LOG" ), "check " . implode( " ", array_slice( $argv, 1 ) ) . " hosts=" . preg_replace( "/\\s+/", " ", trim( (string) getenv( "BFR_TEST_MYSQL_HOSTS" ) ) ) . "\n", FILE_APPEND ); exit( (int) getenv( "before" === ( $argv[1] ?? "" ) ? "FAKE_BEFORE" : "FAKE_AFTER" ) );' );
 			file_put_contents( $root . '/command.sh', "#!/usr/bin/env bash\necho \"command \$* host=\${BFR_TEST_MYSQL_HOST:-} token=\${TEST_TOKEN-unset}\" >> \"\$FAKE_LOG\"\nexit \"\${FAKE_STATUS:-0}\"\n" );
 			chmod( $root . '/command.sh', 0755 );
 			[ $status, $output ] = self::command(

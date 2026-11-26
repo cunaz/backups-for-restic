@@ -34,7 +34,8 @@ for argument in "$@"; do
 			;;
 	esac
 done
-read -r -a servers <<< "${BFR_TEST_MYSQL_HOSTS:-}"
+# Every word of the list, across lines too, as tests/Support/DatabaseServers.php reads it.
+read -r -d '' -a servers <<< "${BFR_TEST_MYSQL_HOSTS:-}" || true
 started="$(date +%s)"
 php "$root/bin/check-database-servers.php" before || exit 1
 
