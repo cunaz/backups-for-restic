@@ -448,6 +448,59 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_a_stored_job_that_cannot_be_read_is_named_by_every_route_and_command_that_meets_it(): void {
+		// The newest of the two, which the refusal of a repository change names.
+		$inaccessible = '20261126T150000Z-0c2002';
+		$unreadable   = '20261126T150000Z-0c2001';
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$backup              = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$container->jobs()->save( $backup );
+			',
+			[ $inaccessible ]
+		);
+		mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
+		file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
+		// As a WP-CLI command run as another user leaves the folder: the web server's PHP user cannot search it.
+		$folder = TestSite::private_dir() . '/jobs/' . $inaccessible;
+		chmod( $folder, 0600 );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$named = 'The PHP user cannot open the stored job ' . $inaccessible . ' in the private working directory.';
+			// Before, GET /jobs/{id}, its log and its cancellation answered 404 "The job does not exist.",
+			// and the others job_unreadable, whose texts ask for another plugin version and name no job.
+			foreach ( [ [ 'GET', '/jobs/' . $inaccessible ], [ 'GET', '/jobs/' . $inaccessible . '/log' ], [ 'POST', '/jobs/' . $inaccessible . '/cancel' ], [ 'GET', '/jobs/' . $inaccessible . '/kept-entries' ], [ 'DELETE', '/restores/' . $inaccessible ], [ 'DELETE', '/repository/ca-certificate' ] ] as [ $method, $route ] ) {
+				[ $status, $error, $raw ] = TestSite::api( $method, $route );
+				self::assertSame( [ 409, 'backups_for_restic_job_inaccessible', $named, $inaccessible ], [ $status, $error['code'] ?? null, $error['message'] ?? null, $error['data']['job'] ?? null ], $method . ' ' . $route . ': ' . $raw );
+				self::assertStringContainsString( 'Give the PHP user back ownership of that folder', (string) ( $error['data']['hint'] ?? '' ), $raw );
+			}
+			foreach ( [ 'logs', 'cancel' ] as $command ) {
+				[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', $command, $inaccessible ] );
+				self::assertSame( 1, $status, $output );
+				// Before: "The job does not exist."
+				self::assertStringContainsString( $named . ' The job\'s folder under jobs/', $output, $command );
+			}
+			chmod( $folder, 0700 );
+			// A document that this version cannot parse keeps its code, and now names its job as well.
+			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $unreadable );
+			self::assertSame( [ 409, 'backups_for_restic_job_unreadable', $unreadable ], [ $status, $error['code'] ?? null, $error['data']['job'] ?? null ], $raw );
+			self::assertSame( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', $error['data']['hint'] ?? null );
+			[ $status, , $raw ] = TestSite::api( 'GET', '/jobs/20261126T150000Z-0c2003' );
+			self::assertSame( 404, $status, 'An ID that no job has: ' . $raw );
+		} finally {
+			chmod( $folder, 0700 );
+			foreach ( [ $inaccessible, $unreadable ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
 	public function test_an_undo_cancelled_after_it_counted_every_entry_records_its_apply_as_undone(): void {
 		$site  = TestSite::root();
 		$apply = '20261126T140000Z-0c1010';
