@@ -506,6 +506,9 @@ final class DatabaseChangesTest extends TestCase {
 		$review = $this->changes( $this->server() )->discard_review( $this->stranded( '20260101T000003Z-cccccc' )->id, 7 );
 		self::assertSame( [ null, null, null ], [ $review['generation'], $review['retained_until'], $review['undo_until'] ] );
 		self::assertSame( 'site', $review['connected']['database'] );
+		// A generation that the plugin does not record is shown as none.
+		$unknown = $this->moved( '20260101T000004Z-dddddd', [ 'database_generation' => 'prepared' ] );
+		self::assertNull( $this->changes( $this->server() )->discard_review( $unknown->id, 7 )['generation'] );
 	}
 
 	public function test_the_digest_of_a_discard_covers_everything_that_its_review_shows(): void {
@@ -757,15 +760,14 @@ final class DatabaseChangesTest extends TestCase {
 	}
 
 	public function test_the_list_of_bindings_to_discard_asks_about_each_finished_binding_as_its_review_does(): void {
-		$queries = new \ArrayObject();
+		// Without a binding the database is not asked, nor its connection opened.
 		self::assertSame(
 			[
 				'jobs'     => [],
 				'complete' => true,
 			],
-			$this->changes( $this->lost( $queries ) )->foreign_bindings()
+			$this->changes_through( static fn (): Connection => throw new \LogicException( 'The connection was asked for without a binding.' ) )->foreign_bindings()
 		);
-		self::assertCount( 0, $queries, 'Without a binding the database is not asked.' );
 		$until  = $this->clock->seconds + 3600;
 		$moved  = $this->moved(
 			'20260101T000001Z-aaaaaa',
@@ -811,5 +813,16 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertSame( $unknown, $this->changes( $this->server( '' ) )->foreign_bindings() );
 		self::assertSame( $unknown, $this->changes( $this->lost( new \ArrayObject() ) )->foreign_bindings() );
 		self::assertSame( $unknown, $this->changes_through( static fn (): Connection => throw new DatabaseFailed( 'The database connection could not be opened again.', [ 'code' => 'database_restore_busy' ] ) )->foreign_bindings() );
+	}
+
+	public function test_the_warning_of_a_discard_quotes_a_name_that_does_not_print(): void {
+		// Another database chose the name: a right-to-left override must not turn the warning around.
+		$job    = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ), self::OTHER, "bfr_\u{202E}site" ) ] );
+		$review = $this->changes( $this->server() )->discard_review( $job->id, 7 );
+		self::assertSame( "bfr_\u{202E}site", $review['database'], 'The review gives the stored name; the page escapes it.' );
+		$this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
+		$warning = $this->jobs->get( $job->id )?->warnings[0] ?? '';
+		self::assertStringContainsString( 'in the database "bfr_\u202esite" on the server ' . self::OTHER . ' was discarded.', $warning );
+		self::assertStringNotContainsString( "\u{202E}", $warning );
 	}
 }
