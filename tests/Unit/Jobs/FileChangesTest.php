@@ -1218,15 +1218,20 @@ final class FileChangesTest extends TestCase {
 	 * An undo whose worker counted its last entry and stopped before the runner saved the step
 	 * after it: the job document on disk names the step that reverts, with every entry counted.
 	 *
-	 * @param bool $edit Whether the created file is edited first, so that the undo keeps it and its folder.
+	 * @param string $before What happens to the created file: nothing, edited before the review
+	 *                       (the undo keeps it and its folder), or deleted after it (the undo
+	 *                       finds nothing left to revert there).
 	 * @return array{Job, Job} The apply and the undo.
 	 */
-	private function counted_and_stopped( bool $edit ): array {
+	private function counted_and_stopped( string $before ): array {
 		$job = $this->run_job( $this->start() );
-		if ( $edit ) {
+		if ( 'edited' === $before ) {
 			file_put_contents( $this->live . '/b-new/new.txt', 'edited' );
 		}
 		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		if ( 'gone' === $before ) {
+			unlink( $this->live . '/b-new/new.txt' );
+		}
 		$this->runner->tick( 0.0 ); // Preflight.
 		for ( $entry = 0; $entry < 3; ++$entry ) {
 			$this->runner->tick( 0.0 );
@@ -1240,31 +1245,36 @@ final class FileChangesTest extends TestCase {
 	}
 
 	/**
-	 * Whether the undo kept an entry, and what its apply is recorded as then.
+	 * What happens to the created file, what the undo counts (restored, removed, unchanged,
+	 * kept), and what its apply is recorded as then.
 	 *
-	 * @return array<string, array{0: bool, 1: string, 2: int, 3: bool}>
+	 * @return array<string, array{0: string, 1: list<int>, 2: string, 3: int, 4: bool}>
 	 */
 	public static function counted_undos(): array {
 		return [
-			'that kept nothing' => [ false, 'undone', 0, true ],
-			'that kept two'     => [ true, 'partly_undone', 2, false ],
+			'that reverted every entry'                    => [ 'nothing', [ 1, 2, 0, 0 ], 'undone', 0, true ],
+			'that found an entry deleted after its review' => [ 'gone', [ 1, 1, 1, 0 ], 'undone', 0, true ],
+			'that kept two entries'                        => [ 'edited', [ 1, 0, 0, 2 ], 'partly_undone', 2, false ],
 		];
 	}
 
+	/**
+	 * @param list<int> $counts Restored, removed, unchanged and kept entries.
+	 */
 	#[DataProvider( 'counted_undos' )]
-	public function test_an_undo_cancelled_after_it_counted_every_entry_is_recorded_as_one_that_finished( bool $edit, string $state, int $kept, bool $reverted ): void {
-		[ $job, $undo ] = $this->counted_and_stopped( $edit );
+	public function test_an_undo_cancelled_after_it_counted_every_entry_is_recorded_as_one_that_finished( string $before, array $counts, string $state, int $kept, bool $reverted ): void {
+		[ $job, $undo ] = $this->counted_and_stopped( $before );
 		$this->runner->cancel( $undo->id );
 		$cancelled = $this->run_job( $undo, JobState::Cancelled );
-		self::assertSame( $edit ? [ 1, 0, 2, $state ] : [ 1, 2, 0, $state ], [ $cancelled->result['restored'], $cancelled->result['removed'], $cancelled->result['kept'], $cancelled->result['apply_state'] ] );
+		self::assertSame( [ ...$counts, $state ], [ $cancelled->result['restored'], $cancelled->result['removed'], $cancelled->result['unchanged'], $cancelled->result['kept'], $cancelled->result['apply_state'] ] );
 		$apply = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
 		// Before: partly undone, the number of kept entries unknown, and the apply listed for undo.
 		self::assertSame( [ $state, $kept, $undo->id ], [ $apply->result['undo_state'], $apply->result['undo_kept'], $apply->result['undo_job'] ] );
 		self::assertSame( $reverted, is_file( $this->jobs->directory( $job ) . '/undo/reverted' ) );
 		self::assertSame( $reverted ? [] : [ [ 'partly_undone', 2 ] ], array_map( static fn ( array $listed ): array => [ $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
-		self::assertSame( $edit ? 'edited' : null, is_file( $this->live . '/b-new/new.txt' ) ? file_get_contents( $this->live . '/b-new/new.txt' ) : null );
+		self::assertSame( 'edited' === $before ? 'edited' : null, is_file( $this->live . '/b-new/new.txt' ) ? file_get_contents( $this->live . '/b-new/new.txt' ) : null );
 		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
-		if ( $edit ) {
+		if ( 'edited' === $before ) {
 			self::assertSame(
 				[
 					$this->live . '/b-new/new.txt' => 'changed_since_apply',
@@ -1275,21 +1285,54 @@ final class FileChangesTest extends TestCase {
 		}
 	}
 
+	public function test_an_undo_of_one_entry_cancelled_after_it_counted_the_entry_is_recorded_as_undone(): void {
+		$restore = $this->second_restore( [ $this->live . '/single.txt' => 'one' ] );
+		$job     = $this->run_job( $this->changes->start_apply( $restore, false, $this->changes->preview( $restore )['digest'] ) );
+		$undo    = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The created file is removed.
+		$document = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		self::assertSame( [ 1, 1, 'recording' ], [ $document->progress['total'], $document->progress['done'], $document->step ] );
+		$document->step = 'undoing';
+		$this->jobs->save( $document );
+		$this->runner->cancel( $undo->id );
+		$this->run_job( $undo, JobState::Cancelled );
+		$apply = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
+		self::assertSame( [ 'undone', 0 ], [ $apply->result['undo_state'], $apply->result['undo_kept'] ] );
+		self::assertFileExists( $this->jobs->directory( $job ) . '/undo/reverted' );
+		self::assertFileDoesNotExist( $this->live . '/single.txt' );
+	}
+
 	/**
-	 * Documents of a stopped undo that do not establish that every entry was counted: the
-	 * cursor and its total, and the counts by outcome.
+	 * Documents of a stopped undo that do not establish that every entry was counted: what
+	 * happens to the created file, the cursor's total and position, the counts by outcome, the
+	 * apply's journal count (null as the apply left it, empty for none, otherwise its content),
+	 * and what the apply is recorded as then.
 	 *
-	 * @return array<string, array{0: int, 1: array<string, int>}>
+	 * @return array<string, array{0: string, 1: int, 2: int, 3: array<string, int>, 4: string|null, 5: string|null}>
 	 */
 	public static function uncounted_undos(): array {
-		$two = [
+		$two   = [
 			'restored' => 1,
 			'removed'  => 1,
 		];
+		$three = [
+			'restored' => 1,
+			'removed'  => 2,
+		];
+		$kept  = [
+			'restored' => 1,
+			'kept'     => 2,
+		];
 		return [
 			// Counts that add up to a cursor at its total, which the apply's journal contradicts.
-			'a total short of the attempted entries'  => [ 2, $two ],
-			'counts that do not add up to the cursor' => [ 3, $two ],
+			'a total short of the attempted entries'  => [ 'nothing', 2, 2, $two, null, 'partly_undone' ],
+			'counts that do not add up to the cursor' => [ 'nothing', 3, 3, $two, null, 'partly_undone' ],
+			// The cursor is on the kept folder, which no record proves reverted.
+			'a cursor short of counts that add up to the total' => [ 'edited', 3, 1, $kept, null, 'partly_undone' ],
+			'a journal count that cannot be read'     => [ 'nothing', 3, 3, $three, 'three', 'partly_undone' ],
+			// Nothing counted and nothing attempted: no entry is established, and none was reverted.
+			'a document that counts no entry'         => [ 'nothing', 0, 0, [], '', null ],
 		];
 	}
 
@@ -1297,20 +1340,26 @@ final class FileChangesTest extends TestCase {
 	 * @param array<string, int> $counts
 	 */
 	#[DataProvider( 'uncounted_undos' )]
-	public function test_an_undo_cancelled_with_a_document_that_does_not_count_every_entry_stays_partly_undone( int $total, array $counts ): void {
-		[ $job, $undo ]                = $this->counted_and_stopped( false );
+	public function test_an_undo_cancelled_with_a_document_that_does_not_count_every_entry_stays_partly_undone( string $before, int $total, int $done, array $counts, ?string $journal, ?string $state ): void {
+		[ $job, $undo ]                = $this->counted_and_stopped( $before );
 		$document                      = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
 		$document->progress['total']   = $total;
-		$document->progress['done']    = $total;
+		$document->progress['done']    = $done;
 		$document->data['undo_counts'] = $counts;
 		$this->jobs->save( $document );
+		$attempted = $this->jobs->directory( $job ) . '/undo/attempted';
+		if ( '' === $journal ) {
+			unlink( $attempted );
+		} elseif ( null !== $journal ) {
+			file_put_contents( $attempted, $journal );
+		}
 		$this->runner->cancel( $undo->id );
 		$this->run_job( $undo, JobState::Cancelled );
 		// What cannot be established keeps the apply open for the next review (fail closed).
 		$apply = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
-		self::assertSame( [ 'partly_undone', null ], [ $apply->result['undo_state'], $apply->result['undo_kept'] ] );
+		self::assertSame( [ $state, null ], [ $apply->result['undo_state'] ?? null, $apply->result['undo_kept'] ?? null ] );
 		self::assertFileDoesNotExist( $this->jobs->directory( $job ) . '/undo/reverted' );
-		self::assertSame( [ [ 'partly_undone', null ] ], array_map( static fn ( array $listed ): array => [ $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
+		self::assertSame( null === $state ? [] : [ [ 'partly_undone', null ] ], array_map( static fn ( array $listed ): array => [ $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
 	}
 
 	public function test_a_review_that_finds_nothing_left_to_revert_records_the_apply_as_undone(): void {
