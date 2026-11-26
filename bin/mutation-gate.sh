@@ -44,7 +44,8 @@
 # with the timed-out mutants counted as not detected, and fails the gate unless that lower bound
 # meets both floors too: minMsi and minCoveredMsi of the configuration, or --min-msi and
 # --min-covered-msi, which it reads before Infection starts and without which it fails. A floor
-# counts as read only when it is set once, in plain digits with at most two decimals. Up to 5
+# of the configuration counts as read only when it is a number that is set once, with at most
+# two decimals, in a file that is JSON apart from its comments. Up to 5
 # percent Infection's verdict stands, as some mutants loop for good and their timeout is a
 # detection.
 #
@@ -91,12 +92,35 @@ if [[ -z "$summary" ]]; then
 fi
 [[ "$summary" == /* ]] || summary="$(dirname "$config")/$summary"
 rm -f "$summary"
-# What the configuration gives a key: the whole value up to the comma, blank, brace or comment
-# that ends it, and every value when the key is set more than once. hundredths() then refuses
-# what it does not take as a whole (8e1, which is 80 to Infection, 0x50, "80", two values)
-# instead of reading its first digits as a lower floor.
+# What the configuration gives a floor, read as Infection reads the file as far as that needs no
+# JSON5 parser: JSON5's comments are taken out, its strings left as they are, and the rest must
+# be JSON in which the floor's name is set once. The value is printed as JSON (8e1, which is 80
+# to Infection, as 80, and not by its first digit), so that hundredths() refuses what is no
+# percentage; a name that is set more than once is printed as such, and a file or a name that
+# cannot be read as nothing, with the reason on the standard error output. PHP runs without a
+# php.ini, so that no setting changes how a number is printed. A name that is written with
+# escapes is not counted.
 configured() {
-	sed -n 's/^[^/]*"'"$1"'"[[:space:]]*:[[:space:]]*\([^,[:space:]}/]*\).*/\1/p' "$config" | paste -s -d ' ' -
+	php -n -d display_errors=stderr -- "$config" "$1" << 'PHP' || true
+<?php
+[ , $file, $name ] = $argv;
+$plain = (string) preg_replace_callback(
+	'~"(?:[^"\\\\]|\\\\.)*+"|\'(?:[^\'\\\\]|\\\\.)*+\'|//[^\n]*|/\*.*?\*/~s',
+	static fn ( array $found ): string => '/' === $found[0][0] ? ' ' : $found[0],
+	is_file( $file ) ? (string) file_get_contents( $file ) : ''
+);
+$read = json_decode( $plain, true );
+if ( ! is_array( $read ) ) {
+	fwrite( STDERR, "$file is not JSON once its comments are taken out (" . json_last_error_msg() . "), so its $name cannot be read.\n" );
+	exit( 1 );
+}
+$times = (int) preg_match_all( '~"' . preg_quote( $name, '~' ) . '"\s*:~', $plain );
+if ( $times > 1 ) {
+	echo "set $times times";
+} elseif ( array_key_exists( $name, $read ) ) {
+	echo json_encode( $read[ $name ] );
+}
+PHP
 }
 if [[ -z "$min_msi" ]]; then
 	min_msi="$(configured minMsi)"
@@ -104,15 +128,14 @@ fi
 if [[ -z "$min_covered" ]]; then
 	min_covered="$(configured minCoveredMsi)"
 fi
-# A percentage in plain digits with at most two decimals, in hundredths: 80 is 8000, 80.5 is
-# 8050.
+# A percentage with at most two decimals, in hundredths: 80 is 8000, 80.5 is 8050.
 hundredths() {
 	[[ "$1" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?$ ]] || return 1
 	local decimals="${BASH_REMATCH[3]}00"
 	echo $((10#${BASH_REMATCH[1]} * 100 + 10#${decimals:0:2}))
 }
 if ! msi_floor="$(hundredths "$min_msi")" || ! covered_floor="$(hundredths "$min_covered")" || ((msi_floor > 10000 || covered_floor > 10000)); then
-	echo "::error::The floors of $config cannot be read (minMsi \"$min_msi\", minCoveredMsi \"$min_covered\"): each must be set once, as a percentage in plain digits with at most two decimals, in the configuration or as --min-msi and --min-covered-msi, or a run whose timeouts make its score an upper bound could not be held to them."
+	echo "::error::The floors of $config cannot be read (minMsi \"$min_msi\", minCoveredMsi \"$min_covered\"): each must be a number that is set once, a percentage with at most two decimals, in a configuration that is JSON apart from its comments, or be given as --min-msi and --min-covered-msi, or a run whose timeouts make its score an upper bound could not be held to them."
 	exit 1
 fi
 

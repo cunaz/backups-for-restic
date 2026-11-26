@@ -447,13 +447,22 @@ final class MutationGatesTest extends TestCase {
 			'no covered floor'                 => [ "    \"minMsi\": 80,\n", [], '::error::The floors of infection.json5.dist cannot be read (minMsi "80", minCoveredMsi "")', false ],
 			'a floor with three decimals'      => [ "    \"minMsi\": 80.125,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "80.125", minCoveredMsi "84")', false ],
 			'a floor in a comment'             => [ "    // \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "", minCoveredMsi "84")', false ],
-			'a floor in exponent notation'     => [ "    \"minMsi\": 8e1,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "8e1", minCoveredMsi "84")', false ],
-			'a floor in hexadecimal'           => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 0x54,\n", [], '(minMsi "80", minCoveredMsi "0x54")', false ],
-			'a floor with a sign'              => [ "    \"minMsi\": +80,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "+80", minCoveredMsi "84")', false ],
+			'a floor in exponent notation'     => [ "    \"minMsi\": 8.6e1,\n    \"minCoveredMsi\": 84,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
+			'a floor in hexadecimal'           => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 0x54,\n", [], '::error::The floors of infection.json5.dist cannot be read (minMsi "", minCoveredMsi "")', false ],
+			'a floor with a sign'              => [ "    \"minMsi\": +80,\n    \"minCoveredMsi\": 84,\n", [], 'infection.json5.dist is not JSON once its comments are taken out (Syntax error), so its minMsi cannot be read.', false ],
+			'a floor without quotes'           => [ "    minMsi: 80,\n    \"minCoveredMsi\": 84,\n", [], 'infection.json5.dist is not JSON once its comments are taken out (Syntax error), so its minCoveredMsi cannot be read.', false ],
 			'a floor as a string'              => [ "    \"minMsi\": \"80\",\n    \"minCoveredMsi\": 84,\n", [], '(minMsi ""80"", minCoveredMsi "84")', false ],
-			'a floor set twice'                => [ "    \"minMsi\": 80,\n    \"minMsi\": 8,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "80 8", minCoveredMsi "84")', false ],
-			'floors before comments'           => [ "    \"minMsi\": 86, // measured\n    \"minCoveredMsi\": 84/* measured */,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
+			'a floor that is no number'        => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": null,\n", [], '(minMsi "80", minCoveredMsi "null")', false ],
+			'a floor below zero'               => [ "    \"minMsi\": -1,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "-1", minCoveredMsi "84")', false ],
+			'a floor above a hundred'          => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 100.5,\n", [], '(minMsi "80", minCoveredMsi "100.5")', false ],
+			'a floor set twice'                => [ "    \"minMsi\": 80,\n    \"minMsi\": 8,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "set 2 times", minCoveredMsi "84")', false ],
+			'a floor set twice on one line'    => [ "    \"minMsi\": 80, \"minMsi\": 8,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "set 2 times", minCoveredMsi "84")', false ],
+			'a floor in a block comment'       => [ "    /*\n    \"minMsi\": 80,\n    */\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "", minCoveredMsi "84")', false ],
+			'a floor in another object'        => [ "    \"mutators\": { \"minMsi\": 80 },\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "", minCoveredMsi "84")', false ],
+			'floors beside comments'           => [ "    // \"minMsi\": 98,\n    \"minMsi\": 86, // measured\n    \"minCoveredMsi\": 84/* \"minCoveredMsi\": 99 */,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
+			'floors after a comment sign'      => [ "    \"testFrameworkOptions\": \"--filter=//x /* y \\\" z\",\n    \"minMsi\": 86,\n    \"minCoveredMsi\": 84,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
 			'floors on one line'               => [ "    \"minMsi\": 86, \"minCoveredMsi\": 84,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
+			'a floor on the line after a name' => [ "    \"minMsi\":\n    86.0,\n    \"minCoveredMsi\": 84,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
 			'floors on the command line'       => [ '', [ '--min-msi=86', '--min-covered-msi', '84.5' ], 'against the floors 86.00 % and 84.50 %', true ],
 			'the command line before the file' => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [ '--min-msi=86' ], 'against the floors 86.00 % and 84.00 %', true ],
 		];
@@ -461,8 +470,10 @@ final class MutationGatesTest extends TestCase {
 
 	/**
 	 * The script reads the floors before Infection starts, as Infection does: from --min-msi and
-	 * --min-covered-msi, else from the configuration. When it cannot, the gate fails, as a run
-	 * whose timeouts make its score an upper bound could not be held to them.
+	 * --min-covered-msi, else from the configuration, which it reads as JSON once the comments
+	 * are taken out. When it cannot, also because a floor is set twice or is no percentage, the
+	 * gate fails, as a run whose timeouts make its score an upper bound could not be held to
+	 * them.
 	 *
 	 * @param string       $floors  Lines of the configuration with the floors.
 	 * @param list<string> $options Arguments of the script.
@@ -481,6 +492,29 @@ final class MutationGatesTest extends TestCase {
 			} else {
 				self::assertStringNotContainsString( 'infection --threads=2', $output, 'Infection did not start.' );
 			}
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	/**
+	 * The script reads the floors of each gate's configuration as they stand in the file. The
+	 * run has 10 timed-out mutants of 100, so the script prints the floors it holds the run to.
+	 */
+	#[DataProvider( 'gates' )]
+	public function test_the_gate_script_reads_the_floors_of_each_gate( string $gate ): void {
+		$text = (string) file_get_contents( dirname( __DIR__, 3 ) . '/' . $gate );
+		self::assertSame( 1, preg_match( '/^    "minMsi": (\d+),$/m', $text, $msi ), $gate );
+		self::assertSame( 1, preg_match( '/^    "minCoveredMsi": (\d+),$/m', $text, $covered ), $gate );
+		self::assertSame( 1, preg_match( '~^        "summary": "\.tools/([a-z-]+)/summary\.log",$~m', $text, $logs ), $gate );
+		$root = self::gate_checkout();
+		try {
+			file_put_contents( $root . '/' . $gate, $text );
+			if ( 'infection' !== $logs[1] ) {
+				symlink( 'infection', $root . '/.tools/' . $logs[1] );
+			}
+			[ , $output ] = self::gate( $root, self::timed_out( '85 0 0 5 10 0', '0' ), [ '--configuration=' . $gate ] );
+			self::assertStringContainsString( 'against the floors ' . $msi[1] . '.00 % and ' . $covered[1] . '.00 %', $output );
 		} finally {
 			TempDir::remove( $root );
 		}
@@ -759,7 +793,10 @@ final class MutationGatesTest extends TestCase {
 			],
 			$pipes,
 			$root,
-			$environment + [ 'TMPDIR' => $root ] + getenv()
+			$environment + [
+				'TMPDIR' => $root,
+				'PATH'   => dirname( PHP_BINARY ) . PATH_SEPARATOR . getenv( 'PATH' ),
+			] + getenv()
 		);
 		self::assertIsResource( $process );
 		$output = (string) stream_get_contents( $pipes[1] );
