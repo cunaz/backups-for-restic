@@ -2002,4 +2002,140 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'database_exchange_changed', $failed->error?->code );
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
+
+	/**
+	 * Expects a review or discard of a binding to be refused with a code.
+	 *
+	 * @param \Closure():mixed $work Review or discard.
+	 */
+	private static function not_discarded( string $code, \Closure $work ): void {
+		try {
+			$work();
+			self::fail( 'Expected the refusal ' . $code );
+		} catch ( JobConflict | DatabaseFailed $refused ) {
+			self::assertSame( $code, $refused->context()['code'] ?? null, $refused->getMessage() );
+		}
+	}
+
+	public function test_the_review_of_a_discard_names_the_private_tables_that_another_server_holds_and_the_discard_drops_none(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$moved    = self::failover( $services['jobs'], $applied );
+		$private  = $this->private_tables();
+		$facts    = ( new SwapCatalog( $this->direct ) )->facts();
+		$review   = $services['changes']->discard_review( $moved->id, 1 );
+		$own      = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $moved->data['database_owner']['token'] . '_' ) ) );
+		self::assertNotSame( [], $own );
+		self::assertSame( [], array_diff( $own, $review['tables'] ), 'Every private table of the binding on the server is named.' );
+		self::assertSame( [ $this->database, '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' ], [ $review['database'], $review['server'] ] );
+		self::assertSame(
+			[
+				'database' => $facts['database'],
+				'server'   => $facts['uuid'],
+			],
+			$review['connected']
+		);
+		self::assertSame( [ 'applied', $applied->result['retained_until'], $applied->result['retained_until'] ], [ $review['generation'], $review['retained_until'], $review['undo_until'] ] );
+		self::assertSame( $private, $this->private_tables(), 'The review drops nothing.' );
+		// The undo of that exchange is offered until the discard, and no longer afterwards.
+		self::assertSame( [ $moved->id ], array_column( $services['changes']->undoable(), 'job' ) );
+		self::assertSame( [ $moved->id ], array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ) );
+		$discarded = $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] );
+		self::assertSame( $review['tables'], $discarded['tables'] );
+		self::assertSame( $private, $this->private_tables(), 'Nothing is dropped on a server that cannot be verified.' );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'], 'The live database stays as the exchange left it.' );
+		self::assertSame( [], $services['changes']->undoable() );
+		self::assertSame( [], $services['changes']->foreign_bindings()['jobs'] );
+		self::not_discarded( 'database_binding_discarded', fn () => $services['changes']->discard_review( $moved->id, 1 ) );
+	}
+
+	public function test_a_binding_of_the_connected_database_or_none_is_not_discarded(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$private  = $this->private_tables();
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
+		self::assertSame(
+			[
+				'jobs'     => [],
+				'complete' => true,
+			],
+			$services['changes']->foreign_bindings()
+		);
+		self::assertSame( $private, $this->private_tables() );
+		self::assertArrayHasKey( 'database_owner', $services['jobs']->get( $applied->id )?->data ?? [] );
+		self::assertTrue( $services['changes']->preview_undo( $applied->id, 1 )['applicable'], 'The undo stays as it was.' );
+		// No such job, and a job that is no database apply.
+		self::not_discarded( 'database_binding_missing', fn () => $services['changes']->discard_review( '20991231T235959Z-ffffff', 1 ) );
+		self::not_discarded( 'database_binding_missing', fn () => $services['changes']->discard_review( $services['source']->id, 1 ) );
+	}
+
+	public function test_a_binding_that_changed_after_the_review_of_its_discard_is_not_discarded(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$moved    = self::failover( $services['jobs'], $applied );
+		$private  = $this->private_tables();
+		$review   = $services['changes']->discard_review( $moved->id, 1 );
+		// The site's connection moved on to another database of the server.
+		$other = $this->database . '_moved';
+		$this->admin->execute( 'CREATE DATABASE `' . $other . '`' );
+		try {
+			$this->db->execute( 'USE `' . $other . '`' );
+			self::not_discarded( 'database_discard_changed', fn () => $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] ) );
+		} finally {
+			$this->db->execute( 'USE `' . $this->database . '`' );
+			$this->admin->execute( 'DROP DATABASE `' . $other . '`' );
+		}
+		// The undo window ended before the confirmation.
+		$now                        = $services['clock']->seconds;
+		$services['clock']->seconds = $applied->result['retained_until'];
+		self::not_discarded( 'database_discard_changed', fn () => $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] ) );
+		$services['clock']->seconds = $now;
+		// The original server answers again: the binding is this database's.
+		$services['jobs']->save( $applied );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] ) );
+		$services['jobs']->save( $moved );
+		self::assertSame( $moved->data, $services['jobs']->get( $moved->id )?->data, 'Nothing was forgotten.' );
+		self::assertSame( $private, $this->private_tables() );
+		// The review of what the binding is now can be confirmed.
+		$services['changes']->discard( $moved->id, 1, 'rest', $services['changes']->discard_review( $moved->id, 1 )['digest'] );
+		self::assertSame( $private, $this->private_tables() );
+	}
+
+	public function test_an_unfinished_import_of_another_server_is_reviewed_and_discarded_without_dropping_its_tables(): void {
+		$services     = $this->services();
+		$token        = explode( ':', $this->importer->tables->owner )[1];
+		$owner        = new Job( '20260101T000001Z-0a0b0c', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$owner->state = JobState::Failed;
+		$owner->data  = [
+			'restore'        => $services['source']->id,
+			'user'           => 1,
+			'digest'         => str_repeat( 'd', 64 ),
+			'database_owner' => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => count( $this->manifest->tables ),
+				'token'       => $token,
+				'database'    => $this->database,
+				'uuid'        => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002',
+			],
+		];
+		$services['jobs']->save( $owner );
+		$private = $this->private_tables();
+		// The shadow tables and the ledger of this suite's import, on MySQL and on MariaDB.
+		$own = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $token . '_' ) ) );
+		self::assertNotSame( [], $own );
+		$review = $services['changes']->discard_review( $owner->id, 1 );
+		self::assertSame( [], array_diff( $own, $review['tables'] ) );
+		self::assertSame( [ null, null ], [ $review['generation'], $review['undo_until'] ] );
+		self::assertSame( [ $owner->id ], array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ) );
+		$services['changes']->discard( $owner->id, 1, 'wp-cli', $review['digest'] );
+		self::assertSame( $private, $this->private_tables(), 'The import is not dropped from a server that cannot be verified.' );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $owner->id )?->data ?? [ 'database_owner' => true ] );
+	}
 }
