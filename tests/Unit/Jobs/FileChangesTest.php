@@ -7,6 +7,7 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\StorageFailed;
+use BackupsForRestic\Jobs\Apply\ApplyJournal;
 use BackupsForRestic\Jobs\Apply\FileChanges;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
@@ -1404,6 +1405,15 @@ final class FileChangesTest extends TestCase {
 	}
 
 	/**
+	 * The lines of a job's log at one level.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	private function log_lines( Job $job, string $level ): array {
+		return array_values( array_filter( $this->jobs->log( $job )->read(), static fn ( array $line ): bool => $level === $line['level'] ) );
+	}
+
+	/**
 	 * What a stopped undo recorded: its removals and the state that it names for its apply, and
 	 * the state and undo that the apply's document names.
 	 *
@@ -1506,10 +1516,77 @@ final class FileChangesTest extends TestCase {
 			chmod( $apply, 0700 );
 		}
 		self::assertSame( [ JobState::Cancelled, 'file_undo_failed' ], [ $ended->state, $ended->error?->code ] );
-		// Nothing is recorded that the documents do not hold, and the other parts still ran.
+		// Nothing is recorded that the documents do not hold, and the other parts still ran. An undo
+		// that stopped before it counted every entry takes no fallback of a finished one.
 		self::assertSame( [ null, null, null, null ], $this->recorded_stop( $job, $undo ) );
+		self::assertSame( [], $this->log_lines( $ended, 'warning' ) );
 		self::assertFileDoesNotExist( $this->live . '/.maintenance' );
 		self::assertDirectoryDoesNotExist( $verification );
+	}
+
+	public function test_a_stopped_undo_whose_release_and_removal_both_fail_reports_each_and_records_what_it_did(): void {
+		[ $job, $undo ] = $this->cancelled_after_one_revert();
+		$held           = $this->jobs->directory( $undo ) . '/verification/held';
+		mkdir( $held, 0700, true );
+		touch( $held . '/checkpoint' );
+		$mode = fileperms( $this->live ) & 0777;
+		chmod( $this->live, 0500 );
+		chmod( $held, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $this->live ) || is_writable( $held ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->runner->tick( 2.0 )->job ?? self::fail( 'The undo is gone.' );
+		} finally {
+			restore_error_handler();
+			chmod( $this->live, $mode );
+			chmod( $held, 0700 );
+		}
+		self::assertSame( [ 1, 'partly_undone', 'partly_undone', $undo->id ], $this->recorded_stop( $job, $undo ) );
+		// The first failure is the job's error; the log names each failure once, the other one first.
+		self::assertSame( 'maintenance_stuck', $ended->error?->code );
+		self::assertSame(
+			[ [ 'file_undo_failed', 'cleaning_up' ], [ 'maintenance_stuck', 'cleaning_up' ] ],
+			array_map( static fn ( array $line ): array => [ $line['context']['code'] ?? null, $line['context']['step'] ?? null ], $this->log_lines( $ended, 'error' ) )
+		);
+	}
+
+	public function test_an_undo_cancelled_before_its_first_entry_ends_without_an_error_and_records_nothing(): void {
+		$job  = $this->run_job( $this->start() );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->cancel( $undo->id );
+		$cancelled = $this->run_job( $undo, JobState::Cancelled );
+		self::assertSame( [ null, [] ], [ $cancelled->error, $cancelled->result ] );
+		self::assertArrayNotHasKey( 'undo_state', $this->jobs->get( $job->id )?->result ?? [ 'undo_state' => 'gone' ] );
+		self::assertSame( [ [ $job->id, 'applied' ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'] ], $this->changes->undoable() ) );
+	}
+
+	public function test_an_apply_can_be_undone_until_the_last_second_of_its_window_and_only_once_it_has_ended(): void {
+		$job     = $this->run_job( $this->start() );
+		$journal = new ApplyJournal( $this->jobs, $this->staging, $this->clock, 1 );
+		$apply   = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
+		$this->clock->advance( 86399 );
+		self::assertSame( [ $job->id ], array_column( $this->changes->undoable(), 'job' ) );
+		// An apply that has not ended is no apply to undo, not even for a runner that undoes it.
+		self::assertTrue( $journal->window( $apply, true ) );
+		$apply->state = JobState::Running;
+		self::assertFalse( $journal->window( $apply, true ) );
+		// Nor is a job of another type, whatever records lie in its directory.
+		$restore = $this->jobs->get( $this->restore ) ?? self::fail( 'The restore is gone.' );
+		mkdir( $this->jobs->directory( $restore ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $restore ) . '/undo/attempted', '1' );
+		self::assertFalse( $journal->window( $restore, true ) );
+		// Nor an ID that no job has.
+		try {
+			$this->changes->preview_undo( '20260101T000000Z-ffffff' );
+			self::fail( 'An undo was offered for no job.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'undo_unavailable', $refused->context()['code'] ?? null );
+		}
+		$this->clock->advance( 1 );
+		self::assertSame( [], $this->changes->undoable() );
 	}
 
 	public function test_a_stopped_apply_records_its_changes_when_the_site_cannot_leave_maintenance_mode(): void {
@@ -1534,6 +1611,7 @@ final class FileChangesTest extends TestCase {
 		// Before, the cleanup ended at the marker before the apply recorded what it changed.
 		self::assertSame( [ 1, 1 ], [ $ended->result['entries_completed'] ?? null, $ended->result['entries_attempted'] ?? null ] );
 		self::assertSame( [ $job->id ], array_column( $this->changes->undoable(), 'job' ) );
+		self::assertSame( [], $this->log_lines( $ended, 'warning' ) );
 	}
 
 	/**
@@ -1594,7 +1672,11 @@ final class FileChangesTest extends TestCase {
 
 	#[DataProvider( 'undo_records' )]
 	public function test_the_undo_records_of_an_apply_decide_its_window_only_where_they_are_established( string $records, ?bool $open ): void {
-		$job     = $this->run_job( $this->start() );
+		$job = $this->run_job( $this->start() );
+		// As an earlier undo that kept two entries leaves it.
+		$job->result['undo_state'] = 'partly_undone';
+		$job->result['undo_kept']  = 2;
+		$this->jobs->save( $job );
 		$undo    = $this->jobs->directory( $job ) . '/undo';
 		$restore = $this->undo_records_as( $job, $records );
 		try {
@@ -1604,7 +1686,7 @@ final class FileChangesTest extends TestCase {
 			// The staged files stay for the window, also where its records cannot be established.
 			self::assertSame( false === $open ? [] : [ $this->restore => $job->finished_at + 86400 ], $this->jobs->restore_pins( $this->clock->seconds ) );
 			// The undo list says what is the case: an apply that can be undone, or one whose records cannot be read.
-			self::assertSame( false === $open ? [] : [ [ $job->id, true === $open ? 'applied' : 'unreadable', null ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
+			self::assertSame( false === $open ? [] : [ true === $open ? [ $job->id, 'partly_undone', 2 ] : [ $job->id, 'unreadable', null ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
 			// An undo is offered only for records that hold the window open, and refused with a
 			// code of its own, not as one past its window, where they cannot be established.
 			try {
@@ -1629,7 +1711,7 @@ final class FileChangesTest extends TestCase {
 		}
 		if ( false !== $open ) {
 			// The records can be read again, and the undo reverts what the apply changed.
-			self::assertSame( [ [ $job->id, 'applied' ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'] ], $this->changes->undoable() ) );
+			self::assertSame( [ [ $job->id, 'partly_undone' ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'] ], $this->changes->undoable() ) );
 			$this->undo( $job );
 			self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
 		}
@@ -1685,7 +1767,7 @@ final class FileChangesTest extends TestCase {
 		$ended = $this->runner->tick( 2.0 )->job ?? self::fail( 'The apply is gone.' );
 		// Before, the apply recorded that it attempted no entry, although it replaced one.
 		self::assertSame( [], $ended->result );
-		self::assertSame( [ JobState::Cancelled, 'file_apply_failed' ], [ $ended->state, $ended->error?->code ] );
+		self::assertSame( [ JobState::Cancelled, 'file_apply_failed', 'The undo cursor cannot be looked up.' ], [ $ended->state, $ended->error?->code, $ended->error?->message ] );
 		self::assertFileDoesNotExist( $this->live . '/.maintenance' );
 		self::assertSame( [ [ $job->id, 'unreadable' ] ], array_map( static fn ( array $listed ): array => [ $listed['job'], $listed['state'] ], $this->changes->undoable() ) );
 	}
@@ -1707,6 +1789,11 @@ final class FileChangesTest extends TestCase {
 			chmod( $workspace, 0700 );
 		}
 		// Before, the link counted as the marker: the failure was reported and nothing recorded.
+		$warnings = $this->log_lines( $cancelled, 'warning' );
+		self::assertSame(
+			[ 'The undo counted every entry, but its apply could not be marked as undone; the apply stays open for a later undo.', 'environment', 'A file in the private directory could not be written.' ],
+			[ $warnings[0]['message'] ?? null, $warnings[0]['context']['code'] ?? null, $warnings[0]['context']['reason'] ?? null ]
+		);
 		self::assertSame( [ 1, 2, 0, 0, 'partly_undone' ], [ $cancelled->result['restored'] ?? null, $cancelled->result['removed'] ?? null, $cancelled->result['unchanged'] ?? null, $cancelled->result['kept'] ?? null, $cancelled->result['apply_state'] ?? null ] );
 		$apply = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
 		self::assertSame( [ 'partly_undone', null, $undo->id ], [ $apply->result['undo_state'] ?? null, $apply->result['undo_kept'] ?? null, $apply->result['undo_job'] ?? null ] );
@@ -1731,6 +1818,7 @@ final class FileChangesTest extends TestCase {
 		self::assertFileExists( $apply . '/undo/reverted' );
 		self::assertSame( [ 'file_undo_failed', [] ], [ $cancelled->error?->code, $cancelled->result ] );
 		self::assertSame( [], $this->changes->undoable() );
+		self::assertSame( [], $this->log_lines( $cancelled, 'warning' ) );
 	}
 
 	/**
