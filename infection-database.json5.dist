@@ -39,23 +39,21 @@
         "summary": ".tools/infection-database/summary.log",
         "github": true
     },
-    // Floors at the scores measured on 2026-11-23 with main at e40ab18 and the tests'
-    // temporary files on tmpfs, as in CI (docs/04 §5.6): 82.16 % and 86.13 % covered, and
-    // 82.14 % and 86.11 %, in two runs with 8 processes against MySQL 8.4.11; 82.02 % and
-    // 85.98 % in CI's run on the same state with 4. These scores, and so the floors, can be
-    // above what the tests alone kill: DatabaseExchangeTest checks the other sessions of its
-    // account, and Infection's processes share one server and account, so it can fail through
-    // another process whatever the mutation. 101 mutants were killed in one local run and not
-    // in the other, and the score over the mutants that all three runs killed is 80.67 % and
-    // 84.56 %, 1.5 points below one run's. The floors are whole numbers within a point of that,
-    // because the gate compares one CI run with them. A run below them fails the gate; they are
-    // lowered only as ADR 0024 says, by a change of its own that measures the same commit again
-    // and shows a defect of the measurement. composer mutation:database checks afterwards that
-    // the server's Performance Schema instrumented every thread, one cause of such kills
-    // (bin/check-performance-schema.php); one server per mutant process is the follow-up that
-    // makes the floors true ones. Otherwise they may only rise; ADR 0024's 90 % is the goal.
-    // The 73.75 % and 79.20 % of 2026-11-20 were measured on older code, under Infection's
-    // file wrapper, on which every durable write of a job document failed.
+    // Floors at the scores measured on 2026-11-26 with main at 932d979, whose code under
+    // mutation and whose tests are those of e40ab18, with one server per process (docs/04
+    // §5.6): 80.69 % and 84.59 % covered, with three processes on three MySQL 8.4.11 servers
+    // and the tests' temporary files on tmpfs, as in CI. Until then the processes shared one
+    // server, and DatabaseExchangeTest, which looks at the whole server, could fail through
+    // another process whatever the mutation: CI's runs of the same code on one server scored
+    // 81.58 % to 81.86 % and 85.52 % to 85.81 %, each with 40 to 52 kills more, and the floors of
+    // 2026-11-23 lay within a point of the 80.67 % and 84.56 % that all three runs of that day
+    // killed. With a server of its own each process meets only what its own tests do, so the
+    // floors are now the whole numbers below what the tests kill. A run below them fails the
+    // gate; they are lowered only as ADR 0024 says, by a change of its own that measures the
+    // same commit again and shows a defect of the measurement. Otherwise they may only rise;
+    // ADR 0024's 90 % is the goal. The 73.75 % and 79.20 % of 2026-11-20 were measured on older
+    // code, under Infection's file wrapper, on which every durable write of a job document
+    // failed.
     "minMsi": 80,
     "minCoveredMsi": 84,
     "mutators": {
