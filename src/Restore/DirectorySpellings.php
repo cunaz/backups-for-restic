@@ -275,12 +275,14 @@ final class DirectorySpellings {
 				$entries->seek( $last );
 			} catch ( \OutOfBoundsException $shorter ) {
 				$this->interrupted( $directory, $table );
-				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', self::UNSETTLED, $shorter );
+				// The folder is as the reading found it: the stored names are damaged, which fails
+				// an undo review too and is no unsettled folder whose entries it would keep.
+				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', [], $shorter );
 			}
 			$table['records']->seek( $last * self::RECORD_BYTES + 32 );
 			if ( ! $entries->valid() || $table['records']->read( 32 ) !== hash( 'sha256', $entries->getFilename(), true ) ) {
 				$this->interrupted( $directory, $table );
-				StorageFailed::raise( 'A directory enumeration changed between file preview workers.', self::UNSETTLED );
+				StorageFailed::raise( 'A directory enumeration changed between file preview workers.' );
 			}
 			$entries->next();
 		}

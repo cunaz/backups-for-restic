@@ -294,6 +294,11 @@ final class DirectorySpellingsTest extends TestCase {
 			} catch ( FileWorkPending ) {
 				// Before, the preview failed: "A directory enumeration changed between file preview workers."
 				self::assertTrue( WatchedFolder::changed() );
+				// The check at the boundary ended the reading: no name beyond the checkpoint's 64
+				// records of 68 bytes was read on from the wrong place. The check at the end of
+				// the tick's part would have ended it as well, after that.
+				clearstatcache();
+				self::assertSame( 64 * 68, filesize( substr( $this->checkpoint(), 0, -strlen( '.head' ) ) . '.names' ) );
 			}
 			$resumed = new DirectorySpellings( $this->workspace, INF );
 			self::assertTrue( $resumed->unique( $folder, 'photo-1' === $gone ? 'photo-2' : 'photo-1' ) );
@@ -303,10 +308,23 @@ final class DirectorySpellingsTest extends TestCase {
 		}
 	}
 
-	public function test_a_damaged_boundary_record_of_an_unchanged_folder_stays_a_damaged_index(): void {
+	/**
+	 * A preview and an undo review.
+	 *
+	 * @return array<string, array{bool}>
+	 */
+	public static function modes(): array {
+		return [
+			'in a preview'      => [ false ],
+			'in an undo review' => [ true ],
+		];
+	}
+
+	#[DataProvider( 'modes' )]
+	public function test_a_damaged_boundary_record_of_an_unchanged_folder_stays_a_damaged_index( bool $undo ): void {
 		$this->photos();
 		try {
-			( new DirectorySpellings( $this->workspace, 0 ) )->unique( $this->folder, 'photo-1' );
+			( new DirectorySpellings( $this->workspace, 0, $undo ) )->unique( $this->folder, 'photo-1' );
 			self::fail( 'The bounded first slice scanned the entire directory.' );
 		} catch ( FileWorkPending ) {
 			$names   = substr( $this->checkpoint(), 0, -strlen( '.head' ) ) . '.names';
@@ -317,9 +335,11 @@ final class DirectorySpellingsTest extends TestCase {
 			fwrite( $records, str_repeat( "\0", 32 ) );
 			fclose( $records );
 		}
+		// Before, an undo review took this for an unsettled folder: it kept the entry and went
+		// on, and the damage was reported nowhere.
 		$this->expectException( StorageFailed::class );
 		$this->expectExceptionMessage( 'A directory enumeration changed between file preview workers.' );
-		( new DirectorySpellings( $this->workspace, INF ) )->unique( $this->folder, 'photo-1' );
+		( new DirectorySpellings( $this->workspace, INF, $undo ) )->unique( $this->folder, 'photo-1' );
 	}
 
 	public function test_a_checkpoint_that_an_earlier_version_wrote_is_resumed(): void {
