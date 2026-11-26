@@ -854,4 +854,27 @@ final class DatabaseChangesTest extends TestCase {
 		$job->warn( 'Beyond the limit' );
 		self::assertSame( [ ...array_map( static fn ( int $number ): string => 'Warning ' . $number, range( 1, Job::MAX_WARNINGS ) ), 'Rebuilt tables to drop by hand: a', 'Discarded tables to remove by hand: b' ], $job->warnings );
 	}
+
+	public function test_the_list_of_bindings_asks_the_server_who_it_is_once_for_all_of_them(): void {
+		$this->moved( '20260101T000001Z-aaaaaa' );
+		$this->stranded( '20260101T000002Z-bbbbbb' );
+		$this->owner( '20260101T000003Z-cccccc', [ 'database_owner' => self::binding( str_repeat( 'd', 32 ) ) ] );
+		$asked  = new \ArrayObject();
+		$server = new class( $this->server(), $asked ) implements Connection {
+			/** @param \ArrayObject<int,string> $asked */
+			public function __construct( private Connection $server, private \ArrayObject $asked ) {}
+
+			public function rows( string $sql ): array {
+				$this->asked[] = $sql;
+				return $this->server->rows( $sql );
+			}
+
+			public function execute( string $sql ): int {
+				return $this->server->execute( $sql );
+			}
+		};
+		self::assertSame( [ '20260101T000002Z-bbbbbb', '20260101T000001Z-aaaaaa' ], array_column( $this->changes( $server )->foreign_bindings()['jobs'], 'job' ) );
+		// Before, each of the three bindings asked again, on each load of the Restores tab.
+		self::assertCount( 2, $asked, implode( "\n", (array) $asked ) );
+	}
 }

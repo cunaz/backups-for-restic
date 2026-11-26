@@ -260,7 +260,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * recorded that its tables were found on another server or in another database
 	 * (`database_foreign`), and the list says that it may be incomplete. A binding whose record
 	 * cannot be read is not listed: its review names that, and the heartbeat reports it on its
-	 * job. Nothing is asked of the database beyond its identity.
+	 * job. Nothing is asked of the database beyond its identity, once for all of them.
 	 *
 	 * @return array{jobs:list<Foreign>,complete:bool} The bindings, and whether every one could be asked about.
 	 */
@@ -280,18 +280,17 @@ final readonly class DatabaseChanges implements StepProvider {
 			];
 		}
 		try {
-			$connection = ( $this->connection )();
+			// One identity of the server for every binding: the list is read on each load of the page.
+			$facts = ( new SwapCatalog( ( $this->connection )() ) )->facts();
 		} catch ( DatabaseFailed ) {
-			$connection = null;
+			$facts = null;
 		}
 		foreach ( $owners as $owner ) {
 			$foreign = null;
-			if ( null !== $connection ) {
+			if ( null !== $facts ) {
 				try {
-					DatabaseGeneration::load( $connection, $owner );
-					$foreign = false;
-				} catch ( DatabaseFailed $error ) {
-					$foreign = 'database_exchange_foreign' === ( $error->context()['code'] ?? null ) ? true : null;
+					$place   = DatabaseGeneration::place( $facts, $owner );
+					$foreign = 'unknown' === $place ? null : 'foreign' === $place;
 				} catch ( FormatException ) {
 					$foreign = false;
 				}

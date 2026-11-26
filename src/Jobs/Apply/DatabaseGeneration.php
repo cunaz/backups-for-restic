@@ -22,7 +22,11 @@ use BackupsForRestic\Jobs\JobType;
 
 defined( 'ABSPATH' ) || exit;
 
-/** A validated operation belongs to a single MySQL server, schema and random namespace. */
+/**
+ * A validated operation belongs to a single MySQL server, schema and random namespace.
+ *
+ * @phpstan-import-type Facts from SwapCatalog
+ */
 final readonly class DatabaseGeneration {
 
 	public const int WINDOW = 86400;
@@ -57,9 +61,9 @@ final readonly class DatabaseGeneration {
 	public static function load( Connection $connection, Job $job ): self {
 		$data  = self::binding( $job );
 		$facts = ( new SwapCatalog( $connection ) )->facts();
-		if ( $facts['mariadb'] || '' === $facts['uuid'] || $facts['uuid'] !== ( $data['uuid'] ?? null ) || $facts['database'] !== ( $data['database'] ?? null ) ) {
-			$foreign = $facts['mariadb'] || $facts['database'] !== ( $data['database'] ?? null ) || ( 1 === preg_match( self::UUID, $facts['uuid'] ) && $facts['uuid'] !== ( $data['uuid'] ?? null ) );
-			DatabaseFailed::raise( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.', $foreign ? [ 'code' => 'database_exchange_foreign' ] : [] );
+		$place = self::place( $facts, $job );
+		if ( 'here' !== $place ) {
+			DatabaseFailed::raise( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.', 'foreign' === $place ? [ 'code' => 'database_exchange_foreign' ] : [] );
 		}
 		$owned = new OwnedTables( $connection, $data['prefix'], $data['fingerprint'], $data['token'] );
 		$plan  = isset( $job->data['exchange_plan'] ) ? ExchangePlan::load( $job->data['exchange_plan'], $owned, $data['prefix'] ) : null;
@@ -67,6 +71,26 @@ final readonly class DatabaseGeneration {
 			throw new DatabaseFailed( 'The saved physical exchange plan has a conflicting ownership binding.' );
 		}
 		return new self( $owned, $data['count'], $data['prefix'], $plan );
+	}
+
+	/**
+	 * Where the private tables of a binding are, by the identity of the connected server, as
+	 * load() decides it: on this server and in this database (`here`); positively elsewhere
+	 * (`foreign`: another valid server UUID, a MariaDB server or another database name); or not
+	 * to be told (`unknown`: a server without a readable UUID cannot be told apart from the
+	 * original one). Nothing is asked of the database: one identity serves every binding.
+	 *
+	 * @param Facts $facts Identity of the connected server (SwapCatalog::facts()).
+	 * @param Job   $job Owning apply.
+	 * @return 'here'|'foreign'|'unknown' Place.
+	 * @throws FormatException If the filesystem document is corrupted.
+	 */
+	public static function place( array $facts, Job $job ): string {
+		$data = self::binding( $job );
+		if ( ! $facts['mariadb'] && '' !== $facts['uuid'] && $facts['uuid'] === ( $data['uuid'] ?? null ) && $facts['database'] === ( $data['database'] ?? null ) ) {
+			return 'here';
+		}
+		return $facts['mariadb'] || $facts['database'] !== ( $data['database'] ?? null ) || ( 1 === preg_match( self::UUID, $facts['uuid'] ) && $facts['uuid'] !== ( $data['uuid'] ?? null ) ) ? 'foreign' : 'unknown';
 	}
 
 	/**
