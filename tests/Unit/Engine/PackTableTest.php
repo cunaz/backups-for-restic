@@ -46,8 +46,8 @@ final class PackTableTest extends TestCase {
 			$position = $batch['position'];
 		} while ( ! $batch['done'] );
 		$table->close();
-		ksort( $expected );
-		ksort( $actual );
+		ksort( $expected, SORT_STRING );
+		ksort( $actual, SORT_STRING );
 		self::assertSame( $expected, $actual );
 		self::assertSame( 0600, fileperms( $file ) & 0777 );
 		$table = new PackTable( $file );

@@ -85,7 +85,11 @@ final class LockingTest extends TestCase {
 		$held     = $this->locking()->acquire( false );
 		$leftover = $this->locking()->acquire( false );
 		$fresh    = $this->locking()->refresh( $held, false );
-		self::assertEqualsCanonicalizing( [ $other->hex(), $fresh->hex() ], $this->locks() );
+		$expected = [ $other->hex(), $fresh->hex() ];
+		$locks    = $this->locks();
+		sort( $expected, SORT_STRING );
+		sort( $locks, SORT_STRING );
+		self::assertSame( $expected, $locks );
 
 		$again = $this->locking()->acquire( false );
 		$this->locking()->release( $fresh );

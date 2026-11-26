@@ -74,7 +74,7 @@ final class IndexCacheTest extends TestCase {
 			$entry   = $location->entry;
 			$lines[] = implode( ' ', [ $entry->type->value, $entry->id->hex(), $location->pack->hex(), $entry->offset, $entry->length, $entry->uncompressed_length ] );
 		}
-		sort( $lines );
+		sort( $lines, SORT_STRING );
 		return $lines;
 	}
 
@@ -109,7 +109,7 @@ final class IndexCacheTest extends TestCase {
 
 	public function test_the_file_is_a_row_of_sealed_pieces_that_carry_one_mark_and_their_number(): void {
 		$names = [ $this->index_file( 'a', 3, 40 ), $this->index_file( 'b', 2, 10 ) ];
-		sort( $names );
+		sort( $names, SORT_STRING );
 		( new IndexCache( $this->directory ) )->load( $this->repository );
 
 		$plain = array_map( $this->repository->cipher()->open( ... ), $this->sealed_pieces() );

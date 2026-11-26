@@ -75,9 +75,9 @@ final class SnapshotBrowserTest extends TestCase {
 				null                              => $none[]   = $snapshot['id'],
 			};
 		}
-		sort( $keep );
-		sort( $remove );
-		sort( $none );
+		sort( $keep, SORT_STRING );
+		sort( $remove, SORT_STRING );
+		sort( $none, SORT_STRING );
 		return compact( 'keep', 'remove', 'none' );
 	}
 
@@ -204,7 +204,7 @@ final class SnapshotBrowserTest extends TestCase {
 		$preview = self::preview( $this->browser( new RetentionPolicy( within: Duration::parse( '1d' ) ) )->snapshots() );
 
 		$kept = [ $recent, $future ];
-		sort( $kept );
+		sort( $kept, SORT_STRING );
 		self::assertSame( $kept, $preview['keep'] );
 		self::assertSame( [ $oldest ], $preview['remove'] );
 	}
@@ -220,7 +220,7 @@ final class SnapshotBrowserTest extends TestCase {
 			$this->snapshot( $tree, [ 'backups-for-restic', 'site:ffffffffffff' ], time: '2025-11-02T00:00:00Z' ),
 			$this->snapshot( $tree, [], time: '2025-11-03T00:00:00Z' ),
 		];
-		sort( $foreign );
+		sort( $foreign, SORT_STRING );
 		$policy  = new RetentionPolicy( 1, 0, 3, 2, within: Duration::parse( '1d' ) );
 		$preview = self::preview( $this->browser( $policy )->snapshots() );
 		self::assertNotSame( [], $preview['keep'] );
@@ -238,9 +238,9 @@ final class SnapshotBrowserTest extends TestCase {
 		}
 
 		$left = array_keys( $this->backend->objects['snapshots'] );
-		sort( $left );
+		sort( $left, SORT_STRING );
 		$expected = [ ...$preview['keep'], ...$foreign ];
-		sort( $expected );
+		sort( $expected, SORT_STRING );
 		self::assertSame( $expected, $left );
 		self::assertSame( count( $preview['remove'] ), $run->result()['removed'] );
 	}
