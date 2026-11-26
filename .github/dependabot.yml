@@ -25,3 +25,9 @@ updates:
     schedule:
       interval: weekly
     versioning-strategy: lockfile-only
+  # PyYAML for the test of the release gates, pinned by version and hashes in
+  # tests/Release/requirements.txt; a new version comes with the hashes of its files.
+  - package-ecosystem: pip
+    directory: /tests/Release
+    schedule:
+      interval: weekly

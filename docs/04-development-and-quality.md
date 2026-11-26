@@ -832,14 +832,19 @@ key `CA7C 2C7A 30C8 E8E1 274A 8476 51C6 7305 FFC2 E5C0` was checked when it was 
 the release asset equals the PHAR in PHPStan's repository at tag 2.3.5. The MySQL and MariaDB
 service images are pinned by digest (MySQL 8.4.13, MariaDB 11.4.13). WordPress, WP-CLI, Plugin
 Check, restic, rest-server and Infection are checked against checksums in the repository.
-Dependabot proposes updates of the actions and of the Composer and npm lock files every week;
-`package.json` names exact versions, so a new version of ESLint or of its WordPress plugin is a
-change by hand, like a new PHPStan, Composer, image, Plugin Check or restic. Not pinned: the
-runner image and the packages that jobs install with apt (Subversion, strace, gdb, Apache,
-nginx, PyYAML), the patch release of PHP that setup-php installs, the patch release of Node.js
-22, the browser that Playwright downloads for its pinned version, and the CodeQL bundle that
-`github/codeql-action` selects. CI installs the npm packages with `npm ci --ignore-scripts`, so
-only what the lock file names is installed and no package runs a script while it is installed.
+PyYAML, which the test of the release gates reads the workflows with, is pinned in
+`tests/Release/requirements.txt` by version and by the SHA-256 digests that PyPI lists for the
+files of the release; CI installs it with `pip --require-hashes --only-binary=:all:` into a
+virtual environment, so only a wheel with one of those digests is installed and nothing is
+built. Dependabot proposes updates of the actions, of the Composer and npm lock files and of
+PyYAML every week; `package.json` names exact versions, so a new version of ESLint or of its
+WordPress plugin is a change by hand, like a new PHPStan, Composer, image, Plugin Check or
+restic. Not pinned: the runner image and the packages that jobs install with apt (Subversion,
+strace, gdb, Apache, nginx), the Python of the runner image, the patch release of PHP that
+setup-php installs, the patch release of Node.js 22, the browser that Playwright downloads for
+its pinned version, and the CodeQL bundle that `github/codeql-action` selects. CI installs the
+npm packages with `npm ci --ignore-scripts`, so only what the lock file names is installed and
+no package runs a script while it is installed.
 
 Whether Dependabot's security updates, which can replace a vulnerable package in a lock file,
 are switched on is a setting of the repository that no file here records. The quality jobs use
