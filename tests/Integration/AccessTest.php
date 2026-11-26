@@ -271,6 +271,7 @@ final class AccessTest extends TestCase {
 			[ $status, $review, $raw ] = TestSite::api( 'POST', $route . '/discard-review', [] );
 			self::assertSame( 200, $status, $raw );
 			self::assertTrue( $review['write_allowed'] ?? null, $raw );
+			self::assertSame( [ [], false ], [ $review['write_lacking'] ?? null, $review['file_mods_disallowed'] ?? null ], $raw );
 			self::assertIsString( $review['review_token'] ?? null, $raw );
 			self::assertSame( TestSite::url(), $review['site_url'] ?? null );
 			self::assertSame( '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002', $review['server'] ?? null );
@@ -412,6 +413,62 @@ final class AccessTest extends TestCase {
 			foreach ( [ $verified, $damaged, $failing ] as $job ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
 			}
+		}
+	}
+
+	public function test_a_site_that_allows_no_file_changes_answers_why_the_page_cannot_discard(): void {
+		$job = '20261126T120000Z-0d1505';
+		TestSite::database_binding( $job, true, [], 'succeeded' );
+		try {
+			// As DISALLOW_FILE_MODS does: WordPress then gives no account update_core.
+			$output                                        = TestSite::php(
+				'
+				wp_set_current_user( 1 );
+				add_filter( "file_mod_allowed", "__return_false" );
+				$route  = "/backups-for-restic/v1/database-changes/" . $arguments[0];
+				$fields = static function ( array $data ): array {
+					$data = array_intersect_key( $data, [ "write_allowed" => true, "write_lacking" => true, "file_mods_disallowed" => true, "review_token" => true ] );
+					ksort( $data, SORT_STRING );
+					return $data;
+				};
+				$review = rest_do_request( new WP_REST_Request( "POST", $route . "/discard-review" ) );
+				$listed = rest_do_request( new WP_REST_Request( "GET", "/backups-for-restic/v1/database-changes/foreign" ) );
+				echo "\n", wp_json_encode(
+					[
+						$review->get_status(),
+						$fields( $review->get_data() ),
+						$fields( $listed->get_data() ),
+						rest_do_request( new WP_REST_Request( "POST", $route . "/discard" ) )->get_status(),
+						rest_do_request( new WP_REST_Request( "POST", $route . "/discarded-done" ) )->get_status(),
+					]
+				);
+				',
+				[ $job ]
+			);
+			[ $status, $review, $listed, $discard, $done ] = json_decode( TestSite::last_line( $output ), true );
+			self::assertSame( 200, $status, $output );
+			// The guard stays as the undo's; before, the answer did not say why, and the page could not either.
+			self::assertSame(
+				[
+					'file_mods_disallowed' => true,
+					'review_token'         => null,
+					'write_allowed'        => false,
+					'write_lacking'        => [ 'update_core' ],
+				],
+				$review
+			);
+			self::assertSame(
+				[
+					'file_mods_disallowed' => true,
+					'write_allowed'        => false,
+					'write_lacking'        => [ 'update_core' ],
+				],
+				$listed
+			);
+			self::assertSame( [ 403, 403 ], [ $discard, $done ] );
+			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [] );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
 		}
 	}
 

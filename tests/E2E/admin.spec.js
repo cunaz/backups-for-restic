@@ -948,7 +948,7 @@ test( 'a binding to private tables on another database server is reviewed and di
 	const url = new URL( page.url() ).origin;
 	const undo = card( page, job ).filter( { has: page.getByRole( 'button', { name: 'Preview database undo' } ) } );
 	const foreign = ( id ) => card( page, id ).filter( { has: page.getByRole( 'button', { name: 'Review the discard of this binding' } ) } ).filter( { hasNot: page.getByRole( 'button', { name: 'Preview database undo' } ) } );
-	const listed = ( id ) => card( page, id ).filter( { has: page.getByRole( 'button', { name: 'Mark these tables as taken care of' } ) } );
+	const listed = ( id ) => page.locator( '.bfr-discarded-binding' ).filter( { has: page.getByRole( 'heading', { name: id, exact: true } ) } );
 	async function confirm( id, address, password ) {
 		await foreign( id ).getByLabel( 'I have reviewed what this discard forgets and noted the table names.' ).check();
 		await foreign( id ).getByLabel( 'Type the site address to confirm' ).fill( address );
@@ -956,6 +956,10 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await foreign( id ).getByRole( 'button', { name: 'Discard binding', exact: true } ).click();
 	}
 	const isDiscard = ( requestURL ) => /\/database-changes\/[^/?&]+\/discard(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+	const isReview = ( requestURL ) => /\/database-changes\/[^/?&]+\/discard-review(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+	const isList = ( requestURL ) => /\/database-changes\/foreign(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+	// What the answers say on a site that allows no changes to its files, as under DISALLOW_FILE_MODS.
+	const refused = { write_allowed: false, write_lacking: [ 'update_core' ], file_mods_disallowed: true };
 	try {
 		await openBackups( page, 'restores' );
 		await expect( page.getByRole( 'heading', { name: 'Private tables on another database server', exact: true } ) ).toBeVisible();
@@ -988,11 +992,18 @@ test( 'a binding to private tables on another database server is reviewed and di
 		// The answer is lost before the request reaches the server: nothing is discarded, the page
 		// asks again and the binding stays listed with its review.
 		await page.route( isDiscard, ( route ) => route.abort( 'connectionreset' ), { times: 1 } );
+		const asked = page.waitForResponse( ( response ) => isList( new URL( response.url() ) ) );
 		await confirm( job, url, ADMIN.password );
 		await expect( foreign( job ) ).toContainText( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded.' );
+		await asked;
 		await expect( foreign( job ).locator( '.bfr-database-discard-tables code' ) ).toHaveCount( 7 );
 		expect( stored( job ).data ).toHaveProperty( 'database_owner' );
 
+		// The list that the page reads after the discard says that this account may not end it.
+		await page.route( isList, async ( route ) => {
+			const response = await route.fetch();
+			await route.fulfill( { response, json: { ...( await response.json() ), ...refused } } );
+		}, { times: 1 } );
 		await confirm( job, url, ADMIN.password );
 		const result = page.locator( '.bfr-discarded' );
 		await expect( result ).toContainText( 'The binding was discarded. Nothing was dropped.' );
@@ -1004,6 +1015,8 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( undo ).toHaveCount( 0 );
 		await expect( listed( job ).locator( '.bfr-discarded-binding-tables code' ) ).toHaveCount( 7 );
 		await expect( listed( job ).locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
+		await expect( listed( job ) ).toContainText( 'so this page cannot mark these tables as taken care of here. On the command line, "wp backups-for-restic database-discarded ' + job + ' --done" can, run without --user.' );
+		await expect( listed( job ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ) ).toHaveCount( 0 );
 		await expect( result ).toBeVisible();
 		const recorded = stored( job );
 		expect( recorded.data ).not.toHaveProperty( 'database_owner' );
@@ -1013,6 +1026,16 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await listed( job ).getByRole( 'button', { name: 'Show the log of this job' } ).click();
 		await expect( listed( job ).locator( '.bfr-log' ) ).toContainText( 'Database restore binding discarded.' );
 
+		// On a site that allows no changes to its files, the review says why this page cannot discard
+		// and names the command that can. Before, it said only that the account could not.
+		await page.route( isReview, async ( route ) => {
+			const response = await route.fetch();
+			await route.fulfill( { response, json: { ...( await response.json() ), ...refused, review_token: null } } );
+		}, { times: 1 } );
+		await foreign( other ).getByRole( 'button', { name: 'Review the discard of this binding' } ).click();
+		await expect( foreign( other ) ).toContainText( 'This site does not allow changes to its files (DISALLOW_FILE_MODS, or a filter of file_mod_allowed).' );
+		await expect( foreign( other ) ).toContainText( 'On the command line, "wp backups-for-restic database-discard ' + other + '" can, run without --user.' );
+		await expect( foreign( other ).getByRole( 'button', { name: 'Discard binding', exact: true } ) ).toHaveCount( 0 );
 		// The answer is lost after the server recorded the discard: the page asks again and shows the result.
 		await foreign( other ).getByRole( 'button', { name: 'Review the discard of this binding' } ).click();
 		await expect( foreign( other ).locator( '.bfr-database-discard-tables code' ) ).toHaveCount( 7 );

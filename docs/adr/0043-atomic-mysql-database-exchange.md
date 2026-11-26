@@ -301,6 +301,11 @@ database could not get rid of the binding. Since then:
 - The admin page lists these bindings on the Restores tab under "Private tables on another
   database server", and the card of an undo whose review answers `database_exchange_foreign`
   offers the same review. Every name is shown as text, escaped where it does not print.
+- The discard needs the capabilities of an undo, `update_core` among them, and WordPress gives
+  that capability to no account under `DISALLOW_FILE_MODS` or a `file_mod_allowed` filter that
+  refuses it. The guard stays as strong as the undo's. The review and the list say why an
+  account may not confirm (`write_lacking`, `file_mods_disallowed`), and the page says it in
+  its words and names the WP-CLI command, which needs neither when it runs without `--user`.
 
 ### Lost replies
 

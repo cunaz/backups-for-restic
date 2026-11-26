@@ -702,6 +702,28 @@ final class RestRoutes {
 	}
 
 	/**
+	 * Why the current account may not discard a database binding or end the listing of its
+	 * tables: the capabilities of database_writes_allowed() that it lacks, and whether the
+	 * site's file modification policy (DISALLOW_FILE_MODS or the file_mod_allowed filter) is
+	 * the reason, for which WordPress gives no account update_core. The page says so and names
+	 * the WP-CLI command, which needs neither when no WordPress user is selected.
+	 *
+	 * @return array{write_lacking:list<string>,file_mods_disallowed:bool} The reasons.
+	 */
+	private static function discard_lacking(): array {
+		$lacking = [];
+		foreach ( array_unique( [ self::capability(), ...self::DATABASE_CAPABILITIES ] ) as $capability ) {
+			if ( ! current_user_can( $capability ) ) {
+				$lacking[] = $capability;
+			}
+		}
+		return [
+			'write_lacking'        => $lacking,
+			'file_mods_disallowed' => ! wp_is_file_mod_allowed( 'capability_update_core' ),
+		];
+	}
+
+	/**
 	 * Rechecks the account that confirmed a live file change, on every tick of the job. A
 	 * process that runs many ticks, such as `wp backups-for-restic tick --until-idle`, keeps
 	 * the account in WordPress's object cache, so a role that another request took away
@@ -863,7 +885,7 @@ final class RestRoutes {
 			$changes->foreign_bindings() + [
 				'discarded'     => $discarded,
 				'write_allowed' => self::database_writes_allowed(),
-			]
+			] + self::discard_lacking()
 		);
 	}
 
@@ -899,7 +921,7 @@ final class RestRoutes {
 		} catch ( PluginException $refused ) {
 			return $this->discard_error( $refused );
 		}
-		return $this->reviewed_response( $review, $id, 'discard', false, true );
+		return $this->reviewed_response( $review + self::discard_lacking(), $id, 'discard', false, true );
 	}
 
 	/**

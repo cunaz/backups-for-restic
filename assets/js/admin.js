@@ -1597,7 +1597,7 @@
 	 * `lost`, the text for an answer that did not arrive.
 	 *
 	 * @param {Object} plan    Authorized preview.
-	 * @param {Object} options Submit label, endpoint, job type, operation-specific arguments and UI callbacks; optionally `reviewedLabel`, `done` and `lost`.
+	 * @param {Object} options Submit label, endpoint, job type, operation-specific arguments and UI callbacks; optionally `reviewedLabel`, `done`, `lost` and `recheck` (called after a lost answer).
 	 * @return {Element} Confirmation form.
 	 */
 	function reviewConfirmation( plan, options ) {
@@ -2288,7 +2288,7 @@
 						showError( error );
 						review.focus();
 					},
-				} ) : notice( 'info', __( 'This account cannot change the database of this site, so it cannot discard the binding.', 'backups-for-restic' ) );
+				} ) : notice( 'info', discardRefused( plan, false, id ), false );
 				replace( body, [
 					detailTable( 'bfr-database-discard', [
 						[ __( 'Database restore', 'backups-for-restic' ), plan.job ],
@@ -2337,6 +2337,46 @@
 	}
 
 	/**
+	 * Why this page cannot discard a database binding or mark its tables as taken care of, from
+	 * the answer of its review or of the list (`write_lacking`, `file_mods_disallowed`), with the
+	 * WP-CLI command that can: it needs neither capability when it runs without --user.
+	 *
+	 * @param {Object}  answer Review or list.
+	 * @param {boolean} done   Whether it is about marking the tables as taken care of.
+	 * @param {string}  id     Database apply job.
+	 * @return {string} Text.
+	 */
+	function discardRefused( answer, done, id ) {
+		const lacking = answer.write_lacking || [];
+		if ( answer.file_mods_disallowed && lacking.includes( 'update_core' ) ) {
+			return done
+				? sprintf(
+					/* translators: %s: ID of the database apply job. */
+					__( 'This site does not allow changes to its files (DISALLOW_FILE_MODS, or a filter of file_mod_allowed). WordPress then gives no account the capability update_core, which a discard needs, so this page cannot mark these tables as taken care of here. On the command line, "wp backups-for-restic database-discarded %s --done" can, run without --user.', 'backups-for-restic' ),
+					id,
+				)
+				: sprintf(
+					/* translators: %s: ID of the database apply job. */
+					__( 'This site does not allow changes to its files (DISALLOW_FILE_MODS, or a filter of file_mod_allowed). WordPress then gives no account the capability update_core, which a change of the database needs, so this page cannot discard the binding here, as it cannot undo a database restore. On the command line, "wp backups-for-restic database-discard %s" can, run without --user.', 'backups-for-restic' ),
+					id,
+				);
+		}
+		return done
+			? sprintf(
+				/* translators: 1: capabilities, 2: ID of the database apply job. */
+				__( 'This account lacks the capabilities %1$s, which a discard needs, so it cannot mark these tables as taken care of. An administrator who has them can, and so can "wp backups-for-restic database-discarded %2$s --done" on the command line, run without --user.', 'backups-for-restic' ),
+				lacking.join( ', ' ),
+				id,
+			)
+			: sprintf(
+				/* translators: 1: capabilities, 2: ID of the database apply job. */
+				__( 'This account lacks the capabilities %1$s, which a change of the database needs, so it cannot discard the binding. An administrator who has them can, and so can "wp backups-for-restic database-discard %2$s" on the command line, run without --user.', 'backups-for-restic' ),
+				lacking.join( ', ' ),
+				id,
+			);
+	}
+
+	/**
 	 * What a confirmed discard forgot, and the tables to remove by hand.
 	 *
 	 * @param {Object}  binding   The answer's `discarded`, or an entry of the list of discarded bindings: job, database, server, tables and until.
@@ -2368,20 +2408,19 @@
 	 * The card of a discarded binding whose private tables are still to be removed by hand: the
 	 * names, until when they are listed, the log of the job and the control that ends the listing.
 	 *
-	 * @param {Object}     entry    Entry of the list of discarded bindings.
-	 * @param {boolean}    allowed  Whether this account may mark the tables as taken care of.
+	 * @param {Object}     entry    Entry of the list of discarded bindings, with the list's `write_allowed`, `write_lacking` and `file_mods_disallowed`.
 	 * @param {() => void} reloaded Called when the listing ended.
 	 * @return {Element} Card.
 	 */
-	function discardedCard( entry, allowed, reloaded ) {
+	function discardedCard( entry, reloaded ) {
 		const message = el( 'div', { role: 'status' } );
-		const done = allowed ? button( __( 'Mark these tables as taken care of', 'backups-for-restic' ), function () {
+		const done = entry.write_allowed ? button( __( 'Mark these tables as taken care of', 'backups-for-restic' ), function () {
 			done.disabled = true;
 			api( '/database-changes/' + encodeURIComponent( entry.job ) + '/discarded-done', { method: 'POST' } ).then( reloaded ).catch( function ( error ) {
 				done.disabled = false;
 				replace( message, [ notice( 'error', errorText( error ), false ) ] );
 			} );
-		} ) : null;
+		} ) : notice( 'info', discardRefused( entry, true, entry.job ), false );
 		return el( 'section', { className: 'bfr-card bfr-discarded-binding' }, [
 			el( 'h3', {}, [ entry.job ] ),
 			el( 'p', {}, [
@@ -2582,7 +2621,9 @@
 			api( '/database-changes/foreign' ).then( function ( response ) {
 				const cards = keyedCards( foreignCards, response.jobs, foreignCard );
 				const partial = response.complete ? [] : [ notice( 'warning', __( 'The database server could not be asked about every database restore that keeps private tables, so this list may be incomplete. Reload the page to ask again.', 'backups-for-restic' ), false ) ];
-				const forgotten = keyedCards( discardedCards, response.discarded, ( entry ) => discardedCard( entry, response.write_allowed, load ) );
+				// What the account may do is part of each entry, so that a card is built anew when it changes.
+				const allowed = { write_allowed: response.write_allowed, write_lacking: response.write_lacking, file_mods_disallowed: response.file_mods_disallowed };
+				const forgotten = keyedCards( discardedCards, response.discarded.map( ( entry ) => ( { ...entry, ...allowed } ) ), ( entry ) => discardedCard( entry, load ) );
 				const recovered = pendingDiscard ? response.discarded.find( ( entry ) => entry.job === pendingDiscard ) : null;
 				pendingDiscard = null;
 				place( foreignHistory, cards.length || partial.length || forgotten.length ? [
