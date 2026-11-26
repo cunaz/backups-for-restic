@@ -218,7 +218,10 @@ class ReleaseGates(unittest.TestCase):
         try:
             import yaml  # noqa: PLC0415 - only this test reads the workflows
         except ImportError:
-            self.fail("PyYAML is needed to read the workflows (apt install python3-yaml)")
+            self.fail(
+                "PyYAML is needed to read the workflows: in a virtual environment, "
+                "pip install --require-hashes --only-binary=:all: -r tests/Release/requirements.txt"
+            )
         names = set()
         for workflow in ("ci.yml", "integration.yml"):
             with open(os.path.join(ROOT, ".github", "workflows", workflow), encoding="utf-8") as handle:

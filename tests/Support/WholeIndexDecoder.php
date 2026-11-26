@@ -119,10 +119,36 @@ final class WholeIndexDecoder {
 		if ( $whole instanceof FormatException ) {
 			throw new \LogicException( 'The pack-by-pack decoder accepts an index file that is invalid: ' . $whole->getMessage(), 0, $whole );
 		}
-		// phpcs:ignore Universal.Operators.StrictComparisons.LooseNotEqual -- Value objects are compared by their fields.
-		if ( $whole != $by_pack ) {
+		if ( ! self::same( $whole, $by_pack ) ) {
 			throw new \LogicException( 'The pack-by-pack decoder gives other packs than the whole-document decoder.' );
 		}
 		return $by_pack;
+	}
+
+	/**
+	 * Whether two results hold the same entries for the same packs, in whatever order of the
+	 * packs. The fields are compared strictly: a loose comparison of the value objects compares
+	 * two IDs whose bytes both read as numbers, such as 0…01000 and 0…001e3, as those numbers.
+	 *
+	 * @param array<string, list<PackEntry>> $one   Entries by hex pack ID.
+	 * @param array<string, list<PackEntry>> $other Entries by hex pack ID.
+	 */
+	public static function same( array $one, array $other ): bool {
+		return self::fields( $one ) === self::fields( $other );
+	}
+
+	/**
+	 * The fields of the entries, by pack in the order of the IDs.
+	 *
+	 * @param array<string, list<PackEntry>> $packs Entries by hex pack ID.
+	 * @return array<string, list<array{string, string, int, int, int}>> Type, ID, offset, length and uncompressed length.
+	 */
+	private static function fields( array $packs ): array {
+		$fields = [];
+		foreach ( $packs as $pack => $entries ) {
+			$fields[ $pack ] = array_map( static fn ( PackEntry $entry ): array => [ $entry->type->value, $entry->id->hex(), $entry->offset, $entry->length, $entry->uncompressed_length ], $entries );
+		}
+		ksort( $fields, SORT_STRING );
+		return $fields;
 	}
 }

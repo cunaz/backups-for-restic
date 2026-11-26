@@ -173,6 +173,22 @@ final class IndexFilePacksTest extends TestCase {
 		WholeIndexDecoder::compare( $nested( 61 ) );
 	}
 
+	public function test_the_results_of_the_two_decoders_are_compared_strictly_in_any_order_of_the_packs(): void {
+		// Two IDs whose bytes PHP reads as the same number, 1000: a loose comparison of the
+		// value objects takes them for one.
+		$thousand = new PackEntry( BlobType::Data, Id::from_bytes( str_pad( '1000', 32, '0', STR_PAD_LEFT ) ), 0, 40 );
+		$exponent = new PackEntry( BlobType::Data, Id::from_bytes( str_pad( '1e3', 32, '0', STR_PAD_LEFT ) ), 0, 40 );
+		$trees    = [ new PackEntry( BlobType::Tree, Id::of( 'b1' ), 0, 40 ), new PackEntry( BlobType::Tree, Id::of( 'b2' ), 40, 40 ) ];
+		$packs    = [
+			Id::of( 'a' )->hex() => [ $thousand ],
+			Id::of( 'b' )->hex() => $trees,
+		];
+
+		self::assertTrue( WholeIndexDecoder::same( $packs, array_reverse( $packs, true ) ), 'The order of the packs does not count.' );
+		self::assertFalse( WholeIndexDecoder::same( $packs, array_replace( $packs, [ Id::of( 'a' )->hex() => [ $exponent ] ] ) ), 'Another ID is another entry.' );
+		self::assertFalse( WholeIndexDecoder::same( $packs, array_replace( $packs, [ Id::of( 'b' )->hex() => array_reverse( $trees ) ] ) ), 'The order of the entries of a pack counts.' );
+	}
+
 	public function test_a_pack_listed_twice_comes_twice_and_is_merged_by_decode(): void {
 		$json  = '{"packs":[' . self::pack( 'a', self::blob( 'a1' ) ) . ',' . self::pack( 'b' ) . ',' . self::pack( 'a', self::blob( 'a2', 40 ) ) . ']}';
 		$packs = [];
