@@ -127,6 +127,19 @@ final class FilesTest extends TestCase {
 		self::assertNull( Files::marker( $this->directory . '/linked/gone/marker' ) );
 	}
 
+	public function test_a_marker_is_a_regular_file_whatever_its_permission_bits(): void {
+		$folder = $this->directory . '/records';
+		mkdir( $folder, 0700 );
+		// Only the file type decides, not the bits beside it: a copy or an archive tool may set
+		// the execute bit for others, which the mask of the type must not read.
+		foreach ( [ 0600, 0644, 0701, 0755, 04600 ] as $mode ) {
+			file_put_contents( $folder . '/marker', '1' );
+			chmod( $folder . '/marker', $mode );
+			self::assertTrue( Files::marker( $folder . '/marker' ), sprintf( 'mode %o', $mode ) );
+			unlink( $folder . '/marker' );
+		}
+	}
+
 	public function test_a_marker_below_a_link_further_up_is_neither_there_nor_missing(): void {
 		mkdir( $this->directory . '/real/sub/deeper', 0700, true );
 		file_put_contents( $this->directory . '/real/sub/present', '1' );
