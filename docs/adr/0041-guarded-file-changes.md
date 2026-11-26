@@ -443,7 +443,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   consistent, so it would refuse every entry of the folder in a preview, which the
   administrator could not tell from a refusal of the site's policy; a refusal of its own says
   which folder to keep still. A checkpoint of an earlier version, without the count, is
-  resumed with none.
+  resumed with none. The other direction is not: a checkpoint of this version is one byte
+  longer, which an earlier version refuses as an invalid index ("The checkpoint of a directory
+  spelling index is invalid."), so that a background review or an apply's check that runs
+  across a downgrade fails, before maintenance and without a change. A new preview works,
+  since a new preview or apply has a workspace of its own.
 - Whether an apply's recovery window is open is decided from `undo/attempted` and
   `undo/reverted` only where they are established (`JobStore::undo_open()`, through
   `Files::marker()`): a marker is there when a regular file is at its name in a folder at its
@@ -467,8 +471,10 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   alike. Not chosen: the text of PHP's warning, which for `stat()` names no reason and for
   `fopen()` carries the C library's text, which a locale can translate; `posix_access()` with
   `posix_get_last_error()`, which gives the error number but needs the optional POSIX
-  extension, checks with the real instead of the effective user and follows a link at the name,
-  so it could only be a second opinion that no test can tell apart; and reading the folder for
+  extension and follows a link at the name, so it could only be a second opinion that no test
+  can tell apart (it checks with the real user, as `is_executable()`, which the rule uses, does
+  too: both are `access()`, and under PHP-FPM, mod_php and the command line the real and the
+  effective user are the same); and reading the folder for
   the name, since `readdir()` answers false at the end and on an error alike and an apply's
   `undo/` holds an item directory for each of up to a million entries. The same rule decides
   whether a job document is stored (`JobStore::has_document()`): one that cannot be looked up
@@ -484,4 +490,5 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   could not be removed, or had to wait, ended the cleanup before the record, so that an undo
   that had reverted files recorded nothing of it, neither in its result nor in its apply, and an
   apply did not record the entries it changed (2026-11-26).
+
 Ticks under the marker boot without the theme and ordinary plugins. Filters that these ticks consult take effect only from `wp-config.php` or a must-use plugin: `file_mod_allowed`, `backups_for_restic_capability`, filters that grant the confirming administrator a capability, and `backups_for_restic_private_dir` or `upload_dir` where they move the private directory. A restriction in a regular plugin or the theme applies at confirmation and in preflight. A capability that only such code grants stops the job at its first tick under the marker, before that tick changes a file. A change to a role's own definition reaches a process that runs many ticks only when it starts again. OPcache caches the marker per web server, and a command-line tick checks only its own cache, which says nothing about the web server's. With timestamp checks disabled, a web server that compiled an earlier marker runs it until one of its own ticks invalidates the name. A job driven only from the command line can then leave the browser's progress requests on the maintenance page, or, if the earlier marker was core's own with its long-passed time, let requests boot normally while files change.
