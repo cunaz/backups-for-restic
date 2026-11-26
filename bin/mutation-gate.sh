@@ -97,9 +97,9 @@ rm -f "$summary"
 # be JSON in which the floor's name is set once. The value is printed as JSON (8e1, which is 80
 # to Infection, as 80, and not by its first digit), so that hundredths() refuses what is no
 # percentage; a name that is set more than once is printed as such, and a file or a name that
-# cannot be read as nothing, with the reason on the standard error output. PHP runs without a
-# php.ini, so that no setting changes how a number is printed. A name that is written with
-# escapes is not counted.
+# cannot be read as nothing, with the reason on the standard error output. The names are
+# compared as JSON decodes them, so one written with escapes counts as well, and at any depth of
+# the file. PHP runs without a php.ini, so that no setting changes how a number is printed.
 configured() {
 	php -n -d display_errors=stderr -- "$config" "$1" << 'PHP' || true
 <?php
@@ -114,7 +114,9 @@ if ( ! is_array( $read ) ) {
 	fwrite( STDERR, "$file is not JSON once its comments are taken out (" . json_last_error_msg() . "), so its $name cannot be read.\n" );
 	exit( 1 );
 }
-$times = (int) preg_match_all( '~"' . preg_quote( $name, '~' ) . '"\s*:~', $plain );
+// In JSON only the name of a member stands before a colon, so these are the names, at any depth.
+preg_match_all( '~("(?:[^"\\\\]|\\\\.)*+")\s*:~', $plain, $names );
+$times = count( array_keys( array_map( 'json_decode', $names[1] ), $name, true ) );
 if ( $times > 1 ) {
 	echo "set $times times";
 } elseif ( array_key_exists( $name, $read ) ) {
