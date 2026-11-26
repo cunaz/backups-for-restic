@@ -681,12 +681,16 @@ final class CliCommand {
 		if ( null !== $job && JobType::Undo === $job->type && JobState::Succeeded !== $job->state && is_int( $job->result['kept'] ?? null ) ) {
 			// A stopped undo still says what it did before it stopped, and what it kept.
 			[ $summary ] = $this->undo_counts( $job );
-			$stopped     = JobState::Cancelled === $job->state ? __( 'The undo was cancelled.', 'backups-for-restic' ) : Messages::job_error( $job->error->code ?? 'internal' )['message'];
+			$stopped     = JobState::Cancelled === $job->state ? __( 'The undo was cancelled.', 'backups-for-restic' ) : Messages::job_failure( $job )['message'];
 			/* translators: 1: why the undo stopped, 2: counts of what it did before. */
 			\WP_CLI::error( sprintf( __( '%1$s Before it stopped, it did this: %2$s', 'backups-for-restic' ), $stopped, $summary ) );
 		}
-		if ( null === $job || null !== $job->error ) {
-			\WP_CLI::error( Messages::job_error( $job?->error->code ?? 'internal' )['message'] );
+		if ( null === $job ) {
+			\WP_CLI::error( Messages::job_error( 'internal' )['message'] );
+		}
+		if ( null !== $job->error ) {
+			// The text of the code for this kind of job, as the admin page shows it.
+			\WP_CLI::error( Messages::job_failure( $job )['message'] );
 		}
 		if ( JobState::Succeeded !== $job->state ) {
 			\WP_CLI::error( Messages::state( $job->state->value ) );

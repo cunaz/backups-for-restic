@@ -88,7 +88,7 @@ final class WpMailer implements Mailer {
 		$url  = home_url();
 		switch ( $notice->kind ) {
 			case NoticeKind::Failure:
-				$error = Messages::job_error( $notice->code );
+				$error = Messages::job_error( $notice->code, $notice->job_type );
 				/* translators: 1: site title, 2: kind of job such as "Backup" or "Check". */
 				$subject = sprintf( __( '[%1$s] %2$s failed', 'backups-for-restic' ), $site, $what );
 				$lines   = [

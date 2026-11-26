@@ -448,6 +448,72 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_a_failed_job_is_described_as_the_kind_of_job_it_is(): void {
+		// Kind of job, its error code and its data; the review of an undo is a file preview job.
+		$failed = [
+			'20261126T130000Z-0c0f01' => [ 'restore', 'key_missing', [] ],
+			'20261126T130000Z-0c0f02' => [ 'restore', 'environment', [] ],
+			'20261126T130000Z-0c0f03' => [ 'prune', 'environment', [] ],
+			'20261126T130000Z-0c0f04' => [ 'undo', 'file_writes_refused', [] ],
+			'20261126T130000Z-0c0f05' => [ 'file_plan', 'file_staging_gone', [ 'undo' => true ] ],
+			'20261126T130000Z-0c0f06' => [ 'database_undo', 'database_exchange_failed', [] ],
+			'20261126T130000Z-0c0f07' => [ 'backup', 'environment', [] ],
+		];
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			foreach ( json_decode( $arguments[0], true ) as $id => [ $type, $code, $data ] ) {
+				$job              = new BackupsForRestic\Jobs\Job( $id, BackupsForRestic\Jobs\JobType::from( $type ), "manual", time() - 60 );
+				$job->state       = BackupsForRestic\Jobs\JobState::Failed;
+				$job->finished_at = time() - 30;
+				$job->data        = $data;
+				$job->error       = new BackupsForRestic\Jobs\JobError( $code, "The job stopped.", false );
+				$container->jobs()->save( $job );
+			}
+			',
+			[ (string) json_encode( $failed ) ]
+		);
+		try {
+			$texts = [];
+			foreach ( array_keys( $failed ) as $id ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', '/jobs/' . $id );
+				self::assertSame( 200, $status, $raw );
+				self::assertSame( $failed[ $id ][1], $answer['job']['error']['code'] ?? null, $raw );
+				$texts[ $id ] = (string) ( $answer['job']['error']['message'] ?? '' ) . ' ' . (string) ( $answer['job']['error']['hint'] ?? '' );
+				if ( 'backup' !== $failed[ $id ][0] ) {
+					// Before: "The backup is not configured completely" and "This server cannot run the backup right now".
+					self::assertDoesNotMatchRegularExpression( '/the backup|a backup job|next backup/i', $texts[ $id ], $id );
+				}
+			}
+			self::assertStringStartsWith( 'The repository key that this job unlocked is no longer stored.', $texts['20261126T130000Z-0c0f01'] );
+			self::assertStringStartsWith( 'This job could not store or read its working data.', $texts['20261126T130000Z-0c0f02'] );
+			self::assertStringStartsWith( 'This server cannot run this job right now.', $texts['20261126T130000Z-0c0f03'] );
+			// An undo's reverts are not changes that can be undone, and staging again does not bring back its staged files.
+			self::assertStringContainsString( 'What the undo reverted stays reverted.', $texts['20261126T130000Z-0c0f04'] );
+			self::assertStringNotContainsString( 'Changes already made can be undone', $texts['20261126T130000Z-0c0f04'] );
+			self::assertStringContainsString( 'Without them this apply cannot be undone.', $texts['20261126T130000Z-0c0f05'] );
+			self::assertStringNotContainsString( 'Restore the snapshot to staging again', $texts['20261126T130000Z-0c0f05'] );
+			// The staged SQL files are no way back to the database that an undo brings back.
+			self::assertStringNotContainsString( 'staged SQL files', $texts['20261126T130000Z-0c0f06'] );
+			self::assertStringStartsWith( 'This server cannot run the backup right now.', $texts['20261126T130000Z-0c0f07'] );
+			// The e-mail about a failed prune says what the admin page says.
+			$mail = TestSite::php(
+				'
+				[ , $body ] = BackupsForRestic\WordPress\WpMailer::compose( new BackupsForRestic\Notifications\Notice( BackupsForRestic\Notifications\NoticeKind::Failure, time(), "prune", $arguments[0], "environment" ) );
+				echo $body;
+				',
+				[ '20261126T130000Z-0c0f03' ]
+			);
+			self::assertStringContainsString( 'What happened: This server cannot run this job right now.', $mail );
+			self::assertStringNotContainsString( 'cannot run the backup', $mail );
+		} finally {
+			foreach ( array_keys( $failed ) as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
 	public function test_the_file_routes_say_what_keeps_or_stops_a_review_and_not_that_a_backup_cannot_run(): void {
 		$site    = TestSite::root();
 		$rows    = [ [ $site . '/bfr-mapped.txt', $site . '/bfr-mapped.txt', 'create' ] ];

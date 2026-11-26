@@ -81,7 +81,8 @@ final class BackupSteps implements StepProvider {
 	}
 
 	/**
-	 * Checks everything that can be checked before touching the repository.
+	 * Checks everything that can be checked before touching the repository. Forget, prune and
+	 * check jobs have this preflight too, so its messages name no backup.
 	 *
 	 * @param Job      $job      Job.
 	 * @param EventLog $log      Log.
@@ -97,11 +98,11 @@ final class BackupSteps implements StepProvider {
 
 		$free = $services->private_dir->free_space();
 		if ( null !== $free && $free < self::MIN_FREE_BYTES + 2 * $services->pack_size() ) {
-			StorageFailed::raise( 'Not enough free disk space for the backup.', [ 'free' => $free ] );
+			StorageFailed::raise( 'Not enough free disk space for this job.', [ 'free' => $free ] );
 		}
 		$memory = $services->memory_budget()->limit ?? -1;
 		if ( $memory > 0 && $memory < self::MIN_MEMORY_BYTES ) {
-			StorageFailed::raise( 'The PHP memory limit is too low for a backup.', [ 'memory_limit' => $memory ] );
+			StorageFailed::raise( 'The PHP memory limit is too low for this job.', [ 'memory_limit' => $memory ] );
 		}
 		$this->require_reachable();
 		$log->write( 'info', 'Preflight passed.' );
