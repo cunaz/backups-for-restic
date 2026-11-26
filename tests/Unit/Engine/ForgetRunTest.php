@@ -121,9 +121,9 @@ final class ForgetRunTest extends TestCase {
 		}
 
 		$left = array_keys( $this->repository->snapshots() );
-		sort( $left );
+		sort( $left, SORT_STRING );
 		$kept = [ $middle, $newest ];
-		sort( $kept );
+		sort( $kept, SORT_STRING );
 		self::assertSame( $kept, $left );
 		self::assertNotContains( $oldest, $left );
 	}
@@ -136,7 +136,7 @@ final class ForgetRunTest extends TestCase {
 			$ours[ $id ] = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $id ) ) );
 		}
 		$expected = Forget::apply( $ours, $policy )['remove'];
-		sort( $expected );
+		sort( $expected, SORT_STRING );
 
 		$result = $this->forget( $policy )->result();
 
@@ -161,7 +161,7 @@ final class ForgetRunTest extends TestCase {
 			$ours[ $id ] = Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $id ) ) );
 		}
 		$expected = Forget::apply( $ours, $policy )['remove'];
-		sort( $expected );
+		sort( $expected, SORT_STRING );
 
 		$result = $this->forget( $policy, true )->result();
 

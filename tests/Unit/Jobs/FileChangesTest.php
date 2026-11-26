@@ -1496,7 +1496,10 @@ final class FileChangesTest extends TestCase {
 		};
 		$kept             = $this->kept( $this->run_job( $undo ) );
 		$this->job_writes = null;
-		self::assertEqualsCanonicalizing( $replaced, array_keys( $kept ) );
+		$listed           = array_keys( $kept );
+		sort( $replaced, SORT_STRING );
+		sort( $listed, SORT_STRING );
+		self::assertSame( $replaced, $listed );
 		self::assertSame( [ 'changed_since_apply' ], array_values( array_unique( $kept ) ) );
 		self::assertContains( 'rename rows-0.4', array_column( $stops, 0 ) );
 		self::assertContains( 'unlink rows-0.2', array_column( $stops, 0 ) );

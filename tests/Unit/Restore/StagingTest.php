@@ -304,9 +304,9 @@ final class StagingTest extends TestCase {
 		);
 
 		$left = $this->names();
-		sort( $left );
+		sort( $left, SORT_STRING );
 		$expected = [ $kept->id, 'notes.txt', 'unrelated' ];
-		sort( $expected );
+		sort( $expected, SORT_STRING );
 		self::assertSame( $expected, $left );
 		self::assertFileExists( $this->restores . '/' . $kept->id . '/entries.jsonl' );
 	}

@@ -333,8 +333,8 @@ final class PruneTest extends TestCase {
 
 		$expected = array_values( array_filter( array_map( static fn ( Id $pack ): string => $pack->hex(), $indexed ), static fn ( string $pack ): bool => isset( $used[ $pack ] ) ) );
 		$actual   = array_keys( $this->backend->list( ObjectType::Data ) );
-		sort( $expected );
-		sort( $actual );
+		sort( $expected, SORT_STRING );
+		sort( $actual, SORT_STRING );
 		self::assertSame( $expected, $actual, 'The used packs stay, every other pack is gone.' );
 		self::assertSame( count( $indexed ) - count( $used ), $result['packs_deleted'] );
 		self::assertGreaterThan( 0, $result['packs_deleted'] );
@@ -449,8 +449,8 @@ final class PruneTest extends TestCase {
 
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
 		$used   = array_keys( $used );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual );
 		self::assertGreaterThan( 0, $result['packs_deleted'] );
 		$this->read_everything();
@@ -576,8 +576,8 @@ final class PruneTest extends TestCase {
 		self::assertGreaterThan( 1, $locks, 'The lock was refreshed during the call.' );
 		self::assertSame( 0, $run->result()['restarts'], 'The lock never went stale, so marking did not start over.' );
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 	}
@@ -609,8 +609,8 @@ final class PruneTest extends TestCase {
 
 		self::assertTrue( $done );
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual, 'Every used pack is still there.' );
 		self::assertGreaterThan( 0, $wasted );
 		self::assertSame( $wasted, $run->result()['reclaimable_bytes'], 'A tree tried again counts once in the estimate.' );
@@ -717,7 +717,7 @@ final class PruneTest extends TestCase {
 		self::assertSame( 0, $run->result()['restarts'], 'Nobody else wrote, so marking never started over, although the lock was taken again every time.' );
 		self::assertSame( count( $left ), $run->result()['unindexed_packs'] );
 		$actual = $this->repository->names( ObjectType::Data );
-		sort( $used );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual, 'The same packs are left as after a prune without pauses.' );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 		$this->read_everything();
@@ -744,7 +744,7 @@ final class PruneTest extends TestCase {
 		}
 
 		self::assertSame( 1, $run->result()['restarts'] );
-		sort( $used );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $this->repository->names( ObjectType::Data ) );
 		$this->read_everything();
 	}
@@ -792,7 +792,7 @@ final class PruneTest extends TestCase {
 			continue;
 		}
 		self::assertSame( 1, $run->result()['restarts'], 'The next request looked, found the new snapshot and marked again.' );
-		sort( $used );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'The packs of the new snapshot are kept.' );
 		$index = $this->repository->load_index();
 		foreach ( $unique as $blob ) {
@@ -844,7 +844,7 @@ final class PruneTest extends TestCase {
 
 		$result = $this->prune()->result();
 
-		sort( $used );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'Only the packs of the snapshot are left.' );
 		self::assertSame( count( $left ), $result['unindexed_packs'] );
 		self::assertSame( count( $left ), $result['packs_deleted'] );
@@ -1216,7 +1216,7 @@ final class PruneTest extends TestCase {
 
 		self::assertSame( 1, $run->result()['restarts'] );
 		self::assertGreaterThan( 0, $run->result()['unindexed_packs'], 'The second plan found the rest of the first as packs that no index file lists.' );
-		sort( $used );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $this->repository->names( ObjectType::Data ), 'Nothing unused is left behind.' );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );
 		$this->read_everything();
@@ -1271,8 +1271,8 @@ final class PruneTest extends TestCase {
 		self::assertSame( 1, $run->result()['restarts'] );
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
 		$used   = array_keys( $used );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual, 'Marking started again and kept the packs of the new snapshot.' );
 		self::assertArrayHasKey( $revived->hex(), $this->backend->list( ObjectType::Snapshots ) );
 		$index = $this->repository->load_index();
@@ -1351,8 +1351,8 @@ final class PruneTest extends TestCase {
 		self::assertTrue( $done );
 		self::assertSame( 2, $stage, 'Both failures happened.' );
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual, 'Every used pack is still there.' );
 		$index = $this->repository->load_index();
 		foreach ( $late as $blob ) {
@@ -1401,8 +1401,8 @@ final class PruneTest extends TestCase {
 		self::assertSame( 0, $run->result()['restarts'], 'Beginning for the first time is not starting over.' );
 		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ), 'The lock of the failed start is gone too.' );
 	}
@@ -1451,8 +1451,8 @@ final class PruneTest extends TestCase {
 		}
 
 		$actual = array_keys( $this->backend->list( ObjectType::Data ) );
-		sort( $actual );
-		sort( $used );
+		sort( $actual, SORT_STRING );
+		sort( $used, SORT_STRING );
 		self::assertSame( $used, $actual, 'The packs planned before the request ended are deleted, and no other.' );
 		self::assertGreaterThan( 0, $run->result()['packs_deleted'] );
 		self::assertSame( [], $this->backend->list( ObjectType::Locks ) );

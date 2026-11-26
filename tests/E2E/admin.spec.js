@@ -635,6 +635,8 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		await destination.getByRole( 'button', { name: 'Save and continue' } ).click();
 		await destination.getByLabel( 'Repository password', { exact: true } ).fill( password );
 		await destination.getByRole( 'button', { name: 'Connect', exact: true } ).click();
+		// Connecting derives the key of the repository with scrypt in PHP; the step after it has
+		// two minutes to appear, not the 30 seconds of an action.
 		await destination.getByLabel( 'I have stored the recovery kit outside this server.' ).check( { timeout: 120000 } );
 		await destination.getByRole( 'button', { name: 'Restore from an existing site snapshot' } ).click();
 		const row = destination.getByRole( 'button', { name: /Open snapshot/ } ).first();
