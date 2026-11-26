@@ -246,6 +246,17 @@ database could not get rid of the binding. Since then:
   this review, the kind `discard`, the confirming user and everything that the review shows.
   The answer carries a review token bound to the session, the site address, the operation
   `discard`, the job and the digest.
+- A connection in latin1 reports the name of a database such as `möbel` as bytes that are not
+  UTF-8, which JSON cannot encode; until 2026-11-26 such a name ended the review of a discard,
+  and that of an exchange into such a database, in an uncaught `JsonException`. Facts that
+  JSON cannot encode are hashed with every key and string as hexadecimal, after the version
+  followed by `:hex`, so their digest covers the bytes; every fact that JSON can encode keeps
+  the digest that it had, version 2 of the exchange's review included, and a test pins both
+  forms. The REST answer of a database review has U+FFFD in place of each byte that is not part
+  of a valid sequence, as the snapshot routes answer names (`SnapshotBrowser::text()`); the
+  confirmation carries the digest, not the name, so it confirms the review of the bytes. WP-CLI
+  prints such a name with Go's escapes. An exchange into such a database is still refused
+  (`dictionary_names`).
 - The confirmation is that of an undo (`RestRoutes::confirmed_plan()`): `reviewed`, the typed
   `site_url`, the digest and the review token, and last the WordPress password through the one
   throttled check. The route needs `database_writes_allowed`, as the undo does, and takes the

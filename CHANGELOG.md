@@ -325,7 +325,16 @@ All notable changes are documented here. The format follows
   a damaged record and an unreadable job document each have a code and text of their own, and a
   database failure says that nothing was discarded and that the log of that database restore
   job names the error, where it is written. Before, the route answered with a backup's text
-  that pointed to "the log of the job", which a discard does not have.
+  that pointed to "the log of the job", which a discard does not have. A private directory
+  whose jobs cannot be read is answered as such (`database_discard_storage`), and any other
+  failure as unexpected, recorded nowhere, with its details in WP-CLI
+  (`database_discard_unexpected`).
+- The review of a discard, and that of a database restore into such a database, no longer end
+  in a fatal error on a site whose connection reports its database name in bytes that are not
+  UTF-8, such as a connection in latin1 to a database named `möbel`. The REST API answers such a
+  name with U+FFFD in place of each of those bytes, and WP-CLI prints it with Go's escapes; the
+  digest of the review covers the bytes, and that of every review that could be made before
+  stays the same.
 - A failed job is described as the kind of job it is, on the admin page, in the job list, in
   WP-CLI and in the failure e-mail. Before, every job got the texts of a backup: a restore
   that lost its repository key, or found the setup incomplete, said "The backup is not

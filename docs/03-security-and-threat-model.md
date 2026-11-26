@@ -505,7 +505,8 @@ direction, and one with a control, zero-width or right-to-left character is show
 double quotes with Go's escapes, as the command line prints it, so that a name cannot pass
 for another one; the reviews of a restore show table names the same way, and the review of the
 discard of a database binding and the list of discarded bindings the names of their databases,
-servers and tables. A valid name is
+servers and tables. A name that a database reports in bytes that are not UTF-8 is answered with
+U+FFFD in place of each such byte, and its review's digest covers the bytes. A valid name is
 `exact` all the same: the flag says that the text is the stored name, not how it looks. The paths ticked for a restore are kept in the page alone;
 what a restore accepts is checked on the server when one is started.
 
