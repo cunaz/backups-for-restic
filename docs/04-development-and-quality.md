@@ -681,6 +681,10 @@ run took 162 s and the exchange's class 89.5 s, so the timeouts went up to 489 s
 that timed out are the ones that loop for good (`WriteBarrier` 5, `SqlLexer` 2,
 `DatabaseChanges` 1), and of the 4,068 other processes whose covering classes are known none used
 more than 31 % of its timeout. Of the 629 escaped mutants 333 had run longer than 60 s there.
+Under a CPU quota of 40 % for the gate and its servers, which slowed the initial run 1.5 times
+and the mutant processes 3.5 times, the 423 mutants of `SwapCatalog`, `WriteBarrier` and
+`SessionDrain` came out as in the full run, every one of them, in 2 h 1 min instead of 42 min:
+the longest escaped process ran 364 s of its 450, where it had run 105 s.
 
 Mutation testing is a merge gate for measured code
 ([ADR 0024](adr/0024-governance-and-quality-assurance.md), point 3), so such a score must not
