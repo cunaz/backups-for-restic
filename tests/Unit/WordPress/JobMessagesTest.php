@@ -199,7 +199,7 @@ final class JobMessagesTest extends TestCase {
 		self::assertStringContainsString( 'If the PHP user does not own the private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions.', $hint );
 		// A link or a folder at the record's name, where ownership is in order: before, the hint said
 		// only to check ownership, which does not help there.
-		self::assertStringContainsString( 'If they are in order, a link or a folder is in the place of a record in the folder undo/ of the apply', $hint );
+		self::assertStringContainsString( 'If they are in order, something that is not a regular file, such as a link or a folder, is in the place of a record in the folder undo/ of the apply', $hint );
 		self::assertStringContainsString( 'leave the apply\'s files as they are, since they hold the saved original files', $hint );
 		self::assertStringContainsString( 'restore what the apply changed from a backup', $hint );
 		// The check is one of the lookup and the file type, not of who wrote the file.
