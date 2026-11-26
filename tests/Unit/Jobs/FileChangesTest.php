@@ -2726,6 +2726,18 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $workspace );
 	}
 
+	public function test_an_unused_sealed_review_is_removed_one_hour_after_its_preview_ended_and_not_before(): void {
+		$plan   = $this->run_job( $this->queue_large_preview() );
+		$sealed = dirname( $this->files ) . '/plans/' . $plan->id;
+		self::assertDirectoryExists( $sealed );
+		$this->clock->seconds = $plan->finished_at + 3599;
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		self::assertDirectoryExists( $sealed, 'A review that can still be confirmed was removed.' );
+		$this->clock->seconds = $plan->finished_at + 3600;
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( $sealed );
+	}
+
 	public function test_expired_undo_is_removed_and_staging_released(): void {
 		$job = $this->run_job( $this->start() );
 		$this->clock->advance( 86400 );
