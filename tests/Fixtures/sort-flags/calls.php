@@ -40,6 +40,11 @@ array_multisort( $ids, SORT_STRING | SORT_FLAG_CASE );
 array_multisort( $ids ); // unflagged
 array_multisort( $ids, SORT_DESC ); // unflagged
 array_multisort( $ids, SORT_STRING, $sizes ); // unflagged
+array_multisort( $ids, ( SORT_STRING | SORT_FLAG_CASE ), $sizes, \SORT_NUMERIC );
+// A subscript that names a flag is an array to sort, not a flag.
+array_multisort( $ids, SORT_STRING, $groups[ SORT_STRING ] ); // unflagged
+array_multisort( $groups[ SORT_NUMERIC ], $ids, SORT_STRING ); // unflagged
+array_multisort( $groups[ SORT_NUMERIC ], SORT_NUMERIC, $ids, SORT_STRING );
 
 // Not PHP's functions, not calls, or not a sort with a flag to name.
 $list->sort( $ids );
