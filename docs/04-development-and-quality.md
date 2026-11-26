@@ -91,6 +91,17 @@ for coverage and mutation runs.
   backticks through `Generic.PHP.BacktickOperator`. Tests and `bin/` are exempt from the
   function list, because they start restic and rest-server.
   Base64 for restic's key files goes through `Support\Bytes`, which decodes strictly.
+- **Sorting in tests and scripts** names its flag. With the default flag, `sort()` compares
+  two numeric strings as numbers and every other pair as strings: a short ID such as
+  `053e4943` is a number to PHP, and the order then depends on the order of the input. Every
+  call of `sort()`, `rsort()`, `asort()`, `arsort()`, `ksort()`, `krsort()` and
+  `array_multisort()` in `tests/` and `bin/` therefore says `SORT_STRING` for IDs, names and
+  paths and `SORT_NUMERIC` for numbers. `tests/Unit/Tooling/SortFlagsTest.php` checks it, also
+  in PHP code that a test hands to a site as a string. It reads tokens, not values, so it
+  cannot tell whether the flag fits, and it leaves `usort()` callbacks and
+  `assertEqualsCanonicalizing()` alone, whose `<=>` is right for numbers. Not checked are
+  `tests/Fixtures`, whose stand-ins copy WordPress, and `src/`, where eight calls sort without
+  a flag: on integers, fixed names, absolute paths or IDs of 64 hexadecimal digits.
 - **Prefixes**: everything global uses `backups_for_restic_` / `backups-for-restic`; classes live in
   `BackupsForRestic\`; `PrefixAllGlobals` configured accordingly.
 - **Cryptography and format code**: `Crypto` and `Format` are `final`, dependency-free,
