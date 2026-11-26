@@ -807,6 +807,17 @@ check and restore the repository. Do not prune or repair it merely because of th
 The index measurements and their limits are documented in
 [ADR 0031](adr/0031-compact-index-and-memory-budget.md).
 
+A restore reads a file in parts of up to 8 MiB, and reading one takes about three times its
+stored size beside the index: 24 MiB for a full part. With little memory left it reads the
+parts one at a time. `restore_blob_memory` means that not even one part fits into what PHP
+has left; the restore stops before that part is downloaded and keeps no files. It is the
+same capacity limit as `index_too_large`, not damage, and the same guidance applies: raise
+the memory limit for WordPress (`WP_MAX_MEMORY_LIMIT`) or PHP's `memory_limit`, deactivate
+plugins that hold much memory, or restore the snapshot with restic and the recovery kit on
+another computer (Scenario B, steps 1 to 3). A check that cannot read a sampled pack in the
+memory left reports it as the warning `pack_memory` and goes on; `restic check --read-data`
+on another computer verifies that pack ([ADR 0036](adr/0036-selected-file-staging.md)).
+
 ## Scenario J — the plugin is inactive after a downgrade
 
 An older plugin can find settings written in a layout it does not understand. It then

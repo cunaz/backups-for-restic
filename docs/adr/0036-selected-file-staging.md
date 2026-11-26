@@ -66,11 +66,12 @@ collisions, useful progress, and recovery after a killed request.
   padded devices follow the conservative [CPython reserved-name check](https://github.com/python/cpython/blob/main/Lib/ntpath.py).
   They are unit-tested without claiming a real Windows filesystem acceptance run.
 - `BlobBatch` groups consecutive, contiguous ranges of the same pack in file order,
-  limited to 16 MiB and 128 blobs. Repeated, reordered, separated or cross-pack blobs end
-  the group. Each result separately authenticates and matches its content hash. Data
-  chunks retain restic's 8 MiB maximum; metadata is checked before a download, and a
-  response must have exactly the requested length. A generator retains one downloaded
-  group and yields plaintext one blob at a time.
+  limited to 16 MiB and 128 blobs, and to what the memory left can take (As built below).
+  Repeated, reordered, separated or cross-pack blobs end the group. Each result separately
+  authenticates and matches its content hash. Data chunks retain restic's 8 MiB maximum;
+  metadata is checked before a download, and a response must have exactly the requested
+  length. One downloaded group is held at a time, and its blobs are handed to the writer
+  one at a time, each let go once it is written.
 - A compressed chunk may be stored larger than its content, up to libzstd's bound for
   8 MiB (`Compression::bound()`) and the 32 bytes of encryption (`BlobBatch::max_length()`).
   restic compresses every data blob of a compressed repository, also data that does not
@@ -155,6 +156,50 @@ Final-head CI remains the merge gate.
   with the clock around every one of them (`IndexCache::load()` takes the callback that
   `Repository::load_index()` takes). After a lock gap the run drops its index as before
   and loads it through the cache, which is not used when an index file it covers is gone.
+- A group is read within the job's memory budget (`MemoryBudget`, ADR 0031). Beside an
+  index of 1,000,000 blobs and WordPress, the run ended with PHP's fatal error in
+  `Cipher::open()` or in the download, or refused a group of compressed chunks that it had
+  already downloaded with `decompression_limit`. What reading a group takes follows from the
+  copies that exist at once, measured on PHP 8.3.37 in 2026-11 and the same in a census of
+  every step:
+  - while the response arrives, three times the group: WordPress' HTTP API keeps the body it
+    collects, the raw response with the headers in front, and the body cut out of that
+    (3.0 times the body with cURL and with fsockopen; `MemoryBudget::RESPONSE_COPIES`);
+  - then, for each blob but the last, the group beside what opening the blob takes: three
+    times its stored length while it is decrypted (the slice, the ciphertext without nonce and
+    tag, the plaintext), and for a compressed blob the decrypted frame and twice its content
+    while it is decoded. `PackReader::open_blob()` lets the slice go before the frame is
+    decoded (`MemoryBudget::opening()`);
+  - the last blob alone: it takes the group with it (`MemoryBudget::slice()`).
+
+  The plaintext of a blob is handed to the writer, which keeps no reference to it, and is let
+  go before the next blob is opened. Until 2026-11 a generator yielded it, and its value and
+  the caller's loop variable kept it while the next blob was decoded: one more chunk of up to
+  8 MiB at the peak. Before each download the run asks the budget what the memory left can
+  take (`MemoryBudget::blob_room()`): the limit less the memory reserved and 2 MiB. The group
+  ends before a blob that would not fit (`MemoryBudget::range()`), down to one blob; a first
+  blob that does not fit by itself is refused before anything is downloaded, with
+  `IndexTooLarge` and the code `restore_blob_memory`. A full chunk takes 24 MiB, three
+  times its size, both while it arrives and while it is opened. The index budget leaves at
+  least 32 MiB once the index has loaded, so the refusal comes only when other memory was
+  taken after that. A restore with memory enough sends the requests it sent before: beside
+  WordPress and an index of 500,000 blobs every group is as large as before
+  (`ReadMemoryTest`). The staged files are the same byte for byte.
+
+  | Peak reserved under 128 MiB, in MiB | 500,000 blobs, before | 500,000 blobs, now | 1,000,000 blobs, before | 1,000,000 blobs, now |
+  | --- | ---: | ---: | ---: | ---: |
+  | Format 1, full chunks | 88.5 | 88.5 | 116.5 | 118.5 |
+  | Format 1, two chunks just under 8 MiB, one group of 16 MiB | 112.5 | 112.5 | fatal error in the download | 118.5, one chunk per request |
+  | Format 1, many small blobs | 79.5 | 79.5 | 107.5 | 109.5 |
+  | Format 2, full chunks that do not compress | 96.5 | 88.5 | 124.5 | 118.5 |
+  | Format 2, full chunks that compress three times, three in a group | 101.2 | 90.6 | `decompression_limit` | 120.6 |
+  | Format 2, many small blobs | 71.0 | 71.0 | 99.0 | 101.0 |
+
+  Each restore ran in a fresh process beside WordPress' 34 MiB and a real index loaded from
+  the cache, with every response held as WordPress holds it. Before the first blob was read,
+  64.5 MiB were reserved beside 500,000 blobs, and 92.5 MiB (before) or 94.5 MiB (now)
+  beside 1,000,000 blobs. An index of 2,000,000 blobs does not fit under 128 MiB and is
+  refused with `index_too_large` before a blob is read, before and now.
 
 ## Remaining release work
 This engine is not yet a WordPress restore feature. Jobs, the browser, downloads and expiry

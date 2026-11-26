@@ -34,7 +34,12 @@ a state every restic tool understands.
   duplicate ids) plus a random sample of packs (`read_data_subset_percent`, default 2)
   downloaded and fully verified (header, blob tags, blob ids). A pack streams in ranged
   pieces of 8 MiB that never split a blob, so memory stays bounded by the piece and the
-  largest blob, not by the pack size (restic allows packs of up to 128 MiB). PHP cannot carry
+  largest blob, not by the pack size (restic allows packs of up to 128 MiB). Since 2026-11 a
+  piece is also no larger than the job's memory budget can take, as a restore's group
+  (ADR 0036): the piece is let go when its last blob to be opened is taken out of it, and a
+  pack with a blob that does not fit by itself becomes the warning `pack_memory` before
+  any of it is downloaded. Beside 94 MiB in use, the check before ended with PHP's fatal
+  error on a pack of full chunks in format 2. PHP cannot carry
   a SHA-256 state into the next request without `unserialize()`, which the plugin does not
   use, so one pack is verified within one request; a marker written before the read counts
   requests that end during it, and after three the pack becomes the warning

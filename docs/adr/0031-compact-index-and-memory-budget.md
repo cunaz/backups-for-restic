@@ -108,6 +108,14 @@ ends the same way.
   loaded (34 MiB), such a file loads with a peak of 84.9 MiB; from a baseline of 64 MiB the
   budget refuses it ([ADR 0019](0019-repository-format-and-chunker.md) has the
   measurements).
+- Restore and check read stored blobs beside the index within the same budget
+  (2026-11-26, ADR 0036): `MemoryBudget::range()` says what reading a range of blobs takes,
+  from three copies of the response while it arrives and what opening each blob takes, and
+  `MemoryBudget::blob_room()` what the limit leaves beside the reserved memory, less 2 MiB. A
+  range ends before a blob that would not fit; a restore whose next blob does not fit by
+  itself is refused with `restore_blob_memory`, and a check reports such a pack as the
+  warning `pack_memory`. A full chunk takes 24 MiB, and the budget for the index leaves at
+  least 32 MiB.
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.
 - Prune and check now examine and rewrite index files pack by pack. Per-file summaries are

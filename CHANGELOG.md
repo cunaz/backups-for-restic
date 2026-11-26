@@ -292,6 +292,18 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- A restore and a check no longer run PHP out of memory while they read large blobs beside
+  a large index. Beside WordPress and an index of 1,000,000 blobs under 128 MiB, a restore of
+  chunks of nearly 8 MiB ended with PHP's fatal error, a restore of full chunks in a
+  compressed repository refused them with `decompression_limit` after the download, and a
+  check ended with the fatal error on a pack of full chunks. A restore now reads a file in
+  groups no larger than the memory left can take, down to one blob at a time; a blob is let
+  go once it is written, and a group once its last blob is taken out of it. A blob that does
+  not fit by itself ends the restore with `restore_blob_memory` and its own text before it is
+  downloaded, which says to raise the memory limit or to restore with restic on another
+  computer. A check reads its pieces the same way, and a sampled pack with a blob that does
+  not fit becomes the warning `pack_memory` without being downloaded. With memory enough, a
+  restore and a check send the requests they sent before, and staged files are unchanged.
 - A failed job is described as the kind of job it is, on the admin page, in the job list, in
   WP-CLI and in the failure e-mail. Before, every job got the texts of a backup: a restore
   that lost its repository key, or found the setup incomplete, said "The backup is not

@@ -312,7 +312,10 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   how much the selection holds. `planning` and `restoring` drive one
   `Engine\Restore\RestoreRun` ([ADR 0036](adr/0036-selected-file-staging.md)): started once,
   resumed from its checkpoint in every later tick, with the throttle of the other jobs.
-  `planning` ends when the selection is counted, `restoring` when every file is staged. The
+  `planning` ends when the selection is counted, `restoring` when every file is staged. A
+  file is read in groups of consecutive blobs of one pack, at most 16 MiB and 128 blobs and
+  no more than the job's memory budget can take beside the index; a blob that does not fit
+  by itself ends the job with `restore_blob_memory` before it is downloaded. The
   job's progress holds `phase`, `files`, `bytes`, `total_files`, `total_bytes`, `skipped`
   and `percent`. A run whose repository lock did not hold gives up its tick and is resumed
   by the next one, at most three times; a snapshot that the repository does not hold fails
@@ -804,8 +807,10 @@ and import it into a separate database. [Database exchange](adr/0043-atomic-mysq
   download `schedule.check.read_data_subset_percent` percent of the packs (default 2 %),
   drawn at random anew for every check without regard to earlier checks, and
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
-  never split a blob, so memory does not grow with the pack size; a pack whose reading ends
-  the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
+  never split a blob, so memory does not grow with the pack size, and no larger than the
+  job's memory budget can take beside the index; a pack with a blob that does not fit by
+  itself becomes the warning `pack_memory` without being downloaded, and a pack whose
+  reading ends the request three times the warning `pack_unverified` (ADR 0022). Monthly by
   default; errors raise a persistent critical notice and are reported in Site Health,
   warnings only appear with the result (ADR 0022). The check counts every finding and keeps
   the details of at most 50; when that list is full, an error takes the place of the newest
@@ -1466,6 +1471,7 @@ translated message and a hint. The codes:
 | `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
 | `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it, or a compressed index file cannot be decoded beside the memory in use ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
+| `restore_blob_memory` | a restore cannot read the next blob of a file by itself in the memory that PHP has left beside the index, about three times its stored size; refused before the blob is downloaded ([ADR 0036](adr/0036-selected-file-staging.md)) |
 | `decompression_limit` | a compressed object that would decode to more than 128 MiB, or whose decoding does not fit into the memory PHP has left, such as a large data blob read beside a large index ([ADR 0019](adr/0019-repository-format-and-chunker.md)) |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |

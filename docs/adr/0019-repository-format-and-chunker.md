@@ -105,4 +105,6 @@ algorithm deduplicates against snapshots written by restic.
   baseline reach. The code before the frame check decoded it up to 94.5 MiB and ended with a
   fatal error from 96.5 MiB. Now it decodes up to 92.5 MiB and is refused with
   `decompression_limit` above that. From 104.5 MiB, decrypting the blob alone exhausts the
-  limit in all three versions.
+  limit in all three versions. Since 2026-11-26 restore and check ask the job's budget
+  before they download a blob, and such a blob is refused before its download
+  (`restore_blob_memory`) or left unverified (`pack_memory`); ADR 0036 has the measurements.
