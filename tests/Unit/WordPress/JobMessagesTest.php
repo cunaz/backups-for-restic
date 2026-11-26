@@ -115,9 +115,9 @@ final class JobMessagesTest extends TestCase {
 		'prune'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'no_snapshots', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'check'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'internal' ],
-		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'internal' ],
+		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'file_folder_changing', 'protected_path_invalid', 'internal' ],
 		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'undo_records_unreadable', 'internal' ],
-		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
+		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_folder_changing', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
 		'undo'           => [ 'file_undo_failed', 'file_staging_gone', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'undo_unavailable', 'undo_records_unreadable', 'undo_review_required', 'internal' ],
 		'database_apply' => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_review_required', 'database_restore_packet', 'database_restore_busy', 'database_restore_prefix', 'database_preview_missing', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'database_wordpress_version', 'environment', 'configuration', 'internal' ],
 		'database_undo'  => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_restore_busy', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'environment', 'configuration', 'internal' ],
@@ -189,6 +189,19 @@ final class JobMessagesTest extends TestCase {
 		self::assertStringContainsString( 'offers the undo again once it can read the records', $texts['hint'] );
 		self::assertNotSame( Messages::job_error( 'undo_unavailable' ), $texts );
 		self::assertSame( $texts, Messages::job_error( 'undo_records_unreadable', 'undo' ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_folder_that_keeps_changing_is_named_in_the_log_and_paused_for_a_new_review(): void {
+		self::text( 'internal' );
+		$preview = Messages::job_error( 'file_folder_changing', 'file_plan' );
+		self::assertSame( 'A folder kept changing while the preview read its names.', $preview['message'] );
+		self::assertStringContainsString( 'The log of the job names the folder.', $preview['hint'] );
+		self::assertStringContainsString( 'Nothing on the live site was changed.', $preview['hint'] );
+		$apply = Messages::job_error( 'file_folder_changing', 'apply' );
+		self::assertSame( 'A folder kept changing while the apply checked the reviewed changes again.', $apply['message'] );
+		self::assertStringContainsString( 'open a new preview and confirm it again', $apply['hint'] );
+		self::assertStringContainsString( 'Nothing on the live site was changed.', $apply['hint'] );
 	}
 
 	#[RunInSeparateProcess]

@@ -149,6 +149,10 @@ final class Messages {
 				'message' => __( 'The file preview could not be completed.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job names the reason, for example a file that changed while the preview read it. Nothing on the live site was changed. Open the preview again.', 'backups-for-restic' ),
 			],
+			'file_folder_changing'           => [
+				'message' => __( 'A folder kept changing while the preview read its names.', 'backups-for-restic' ),
+				'hint'    => __( 'For a folder with more than 2,048 names, the preview needs one reading of all of them during which the folder does not change. It began five times, and each time the folder changed before the reading was complete. The log of the job names the folder. Pause what writes into it, for example uploads, a cache or a synchronisation, then open the preview again. Nothing on the live site was changed.', 'backups-for-restic' ),
+			],
 			'file_staging_gone'              => [
 				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),
 				'hint'    => __( 'They expired or were deleted. Restore the snapshot to staging again, then open a new preview.', 'backups-for-restic' ),
@@ -439,6 +443,11 @@ final class Messages {
 			'maintenance_opcache' === $code && 'undo' === $type => [
 				'message' => __( 'OPcache did not let the plugin clear its cached copy of the WordPress maintenance file.', 'backups-for-restic' ),
 				'hint'    => __( 'The PHP setting opcache.restrict_api leaves this site out. With opcache.validate_timestamps off, or with opcache.revalidate_freq above four seconds, the server could keep serving the site from an earlier maintenance file while files change. Add the WordPress directory to opcache.restrict_api, or turn timestamp checks on with a short interval, then preview the undo again. What the undo reverted stays reverted.', 'backups-for-restic' ),
+			],
+			// The apply checks every reviewed change again before its first one.
+			'file_folder_changing' === $code && 'apply' === $type => [
+				'message' => __( 'A folder kept changing while the apply checked the reviewed changes again.', 'backups-for-restic' ),
+				'hint'    => __( 'Before it changes a file, the apply checks every reviewed change again. For a folder with more than 2,048 names it needs one reading of all of them during which the folder does not change. It began five times, and each time the folder changed before the reading was complete. The log of the job names the folder. Nothing on the live site was changed. Pause what writes into the folder, then open a new preview and confirm it again.', 'backups-for-restic' ),
 			],
 			'file_staging_gone' === $code && $undo => [
 				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),

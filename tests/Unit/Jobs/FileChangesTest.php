@@ -1733,6 +1733,104 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( [], $this->changes->undoable() );
 	}
 
+	/**
+	 * A live folder with more names than a review lists at once, to which the staged files add
+	 * one file.
+	 *
+	 * @return string The folder.
+	 */
+	private function wide_folder(): string {
+		$wide = $this->live . '/wide';
+		mkdir( $wide );
+		for ( $i = 0; $i < 2050; ++$i ) {
+			touch( $wide . '/upload-' . $i );
+		}
+		mkdir( $this->files . $wide, 0700 );
+		file_put_contents( $this->files . $wide . '/added.txt', 'added' );
+		$this->write_report( $this->live . '/skipped-link' );
+		return $wide;
+	}
+
+	/**
+	 * Ticks a job whose worker indexes the names of a wide folder, and once the index has begun
+	 * puts an upload into the folder before every tick, until the job ends or twenty uploads
+	 * have arrived. Each upload also gives the folder a modification time of its own, as a change
+	 * in a later second does.
+	 *
+	 * @return Job The job as the last tick left it.
+	 */
+	private function tick_while_uploading( Job $job, string $wide ): Job {
+		$indexed = fn (): bool => ! in_array( glob( $this->jobs->directory( $job ) . '/verification/spell-*.head' ), [ false, [] ], true );
+		$tick    = 0;
+		while ( ! $indexed() && ++$tick < 40 ) {
+			$this->runner->tick( 0.0 );
+		}
+		self::assertTrue( $indexed() );
+		$current = $job;
+		$upload  = 0;
+		while ( $upload < 20 && ! $current->state->is_terminal() ) {
+			touch( $wide . '/arrived-' . $upload );
+			touch( $wide, 1700000000 + $upload++ );
+			$current = $this->runner->tick( 0.0 )->job ?? self::fail( 'The job is gone.' );
+		}
+		return $current;
+	}
+
+	public function test_a_background_preview_of_a_wide_folder_that_changes_between_every_two_ticks_ends_with_a_code_of_its_own(): void {
+		$wide    = $this->wide_folder();
+		$preview = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $preview );
+		$ended = $this->tick_while_uploading( $preview, $wide );
+		// Before, every tick began the reading of the folder's names again, and the preview went on for ever.
+		self::assertSame( [ JobState::Failed, 'file_folder_changing' ], [ $ended->state, $ended->error?->code ] );
+		$errors = array_values( array_filter( $this->jobs->log( $ended )->read(), static fn ( array $line ): bool => 'error' === $line['level'] ) );
+		self::assertSame( $wide, $errors[0]['context']['folder'] ?? null );
+		self::assertFileDoesNotExist( $wide . '/added.txt' );
+	}
+
+	public function test_a_background_undo_review_keeps_the_entry_of_a_wide_folder_that_changes_between_every_two_ticks(): void {
+		$wide    = $this->wide_folder();
+		$preview = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $preview );
+		$plan  = $this->run_job( $preview );
+		$apply = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );
+		self::assertSame( 'added', file_get_contents( $wide . '/added.txt' ) );
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		self::assertInstanceOf( Job::class, $review );
+		$reviewed = $this->tick_while_uploading( $review, $wide );
+		if ( ! $reviewed->state->is_terminal() ) {
+			// The rest of the review does not read the folder.
+			$reviewed = $this->run_job( $reviewed );
+		}
+		// Before, the review read the folder again at every tick while the uploads lasted, and
+		// decided the entry once they stopped. Now another spelling may be in the folder: its
+		// entry is kept, and the review decides the others.
+		self::assertSame( JobState::Succeeded, $reviewed->state );
+		$page = $this->changes->request_preview( $apply->id, true, false, $reviewed->id );
+		self::assertIsArray( $page );
+		$decisions = [];
+		foreach ( $page['entries'] as $entry ) {
+			$decisions[ (string) $entry['destination'] ] = [ $entry['action'], $entry['reason'] ];
+		}
+		self::assertSame( [ 'keep', 'ambiguous_destination' ], $decisions[ $wide . '/added.txt' ] );
+		self::assertSame( [ 'restore', 'undo_journal' ], $decisions[ $this->live . '/a-existing' ] );
+	}
+
+	public function test_an_apply_whose_wide_folder_changes_between_every_two_ticks_of_its_check_stops_before_its_first_change(): void {
+		$wide    = $this->wide_folder();
+		$preview = $this->changes->request_preview( $this->restore, false, false );
+		self::assertInstanceOf( Job::class, $preview );
+		$plan  = $this->run_job( $preview );
+		$apply = $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id );
+		$ended = $this->tick_while_uploading( $apply, $wide );
+		// Before, the apply checked the reviewed changes again for ever, before maintenance.
+		self::assertSame( [ JobState::Failed, 'file_folder_changing' ], [ $ended->state, $ended->error?->code ] );
+		self::assertFileDoesNotExist( $this->live . '/.maintenance' );
+		self::assertFileDoesNotExist( $wide . '/added.txt' );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+		self::assertSame( [], $this->changes->undoable() );
+	}
+
 	public function test_kept_entries_of_an_undo_whose_document_cannot_be_looked_up_are_not_those_of_no_job(): void {
 		$job    = $this->run_job( $this->start() );
 		$undo   = $this->undo( $job );

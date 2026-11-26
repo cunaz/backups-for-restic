@@ -23,12 +23,23 @@ defined( 'ABSPATH' ) || exit;
  * the same bucket. Readers can check a spelling without retaining a wide folder in RAM.
  * Only a read-only worker uses these indexes. Live publication enumerates the filesystem.
  *
- * A folder that disappears, cannot be read, or changes while its names are read cannot be
- * indexed. A preview fails then. An undo review answers that another spelling may exist, so
- * that the site policy keeps the entry with a reason and the review goes on with the next
- * one (ADR 0041). A damaged index fails in both.
+ * An index holds one reading of a folder during which the folder did not change: a reading
+ * begins after the second of the folder's last change, so that any later change moves the
+ * folder's identity, which every lookup and the end of each tick's part of the reading compare.
+ * A folder that changes before its reading is complete, within a tick or between two, is read
+ * again from its first name, because names may have arrived in the part already read. Five
+ * readings in a row that changes cut short end the reading: the folder keeps changing
+ * (`file_folder_changing`, with the folder in the context). Before, the reading started again
+ * as often as the folder changed between two ticks, so that the review of a folder that
+ * changed between every two ticks never ended, and a change within a tick failed a preview.
  *
- * @phpstan-type Table array{identity:string,count:int,complete:bool,salt:string,heads:string,records:WorkFile}
+ * A folder that disappears, cannot be read, or keeps changing cannot be indexed. A preview and
+ * the apply's own check fail then. An undo review answers that another spelling may exist, so
+ * that the site policy keeps the entry with a reason and the review goes on with the next
+ * one (ADR 0041); a folder that keeps changing is answered so for the rest of the review. A
+ * damaged index fails in both.
+ *
+ * @phpstan-type Table array{identity:string,count:int,complete:bool,salt:string,heads:string,records:WorkFile,failed:int}
  */
 final class DirectorySpellings {
 
@@ -37,6 +48,11 @@ final class DirectorySpellings {
 	private const int RECORD_BYTES = 68;
 	private const int MAX_NAMES    = 1000002; // Includes . and .. in the iterator.
 	private const int MAX_CHAIN    = 512;
+
+	/**
+	 * Readings of a folder in a row that a change may cut short before the review gives up on it.
+	 */
+	private const int READINGS = 5;
 
 	/**
 	 * Context of a failure that is about the folder itself, not about its index.
@@ -150,11 +166,14 @@ final class DirectorySpellings {
 
 	/**
 	 * Restores the table's exact position or starts a new generation after a directory edit.
+	 * A generation that a change ended before it was complete counts as a reading cut short,
+	 * and a folder whose last readings were all cut short gets no other one.
 	 *
 	 * @param string $directory Indexed folder.
 	 * @param string $identity Hash of stable metadata.
 	 * @return Table Private working state.
-	 * @throws StorageFailed If a private component or cursor is invalid.
+	 * @throws StorageFailed If a private component or cursor is invalid, or with the code
+	 *                       `file_folder_changing` if the folder keeps changing.
 	 */
 	private function open( string $directory, string $identity ): array {
 		$prefix  = $this->prefix( $directory );
@@ -168,26 +187,43 @@ final class DirectorySpellings {
 		}
 		$file         = new WorkFile( $records, ! file_exists( $records ) );
 		$header_bytes = strlen( self::MAGIC ) + 32 + 16 + 4 + 1;
+		$failed       = 0;
 		if ( is_file( $marker ) ) {
-			$body = file_get_contents( $marker, false, null, 0, $header_bytes + self::HEAD_BYTES + 1 );
-			if ( ! is_string( $body ) || strlen( $body ) !== $header_bytes + self::HEAD_BYTES || ! str_starts_with( $body, self::MAGIC ) ) {
+			$body = (string) file_get_contents( $marker, false, null, 0, $header_bytes + self::HEAD_BYTES + 2 );
+			// The number of readings cut short follows the bucket heads. A checkpoint that an
+			// earlier version wrote ends with the heads and counts none.
+			$tail = substr( $body, $header_bytes + self::HEAD_BYTES );
+			$cut  = '' === $tail ? 0 : ord( $tail );
+			if ( strlen( $body ) < $header_bytes + self::HEAD_BYTES || strlen( $tail ) > 1 || $cut >= self::READINGS || ! str_starts_with( $body, self::MAGIC ) || ! in_array( $body[ $header_bytes - 1 ], [ "\0", "\1" ], true ) ) {
 				throw new StorageFailed( 'The checkpoint of a directory spelling index is invalid.' );
 			}
+			$complete = "\1" === $body[ $header_bytes - 1 ];
 			if ( substr( $body, strlen( self::MAGIC ), 32 ) === $identity ) {
 				$count = Bytes::read_uint32_le( $body, $header_bytes - 5 );
-				$flag  = $body[ $header_bytes - 1 ];
-				if ( $count > self::MAX_NAMES || $file->size() < $count * self::RECORD_BYTES || ! in_array( $flag, [ "\0", "\1" ], true ) ) {
+				if ( $count > self::MAX_NAMES || $file->size() < $count * self::RECORD_BYTES ) {
 					throw new StorageFailed( 'The directory spelling cursor exceeds its stored records.' );
 				}
 				return [
 					'identity' => $identity,
 					'count'    => $count,
-					'complete' => "\1" === $flag,
+					'complete' => $complete,
 					'salt'     => substr( $body, strlen( self::MAGIC ) + 32, 16 ),
-					'heads'    => substr( $body, $header_bytes ),
+					'heads'    => substr( $body, $header_bytes, self::HEAD_BYTES ),
 					'records'  => $file,
+					'failed'   => $cut,
 				];
 			}
+			// The folder changed since this generation began; a complete reading was no failed one.
+			$failed = $complete ? 0 : $cut + 1;
+		}
+		if ( $failed >= self::READINGS ) {
+			StorageFailed::raise(
+				'A folder kept changing while its names were being reviewed.',
+				self::UNSETTLED + [
+					'code'   => 'file_folder_changing',
+					'folder' => $directory,
+				]
+			);
 		}
 		$table = [
 			'identity' => $identity,
@@ -196,6 +232,7 @@ final class DirectorySpellings {
 			'salt'     => random_bytes( 16 ),
 			'heads'    => str_repeat( "\0", self::HEAD_BYTES ),
 			'records'  => $file,
+			'failed'   => $failed,
 		];
 		$this->save( $directory, $table );
 		$file->truncate( 0 );
@@ -264,7 +301,10 @@ final class DirectorySpellings {
 			}
 		}
 		if ( hash( 'sha256', self::identity( $directory ), true ) !== $table['identity'] ) {
-			StorageFailed::raise( 'A directory changed while its names were being reviewed.', self::UNSETTLED );
+			// What this tick read is not saved: the next lookup finds the folder's new identity,
+			// counts this reading as cut short and begins another one.
+			unset( $this->tables[ $directory ] );
+			throw new FileWorkPending();
 		}
 		$table['complete'] = ! $entries->valid();
 		$table['records']->flush();
@@ -281,7 +321,7 @@ final class DirectorySpellings {
 	 * @param Table  $table Working state.
 	 */
 	private function save( string $directory, array $table ): void {
-		Files::write_atomic( $this->prefix( $directory ) . '.head', self::MAGIC . $table['identity'] . $table['salt'] . Bytes::uint32_le( $table['count'] ) . ( $table['complete'] ? "\1" : "\0" ) . $table['heads'] );
+		Files::write_atomic( $this->prefix( $directory ) . '.head', self::MAGIC . $table['identity'] . $table['salt'] . Bytes::uint32_le( $table['count'] ) . ( $table['complete'] ? "\1" : "\0" ) . $table['heads'] . chr( $table['failed'] ) );
 	}
 
 	/**
