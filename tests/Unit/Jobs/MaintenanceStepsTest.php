@@ -21,6 +21,7 @@ use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Backup\BackupServices;
 use BackupsForRestic\Jobs\Backup\BackupSteps;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Maintenance\MaintenanceServices;
@@ -187,6 +188,25 @@ final class MaintenanceStepsTest extends TestCase {
 			self::assertCount( 1, $repository->backend()->list( ObjectType::Locks ) );
 			$this->run_step( $job, 'releasing' );
 			self::assertSame( [], $repository->backend()->list( ObjectType::Locks ) );
+		} finally {
+			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the test process's original limit.
+		}
+	}
+
+	#[RunInSeparateProcess]
+	public function test_the_preflight_that_a_maintenance_job_shares_with_backups_names_no_backup(): void {
+		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->set( SecretName::RepositoryPassword, new Secret( self::PASSWORD ) );
+		$job      = new Job( '20270115T030000Z-abcdef', JobType::Prune, 'manual', 1_800_000_000 );
+		$previous = ini_set( 'memory_limit', '64M' ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- This isolated test simulates a host's limit without WordPress.
+		self::assertNotFalse( $previous );
+		try {
+			$this->run_step( $job, 'preflight' );
+			self::fail( 'A memory limit below 96 MiB stops the job before the repository is asked.' );
+		} catch ( StorageFailed $refused ) {
+			// What the log of the prune says. Before: "The PHP memory limit is too low for a backup."
+			self::assertSame( 'The PHP memory limit is too low for this job.', $refused->getMessage() );
+			self::assertSame( 'environment', JobError::from_throwable( $refused, JobType::Prune )->code );
+			self::assertSame( [], $this->server->requests );
 		} finally {
 			ini_set( 'memory_limit', $previous ); // phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restore the test process's original limit.
 		}

@@ -371,11 +371,15 @@ final class AccessTest extends TestCase {
 				self::assertSame( 400, $status, $offset . ': ' . $raw );
 				self::assertSame( 'backups_for_restic_invalid_plan_page', $error['code'] ?? null, $raw );
 			}
-			// A job that is no ended undo, or no job at all.
-			foreach ( [ $apply, '20261121T120000Z-0c0d99' ] as $id ) {
+			// A job that is no undo, and no job at all.
+			$others = [
+				$apply                    => 'not_an_undo',
+				'20261121T120000Z-0c0d99' => 'not_found',
+			];
+			foreach ( $others as $id => $code ) {
 				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $id . '/kept-entries' );
 				self::assertSame( 404, $status, $id . ': ' . $raw );
-				self::assertSame( 'backups_for_restic_not_found', $error['code'] ?? null, $raw );
+				self::assertSame( 'backups_for_restic_' . $code, $error['code'] ?? null, $raw );
 			}
 			// A sealed list whose page was changed since is unavailable too, not an entry that the undo never recorded.
 			$page = TestSite::private_dir() . '/jobs/' . $undo . '/kept/rows-0.1';
@@ -389,6 +393,177 @@ final class AccessTest extends TestCase {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
 			}
 			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
+	}
+
+	public function test_kept_entries_of_a_job_that_exists_are_not_answered_as_those_of_a_job_that_does_not(): void {
+		$running    = '20261126T120000Z-0c0e01';
+		$backup     = '20261126T120000Z-0c0e02';
+		$unreadable = '20261126T120000Z-0c0e03';
+		// An undo at work, whose tick holds the lease: no other tick touches it meanwhile. And a
+		// backup that has ended.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$jobs = $container->jobs();
+			$undo = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Undo, "cli", time() - 60 );
+			$undo->data             = [ "apply" => "20261120T000000Z-0a0b01", "restore" => "20261120T000000Z-0a0b02" ];
+			$undo->state            = BackupsForRestic\Jobs\JobState::Running;
+			$undo->step             = "undoing";
+			$undo->started_at       = time() - 30;
+			$undo->lease_owner      = "0123456789abcdef";
+			$undo->lease_expires_at = time() + 3600;
+			$jobs->save( $undo );
+			$backup = new BackupsForRestic\Jobs\Job( $arguments[1], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$jobs->save( $backup );
+			',
+			[ $running, $backup ]
+		);
+		// A document that this version cannot read.
+		mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
+		file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
+		try {
+			$answers = [];
+			foreach ( [ $running, $backup, $unreadable ] as $id ) {
+				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $id . '/kept-entries' );
+				$answers[ $id ]           = [ $status, $error['code'] ?? null, $error['message'] ?? null, $error['data']['hint'] ?? null ];
+				// Before, each of them was "The job does not exist."
+				self::assertStringNotContainsString( 'does not exist', $raw, $id );
+			}
+			self::assertSame(
+				[
+					$running    => [ 409, 'backups_for_restic_undo_not_ended', 'This undo has not ended yet.', 'The entries that it keeps are listed once it has ended.' ],
+					$backup     => [ 404, 'backups_for_restic_not_an_undo', 'This job is not an undo of live file changes.', 'Only an undo keeps entries that it could not revert, and it lists them once it has ended.' ],
+					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'A stored job cannot be read by this version of the plugin.', 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.' ],
+				],
+				$answers
+			);
+		} finally {
+			foreach ( [ $running, $backup, $unreadable ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
+	public function test_an_undo_cancelled_after_it_counted_every_entry_records_its_apply_as_undone(): void {
+		$site  = TestSite::root();
+		$apply = '20261126T140000Z-0c1010';
+		$undo  = '20261126T140000Z-0c1020';
+		TestSite::undoable_apply(
+			$apply,
+			[
+				[ $site . '/bfr-counted-1.txt', $site . '/bfr-counted-1.txt', 'create' ],
+				[ $site . '/bfr-counted-2.txt', $site . '/bfr-counted-2.txt', 'create' ],
+			]
+		);
+		// The worker counted the undo's last entry, and the request ended before the runner saved
+		// the step after it; then the administrator cancelled the undo.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$jobs = $container->jobs();
+			$undo = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Undo, "cli", time() - 60 );
+			$undo->data             = [
+				"apply"             => $arguments[1],
+				"restore"           => substr( $arguments[1], 0, -1 ) . "1",
+				"maintenance_grant" => "",
+				"undo_counts"       => [ "restored" => 0, "removed" => 2, "unchanged" => 0, "kept" => 0, "changed_after_review" => 0 ],
+			];
+			$undo->state            = BackupsForRestic\Jobs\JobState::Running;
+			$undo->step             = "undoing";
+			$undo->started_at       = time() - 30;
+			$undo->progress         = [ "total" => 2, "done" => 2 ];
+			$undo->cancel_requested = true;
+			$jobs->save( $undo );
+			',
+			[ $undo, $apply ]
+		);
+		try {
+			[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'tick' ] );
+			self::assertSame( 0, $status, $output );
+			$job = TestSite::job( $undo );
+			self::assertSame( [ 'cancelled', 2, 0, 'undone' ], [ $job['state'] ?? null, $job['result']['removed'] ?? null, $job['result']['kept'] ?? null, $job['result']['apply_state'] ?? null ], (string) json_encode( $job ) );
+			// Before: listed as partly undone, "the last undo stopped before it finished", until a review retired it.
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/undo' );
+			self::assertSame( 200, $status, $raw );
+			self::assertNotContains( $apply, array_column( $listed['jobs'] ?? [], 'job' ), $raw );
+			$document = TestSite::job_document( $apply );
+			self::assertSame( [ 'undone', 0, $undo ], [ $document['result']['undo_state'] ?? null, $document['result']['undo_kept'] ?? null, $document['result']['undo_job'] ?? null ] );
+			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $apply . '/undo/reverted' );
+		} finally {
+			foreach ( [ $apply, $undo, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
+	}
+
+	public function test_a_failed_job_is_described_as_the_kind_of_job_it_is(): void {
+		// Kind of job, its error code and its data; the review of an undo is a file preview job.
+		$failed = [
+			'20261126T130000Z-0c0f01' => [ 'restore', 'key_missing', [] ],
+			'20261126T130000Z-0c0f02' => [ 'restore', 'environment', [] ],
+			'20261126T130000Z-0c0f03' => [ 'prune', 'environment', [] ],
+			'20261126T130000Z-0c0f04' => [ 'undo', 'file_writes_refused', [] ],
+			'20261126T130000Z-0c0f05' => [ 'file_plan', 'file_staging_gone', [ 'undo' => true ] ],
+			'20261126T130000Z-0c0f06' => [ 'database_undo', 'database_exchange_failed', [] ],
+			'20261126T130000Z-0c0f07' => [ 'backup', 'environment', [] ],
+		];
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			foreach ( json_decode( $arguments[0], true ) as $id => [ $type, $code, $data ] ) {
+				$job              = new BackupsForRestic\Jobs\Job( $id, BackupsForRestic\Jobs\JobType::from( $type ), "manual", time() - 60 );
+				$job->state       = BackupsForRestic\Jobs\JobState::Failed;
+				$job->finished_at = time() - 30;
+				$job->data        = $data;
+				$job->error       = new BackupsForRestic\Jobs\JobError( $code, "The job stopped.", false );
+				$container->jobs()->save( $job );
+			}
+			',
+			[ (string) json_encode( $failed ) ]
+		);
+		try {
+			$texts = [];
+			foreach ( array_keys( $failed ) as $id ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', '/jobs/' . $id );
+				self::assertSame( 200, $status, $raw );
+				self::assertSame( $failed[ $id ][1], $answer['job']['error']['code'] ?? null, $raw );
+				$texts[ $id ] = (string) ( $answer['job']['error']['message'] ?? '' ) . ' ' . (string) ( $answer['job']['error']['hint'] ?? '' );
+				if ( 'backup' !== $failed[ $id ][0] ) {
+					// Before: "The backup is not configured completely" and "This server cannot run the backup right now".
+					self::assertDoesNotMatchRegularExpression( '/the backup|a backup job|next backup/i', $texts[ $id ], $id );
+				}
+			}
+			self::assertStringStartsWith( 'The repository key that this job unlocked is no longer stored.', $texts['20261126T130000Z-0c0f01'] );
+			self::assertStringStartsWith( 'This job could not store or read its working data.', $texts['20261126T130000Z-0c0f02'] );
+			self::assertStringStartsWith( 'This server cannot run this job right now.', $texts['20261126T130000Z-0c0f03'] );
+			// An undo's reverts are not changes that can be undone, and staging again does not bring back its staged files.
+			self::assertStringContainsString( 'What the undo reverted stays reverted.', $texts['20261126T130000Z-0c0f04'] );
+			self::assertStringNotContainsString( 'Changes already made can be undone', $texts['20261126T130000Z-0c0f04'] );
+			self::assertStringContainsString( 'Without them this apply cannot be undone.', $texts['20261126T130000Z-0c0f05'] );
+			self::assertStringNotContainsString( 'Restore the snapshot to staging again', $texts['20261126T130000Z-0c0f05'] );
+			// The staged SQL files are no way back to the database that an undo brings back.
+			self::assertStringNotContainsString( 'staged SQL files', $texts['20261126T130000Z-0c0f06'] );
+			self::assertStringStartsWith( 'This server cannot run the backup right now.', $texts['20261126T130000Z-0c0f07'] );
+			// The e-mail about a failed prune says what the admin page says.
+			$mail = TestSite::php(
+				'
+				[ , $body ] = BackupsForRestic\WordPress\WpMailer::compose( new BackupsForRestic\Notifications\Notice( BackupsForRestic\Notifications\NoticeKind::Failure, time(), "prune", $arguments[0], "environment" ) );
+				echo $body;
+				',
+				[ '20261126T130000Z-0c0f03' ]
+			);
+			self::assertStringContainsString( 'What happened: This server cannot run this job right now.', $mail );
+			self::assertStringNotContainsString( 'cannot run the backup', $mail );
+		} finally {
+			foreach ( array_keys( $failed ) as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
 		}
 	}
 

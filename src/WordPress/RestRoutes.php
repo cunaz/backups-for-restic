@@ -736,7 +736,14 @@ final class RestRoutes {
 		try {
 			return $this->respond( $this->container->file_changes()->kept_page( Decoded::string( $request->get_url_params()['id'] ?? null ), (int) $offset ) );
 		} catch ( JobConflict $conflict ) {
-			return 'kept_list_unavailable' === ( $conflict->context()['code'] ?? null ) ? $this->error( 'kept_list_unavailable', 409 ) : $this->error( 'not_found', 404 );
+			// Only a job that does not exist is answered as one: another job, an undo that has
+			// not ended and a document that cannot be read each say what is the case.
+			$code = $conflict->context()['code'] ?? null;
+			return match ( $code ) {
+				'kept_list_unavailable', 'undo_not_ended', 'job_unreadable' => $this->error( $code, 409 ),
+				'not_an_undo' => $this->error( $code, 404 ),
+				default => $this->error( 'not_found', 404 ),
+			};
 		} catch ( InvalidArgument ) {
 			return $this->error( 'invalid_plan_page', 400 );
 		} catch ( StorageFailed ) {
@@ -1686,7 +1693,7 @@ final class RestRoutes {
 	private function job_summary( Job $job ): array {
 		$error = null;
 		if ( null !== $job->error ) {
-			$error = [ 'code' => $job->error->code ] + Messages::job_error( $job->error->code, $job->type->value );
+			$error = [ 'code' => $job->error->code ] + Messages::job_failure( $job );
 		}
 		return [
 			'id'               => $job->id,
@@ -1755,6 +1762,14 @@ final class RestRoutes {
 			'not_found'                     => [
 				'message' => __( 'The job does not exist.', 'backups-for-restic' ),
 				'hint'    => '',
+			],
+			'not_an_undo'                   => [
+				'message' => __( 'This job is not an undo of live file changes.', 'backups-for-restic' ),
+				'hint'    => __( 'Only an undo keeps entries that it could not revert, and it lists them once it has ended.', 'backups-for-restic' ),
+			],
+			'undo_not_ended'                => [
+				'message' => __( 'This undo has not ended yet.', 'backups-for-restic' ),
+				'hint'    => __( 'The entries that it keeps are listed once it has ended.', 'backups-for-restic' ),
 			],
 			'kept_list_unavailable'         => [
 				'message' => __( 'The list of the entries that this undo kept is not available.', 'backups-for-restic' ),

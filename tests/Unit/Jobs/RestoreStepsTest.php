@@ -416,7 +416,9 @@ final class RestoreStepsTest extends TestCase {
 		$job = $this->drive( $this->restore_job( str_repeat( 'ab', 32 ) ) );
 
 		self::assertSame( JobState::Failed, $job->state );
-		self::assertSame( 'repository_changed', $job->error?->code );
+		// Its own code: not "Another program kept changing the repository", "started over three times".
+		self::assertSame( 'restore_snapshot_missing', $job->error?->code );
+		self::assertFalse( $job->error?->retryable );
 		self::assertArrayNotHasKey( 'resumptions', $job->data, 'A snapshot that is not there is not a lost lock.' );
 		self::assertSame( [], $this->locks() );
 		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
@@ -662,6 +664,22 @@ final class RestoreStepsTest extends TestCase {
 
 		self::assertSame( JobState::Failed, $job->state );
 		self::assertSame( 'preflight', $this->failed_step( $job ) );
+		// Not "The backup is not configured completely".
+		self::assertSame( 'setup_incomplete', $job->error?->code );
+	}
+
+	public function test_a_restore_whose_repository_key_is_discarded_after_its_unlock_says_so(): void {
+		$snapshot = $this->backup();
+		$job      = $this->drive( $this->restore_job( $snapshot ), static fn ( Job $now ): bool => 'planning' === $now->step );
+		// As when the stored passwords stop decrypting while the restore runs.
+		( new EncryptedOptionStore( $this->options, new Secret( 'salts' ), new SystemRandom() ) )->delete( SecretName::MasterKey );
+
+		$job = $this->drive( $job );
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( [ 'key_missing', 'The repository key is no longer available; the restore must unlock again.' ], [ $job->error?->code, $job->error?->message ] );
+		self::assertSame( 'planning', $this->failed_step( $job ) );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
 	}
 
 	public function test_an_active_restore_keeps_every_other_job_from_starting(): void {

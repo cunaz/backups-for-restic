@@ -665,4 +665,20 @@ final class CliTest extends TestCase {
 			TestSite::api( 'PUT', '/settings', [ 'values' => [ 'retention.mode' => 'plugin' ] ] );
 		}
 	}
+
+	#[DependsExternal( WordPressSiteTest::class, self::SETUP )]
+	public function test_a_restore_of_a_snapshot_that_the_repository_does_not_hold_ends_with_the_restores_text(): void {
+		TestSite::idle( 600 );
+		[ $status, $output ] = self::command( [ 'restore', str_repeat( 'ab', 32 ), '--wait' ] );
+		self::assertSame( 1, $status, $output );
+		$id = self::created( $output );
+		// Before: "Another program kept changing the repository while this job worked on it."
+		self::assertStringContainsString( 'Error: The snapshot of this restore is not in the repository.', $output );
+		self::assertStringNotContainsString( 'kept changing', $output );
+		$job = TestSite::job( $id );
+		self::assertSame( [ 'restore', 'failed', 'restore_snapshot_missing' ], [ $job['type'] ?? null, $job['state'] ?? null, $job['error']['code'] ?? null ], (string) json_encode( $job ) );
+		self::assertStringContainsString( 'The restore stopped and kept no files.', (string) ( $job['error']['hint'] ?? '' ) );
+		self::assertDirectoryDoesNotExist( TestSite::private_dir() . '/restores/' . $id );
+		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ) );
+	}
 }
