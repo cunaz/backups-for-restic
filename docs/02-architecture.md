@@ -1154,7 +1154,7 @@ first backup: an estimate needs a backup to measure against (§14).
 | `GET /jobs`, `POST /jobs` | recent jobs; start a backup, or with `type` a forget, prune or check job, or with `type: restore` a restore to staging: `snapshot` is the full 64-character ID, `paths` a list of at most 256 absolute paths as the snapshot holds them, the whole snapshot without it. Refused with 400 `invalid_job_type`, `invalid_snapshot` or `invalid_paths`, or with 409 and, in this order, `setup_incomplete` until the setup is completed, `configuration` without a repository address, `retention_external` for forget and prune in that mode, `job_conflict` while another job is active |
 | `GET /jobs/{id}` | one job; while it runs, the request advances it for up to 5 s (admin polling) |
 | `POST /jobs/{id}/cancel`, `GET /jobs/{id}/log` | request to cancel, recorded as a marker file (§4.4); redacted events |
-| `GET /jobs/{id}/kept-entries?offset=0` | one page of up to 100 entries that an ended file undo kept, with their reasons, and `total`, `offset` and `next_offset` ([ADR 0041](adr/0041-guarded-file-changes.md)); 404 `not_found` for a job that is not an ended undo, 400 `invalid_plan_page` for an offset outside the list, 409 `kept_list_unavailable` for an undo that kept entries but could not seal their list (its log says why), or whose sealed list is missing a part or was changed since; the undo's counts stay in its result, and why it kept each entry is recorded nowhere else. A file undo reviews every entry on its own: `GET /undo` also lists partly undone applies with `state` and `kept`, and an undo review has `totals` by action and, when it finds nothing left to revert and records the apply as undone, `undone: true`. A review that reverts nothing while it keeps an entry is not applicable and has no `review_token`: a client shows its totals and does not confirm it, and `POST /undo/{id}` without the token of an applicable review answers 409 `live_plan_changed`, as for any confirmation that was not reviewed. `undo_nothing_to_revert` is the refusal of the service behind the route for a confirmed review with nothing to revert, which WP-CLI reports after its own review; the route would pass it on as 409, but issues no token that leads there |
+| `GET /jobs/{id}/kept-entries?offset=0` | one page of up to 100 entries that an ended file undo kept, with their reasons, and `total`, `offset` and `next_offset` ([ADR 0041](adr/0041-guarded-file-changes.md)); an ended undo that kept nothing has an empty list. 404 `not_found` only for an ID that no job has; a job that exists says why it has no list: 404 `not_an_undo` for a job of another type, 409 `undo_not_ended` for an undo that is queued or running, 409 `job_unreadable` for a document that this version cannot read (before 2026-11-26 each of them was "The job does not exist."); 400 `invalid_plan_page` for an offset outside the list, 409 `kept_list_unavailable` for an undo that kept entries but could not seal their list (its log says why), or whose sealed list is missing a part or was changed since; the undo's counts stay in its result, and why it kept each entry is recorded nowhere else. A file undo reviews every entry on its own: `GET /undo` also lists partly undone applies with `state` and `kept`, and an undo review has `totals` by action and, when it finds nothing left to revert and records the apply as undone, `undone: true`. A review that reverts nothing while it keeps an entry is not applicable and has no `review_token`: a client shows its totals and does not confirm it, and `POST /undo/{id}` without the token of an applicable review answers 409 `live_plan_changed`, as for any confirmation that was not reviewed. `undo_nothing_to_revert` is the refusal of the service behind the route for a confirmed review with nothing to revert, which WP-CLI reports after its own review; the route would pass it on as 409, but issues no token that leads there |
 | `GET /snapshots?scope=site\|repository&fresh=1` | snapshots, newest first: with `scope=site` (the default) those of this site, with `scope=repository` all of the repository. Each list is cached for 5 minutes; `fresh=1` reads it again. Answers `scope` and `snapshots`, each with `id`, `short_id`, `time`, `hostname`, `tags`, `data_added`, `files`, `bytes` and `retention` (the retention preview described below) |
 | `GET /snapshots/{id}` | one snapshot by its full ID: the fields of the list, `paths`, `tree`, and `manifest` with the site's manifest (`path`, `token`, `data`) or null. `manifest_state` is `found`, `none`, or `unreadable` for a manifest that cannot be located or is not valid |
 | `GET /snapshots/{id}/tree?path=/&offset=0&limit=200` | one page of one directory of a snapshot; the entries, the paging and the path tokens are described below |
@@ -1383,7 +1383,9 @@ named job to stop and runs one tick for its cleanup; `logs` prints a job's event
 which is redacted when it is written. The four commands that start a job end
 with an error under the same conditions as `POST /jobs` (§13.2): before the setup is
 completed, without a repository address, and `forget` and `prune` in retention mode
-`external`. `status` prints the last backup and the active job only.
+`external`. A command that ran its job, with `--wait` or as `apply` and `undo` do, and found
+it failed ends with the message of the job's error code for that kind of job, as the admin
+page shows it (§14). `status` prints the last backup and the active job only.
 
 `restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
 private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
@@ -1459,7 +1461,8 @@ translated message and a hint. The codes:
 | `repository_damaged` | an object that does not match its name or cannot be parsed (`FormatException`) |
 | `repository_unsupported_version` | compressed data without `ext-zstd`, an unknown repository version, a key file that is not scrypt or beyond the limits of §5.3 |
 | `repository_locked` | a conflicting lock of another client; retryable |
-| `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning |
+| `repository_changed` | another client removed what a backup or a check relied on while the job's lock did not hold, after a pause of more than 25 minutes or because the lock was removed, more than three times in one job (§5.9, [ADR 0030](adr/0030-lock-continuity.md)). The first three times the job starts the backup or the check over and logs a warning. A restore whose lock did not hold takes up its work again from its checkpoint, three times, and then fails with this code ([ADR 0037](adr/0037-restore-job.md)) |
+| `restore_snapshot_missing` | the repository does not hold the snapshot of a restore when the restore takes its lock: the request named an unknown ID, or another client forgot the snapshot. The restore fails in the tick that finds out and keeps no files. Before 2026-11-26 it was `repository_changed`, whose text said that the job "started over three times" |
 | `job_unreadable` | an existing job document cannot be read; new jobs and repository changes are refused, and the document is retained (§18) |
 | `repository_append_only` | the server refused a deletion |
 | `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it, or a compressed index file cannot be decoded beside the memory in use ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
@@ -1475,8 +1478,9 @@ translated message and a hint. The codes:
 | `restore_path_missing` | a path selected for a restore is not in the snapshot |
 | `database_dump_failed` | a query of the dump failed |
 | `database_dump_locked` | another connection kept a table locked for longer than the dump waits, five seconds; retryable ([ADR 0021](adr/0021-database-streaming.md)) |
-| `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing |
-| `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created |
+| `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key for a request, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing. It is also the code of an `InvalidArgument` without a code of its own, such as a restore whose stored request is not valid or whose snapshot lacks the site manifest that a restore for a new installation needs |
+| `key_missing` | the repository key that the job's unlocking step stored is gone when a later step of a backup, forget, prune, check or restore needs it: the plugin discards it when the stored secrets do not decrypt, when it no longer opens the repository, and when another repository address is saved. Before 2026-11-26 such a job ended with `configuration`, "The backup is not configured completely" |
+| `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created. A restore whose preflight finds the setup incomplete ends with it as well (before 2026-11-26 with `configuration`) |
 | `job_conflict` | another job is active |
 | `no_snapshots`, `retention_external` | prune found no snapshots; forget or prune asked for in retention mode `external` |
 | `file_changed_after_review` | a file preview, apply or undo found that a live or staged file, or the site's file policy, changed after the review: before the apply's first change or between two of its changes |
@@ -1491,6 +1495,27 @@ in its context (`JobError::FILE_JOB_CODES`). Whether a code is retried still fol
 exception, so this changes no retry. A failed or cancelled apply records
 `entries_completed` and `entries_attempted`, which the admin page shows with the error.
 
+The texts of a job's error code are those of the kind of job that ended with it
+(`Messages::job_failure()`; the kind is the job's type, and `undo_review` for the file preview
+job that reviews an undo). Where the general texts would name the backup or an action that
+the job does not have, the kind has texts of its own: `configuration`, `environment` and
+`upload_rejected` for every job but a backup (for forget, prune and check, whose preflight is
+the backup's, `environment` says that the server cannot run this job; for the others that
+the job could not store or read its working data), `repository_exists` for every job, since
+only the setup creates a repository, `decompression_limit` for every job but a restore,
+`repository_changed` for a restore, `file_writes_refused`, `maintenance_opcache` and
+`file_staging_gone` for an undo, `file_staging_gone` and `file_plan_too_large` for the review
+of an undo, and `database_exchange_failed`, `performance_schema`, `database_exchange_foreign`
+and `database_admin_collision` for a database undo, beside the five it had. The admin page,
+the job list, WP-CLI and the failure e-mail show these; a request, such as a read of
+snapshots, and a code without a job keep the general texts. Before 2026-11-26 every kind got
+the backup's texts, among them "The backup is not configured completely" and "This server
+cannot run the backup right now" for a restore, "The next backup tries again" for a prune and
+"Changes already made can be undone" for an undo. `tests/Unit/WordPress/JobMessagesTest.php`
+holds the codes that each kind of job can end with and the phrases that its texts must not
+contain. The preflight that forget, prune and check share with backups logs its refusals
+"for this job" instead of "for the backup".
+
 Only `repository_unreachable`, `repository_locked`, `database_restore_busy`,
 `database_exchange_sessions` and `database_dump_locked` are retryable (§4.4): a job tries
 again at most five times, 30 seconds after the first failure and twice as long after each
@@ -1503,6 +1528,8 @@ that runs out of time simply continues in the next one. Codes for restore
 (`database_import_failed`, `restore_validation_failed`) arrive with Milestone 3.
 
 The REST API has codes of its own for requests it refuses: `not_found` (unknown job),
+`not_an_undo` and `undo_not_ended` (the kept entries of a job that is no undo, and of an
+undo that has not ended),
 `not_editable` (a setting that `PUT /settings` does not accept), `invalid_job_type`,
 `invalid_job_id`, `restore_not_found`, `restore_active`, `restore_in_use` and
 `restore_kept_for_undo` (`DELETE /restores/{id}` with a name that is no job ID, for a job

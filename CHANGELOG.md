@@ -292,6 +292,26 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- A failed job is described as the kind of job it is, on the admin page, in the job list, in
+  WP-CLI and in the failure e-mail. Before, every job got the texts of a backup: a restore
+  that lost its repository key, or found the setup incomplete, said "The backup is not
+  configured completely", a restore that could not write in the private directory "This
+  server cannot run the backup right now", a restore of a snapshot that is gone that the
+  repository kept changing while it "started over three times", a prune "The next backup
+  tries again", and an undo that its reverts "can be undone". A restore or maintenance job
+  whose key is gone now ends with `key_missing`, a restore before the completed setup with
+  `setup_incomplete`, and a restore of a missing snapshot with `restore_snapshot_missing`,
+  each with its own text; where a general text names the backup or an action that the job
+  does not have, the job's kind has texts of its own. No retry changes. The preflight that
+  forget, prune and check share with backups no longer logs "for the backup".
+- `GET /jobs/{id}/kept-entries` answers "The job does not exist." only for an ID that no job
+  has. A job of another type answers 404 `not_an_undo`, an undo that is queued or running
+  409 `undo_not_ended`, and a document that cannot be read 409 `job_unreadable`.
+- An undo that is cancelled after it counted every entry is recorded as a finished undo:
+  undone when it kept nothing, which ends the recovery window as such an undo does, and
+  partly undone with the number of kept entries otherwise. Before, it was recorded as partly
+  undone without a number, also when it had reverted everything, and the Restores tab
+  offered to revert the rest until a review retired the apply.
 - A file preview, apply or undo that stops says what stopped it, on the admin page, in the
   job list, in the failure e-mail and in WP-CLI. Before, a file that changed after the
   review was reported as "Another backup job is still running", and a refused or damaged
