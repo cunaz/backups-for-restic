@@ -1798,9 +1798,13 @@ final class FileChangesTest extends TestCase {
 		$review = $this->changes->request_preview( $apply->id, true, false );
 		self::assertInstanceOf( Job::class, $review );
 		$reviewed = $this->tick_while_uploading( $review, $wide );
-		if ( ! $reviewed->state->is_terminal() ) {
-			// The rest of the review does not read the folder.
-			$reviewed = $this->run_job( $reviewed );
+		// The rest of the review does not read the folder. Its check of the folder that the apply
+		// created, once a tick without time ended in it, waits for the second of that folder's
+		// last change, which ticks that end at once can all fall into: they are bounded by time.
+		$until = microtime( true ) + 10.0;
+		while ( ! $reviewed->state->is_terminal() && microtime( true ) < $until ) {
+			usleep( 20000 );
+			$reviewed = $this->runner->tick( 2.0 )->job ?? self::fail( 'The review is gone.' );
 		}
 		// Before, the review read the folder again at every tick while the uploads lasted, and
 		// decided the entry once they stopped. Now another spelling may be in the folder: its
