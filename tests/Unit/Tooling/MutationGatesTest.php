@@ -42,7 +42,9 @@ final class MutationGatesTest extends TestCase {
 		self::assertTrue( @$phpunit->load( $root . '/' . $config_dir . '/phpunit.xml.dist' ), $gate . ': no phpunit.xml.dist in ' . $config_dir . '.' );
 		$xpath     = new DOMXPath( $phpunit );
 		$bootstrap = realpath( $root . '/' . $config_dir . '/' . $xpath->evaluate( 'string(/phpunit/@bootstrap)' ) );
-		self::assertSame( realpath( $root . '/tests/Mutation/bootstrap.php' ), $bootstrap, $gate . ' runs its tests without tests/Mutation/bootstrap.php.' );
+		// The bootstrap of the mutation suites, or one of the gate's own beside its configuration
+		// that does what that one does first, as the database gate's does.
+		self::assertContains( $bootstrap, [ realpath( $root . '/tests/Mutation/bootstrap.php' ), realpath( $root . '/' . $config_dir . '/bootstrap.php' ) ], $gate . ' runs its tests without tests/Mutation/bootstrap.php.' );
 		self::assertStringContainsString( 'MutationProcess::prepare(', (string) file_get_contents( (string) $bootstrap ) );
 
 		$options = $config['testFrameworkOptions'] ?? '';
@@ -76,7 +78,8 @@ final class MutationGatesTest extends TestCase {
 			foreach ( (array) $commands as $command ) {
 				self::assertIsString( $command );
 				self::assertStringNotContainsString( '.tools/bin/infection', $command, 'composer ' . $name . ' runs Infection without bin/mutation-gate.sh, which fails the gate when the canary fires.' );
-				if ( str_starts_with( $command, 'bin/mutation-gate.sh ' ) ) {
+				// The database gate runs it with one database server per thread.
+				if ( 1 === preg_match( '#^(?:bin/database-servers\.sh )?bin/mutation-gate\.sh #', $command ) ) {
 					$configured[] = 1 === preg_match( '/--configuration=(\S+)/', $command, $match ) ? $match[1] : 'infection.json5.dist';
 				}
 			}
@@ -307,8 +310,10 @@ final class MutationGatesTest extends TestCase {
 					'FAKE_MARK'   => 'variable',
 				],
 				1,
-				'::error::Mutant processes that could not write durably: 2.',
+				'::error::Mutant processes whose checks failed: 2.',
 			],
+			// The database gate's bootstrap reports so a process that has no server of its own.
+			'a process had no database server'           => [ [ 'FAKE_MARK' => 'server' ], 1, "::error::Mutant processes whose checks failed: 1. Their tests did not run as the gate measures them, as they could not write durably or had no database server of their own, so the score above cannot be trusted. First lines of their reports and the markers:\nProcess 9: Thread 4 has no database server of its own: BFR_TEST_MYSQL_HOSTS names 3." ],
 			'a process could write only the fallback'    => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
 			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4), 0 of them after a fatal error in a test, and 0 more after a fatal error outside a test, which do not count." ],
 			'more reports than processes pass'           => [
@@ -695,7 +700,8 @@ final class MutationGatesTest extends TestCase {
 
 	/**
 	 * A copy of bin/mutation-gate.sh in a temporary checkout, with a stand-in for Infection that
-	 * prints its arguments, writes the markers that FAKE_MARK names, and leaves FAKE_REPORTS
+	 * prints its arguments, writes the markers that FAKE_MARK names (or, for "report" and
+	 * "server", a report with a failed check), and leaves FAKE_REPORTS
 	 * reports (6): the first FAKE_PASSES (5) say they can write durably, the next FAKE_UNCOMPILED
 	 * (1) that their copy does not compile, and the first FAKE_ENDS (4) how they ended. It writes
 	 * the summary that FAKE_SUMMARY names (full: 3 killed, 1 escaped, 1 timed out, 1 syntax error,
@@ -724,6 +730,7 @@ final class MutationGatesTest extends TestCase {
 				variable) printf 'Process 7: fsync() failed\nProcess 7: still user-space\nProcess 8: fsync() failed\n' >> "$BFR_MUTATION_CANARY" ;;
 				fallback) printf 'Process 7: fsync() failed\n' >> "$tools/mutation-canary" ;;
 				report) printf 'Process 9 reported in.\nProcess 9: fsync() failed\n' > "$BFR_MUTATION_REPORTS/report-9-x" ;;
+				server) printf 'Process 9 reported in.\nProcess 9 can write durably.\nProcess 9: Thread 4 has no database server of its own: BFR_TEST_MYSQL_HOSTS names 3. The tests of this process reach no server.\n' > "$BFR_MUTATION_REPORTS/report-9-x" ;;
 			esac
 			passes=${FAKE_PASSES:-5}
 			for ((n = 0; n < ${FAKE_REPORTS:-6}; n++)); do

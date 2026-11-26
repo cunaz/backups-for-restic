@@ -9,6 +9,8 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Support;
 
+use BackupsForRestic\Database\Dump\Connection;
+use BackupsForRestic\Exception\DatabaseFailed;
 use Throwable;
 
 /**
@@ -76,7 +78,7 @@ final class DatabaseServers {
 		try {
 			$problem = self::own( getenv( self::TOKEN ), getenv( self::VARIABLE ), $mutant );
 		} catch ( Throwable $error ) {
-			$problem = 'The database server of this process could not be cleared: ' . $error->getMessage();
+			$problem = 'The database server of this process could not be cleared of what an earlier process left: ' . $error->getMessage();
 		}
 		if ( null !== $problem ) {
 			MutationProcess::problem( $root, $problem );
@@ -103,44 +105,54 @@ final class DatabaseServers {
 			return sprintf( 'Thread %s has no database server of its own: %s names %d. The tests of this process reach no server.', $token, self::VARIABLE, count( $servers ) );
 		}
 		self::point( $host );
-		return $mutant ? self::clear( $host ) : null;
-	}
-
-	/**
-	 * Ends every session on the server but this one and the server's daemons, waits until they
-	 * have gone, and sets the server's max_allowed_packet back to its default. The server belongs
-	 * to this process's thread, so every other session is one that an earlier process left.
-	 *
-	 * @param string $host The server, which BFR_TEST_MYSQL_HOST names already.
-	 * @return string|null What went wrong, or null.
-	 * @throws \RuntimeException If the server refuses a statement.
-	 */
-	private static function clear( string $host ): ?string {
+		if ( ! $mutant ) {
+			return null;
+		}
 		$connection = MysqliConnection::connect();
 		if ( null === $connection ) {
 			return sprintf( 'The database server of this process, %s, does not answer: its tests skip.', $host );
 		}
 		try {
-			$until = microtime( true ) + self::ENDING;
-			while ( true ) {
-				$left = $connection->rows( "SELECT ID,USER,DB,COMMAND FROM performance_schema.processlist WHERE ID<>CONNECTION_ID() AND COMMAND<>'Daemon'" );
-				if ( [] === $left || microtime( true ) >= $until ) {
-					break;
-				}
-				foreach ( $left as $session ) {
-					// A session that ends meanwhile is unknown to KILL, which is what is wanted.
-					$connection->mysqli->query( 'KILL ' . (int) $session['ID'] );
-				}
-				usleep( 50000 );
-			}
-			if ( [] !== $left ) {
-				return sprintf( 'Sessions that an earlier process left on %s did not end within %d seconds: %s.', $host, (int) self::ENDING, (string) json_encode( $left ) );
-			}
-			$connection->execute( 'SET GLOBAL max_allowed_packet=DEFAULT' );
-			return null;
+			return self::clear( $connection, $host );
 		} finally {
 			$connection->mysqli->close();
 		}
+	}
+
+	/**
+	 * Ends every session on the server but this one and the server's daemons, waits until they
+	 * have gone, and sets the server's max_allowed_packet back to its default. The server belongs
+	 * to this process's thread, and the bootstrap runs before any test, so every other session is
+	 * one that an earlier process of the thread left.
+	 *
+	 * @param Connection $connection A session of this process on its server.
+	 * @param string     $host       The server, for the message.
+	 * @param float      $ending     How long the sessions may take to end, in seconds.
+	 * @return string|null What went wrong, or null.
+	 * @throws DatabaseFailed If the server refuses to list its sessions or to set the limit.
+	 */
+	public static function clear( Connection $connection, string $host, float $ending = self::ENDING ): ?string {
+		$until = microtime( true ) + $ending;
+		while ( true ) {
+			$left = $connection->rows( "SELECT ID,USER,DB,COMMAND FROM performance_schema.processlist WHERE ID<>CONNECTION_ID() AND COMMAND<>'Daemon'" );
+			if ( [] === $left || microtime( true ) >= $until ) {
+				break;
+			}
+			foreach ( $left as $session ) {
+				try {
+					$connection->rows( 'KILL ' . (int) ( $session['ID'] ?? 0 ) );
+				} catch ( DatabaseFailed ) {
+					// It ended meanwhile; one that cannot be ended is listed again.
+					continue;
+				}
+			}
+			usleep( 50000 );
+		}
+		if ( [] !== $left ) {
+			return sprintf( 'Sessions that an earlier process left on %s did not end within %s seconds: %s.', $host, (string) $ending, (string) json_encode( $left ) );
+		}
+		$connection->rows( 'SET GLOBAL max_allowed_packet=DEFAULT' );
+		return null;
 	}
 
 	/**
