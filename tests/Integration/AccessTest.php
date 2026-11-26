@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Integration;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Storage\PrivateDirectory;
+use BackupsForRestic\Tests\Support\MysqliConnection;
 use BackupsForRestic\Tests\Support\TestSite;
 use BackupsForRestic\Tests\Support\TempDir;
 
@@ -395,6 +396,64 @@ final class AccessTest extends TestCase {
 			foreach ( [ $verified, $damaged, $failing ] as $job ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
 			}
+		}
+	}
+
+	public function test_a_site_whose_database_name_is_not_utf8_reviews_and_discards_a_binding_and_the_answer_is_utf8(): void {
+		// As the reviewer found it: the site's connection in latin1, on a database whose name is not
+		// ASCII, so that the server reports the name as bytes that are not UTF-8.
+		$admin = MysqliConnection::connect();
+		self::assertNotNull( $admin, 'The integration suite needs BFR_TEST_MYSQL_* for this test.' );
+		$account = MysqliConnection::environment( 'BFR_DB_USER', 'bfr_site' );
+		$name    = MysqliConnection::environment( 'BFR_DB_NAME', 'bfr_site' ) . '_möbel';
+		$job     = '20261126T120000Z-0d1504';
+		$admin->execute( 'CREATE DATABASE IF NOT EXISTS `' . $name . '`' );
+		foreach ( [ 'localhost', '%' ] as $host ) {
+			$admin->execute( 'GRANT SELECT ON `' . $name . "`.* TO '" . $account . "'@'" . $host . "'" );
+		}
+		TestSite::database_binding( $job, true, [], 'succeeded' );
+		try {
+			$output = TestSite::php(
+				'
+				wp_set_current_user( 1 );
+				$route  = "/backups-for-restic/v1/database-changes/" . $arguments[0];
+				$review = static fn (): WP_REST_Response => rest_do_request( new WP_REST_Request( "POST", $route . "/discard-review" ) );
+				// A first review reads what WordPress keeps in this request\'s cache from its own database.
+				$first = $review()->get_status();
+				global $wpdb;
+				$wpdb->dbh->set_charset( "latin1" );
+				$selected = $wpdb->dbh->select_db( mb_convert_encoding( $arguments[1], "ISO-8859-1", "UTF-8" ) );
+				$reviewed = $review();
+				$data     = $reviewed->get_data();
+				// What the REST API sends: the server encodes the answer so.
+				$sent      = wp_json_encode( rest_get_server()->response_to_data( $reviewed, false ) );
+				$confirmed = new WP_REST_Request( "POST", $route . "/discard" );
+				$confirmed->set_header( "Content-Type", "application/json" );
+				$confirmed->set_body( (string) wp_json_encode( [ "reviewed" => true, "site_url" => $data["site_url"] ?? null, "digest" => $data["digest"] ?? null, "review_token" => $data["review_token"] ?? null, "user_password" => $arguments[2] ] ) );
+				$discarded = rest_do_request( $confirmed );
+				$wpdb->dbh->set_charset( "utf8mb4" );
+				$wpdb->dbh->select_db( DB_NAME );
+				echo "\n", base64_encode( (string) wp_json_encode( [ $first, $selected, $reviewed->get_status(), $sent, $discarded->get_status(), wp_json_encode( rest_get_server()->response_to_data( $discarded, false ) ) ] ) );
+				',
+				[ $job, $name, TestSite::ADMIN_PASSWORD ]
+			);
+			[ $first, $selected, $status, $sent, $discarded, $answer ] = json_decode( (string) base64_decode( TestSite::last_line( $output ), true ), true );
+			self::assertSame( [ 200, true ], [ $first, $selected ], $output );
+			// Before, the digest of the review could not encode the name: a JsonException that no route caught.
+			self::assertSame( 200, $status, $sent );
+			$review = json_decode( $sent, true );
+			self::assertIsArray( $review, $sent );
+			self::assertSame( str_replace( 'ö', "\u{FFFD}", $name ), $review['connected']['database'] ?? null, 'The bytes that are not UTF-8 are answered as U+FFFD, as names in snapshots are.' );
+			self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] ?? '' );
+			// The digest is that of the bytes, so the confirmation of the answered review is accepted.
+			self::assertSame( 200, $discarded, $answer );
+			self::assertArrayNotHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [ 'database_owner' => true ] );
+		} finally {
+			foreach ( [ 'localhost', '%' ] as $host ) {
+				$admin->execute( 'REVOKE SELECT ON `' . $name . "`.* FROM '" . $account . "'@'" . $host . "'" );
+			}
+			$admin->execute( 'DROP DATABASE IF EXISTS `' . $name . '`' );
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
 		}
 	}
 

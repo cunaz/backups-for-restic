@@ -2158,4 +2158,70 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertCount( Job::MAX_WARNINGS + 1, $expired->warnings );
 		self::assertStringContainsString( 'check them and drop them by hand: ' . $retained, $expired->warnings[ Job::MAX_WARNINGS ] );
 	}
+
+	/**
+	 * Runs work while the suite's connection uses latin1 in a database whose name has a letter
+	 * that is not ASCII: the server then reports the name as latin1 bytes, which are not UTF-8.
+	 *
+	 * @template T
+	 * @param \Closure(string):T $work Gets the name as the connection reports it.
+	 * @return T What the work returns.
+	 */
+	private function in_latin1_database( \Closure $work ): mixed {
+		$name = $this->database . '_möbel';
+		$this->admin->execute( 'CREATE DATABASE `' . $name . '`' );
+		try {
+			$this->db->mysqli->set_charset( 'latin1' );
+			$bytes = (string) mb_convert_encoding( $name, 'ISO-8859-1', 'UTF-8' );
+			self::assertTrue( $this->db->mysqli->select_db( $bytes ) );
+			self::assertSame( [ [ 'name' => $bytes ] ], $this->db->rows( 'SELECT DATABASE() AS name' ) );
+			self::assertFalse( mb_check_encoding( $bytes, 'UTF-8' ) );
+			return $work( $bytes );
+		} finally {
+			$this->db->mysqli->set_charset( 'utf8mb4' );
+			$this->db->mysqli->select_db( $this->database );
+			$this->admin->execute( 'DROP DATABASE `' . $name . '`' );
+		}
+	}
+
+	public function test_a_binding_is_reviewed_and_discarded_while_the_site_uses_a_database_whose_name_is_not_utf8(): void {
+		$services     = $this->services();
+		$owner        = new Job( '20260101T000001Z-0a0b0d', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$owner->state = JobState::Failed;
+		$owner->data  = [
+			'restore'        => $services['source']->id,
+			'user'           => 1,
+			'digest'         => str_repeat( 'd', 64 ),
+			'database_owner' => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => count( $this->manifest->tables ),
+				'token'       => explode( ':', $this->importer->tables->owner )[1],
+				'database'    => $this->database,
+				'uuid'        => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002',
+			],
+		];
+		$services['jobs']->save( $owner );
+		$private = $this->private_tables();
+		// Before, the digest of the review could not encode the name and ended in a JsonException.
+		$this->in_latin1_database(
+			static function ( string $bytes ) use ( $services, $owner ): void {
+				$review = $services['changes']->discard_review( $owner->id, 1 );
+				self::assertSame( $bytes, $review['connected']['database'] );
+				$services['changes']->discard( $owner->id, 1, 'wp-cli', $review['digest'] );
+			}
+		);
+		self::assertSame( $private, $this->private_tables(), 'Nothing was dropped.' );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $owner->id )?->data ?? [ 'database_owner' => true ] );
+	}
+
+	public function test_the_review_of_an_exchange_into_a_database_whose_name_is_not_utf8_names_its_blocker(): void {
+		$services = $this->services();
+		// Before, the digest of the review could not encode the name and ended in a JsonException.
+		$review = $this->in_latin1_database( static fn (): array => $services['changes']->preview( $services['source']->id, 1 ) );
+		self::assertFalse( $review['applicable'] );
+		self::assertContains( 'dictionary_names', $review['blockers'] );
+		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] );
+	}
 }

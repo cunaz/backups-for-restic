@@ -986,7 +986,28 @@ final class RestRoutes {
 		// A job that a confirmation of this review starts is created at this time or later: the
 		// page looks for it by its type and this time when the answer to the confirmation is lost.
 		$plan['reviewed_at'] = time();
-		return $this->respond( $plan, 200, true );
+		return $this->respond( $database ? self::utf8( $plan ) : $plan, 200, true );
+	}
+
+	/**
+	 * Data from a database as the REST API answers it. A name that is not UTF-8, such as that of
+	 * a database which a connection in latin1 reports, has U+FFFD in place of each byte that is
+	 * not part of a valid sequence, as the snapshot routes answer names; the review's digest is
+	 * that of the bytes.
+	 *
+	 * @param array<string, mixed> $data Answer.
+	 * @return array<string, mixed> The answer in UTF-8.
+	 */
+	private static function utf8( array $data ): array {
+		array_walk_recursive(
+			$data,
+			static function ( mixed &$value ): void {
+				if ( is_string( $value ) ) {
+					$value = SnapshotBrowser::text( $value );
+				}
+			}
+		);
+		return $data;
 	}
 
 	/**

@@ -347,12 +347,46 @@ final readonly class DatabaseReview {
 	 * (summary(), version 2) and of the discard of a binding (DatabaseChanges::discard_review(),
 	 * version 1) are bound with it.
 	 *
+	 * Facts with bytes that are not UTF-8, such as the name of a database that a connection in
+	 * latin1 reports, cannot be encoded as JSON. They are hashed with every key and string
+	 * given as hexadecimal, after the version followed by ":hex": no encodable facts have that
+	 * form, and the digest of every fact that can be encoded stays the same.
+	 *
 	 * @param int         $version What this kind of review shows, counted up when that changes.
 	 * @param list<mixed> $facts What the review shows and binds, in a fixed order.
 	 * @return string Lower-case hexadecimal SHA-256.
+	 * @throws \JsonException If the facts cannot be encoded for another reason than their bytes.
 	 */
 	public static function digest( int $version, array $facts ): string {
-		return hash( 'sha256', json_encode( [ $version, ...$facts ], JSON_THROW_ON_ERROR ) );
+		try {
+			return hash( 'sha256', json_encode( [ $version, ...$facts ], JSON_THROW_ON_ERROR ) );
+		} catch ( \JsonException $error ) {
+			if ( JSON_ERROR_UTF8 !== $error->getCode() ) {
+				throw $error;
+			}
+			return hash( 'sha256', json_encode( [ $version . ':hex', ...self::hex( $facts ) ], JSON_THROW_ON_ERROR ) );
+		}
+	}
+
+	/**
+	 * Facts with every string key and value as hexadecimal, after the letter h for a key, so that
+	 * no key becomes a number; numbers, booleans and null stay as they are.
+	 *
+	 * @param array<mixed> $facts Facts.
+	 * @return array<mixed> The same facts in ASCII.
+	 */
+	private static function hex( array $facts ): array {
+		$hex = [];
+		foreach ( $facts as $key => $value ) {
+			$name = is_string( $key ) ? 'h' . bin2hex( $key ) : $key;
+			if ( is_array( $value ) ) {
+				$value = self::hex( $value );
+			} elseif ( is_string( $value ) ) {
+				$value = bin2hex( $value );
+			}
+			$hex[ $name ] = $value;
+		}
+		return $hex;
 	}
 
 	/**

@@ -877,4 +877,17 @@ final class DatabaseChangesTest extends TestCase {
 		// Before, each of the three bindings asked again, on each load of the Restores tab.
 		self::assertCount( 2, $asked, implode( "\n", (array) $asked ) );
 	}
+
+	public function test_a_connected_database_whose_name_is_not_utf8_is_reviewed_and_the_binding_discarded(): void {
+		// A connection in latin1 to a database with a name that is not ASCII.
+		$job    = $this->stranded();
+		$server = $this->server( self::UUID, "m\xF6bel" );
+		$review = $this->changes( $server )->discard_review( $job->id, 7 );
+		self::assertSame( "m\xF6bel", $review['connected']['database'], 'The review gives the bytes; the REST answer and the page escape them.' );
+		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] );
+		self::assertNotSame( $review['digest'], $this->changes( $this->server( self::UUID, "m\xF7bel" ) )->discard_review( $job->id, 7 )['digest'] );
+		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server( self::UUID, "m\xF7bel" ) )->discard( $job->id, 7, 'rest', $review['digest'] ) );
+		self::assertSame( 'site', $this->changes( $server )->discard( $job->id, 7, 'rest', $review['digest'] )['database'] );
+		self::assertArrayNotHasKey( 'database_owner', $this->jobs->get( $job->id )?->data ?? [ 'database_owner' => true ] );
+	}
 }

@@ -486,4 +486,32 @@ final class DatabaseReviewTest extends TestCase {
 		self::assertSame( $review['digest'], DatabaseReview::digest( 2, $facts ) );
 		self::assertNotSame( $review['digest'], DatabaseReview::digest( 1, $facts ), 'The version is part of the digest.' );
 	}
+
+	public function test_facts_with_bytes_that_are_not_utf8_have_a_digest_and_encodable_facts_keep_theirs(): void {
+		// A connection in latin1 reports the name of a database or a table as such bytes.
+		$entry  = [
+			'table'  => "wp_m\xF6bel",
+			'action' => 'keep',
+		];
+		$latin1 = [ 'restore', 1, [ $entry ], [], [], [ 'apply', [ 'database' => "m\xF6bel" ] ], [] ];
+		$digest = DatabaseReview::digest( 2, $latin1 );
+		// The form that such facts are hashed in, spelled out: a change to it would change the digest of every such review.
+		self::assertSame( hash( 'sha256', '["2:hex","726573746f7265",1,[{"h7461626c65":"77705f6df662656c","h616374696f6e":"6b656570"}],[],[],["6170706c79",{"h6461746162617365":"6df662656c"}],[]]' ), $digest );
+		self::assertSame( $digest, DatabaseReview::digest( 2, $latin1 ) );
+		$other                   = $latin1;
+		$other[5][1]['database'] = "m\xF7bel";
+		$replaced                = $latin1;
+		$replaced[5][1]          = [ 'database' => "m\u{FFFD}bel" ];
+		$replaced[2][0]['table'] = "wp_m\u{FFFD}bel";
+		foreach ( [ $other, $replaced ] as $facts ) {
+			self::assertNotSame( $digest, DatabaseReview::digest( 2, $facts ) );
+		}
+		self::assertNotSame( $digest, DatabaseReview::digest( 1, $latin1 ), 'The version is part of the digest.' );
+		// A key of such bytes, and the same facts with the hexadecimal as their text, which an encodable review could show.
+		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', DatabaseReview::digest( 1, [ [ "m\xF6bel" => 'x' ] ] ) );
+		self::assertNotSame( DatabaseReview::digest( 1, [ [ "m\xF6bel" => 'x' ] ] ), DatabaseReview::digest( 1, [ [ 'h' . bin2hex( "m\xF6bel" ) => bin2hex( 'x' ) ] ] ) );
+		// Facts that can be encoded keep the bytes of the expression before.
+		$encodable = [ 'discard', 7, [ 'database' => 'site' ] ];
+		self::assertSame( hash( 'sha256', json_encode( [ 1, ...$encodable ], JSON_THROW_ON_ERROR ) ), DatabaseReview::digest( 1, $encodable ) );
+	}
 }

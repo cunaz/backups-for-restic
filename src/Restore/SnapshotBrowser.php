@@ -487,12 +487,13 @@ final class SnapshotBrowser {
 
 	/**
 	 * Text to show for bytes from the repository: the bytes when they are valid UTF-8,
-	 * otherwise with U+FFFD in place of every byte that is not part of a valid sequence.
+	 * otherwise with U+FFFD in place of every byte that is not part of a valid sequence. The
+	 * REST API answers names from a database in the same way.
 	 *
-	 * @param string $bytes Bytes from the repository.
+	 * @param string $bytes Bytes from the repository or a database.
 	 * @return string Valid UTF-8.
 	 */
-	private static function text( string $bytes ): string {
+	public static function text( string $bytes ): string {
 		if ( self::is_text( $bytes ) ) {
 			return $bytes;
 		}
