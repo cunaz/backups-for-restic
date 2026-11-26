@@ -7,8 +7,10 @@ use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
+use BackupsForRestic\Jobs\Apply\DatabaseReview;
 use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
@@ -256,9 +258,9 @@ final class DatabaseChangesTest extends TestCase {
 
 	public function test_a_foreign_binding_is_discarded_with_its_private_names_and_nothing_is_dropped(): void {
 		$owner     = $this->stranded();
-		$preview   = $this->changes( $this->server() )->foreign_binding( $owner->id );
-		$discarded = $this->changes( $this->server() )->discard( $owner->id, 7, 'rest' );
-		self::assertSame( $preview, $discarded );
+		$preview   = $this->changes( $this->server() )->discard_review( $owner->id, 7 );
+		$discarded = $this->changes( $this->server() )->discard( $owner->id, 7, 'rest', $preview['digest'] );
+		self::assertSame( array_intersect_key( $preview, $discarded ), $discarded );
 		$base = '_bfr_r_' . str_repeat( 'c', 32 );
 		self::assertSame(
 			[
@@ -284,26 +286,26 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertContains( 'database_exchange_foreign', array_column( array_column( $this->jobs->log( $saved )->read( 5 ), 'context' ), 'code' ) );
 		$backup = $this->jobs->create( JobType::DatabaseApply, 'manual', $this->clock->seconds );
 		self::assertSame( JobState::Queued, $backup->state, 'Once discarded, another database apply may start.' );
-		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( $owner->id, 7, 'rest' ) );
+		self::refused( 'database_binding_discarded', fn () => $this->changes( $this->server() )->discard( $owner->id, 7, 'rest', $preview['digest'] ) );
 	}
 
 	public function test_only_a_finished_binding_that_this_server_disowns_can_be_discarded(): void {
 		$here = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ] );
-		self::refused( 'database_binding_verified', fn () => $this->changes( $this->server() )->discard( $here->id, 1, 'wp-cli' ) );
+		self::refused( 'database_binding_verified', fn () => $this->changes( $this->server() )->discard( $here->id, 1, 'wp-cli', str_repeat( 'd', 64 ) ) );
 		self::assertArrayHasKey( 'database_owner', $this->jobs->get( $here->id )?->data ?? [] );
-		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( '20260101T000009Z-cccccc', 1, 'wp-cli' ) );
-		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( 'not-a-job', 1, 'wp-cli' ) );
+		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( '20260101T000009Z-cccccc', 1, 'wp-cli', str_repeat( 'd', 64 ) ) );
+		self::refused( 'database_binding_missing', fn () => $this->changes( $this->server() )->discard( 'not-a-job', 1, 'wp-cli', str_repeat( 'd', 64 ) ) );
 		$running        = $this->stranded( '20260101T000002Z-bbbbbb' );
 		$running->state = JobState::Running;
 		$this->jobs->save( $running );
-		self::refused( 'job_conflict', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli' ) );
+		self::refused( 'database_binding_busy', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli', str_repeat( 'd', 64 ) ) );
 		$running->state = JobState::Failed;
 		$this->jobs->save( $running );
 		$undo       = new Job( '20260101T000003Z-dddddd', JobType::DatabaseUndo, 'manual', $this->clock->seconds );
 		$undo->data = [ 'apply' => $running->id ];
 		$this->jobs->save( $undo );
-		self::refused( 'job_conflict', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli' ) );
-		self::refused( null, fn () => $this->changes( $this->server( '' ) )->foreign_binding( $here->id ) );
+		self::refused( 'database_binding_busy', fn () => $this->changes( $this->server() )->discard( $running->id, 1, 'wp-cli', str_repeat( 'd', 64 ) ) );
+		self::refused( 'database_binding_unverified', fn () => $this->changes( $this->server( '' ) )->discard_review( $here->id, 1 ) );
 	}
 
 	/**
@@ -397,5 +399,417 @@ final class DatabaseChangesTest extends TestCase {
 		$asked = $server->asked;
 		self::assertFalse( $changes->step( JobType::DatabaseApply, 'cleaning_up' )->advance( $job, $this->jobs->log( $job ), microtime( true ) + 5 ), 'The server closed that session.' );
 		self::assertSame( $asked, $server->asked );
+	}
+
+	/** A third server, to which the site could move after the review. */
+	private const string THIRD = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+
+	/**
+	 * The service on a connection that a closure gives, as WordPress gives it.
+	 *
+	 * @param \Closure():Connection $connection Connection.
+	 */
+	private function changes_through( \Closure $connection ): DatabaseChanges {
+		$site = realpath( $this->directory . '/site' );
+		self::assertIsString( $site );
+		return new DatabaseChanges(
+			$this->jobs,
+			new Staging( $this->directory . '/restores', $this->jobs, $this->clock ),
+			$this->clock,
+			new FixedRandom(),
+			24,
+			'wp_',
+			$connection,
+			static fn ( int $user ): array => [],
+			new FileMaintenance( $site ),
+			static function (): void {},
+			new ExchangeSite( 'backups-for-restic/backups-for-restic.php', static fn (): array => [ 'manage_options' ], static fn ( string $plugin ): bool => true )
+		);
+	}
+
+	/**
+	 * A finished database apply whose binding names another server, with what its exchange recorded.
+	 *
+	 * @param array<string,mixed> $data Further job data.
+	 */
+	private function moved( string $id, array $data = [], JobState $state = JobState::Succeeded ): Job {
+		return $this->owner( $id, [ 'database_owner' => self::binding( str_repeat( 'c', 32 ), self::OTHER ) ] + $data, $state );
+	}
+
+	/**
+	 * What a review of a discard shows, without its digest.
+	 *
+	 * @param array<string,mixed> $review Review.
+	 * @return array<string,mixed> Shown facts.
+	 */
+	private static function shown( array $review ): array {
+		return array_diff_key( $review, array_flip( [ 'digest', 'applicable' ] ) );
+	}
+
+	public function test_the_review_of_a_discard_names_what_it_forgets_and_what_stays(): void {
+		$until   = $this->clock->seconds + 3600;
+		$applied = $this->moved(
+			'20260101T000001Z-aaaaaa',
+			[
+				'database_generation' => 'applied',
+				'retained_until'      => $until,
+			]
+		);
+		// The server answers who it is and nothing else; it would refuse any other statement.
+		$review = $this->changes( $this->server( self::UUID, 'moved' ) )->discard_review( $applied->id, 7 );
+		$base   = '_bfr_r_' . str_repeat( 'c', 32 );
+		self::assertSame(
+			[
+				'job'            => $applied->id,
+				'restore'        => '20251231T000000Z-000000',
+				'database'       => 'site',
+				'server'         => self::OTHER,
+				'connected'      => [
+					'database' => 'moved',
+					'server'   => self::UUID,
+				],
+				'tables'         => [ $base . '_p', $base . '_a', $base . '_u', $base . '_t0', $base . '_b0', $base . '_t1', $base . '_b1' ],
+				'generation'     => 'applied',
+				'retained_until' => $until,
+				'undo_until'     => $until,
+				'kept'           => DatabaseChanges::DISCARD_KEPT,
+			],
+			self::shown( $review )
+		);
+		self::assertSame( [ 'live_database', 'private_tables', 'job_record' ], DatabaseChanges::DISCARD_KEPT );
+		self::assertTrue( $review['applicable'] );
+		// Versioned and keyed to the confirming user as the review of an exchange is, by the same function.
+		self::assertSame( DatabaseReview::digest( 1, [ 'discard', 7, self::shown( $review ) ] ), $review['digest'] );
+		self::assertSame( $applied->data, $this->jobs->get( $applied->id )?->data, 'A review changes nothing.' );
+		self::assertSame( [], $this->jobs->log( $applied )->read(), 'A review writes nothing to the log.' );
+		// An undo whose window has ended, or whose expiry has begun, no longer ends with the discard.
+		$ended = $this->jobs->get( $applied->id );
+		self::assertNotNull( $ended );
+		$ended->data['retained_until'] = $this->clock->seconds;
+		$this->jobs->save( $ended );
+		$late = $this->changes( $this->server() )->discard_review( $applied->id, 7 );
+		self::assertSame( [ 'applied', $this->clock->seconds, null ], [ $late['generation'], $late['retained_until'], $late['undo_until'] ] );
+		$ended->data['retained_until']              = $until;
+		$ended->data['database_cleanup_generation'] = 'applied';
+		$this->jobs->save( $ended );
+		self::assertNull( $this->changes( $this->server() )->discard_review( $applied->id, 7 )['undo_until'] );
+		// An undone exchange keeps the generation that its undo replaced; an unfinished import has none.
+		$undone = $this->moved(
+			'20260101T000002Z-bbbbbb',
+			[
+				'database_generation' => 'undone',
+				'retained_until'      => $until,
+			]
+		);
+		$review = $this->changes( $this->server() )->discard_review( $undone->id, 7 );
+		self::assertSame( [ 'undone', $until, null ], [ $review['generation'], $review['retained_until'], $review['undo_until'] ] );
+		$review = $this->changes( $this->server() )->discard_review( $this->stranded( '20260101T000003Z-cccccc' )->id, 7 );
+		self::assertSame( [ null, null, null ], [ $review['generation'], $review['retained_until'], $review['undo_until'] ] );
+		self::assertSame( 'site', $review['connected']['database'] );
+	}
+
+	public function test_the_digest_of_a_discard_covers_everything_that_its_review_shows(): void {
+		$until  = $this->clock->seconds + 3600;
+		$job    = $this->moved(
+			'20260101T000001Z-aaaaaa',
+			[
+				'database_generation' => 'applied',
+				'retained_until'      => $until,
+			]
+		);
+		$digest = fn ( int $user = 7, ?Connection $server = null ): string => $this->changes( $server ?? $this->server() )->discard_review( $job->id, $user )['digest'];
+		$first  = $digest();
+		self::assertSame( $first, $digest(), 'The same facts give the same digest.' );
+		$digests = [
+			'first'              => $first,
+			'user'               => $digest( 8 ),
+			'connected database' => $digest( 7, $this->server( self::UUID, 'moved' ) ),
+			'connected server'   => $digest( 7, $this->server( self::THIRD ) ),
+		];
+		$changes = [
+			'database'   => static function ( Job $changed ): void {
+				$changed->data['database_owner']['database'] = 'elsewhere';
+			},
+			'server'     => static function ( Job $changed ): void {
+				$changed->data['database_owner']['uuid'] = self::THIRD;
+			},
+			'tables'     => static function ( Job $changed ): void {
+				$changed->data['database_owner']['count'] = 3;
+			},
+			'names'      => static function ( Job $changed ): void {
+				$changed->data['database_owner']['token'] = str_repeat( 'e', 32 );
+			},
+			'restore'    => static function ( Job $changed ): void {
+				$changed->data['restore'] = '20251231T000000Z-111111';
+			},
+			'generation' => static function ( Job $changed ): void {
+				$changed->data['database_generation'] = 'undone';
+			},
+			'window'     => static function ( Job $changed ) use ( $until ): void {
+				$changed->data['retained_until'] = $until + 1;
+			},
+		];
+		foreach ( $changes as $name => $change ) {
+			$changed = $this->jobs->get( $job->id );
+			self::assertNotNull( $changed );
+			$change( $changed );
+			$this->jobs->save( $changed );
+			$digests[ $name ] = $digest();
+			$this->jobs->save( $job );
+		}
+		$this->clock->seconds  = $until;
+		$digests['undo ended'] = $digest();
+		self::assertSame( array_keys( $digests ), array_keys( array_unique( $digests ) ), 'Each fact that the review shows is in its digest.' );
+	}
+
+	public function test_a_discard_needs_the_digest_of_its_review_and_refuses_a_binding_that_changed_since(): void {
+		$until  = $this->clock->seconds + 3600;
+		$job    = $this->moved(
+			'20260101T000001Z-aaaaaa',
+			[
+				'database_generation' => 'applied',
+				'retained_until'      => $until,
+			]
+		);
+		$review = $this->changes( $this->server() )->discard_review( $job->id, 7 );
+		$kept   = function () use ( $job ): void {
+			$saved = $this->jobs->get( $job->id );
+			self::assertNotNull( $saved );
+			self::assertSame( $job->data, $saved->data, 'Nothing is forgotten.' );
+			self::assertSame( [], $saved->warnings );
+			self::assertSame( [], $this->jobs->log( $saved )->read() );
+		};
+		// Another review's digest, and this review confirmed by another user.
+		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', str_repeat( '0', 64 ) ) );
+		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server() )->discard( $job->id, 8, 'rest', $review['digest'] ) );
+		$kept();
+		// The heartbeat recorded an undo after the review.
+		$undone = $this->jobs->get( $job->id );
+		self::assertNotNull( $undone );
+		$undone->data['database_generation'] = 'undone';
+		$this->jobs->save( $undone );
+		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) );
+		$this->jobs->save( $job );
+		// The site moved on to a third server, and the undo window ended.
+		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server( self::THIRD ) )->discard( $job->id, 7, 'rest', $review['digest'] ) );
+		$this->clock->seconds = $until;
+		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'wp-cli', $review['digest'] ) );
+		$this->clock->seconds = $until - 3600;
+		$kept();
+		$discarded = $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
+		self::assertSame( array_intersect_key( $review, $discarded ), $discarded );
+		$saved = $this->jobs->get( $job->id );
+		self::assertNotNull( $saved );
+		foreach ( [ 'database_owner', 'database_generation', 'retained_until' ] as $forgotten ) {
+			self::assertArrayNotHasKey( $forgotten, $saved->data );
+		}
+		// The job keeps the names where the administrator finds them again, with who confirmed which review.
+		self::assertCount( 1, $saved->warnings );
+		foreach ( [ 'database site on the server ' . self::OTHER, 'Nothing was dropped', implode( ', ', $review['tables'] ) ] as $part ) {
+			self::assertStringContainsString( $part, $saved->warnings[0] );
+		}
+		$entries = $this->jobs->log( $saved )->read();
+		self::assertSame(
+			[
+				'user'   => 7,
+				'via'    => 'rest',
+				'digest' => $review['digest'],
+				'code'   => 'database_exchange_foreign',
+			],
+			end( $entries )['context'] ?? null
+		);
+	}
+
+	public function test_the_review_and_the_discard_answer_a_binding_that_cannot_be_discarded_with_what_is_the_case(): void {
+		$review = fn ( string $id, ?Connection $server = null ): \Closure => fn () => $this->changes( $server ?? $this->server() )->discard_review( $id, 7 );
+		self::refused( 'database_binding_missing', $review( '20260101T000009Z-cccccc' ) );
+		self::refused( 'database_binding_missing', $review( 'not-a-job' ) );
+		$backup        = new Job( '20260101T000008Z-eeeeee', JobType::Backup, 'manual', $this->clock->seconds );
+		$backup->state = JobState::Succeeded;
+		$this->jobs->save( $backup );
+		self::refused( 'database_binding_missing', $review( $backup->id ) );
+		self::refused( 'database_binding_missing', $review( $this->owner( '20260101T000007Z-ffffff', [] )->id ) );
+		// A document that this version cannot read is a job all the same.
+		mkdir( $this->directory . '/jobs/20260101T000006Z-abcabc' );
+		file_put_contents( $this->directory . '/jobs/20260101T000006Z-abcabc/job.json', '{' );
+		self::refused( 'job_unreadable', $review( '20260101T000006Z-abcabc' ) );
+		// A binding of this database, and a server that does not say which one it is.
+		$here = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ] );
+		self::refused( 'database_binding_verified', $review( $here->id ) );
+		self::refused( 'database_binding_unverified', $review( $here->id, $this->server( '' ) ) );
+		self::refused( 'database_binding_unverified', $review( $here->id, $this->server( 'not-a-uuid' ) ) );
+		// Records of a binding that cannot be read: on another server, and on the recorded one.
+		$token = $this->owner( '20260101T000002Z-bbbbbb', [ 'database_owner' => array_replace( self::binding( str_repeat( 'c', 32 ), self::OTHER ), [ 'token' => 'not-a-token' ] ) ] );
+		self::refused( 'database_binding_unreadable', $review( $token->id ) );
+		$version = $this->owner( '20260101T000003Z-dddddd', [ 'database_owner' => array_replace( self::binding( str_repeat( 'c', 32 ), self::OTHER ), [ 'version' => 2 ] ) ] );
+		self::refused( 'database_binding_unreadable', $review( $version->id ) );
+		$pair    = static fn ( string $name, int $id ): array => [
+			'name'          => $name,
+			'before'        => (string) $id,
+			'after'         => (string) ( $id + 1 ),
+			'before_schema' => str_repeat( 'a', 64 ),
+			'after_schema'  => str_repeat( 'b', 64 ),
+		];
+		$planned = $this->owner(
+			'20260101T000004Z-aaaaab',
+			[
+				'database_owner' => self::binding( str_repeat( 'c', 32 ) ),
+				'exchange_plan'  => [
+					'version'  => 1,
+					'database' => 'site',
+					'uuid'     => self::UUID,
+					'prefix'   => 'wp_',
+					'witness'  => '1',
+					'pairs'    => [ $pair( 'wp_options', 2 ), $pair( 'wp_users', 4 ), $pair( 'wp_usermeta', 6 ) ],
+				],
+			]
+		);
+		self::refused( 'database_binding_unreadable', $review( $planned->id ) );
+		// The job, or an undo of it, has not ended.
+		$running        = $this->stranded( '20260101T000005Z-aaaaac' );
+		$running->state = JobState::Running;
+		$this->jobs->save( $running );
+		self::refused( 'database_binding_busy', $review( $running->id ) );
+		$running->state = JobState::Failed;
+		$this->jobs->save( $running );
+		self::assertIsArray( $review( $running->id )() );
+		$undo       = new Job( '20260101T000010Z-aaaaad', JobType::DatabaseUndo, 'manual', $this->clock->seconds );
+		$undo->data = [ 'apply' => $running->id ];
+		$this->jobs->save( $undo );
+		self::refused( 'database_binding_busy', $review( $running->id ) );
+		$undo->state = JobState::Cancelled;
+		$this->jobs->save( $undo );
+		// Discarded already: said as such, also to a confirmation that arrives twice.
+		$digest = $this->changes( $this->server() )->discard_review( $running->id, 7 )['digest'];
+		$this->changes( $this->server() )->discard( $running->id, 7, 'rest', $digest );
+		self::refused( 'database_binding_discarded', $review( $running->id ) );
+		self::refused( 'database_binding_discarded', fn () => $this->changes( $this->server() )->discard( $running->id, 7, 'rest', $digest ) );
+	}
+
+	public function test_a_database_failure_is_written_to_the_log_of_the_job_that_holds_the_binding(): void {
+		$job = $this->stranded();
+		// The server does not answer at all, and one that answers who it is once and then fails.
+		$once     = new class( self::UUID ) implements Connection {
+			private int $asked = 0;
+
+			public function __construct( private string $uuid ) {}
+
+			public function rows( string $sql ): array {
+				if ( ++$this->asked > 2 ) {
+					throw new DatabaseFailed( 'The database refused a restore statement.', [ 'code' => 1142 ] );
+				}
+				return str_starts_with( $sql, 'SELECT DATABASE() AS db' ) ? [
+					[
+						'db'        => 'site',
+						'version'   => '8.4.11',
+						'read_only' => '0',
+						'name_case' => '0',
+					],
+				] : [ [ 'Value' => $this->uuid ] ];
+			}
+
+			public function execute( string $sql ): int {
+				throw new \LogicException( 'No statement may change this server: ' . $sql );
+			}
+		};
+		$failures = [
+			2013                    => $this->changes( $this->lost( new \ArrayObject() ) ),
+			1142                    => $this->changes( $once ),
+			'database_restore_busy' => $this->changes_through( static fn (): Connection => throw new DatabaseFailed( 'The database connection could not be opened again.', [ 'code' => 'database_restore_busy' ] ) ),
+		];
+		foreach ( $failures as $error => $changes ) {
+			foreach ( [ fn () => $changes->discard_review( $job->id, 7 ), fn () => $changes->discard( $job->id, 7, 'rest', str_repeat( 'd', 64 ) ) ] as $work ) {
+				self::refused( 'database_discard_failed', $work );
+				$entries = $this->jobs->log( $job )->read();
+				self::assertSame( 'error', end( $entries )['level'] ?? null );
+				self::assertSame(
+					[
+						'code'  => 'database_discard_failed',
+						'cause' => 'database_restore_busy' === $error ? 'The database connection could not be opened again.' : ( 2013 === $error ? 'Lost connection to the server.' : 'The database refused a restore statement.' ),
+						'error' => $error,
+					],
+					end( $entries )['context'] ?? null
+				);
+			}
+		}
+		self::assertSame( $job->data, $this->jobs->get( $job->id )?->data, 'Nothing was discarded.' );
+		self::assertCount( 6, $this->jobs->log( $job )->read() );
+	}
+
+	public function test_a_discard_that_cannot_be_recorded_keeps_the_binding_and_says_so(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Directory permissions do not bind root.' );
+		}
+		$job       = $this->stranded();
+		$review    = $this->changes( $this->server() )->discard_review( $job->id, 7 );
+		$directory = $this->jobs->directory( $job );
+		chmod( $directory, 0500 );
+		try {
+			$this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
+			self::fail( 'A discard was recorded in a read-only directory.' );
+		} catch ( StorageFailed $unsaved ) {
+			self::assertSame( 'database_discard_unsaved', $unsaved->context()['code'] ?? null );
+		} finally {
+			chmod( $directory, 0700 );
+		}
+		self::assertSame( $job->data, $this->jobs->get( $job->id )?->data, 'The binding stays.' );
+		self::assertSame( $review, $this->changes( $this->server() )->discard_review( $job->id, 7 ) );
+	}
+
+	public function test_the_list_of_bindings_to_discard_asks_about_each_finished_binding_as_its_review_does(): void {
+		$queries = new \ArrayObject();
+		self::assertSame(
+			[
+				'jobs'     => [],
+				'complete' => true,
+			],
+			$this->changes( $this->lost( $queries ) )->foreign_bindings()
+		);
+		self::assertCount( 0, $queries, 'Without a binding the database is not asked.' );
+		$until  = $this->clock->seconds + 3600;
+		$moved  = $this->moved(
+			'20260101T000001Z-aaaaaa',
+			[
+				'database_generation' => 'applied',
+				'retained_until'      => $until,
+			]
+		);
+		$failed = $this->stranded( '20260101T000002Z-bbbbbb' );
+		$this->owner( '20260101T000003Z-cccccc', [ 'database_owner' => self::binding( str_repeat( 'd', 32 ) ) ] );
+		$this->moved( '20260101T000004Z-dddddd', [], JobState::Running );
+		$this->owner( '20260101T000005Z-eeeeee', [ 'database_owner' => array_replace( self::binding( str_repeat( 'e', 32 ), self::OTHER ), [ 'version' => 2 ] ) ] );
+		$listed = [
+			[
+				'job'            => $failed->id,
+				'restore'        => '20251231T000000Z-000000',
+				'generation'     => null,
+				'retained_until' => null,
+			],
+			[
+				'job'            => $moved->id,
+				'restore'        => '20251231T000000Z-000000',
+				'generation'     => 'applied',
+				'retained_until' => $until,
+			],
+		];
+		self::assertSame(
+			[
+				'jobs'     => $listed,
+				'complete' => true,
+			],
+			$this->changes( $this->server() )->foreign_bindings()
+		);
+		// A server that cannot be identified or asked: what the jobs recorded, and the list says so.
+		$flagged = $this->jobs->get( $failed->id );
+		self::assertNotNull( $flagged );
+		$flagged->data['database_foreign'] = $this->clock->seconds;
+		$this->jobs->save( $flagged );
+		$unknown = [
+			'jobs'     => [ $listed[0] ],
+			'complete' => false,
+		];
+		self::assertSame( $unknown, $this->changes( $this->server( '' ) )->foreign_bindings() );
+		self::assertSame( $unknown, $this->changes( $this->lost( new \ArrayObject() ) )->foreign_bindings() );
+		self::assertSame( $unknown, $this->changes_through( static fn (): Connection => throw new DatabaseFailed( 'The database connection could not be opened again.', [ 'code' => 'database_restore_busy' ] ) )->foreign_bindings() );
 	}
 }

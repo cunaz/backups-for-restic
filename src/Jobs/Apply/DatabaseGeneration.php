@@ -28,7 +28,7 @@ final readonly class DatabaseGeneration {
 	public const int WINDOW = 86400;
 
 	/** A MySQL server UUID as SHOW VARIABLES reports it. */
-	private const string UUID = '/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/';
+	public const string UUID = '/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/';
 
 	/**
 	 * Keeps the validated durable ownership binding.

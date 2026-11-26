@@ -481,46 +481,148 @@ final class CliCommand {
 	}
 
 	/**
-	 * Forgets a database restore binding whose private tables are on another database server
-	 * or in another database. Nothing is dropped: the command lists the tables that a
-	 * database administrator removes by hand where they are.
+	 * Reviews and forgets a database restore binding whose private tables are on another
+	 * database server or in another database, as the Restores tab does: the command prints what
+	 * the discard forgets, what stays and the digest of that review, and the site address has to
+	 * be typed to confirm it. Nothing is dropped: the command lists the tables that a database
+	 * administrator removes by hand where they are.
 	 *
 	 * ## OPTIONS
 	 *
 	 * <apply-job>
 	 * : ID of the database apply job that holds the binding.
 	 *
+	 * [--site-url=<url>]
+	 * : The site address, typed to confirm the discard. Without it, the command asks for it.
+	 *
+	 * [--digest=<digest>]
+	 * : The digest that an earlier run printed for the review that you confirm. The binding must
+	 * still be as that review showed it. Without it, the review that this run prints is confirmed.
+	 *
 	 * [--yes]
-	 * : Discard the binding without a prompt.
+	 * : Not accepted: the discard is confirmed with the typed site address. A script that passes
+	 * it stops with an error and discards nothing.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp backups-for-restic database-discard 20261120T000000Z-0a0b0c
+	 *     wp backups-for-restic database-discard 20261120T000000Z-0a0b0c --site-url=https://example.com --digest=<digest>
 	 *
 	 * @subcommand database-discard
 	 * @param list<string>         $args Apply job.
 	 * @param array<string,string> $assoc_args Confirmation options.
 	 */
 	public function database_discard( array $args, array $assoc_args ): void {
+		if ( isset( $assoc_args['yes'] ) ) {
+			\WP_CLI::error( __( 'database-discard no longer takes --yes, and nothing was discarded. Run it without --yes to see its review, then confirm by typing the site address, or pass --site-url with the site address and --digest with the digest that the review printed.', 'backups-for-restic' ) );
+		}
+		$user = get_current_user_id();
+		if ( $user > 0 && ! RestRoutes::database_writes_allowed() ) {
+			\WP_CLI::error( __( 'The selected WordPress user may not change the database of this site.', 'backups-for-restic' ) );
+		}
 		$id      = $args[0] ?? '';
 		$service = $this->container->database_changes();
 		try {
-			$binding = $service->foreign_binding( $id );
-			/* translators: 1: database name, 2: MySQL server UUID. */
-			\WP_CLI::line( sprintf( __( 'Private tables of this restore may remain in the database %1$s on the server %2$s:', 'backups-for-restic' ), $binding['database'], $binding['server'] ) );
-			foreach ( $binding['tables'] as $table ) {
-				\WP_CLI::line( $table );
-			}
-			\WP_CLI::confirm( __( 'Forget this binding? The plugin drops none of these tables; remove those that exist there by hand.', 'backups-for-restic' ), $assoc_args );
-			$lock = $this->container->runner_lock();
-			if ( ! $lock->acquire() ) {
-				\WP_CLI::error( __( 'Another request is working on the jobs. Try again in a moment.', 'backups-for-restic' ) );
-			}
-			try {
-				$service->discard( $id, get_current_user_id(), 'wp-cli' );
-			} finally {
-				$lock->release();
-			}
-		} catch ( PluginException $error ) {
-			\WP_CLI::error( $error->getMessage() );
+			$review = $service->discard_review( $id, $user );
+		} catch ( PluginException $refused ) {
+			self::discard_refused( $refused );
 		}
-		\WP_CLI::success( __( 'The database restore binding was discarded.', 'backups-for-restic' ) );
+		self::discard_review( $review );
+		$digest = $assoc_args['digest'] ?? $review['digest'];
+		if ( ! hash_equals( $review['digest'], $digest ) ) {
+			$texts = Messages::job_error( 'database_discard_changed' );
+			\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
+		}
+		/* translators: %s: the site address. */
+		$typed = $assoc_args['site-url'] ?? self::typed( sprintf( __( 'Type the site address, %s, to discard this binding, or press Enter to keep it:', 'backups-for-restic' ), home_url() ) );
+		if ( home_url() !== $typed ) {
+			/* translators: %s: the site address. */
+			\WP_CLI::error( sprintf( __( 'The typed address is not the site address, %s. Nothing was discarded.', 'backups-for-restic' ), home_url() ) );
+		}
+		$lock = $this->container->runner_lock();
+		if ( ! $lock->acquire() ) {
+			$texts = Messages::job_error( 'database_discard_busy' );
+			\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
+		}
+		try {
+			$discarded = $service->discard( $id, $user, 'wp-cli', $digest );
+		} catch ( PluginException $refused ) {
+			self::discard_refused( $refused );
+		} finally {
+			$lock->release();
+		}
+		/* translators: 1: number of private table names, 2: database name, 3: MySQL server UUID. */
+		\WP_CLI::success( sprintf( __( 'The binding was discarded and nothing was dropped. Remove those of the %1$d tables listed above that exist in the database %2$s on the server %3$s by hand, where you can verify them.', 'backups-for-restic' ), count( $discarded['tables'] ), SnapshotBrowser::printable( $discarded['database'] ), SnapshotBrowser::printable( $discarded['server'] ) ) );
+	}
+
+	/**
+	 * Prints the review of a discard: what it forgets, what stays and its digest. The names come
+	 * from another database or server and are printed with what does not print quoted.
+	 *
+	 * @param array{job:string,restore:string,database:string,server:string,connected:array{database:string,server:string},tables:list<string>,generation:string|null,retained_until:int|null,undo_until:int|null,kept:list<string>,digest:string} $review Review.
+	 */
+	private static function discard_review( array $review ): void {
+		/* translators: 1: ID of the database apply job, 2: ID of its restore job. */
+		\WP_CLI::line( sprintf( __( 'Database restore %1$s (from restore %2$s)', 'backups-for-restic' ), $review['job'], '' === $review['restore'] ? '–' : $review['restore'] ) );
+		/* translators: 1: database name, 2: MySQL server UUID. */
+		\WP_CLI::line( sprintf( __( 'Its private tables are in the database %1$s on the server %2$s.', 'backups-for-restic' ), SnapshotBrowser::printable( $review['database'] ), '' === $review['server'] ? '–' : SnapshotBrowser::printable( $review['server'] ) ) );
+		/* translators: 1: database name, 2: MySQL server UUID. */
+		\WP_CLI::line( sprintf( __( 'This site uses the database %1$s on the server %2$s.', 'backups-for-restic' ), SnapshotBrowser::printable( $review['connected']['database'] ), '' === $review['connected']['server'] ? __( 'that reports no server UUID', 'backups-for-restic' ) : SnapshotBrowser::printable( $review['connected']['server'] ) ) );
+		if ( null !== $review['undo_until'] ) {
+			/* translators: %s: date and time when the undo window of the database restore ends. */
+			\WP_CLI::line( sprintf( __( 'Discarding ends the undo of this database restore for good. Until %s, it could still bring the earlier tables back once the site uses the database that holds them again.', 'backups-for-restic' ), gmdate( 'Y-m-d H:i:s', $review['undo_until'] ) . ' UTC' ) );
+		} elseif ( 'undone' === $review['generation'] && null !== $review['retained_until'] ) {
+			/* translators: %s: date and time until which the tables that the undo replaced are kept. */
+			\WP_CLI::line( sprintf( __( 'This database restore was undone. Among these tables are those that the undo replaced, which the plugin would have kept until %s.', 'backups-for-restic' ), gmdate( 'Y-m-d H:i:s', $review['retained_until'] ) . ' UTC' ) );
+		} elseif ( null === $review['generation'] ) {
+			\WP_CLI::line( __( 'This database restore recorded no completed exchange.', 'backups-for-restic' ) );
+		}
+		\WP_CLI::line( __( 'Private tables to remove by hand where they exist, on the server that holds them; the plugin drops none of them:', 'backups-for-restic' ) );
+		foreach ( $review['tables'] as $table ) {
+			\WP_CLI::line( '  ' . SnapshotBrowser::printable( $table ) );
+		}
+		\WP_CLI::line( __( 'What stays:', 'backups-for-restic' ) );
+		foreach ( $review['kept'] as $kept ) {
+			\WP_CLI::line( '  ' . Messages::discard_kept( $kept ) );
+		}
+		/* translators: %s: SHA-256 digest of the review. */
+		\WP_CLI::line( sprintf( __( 'Digest of this review: %s', 'backups-for-restic' ), $review['digest'] ) );
+	}
+
+	/**
+	 * Ends the command with the text of a refused or failed review or discard, and for a
+	 * database failure with what the database raised.
+	 *
+	 * @param PluginException $refused Refusal or failure.
+	 * @return never
+	 */
+	private static function discard_refused( PluginException $refused ): never {
+		$code  = JobError::from_throwable( $refused )->code;
+		$texts = Messages::job_error( $code );
+		$cause = $refused->getPrevious();
+		$extra = '';
+		$error = $cause instanceof PluginException ? $cause->context()['code'] ?? null : null;
+		if ( $cause instanceof PluginException && null === $error ) {
+			/* translators: %s: technical message of what failed. */
+			$extra = ' ' . sprintf( __( 'Details: %s', 'backups-for-restic' ), $cause->getMessage() );
+		} elseif ( $cause instanceof PluginException ) {
+			/* translators: 1: technical message of what failed, 2: error code of the database server or of the plugin. */
+			$extra = ' ' . sprintf( __( 'Details: %1$s (code %2$s)', 'backups-for-restic' ), $cause->getMessage(), (string) $error );
+		}
+		\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] . $extra );
+	}
+
+	/**
+	 * Asks a question and reads the answer, one line of standard input, as WP_CLI::confirm()
+	 * does. Without an answer, as from a closed input, the answer is empty.
+	 *
+	 * @param string $question Question.
+	 * @return string The answer without surrounding white space.
+	 */
+	private static function typed( string $question ): string {
+		\WP_CLI::line( $question );
+		$answer = fgets( STDIN );
+		return false === $answer ? '' : trim( $answer );
 	}
 
 	/**

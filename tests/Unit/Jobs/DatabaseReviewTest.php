@@ -470,4 +470,20 @@ final class DatabaseReviewTest extends TestCase {
 		$refused = DatabaseReview::summary( 'restore', 1, $entries, [ 'database_admin_capabilities' ], [], [ 'apply', 'binding' ], $state );
 		self::assertFalse( $refused['applicable'] );
 	}
+
+	public function test_the_digest_that_the_review_of_a_discard_shares_keeps_the_bytes_of_the_exchange_review(): void {
+		$state   = DatabaseReview::blank( self::OWN );
+		$entries = [
+			[
+				'table'  => 'wp_posts',
+				'action' => 'replace',
+			],
+		];
+		$review  = DatabaseReview::summary( 'restore', 1, $entries, [ 'wordpress_tables', 'database_account' ], [ 'TRIGGER', 'ALTER' ], [ 'undo', 'binding' ], $state );
+		// Version 2 as summary() built it before DatabaseReview::digest() existed: blockers and privileges sorted.
+		$facts = [ 'restore', 1, $entries, [ 'database_account', 'wordpress_tables' ], [ 'ALTER', 'TRIGGER' ], [ 'undo', 'binding' ], $state ];
+		self::assertSame( hash( 'sha256', json_encode( [ 2, ...$facts ], JSON_THROW_ON_ERROR ) ), $review['digest'] );
+		self::assertSame( $review['digest'], DatabaseReview::digest( 2, $facts ) );
+		self::assertNotSame( $review['digest'], DatabaseReview::digest( 1, $facts ), 'The version is part of the digest.' );
+	}
 }

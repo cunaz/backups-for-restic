@@ -340,6 +340,22 @@ final readonly class DatabaseReview {
 	}
 
 	/**
+	 * The digest of a review: SHA-256 over the JSON of its version and of everything it shows
+	 * and binds, the confirming user among them. A confirmation names it, so that a review with
+	 * other facts cannot be confirmed, nor one that an earlier version of the plugin built when
+	 * that kind of review showed other facts. The reviews of an exchange and its undo
+	 * (summary(), version 2) and of the discard of a binding (DatabaseChanges::discard_review(),
+	 * version 1) are bound with it.
+	 *
+	 * @param int         $version What this kind of review shows, counted up when that changes.
+	 * @param list<mixed> $facts What the review shows and binds, in a fixed order.
+	 * @return string Lower-case hexadecimal SHA-256.
+	 */
+	public static function digest( int $version, array $facts ): string {
+		return hash( 'sha256', json_encode( [ $version, ...$facts ], JSON_THROW_ON_ERROR ) );
+	}
+
+	/**
 	 * Binds one visible plan and its private physical inputs to its confirming user. Version 2
 	 * of the digest covers what the exchange keeps and how the generations differ, so no review
 	 * from before it can be confirmed.
@@ -359,7 +375,7 @@ final readonly class DatabaseReview {
 		sort( $missing, SORT_STRING );
 		return [
 			'restore'            => $restore,
-			'digest'             => hash( 'sha256', json_encode( [ 2, $restore, $user, $entries, $blockers, $missing, $binding, $state ], JSON_THROW_ON_ERROR ) ),
+			'digest'             => self::digest( 2, [ $restore, $user, $entries, $blockers, $missing, $binding, $state ] ),
 			'applicable'         => $user > 0 && [] === $blockers && [] !== $entries,
 			'entries'            => $entries,
 			'blockers'           => $blockers,

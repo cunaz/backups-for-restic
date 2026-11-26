@@ -720,7 +720,7 @@ final class DatabaseExchangeTest extends TestCase {
 		} catch ( JobConflict $refused ) {
 			self::assertSame( 'database_exchange_foreign', $refused->context()['code'] ?? null );
 		}
-		$discarded = $services['changes']->discard( $failed->id, 1, 'wp-cli' );
+		$discarded = $services['changes']->discard( $failed->id, 1, 'wp-cli', $services['changes']->discard_review( $failed->id, 1 )['digest'] );
 		$own       = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $failed->data['database_owner']['token'] . '_' ) ) );
 		self::assertNotSame( [], $own );
 		self::assertSame( [], array_diff( $own, $discarded['tables'] ), 'Every private table of the binding is named for the administrator.' );
