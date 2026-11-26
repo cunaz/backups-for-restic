@@ -186,7 +186,7 @@ final class JobMessagesTest extends TestCase {
 		$texts = Messages::job_error( 'undo_records_unreadable' );
 		self::assertSame( 'The plugin cannot tell whether this apply can still be undone.', $texts['message'] );
 		self::assertStringContainsString( 'keeps the saved original files and the staged files', $texts['hint'] );
-		self::assertStringContainsString( 'offers the undo again once it can read the records', $texts['hint'] );
+		self::assertStringContainsString( 'once it can read the records, it offers the undo again if they show that the apply can still be undone.', $texts['hint'] );
 		self::assertNotSame( Messages::job_error( 'undo_unavailable' ), $texts );
 		self::assertSame( $texts, Messages::job_error( 'undo_records_unreadable', 'undo' ) );
 	}
