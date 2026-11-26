@@ -343,6 +343,12 @@ All notable changes are documented here. The format follows
   REST API returns as `job`, and `GET /jobs/{id}`, its log, its cancellation and the
   WP-CLI commands `logs` and `cancel` answer for that job as the refusal does, where they
   said that it did not exist.
+- A heartbeat that stops while it deletes the journal of an apply that was undone completely
+  leaves the apply's window closed: the count of attempted changes goes first, and its removal
+  is synchronised. Before, the journal went in the order that the file system lists it, and on
+  tmpfs, which lists the newest entry first, a deadline between the undone marker and the
+  count left an attempted change that no undo had reverted: the apply was listed for undo
+  again until its 24 hours ended.
 - While a stored job cannot be read, no staging and no sealed review expires. Such a job may
   be an apply within its recovery window: before, the staging of its restore expired with its
   own hours and its sealed review after one, while its journal stayed, so that once the job

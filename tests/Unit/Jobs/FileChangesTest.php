@@ -2594,6 +2594,41 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->live . '/b-new' );
 	}
 
+	public function test_a_heartbeat_that_stops_while_it_deletes_an_undone_journal_leaves_the_window_closed(): void {
+		$apply = $this->run_job( $this->start() );
+		$this->undo( $apply );
+		$workspace = $this->jobs->directory( $apply ) . '/undo';
+		$names     = static fn (): array => array_values( array_diff( (array) scandir( $workspace ), [ '.', '..' ] ) );
+		$journal   = $names();
+		self::assertContains( 'reverted', $journal );
+		self::assertContains( 'attempted', $journal );
+		self::assertFalse( $this->jobs->undo_open( $apply ) );
+		// A heartbeat whose deadline comes as soon as one entry of the journal is gone, whichever
+		// entry readdir() lists first: the deletion stops there.
+		$clock = new class( $this->clock, static fn (): bool => count( $names() ) < count( $journal ) ) implements Clock {
+			/**
+			 * @param FrozenClock          $base Clock of the test.
+			 * @param \Closure(): bool     $past Whether the deadline has come.
+			 */
+			public function __construct( private FrozenClock $base, private \Closure $past ) {
+			}
+
+			public function now(): array {
+				return ( $this->past )() ? [ $this->base->seconds + 1000, 0 ] : $this->base->now();
+			}
+		};
+		( new Staging( $this->directory . '/restores', $this->jobs, $clock ) )->remove_due( 24, $this->clock->seconds + 100 );
+		// The count of attempted changes goes first. Before, the entry that went was the one that
+		// readdir() listed first; on tmpfs that is the undone marker, the newest entry, and the count
+		// that it left made the window of the apply, undone completely, open again.
+		self::assertSame( array_values( array_diff( $journal, [ 'attempted' ] ) ), $names() );
+		self::assertFalse( $this->jobs->undo_open( $apply ) );
+		self::assertSame( [], $this->changes->undoable() );
+		// The next heartbeat deletes the rest.
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( $workspace );
+	}
+
 	public function test_expired_undo_is_removed_and_staging_released(): void {
 		$job = $this->run_job( $this->start() );
 		$this->clock->advance( 86400 );

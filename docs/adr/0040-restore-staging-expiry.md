@@ -95,7 +95,13 @@ packages must never be offered a tree that is half gone.
   removed at once as a leftover ([ADR 0041](0041-guarded-file-changes.md), As built).
 - The undo workspace of an apply is removed once its window of 24 hours is over or its records
   establish that no window is open; records that cannot be established keep it, and the
-  staging and the sealed review of the apply, for the window, as an open window does.
+  staging and the sealed review of the apply, for the window, as an open window does. The
+  count of attempted changes (`undo/attempted`) is removed first, and its removal synchronised,
+  before the rest goes in `readdir()` order: without the count the window is closed, whatever
+  is left when a heartbeat's deadline stops the deletion. Before (until 2026-11-26), a deletion
+  that stopped after the undone marker and before the count left an attempted change that no
+  undo had reverted, so that an apply undone completely was offered for undo again until its
+  24 hours ended. tmpfs lists the newest entry, the undone marker, first.
 - While any stored job cannot be read (`JobStore::unreadable()`), the heartbeat sets no
   staging aside and removes no sealed review, whatever their own hours say; what was set aside
   before goes on being deleted, and the undo workspaces of applies that can be read are decided

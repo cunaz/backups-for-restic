@@ -413,6 +413,7 @@ final class Staging {
 				$undo = $this->jobs->directory( $job ) . '/undo';
 				// Only an ended window, or records that establish that none is open, let the journal go.
 				if ( $job->finished_at + 86400 <= $this->clock->now()[0] || false === $this->jobs->undo_open( $job ) ) {
+					$this->close( $undo );
 					$this->delete( $undo, $deadline );
 				}
 			} catch ( PluginException ) {
@@ -635,6 +636,32 @@ final class Staging {
 			StorageFailed::raise( 'A directory of a staging directory could not be removed.' );
 		}
 		return true;
+	}
+
+	/**
+	 * Makes the end of an apply's recovery window durable before its journal is deleted. The
+	 * count of attempted changes goes first, and its removal is synchronised: without the count
+	 * the window is closed, whatever else is left (JobStore::undo_open()). delete() takes the
+	 * entries in readdir() order and stops at its deadline after any of them. Before, one that
+	 * stopped after the undone marker and before the count left an attempted change that no
+	 * undo had reverted: the window of an apply undone completely was open again, and the apply
+	 * was offered for undo until its 24 hours ended. tmpfs lists the newest entry first, which
+	 * the undone marker is; ext4 lists by a hash of the name.
+	 *
+	 * @param string $undo Undo workspace of an apply whose window has ended.
+	 * @throws StorageFailed If the count is there and cannot be removed.
+	 */
+	private function close( string $undo ): void {
+		$attempted = $undo . '/attempted';
+		clearstatcache( true, $attempted );
+		if ( ! is_link( $attempted ) && ! is_file( $attempted ) ) {
+			// Missing, or the folder of a damaged journal, which delete() removes as it comes.
+			return;
+		}
+		if ( ! unlink( $attempted ) && self::exists( $attempted ) ) {
+			StorageFailed::raise( 'The count of an apply\'s attempted changes could not be removed.' );
+		}
+		Files::sync_directory( $undo );
 	}
 
 	/**
