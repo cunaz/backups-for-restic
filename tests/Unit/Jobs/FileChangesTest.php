@@ -2679,7 +2679,7 @@ final class FileChangesTest extends TestCase {
 			foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $workspace, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $item ) {
 				$entries[ substr( $item->getPathname(), strlen( $workspace ) ) ] = $item->isDir() ? 'dir' : hash_file( 'sha256', $item->getPathname() );
 			}
-			ksort( $entries );
+			ksort( $entries, SORT_STRING );
 			return $entries;
 		};
 		$journal   = $tree();
