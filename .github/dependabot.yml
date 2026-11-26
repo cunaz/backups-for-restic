@@ -6,6 +6,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The steps of github/codeql-action must run at one version; a pull request that updates
+    # init or analyze alone fails the analysis with a configuration error.
+    groups:
+      codeql-action:
+        patterns:
+          - 'github/codeql-action*'
   - package-ecosystem: composer
     directory: /
     schedule:
