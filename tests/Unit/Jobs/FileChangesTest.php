@@ -1387,6 +1387,155 @@ final class FileChangesTest extends TestCase {
 		self::assertSame( null === $state ? [] : [ [ 'partly_undone', null ] ], array_map( static fn ( array $listed ): array => [ $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
 	}
 
+	/**
+	 * An undo that is asked to stop after it removed the file that its apply created; the request
+	 * is recorded, and the tick that follows runs the cleanup.
+	 *
+	 * @return array{Job, Job} The apply and the undo.
+	 */
+	private function cancelled_after_one_revert(): array {
+		$job  = $this->run_job( $this->start() );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The created file is removed.
+		self::assertFileDoesNotExist( $this->live . '/b-new/new.txt' );
+		$this->runner->cancel( $undo->id );
+		return [ $job, $undo ];
+	}
+
+	/**
+	 * What a stopped undo recorded: its removals and the state that it names for its apply, and
+	 * the state and undo that the apply's document names.
+	 *
+	 * @return list<int|string|null>
+	 */
+	private function recorded_stop( Job $job, Job $undo ): array {
+		$stopped = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		$apply   = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
+		return [ $stopped->result['removed'] ?? null, $stopped->result['apply_state'] ?? null, $apply->result['undo_state'] ?? null, $apply->result['undo_job'] ?? null ];
+	}
+
+	public function test_a_stopped_undo_records_what_it_reverted_when_the_site_cannot_leave_maintenance_mode(): void {
+		[ $job, $undo ] = $this->cancelled_after_one_revert();
+		$verification   = $this->jobs->directory( $undo ) . '/verification';
+		mkdir( $verification );
+		touch( $verification . '/checkpoint' );
+		$mode = fileperms( $this->live ) & 0777;
+		// The WordPress directory refuses the removal of the maintenance marker.
+		chmod( $this->live, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $this->live ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->runner->tick( 2.0 )->job ?? self::fail( 'The undo is gone.' );
+		} finally {
+			restore_error_handler();
+			chmod( $this->live, $mode );
+		}
+		// Before, the cleanup ended at the marker: neither the undo nor its apply recorded the
+		// removal, and the cleanup's other parts did not run.
+		self::assertSame( [ 1, 'partly_undone', 'partly_undone', $undo->id ], $this->recorded_stop( $job, $undo ) );
+		self::assertSame( [ JobState::Cancelled, 'maintenance_stuck' ], [ $ended->state, $ended->error?->code ] );
+		self::assertFileExists( $this->live . '/.maintenance' );
+		self::assertDirectoryDoesNotExist( $verification );
+		self::assertSame( [ [ 'partly_undone', null ] ], array_map( static fn ( array $listed ): array => [ $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
+	}
+
+	public function test_a_stopped_undo_records_what_it_reverted_when_its_verification_data_cannot_be_removed(): void {
+		[ $job, $undo ] = $this->cancelled_after_one_revert();
+		$held           = $this->jobs->directory( $undo ) . '/verification/held';
+		mkdir( $held, 0700, true );
+		touch( $held . '/checkpoint' );
+		// The folder refuses the removal of the checkpoint in it.
+		chmod( $held, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $held ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->runner->tick( 2.0 )->job ?? self::fail( 'The undo is gone.' );
+		} finally {
+			restore_error_handler();
+			chmod( $held, 0700 );
+		}
+		// Before, the cleanup ended at the removal, and neither the undo nor its apply recorded it.
+		self::assertSame( [ 1, 'partly_undone', 'partly_undone', $undo->id ], $this->recorded_stop( $job, $undo ) );
+		self::assertSame( [ JobState::Cancelled, 'file_undo_failed' ], [ $ended->state, $ended->error?->code ] );
+		self::assertFileDoesNotExist( $this->live . '/.maintenance' );
+		self::assertFileExists( $held . '/checkpoint' );
+	}
+
+	public function test_a_stopped_undo_records_what_it_reverted_in_the_tick_in_which_its_cleanup_begins(): void {
+		[ $job, $undo ] = $this->cancelled_after_one_revert();
+		$verification   = $this->jobs->directory( $undo ) . '/verification';
+		mkdir( $verification );
+		touch( $verification . '/checkpoint' );
+		// The tick has no time left for the removal, as one that a deactivation runs with a budget
+		// that is used up: the removal waits for a later tick, which may not come.
+		$frozen               = $this->clock->seconds;
+		$this->clock->seconds = (int) microtime( true ) + 60;
+		$this->runner->tick( 0.0 );
+		$this->clock->seconds = $frozen;
+		$stopped              = $this->jobs->get( $undo->id ) ?? self::fail( 'The undo is gone.' );
+		self::assertSame( [ 'cleaning_up', JobState::Running ], [ $stopped->step, $stopped->state ] );
+		self::assertFileExists( $verification . '/checkpoint' );
+		// Before, the record waited for the removal: nothing was recorded in that tick.
+		self::assertSame( [ 1, 'partly_undone', 'partly_undone', $undo->id ], $this->recorded_stop( $job, $undo ) );
+		// The next tick removes the rest and ends the undo with what it recorded once.
+		$ended = $this->run_job( $undo, JobState::Cancelled );
+		self::assertSame( [ 1, 'partly_undone', 'partly_undone', $undo->id ], $this->recorded_stop( $job, $undo ) );
+		self::assertNull( $ended->error );
+		self::assertDirectoryDoesNotExist( $verification );
+	}
+
+	public function test_a_stopped_undo_whose_record_fails_still_leaves_maintenance_mode_and_removes_its_verification_data(): void {
+		[ $job, $undo ] = $this->cancelled_after_one_revert();
+		$verification   = $this->jobs->directory( $undo ) . '/verification';
+		mkdir( $verification );
+		touch( $verification . '/checkpoint' );
+		$apply = $this->jobs->directory( $job );
+		// The apply's document cannot be written, so the undo cannot record what it did.
+		chmod( $apply, 0500 );
+		try {
+			if ( is_writable( $apply ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->runner->tick( 2.0 )->job ?? self::fail( 'The undo is gone.' );
+		} finally {
+			chmod( $apply, 0700 );
+		}
+		self::assertSame( [ JobState::Cancelled, 'file_undo_failed' ], [ $ended->state, $ended->error?->code ] );
+		// Nothing is recorded that the documents do not hold, and the other parts still ran.
+		self::assertSame( [ null, null, null, null ], $this->recorded_stop( $job, $undo ) );
+		self::assertFileDoesNotExist( $this->live . '/.maintenance' );
+		self::assertDirectoryDoesNotExist( $verification );
+	}
+
+	public function test_a_stopped_apply_records_its_changes_when_the_site_cannot_leave_maintenance_mode(): void {
+		$job = $this->start();
+		$this->runner->tick( 0.0 ); // Preflight.
+		$this->runner->tick( 0.0 ); // The first entry is replaced.
+		self::assertSame( 'replacement', file_get_contents( $this->live . '/a-existing' ) );
+		$this->runner->cancel( $job->id );
+		$mode = fileperms( $this->live ) & 0777;
+		chmod( $this->live, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $this->live ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->runner->tick( 2.0 )->job ?? self::fail( 'The apply is gone.' );
+		} finally {
+			restore_error_handler();
+			chmod( $this->live, $mode );
+		}
+		self::assertSame( [ JobState::Cancelled, 'maintenance_stuck' ], [ $ended->state, $ended->error?->code ] );
+		// Before, the cleanup ended at the marker before the apply recorded what it changed.
+		self::assertSame( [ 1, 1 ], [ $ended->result['entries_completed'] ?? null, $ended->result['entries_attempted'] ?? null ] );
+		self::assertSame( [ $job->id ], array_column( $this->changes->undoable(), 'job' ) );
+	}
+
 	public function test_a_review_that_finds_nothing_left_to_revert_records_the_apply_as_undone(): void {
 		$job = $this->run_job( $this->start() );
 		$new = $this->live . '/b-new/new.txt';
