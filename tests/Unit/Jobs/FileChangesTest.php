@@ -1820,6 +1820,43 @@ final class FileChangesTest extends TestCase {
 	}
 
 	#[DataProvider( 'apply_documents_that_cannot_be_read' )]
+	public function test_the_undo_of_an_apply_whose_document_cannot_be_read_is_refused_as_such_and_not_as_past_its_window( string $how ): void {
+		$apply    = $this->run_job( $this->start() );
+		$review   = $this->changes->preview_undo( $apply->id );
+		$readable = $this->unreadable_document( $apply, $how );
+		$refusals = [];
+		try {
+			foreach ( [
+				'review'            => fn () => $this->changes->preview_undo( $apply->id ),
+				'background review' => fn () => $this->changes->request_preview( $apply->id, true, false ),
+				'undo'              => fn () => $this->changes->start_undo( $apply->id, $review['digest'] ),
+			] as $what => $request ) {
+				try {
+					$request();
+					self::fail( 'The ' . $what . ' of an apply whose document cannot be read was accepted.' );
+				} catch ( JobConflict $refused ) {
+					$refusals[ $what ] = [ $refused->context()['code'] ?? null, $refused->context()['job'] ?? null ];
+				}
+			}
+		} finally {
+			$readable();
+		}
+		// Before, each was refused as for an apply past its window, undo_unavailable, which said
+		// that the undo was gone for good.
+		$code = 'unsearchable' === $how ? 'job_inaccessible' : 'job_unreadable';
+		self::assertSame( array_fill_keys( [ 'review', 'background review', 'undo' ], [ $code, $apply->id ] ), $refusals );
+		// An ID that no job has is still an apply without an undo.
+		try {
+			$this->changes->preview_undo( '20260101T000000Z-000000' );
+			self::fail( 'An undo of no job was reviewed.' );
+		} catch ( JobConflict $refused ) {
+			self::assertSame( 'undo_unavailable', $refused->context()['code'] ?? null );
+		}
+		$this->undo( $apply );
+		self::assertSame( 'original', file_get_contents( $this->live . '/a-existing' ) );
+	}
+
+	#[DataProvider( 'apply_documents_that_cannot_be_read' )]
 	public function test_a_background_apply_whose_document_cannot_be_read_keeps_its_sealed_review_and_staged_files( string $how ): void {
 		$plan     = $this->run_job( $this->queue_large_preview() );
 		$apply    = $this->run_job( $this->changes->start_apply( $this->restore, false, $plan->result['digest'], '', $plan->id ) );

@@ -342,7 +342,8 @@ All notable changes are documented here. The format follows
   that this version reads but cannot parse. Every refusal for either names the job, which the
   REST API returns as `job`, and `GET /jobs/{id}`, its log, its cancellation and the
   WP-CLI commands `logs` and `cancel` answer for that job as the refusal does, where they
-  said that it did not exist.
+  said that it did not exist. So do an undo and its reviews of an apply whose document cannot
+  be read, which were refused as for an apply past its window (`undo_unavailable`).
 - A heartbeat that stops while it deletes the journal of an apply that was undone completely
   leaves the apply's window closed: the count of attempted changes goes first, and its removal
   is synchronised. Before, the journal went in the order that the file system lists it, and on

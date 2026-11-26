@@ -40,15 +40,22 @@ final readonly class ApplyJournal {
 	 * Checks the undo window. An undo already queued in the window may finish after it. An
 	 * apply whose undo records cannot be established is refused with a code of its own, not as
 	 * one past its window: its staging and journal are kept while the window lasts (window()).
+	 * So is an ID whose document is stored but cannot be read, as kept_page() refuses it: that
+	 * job may be an apply within its window. Before, it was answered as one past its window.
 	 *
 	 * @param string $id Apply ID.
 	 * @param bool   $active The current runner is undoing this apply.
 	 * @return Job Apply job.
-	 * @throws JobConflict If the recovery window has closed, or with the code
-	 *                     `undo_records_unreadable` if the records of its undo cannot be established.
+	 * @throws JobConflict If the recovery window has closed, with the code
+	 *                     `undo_records_unreadable` if the records of its undo cannot be established,
+	 *                     or with `job_inaccessible` or `job_unreadable` and the job's ID if its
+	 *                     document cannot be read (JobStore::refuse_unreadable()).
 	 */
 	public function original( string $id, bool $active = false ): Job {
-		$job    = $this->jobs->get( $id );
+		$job = $this->jobs->get( $id );
+		if ( null === $job && $this->jobs->has_document( $id ) ) {
+			$this->jobs->refuse_unreadable( $id );
+		}
 		$window = null === $job ? false : $this->window( $job, $active );
 		if ( null === $window ) {
 			JobConflict::raise( 'The records of this apply\'s undo cannot be looked up; its journal and staged files are kept while its recovery window lasts.', [ 'code' => 'undo_records_unreadable' ] );
