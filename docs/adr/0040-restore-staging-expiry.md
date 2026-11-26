@@ -80,3 +80,18 @@ packages must never be offered a tree that is half gone.
 - The `last_restore` entry of the state keeps naming a staging directory after it is
   gone. Screens take what exists from `GET /restores`.
 - Deleting staging after a successful apply belongs to the apply package.
+
+## As built (2026-11)
+
+- "A job whose document this version cannot read" includes one whose document cannot be
+  looked up, below a job directory that the PHP user cannot search, or that is something
+  other than a file (`JobStore::has_document()`): its staging is neither listed nor removed,
+  and `DELETE /restores/{id}` answers `job_unreadable`. A directory whose job document is gone,
+  which is established only where the job's directory or its document is missing, and whose
+  report cannot be looked up is not touched either: it is neither staging with a report nor a
+  leftover without one. Before (until 2026-11-26), both counted as gone, so that the staging
+  expired by the time in its ID, and a directory without a report that could be read was
+  removed at once as a leftover ([ADR 0041](0041-guarded-file-changes.md), As built).
+- The undo workspace of an apply is removed once its window of 24 hours is over or its records
+  establish that no window is open; records that cannot be established keep it, and the
+  staging and the sealed review of the apply, for the window, as an open window does.

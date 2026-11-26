@@ -76,7 +76,12 @@ job (docs/02-architecture.md §18). An existing document that cannot be read is 
 this version cannot establish that its job has finished, even if a raw state field looks
 terminal. Under the creation lock it blocks both new jobs and `while_idle()` changes with
 `job_unreadable`; pruning history does not remove it. A directory with no document does not
-count as an existing job. The first options layout number is inserted atomically and never
+count as an existing job. Since 2026-11-26 a document that cannot be looked up counts as one
+that cannot be read (`JobStore::has_document()`): a document is gone only where its name is
+missing from a job directory that the PHP user can search, or the directory is missing; below
+a job directory without search permission, or with a directory or a link at its name, it may
+be there. Before, `is_file()` counted it as gone, so that such a job did not block a new one
+and the staging of its restore expired by the time in its ID ([ADR 0041](0041-guarded-file-changes.md), As built). The first options layout number is inserted atomically and never
 overwrites a competing writer's value. A malformed options marker is preserved and keeps
 the plugin inactive, including leaving jobs and locks alone during deactivation; only a
 missing marker denotes legacy settings.

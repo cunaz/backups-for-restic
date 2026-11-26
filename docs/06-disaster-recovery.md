@@ -80,7 +80,13 @@ The site records each delivery. Store the file with the other offline recovery m
    changes** and **Previous file changes** to inspect the pages. A single review accepts
    up to one million entries. Stage larger selections as separate restore jobs. A finished
    background preview is available for one hour while its source remains available. Review a fresh
-   preview if the files changed. Use the recovery kit offline for WordPress core,
+   preview if the files changed. For a folder with more than 2,048 names the preview reads all
+   of them in one reading during which the folder does not change. If the folder changes before
+   such a reading is complete five times in a row, the preview stops and says that a folder
+   kept changing, and the job's log names the folder: pause what writes into it, for example
+   uploads, a cache plugin or a synchronisation, and open the preview again. The apply reads
+   such folders again before it changes a file and stops the same way, before maintenance and
+   without a change; open a new preview and confirm it again. Use the recovery kit offline for WordPress core,
    configuration, must-use plugins and early-loaded drop-ins. The preview identifies
    these startup paths. It never applies the backup's private database dump. The database
    is restored separately: a database rehearsal imports the dump into temporary tables and
@@ -109,7 +115,17 @@ The site records each delivery. Store the file with the other offline recovery m
    and lists every kept entry with its reason, also when the undo was cancelled or failed.
    An undo that was cancelled or failed after it had gone through every entry is recorded
    as one that finished. One that stopped earlier leaves the apply listed, as partly undone
-   once it reverted an entry: preview the undo again to revert the rest.
+   once it reverted an entry: preview the undo again to revert the rest. What an undo did is
+   recorded also when the site could not leave maintenance mode at its end, which the undo
+   then reports: delete the file `.maintenance` in the WordPress directory if no update is
+   running. An entry in a folder with more than 2,048 names that keeps changing while the
+   preview reads it is kept with "Conflicting names at the destination"; preview the undo
+   again once the folder is quiet, before the expiry time.
+   An apply whose undo records the plugin cannot read, for example after the permissions of
+   its private directory were changed, is listed with a notice and without **Preview undo**.
+   Its saved original files and staged files are kept until the expiry time. Give the PHP user
+   back the ownership of the private directory and the right to read and open every folder in
+   it, and the undo is offered again.
    Kept entries stay undoable until the expiry time, and the apply stays listed as partly
    undone: if a kept entry is put back as the apply left it, for example by undoing a later
    apply over the same files, preview the undo again. When nothing is left to revert, the

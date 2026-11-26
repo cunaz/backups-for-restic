@@ -409,9 +409,15 @@ Every route that asks for the WordPress password asks through one check
   first heartbeat removes what is due, or uninstalled. A staging directory whose job
   document this version cannot read, for example after a downgrade, is neither listed nor
   removed, because nothing proves that its job has ended; it goes with a version that can
-  read the document, or with the uninstall.
-  Active review, apply and undo jobs can pin their source while they run. Database
-  rehearsal reports and ZIP downloads share staging's ownership and expiry rules.
+  read the document, or with the uninstall. A document that cannot be looked up, below a job
+  directory that the PHP user cannot search, counts as one that cannot be read, and the
+  staging of a pruned job whose report cannot be looked up is not touched either.
+  Active review, apply and undo jobs can pin their source while they run. An apply keeps
+  its staging, its sealed review and its undo journal for its 24-hour recovery window, also
+  while the records of its undo (`undo/attempted`, `undo/reverted`) cannot be looked up or are
+  not files that the plugin wrote; its undo is refused until they can be read. A record counts
+  as missing only where its name is missing from a directory that the PHP user can search.
+  Database rehearsal reports and ZIP downloads share staging's ownership and expiry rules.
 - Who may do what with staging: staging needs the backup capability alone, because the
   staged copy stays in the private directory, readable by the PHP user only. Taking it out
   of there is guarded: the download of a restored file or ZIP needs the WordPress password
@@ -454,7 +460,10 @@ Every route that asks for the WordPress password asks through one check
   empty directory created at the same name in that moment. In a folder of more than 2,048
   names, a second spelling of a name that another process creates in the same second as
   one of the worker's own changes can stay hidden from the worker's rechecks for up to
-  about one and a quarter seconds.
+  about one and a quarter seconds. A background review, and the apply's check before
+  maintenance, read the names of such a folder only in one reading during which the folder
+  did not change; after five readings in a row that changes cut short, a preview and the
+  apply stop, and an undo review keeps the folder's entries.
 - The zip writer for downloads (`Storage\Zip\ZipWriter`, ADR 0038) reads staging the same
   way: it inspects every entry with `lstat()` and ends on a symbolic link, a second hard
   link or a special file. It refuses names that are not valid UTF-8 or that could leave the

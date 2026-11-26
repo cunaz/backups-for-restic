@@ -313,6 +313,36 @@ All notable changes are documented here. The format follows
   undone without a number, also when it had reverted everything, and the Restores tab
   offered to revert the rest until a review retired the apply. If the apply cannot be marked
   as undone then, it stays open for a later undo and the job's log says why.
+- A background file review of a folder with more than 2,048 names ends when the folder keeps
+  changing. The review needs one reading of all the folder's names during which the folder
+  does not change; a reading that a change cuts short, between two ticks or during one, is
+  begun again, and after five such readings in a row a preview stops with
+  `file_folder_changing`, whose log line names the folder, and so does the check that an
+  apply makes before maintenance, before it changes a file. An undo review keeps the entries
+  of that folder as it keeps those of a folder it cannot read (`ambiguous_destination`) and
+  goes on. Before, the reading began again at every tick for as long as the folder changed
+  between ticks, so that such a review never ended, and a change during a tick failed a
+  preview at once.
+- The recovery window of an apply is decided only from undo records that can be
+  established. A count of attempted changes or an undone marker that cannot be looked up,
+  below a folder that the PHP user cannot search, or that is not a file that the plugin
+  wrote, keeps the saved original files, the journal, the staged files and the sealed review
+  until the window ends, as an open window does. The Restores tab lists the apply with a
+  notice and without **Preview undo**, and an undo or its preview is refused with
+  `undo_records_unreadable`. Before, such a record counted as missing: the heartbeat deleted
+  the journal and the saved copies, the staged files expired with their own hours, the apply
+  left the list, and a stopped apply recorded that it had attempted no change. A link at the
+  name of the undone marker counted as an apply undone completely. By the same rule a job
+  document that cannot be looked up counts as one that cannot be read (`job_unreadable`): it
+  blocks new jobs, keeps the staging of its restore and stops an uninstall, where it counted
+  as gone before; and the staging of a pruned job is not removed as a leftover while its
+  report cannot be looked up.
+- A stopped apply or undo records what it did also when another part of its cleanup fails:
+  when the site cannot leave maintenance mode, when its verification data cannot be removed,
+  and when that removal has to wait for a later tick, which a deactivation may never give.
+  The failure is still reported and the other parts still run. Before, the cleanup ended
+  there, and an undo that had reverted files recorded nothing of it, in its result or in its
+  apply.
 - A file preview, apply or undo that stops says what stopped it, on the admin page, in the
   job list, in the failure e-mail and in WP-CLI. Before, a file that changed after the
   review was reported as "Another backup job is still running", and a refused or damaged
