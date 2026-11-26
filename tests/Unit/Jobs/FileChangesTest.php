@@ -2667,6 +2667,65 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $workspace );
 	}
 
+	public function test_a_heartbeat_that_cannot_remove_the_count_of_an_undone_journal_deletes_nothing_of_it(): void {
+		$apply = $this->run_job( $this->start() );
+		$this->undo( $apply );
+		$workspace = $this->jobs->directory( $apply ) . '/undo';
+		$tree      = static function () use ( $workspace ): array {
+			$entries = [];
+			foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $workspace, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST ) as $item ) {
+				$entries[ substr( $item->getPathname(), strlen( $workspace ) ) ] = $item->isDir() ? 'dir' : hash_file( 'sha256', $item->getPathname() );
+			}
+			ksort( $entries );
+			return $entries;
+		};
+		$journal   = $tree();
+		self::assertGreaterThan( 3, count( $journal ) );
+		$closed           = 0;
+		$this->job_writes = static function ( string $operation, string $path ) use ( $workspace, &$closed ): void {
+			$closed += (int) ( 'sync' === $operation && $workspace === $path );
+		};
+		chmod( $workspace, 0500 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $workspace ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// The window cannot be closed durably, so nothing of the journal goes: not the saved
+			// original files of its items, which a deletion in readdir() order may reach first, and
+			// the journal's folder is not synchronised as one whose window is closed.
+			self::assertSame( 1, $this->staging->remove_due( 24, PHP_FLOAT_MAX )['failed'] );
+			self::assertSame( 0, $closed );
+		} finally {
+			restore_error_handler();
+			chmod( $workspace, 0700 );
+			$this->job_writes = null;
+		}
+		self::assertSame( $journal, $tree() );
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		self::assertDirectoryDoesNotExist( $workspace );
+	}
+
+	public function test_the_closed_window_of_an_undone_journal_is_on_disk_before_the_rest_of_it_goes(): void {
+		$apply = $this->run_job( $this->start() );
+		$this->undo( $apply );
+		$workspace = $this->jobs->directory( $apply ) . '/undo';
+		$journal   = array_values( array_diff( (array) scandir( $workspace ), [ '.', '..', 'attempted' ] ) );
+		$synced    = [];
+		// What is left of the journal when its folder is synchronised.
+		$this->job_writes = static function ( string $operation, string $path ) use ( $workspace, &$synced ): void {
+			if ( 'sync' === $operation && $workspace === $path ) {
+				$synced[] = array_values( array_diff( (array) scandir( $workspace ), [ '.', '..' ] ) );
+			}
+		};
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		$this->job_writes = null;
+		// The removal of the count is synchronised before anything else of the journal goes, so
+		// that a power loss cannot bring back the count without the undone marker.
+		self::assertSame( [ $journal ], $synced );
+		self::assertDirectoryDoesNotExist( $workspace );
+	}
+
 	public function test_expired_undo_is_removed_and_staging_released(): void {
 		$job = $this->run_job( $this->start() );
 		$this->clock->advance( 86400 );

@@ -662,7 +662,8 @@ final class Staging {
 		if ( ! unlink( $attempted ) && self::exists( $attempted ) ) {
 			StorageFailed::raise( 'The count of an apply\'s attempted changes could not be removed.' );
 		}
-		Files::sync_directory( $undo );
+		// The journal is a record in the apply's directory, synchronised in one order with its documents.
+		Files::sync_directory( $undo, $this->jobs->observer() );
 	}
 
 	/**
