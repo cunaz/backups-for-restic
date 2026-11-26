@@ -233,8 +233,8 @@ final class JobStore {
 	 * Why get() does not load a job whose document has_document() counts. `job_unreadable`
 	 * where this process reads a regular file in the job's own directory that this version
 	 * cannot parse. `job_inaccessible` where it cannot look the document up or read it: below a
-	 * job directory that it may not search, as a file that it may not read, or as a link or
-	 * anything else that the plugin did not write in the place of the directory or the
+	 * job directory that it may not search, as a file that it may not read, below a link in the
+	 * place of the job directory, or as anything other than a regular file in the place of the
 	 * document. Ownership and permissions settle the second, not another plugin version; a
 	 * job directory that a command-line run as another user created (reserve_id() makes it
 	 * 0700) is one.

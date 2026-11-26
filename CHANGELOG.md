@@ -325,8 +325,8 @@ All notable changes are documented here. The format follows
   preview at once.
 - The recovery window of an apply is decided only from undo records that can be
   established. A count of attempted changes or an undone marker that cannot be looked up,
-  below a folder that the PHP user cannot search, or that is not a file that the plugin
-  wrote, keeps the saved original files, the journal, the staged files and the sealed review
+  below a folder that the PHP user cannot search, or that is not a regular file, such as a
+  directory or a link, keeps the saved original files, the journal, the staged files and the sealed review
   until the window ends, as an open window does. The Restores tab lists the apply with a
   notice and without **Preview undo**, and an undo or its preview is refused with
   `undo_records_unreadable`. Before, such a record counted as missing: the heartbeat deleted

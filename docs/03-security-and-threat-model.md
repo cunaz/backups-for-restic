@@ -415,7 +415,7 @@ Every route that asks for the WordPress password asks through one check
   Active review, apply and undo jobs can pin their source while they run. An apply keeps
   its staging, its sealed review and its undo journal for its 24-hour recovery window, also
   while the records of its undo (`undo/attempted`, `undo/reverted`) cannot be looked up or are
-  not files that the plugin wrote; its undo is refused until they can be read. A record counts
+  not regular files; its undo is refused until they can be read. A record counts
   as missing only where its name is missing from a directory that the PHP user can search.
   Database rehearsal reports and ZIP downloads share staging's ownership and expiry rules.
 - Who may do what with staging: staging needs the backup capability alone, because the

@@ -860,8 +860,8 @@ to that user, with mode 0700, so the web server's PHP user cannot search it. Giv
 user back ownership of that folder and of everything in it, with permission to read and
 search them, for example with `chown -R` to the web server's user. Run WP-CLI as that user
 from then on (`sudo -u www-data wp …`) rather than with `--allow-root`. If ownership and
-permissions are in order, something other than what the plugin wrote is in the place of the
-folder or of its `job.json`, such as a link: put the job's own files back. Uninstalling is
+permissions are in order, a link is in the place of the folder, or something other than a
+regular file in the place of its `job.json`: put the job's own files back. Uninstalling is
 refused for the same job until it can be read. `GET /jobs/{id}`, its log and
 `wp backups-for-restic logs <id>` answer for that job with the same code and texts.
 

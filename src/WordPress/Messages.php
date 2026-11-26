@@ -71,7 +71,7 @@ final class Messages {
 	 * @return string Hint.
 	 */
 	private static function inaccessible_hint(): string {
-		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link or something else that the plugin did not write is in the place of the folder or of job.json: put the job\'s own files back. Until the job can be read, its files are kept, and new jobs and repository changes stay blocked.', 'backups-for-restic' );
+		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link is in the place of the folder, or something other than a regular file is in the place of job.json: put the job\'s own files back. Until the job can be read, its files are kept, and new jobs and repository changes stay blocked.', 'backups-for-restic' );
 	}
 
 	/**

@@ -213,7 +213,7 @@ final class JobMessagesTest extends TestCase {
 		$named = Messages::stored_job( 'job_inaccessible', $id );
 		// Before, this job was refused as job_unreadable, which neither named it nor said what to do.
 		self::assertSame( 'The PHP user cannot open the stored job 20260101T000000Z-0a1b2c in the private working directory.', $named['message'] );
-		foreach ( [ 'belongs to another user or lacks read or search permission', 'WP-CLI command that ran as root', 'Give the PHP user back ownership of that folder', 'a link or something else that the plugin did not write', 'new jobs and repository changes stay blocked' ] as $part ) {
+		foreach ( [ 'belongs to another user or lacks read or search permission', 'WP-CLI command that ran as root', 'Give the PHP user back ownership of that folder', 'a link is in the place of the folder, or something other than a regular file is in the place of job.json', 'new jobs and repository changes stay blocked' ] as $part ) {
 			self::assertStringContainsString( $part, $named['hint'] );
 		}
 		self::assertStringNotContainsString( 'plugin version', $named['message'] . ' ' . $named['hint'] );
