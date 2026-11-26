@@ -55,8 +55,10 @@ final class AccessTest extends TestCase {
 			[ 'POST', '/restores/' . self::JOB . '/database/plan' ],
 			[ 'POST', '/restores/' . self::JOB . '/database/apply' ],
 			[ 'GET', '/database-changes' ],
+			[ 'GET', '/database-changes/foreign' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/undo-plan' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/undo' ],
+			[ 'POST', '/database-changes/' . self::JOB . '/discard-review' ],
 			[ 'POST', '/database-changes/' . self::JOB . '/discard' ],
 			[ 'GET', '/undo' ],
 			[ 'POST', '/undo/' . self::JOB . '/plan' ],
@@ -212,7 +214,10 @@ final class AccessTest extends TestCase {
 			wp_set_current_user( 1 );
 			$request = new WP_REST_Request( "POST", "/backups-for-restic/v1/database-changes/" . $arguments[0] . "/discard" );
 			$request->set_header( "content-type", "application/json" );
-			$request->set_body( wp_json_encode( [ "user_password" => "wrong-password-test-only" ] ) );
+			// A confirmation of a review in all but the password, which is counted as last.
+			$digest = str_repeat( "a", 64 );
+			$token  = wp_create_nonce( implode( "|", [ "backups_for_restic_live", home_url(), "tables", "discard", $arguments[0], "default", $digest, "" ] ) );
+			$request->set_body( wp_json_encode( [ "reviewed" => true, "site_url" => home_url(), "digest" => $digest, "review_token" => $token, "user_password" => "wrong-password-test-only" ] ) );
 			$response = rest_do_request( $request );
 			$state    = get_option( "backups_for_restic_state" );
 			$failures = ( $state["password_confirmation"] ?? [] )["user_1"]["failures"] ?? null;
@@ -223,6 +228,174 @@ final class AccessTest extends TestCase {
 			[ self::JOB ]
 		);
 		self::assertSame( [ 403, 'backups_for_restic_wrong_user_password', 1, 1 ], json_decode( TestSite::last_line( $output ), true ), $output );
+	}
+
+	/**
+	 * A confirmation of the discard of a binding: the fields of an undo's confirmation, with
+	 * changes.
+	 *
+	 * @param array<string, mixed> $review  Answer of the review.
+	 * @param array<string, mixed> $changes Fields to replace.
+	 * @return array<string, mixed> JSON body.
+	 */
+	private static function discard_confirmation( array $review, array $changes = [] ): array {
+		return array_replace(
+			[
+				'reviewed'      => true,
+				'site_url'      => $review['site_url'] ?? null,
+				'digest'        => $review['digest'] ?? null,
+				'review_token'  => $review['review_token'] ?? null,
+				'user_password' => TestSite::ADMIN_PASSWORD,
+			],
+			$changes
+		);
+	}
+
+	public function test_the_discard_of_a_database_binding_is_confirmed_as_an_undo_is(): void {
+		$job   = '20261126T120000Z-0d1500';
+		$route = '/database-changes/' . $job;
+		TestSite::database_binding(
+			$job,
+			true,
+			[
+				'database_generation' => 'applied',
+				'retained_until'      => time() + 3600,
+			],
+			'succeeded'
+		);
+		try {
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
+			self::assertSame( 200, $status, $raw );
+			self::assertContains( $job, array_column( $listed['jobs'] ?? [], 'job' ), $raw );
+			[ $status, $review, $raw ] = TestSite::api( 'POST', $route . '/discard-review', [] );
+			self::assertSame( 200, $status, $raw );
+			self::assertTrue( $review['write_allowed'] ?? null, $raw );
+			self::assertIsString( $review['review_token'] ?? null, $raw );
+			self::assertSame( TestSite::url(), $review['site_url'] ?? null );
+			self::assertSame( '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002', $review['server'] ?? null );
+			self::assertCount( 7, $review['tables'] ?? [] );
+			self::assertIsInt( $review['undo_until'] ?? null );
+			$refused = static function ( array $changes ) use ( $route, $review ): array {
+				[ $status, $error ] = TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review, $changes ) );
+				return [ $status, $error['code'] ?? null ];
+			};
+			$token   = static fn ( string $operation, string $digest ): string => TestSite::php(
+				'wp_set_current_user( 1 ); echo "\n", wp_create_nonce( implode( "|", [ "backups_for_restic_live", home_url(), "tables", $arguments[0], $arguments[1], "default", $arguments[2], "" ] ) );',
+				[ $operation, $job, $digest ]
+			);
+			$other   = str_repeat( 'e', 64 );
+			self::assertSame( [ 400, 'backups_for_restic_live_confirmation' ], $refused( [ 'reviewed' => false ] ) );
+			self::assertSame( [ 400, 'backups_for_restic_live_confirmation' ], $refused( [ 'site_url' => TestSite::url() . '/' ] ) );
+			self::assertSame( [ 409, 'backups_for_restic_database_discard_changed' ], $refused( [ 'review_token' => null ] ) );
+			self::assertSame( [ 409, 'backups_for_restic_database_discard_changed' ], $refused( [ 'digest' => '' ] ) );
+			// The token of an undo of the same job and digest, and a token for another digest.
+			self::assertSame( [ 409, 'backups_for_restic_database_discard_changed' ], $refused( [ 'review_token' => TestSite::last_line( $token( 'undo', $review['digest'] ) ) ] ) );
+			self::assertSame(
+				[ 409, 'backups_for_restic_database_discard_changed' ],
+				$refused(
+					[
+						'digest'       => $other,
+						'review_token' => TestSite::last_line( $token( 'discard', $other ) ),
+					]
+				)
+			);
+			self::assertSame( [ 403, 'backups_for_restic_wrong_user_password' ], $refused( [ 'user_password' => 'wrong-password-test-only' ] ) );
+			// Another request holds the runner lock.
+			$lock = fopen( TestSite::private_dir() . '/runner.lock', 'c' );
+			self::assertIsResource( $lock );
+			self::assertTrue( flock( $lock, LOCK_EX ) );
+			try {
+				self::assertSame( [ 409, 'backups_for_restic_database_discard_busy' ], $refused( [] ) );
+			} finally {
+				flock( $lock, LOCK_UN );
+				fclose( $lock );
+			}
+			// The binding changed after the review: its undo window ended.
+			$file     = TestSite::private_dir() . '/jobs/' . $job . '/job.json';
+			$document = (string) file_get_contents( $file );
+			$changed  = json_decode( $document, true );
+			self::assertIsArray( $changed );
+			$changed['data']['retained_until'] = time() - 1;
+			file_put_contents( $file, (string) json_encode( $changed ) );
+			self::assertSame( [ 409, 'backups_for_restic_database_discard_changed' ], $refused( [] ) );
+			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [] );
+			file_put_contents( $file, $document );
+			[ $status, $answer, $raw ] = TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( $review['tables'], $answer['discarded']['tables'] ?? null );
+			self::assertSame( $review['server'], $answer['discarded']['server'] ?? null );
+			$recorded = TestSite::job_document( $job )['data'] ?? [];
+			self::assertArrayNotHasKey( 'database_owner', $recorded );
+			self::assertSame( [ 1, 'rest' ], [ $recorded['database_discarded']['user'] ?? null, $recorded['database_discarded']['via'] ?? null ] );
+			self::assertStringContainsString( '"digest":"' . $review['digest'] . '"', TestSite::job_log( $job ) );
+			self::assertSame( [ 409, 'backups_for_restic_database_binding_discarded' ], $refused( [] ) );
+			[ $status, $error ] = TestSite::api( 'POST', $route . '/discard-review', [] );
+			self::assertSame( [ 409, 'backups_for_restic_database_binding_discarded' ], [ $status, $error['code'] ?? null ] );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+		}
+	}
+
+	public function test_the_review_of_a_discard_says_what_is_the_case_and_where_a_database_error_is_logged(): void {
+		$verified = '20261126T120000Z-0d1501';
+		$damaged  = '20261126T120000Z-0d1502';
+		$failing  = '20261126T120000Z-0d1503';
+		TestSite::database_binding( $verified, false );
+		TestSite::database_binding( $damaged, true, [ 'database_owner' => [ 'version' => 2 ] ] );
+		TestSite::database_binding( $failing, true );
+		try {
+			$reviewed = static function ( string $job ): array {
+				[ $status, $error ] = TestSite::api( 'POST', '/database-changes/' . $job . '/discard-review', [] );
+				return [ $status, $error['code'] ?? null ];
+			};
+			self::assertSame( [ 409, 'backups_for_restic_database_binding_verified' ], $reviewed( $verified ) );
+			self::assertSame( [ 500, 'backups_for_restic_database_binding_unreadable' ], $reviewed( $damaged ) );
+			self::assertSame( [ 409, 'backups_for_restic_database_binding_missing' ], $reviewed( '20991231T235959Z-ffffff' ) );
+			self::assertSame( [ 409, 'backups_for_restic_database_binding_missing' ], $reviewed( 'not-a-job' ) );
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
+			self::assertSame( 200, $status, $raw );
+			self::assertNotContains( $verified, array_column( $listed['jobs'] ?? [], 'job' ) );
+			self::assertNotContains( $damaged, array_column( $listed['jobs'] ?? [], 'job' ) );
+			// The site's database connection fails when the review asks the server who it is. A first
+			// review keeps what WordPress and the plugin read in this request's cache, so that only
+			// the plugin's own connection meets the broken one, which cannot be opened again.
+			$output                                     = TestSite::php(
+				'
+				wp_set_current_user( 1 );
+				$review = static fn (): WP_REST_Response => rest_do_request( new WP_REST_Request( "POST", "/backups-for-restic/v1/database-changes/" . $arguments[0] . "/discard-review" ) );
+				$first  = $review()->get_status();
+				global $wpdb;
+				$host         = $wpdb->dbhost;
+				$handle       = $wpdb->dbh;
+				$wpdb->dbhost = "127.0.0.1:1";
+				$wpdb->dbh    = mysqli_init();
+				$response     = $review();
+				$wpdb->dbhost = $host;
+				$wpdb->dbh    = $handle;
+				$wpdb->ready  = true;
+				$data         = $response->get_data();
+				echo "\n", wp_json_encode( [ $first, $response->get_status(), $data["code"] ?? null, $data["message"] ?? null, $data["data"]["hint"] ?? null ] );
+				',
+				[ $failing ]
+			);
+			[ $first, $status, $code, $message, $hint ] = json_decode( TestSite::last_line( $output ), true );
+			self::assertSame( 200, $first, $output );
+			self::assertSame( [ 500, 'backups_for_restic_database_discard_failed' ], [ $status, $code ], $output );
+			self::assertSame( 'The plugin could not ask the database server whether it holds the private tables of this database restore.', $message );
+			self::assertStringContainsString( 'Nothing was discarded. The log of that database restore job, on the Logs tab, names the database error.', $hint );
+			self::assertStringNotContainsString( 'The log of the job contains', $message . ' ' . $hint );
+			// The log of that job names what the database raised, whichever PHP's mysqli raises for the handle.
+			$entries = array_map( static fn ( string $line ): mixed => json_decode( $line, true ), array_filter( explode( "\n", TestSite::job_log( $failing ) ) ) );
+			$failure = end( $entries );
+			self::assertIsArray( $failure );
+			self::assertSame( [ 'error', 'database_discard_failed' ], [ $failure['level'] ?? null, $failure['context']['code'] ?? null ] );
+			self::assertContains( $failure['context']['cause'] ?? null, [ 'The database restore connection is no longer usable.', 'The database connection could not be opened again.' ] );
+			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $failing )['data'] ?? [] );
+		} finally {
+			foreach ( [ $verified, $damaged, $failing ] as $job ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+			}
+		}
 	}
 
 	public function test_wrong_passwords_are_counted_per_user_slowed_down_and_reported_to_login_limiters(): void {
