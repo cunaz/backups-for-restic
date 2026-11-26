@@ -2726,6 +2726,21 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $workspace );
 	}
 
+	public function test_a_link_in_place_of_an_ended_journal_is_removed_as_a_link_and_nothing_behind_it_goes(): void {
+		$apply     = $this->run_job( $this->start() );
+		$workspace = $this->jobs->directory( $apply ) . '/undo';
+		$elsewhere = $this->directory . '/elsewhere';
+		rename( $workspace, $elsewhere );
+		symlink( $elsewhere, $workspace );
+		// Past the window, which ends the journal whatever its records say.
+		$this->clock->advance( 86400 );
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		self::assertFalse( is_link( $workspace ) );
+		// Before the guard, the count of attempted changes went first, through the link.
+		self::assertFileExists( $elsewhere . '/attempted', 'A file behind the link was deleted.' );
+		self::assertDirectoryExists( $elsewhere . '/item-0' );
+	}
+
 	public function test_an_unused_sealed_review_is_removed_one_hour_after_its_preview_ended_and_not_before(): void {
 		$plan   = $this->run_job( $this->queue_large_preview() );
 		$sealed = dirname( $this->files ) . '/plans/' . $plan->id;

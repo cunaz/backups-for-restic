@@ -653,6 +653,11 @@ final class Staging {
 	 * @throws StorageFailed If the count is there and cannot be removed.
 	 */
 	private function close( string $undo ): void {
+		clearstatcache( true, $undo );
+		if ( is_link( $undo ) || ! is_dir( $undo ) ) {
+			// No journal: a link in its place is removed as a link (delete()), never followed.
+			return;
+		}
 		$attempted = $undo . '/attempted';
 		clearstatcache( true, $attempted );
 		if ( ! is_link( $attempted ) && ! is_file( $attempted ) ) {
