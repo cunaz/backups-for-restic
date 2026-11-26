@@ -574,6 +574,11 @@ final class CliCommand {
 		} elseif ( 'undone' === $review['generation'] && null !== $review['retained_until'] ) {
 			/* translators: %s: date and time until which the tables that the undo replaced are kept. */
 			\WP_CLI::line( sprintf( __( 'This database restore was undone. Among these tables are those that the undo replaced, which the plugin would have kept until %s.', 'backups-for-restic' ), gmdate( 'Y-m-d H:i:s', $review['retained_until'] ) . ' UTC' ) );
+		} elseif ( 'applied' === $review['generation'] && null !== $review['retained_until'] && $review['retained_until'] <= time() ) {
+			/* translators: %s: date and time when the undo window of the database restore ended. */
+			\WP_CLI::line( sprintf( __( 'The undo window of this database restore ended on %s.', 'backups-for-restic' ), gmdate( 'Y-m-d H:i:s', $review['retained_until'] ) . ' UTC' ) );
+		} elseif ( 'applied' === $review['generation'] ) {
+			\WP_CLI::line( __( 'The undo of this database restore is no longer available.', 'backups-for-restic' ) );
 		} elseif ( null === $review['generation'] ) {
 			\WP_CLI::line( __( 'This database restore recorded no completed exchange.', 'backups-for-restic' ) );
 		}
