@@ -5,11 +5,61 @@
 const { execFileSync } = require( 'node:child_process' );
 const crypto = require( 'node:crypto' );
 const fs = require( 'node:fs' );
+const os = require( 'node:os' );
 const path = require( 'node:path' );
 const net = require( 'node:net' );
 
 const ROOT = path.resolve( __dirname, '../..' );
 const UPLOADS = path.join( ROOT, '.tools/site/wp-content/uploads/e2e' );
+
+/** The program that runs a command in a process group of its own and stops the group after the bound. */
+const BOUNDED = path.join( __dirname, 'bounded-command.js' );
+
+/**
+ * Runs a command to its end, for at most the given time. The worker waits for it
+ * synchronously, and while it waits, no timer of Playwright's fires in this process, not even
+ * the test's timeout: a command that hangs would block the run until CI's job limit. After the
+ * bound the command is stopped together with everything it started and still waits for
+ * (bounded-command.js, and here if that program does not get to it), and the test fails with
+ * an error that names it and says whether it was stopped. Stopping the command
+ * alone would leave, for example, the database client of an installation that hangs running
+ * beside the clean-up that follows.
+ *
+ * @param {string}   name    The command as the error names it.
+ * @param {string}   file    Program.
+ * @param {string[]} args    Arguments.
+ * @param {number}   seconds The bound.
+ * @param {Object}   options Further options of execFileSync().
+ * @return {string|import('node:buffer').Buffer} What the command printed.
+ */
+function runCommand( name, file, args, seconds, options = {} ) {
+	// Where the wrapper notes the group that the command leads.
+	const record = path.join( os.tmpdir(), 'bfr-command-' + crypto.randomBytes( 8 ).toString( 'hex' ) );
+	try {
+		// The second bound, five seconds later, is for a wrapper that does not end by itself.
+		return execFileSync( process.execPath, [ BOUNDED, String( seconds ), record, file, ...args ], { ...options, timeout: ( seconds + 5 ) * 1000, killSignal: 'SIGKILL' } );
+	} catch ( error ) {
+		let stopped = 124 === error.status;
+		if ( 'ETIMEDOUT' === error.code ) {
+			// The wrapper did not stop the command and was stopped itself: the group it noted
+			// is stopped here. Without a note the command had not started, or the wrapper
+			// stalled between its start and the note (bounded-command.js).
+			try {
+				process.kill( -Number( fs.readFileSync( record, 'utf8' ) ), 'SIGKILL' );
+				stopped = true;
+			} catch ( failure ) {
+				// A group that ended in this moment is stopped as well.
+				stopped = 'ESRCH' === failure.code;
+			}
+		}
+		if ( 124 === error.status || 'ETIMEDOUT' === error.code ) {
+			throw new Error( name + ' did not finish within ' + seconds + ' seconds' + ( stopped ? ' and was stopped.' : '; its wrapper was stopped, and nothing says whether the command itself still runs.' ) );
+		}
+		throw error;
+	} finally {
+		fs.rmSync( record, { force: true } );
+	}
+}
 
 function freePort() {
 	return new Promise( function ( resolve, reject ) {
@@ -70,7 +120,8 @@ function siteRoot() {
 }
 
 /**
- * Seeds WordPress content for the migration or reads a stored value for verification.
+ * Seeds WordPress content for the migration or reads a stored value for verification. Each
+ * script loads WordPress and does one small thing; a minute is the bound.
  *
  * @param {string} root   Disposable site's installation directory.
  * @param {string} script PHP fixture operation.
@@ -78,7 +129,8 @@ function siteRoot() {
  * @return {string} Fixture response.
  */
 function wordpress( root, script, args = [] ) {
-	return execFileSync( 'php', [ '-r', '$_SERVER["HTTP_HOST"] = "127.0.0.1"; require $argv[1] . "/wp-load.php"; ' + script, root, ...args ], { encoding: 'utf8' } ).trim();
+	const name = 'php -r \'' + ( script.length > 60 ? script.slice( 0, 60 ) + '…' : script ) + '\' for ' + root;
+	return runCommand( name, 'php', [ '-r', '$_SERVER["HTTP_HOST"] = "127.0.0.1"; require $argv[1] . "/wp-load.php"; ' + script, root, ...args ], 60, { encoding: 'utf8' } ).trim();
 }
 
 /**
@@ -136,8 +188,10 @@ async function freshSite() {
 	const tools = fs.mkdtempSync( path.join( ROOT, '.tools/e2e-destination-' ) );
 	const env = { ...process.env, BFR_TEST_PLUGIN_DIR: plugin, BFR_SITE_TOOLS_DIR: tools, BFR_DISABLE_WP_CRON: '1',
 		BFR_SITE_PORT: String( port ), BFR_DB_NAME: 'bfr_import_' + crypto.randomBytes( 8 ).toString( 'hex' ) };
+	// In CI the installation takes about two seconds, with WordPress already downloaded by the
+	// first site, and starting and resetting a second each; two minutes is the bound of each.
 	function run( command ) {
-		execFileSync( path.join( ROOT, 'bin/test-site.sh' ), [ command ], { env } );
+		runCommand( 'bin/test-site.sh ' + command, path.join( ROOT, 'bin/test-site.sh' ), [ command ], 120, { env } );
 	}
 	function remove() {
 		run( 'reset' );
@@ -153,4 +207,4 @@ async function freshSite() {
 	}
 }
 
-module.exports = { ADMIN, freePort, freshSite, signIn, openBackups, repositoryServer, siteRoot, wordpress, addUpload, removeUpload, noLoopback };
+module.exports = { ADMIN, freePort, freshSite, runCommand, signIn, openBackups, repositoryServer, siteRoot, wordpress, addUpload, removeUpload, noLoopback };

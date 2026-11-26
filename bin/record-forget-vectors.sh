@@ -63,7 +63,7 @@ foreach ( $cases as $flags ) {
 		foreach ( $g["keep"] ?? [] as $s ) { $keep[] = $s["id"]; }
 		foreach ( $g["remove"] ?? [] as $s ) { $remove[] = $s["id"]; }
 	}
-	sort( $keep ); sort( $remove );
+	sort( $keep, SORT_STRING ); sort( $remove, SORT_STRING );
 	$out["cases"][] = [ "flags" => $flags, "keep" => $keep, "remove" => $remove ];
 }
 file_put_contents( $argv[2], json_encode( $out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n" );

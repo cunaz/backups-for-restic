@@ -144,7 +144,7 @@ final class MutationJobScopeTest extends TestCase {
 			$paths[] = $directory . '/Any.php';
 		}
 		$paths = array_values( array_unique( $paths ) );
-		sort( $paths );
+		sort( $paths, SORT_STRING );
 		return $paths;
 	}
 

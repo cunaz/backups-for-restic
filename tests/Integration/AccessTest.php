@@ -762,9 +762,9 @@ final class AccessTest extends TestCase {
 				}
 			}
 		}
-		sort( $registered );
+		sort( $registered, SORT_STRING );
 		$tested = array_keys( iterator_to_array( self::routes() ) );
-		sort( $tested );
+		sort( $tested, SORT_STRING );
 		self::assertSame( $registered, $tested, 'A route that this test does not know is not tested for who may call it.' );
 	}
 
