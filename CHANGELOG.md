@@ -311,7 +311,8 @@ All notable changes are documented here. The format follows
   undone when it kept nothing, which ends the recovery window as such an undo does, and
   partly undone with the number of kept entries otherwise. Before, it was recorded as partly
   undone without a number, also when it had reverted everything, and the Restores tab
-  offered to revert the rest until a review retired the apply.
+  offered to revert the rest until a review retired the apply. If the apply cannot be marked
+  as undone then, it stays open for a later undo and the job's log says why.
 - A file preview, apply or undo that stops says what stopped it, on the admin page, in the
   job list, in the failure e-mail and in WP-CLI. Before, a file that changed after the
   review was reported as "Another backup job is still running", and a refused or damaged

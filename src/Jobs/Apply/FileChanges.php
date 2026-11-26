@@ -970,11 +970,15 @@ final readonly class FileChanges implements StepProvider {
 	 * A partial apply keeps all its journals. An interrupted maintenance marker is cleared. A
 	 * stopped undo records what it did before it stopped, with the entry at its cursor when a
 	 * record proves that the worker reverted it before the job document counted it, and as a
-	 * finished undo when its document then counts every entry.
+	 * finished undo when its document then counts every entry. If the marker of a fully undone
+	 * apply cannot be written then, the apply is recorded as that of a stopped undo, as it was
+	 * before the count decided: an undo that reverted files never leaves its apply without a
+	 * record.
 	 *
 	 * @param Job   $job Current job.
 	 * @param float $deadline Worker cleanup deadline.
 	 * @return bool True.
+	 * @throws PluginException If what a stopped undo did cannot be recorded.
 	 */
 	private function cleanup( Job $job, float $deadline ): bool {
 		$this->maintenance->release( $job->id, $this->jobs->directory( $job ) );
@@ -991,7 +995,29 @@ final readonly class FileChanges implements StepProvider {
 			$this->reconcile( $job );
 			$apply = isset( $job->data['undo_counts'] ) ? $this->jobs->get( ApplyJournal::field( $job, 'apply' ) ) : null;
 			if ( null !== $apply ) {
-				$this->conclude( $job, $apply, $this->counted_all( $job, $apply ) );
+				$finished = $this->counted_all( $job, $apply );
+				try {
+					$this->conclude( $job, $apply, $finished );
+				} catch ( PluginException $failure ) {
+					// Only the record of a fully undone apply needs more than the documents: its
+					// marker. With the marker the apply is undone; with entries kept, a stopped
+					// undo is recorded through the same documents as a finished one.
+					if ( ! $finished || self::counts( $job )['kept'] > 0 || is_file( $this->journal->workspace( $apply ) . '/reverted' ) ) {
+						throw $failure;
+					}
+					// Without its marker the apply is not undone, whatever the undo counted. It is
+					// recorded as the apply of a stopped undo: partly undone without a number if the
+					// undo reverted an entry, and as it was otherwise.
+					$this->jobs->log( $job )->write(
+						'warning',
+						'The undo counted every entry, but its apply could not be marked as undone; the apply stays open for a later undo.',
+						[
+							'code'   => JobError::from_throwable( $failure )->code,
+							'reason' => $failure->getMessage(),
+						]
+					);
+					$this->conclude( $job, $apply, false );
+				}
 			}
 		}
 		return true;

@@ -1303,6 +1303,31 @@ final class FileChangesTest extends TestCase {
 		self::assertFileDoesNotExist( $this->live . '/single.txt' );
 	}
 
+	public function test_an_undo_cancelled_after_it_counted_every_entry_stays_partly_undone_when_its_apply_cannot_be_marked(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Root ignores the permissions used to refuse the marker.' );
+		}
+		[ $job, $undo ] = $this->counted_and_stopped( 'nothing' );
+		$workspace      = $this->jobs->directory( $job ) . '/undo';
+		$this->runner->cancel( $undo->id );
+		chmod( $workspace, 0500 );
+		try {
+			$cancelled = $this->run_job( $undo, JobState::Cancelled );
+		} finally {
+			chmod( $workspace, 0700 );
+		}
+		// Without the fallback the cleanup ended on the marker, and neither the undo nor its apply
+		// recorded that three entries were reverted.
+		self::assertSame( [ 1, 2, 0, 0, 'partly_undone' ], [ $cancelled->result['restored'] ?? null, $cancelled->result['removed'] ?? null, $cancelled->result['unchanged'] ?? null, $cancelled->result['kept'] ?? null, $cancelled->result['apply_state'] ?? null ] );
+		$apply = $this->jobs->get( $job->id ) ?? self::fail( 'The apply is gone.' );
+		self::assertSame( [ 'partly_undone', null, $undo->id ], [ $apply->result['undo_state'] ?? null, $apply->result['undo_kept'] ?? null, $apply->result['undo_job'] ?? null ] );
+		self::assertFileDoesNotExist( $workspace . '/reverted' );
+		// The apply stays listed, so the next review can settle it.
+		self::assertSame( [ [ 'partly_undone', null ] ], array_map( static fn ( array $listed ): array => [ $listed['state'], $listed['kept'] ], $this->changes->undoable() ) );
+		$warnings = array_values( array_filter( $this->jobs->log( $cancelled )->read(), static fn ( array $line ): bool => 'warning' === $line['level'] ) );
+		self::assertSame( [ 'The undo counted every entry, but its apply could not be marked as undone; the apply stays open for a later undo.', 'environment' ], [ $warnings[0]['message'] ?? null, $warnings[0]['context']['code'] ?? null ] );
+	}
+
 	/**
 	 * Documents of a stopped undo that do not establish that every entry was counted: what
 	 * happens to the created file, the cursor's total and position, the counts by outcome, the

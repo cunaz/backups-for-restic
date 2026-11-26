@@ -299,7 +299,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   cursor short of the apply's attempted entries, counts by outcome that do not add up to
   it, or a journal whose count cannot be read leave the apply partly undone, as does an
   undo that stopped before it counted its last entry, whose entry at the cursor no record
-  proves reverted; a review decides those against the live files.
+  proves reverted; a review decides those against the live files. If the `reverted` marker
+  of an apply that such an undo reverted completely cannot be written, the cleanup records
+  the apply as partly undone without a number and says so in the job's log: without its
+  marker the apply is not undone, and an undo that reverted files does not leave it
+  without a record.
 - An undo's result counts the entries by outcome, `restored`, `removed`, `unchanged`, `kept`
   and `changed_after_review`, and names `apply_state`. The kept entries with their reasons
   are written to a paged list in the undo job's directory, in pages of 100 that a sealed
