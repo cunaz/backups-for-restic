@@ -196,6 +196,27 @@ final class RestoreRunTest extends TestCase {
 		self::assertSame( 900, $run->progress()['bytes'] );
 	}
 
+	public function test_a_restore_rests_after_every_blob_it_writes(): void {
+		$content  = [ $this->store->save( BlobType::Data, 'one' ), $this->store->save( BlobType::Data, 'two' ), $this->store->save( BlobType::Data, 'six' ) ];
+		$snapshot = $this->snapshot( [ new Node( 'three.bin', NodeType::File, 0644, '2026-01-01T00:00:00Z', size: 9, content: $content ) ] );
+		$this->plan( $this->start( $snapshot ) );
+		$target   = $this->target . '/three.bin';
+		$sizes    = [];
+		$throttle = new Throttle(
+			0.0,
+			0.0,
+			static fn (): float => 1.0,
+			static function () use ( $target, &$sizes ): void {
+				clearstatcache( true, $target );
+				$sizes[] = is_file( $target ) ? filesize( $target ) : null;
+			}
+		);
+		self::assertTrue( RestoreRun::resume( $this->repository, $this->work, $this->clock, $throttle )->advance( INF ) );
+		self::assertSame( 'onetwosix', file_get_contents( $target ) );
+		// The three blobs are one group; the run rests after each, with three and six bytes written.
+		self::assertSame( [ 3, 6, 9 ], array_values( array_unique( array_filter( $sizes, 'is_int' ) ) ) );
+	}
+
 	public function test_interrupted_planning_replays_only_the_uncommitted_blob_batch(): void {
 		$run = $this->start( $this->snapshot( [ $this->file( 'large', 'abc', 300 ) ] ) );
 		$run->advance( 0.0 );

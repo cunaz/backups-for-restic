@@ -16,6 +16,7 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
+use BackupsForRestic\Engine\MemoryBudget;
 use BackupsForRestic\Engine\Prune\PackTable;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
@@ -744,6 +745,11 @@ final class CheckRun {
 	 * the index, and every blob. Findings follow restic: a pack whose content does not match its
 	 * name is reported as that alone.
 	 *
+	 * With a memory budget a piece is also no larger than the memory left can take
+	 * (MemoryBudget::range()). A pack with a blob that does not fit by itself becomes the warning
+	 * pack_memory before any of it is downloaded, as a pack that cannot be read within a request
+	 * becomes pack_unverified.
+	 *
 	 * @param string $pack Pack ID (hex).
 	 * @throws BackendException If the server cannot be reached.
 	 * @throws UnsupportedRepository If a blob is compressed and PHP lacks the zstd extension.
@@ -759,8 +765,22 @@ final class CheckRun {
 			[ $entries, $header_error ] = $this->pack_header( $pack, $size );
 			$index                      = $this->index();
 			$statuses                   = [];
+			$openings                   = [];
+			$blobs                      = 0;
+			$largest                    = 0;
 			foreach ( $entries as $position => $entry ) {
 				$statuses[ $position ] = $this->entry_status( $index, $pack, $entry );
+				// Only a blob that is verified is opened; the others are read with their piece.
+				$openings[ $position ] = 'verify' === $statuses[ $position ] ? MemoryBudget::opening( $entry ) : 0;
+				$largest               = max( $largest, MemoryBudget::range( $entry->length, 0, $openings[ $position ] ) );
+				$blobs                 = $entry->offset + $entry->length;
+			}
+			// After the blobs, the rest of the pack is read in pieces of the configured size.
+			$largest = max( $largest, MemoryBudget::RESPONSE_COPIES * min( $this->state['piece'], $size - $blobs ) );
+			$room    = $this->repository->memory()?->available() ?? PHP_INT_MAX;
+			if ( $largest > $room ) {
+				$this->find( 'warning', 'pack_memory', $pack, 'A blob of the pack does not fit into the memory that PHP has left; run restic check --read-data from another computer to verify it.' );
+				return;
 			}
 			$context  = hash_init( 'sha256' );
 			$failed   = [];
@@ -768,11 +788,18 @@ final class CheckRun {
 			$offset   = 0;
 			$next     = 0;
 			while ( $offset < $size ) {
-				[ $end, $last ] = self::piece( $entries, $next, $offset, $size, $this->state['piece'] );
+				[ $end, $last ] = self::piece( $entries, $openings, $next, $offset, $size, $this->state['piece'], $room );
 				$bytes          = $backend->load( ObjectType::Data, $pack, $offset, $end - $offset );
 				hash_update( $context, $bytes );
 				if ( strlen( $bytes ) !== $end - $offset ) {
 					break; // The pack changed while it was read; its hash cannot match.
+				}
+				// The piece is let go with its last blob to be opened, which is then opened alone.
+				$final = -1;
+				for ( $position = $next; $position < $last; $position++ ) {
+					if ( $openings[ $position ] > 0 ) {
+						$final = $position;
+					}
 				}
 				for ( $position = $next; $position < $last; $position++ ) {
 					if ( 'verify' !== $statuses[ $position ] ) {
@@ -780,7 +807,7 @@ final class CheckRun {
 					}
 					$entry = $entries[ $position ];
 					try {
-						PackReader::open_blob( $this->repository->cipher(), $entry, substr( $bytes, $entry->offset - $offset, $entry->length ) );
+						PackReader::open_blob( $this->repository->cipher(), $entry, MemoryBudget::slice( $bytes, $entry->offset - $offset, $entry->length, $position === $final ) );
 						++$verified;
 					} catch ( UnsupportedRepository $exception ) {
 						throw $exception;
@@ -788,6 +815,8 @@ final class CheckRun {
 						$failed[ $position ] = $exception->getMessage();
 					}
 				}
+				// Also a piece without a blob to open is gone before the next one arrives.
+				unset( $bytes );
 				$offset = $end;
 				$next   = $last;
 				$this->throttle?->pause(); // A large pack is a long unit of work.
@@ -877,22 +906,33 @@ final class CheckRun {
 
 	/**
 	 * The next piece to read: whole blobs from the next entry on, together at most $limit bytes
-	 * unless a single blob is larger; after the last blob, the rest of the pack (any unlisted
-	 * bytes, the header and its length) in pieces of $limit bytes. The header lists its blobs
-	 * back to back from offset 0, so the pieces cover the pack exactly once.
+	 * unless a single blob is larger, and no more than $room can take beside the memory in use
+	 * (MemoryBudget::range()); after the last blob, the rest of the pack (any unlisted bytes,
+	 * the header and its length) in pieces of $limit bytes. The header lists its blobs back to
+	 * back from offset 0, so the pieces cover the pack exactly once.
 	 *
-	 * @param list<PackEntry> $entries Header entries in pack order.
-	 * @param int             $next    First entry not read yet.
-	 * @param int             $offset  First byte not read yet.
-	 * @param int             $size    Size of the pack.
-	 * @param int             $limit   Bytes to read at once.
+	 * @param list<PackEntry> $entries  Header entries in pack order.
+	 * @param array<int, int> $openings What opening each entry takes; 0 for one that is not opened.
+	 * @param int             $next     First entry not read yet.
+	 * @param int             $offset   First byte not read yet.
+	 * @param int             $size     Size of the pack.
+	 * @param int             $limit    Bytes to read at once.
+	 * @param int             $room     What reading a piece may take; the next entry by itself is known to fit.
 	 * @return array{int, int} End of the piece (exclusive) and the first entry after it.
 	 */
-	private static function piece( array $entries, int $next, int $offset, int $size, int $limit ): array {
-		$end  = $offset;
-		$last = $next;
-		while ( isset( $entries[ $last ] ) && ( $last === $next || $entries[ $last ]->offset + $entries[ $last ]->length - $offset <= $limit ) ) {
-			$end = $entries[ $last ]->offset + $entries[ $last ]->length;
+	private static function piece( array $entries, array $openings, int $next, int $offset, int $size, int $limit, int $room ): array {
+		$end    = $offset;
+		$last   = $next;
+		$before = 0;
+		$latest = 0;
+		while ( isset( $entries[ $last ] ) ) {
+			$length = $entries[ $last ]->offset + $entries[ $last ]->length - $offset;
+			if ( $last !== $next && ( $length > $limit || MemoryBudget::range( $length, max( $before, $latest ), $openings[ $last ] ) > $room ) ) {
+				break;
+			}
+			$before = max( $before, $latest );
+			$latest = $openings[ $last ];
+			$end    = $entries[ $last ]->offset + $entries[ $last ]->length;
 			++$last;
 		}
 		if ( $last === $next ) {

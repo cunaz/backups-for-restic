@@ -87,6 +87,10 @@ final class PackReader {
 	/**
 	 * Opens a stored blob and verifies that its content matches its ID.
 	 *
+	 * The stored bytes are let go once they are decrypted: when the caller passes them as a
+	 * temporary value, such as a slice of a downloaded range, a compressed blob is decoded
+	 * beside its plaintext alone.
+	 *
 	 * @param Cipher    $cipher Cipher with the master key.
 	 * @param PackEntry $entry  Header entry.
 	 * @param string    $sealed Stored bytes of the blob.
@@ -99,6 +103,7 @@ final class PackReader {
 		}
 
 		$plaintext = $cipher->open( $sealed );
+		unset( $sealed );
 		if ( $entry->uncompressed_length > 0 ) {
 			$plaintext = Compression::decompress( $plaintext, $entry->uncompressed_length );
 		}

@@ -470,4 +470,63 @@ final class MemoryBudgetTest extends TestCase {
 		$store->flush();
 		self::assertCount( 2, $backend->list( ObjectType::Data ) );
 	}
+
+	/**
+	 * What opening a blob takes, for blobs of each kind.
+	 *
+	 * @return iterable<string, array{PackEntry, int}>
+	 */
+	public static function openings(): iterable {
+		$id = Id::of( 'blob' );
+		yield 'a full chunk, uncompressed' => [ new PackEntry( BlobType::Data, $id, 0, 8388640 ), 3 * 8388640 ];
+		// restic stores a full chunk that does not compress 202 bytes longer than the chunk.
+		yield 'a full chunk in raw zstd blocks' => [ new PackEntry( BlobType::Data, $id, 0, 8388842, 8388608 ), 3 * 8388842 ];
+		yield 'a full chunk that compresses' => [ new PackEntry( BlobType::Data, $id, 0, 2654000, 8388608 ), 2654000 - 32 + 2 * 8388608 ];
+		yield 'where decrypting and decoding take the same' => [ new PackEntry( BlobType::Data, $id, 0, 100, 116 ), 300 ];
+		yield 'a blob that claims more than Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE + 1 ), 3000 ];
+		yield 'a blob that claims exactly what Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE ), 1000 - 32 + 2 * Compression::MAX_DECOMPRESSED_SIZE ];
+	}
+
+	#[DataProvider( 'openings' )]
+	public function test_opening_a_blob_takes_three_times_its_stored_length_and_a_compressed_one_twice_its_content( PackEntry $entry, int $bytes ): void {
+		self::assertSame( $bytes, MemoryBudget::opening( $entry ) );
+	}
+
+	public function test_reading_a_range_takes_its_response_then_each_blob_beside_the_range_and_the_last_alone(): void {
+		self::assertSame( 3 * 16 * self::MIB, MemoryBudget::range( 16 * self::MIB, 24 * self::MIB, 24 * self::MIB ), 'The response is held three times while it arrives.' );
+		self::assertSame( 8 * self::MIB + 20 * self::MIB, MemoryBudget::range( 8 * self::MIB, 20 * self::MIB, 16 * self::MIB ), 'A blob before the last is opened beside the whole range.' );
+		self::assertSame( 30 * self::MIB, MemoryBudget::range( 8 * self::MIB, 0, 30 * self::MIB ), 'The last blob is opened by itself.' );
+		self::assertSame( 3 * self::MIB, MemoryBudget::range( self::MIB, 0, 0 ) );
+	}
+
+	public function test_a_blob_is_taken_out_of_its_range_and_the_last_takes_the_range_with_it(): void {
+		$range = 'firstsecond';
+		self::assertSame( 'first', MemoryBudget::slice( $range, 0, 5, false ) );
+		self::assertSame( 'firstsecond', $range, 'A blob that is followed by another keeps the range.' );
+		self::assertSame( 'second', MemoryBudget::slice( $range, 5, 6, true ) );
+		self::assertSame( '', $range, 'The last blob lets the range go.' );
+	}
+
+	public function test_the_room_for_blobs_is_what_the_limit_leaves_beside_the_reserved_memory_less_two_mib(): void {
+		$reserved = self::reserved();
+		$budget   = new MemoryBudget( $reserved + 2 * self::MIB + 30 * self::MIB );
+		self::assertSame( 30 * self::MIB, $budget->available() );
+		self::assertSame( 30 * self::MIB, $budget->blob_room( 30 * self::MIB ), 'A first blob that takes exactly what is left fits.' );
+		try {
+			$budget->blob_room( 30 * self::MIB + 1 );
+			self::fail( 'A first blob that takes one byte more does not fit.' );
+		} catch ( IndexTooLarge $error ) {
+			self::assertSame( 'The next blob of the restore does not fit beside the memory already in use.', $error->getMessage() );
+			self::assertSame(
+				[
+					'memory_limit' => $reserved + 32 * self::MIB,
+					'available'    => 30 * self::MIB,
+					'blob_bytes'   => 30 * self::MIB + 1,
+					'code'         => 'restore_blob_memory',
+				],
+				$error->context()
+			);
+		}
+		self::assertSame( 0, ( new MemoryBudget( $reserved ) )->available(), 'Never less than nothing.' );
+	}
 }

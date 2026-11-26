@@ -114,7 +114,7 @@ final class JobMessagesTest extends TestCase {
 		'forget'         => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'prune'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'no_snapshots', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'check'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
-		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'internal' ],
+		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'restore_blob_memory', 'internal' ],
 		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'internal' ],
 		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'internal' ],
 		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
@@ -191,6 +191,11 @@ final class JobMessagesTest extends TestCase {
 		self::assertSame( 'The snapshot of this restore is not in the repository.', $snapshot['message'] );
 		self::assertStringContainsString( 'The restore stopped and kept no files.', $snapshot['hint'] );
 		self::assertStringContainsString( 'Backups, restores and maintenance start after that.', Messages::job_error( 'setup_incomplete', 'restore' )['hint'] );
+		// A restore that cannot read the next part of a file in the memory left says what to raise.
+		$memory = Messages::job_error( 'restore_blob_memory', 'restore' );
+		self::assertSame( 'PHP has too little memory left to restore the next part of a file.', $memory['message'] );
+		self::assertStringContainsString( 'Raise the memory limit for WordPress (WP_MAX_MEMORY_LIMIT) or ask your host to increase memory_limit, then start the restore again.', $memory['hint'] );
+		self::assertStringContainsString( 'restore the snapshot with restic on another computer', $memory['hint'] );
 		// A restore takes up its work again after a lock that did not hold; it never starts over.
 		self::assertStringContainsString( 'took up its work again three times', Messages::job_error( 'repository_changed', 'restore' )['hint'] );
 		self::assertStringContainsString( 'started over three times', Messages::job_error( 'repository_changed', 'prune' )['hint'] );
@@ -214,5 +219,13 @@ final class JobMessagesTest extends TestCase {
 		self::assertStringContainsString( 'Without them this apply cannot be undone.', Messages::job_failure( $job )['hint'] );
 		$job->error = null;
 		self::assertSame( Messages::job_error( 'internal' ), Messages::job_failure( $job ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_pack_that_a_check_could_not_read_in_the_memory_left_has_a_label_of_its_own(): void {
+		self::text( 'internal' );
+		$label = Messages::check_finding( 'pack_memory' );
+		self::assertNotSame( Messages::check_finding( 'some_other_finding' ), $label );
+		self::assertSame( 'A sampled pack could not be verified in the memory that PHP has left; "restic check --read-data" on another computer verifies it.', $label );
 	}
 }

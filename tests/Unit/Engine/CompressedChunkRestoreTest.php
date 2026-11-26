@@ -78,7 +78,16 @@ final class CompressedChunkRestoreTest extends TestCase {
 		$index = new IndexSet();
 		$index->add_pack( $pack, [ $entry ] );
 
-		$read = iterator_to_array( BlobBatch::read( $this->repository, $index, [ $entry->id ], 0 ) );
+		$read = [];
+		BlobBatch::read(
+			$this->repository,
+			$index,
+			[ $entry->id ],
+			0,
+			static function ( int $number, string $plain ) use ( &$read ): void {
+				$read[ $number ] = $plain;
+			}
+		);
 		self::assertSame( [ 0 ], array_keys( $read ) );
 		self::assertSame( hash( 'sha256', $content ), hash( 'sha256', $read[0] ) );
 	}
@@ -107,7 +116,7 @@ final class CompressedChunkRestoreTest extends TestCase {
 		$index = new IndexSet();
 		$index->add_pack( Id::of( 'missing pack' ), [ new PackEntry( BlobType::Data, $id, 0, $length, RabinChunker::MAX_SIZE ) ] );
 		try {
-			iterator_to_array( BlobBatch::read( $this->repository, $index, [ $id ], 0 ) );
+			BlobBatch::read( $this->repository, $index, [ $id ], 0, static function (): void {} );
 			self::fail( 'The pack does not exist.' );
 		} catch ( NotFound | FormatException $raised ) {
 			self::assertSame( $error, $raised::class );

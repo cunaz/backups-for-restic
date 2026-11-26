@@ -9,7 +9,10 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Engine;
 
+use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Format\Compression;
+use BackupsForRestic\Format\Pack\PackEntry;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -32,6 +35,12 @@ defined( 'ABSPATH' ) || exit;
  * at the memory in use, which costs nothing to read. Once the index has loaded, and when a
  * pack size is chosen, it looks at the reserved memory, after PHP has given back the blocks
  * that are free altogether, as PHP itself does before it gives up.
+ *
+ * A restore and a check read stored blobs beside the index, in ranges of a pack. What reading
+ * a range takes follows from the copies that exist at once (ADR 0036): the response while it
+ * arrives, and then, blob by blob, the range beside what opening the blob takes. The range is
+ * let go when its last blob is taken out of it. A reader asks blob_room() before a download
+ * and makes its range smaller when it does not fit, down to one blob.
  */
 final readonly class MemoryBudget {
 
@@ -43,6 +52,22 @@ final readonly class MemoryBudget {
 
 	/** How many times its size a pack takes while it is uploaded. */
 	public const int PACK_COPIES = 3;
+
+	/**
+	 * How many times its size a ranged read is held at once while it arrives. WordPress' HTTP
+	 * API keeps the body it collects, the raw response with the headers in front, and the body
+	 * cut out of that; the same with cURL and with fsockopen.
+	 */
+	public const int RESPONSE_COPIES = 3;
+
+	/**
+	 * How many times its stored length a blob takes while it is decrypted: the stored bytes,
+	 * the ciphertext without nonce and tag, and the plaintext.
+	 */
+	public const int OPENING_COPIES = 3;
+
+	/** Memory that stays free beside a read, for allocation rounding and reporting a refusal. */
+	private const int RESERVE = 2097152;
 
 	/**
 	 * Creates the budget.
@@ -138,6 +163,92 @@ final readonly class MemoryBudget {
 				]
 			);
 		}
+	}
+
+	/**
+	 * What opening one stored blob takes beside the range it was read in: three times its
+	 * stored length while it is decrypted, and for a compressed blob at least the decrypted
+	 * frame and twice its content while it is decoded (Format\Compression). The stored bytes
+	 * are let go before the frame is decoded (Format\Pack\PackReader::open_blob()). A blob that
+	 * claims more content than Compression decodes at all is refused before its frame is
+	 * decoded, so only its decryption counts.
+	 *
+	 * @param PackEntry $entry Index or header entry of the blob.
+	 * @return int Bytes.
+	 */
+	public static function opening( PackEntry $entry ): int {
+		$decrypting = self::OPENING_COPIES * $entry->length;
+		if ( 0 === $entry->uncompressed_length || $entry->uncompressed_length > Compression::MAX_DECOMPRESSED_SIZE ) {
+			return $decrypting;
+		}
+		return max( $decrypting, $entry->length - Cipher::OVERHEAD + 2 * $entry->uncompressed_length );
+	}
+
+	/**
+	 * Takes a blob's stored bytes out of the range it was downloaded in. The last blob takes the
+	 * range with it: the caller passes the result on as a temporary value, and the blob is then
+	 * opened beside nothing else of the range (range()).
+	 *
+	 * @param string $range  Downloaded range; emptied when the last blob is taken.
+	 * @param int    $start  Offset of the blob in the range.
+	 * @param int    $length Stored length of the blob.
+	 * @param bool   $last   Whether no blob that is still to be opened follows in the range.
+	 * @return string Stored bytes.
+	 */
+	public static function slice( string &$range, int $start, int $length, bool $last ): string {
+		$bytes = substr( $range, $start, $length );
+		if ( $last ) {
+			$range = '';
+		}
+		return $bytes;
+	}
+
+	/**
+	 * What reading a range of stored blobs takes beside the memory in use: the response while it
+	 * arrives; then each blob but the last beside the whole range; then the last one alone,
+	 * because the range is let go when it is taken out.
+	 *
+	 * @param int $range  Bytes of the range.
+	 * @param int $before The most that opening one of its blobs takes, of all but the last; 0 for one blob.
+	 * @param int $last   What opening its last blob takes.
+	 * @return int Bytes.
+	 */
+	public static function range( int $range, int $before, int $last ): int {
+		return max( self::RESPONSE_COPIES * $range, $range + $before, $last );
+	}
+
+	/**
+	 * The bytes that reading blobs may take now: what the limit leaves beside the reserved
+	 * memory, less two MiB for allocation rounding and for reporting a refusal.
+	 *
+	 * @return int Bytes, at least 0.
+	 */
+	public function available(): int {
+		return max( 0, $this->limit - self::reserved() - self::RESERVE );
+	}
+
+	/**
+	 * The bytes that a restore's next range of blobs may take, once its first blob is known
+	 * to fit (available()). Called before the range is downloaded.
+	 *
+	 * @param int $first What reading the first blob takes by itself (range()).
+	 * @return int Bytes.
+	 * @throws IndexTooLarge With the code restore_blob_memory if the first blob does not fit.
+	 */
+	public function blob_room( int $first ): int {
+		$available = $this->available();
+		if ( $first > $available ) {
+			IndexTooLarge::raise(
+				'The next blob of the restore does not fit beside the memory already in use.',
+				[
+					'memory_limit' => $this->limit,
+					'available'    => $available,
+					'blob_bytes'   => $first,
+					'code'         => 'restore_blob_memory',
+				]
+			);
+		}
+		return $available;
 	}
 
 	/**
