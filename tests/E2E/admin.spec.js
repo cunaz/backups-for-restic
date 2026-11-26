@@ -929,3 +929,76 @@ test( 'a restore of a snapshot that another client forgot says so', async ( { pa
 		fs.renameSync( aside, path.join( snapshots, file ) );
 	}
 } );
+
+test( 'a binding to private tables on another database server is reviewed and discarded on the Restores tab', async ( { page } ) => {
+	// A database restore that keeps the earlier tables for its undo, on a database server that
+	// the site no longer uses, as after a failover. The name of its database holds a right-to-left
+	// override, which the page shows escaped.
+	const job = '20261126T140000Z-0d1700';
+	const directory = path.join( siteRoot(), 'wp-content/backups-for-restic/jobs', job );
+	wordpress( siteRoot(), 'global $wpdb; $container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); $apply = new BackupsForRestic\\Jobs\\Job( $argv[2], BackupsForRestic\\Jobs\\JobType::DatabaseApply, "manual", time() - 120 ); $apply->state = BackupsForRestic\\Jobs\\JobState::Succeeded; $apply->finished_at = time() - 60; $apply->data = [ "restore" => "20261126T130000Z-0d16ff", "user" => 1, "digest" => str_repeat( "d", 64 ), "database_generation" => "applied", "retained_until" => time() + 3600, "database_owner" => [ "version" => 1, "prefix" => $wpdb->prefix, "fingerprint" => str_repeat( "f", 64 ), "count" => 2, "token" => str_repeat( "c", 32 ), "database" => $argv[3], "uuid" => "7c4dd2a2-d1b4-11f1-9b6f-0242ac120002" ] ]; $container->jobs()->save( $apply );', [ job, 'bfr_‮site' ] );
+	// Request interception stays on for the whole test (see the test of live apply and undo).
+	await page.route( '**/*', ( route ) => route.fallback() );
+	const url = new URL( page.url() ).origin;
+	const undo = card( page, job ).filter( { has: page.getByRole( 'button', { name: 'Preview database undo' } ) } );
+	const foreign = card( page, job ).filter( { hasNot: page.getByRole( 'button', { name: 'Preview database undo' } ) } );
+	async function confirm( address, password ) {
+		await foreign.getByLabel( 'I have reviewed what this discard forgets and noted the table names.' ).check();
+		await foreign.getByLabel( 'Type the site address to confirm' ).fill( address );
+		await foreign.getByLabel( 'Your WordPress password' ).fill( password );
+		await foreign.getByRole( 'button', { name: 'Discard binding', exact: true } ).click();
+	}
+	try {
+		await openBackups( page, 'restores' );
+		await expect( page.getByRole( 'heading', { name: 'Private tables on another database server', exact: true } ) ).toBeVisible();
+		// The undo of the exchange cannot be reviewed while its tables are elsewhere; its card offers the discard.
+		await undo.getByRole( 'button', { name: 'Preview database undo' } ).click();
+		await expect( undo ).toContainText( 'A database restore keeps private tables on another database server or in another database.' );
+		await expect( undo.getByRole( 'button', { name: 'Review the discard of this binding' } ) ).toBeVisible();
+
+		await foreign.getByRole( 'button', { name: 'Review the discard of this binding' } ).click();
+		const review = foreign.locator( '.bfr-database-discard' );
+		await expect( review.locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
+		await expect( review ).not.toContainText( '‮' );
+		await expect( review ).toContainText( '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' );
+		const tables = foreign.locator( '.bfr-database-discard-tables code' );
+		await expect( tables ).toHaveCount( 7 );
+		await expect( tables.first() ).toHaveText( '_bfr_r_' + 'c'.repeat( 32 ) + '_p' );
+		await expect( foreign ).toContainText( 'The discard ends the undo of this database restore for good.' );
+		await expect( foreign.locator( '.bfr-discard-kept li' ) ).toHaveText( [
+			'The database that this site uses now: the discard changes none of its tables.',
+			'The private tables, wherever they are: the plugin drops none of them, now or later.',
+			'The database restore job and its log, which record the discard, who confirmed it and these table names.',
+		] );
+
+		await confirm( url + '/another-site', ADMIN.password );
+		await expect( foreign ).toContainText( 'type the exact site address' );
+		await expect( foreign.getByLabel( 'Type the site address to confirm' ) ).toBeFocused();
+		await confirm( url, 'incorrect' );
+		await expect( foreign ).toContainText( 'Your WordPress password was not correct.' );
+		await expect( foreign.getByLabel( 'Your WordPress password' ) ).toBeFocused();
+		// The answer is lost before the request reaches the server: nothing is discarded, and the page says what to do.
+		const isDiscard = ( requestURL ) => /\/database-changes\/[^/?&]+\/discard(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		await page.route( isDiscard, ( route ) => route.abort( 'connectionreset' ), { times: 1 } );
+		await confirm( url, ADMIN.password );
+		await expect( foreign ).toContainText( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded.' );
+		expect( JSON.parse( fs.readFileSync( path.join( directory, 'job.json' ), 'utf8' ) ).data ).toHaveProperty( 'database_owner' );
+
+		await confirm( url, ADMIN.password );
+		const result = page.locator( '.bfr-discarded' );
+		await expect( result ).toContainText( 'The binding was discarded. Nothing was dropped.' );
+		await expect( result ).toBeFocused();
+		await expect( result.locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
+		await expect( result.locator( '.bfr-database-discarded-tables code' ) ).toHaveCount( 7 );
+		// The cards leave the lists; what was discarded stays on the page.
+		await expect( page.getByRole( 'heading', { name: 'Private tables on another database server', exact: true } ) ).toHaveCount( 0 );
+		await expect( card( page, job ) ).toHaveCount( 0 );
+		await expect( result ).toBeVisible();
+		const recorded = JSON.parse( fs.readFileSync( path.join( directory, 'job.json' ), 'utf8' ) );
+		expect( recorded.data ).not.toHaveProperty( 'database_owner' );
+		expect( recorded.data.database_discarded.via ).toBe( 'rest' );
+		expect( recorded.warnings.at( -1 ) ).toContain( '_bfr_r_' + 'c'.repeat( 32 ) + '_b1' );
+	} finally {
+		fs.rmSync( directory, { recursive: true, force: true } );
+	}
+} );
