@@ -5,6 +5,7 @@
 const { execFileSync } = require( 'node:child_process' );
 const crypto = require( 'node:crypto' );
 const fs = require( 'node:fs' );
+const os = require( 'node:os' );
 const path = require( 'node:path' );
 const net = require( 'node:net' );
 
@@ -19,7 +20,8 @@ const BOUNDED = path.join( __dirname, 'bounded-command.js' );
  * synchronously, and while it waits, no timer of Playwright's fires in this process, not even
  * the test's timeout: a command that hangs would block the run until CI's job limit. After the
  * bound the command is stopped together with everything it started and still waits for
- * (bounded-command.js), and the test fails with an error that names it. Stopping the command
+ * (bounded-command.js, and here if that program does not get to it), and the test fails with
+ * an error that names it. Stopping the command
  * alone would leave, for example, the database client of an installation that hangs running
  * beside the clean-up that follows.
  *
@@ -31,14 +33,27 @@ const BOUNDED = path.join( __dirname, 'bounded-command.js' );
  * @return {string|import('node:buffer').Buffer} What the command printed.
  */
 function runCommand( name, file, args, seconds, options = {} ) {
+	// Where the wrapper notes the group that the command leads.
+	const record = path.join( os.tmpdir(), 'bfr-command-' + crypto.randomBytes( 8 ).toString( 'hex' ) );
 	try {
 		// The second bound, five seconds later, is for a wrapper that does not end by itself.
-		return execFileSync( process.execPath, [ BOUNDED, String( seconds ), file, ...args ], { ...options, timeout: ( seconds + 5 ) * 1000, killSignal: 'SIGKILL' } );
+		return execFileSync( process.execPath, [ BOUNDED, String( seconds ), record, file, ...args ], { ...options, timeout: ( seconds + 5 ) * 1000, killSignal: 'SIGKILL' } );
 	} catch ( error ) {
+		if ( 'ETIMEDOUT' === error.code ) {
+			// The wrapper did not stop the command and was stopped itself: the group it noted
+			// is stopped here. Without a note, the command had not started.
+			try {
+				process.kill( -Number( fs.readFileSync( record, 'utf8' ) ), 'SIGKILL' );
+			} catch {
+				// No note, or the group ended in this moment.
+			}
+		}
 		if ( 124 === error.status || 'ETIMEDOUT' === error.code ) {
 			throw new Error( name + ' did not finish within ' + seconds + ' seconds and was stopped.' );
 		}
 		throw error;
+	} finally {
+		fs.rmSync( record, { force: true } );
 	}
 }
 
