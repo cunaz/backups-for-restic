@@ -232,6 +232,26 @@ final class AccessTest extends TestCase {
 	}
 
 	/**
+	 * Sends the confirmation of a discard again while another request holds the runner lock, at
+	 * most 40 times in ten seconds. A request of the test can start WP-Cron, whose heartbeat holds
+	 * that lock for a moment, and the discard then answers database_discard_busy before it looks
+	 * at the binding. The test checks the first other answer; the busy answer itself is checked
+	 * with a lock that the test holds.
+	 *
+	 * @param \Closure():array{int, array<mixed>, string} $send The confirmation, as TestSite::api() answers it.
+	 * @return array{int, array<mixed>, string} The first answer that is not database_discard_busy, or the last one.
+	 */
+	private static function unless_busy( \Closure $send ): array {
+		for ( $attempt = 1; ; ++$attempt ) {
+			$answer = $send();
+			if ( 'backups_for_restic_database_discard_busy' !== ( $answer[1]['code'] ?? null ) || $attempt >= 40 ) {
+				return $answer;
+			}
+			usleep( 250000 );
+		}
+	}
+
+	/**
 	 * A confirmation of the discard of a binding: the fields of an undo's confirmation, with
 	 * changes.
 	 *
@@ -277,8 +297,9 @@ final class AccessTest extends TestCase {
 			self::assertSame( '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002', $review['server'] ?? null );
 			self::assertCount( 7, $review['tables'] ?? [] );
 			self::assertIsInt( $review['undo_until'] ?? null );
-			$refused = static function ( array $changes ) use ( $route, $review ): array {
-				[ $status, $error ] = TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review, $changes ) );
+			$refused = static function ( array $changes, bool $locked = false ) use ( $route, $review ): array {
+				$send               = static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review, $changes ) );
+				[ $status, $error ] = $locked ? $send() : self::unless_busy( $send );
 				return [ $status, $error['code'] ?? null ];
 			};
 			$token   = static fn ( string $operation, string $digest ): string => TestSite::php(
@@ -307,7 +328,7 @@ final class AccessTest extends TestCase {
 			self::assertIsResource( $lock );
 			self::assertTrue( flock( $lock, LOCK_EX ) );
 			try {
-				self::assertSame( [ 409, 'backups_for_restic_database_discard_busy' ], $refused( [] ) );
+				self::assertSame( [ 409, 'backups_for_restic_database_discard_busy' ], $refused( [], true ) );
 			} finally {
 				flock( $lock, LOCK_UN );
 				fclose( $lock );
@@ -322,7 +343,7 @@ final class AccessTest extends TestCase {
 			self::assertSame( [ 409, 'backups_for_restic_database_discard_changed' ], $refused( [] ) );
 			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [] );
 			file_put_contents( $file, $document );
-			[ $status, $answer, $raw ] = TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) );
+			[ $status, $answer, $raw ] = self::unless_busy( static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) ) );
 			self::assertSame( 200, $status, $raw );
 			self::assertSame( $review['tables'], $answer['discarded']['tables'] ?? null );
 			self::assertSame( $review['server'], $answer['discarded']['server'] ?? null );
@@ -531,7 +552,14 @@ final class AccessTest extends TestCase {
 						$confirmed = new WP_REST_Request( "POST", $route . "/discard" );
 						$confirmed->set_header( "Content-Type", "application/json" );
 						$confirmed->set_body( (string) wp_json_encode( [ "reviewed" => true, "site_url" => $data["site_url"] ?? null, "digest" => $data["digest"] ?? null, "review_token" => $data["review_token"] ?? null, "user_password" => $arguments[2] ] ) );
-						$discarded = rest_do_request( $confirmed );
+						// The heartbeat of a WP-Cron run that a request started can hold the runner lock for a moment.
+						for ( $attempt = 1; ; ++$attempt ) {
+							$discarded = rest_do_request( $confirmed );
+							if ( "backups_for_restic_database_discard_busy" !== ( $discarded->get_data()["code"] ?? null ) || $attempt >= 40 ) {
+								break;
+							}
+							usleep( 250000 );
+						}
 						$wpdb->dbh->set_charset( "utf8mb4" );
 						$wpdb->dbh->select_db( DB_NAME );
 						echo "\n", base64_encode( (string) wp_json_encode( [ $first, $selected, $reviewed->get_status(), $sent, $discarded->get_status(), wp_json_encode( rest_get_server()->response_to_data( $discarded, false ) ) ] ) );
