@@ -772,4 +772,39 @@ final class TestSite {
 		fclose( $pipes[1] );
 		return [ proc_close( $process ), rtrim( str_replace( "\r\n", "\n", $output ), "\n" ) ];
 	}
+
+	/**
+	 * Runs work while a database whose name has a letter that is not ASCII exists beside the
+	 * site's own, as the review found it: a connection in latin1 to it reports the name as bytes
+	 * that are not UTF-8. Its WordPress tables are views of the site's own, so that WordPress
+	 * keeps working there, and the site's account may read and write them. The work gets the
+	 * name in UTF-8; the database is dropped afterwards. Needs BFR_TEST_MYSQL_* for an account
+	 * that may create databases and grant.
+	 *
+	 * @template T
+	 * @param \Closure(string): T $work Work.
+	 * @return T What the work returns.
+	 */
+	public static function in_latin1_database( \Closure $work ): mixed {
+		$admin = MysqliConnection::connect();
+		Assert::assertNotNull( $admin, 'This test needs BFR_TEST_MYSQL_* for an account that may create databases.' );
+		$account = MysqliConnection::environment( 'BFR_DB_USER', 'bfr_site' );
+		$site    = MysqliConnection::environment( 'BFR_DB_NAME', 'bfr_site' );
+		$name    = $site . '_möbel';
+		$admin->execute( 'CREATE DATABASE IF NOT EXISTS `' . $name . '`' );
+		try {
+			foreach ( $admin->rows( "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '" . $admin->mysqli->real_escape_string( $site ) . "' AND TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME LIKE 'wp\\_%'" ) as $row ) {
+				$admin->execute( 'CREATE VIEW `' . $name . '`.`' . $row['TABLE_NAME'] . '` AS SELECT * FROM `' . $site . '`.`' . $row['TABLE_NAME'] . '`' );
+			}
+			foreach ( [ 'localhost', '%' ] as $host ) {
+				$admin->execute( 'GRANT SELECT, INSERT, UPDATE, DELETE ON `' . $name . "`.* TO '" . $account . "'@'" . $host . "'" );
+			}
+			return $work( $name );
+		} finally {
+			foreach ( [ 'localhost', '%' ] as $host ) {
+				$admin->mysqli->query( 'REVOKE ALL PRIVILEGES ON `' . $name . "`.* FROM '" . $account . "'@'" . $host . "'" );
+			}
+			$admin->execute( 'DROP DATABASE IF EXISTS `' . $name . '`' );
+		}
+	}
 }

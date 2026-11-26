@@ -809,4 +809,26 @@ final class CliTest extends TestCase {
 			TestSite::wp( [ 'user', 'delete', 'bfr-cli-editor', '--yes' ] );
 		}
 	}
+
+	public function test_database_discard_prints_a_database_name_that_is_not_utf8_with_go_escapes(): void {
+		$job = '20261126T130000Z-0d1605';
+		TestSite::database_binding( $job, true );
+		try {
+			// After WordPress loaded, the command's connection uses latin1 on a database whose name is not ASCII.
+			[ $status, $output, $name ] = TestSite::in_latin1_database(
+				static fn ( string $name ): array => [
+					...TestSite::wp_input( [ '--exec=WP_CLI::add_hook( "after_wp_load", static function (): void { global $wpdb; $wpdb->dbh->set_charset( "latin1" ); $wpdb->dbh->select_db( mb_convert_encoding( ' . var_export( $name, true ) . ', "ISO-8859-1", "UTF-8" ) ); } );', 'backups-for-restic', 'database-discard', $job ], '' ),
+					$name,
+				]
+			);
+			self::assertSame( 1, $status, $output );
+			// Before, the review ended in a JsonException. The name is printed with Go's escapes, as names in snapshots are.
+			self::assertStringContainsString( 'This site uses the database "' . str_replace( 'ö', '\xf6', $name ) . '" on the server ', $output );
+			self::assertSame( 1, preg_match( '/^Digest of this review: [0-9a-f]{64}$/m', $output ), $output );
+			self::assertStringContainsString( 'Error: There is no terminal to ask for the site address, so nothing was discarded.', $output );
+			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [] );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+		}
+	}
 }
