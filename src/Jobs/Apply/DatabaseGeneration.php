@@ -288,7 +288,8 @@ final readonly class DatabaseGeneration {
 			return;
 		}
 		$job->data['database_rebuilt'] = [ ...$known, ...$new ];
-		$job->warn( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $new ), implode( ', ', $new ) ) );
+		// What is left to do by hand: the limit of a job's warnings must not drop it.
+		$job->warn_kept( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $new ), implode( ', ', $new ) ) );
 		$jobs->log( $job )->write( 'warning', 'Rebuilt private tables were kept.', [ 'code' => 'database_exchange_rebuilt' ] );
 	}
 

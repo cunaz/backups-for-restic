@@ -837,8 +837,21 @@ final class DatabaseChangesTest extends TestCase {
 		$this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
 		$warnings = $this->jobs->get( $job->id )?->warnings ?? [];
 		// Before, the limit dropped the one warning that names what is left to remove by hand.
-		self::assertCount( Job::MAX_WARNINGS, $warnings );
-		self::assertSame( 'Warning ' . ( Job::MAX_WARNINGS - 1 ), $warnings[ Job::MAX_WARNINGS - 2 ] );
-		self::assertStringContainsString( ' was discarded. Nothing was dropped; remove those that exist there by hand: ' . implode( ', ', $review['tables'] ), $warnings[ Job::MAX_WARNINGS - 1 ] );
+		// It comes after the limit, and takes the place of no other warning.
+		self::assertCount( Job::MAX_WARNINGS + 1, $warnings );
+		self::assertSame( 'Warning ' . Job::MAX_WARNINGS, $warnings[ Job::MAX_WARNINGS - 1 ] );
+		self::assertStringContainsString( ' was discarded. Nothing was dropped; remove those that exist there by hand: ' . implode( ', ', $review['tables'] ), $warnings[ Job::MAX_WARNINGS ] );
+	}
+
+	public function test_a_warning_of_what_is_left_to_do_by_hand_never_takes_the_place_of_another(): void {
+		$job = new Job( '20260101T000001Z-aaaaaa', JobType::DatabaseApply, 'manual', $this->clock->seconds );
+		for ( $number = 1; $number <= Job::MAX_WARNINGS; ++$number ) {
+			$job->warn( 'Warning ' . $number );
+		}
+		// The tables that an expiry kept, then those of a discard: both lists stay, and so do the others.
+		$job->warn_kept( 'Rebuilt tables to drop by hand: a' );
+		$job->warn_kept( 'Discarded tables to remove by hand: b' );
+		$job->warn( 'Beyond the limit' );
+		self::assertSame( [ ...array_map( static fn ( int $number ): string => 'Warning ' . $number, range( 1, Job::MAX_WARNINGS ) ), 'Rebuilt tables to drop by hand: a', 'Discarded tables to remove by hand: b' ], $job->warnings );
 	}
 }

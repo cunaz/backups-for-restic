@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Job {
 
-	/** The warnings that a job keeps. */
+	/** The warnings that warn() keeps; those of warn_kept() come after them. */
 	public const int MAX_WARNINGS = 50;
 
 	/**
@@ -151,7 +151,8 @@ final class Job {
 	public array $data = [];
 
 	/**
-	 * Warnings for the administrator, at most MAX_WARNINGS.
+	 * Warnings for the administrator: at most MAX_WARNINGS that warn() adds, and those that
+	 * warn_kept() adds.
 	 *
 	 * @var list<string>
 	 */
@@ -187,14 +188,14 @@ final class Job {
 
 	/**
 	 * Adds a warning that the limit must not drop, because it tells the administrator what is
-	 * left to do by hand: among MAX_WARNINGS warnings it takes the place of the last one.
+	 * left to do by hand: private tables to check and drop. It is added after MAX_WARNINGS as
+	 * well and takes the place of no other warning, so that one such list never replaces
+	 * another. A job gets few of them: each table is named once, in the discard of its binding
+	 * or when its expiry keeps rebuilt tables.
 	 *
 	 * @param string $warning Text without secrets.
 	 */
 	public function warn_kept( string $warning ): void {
-		if ( count( $this->warnings ) >= self::MAX_WARNINGS ) {
-			array_splice( $this->warnings, self::MAX_WARNINGS - 1 );
-		}
 		$this->warnings[] = $warning;
 	}
 

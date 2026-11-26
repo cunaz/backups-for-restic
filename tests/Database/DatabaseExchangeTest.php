@@ -2138,4 +2138,24 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $owner->id )?->data ?? [ 'database_owner' => true ] );
 	}
+
+	public function test_rebuilt_tables_are_named_also_in_an_apply_that_holds_as_many_warnings_as_it_keeps(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		$retained = trim( $this->holder( $applied, 'wp_posts', 'retained' ), '`' );
+		$this->optimize( $retained );
+		$full = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $full );
+		for ( $number = count( $full->warnings ); $number < Job::MAX_WARNINGS; ++$number ) {
+			$full->warn( 'An earlier warning ' . $number );
+		}
+		self::assertCount( Job::MAX_WARNINGS, $full->warnings );
+		$services['jobs']->save( $full );
+		$services['clock']->seconds = $applied->data['retained_until'] + 1;
+		$expired                    = self::expire_all( $services, $applied );
+		// Before, a job at its limit of warnings dropped the one that names the tables to drop by hand.
+		self::assertCount( Job::MAX_WARNINGS + 1, $expired->warnings );
+		self::assertStringContainsString( 'check them and drop them by hand: ' . $retained, $expired->warnings[ Job::MAX_WARNINGS ] );
+	}
 }
