@@ -438,10 +438,9 @@ final readonly class DatabaseChanges implements StepProvider {
 		$listed = [];
 		try {
 			foreach ( $this->jobs->file_changes() as $job ) {
-				$until = JobStore::discard_listed_until( $job );
-				$entry = self::discarded( $job );
-				if ( null !== $until && $until > $now && null !== $entry ) {
-					$listed[] = $entry + [ 'until' => $until ];
+				$entry = self::listed( $job, $now );
+				if ( null !== $entry ) {
+					$listed[] = $entry;
 				}
 			}
 		} catch ( StorageFailed $error ) {
@@ -466,19 +465,19 @@ final readonly class DatabaseChanges implements StepProvider {
 		try {
 			return $this->staging->guard(
 				function () use ( $apply, $user, $via ): array {
-					$job    = $this->jobs->get( $apply );
-					$until  = null === $job ? null : JobStore::discard_listed_until( $job );
-					$entry  = null === $job ? null : self::discarded( $job );
-					$record = $job?->data['database_discarded'] ?? null;
-					if ( null === $job || null === $until || $until <= $this->clock->now()[0] || null === $entry || ! is_array( $record ) ) {
+					$job   = $this->jobs->get( $apply );
+					$entry = null === $job ? null : self::listed( $job, $this->clock->now()[0] );
+					if ( null === $job || null === $entry ) {
 						JobConflict::raise( 'This job lists no private tables of a discarded binding.', [ 'code' => 'database_discarded_missing' ] );
 					}
-					$record['done']                  = [
-						'at'   => $this->clock->now()[0],
-						'user' => $user,
-						'via'  => $via,
-					];
-					$job->data['database_discarded'] = $record;
+					$record                          = $job->data['database_discarded'];
+					$job->data['database_discarded'] = [
+						'done' => [
+							'at'   => $this->clock->now()[0],
+							'user' => $user,
+							'via'  => $via,
+						],
+					] + ( is_array( $record ) ? $record : [] );
 					$this->jobs->save( $job );
 					$this->jobs->log( $job )->write(
 						'info',
@@ -488,7 +487,7 @@ final readonly class DatabaseChanges implements StepProvider {
 							'via'  => $via,
 						]
 					);
-					return $entry + [ 'until' => $until ];
+					return $entry;
 				}
 			);
 		} catch ( StorageFailed $error ) {
@@ -497,24 +496,29 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * What a database apply recorded about the discard of its binding.
+	 * The entry of a database apply in the list of discarded bindings: while it lists the tables
+	 * of its discarded binding (JobStore::discard_listed_until()), and if its record names the
+	 * database, the server and the tables.
 	 *
 	 * @param Job $job Database apply.
-	 * @return array{job:string,restore:string,at:int,via:string,database:string,server:string,tables:list<string>}|null The record, or null without a complete one.
+	 * @param int $now Unix time.
+	 * @return Discarded|null The entry, or null if the job lists no such tables now.
 	 */
-	private static function discarded( Job $job ): ?array {
+	private static function listed( Job $job, int $now ): ?array {
+		$until  = JobStore::discard_listed_until( $job );
 		$record = $job->data['database_discarded'] ?? null;
-		if ( ! is_array( $record ) || ! is_int( $record['at'] ?? null ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
+		if ( null === $until || $until <= $now || ! is_array( $record ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
 			return null;
 		}
 		return [
 			'job'      => $job->id,
 			'restore'  => self::text( $job, 'restore' ),
-			'at'       => $record['at'],
+			'at'       => $until - JobStore::DISCARD_LISTED_DAYS * 86400,
 			'via'      => is_string( $record['via'] ?? null ) ? $record['via'] : '',
 			'database' => $record['database'],
 			'server'   => $record['server'],
 			'tables'   => array_values( array_filter( $record['tables'], 'is_string' ) ),
+			'until'    => $until,
 		];
 	}
 

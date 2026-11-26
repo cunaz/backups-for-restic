@@ -903,7 +903,7 @@ final class DatabaseChangesTest extends TestCase {
 		chmod( $this->directory . '/jobs', 0300 );
 		set_error_handler( static fn (): bool => true, E_WARNING );
 		try {
-			foreach ( [ fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ), fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) ] as $work ) {
+			foreach ( [ fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ), fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ), fn () => $this->changes( $this->server() )->discarded_bindings() ] as $work ) {
 				try {
 					$work();
 					self::fail( 'A review was made without the list of the jobs.' );
@@ -963,8 +963,19 @@ final class DatabaseChangesTest extends TestCase {
 			],
 			$this->jobs->get( $job->id )?->data['database_discarded']['done'] ?? null
 		);
+		self::assertSame( $review['tables'], $this->jobs->get( $job->id )?->data['database_discarded']['tables'] ?? null, 'The record of the discard stays as it was.' );
 		self::assertSame( [ $older->id ], array_column( $changes->discarded_bindings(), 'job' ) );
-		self::assertStringContainsString( 'marked as taken care of', implode( "\n", array_column( $this->jobs->log( $job )->read(), 'message' ) ) );
+		$logged = $this->jobs->log( $job )->read();
+		self::assertSame(
+			[
+				'The private tables of the discarded binding were marked as taken care of.',
+				[
+					'user' => 9,
+					'via'  => 'rest',
+				],
+			],
+			[ end( $logged )['message'] ?? null, end( $logged )['context'] ?? null ]
+		);
 		self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( $job->id, 9, 'rest' ) );
 		self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( '20991231T235959Z-ffffff', 9, 'rest' ) );
 		self::assertSame( 1, $this->jobs->prune( 30, $this->clock->seconds ), 'Then the job history prunes it as any other.' );
@@ -999,5 +1010,59 @@ final class DatabaseChangesTest extends TestCase {
 		$this->jobs->save( $job );
 		self::assertSame( [], $this->changes( $this->server() )->discarded_bindings() );
 		self::assertNull( JobStore::discard_listed_until( $job ) );
+	}
+
+	public function test_a_discarded_binding_whose_record_does_not_name_its_tables_is_not_listed_and_cannot_be_marked(): void {
+		$record = [
+			'at'       => $this->clock->seconds,
+			'user'     => 1,
+			'via'      => 'rest',
+			'database' => 'site',
+			'server'   => self::OTHER,
+			'tables'   => [ 'bfr_r_x', 5, 'bfr_r_y' ],
+		];
+		$broken = [];
+		foreach ( [
+			'database' => 7,
+			'server'   => null,
+			'tables'   => 'bfr_r_x',
+		] as $field => $value ) {
+			$job = $this->stranded( sprintf( '20260101T00000%dZ-cccccc', count( $broken ) + 2 ) );
+			unset( $job->data['database_owner'] );
+			$job->data['database_discarded'] = [ $field => $value ] + $record;
+			$this->jobs->save( $job );
+			$broken[] = $job->id;
+		}
+		// A record without the way it was confirmed, and with a table entry that is no name.
+		$job = $this->stranded();
+		unset( $job->data['database_owner'] );
+		$job->data['database_discarded'] = array_diff_key( $record, [ 'via' => true ] );
+		$this->jobs->save( $job );
+		$changes = $this->changes( $this->server() );
+		self::assertSame( [ [ $job->id, '', [ 'bfr_r_x', 'bfr_r_y' ] ] ], array_map( static fn ( array $entry ): array => [ $entry['job'], $entry['via'], $entry['tables'] ], $changes->discarded_bindings() ) );
+		foreach ( $broken as $id ) {
+			self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( $id, 9, 'rest' ) );
+		}
+		self::assertSame( [ 'bfr_r_x', 'bfr_r_y' ], $changes->discarded_done( $job->id, 9, 'rest' )['tables'] );
+	}
+
+	public function test_the_end_of_a_listing_that_cannot_be_recorded_keeps_it_listed_and_says_so(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Directory permissions do not bind root.' );
+		}
+		$job     = $this->stranded();
+		$changes = $this->changes( $this->server() );
+		$changes->discard( $job->id, 7, 'rest', $changes->discard_review( $job->id, 7 )['digest'] );
+		$directory = $this->jobs->directory( $job );
+		chmod( $directory, 0500 );
+		try {
+			$changes->discarded_done( $job->id, 9, 'rest' );
+			self::fail( 'The end of a listing was recorded in a read-only directory.' );
+		} catch ( StorageFailed $unsaved ) {
+			self::assertSame( 'database_discard_storage', $unsaved->context()['code'] ?? null );
+		} finally {
+			chmod( $directory, 0700 );
+		}
+		self::assertSame( [ $job->id ], array_column( $changes->discarded_bindings(), 'job' ), 'It is still listed.' );
 	}
 }
