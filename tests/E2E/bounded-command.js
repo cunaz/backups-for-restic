@@ -5,8 +5,11 @@
  * database client or a download, ends with it and does not outlive the test. A command that
  * ends in time leaves what it put in the background running, as the site's server of
  * "bin/test-site.sh start". The ID of the group is written to <record>, so that runCommand()
- * can stop the group itself if this program does not get to it. The exit status is the
- * command's, 124 after the bound, and 127 for a program that cannot be started.
+ * can stop the group itself if this program does not get to it; a command whose group cannot
+ * be noted is stopped at once. What is left is the moment between the start of the command
+ * and the note: a wrapper that stalls exactly there leaves the command to CI's job limit. The
+ * exit status is the command's, 124 after the bound, 125 without the note, and 127 for a
+ * program that cannot be started.
  */
 const { spawn } = require( 'node:child_process' );
 const fs = require( 'node:fs' );
@@ -15,7 +18,19 @@ const { clearTimeout, setTimeout } = require( 'node:timers' );
 const [ seconds, record, file, ...args ] = process.argv.slice( 2 );
 const child = spawn( file, args, { stdio: 'inherit', detached: true } );
 if ( undefined !== child.pid ) {
-	fs.writeFileSync( record, String( child.pid ) );
+	try {
+		fs.writeFileSync( record, String( child.pid ) );
+	} catch ( error ) {
+		// Without the note, runCommand() could not stop the group where this program does
+		// not: the command does not go on unrecorded.
+		try {
+			process.kill( -child.pid, 'SIGKILL' );
+		} catch {
+			// The group ended in this moment.
+		}
+		process.stderr.write( 'The group of the command could not be noted: ' + error.message + '\n' );
+		process.exit( 125 );
+	}
 }
 const timer = setTimeout( function () {
 	try {
