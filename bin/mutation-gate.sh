@@ -38,9 +38,14 @@
 #   disk of the checkout. Any such line fails the gate, whatever the score, so both markers must
 #   be writable before Infection starts.
 #
-# When more than 5 percent of the mutant processes timed out, the script warns and does not fail:
-# Infection counts a timed-out mutant as detected, so on a slow machine the score is higher than
-# what the tests kill.
+# When more than 5 percent of the mutant processes timed out, Infection's score is an upper
+# bound: it counts a timed-out mutant as detected, and on a slow machine mutants time out that
+# the tests would let escape. The script then computes the scores as Infection 0.35.10 does, but
+# with the timed-out mutants counted as not detected, and fails the gate unless that lower bound
+# meets both floors too: minMsi and minCoveredMsi of the configuration, or --min-msi and
+# --min-covered-msi, which it reads before Infection starts and without which it fails. Up to 5
+# percent Infection's verdict stands, as some mutants loop for good and their timeout is a
+# detection.
 #
 # Infection's own exit status does not stop the script (|| status=$?): the reports and markers
 # are checked after a failed run as well, and their failure takes precedence.
@@ -48,12 +53,23 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The configuration Infection reads, as it finds it, and the summary log that it names.
+# The configuration Infection reads, as it finds it, the summary log that it names, and the
+# floors, which Infection takes from --min-msi and --min-covered-msi before the configuration.
 config=""
+min_msi=""
+min_covered=""
 previous=""
 for argument in "$@"; do
-	case "$previous" in --configuration | -c) config="$argument" ;; esac
-	case "$argument" in --configuration=*) config="${argument#--configuration=}" ;; esac
+	case "$previous" in
+		--configuration | -c) config="$argument" ;;
+		--min-msi) min_msi="$argument" ;;
+		--min-covered-msi) min_covered="$argument" ;;
+	esac
+	case "$argument" in
+		--configuration=*) config="${argument#--configuration=}" ;;
+		--min-msi=*) min_msi="${argument#--min-msi=}" ;;
+		--min-covered-msi=*) min_covered="${argument#--min-covered-msi=}" ;;
+	esac
 	previous="$argument"
 done
 if [[ -z "$config" ]]; then
@@ -74,6 +90,22 @@ if [[ -z "$summary" ]]; then
 fi
 [[ "$summary" == /* ]] || summary="$(dirname "$config")/$summary"
 rm -f "$summary"
+if [[ -z "$min_msi" ]]; then
+	min_msi="$(sed -n 's/^[^/]*"minMsi"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' "$config" | head -n 1)"
+fi
+if [[ -z "$min_covered" ]]; then
+	min_covered="$(sed -n 's/^[^/]*"minCoveredMsi"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' "$config" | head -n 1)"
+fi
+# A percentage with at most two decimals, in hundredths: 80 is 8000, 80.5 is 8050.
+hundredths() {
+	[[ "$1" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?$ ]] || return 1
+	local decimals="${BASH_REMATCH[3]}00"
+	echo $((10#${BASH_REMATCH[1]} * 100 + 10#${decimals:0:2}))
+}
+if ! msi_floor="$(hundredths "$min_msi")" || ! covered_floor="$(hundredths "$min_covered")" || ((msi_floor > 10000 || covered_floor > 10000)); then
+	echo "::error::The floors of $config cannot be read (minMsi \"$min_msi\", minCoveredMsi \"$min_covered\"): each must be a percentage with at most two decimals, in the configuration or as --min-msi and --min-covered-msi, or a run whose timeouts make its score an upper bound could not be held to them."
+	exit 1
+fi
 
 if ! canary="$(mktemp -d "${TMPDIR:-/tmp}/bfr-mutation-canary.XXXXXX")"; then
 	echo "::error::No directory for the reports and the canary marker can be made under ${TMPDIR:-/tmp}, so the mutant processes could not report to this gate."
@@ -118,23 +150,27 @@ if [[ ! -f "$summary" ]]; then
 	echo "::error::Infection wrote no summary to $summary, so it is unknown how many mutant processes should have reported in: the score cannot be trusted."
 	exit 1
 fi
-processes=0
-finished=0
-syntax=0
-timed=0
-for counted in 'Killed by Test Framework' 'Errored' 'Syntax Errors' 'Escaped' 'Timed Out'; do
+for counted in 'Killed by Test Framework' 'Errored' 'Syntax Errors' 'Escaped' 'Timed Out' 'Killed by Static Analysis' 'Skipped' 'Ignored' 'Not Covered' 'Total'; do
 	value="$(sed -n "s/^$counted: \([0-9][0-9]*\)\$/\1/p" "$summary" | head -n 1)"
 	if [[ -z "$value" ]]; then
-		echo "::error::Infection's summary $summary has no line \"$counted: N\", so it is unknown how many mutant processes should have reported in: the score cannot be trusted."
+		echo "::error::Infection's summary $summary has no line \"$counted: N\", so it is unknown how many mutant processes should have reported in and what the scores are: the score cannot be trusted."
 		exit 1
 	fi
-	processes=$((processes + value))
 	case "$counted" in
-		'Killed by Test Framework' | 'Escaped') finished=$((finished + value)) ;;
+		'Killed by Test Framework') killed=$value ;;
+		'Errored') errored=$value ;;
 		'Syntax Errors') syntax=$value ;;
+		'Escaped') escaped=$value ;;
 		'Timed Out') timed=$value ;;
+		'Killed by Static Analysis') static=$value ;;
+		'Skipped') skipped=$value ;;
+		'Ignored') ignored=$value ;;
+		'Not Covered') uncovered=$value ;;
+		'Total') total=$value ;;
 	esac
 done
+processes=$((killed + errored + syntax + escaped + timed))
+finished=$((killed + escaped))
 # How many reports hold a line that matches the pattern.
 holding() {
 	{ find "$canary" -maxdepth 1 -type f -name 'report-*' -exec grep -l -x -E "$1" {} + || true; } | wc -l
@@ -151,13 +187,35 @@ among=$((caught - syntax))
 ((among > 0)) || among=0
 needed=$((finished - among))
 echo "Mutant processes: $processes ran tests, $finished of them to their end; $reported reported in, $passed could write durably or did not compile ($caught caught, $syntax counted as syntax errors, $loading ended while the classes loaded), $ended ended with PHP's own file wrapper (needed: $needed), $intest of them after a fatal error in a test, and $outside more after a fatal error outside a test, which do not count."
-# Healthy runs of the six gates, locally and in CI, timed out 0.1 to 1.8 percent of their mutant
-# processes; the database gate on a slow runner 10.1 percent (414 of 4,081), at a score 8 points
-# above what its tests kill.
-if ((timed * 20 > processes)); then
-	echo "::warning::$timed of the $processes mutant processes timed out, more than 5 percent. Infection counts a timed-out mutant as detected, so on a slow machine the score is higher than what the tests kill: compare this run with one on a faster machine before trusting its score."
-fi
 short=0
+# Infection 0.35.10 scores the mutants it tested, the total less skipped and ignored: detected
+# are those killed by the tests or by static analysis, errored, syntax errors and timed out, and
+# the covered code MSI leaves out those not covered as well. It rounds half up to hundredths.
+# The score in hundredths of a percent, from the detected and the scored mutants:
+score() {
+	if (($2 > 0)); then echo $(((20000 * $1 + $2) / (2 * $2))); else echo 0; fi
+}
+percent() {
+	printf '%d.%02d %%' $(($1 / 100)) $(($1 % 100))
+}
+# Healthy runs of the six gates, locally and in CI, timed out 0.1 to 1.8 percent of their mutant
+# processes, where the lower bound lies below the floors of the ZIP and core gates; the database
+# gate on a slow runner 10.1 percent (414 of 4,081), between 80.62 and 90.30 percent.
+if ((timed * 20 > processes)); then
+	tested=$((total - skipped - ignored))
+	detected=$((killed + static + errored + syntax))
+	msi_low="$(score "$detected" "$tested")"
+	msi_high="$(score $((detected + timed)) "$tested")"
+	covered_low="$(score "$detected" $((tested - uncovered)))"
+	covered_high="$(score $((detected + timed)) $((tested - uncovered)))"
+	bounds="MSI between $(percent "$msi_low") and $(percent "$msi_high"), covered code MSI between $(percent "$covered_low") and $(percent "$covered_high"), against the floors $(percent "$msi_floor") and $(percent "$covered_floor")"
+	if ((msi_low >= msi_floor && covered_low >= covered_floor)); then
+		echo "::notice::$timed of the $processes mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: $bounds. Counted as not detected, the timed-out mutants still leave both scores at their floors, so the run counts."
+	else
+		echo "::error::$timed of the $processes mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: $bounds. Counted as not detected, the timed-out mutants leave a score below its floor, so the score cannot be trusted on this machine: run the gate again on a faster one."
+		short=1
+	fi
+fi
 if ((reported < processes)); then
 	echo "::error::$((processes - reported)) of the $processes mutant processes that Infection ran did not report in: they did not run tests/Mutation/bootstrap.php or could not write their report, so the score above cannot be trusted."
 	short=1

@@ -621,11 +621,27 @@ differs: on 2026-11-20 a run of the database gate during other test runs counted
 instead of 8, and on 2026-11-25 CI's run on `662c8b1` counted 414 instead of 9 on a runner whose
 initial test run took 77.7 s instead of 46.6 s: the gate took 3 h 21 min instead of 1 h 47 min,
 218 mutants escaped instead of 572, and its 90.30 % and 94.66 % measured the runner, not the
-tests. So `bin/mutation-gate.sh` warns, without failing the gate, when more than 5 % of the
-mutant processes timed out: healthy runs of the six gates, locally and in CI, lay between 0.1 %
-and 1.8 %, that run at 10.1 %. One mutant of the ZIP writer writes its checkpoint files into the
-working directory, and so do mutants of the file restore gate; delete `.head`, `.names` and
-`.state` there after a local run.
+tests. Mutation testing is a merge gate for measured code
+([ADR 0024](adr/0024-governance-and-quality-assurance.md), point 3), so such a score must not
+pass a floor. When more than 5 % of the mutant processes timed out, `bin/mutation-gate.sh`
+therefore computes the scores again with every timed-out mutant counted as not detected, and
+otherwise as Infection 0.35.10 does: the mutants killed by the tests or by static analysis, the
+errored ones and the syntax errors, over all mutants less the skipped and ignored ones, and for
+the covered code MSI less those not covered as well, rounded half up to hundredths. It lets the
+run count only if that lower bound meets both floors too, `minMsi` and `minCoveredMsi` of the
+configuration or `--min-msi` and `--min-covered-msi`, and says so in a notice with both bounds;
+otherwise it fails the gate, as the score cannot be trusted on that machine, and the gate has to
+run again on a faster one. It reads the floors before Infection starts and fails when it cannot.
+Up to 5 % Infection's verdict stands: healthy runs of the six gates, locally and in CI, timed
+out 0.1 % to 1.8 % of their mutant processes, among them mutants that loop for good, whose
+timeout is a detection, and on such runs the lower bound lies below the floors of the ZIP and
+core gates (81.61 % against 83 %, 88.50 % against 89 %). The slow run of `662c8b1` timed out
+10.1 %, and its bounds, 80.62 % to 90.30 % and 84.51 % to 94.66 % covered, meet the database
+gate's floors of 80 % and 84 %: it would have counted on the mutants that its tests killed. On
+the last runs of the six gates, locally and in CI on `662c8b1`, the script's arithmetic gave
+Infection's scores to the hundredth. One mutant of the ZIP writer writes its checkpoint files
+into the working directory, and so do mutants of the file restore gate; delete `.head`, `.names`
+and `.state` there after a local run.
 
 The escaped mutants by class with `main` at `e40ab18`, the work of a later package:
 

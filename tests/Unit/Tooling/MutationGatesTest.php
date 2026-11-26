@@ -381,57 +381,120 @@ final class MutationGatesTest extends TestCase {
 	}
 
 	/**
-	 * Runs whose mutant processes timed out: "killed errored syntax escaped timed-out", Infection's
-	 * exit status, and whether the script warns.
+	 * Runs whose mutant processes timed out, against the floors 80 % and 84 %: the counts "killed
+	 * errored syntax escaped timed-out not-covered", Infection's exit status, the script's, and
+	 * the annotation that it prints, if any.
 	 *
-	 * @return array<string, array{string, string, bool}>
+	 * @return array<string, array{string, string, int, string}>
 	 */
 	public static function timed_out_runs(): array {
 		return [
-			'2 of 20 timed out, a healthy run'     => [ '18 0 0 0 2', '0', true ],
-			'2 of 20 timed out, Infection failed'  => [ '18 0 0 0 2', '3', true ],
-			'1 of 20 timed out, exactly 5 percent' => [ '19 0 0 0 1', '0', false ],
-			'1 of 40 timed out'                    => [ '39 0 0 0 1', '0', false ],
+			// 10 of 100 timed out: both scores lie between 85 % and 95 %.
+			'both floors met without the timed-out mutants' => [ '85 0 0 5 10 0', '0', 0, '::notice::10 of the 100 mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: MSI between 85.00 % and 95.00 %, covered code MSI between 85.00 % and 95.00 %, against the floors 80.00 % and 84.00 %. Counted as not detected, the timed-out mutants still leave both scores at their floors, so the run counts.' ],
+			"Infection's status passes on"         => [ '85 0 0 5 10 0', '3', 3, '::notice::10 of the 100 mutant processes timed out, more than 5 percent' ],
+			// 7 not covered: MSI 79.44 % to 88.79 %, covered code MSI 85 % to 95 %.
+			'the MSI floor met only with them'     => [ '85 0 0 5 10 7', '0', 1, '::error::10 of the 100 mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: MSI between 79.44 % and 88.79 %, covered code MSI between 85.00 % and 95.00 %, against the floors 80.00 % and 84.00 %. Counted as not detected, the timed-out mutants leave a score below its floor, so the score cannot be trusted on this machine: run the gate again on a faster one.' ],
+			// Both scores between 82 % and 92 %.
+			'the covered floor met only with them' => [ '82 0 0 8 10 0', '0', 1, '::error::10 of the 100 mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: MSI between 82.00 % and 92.00 %, covered code MSI between 82.00 % and 92.00 %, against the floors 80.00 % and 84.00 %.' ],
+			// Infection's verdict stands, although 80 % covered without the timed-out mutants is below 84 %.
+			'exactly 5 percent timed out'          => [ '80 0 0 15 5 0', '0', 0, '' ],
+			'1 of 40 timed out'                    => [ '29 0 0 10 1 0', '0', 0, '' ],
 		];
 	}
 
 	/**
-	 * More than 5 percent of the mutant processes timed out draws a warning, and only a warning:
-	 * Infection counts a timeout as detected, so on a slow machine the score is higher than what
-	 * the tests kill, as for the database gate on a slow runner (414 of 4,081). Healthy runs of
-	 * the six gates timed out 0.1 to 1.8 percent.
+	 * Above 5 percent of timed-out mutant processes Infection's score is an upper bound, as it
+	 * counts a timeout as detected: the database gate on a slow runner timed out 414 of 4,081.
+	 * The run then counts only if the score with the timed-out mutants counted as not detected
+	 * meets both floors as well. Up to 5 percent Infection's verdict stands: healthy runs of the
+	 * six gates timed out 0.1 to 1.8 percent.
 	 *
-	 * @param string $counts The summary's counts.
-	 * @param string $status Infection's exit status, which the script passes on.
-	 * @param bool   $warned Whether the script warns.
+	 * @param string $counts     The summary's counts.
+	 * @param string $infection  Infection's exit status.
+	 * @param int    $expected   The script's exit status.
+	 * @param string $annotation What the script prints about the bounds, or "" for nothing.
 	 */
 	#[DataProvider( 'timed_out_runs' )]
-	public function test_the_gate_script_warns_when_many_mutant_processes_timed_out( string $counts, string $status, bool $warned ): void {
+	public function test_the_gate_script_bounds_the_score_when_many_mutant_processes_timed_out( string $counts, string $infection, int $expected, string $annotation ): void {
 		$numbers = array_map( 'intval', explode( ' ', $counts ) );
-		$killed  = $numbers[0];
-		$timed   = $numbers[4];
-		$root    = self::gate_checkout();
+		$root    = self::gate_checkout( "    \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n" );
 		try {
-			[ $exit, $output ] = self::gate(
-				$root,
-				[
-					'FAKE_REPORTS' => '0',
-					'FAKE_SUMMARY' => 'counts',
-					'FAKE_COUNTS'  => $counts,
-					'FAKE_LINES'   => implode( ';', array_merge( array_fill( 0, $killed, 'pass,end' ), array_fill( 0, $timed, 'pass' ) ) ),
-					'FAKE_STATUS'  => $status,
-				]
-			);
-			self::assertSame( (int) $status, $exit, $output );
-			self::assertStringContainsString( "$killed ended with PHP's own file wrapper (needed: $killed)", $output );
-			if ( $warned ) {
-				self::assertStringContainsString( "::warning::$timed of the " . ( $killed + $timed ) . ' mutant processes timed out, more than 5 percent. Infection counts a timed-out mutant as detected, so on a slow machine the score is higher than what the tests kill', $output );
+			[ $status, $output ] = self::gate( $root, self::timed_out( $counts, $infection ) );
+			self::assertSame( $expected, $status, $output );
+			self::assertStringContainsString( ( $numbers[0] + $numbers[3] ) . " ended with PHP's own file wrapper (needed: " . ( $numbers[0] + $numbers[3] ) . ')', $output );
+			if ( '' === $annotation ) {
+				self::assertStringNotContainsString( '::notice::', $output );
+				self::assertStringNotContainsString( '::error::', $output );
 			} else {
-				self::assertStringNotContainsString( '::warning::', $output );
+				self::assertStringContainsString( $annotation, $output );
+				self::assertStringNotContainsString( str_starts_with( $annotation, '::notice::' ) ? '::error::' : '::notice::', $output );
 			}
 		} finally {
 			TempDir::remove( $root );
 		}
+	}
+
+	/**
+	 * Floors as the script reads them: the configuration's lines, the arguments, what the script
+	 * prints, and whether Infection started. The run has 10 timed-out mutants of 100, so both
+	 * scores lie between 85 % and 95 %.
+	 *
+	 * @return array<string, array{string, list<string>, string, bool}>
+	 */
+	public static function floor_readings(): array {
+		return [
+			'no floors'                        => [ '', [], '::error::The floors of infection.json5.dist cannot be read (minMsi "", minCoveredMsi "")', false ],
+			'no covered floor'                 => [ "    \"minMsi\": 80,\n", [], '::error::The floors of infection.json5.dist cannot be read (minMsi "80", minCoveredMsi "")', false ],
+			'a floor with three decimals'      => [ "    \"minMsi\": 80.125,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "80.125", minCoveredMsi "84")', false ],
+			'a floor in a comment'             => [ "    // \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "", minCoveredMsi "84")', false ],
+			'floors on the command line'       => [ '', [ '--min-msi=86', '--min-covered-msi', '84.5' ], 'against the floors 86.00 % and 84.50 %', true ],
+			'the command line before the file' => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [ '--min-msi=86' ], 'against the floors 86.00 % and 84.00 %', true ],
+		];
+	}
+
+	/**
+	 * The script reads the floors before Infection starts, as Infection does: from --min-msi and
+	 * --min-covered-msi, else from the configuration. When it cannot, the gate fails, as a run
+	 * whose timeouts make its score an upper bound could not be held to them.
+	 *
+	 * @param string       $floors  Lines of the configuration with the floors.
+	 * @param list<string> $options Arguments of the script.
+	 * @param string       $printed What the script prints.
+	 * @param bool         $started Whether Infection started.
+	 */
+	#[DataProvider( 'floor_readings' )]
+	public function test_the_gate_script_reads_the_floors_before_infection_starts( string $floors, array $options, string $printed, bool $started ): void {
+		$root = self::gate_checkout( $floors );
+		try {
+			[ $status, $output ] = self::gate( $root, self::timed_out( '85 0 0 5 10 0', '0' ), $options );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( $printed, $output );
+			if ( $started ) {
+				self::assertStringContainsString( 'infection ' . implode( ' ', $options ) . ' --threads=2', $output );
+			} else {
+				self::assertStringNotContainsString( 'infection --threads=2', $output, 'Infection did not start.' );
+			}
+		} finally {
+			TempDir::remove( $root );
+		}
+	}
+
+	/**
+	 * The stand-in's variables for a summary of the counts "killed errored syntax escaped
+	 * timed-out not-covered", with the reports that the processes leave: a pass and an end line
+	 * for the killed and escaped mutants, a pass for the timed-out ones.
+	 *
+	 * @return array<string, string>
+	 */
+	private static function timed_out( string $counts, string $infection ): array {
+		$numbers = array_map( 'intval', explode( ' ', $counts ) );
+		return [
+			'FAKE_REPORTS' => '0',
+			'FAKE_SUMMARY' => 'counts',
+			'FAKE_COUNTS'  => $counts,
+			'FAKE_LINES'   => implode( ';', array_merge( array_fill( 0, $numbers[0] + $numbers[3], 'pass,end' ), array_fill( 0, $numbers[4], 'pass' ) ) ),
+			'FAKE_STATUS'  => $infection,
+		];
 	}
 
 	/**
@@ -488,7 +551,7 @@ final class MutationGatesTest extends TestCase {
 	public function test_the_gate_reads_the_summary_of_the_configuration_it_is_given(): void {
 		$root = self::gate_checkout();
 		try {
-			file_put_contents( $root . '/infection-other.json5.dist', "{\n    // \"summary\": \"commented/out.log\"\n    \"logs\": {\n        \"summary\": \".tools/infection/summary.log\"\n    }\n}\n" );
+			file_put_contents( $root . '/infection-other.json5.dist', "{\n    // \"summary\": \"commented/out.log\"\n    \"minMsi\": 0,\n    \"minCoveredMsi\": 0,\n    \"logs\": {\n        \"summary\": \".tools/infection/summary.log\"\n    }\n}\n" );
 			unlink( $root . '/infection.json5.dist' );
 			[ $status, $output ] = self::gate( $root, [], [ '--configuration=infection-other.json5.dist' ] );
 			self::assertSame( 0, $status, $output );
@@ -591,18 +654,20 @@ final class MutationGatesTest extends TestCase {
 	 * (1) that their copy does not compile, and the first FAKE_ENDS (4) how they ended. It writes
 	 * the summary that FAKE_SUMMARY names (full: 3 killed, 1 escaped, 1 timed out, 1 syntax error,
 	 * 3 not covered; killed-compile: the syntax error counted as killed; counts: FAKE_COUNTS, as
-	 * "killed errored syntax escaped timed-out"). FAKE_LINES adds reports whose statements it
-	 * names, one report per ";" (pass, caught, loading, end, fatal-in-test, fatal-outside). The
-	 * stand-in locks the
-	 * reports and .tools when FAKE_LOCK is "before", runs FAKE_CHILD with FAKE_PHP, and exits with
-	 * FAKE_STATUS.
+	 * "killed errored syntax escaped timed-out [not-covered]"). FAKE_LINES adds reports whose
+	 * statements it names, one report per ";" (pass, caught, loading, end, fatal-in-test,
+	 * fatal-outside). The stand-in locks the reports and .tools when FAKE_LOCK is "before", runs
+	 * FAKE_CHILD with FAKE_PHP, and exits with FAKE_STATUS. The configuration has the floors given,
+	 * by default 0 and 0, which any lower bound meets.
+	 *
+	 * @param string $floors Lines of the configuration with the floors.
 	 */
-	private static function gate_checkout(): string {
+	private static function gate_checkout( string $floors = "    \"minMsi\": 0,\n    \"minCoveredMsi\": 0,\n" ): string {
 		$root = TempDir::create( 'mutation-gate' );
 		mkdir( $root . '/bin' );
 		mkdir( $root . '/.tools/bin', 0700, true );
 		copy( dirname( __DIR__, 3 ) . '/bin/mutation-gate.sh', $root . '/bin/mutation-gate.sh' );
-		file_put_contents( $root . '/infection.json5.dist', "{\n    \"logs\": {\n        \"text\": \".tools/infection/infection.log\",\n        \"summary\": \".tools/infection/summary.log\"\n    }\n}\n" );
+		file_put_contents( $root . '/infection.json5.dist', "{\n" . $floors . "    \"logs\": {\n        \"text\": \".tools/infection/infection.log\",\n        \"summary\": \".tools/infection/summary.log\"\n    }\n}\n" );
 		file_put_contents(
 			$root . '/.tools/bin/infection',
 			<<<'BASH'
@@ -653,8 +718,8 @@ final class MutationGatesTest extends TestCase {
 				killed-compile) printf 'Total: 9\n\nKilled by Test Framework: 4\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 0\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
 				partial) printf 'Total: 9\n\nKilled by Test Framework: 3\n' > "$tools/infection/summary.log" ;;
 				counts)
-					read -r killed errored syntax escaped timed <<< "$FAKE_COUNTS"
-					printf 'Total: %d\n\nKilled by Test Framework: %d\nKilled by Static Analysis: 0\nErrored: %d\nSyntax Errors: %d\nEscaped: %d\nTimed Out: %d\nSkipped: 0\nIgnored: 0\nNot Covered: 0\n' "$((killed + errored + syntax + escaped + timed))" "$killed" "$errored" "$syntax" "$escaped" "$timed" > "$tools/infection/summary.log"
+					read -r killed errored syntax escaped timed uncovered <<< "$FAKE_COUNTS"
+					printf 'Total: %d\n\nKilled by Test Framework: %d\nKilled by Static Analysis: 0\nErrored: %d\nSyntax Errors: %d\nEscaped: %d\nTimed Out: %d\nSkipped: 0\nIgnored: 0\nNot Covered: %d\n' "$((killed + errored + syntax + escaped + timed + ${uncovered:-0}))" "$killed" "$errored" "$syntax" "$escaped" "$timed" "${uncovered:-0}" > "$tools/infection/summary.log"
 					;;
 			esac
 			if [[ "${FAKE_LOCK:-}" == before ]]; then
