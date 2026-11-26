@@ -230,6 +230,43 @@ final class JobStore {
 	}
 
 	/**
+	 * Why get() does not load a job whose document has_document() counts. `job_unreadable`
+	 * where this process reads a regular file in the job's own directory that this version
+	 * cannot parse. `job_inaccessible` where it cannot look the document up or read it: below a
+	 * job directory that it may not search, as a file that it may not read, or as a link or
+	 * anything else that the plugin did not write in the place of the directory or the
+	 * document. Ownership and permissions settle the second, not another plugin version; a
+	 * job directory that a command-line run as another user created (reserve_id() makes it
+	 * 0700) is one.
+	 *
+	 * @param string $id Job ID that has_document() counts.
+	 * @return string The code, job_unreadable or job_inaccessible.
+	 */
+	public function unreadable_code( string $id ): string {
+		$file = $this->directory . '/' . $id . '/job.json';
+		return true === Files::marker( $file ) && is_readable( $file ) ? 'job_unreadable' : 'job_inaccessible';
+	}
+
+	/**
+	 * Refuses because of a job that get() does not load although has_document() counts its
+	 * document: its state cannot be established, so it may still be running. The refusal
+	 * carries the code of unreadable_code() and the job's ID, which its texts name.
+	 *
+	 * @param string $id Job ID that has_document() counts.
+	 * @throws JobConflict Always.
+	 */
+	public function refuse_unreadable( string $id ): never {
+		$code = $this->unreadable_code( $id );
+		JobConflict::raise(
+			'job_inaccessible' === $code ? 'The PHP user cannot open the directory or the document of a stored job.' : 'A stored job cannot be read by this version of the plugin.',
+			[
+				'job'  => $id,
+				'code' => $code,
+			]
+		);
+	}
+
+	/**
 	 * Whether the records of an apply's undo hold its recovery window open, by their presence:
 	 * true while `undo/attempted` shows an attempted change and no `undo/reverted` marks it as
 	 * undone completely, false where it is established that the apply attempted no change or was
@@ -522,13 +559,20 @@ final class JobStore {
 	 *
 	 * @param bool $uninstall Also finish cleanup for interrupted, deactivated jobs.
 	 * @return \Generator<int, Job> Jobs holding their original cleanup identity.
-	 * @throws StorageFailed If uninstall cannot verify a stored job's ownership records.
+	 * @throws StorageFailed If uninstall cannot verify a stored job's ownership records, with the
+	 *                       job's ID and the code of unreadable_code().
 	 */
 	public function pending_database_cleanups( bool $uninstall ): \Generator {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( $uninstall && null === $job && $this->has_document( $id ) ) {
-				throw new StorageFailed( 'An unreadable job must be recovered before uninstalling.' );
+				StorageFailed::raise(
+					'An unreadable job must be recovered before uninstalling.',
+					[
+						'job'  => $id,
+						'code' => $this->unreadable_code( $id ),
+					]
+				);
 			}
 			if ( null !== $job && JobType::Restore === $job->type && isset( $job->data['database_binding'] ) && ( $uninstall || $job->state->is_terminal() ) ) {
 				yield $job;
@@ -557,7 +601,8 @@ final class JobStore {
 
 	/**
 	 * Requires a store with no active job and no unreadable job document, which includes a
-	 * document that cannot be looked up (has_document()). Called while the creation lock holds.
+	 * document that cannot be looked up (has_document()); refuse_unreadable() names it and
+	 * says which of the two it is. Called while the creation lock holds.
 	 * An unknown layout cannot prove that a job has finished, even if its raw state field looks
 	 * familiar; no part of that layout is interpreted here.
 	 *
@@ -572,13 +617,7 @@ final class JobStore {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( null === $job && $this->has_document( $id ) ) {
-				JobConflict::raise(
-					'A stored job cannot be read by this version of the plugin.',
-					[
-						'job'  => $id,
-						'code' => 'job_unreadable',
-					]
-				);
+				$this->refuse_unreadable( $id );
 			}
 			if ( null !== $job && $job->state->is_terminal() && isset( $job->data['database_owner'], $job->data['database_foreign'] ) ) {
 				if ( JobType::DatabaseApply === $type ) {

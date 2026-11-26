@@ -45,6 +45,36 @@ final class Messages {
 	}
 
 	/**
+	 * Message and hint for the refusal because of a stored job that cannot be read
+	 * (JobStore::refuse_unreadable()), with the job's ID where the job cannot be opened, so that
+	 * the administrator finds its folder. A document that this version cannot parse has the
+	 * texts of its code.
+	 *
+	 * @param string $code job_inaccessible or job_unreadable.
+	 * @param string $id   ID of the job, the name of its folder under jobs/.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function stored_job( string $code, string $id ): array {
+		if ( 'job_inaccessible' !== $code ) {
+			return self::job_error( $code );
+		}
+		return [
+			/* translators: %s: job ID, which is also the name of the job's folder. */
+			'message' => sprintf( __( 'The PHP user cannot open the stored job %s in the private working directory.', 'backups-for-restic' ), $id ),
+			'hint'    => self::inaccessible_hint(),
+		];
+	}
+
+	/**
+	 * What to do about a stored job that the PHP user cannot open: its cause and the way out.
+	 *
+	 * @return string Hint.
+	 */
+	private static function inaccessible_hint(): string {
+		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link or something else that the plugin did not write is in the place of the folder or of job.json: put the job\'s own files back. Until the job can be read, its files are kept, and new jobs and repository changes stay blocked.', 'backups-for-restic' );
+	}
+
+	/**
 	 * Message and hint for a job error code. Without a kind of job, the texts are those that a
 	 * request is answered with and those of a backup; a job of another kind gets texts of its
 	 * own where these would name the backup or an action that the job does not have.
@@ -372,6 +402,10 @@ final class Messages {
 			'job_unreadable'                 => [
 				'message' => __( 'A stored job cannot be read by this version of the plugin.', 'backups-for-restic' ),
 				'hint'    => __( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', 'backups-for-restic' ),
+			],
+			'job_inaccessible'               => [
+				'message' => __( 'The PHP user cannot open a stored job in the private working directory.', 'backups-for-restic' ),
+				'hint'    => self::inaccessible_hint(),
 			],
 			'configuration'                  => [
 				'message' => __( 'The backup is not configured completely.', 'backups-for-restic' ),

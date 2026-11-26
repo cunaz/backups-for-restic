@@ -410,8 +410,9 @@ final readonly class FileChanges implements StepProvider {
 	 * @param string $undo_job Undo job.
 	 * @param int    $offset First kept entry.
 	 * @return KeptPage Page.
-	 * @throws JobConflict With the code `not_found` if no job has this ID, `job_unreadable` if
-	 *                     its document cannot be read, `not_an_undo` for a job of another type,
+	 * @throws JobConflict With the code `not_found` if no job has this ID, `job_unreadable` or
+	 *                     `job_inaccessible` with the job's ID if its document cannot be read
+	 *                     (JobStore::refuse_unreadable()), `not_an_undo` for a job of another type,
 	 *                     `undo_not_ended` for an undo that is queued or running, and
 	 *                     `kept_list_unavailable` for kept entries whose list it could not seal.
 	 * @throws InvalidArgument If the page is outside the list.
@@ -420,9 +421,9 @@ final readonly class FileChanges implements StepProvider {
 	public function kept_page( string $undo_job, int $offset ): array {
 		$job = $this->jobs->get( $undo_job );
 		if ( null === $job ) {
-			// A document that this version cannot read is a job all the same.
+			// A document that cannot be read is a job all the same.
 			if ( $this->jobs->has_document( $undo_job ) ) {
-				JobConflict::raise( 'A stored job cannot be read by this version of the plugin.', [ 'code' => 'job_unreadable' ] );
+				$this->jobs->refuse_unreadable( $undo_job );
 			}
 			JobConflict::raise( 'No job has this ID.', [ 'code' => 'not_found' ] );
 		}

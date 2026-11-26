@@ -192,6 +192,25 @@ final class JobMessagesTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_a_stored_job_that_the_php_user_cannot_open_is_named_with_its_cause_and_way_out(): void {
+		self::text( 'internal' );
+		$id    = '20260101T000000Z-0a1b2c';
+		$named = Messages::stored_job( 'job_inaccessible', $id );
+		// Before, this job was refused as job_unreadable, which neither named it nor said what to do.
+		self::assertSame( 'The PHP user cannot open the stored job 20260101T000000Z-0a1b2c in the private working directory.', $named['message'] );
+		foreach ( [ 'belongs to another user or lacks read or search permission', 'WP-CLI command that ran as root', 'Give the PHP user back ownership of that folder', 'a link or something else that the plugin did not write', 'new jobs and repository changes stay blocked' ] as $part ) {
+			self::assertStringContainsString( $part, $named['hint'] );
+		}
+		self::assertStringNotContainsString( 'plugin version', $named['message'] . ' ' . $named['hint'] );
+		$general = Messages::job_error( 'job_inaccessible' );
+		self::assertSame( 'The PHP user cannot open a stored job in the private working directory.', $general['message'] );
+		self::assertSame( $named['hint'], $general['hint'] );
+		// A document that this version cannot parse keeps its texts, which ask for another version.
+		self::assertSame( Messages::job_error( 'job_unreadable' ), Messages::stored_job( 'job_unreadable', $id ) );
+		self::assertStringContainsString( 'Install a plugin version that can read the job.', Messages::stored_job( 'job_unreadable', $id )['hint'] );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_a_folder_that_keeps_changing_is_named_in_the_log_and_paused_for_a_new_review(): void {
 		self::text( 'internal' );
 		$preview = Messages::job_error( 'file_folder_changing', 'file_plan' );

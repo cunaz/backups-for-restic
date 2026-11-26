@@ -1936,7 +1936,7 @@ final class FileChangesTest extends TestCase {
 			self::fail( 'The kept entries of an undo whose document cannot be looked up were listed.' );
 		} catch ( JobConflict $refused ) {
 			// Before, the answer was that of an ID that no job has, not_found.
-			self::assertSame( 'job_unreadable', $refused->context()['code'] ?? null );
+			self::assertSame( [ 'job_inaccessible', $undo->id ], [ $refused->context()['code'] ?? null, $refused->context()['job'] ?? null ] );
 		} finally {
 			chmod( $folder, 0700 );
 		}

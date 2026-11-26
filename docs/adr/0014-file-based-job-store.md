@@ -81,7 +81,11 @@ that cannot be read (`JobStore::has_document()`): a document is gone only where 
 missing from a job directory that the PHP user can search, or the directory is missing; below
 a job directory without search permission, or with a directory or a link at its name, it may
 be there. Before, `is_file()` counted it as gone, so that such a job did not block a new one
-and the staging of its restore expired by the time in its ID ([ADR 0041](0041-guarded-file-changes.md), As built). The first options layout number is inserted atomically and never
+and the staging of its restore expired by the time in its ID ([ADR 0041](0041-guarded-file-changes.md), As built).
+Such a job is refused with a code of its own, `job_inaccessible`, which names the job and
+asks for ownership and permissions to be put right; another plugin version would not help.
+`job_unreadable` stays for a regular file that this version reads but cannot parse
+(`JobStore::unreadable_code()`). The first options layout number is inserted atomically and never
 overwrites a competing writer's value. A malformed options marker is preserved and keeps
 the plugin inactive, including leaving jobs and locks alone during deactivation; only a
 missing marker denotes legacy settings.

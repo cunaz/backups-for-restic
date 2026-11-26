@@ -233,7 +233,8 @@ final class Staging {
 	 *                   null if nothing is staged for the job.
 	 * @throws InvalidArgument With the code invalid_job_id if the ID is not one of a job.
 	 * @throws JobConflict If the job is a restore that has not ended, or with the code
-	 *                     job_unreadable if its document cannot be read.
+	 *                     job_unreadable or job_inaccessible if its document cannot be read
+	 *                     (JobStore::refuse_unreadable()).
 	 * @throws StorageFailed If the directory cannot be set aside or deleted.
 	 */
 	public function remove( string $id, float $deadline ): ?bool {
@@ -274,13 +275,7 @@ final class Staging {
 		}
 		$job = $this->jobs->get( $id );
 		if ( null === $job && $this->jobs->has_document( $id ) ) {
-			JobConflict::raise(
-				'A stored job cannot be read by this version of the plugin.',
-				[
-					'job'  => $id,
-					'code' => 'job_unreadable',
-				]
-			);
+			$this->jobs->refuse_unreadable( $id );
 		}
 		// Only a restore stages. An active job of another type has nothing here to wait for,
 		// and the answer for it is the one for a job without staging.

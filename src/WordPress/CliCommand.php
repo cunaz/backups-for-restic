@@ -233,7 +233,7 @@ final class CliCommand {
 			// The data is part of the new job document: a later save could meet the job's first tick.
 			$job = $this->container->jobs()->create( $type, 'cli', time(), $data );
 		} catch ( JobConflict $conflict ) {
-			\WP_CLI::error( Messages::job_error( JobError::from_throwable( $conflict )->code )['message'] );
+			\WP_CLI::error( self::refusal( $conflict, Messages::job_error( JobError::from_throwable( $conflict )->code )['message'] ) );
 		} catch ( StorageFailed ) {
 			\WP_CLI::error( __( 'The job could not be started. Check free space and write permissions in the private working directory.', 'backups-for-restic' ) );
 		}
@@ -399,7 +399,7 @@ final class CliCommand {
 				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
 			}
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( $error->getMessage() );
+			\WP_CLI::error( self::refusal( $error ) );
 		}
 		if ( $refused ) {
 			\WP_CLI::error( __( 'The preview contains refused entries.', 'backups-for-restic' ) );
@@ -466,7 +466,7 @@ final class CliCommand {
 			$this->run_until_idle( $this->container->tick_budget() );
 			$this->report( $job->id );
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( $error->getMessage() );
+			\WP_CLI::error( self::refusal( $error ) );
 		}
 	}
 
@@ -518,7 +518,7 @@ final class CliCommand {
 				$lock->release();
 			}
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( $error->getMessage() );
+			\WP_CLI::error( self::refusal( $error ) );
 		}
 		\WP_CLI::success( __( 'The database restore binding was discarded.', 'backups-for-restic' ) );
 	}
@@ -614,7 +614,7 @@ final class CliCommand {
 		}
 		$job = $this->container->runner()->cancel( $id, [ 'user' => 'wp-cli' ] );
 		if ( null === $job ) {
-			\WP_CLI::error( __( 'The job does not exist.', 'backups-for-restic' ) );
+			$this->missing_job( $id );
 		}
 		if ( ! $job->state->is_terminal() ) {
 			// The cleanup releases the repository lock; do it now if no other tick is at work.
@@ -642,7 +642,7 @@ final class CliCommand {
 		$jobs = $this->container->jobs();
 		$job  = isset( $args[0] ) ? $jobs->get( $args[0] ) : ( $jobs->latest( 1 )[0] ?? null );
 		if ( null === $job ) {
-			\WP_CLI::error( __( 'The job does not exist.', 'backups-for-restic' ) );
+			$this->missing_job( $args[0] ?? '' );
 		}
 		$lines = max( 1, (int) ( $assoc_args['lines'] ?? 50 ) );
 		\WP_CLI::line( $job->id . ' ' . Messages::job_type( $job->type->value ) . ' ' . Messages::state( $job->state->value ) );
@@ -650,6 +650,41 @@ final class CliCommand {
 			$context = is_array( $entry['context'] ?? null ) && [] !== $entry['context'] ? ' ' . (string) wp_json_encode( $entry['context'] ) : '';
 			\WP_CLI::line( sprintf( '%s %-7s %s%s', gmdate( 'Y-m-d H:i:s', is_int( $entry['time'] ?? null ) ? $entry['time'] : 0 ), is_string( $entry['level'] ?? null ) ? $entry['level'] : '', is_string( $entry['message'] ?? null ) ? $entry['message'] : '', $context ) );
 		}
+	}
+
+	/**
+	 * What the command line says about a refusal: for a stored job that cannot be read
+	 * (JobStore::refuse_unreadable()), the texts that name the job and what to do, as the
+	 * admin page shows them; otherwise the given text or the exception's message.
+	 *
+	 * @param PluginException $error    Refusal.
+	 * @param string|null     $fallback Text for any other refusal, or null for the exception's message.
+	 * @return string Text.
+	 */
+	private static function refusal( PluginException $error, ?string $fallback = null ): string {
+		$context = $error->context();
+		$code    = $context['code'] ?? null;
+		$job     = $context['job'] ?? null;
+		if ( in_array( $code, [ 'job_inaccessible', 'job_unreadable' ], true ) && is_string( $job ) ) {
+			$texts = Messages::stored_job( $code, $job );
+			return $texts['message'] . ' ' . $texts['hint'];
+		}
+		return $fallback ?? $error->getMessage();
+	}
+
+	/**
+	 * Ends a command for a job ID that JobStore::get() does not load: a stored job that cannot
+	 * be read says so with the texts of the refusal of a new job, any other ID that no job has it.
+	 *
+	 * @param string $id Job ID.
+	 */
+	private function missing_job( string $id ): never {
+		$jobs = $this->container->jobs();
+		if ( $jobs->has_document( $id ) ) {
+			$texts = Messages::stored_job( $jobs->unreadable_code( $id ), $id );
+			\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
+		}
+		\WP_CLI::error( __( 'The job does not exist.', 'backups-for-restic' ) );
 	}
 
 	/**

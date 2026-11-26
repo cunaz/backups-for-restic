@@ -468,7 +468,8 @@ final class StagingTest extends TestCase {
 				$this->staging->remove( $job->id, self::NO_DEADLINE );
 				self::fail( 'A staging whose job cannot be read was removed.' );
 			} catch ( JobConflict $conflict ) {
-				self::assertSame( 'job_unreadable', JobError::from_throwable( $conflict )->code );
+				// Named, and as a job that the PHP user cannot open, not one for another plugin version.
+				self::assertSame( [ 'job_inaccessible', $job->id ], [ JobError::from_throwable( $conflict )->code, $conflict->context()['job'] ?? null ] );
 			}
 			self::assertNull( $this->staging->files_directory( $job->id, 24 ) );
 		} finally {

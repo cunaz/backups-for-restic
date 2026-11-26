@@ -130,13 +130,13 @@ final class JobDocumentTest extends TestCase {
 		$this->assert_blocks_changes( $store, $job );
 	}
 
-	private function assert_blocks_changes( JobStore $store, Job $unreadable ): void {
+	private function assert_blocks_changes( JobStore $store, Job $unreadable, string $code = 'job_unreadable' ): void {
 		try {
 			$store->create( JobType::Backup, 'manual', $unreadable->created_at + 1 );
 			self::fail( 'An unreadable job must not allow a second one.' );
 		} catch ( JobConflict $conflict ) {
 			self::assertSame( $unreadable->id, $conflict->context()['job'] ?? null );
-			self::assertSame( 'job_unreadable', JobError::from_throwable( $conflict )->code );
+			self::assertSame( $code, JobError::from_throwable( $conflict )->code );
 		}
 		$changed = false;
 		try {
@@ -148,6 +148,7 @@ final class JobDocumentTest extends TestCase {
 			self::fail( 'An unreadable job cannot prove that the store is idle.' );
 		} catch ( JobConflict $conflict ) {
 			self::assertSame( $unreadable->id, $conflict->context()['job'] ?? null );
+			self::assertSame( $code, JobError::from_throwable( $conflict )->code );
 		}
 		self::assertFalse( $changed );
 	}
@@ -211,14 +212,17 @@ final class JobDocumentTest extends TestCase {
 	}
 
 	/**
-	 * Documents that cannot be looked up, and how to put each in place in a job's directory.
+	 * Documents that cannot be looked up or read, and how to put each in place in a job's directory.
 	 *
 	 * @return array<string, array{0: string}>
 	 */
 	public static function documents_that_cannot_be_looked_up(): array {
 		return [
 			'below a job directory that cannot be searched' => [ 'unsearchable' ],
-			'a folder at the name of the document' => [ 'folder' ],
+			'a folder at the name of the document'    => [ 'folder' ],
+			'a document that cannot be read'          => [ 'unreadable' ],
+			'a link at the name of the document'      => [ 'link' ],
+			'a link at the name of the job directory' => [ 'linked directory' ],
 		];
 	}
 
@@ -230,39 +234,78 @@ final class JobDocumentTest extends TestCase {
 		$store->save( $job );
 		$folder   = $this->directory . '/' . $job->id;
 		$document = $folder . '/job.json';
-		if ( 'folder' === $document_case ) {
-			rename( $document, $folder . '/job.saved' );
-			mkdir( $document, 0700 );
-		} else {
-			chmod( $folder, 0600 );
-		}
+		$moved    = $this->directory . '/elsewhere';
+		match ( $document_case ) {
+			'folder' => rename( $document, $folder . '/job.saved' ) && mkdir( $document, 0700 ),
+			'unreadable' => chmod( $document, 0000 ),
+			'link' => rename( $document, $folder . '/job.saved' ) && symlink( $folder . '/job.saved', $document ),
+			'linked directory' => rename( $folder, $moved ) && symlink( $moved, $folder ),
+			default => chmod( $folder, 0600 ),
+		};
+		// get() reads a document that it may not read with PHP's warning, as it did before.
+		set_error_handler( static fn (): bool => true, E_WARNING );
 		try {
-			if ( 'unsearchable' === $document_case && is_executable( $folder ) ) {
-				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			if ( ( 'unsearchable' === $document_case && is_executable( $folder ) ) || ( 'unreadable' === $document_case && is_readable( $document ) ) ) {
+				self::markTestSkipped( 'This user bypasses file permissions.' );
 			}
 			self::assertNull( $store->get( $job->id ) );
 			// Before, is_file() answered false: the job counted as gone, and nothing stopped a new
 			// job or an uninstall that would remove what this one holds.
 			self::assertTrue( $store->has_document( $job->id ) );
-			$this->assert_blocks_changes( $store, $job );
+			// Another plugin version would not help: ownership, permissions or the files in place
+			// have to be put right. Before, the code was job_unreadable and asked for another version.
+			self::assertSame( 'job_inaccessible', $store->unreadable_code( $job->id ) );
+			$this->assert_blocks_changes( $store, $job, 'job_inaccessible' );
 			try {
 				iterator_to_array( $store->pending_database_cleanups( true ) );
 				self::fail( 'An uninstall went past a job that may hold private tables.' );
 			} catch ( StorageFailed $refused ) {
 				self::assertSame( 'An unreadable job must be recovered before uninstalling.', $refused->getMessage() );
+				self::assertSame(
+					[
+						'job'  => $job->id,
+						'code' => 'job_inaccessible',
+					],
+					$refused->context()
+				);
 			}
 		} finally {
-			if ( 'folder' === $document_case ) {
-				rmdir( $document );
-				rename( $folder . '/job.saved', $document );
-			} else {
-				chmod( $folder, 0700 );
-			}
+			restore_error_handler();
+			match ( $document_case ) {
+				'folder' => rmdir( $document ) && rename( $folder . '/job.saved', $document ),
+				'unreadable' => chmod( $document, 0600 ),
+				'link' => unlink( $document ) && rename( $folder . '/job.saved', $document ),
+				'linked directory' => unlink( $folder ) && rename( $moved, $folder ),
+				default => chmod( $folder, 0700 ),
+			};
 		}
 		self::assertSame( $job->id, $store->get( $job->id )?->id );
 		// A name that is missing from the job's directory is a document that is gone.
 		unlink( $document );
 		self::assertFalse( $store->has_document( $job->id ) );
+	}
+
+	public function test_a_document_that_this_version_cannot_parse_is_named_as_one_for_another_version(): void {
+		$store      = $this->store();
+		$job        = $store->create( JobType::Restore, 'manual', 1767225600, [ 'database_binding' => [ 'pending' => true ] ] );
+		$job->state = JobState::Succeeded;
+		$store->save( $job );
+		$this->rewrite( $job, static fn ( array $document ): array => [ 'schema' => Job::SCHEMA + 1 ] + $document );
+		// A regular file in the job's own directory that this process reads: a version that knows the layout can read it.
+		self::assertSame( 'job_unreadable', $store->unreadable_code( $job->id ) );
+		try {
+			iterator_to_array( $store->pending_database_cleanups( true ) );
+			self::fail( 'An uninstall went past a job that may hold private tables.' );
+		} catch ( StorageFailed $refused ) {
+			// Before, the refusal carried neither the job nor the reason, and the uninstall could not name them.
+			self::assertSame(
+				[
+					'job'  => $job->id,
+					'code' => 'job_unreadable',
+				],
+				$refused->context()
+			);
+		}
 	}
 
 	public function test_a_directory_without_a_document_does_not_block_a_new_job(): void {

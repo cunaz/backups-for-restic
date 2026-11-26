@@ -333,10 +333,16 @@ All notable changes are documented here. The format follows
   the journal and the saved copies, the staged files expired with their own hours, the apply
   left the list, and a stopped apply recorded that it had attempted no change. A link at the
   name of the undone marker counted as an apply undone completely. By the same rule a job
-  document that cannot be looked up counts as one that cannot be read (`job_unreadable`): it
-  blocks new jobs, keeps the staging of its restore and stops an uninstall, where it counted
-  as gone before; and the staging of a pruned job is not removed as a leftover while its
-  report cannot be looked up.
+  document that cannot be looked up counts as stored: it blocks new jobs, keeps the staging
+  of its restore and stops an uninstall, where it counted as gone before; and the staging of
+  a pruned job is not removed as a leftover while its report cannot be looked up. Such a job
+  has a code of its own, `job_inaccessible`, whose texts name the job and ask for ownership
+  and permissions of its folder to be put right, for example after a WP-CLI command that ran
+  as root; `job_unreadable`, whose texts ask for another plugin version, stays for a document
+  that this version reads but cannot parse. Every refusal for either names the job, which the
+  REST API returns as `job`, and `GET /jobs/{id}`, its log, its cancellation and the
+  WP-CLI commands `logs` and `cancel` answer for that job as the refusal does, where they
+  said that it did not exist.
 - A stopped apply or undo records what it did also when another part of its cleanup fails:
   when the site cannot leave maintenance mode, when its verification data cannot be removed,
   and when that removal has to wait for a later tick, which a deactivation may never give.

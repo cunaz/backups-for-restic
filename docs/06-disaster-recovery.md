@@ -852,6 +852,19 @@ that can read the job. If that version still refuses it, keep a copy of the priv
 directory when investigating damaged files; do not remove the job just to unblock changes
 while it may still be running.
 
+A job that the PHP user cannot open blocks new jobs and repository changes in the same way,
+with `job_inaccessible`, whatever the plugin version. The refusal names the job; its ID is
+the name of its folder under `jobs/` in the private working directory. The usual cause is a
+WP-CLI command that ran as root or as another user: the job folder that it created belongs
+to that user, with mode 0700, so the web server's PHP user cannot search it. Give the PHP
+user back ownership of that folder and of everything in it, with permission to read and
+search them, for example with `chown -R` to the web server's user. Run WP-CLI as that user
+from then on (`sudo -u www-data wp …`) rather than with `--allow-root`. If ownership and
+permissions are in order, something other than what the plugin wrote is in the place of the
+folder or of its `job.json`, such as a link: put the job's own files back. Uninstalling is
+refused for the same job until it can be read. `GET /jobs/{id}`, its log and
+`wp backups-for-restic logs <id>` answer for that job with the same code and texts.
+
 A different notice says that the first settings layout number could not be saved. Check
 the database's write access and storage availability. The plugin retries recording the
 number on the next request and starts normally once that write succeeds.
