@@ -1001,6 +1001,43 @@ final class FileChangesTest extends TestCase {
 		$this->changes->kept_page( $again->id, 1 );
 	}
 
+	public function test_kept_entries_of_a_job_that_exists_say_why_there_is_no_list_instead_of_that_it_does_not_exist(): void {
+		$job  = $this->run_job( $this->start() );
+		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );
+		// A document that this version cannot read, written after the undo was queued: it would
+		// keep every new job from starting.
+		$unreadable = '20260101T000000Z-0000aa';
+		mkdir( $this->directory . '/jobs/' . $unreadable, 0700 );
+		file_put_contents( $this->directory . '/jobs/' . $unreadable . '/job.json', '{' );
+		$missing = '20260101T000000Z-000000';
+		$codes   = [];
+		foreach ( [ $missing, $unreadable, $job->id, $this->restore, $undo->id ] as $id ) {
+			try {
+				$this->changes->kept_page( $id, 0 );
+				self::fail( 'Only an undo that has ended lists kept entries: ' . $id );
+			} catch ( JobConflict $refused ) {
+				$codes[ $id ] = $refused->context()['code'] ?? null;
+			}
+		}
+		// Before, each of them was "The job does not exist."
+		self::assertSame(
+			[
+				$missing       => 'not_found',
+				$unreadable    => 'job_unreadable',
+				$job->id       => 'not_an_undo',
+				$this->restore => 'not_an_undo',
+				$undo->id      => 'undo_not_ended',
+			],
+			$codes
+		);
+		// Once the undo has ended it lists what it kept: nothing here.
+		unlink( $this->directory . '/jobs/' . $unreadable . '/job.json' );
+		$done = $this->run_job( $undo );
+		self::assertSame( 0, $done->result['kept'] );
+		$page = $this->changes->kept_page( $done->id, 0 );
+		self::assertSame( [ [], 0, null ], [ $page['entries'], $page['total'], $page['next_offset'] ] );
+	}
+
 	public function test_an_undo_queued_within_the_window_finishes_after_it(): void {
 		$job  = $this->run_job( $this->start() );
 		$undo = $this->changes->start_undo( $job->id, $this->changes->preview_undo( $job->id )['digest'] );

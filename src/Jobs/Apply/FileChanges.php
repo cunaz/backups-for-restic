@@ -399,19 +399,33 @@ final readonly class FileChanges implements StepProvider {
 
 	/**
 	 * Reads one page of the entries that a finished or stopped undo kept, with their reasons.
+	 * A job that exists is never answered as one that does not: the code names why it has no
+	 * list to show.
 	 *
 	 * @param string $undo_job Undo job.
 	 * @param int    $offset First kept entry.
 	 * @return KeptPage Page.
-	 * @throws JobConflict If the job is not an undo that has ended, or kept entries whose list it
-	 *                     could not seal (`kept_list_unavailable`).
+	 * @throws JobConflict With the code `not_found` if no job has this ID, `job_unreadable` if
+	 *                     its document cannot be read, `not_an_undo` for a job of another type,
+	 *                     `undo_not_ended` for an undo that is queued or running, and
+	 *                     `kept_list_unavailable` for kept entries whose list it could not seal.
 	 * @throws InvalidArgument If the page is outside the list.
 	 * @throws StorageFailed If the sealed list does not belong to this undo, or a page of it changed.
 	 */
 	public function kept_page( string $undo_job, int $offset ): array {
 		$job = $this->jobs->get( $undo_job );
-		if ( null === $job || JobType::Undo !== $job->type || ! $job->state->is_terminal() ) {
-			throw new JobConflict( 'Kept entries are listed only for an undo that has ended.' );
+		if ( null === $job ) {
+			// A document that this version cannot read is a job all the same.
+			if ( $this->jobs->has_document( $undo_job ) ) {
+				JobConflict::raise( 'A stored job cannot be read by this version of the plugin.', [ 'code' => 'job_unreadable' ] );
+			}
+			JobConflict::raise( 'No job has this ID.', [ 'code' => 'not_found' ] );
+		}
+		if ( JobType::Undo !== $job->type ) {
+			JobConflict::raise( 'Only an undo of live file changes keeps entries.', [ 'code' => 'not_an_undo' ] );
+		}
+		if ( ! $job->state->is_terminal() ) {
+			JobConflict::raise( 'An undo lists the entries it kept once it has ended.', [ 'code' => 'undo_not_ended' ] );
 		}
 		$digest = $job->data['kept_digest'] ?? null;
 		$kept   = $job->result['kept'] ?? 0;

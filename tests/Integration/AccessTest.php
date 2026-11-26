@@ -371,11 +371,15 @@ final class AccessTest extends TestCase {
 				self::assertSame( 400, $status, $offset . ': ' . $raw );
 				self::assertSame( 'backups_for_restic_invalid_plan_page', $error['code'] ?? null, $raw );
 			}
-			// A job that is no ended undo, or no job at all.
-			foreach ( [ $apply, '20261121T120000Z-0c0d99' ] as $id ) {
+			// A job that is no undo, and no job at all.
+			$others = [
+				$apply                    => 'not_an_undo',
+				'20261121T120000Z-0c0d99' => 'not_found',
+			];
+			foreach ( $others as $id => $code ) {
 				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $id . '/kept-entries' );
 				self::assertSame( 404, $status, $id . ': ' . $raw );
-				self::assertSame( 'backups_for_restic_not_found', $error['code'] ?? null, $raw );
+				self::assertSame( 'backups_for_restic_' . $code, $error['code'] ?? null, $raw );
 			}
 			// A sealed list whose page was changed since is unavailable too, not an entry that the undo never recorded.
 			$page = TestSite::private_dir() . '/jobs/' . $undo . '/kept/rows-0.1';
@@ -389,6 +393,58 @@ final class AccessTest extends TestCase {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
 			}
 			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
+	}
+
+	public function test_kept_entries_of_a_job_that_exists_are_not_answered_as_those_of_a_job_that_does_not(): void {
+		$running    = '20261126T120000Z-0c0e01';
+		$backup     = '20261126T120000Z-0c0e02';
+		$unreadable = '20261126T120000Z-0c0e03';
+		// An undo at work, whose tick holds the lease: no other tick touches it meanwhile. And a
+		// backup that has ended.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$jobs = $container->jobs();
+			$undo = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Undo, "cli", time() - 60 );
+			$undo->data             = [ "apply" => "20261120T000000Z-0a0b01", "restore" => "20261120T000000Z-0a0b02" ];
+			$undo->state            = BackupsForRestic\Jobs\JobState::Running;
+			$undo->step             = "undoing";
+			$undo->started_at       = time() - 30;
+			$undo->lease_owner      = "0123456789abcdef";
+			$undo->lease_expires_at = time() + 3600;
+			$jobs->save( $undo );
+			$backup = new BackupsForRestic\Jobs\Job( $arguments[1], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$jobs->save( $backup );
+			',
+			[ $running, $backup ]
+		);
+		// A document that this version cannot read.
+		mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
+		file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
+		try {
+			$answers = [];
+			foreach ( [ $running, $backup, $unreadable ] as $id ) {
+				[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $id . '/kept-entries' );
+				$answers[ $id ]           = [ $status, $error['code'] ?? null, $error['message'] ?? null, $error['data']['hint'] ?? null ];
+				// Before, each of them was "The job does not exist."
+				self::assertStringNotContainsString( 'does not exist', $raw, $id );
+			}
+			self::assertSame(
+				[
+					$running    => [ 409, 'backups_for_restic_undo_not_ended', 'This undo has not ended yet.', 'The entries that it keeps are listed once it has ended.' ],
+					$backup     => [ 404, 'backups_for_restic_not_an_undo', 'This job is not an undo of live file changes.', 'Only an undo keeps entries that it could not revert, and it lists them once it has ended.' ],
+					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'A stored job cannot be read by this version of the plugin.', 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.' ],
+				],
+				$answers
+			);
+		} finally {
+			foreach ( [ $running, $backup, $unreadable ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
 		}
 	}
 
