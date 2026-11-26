@@ -448,6 +448,59 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_an_undo_cancelled_after_it_counted_every_entry_records_its_apply_as_undone(): void {
+		$site  = TestSite::root();
+		$apply = '20261126T140000Z-0c1010';
+		$undo  = '20261126T140000Z-0c1020';
+		TestSite::undoable_apply(
+			$apply,
+			[
+				[ $site . '/bfr-counted-1.txt', $site . '/bfr-counted-1.txt', 'create' ],
+				[ $site . '/bfr-counted-2.txt', $site . '/bfr-counted-2.txt', 'create' ],
+			]
+		);
+		// The worker counted the undo's last entry, and the request ended before the runner saved
+		// the step after it; then the administrator cancelled the undo.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$jobs = $container->jobs();
+			$undo = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Undo, "cli", time() - 60 );
+			$undo->data             = [
+				"apply"             => $arguments[1],
+				"restore"           => substr( $arguments[1], 0, -1 ) . "1",
+				"maintenance_grant" => "",
+				"undo_counts"       => [ "restored" => 0, "removed" => 2, "unchanged" => 0, "kept" => 0, "changed_after_review" => 0 ],
+			];
+			$undo->state            = BackupsForRestic\Jobs\JobState::Running;
+			$undo->step             = "undoing";
+			$undo->started_at       = time() - 30;
+			$undo->progress         = [ "total" => 2, "done" => 2 ];
+			$undo->cancel_requested = true;
+			$jobs->save( $undo );
+			',
+			[ $undo, $apply ]
+		);
+		try {
+			[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'tick' ] );
+			self::assertSame( 0, $status, $output );
+			$job = TestSite::job( $undo );
+			self::assertSame( [ 'cancelled', 2, 0, 'undone' ], [ $job['state'] ?? null, $job['result']['removed'] ?? null, $job['result']['kept'] ?? null, $job['result']['apply_state'] ?? null ], (string) json_encode( $job ) );
+			// Before: listed as partly undone, "the last undo stopped before it finished", until a review retired it.
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/undo' );
+			self::assertSame( 200, $status, $raw );
+			self::assertNotContains( $apply, array_column( $listed['jobs'] ?? [], 'job' ), $raw );
+			$document = TestSite::job_document( $apply );
+			self::assertSame( [ 'undone', 0, $undo ], [ $document['result']['undo_state'] ?? null, $document['result']['undo_kept'] ?? null, $document['result']['undo_job'] ?? null ] );
+			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $apply . '/undo/reverted' );
+		} finally {
+			foreach ( [ $apply, $undo, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
+	}
+
 	public function test_a_failed_job_is_described_as_the_kind_of_job_it_is(): void {
 		// Kind of job, its error code and its data; the review of an undo is a file preview job.
 		$failed = [

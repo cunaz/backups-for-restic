@@ -906,7 +906,9 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * Records what an undo did, in its result and in the document of its apply: fully undone
 	 * when a finished undo kept no entry, partly undone with the number of kept entries when
-	 * it kept some, and partly undone without a number when it stopped after a revert. Only
+	 * it kept some, and partly undone without a number when it stopped after a revert before
+	 * its document counted every entry. A stopped undo whose document counts every entry is
+	 * finished in this sense (counted_all()). Only
 	 * a fully undone apply is marked reverted, which ends its undo window early; kept entries
 	 * keep their journal and saved copies for a later undo within the window. A list of kept
 	 * entries that cannot be sealed, for example because a counted page changed on disk, is
@@ -967,7 +969,8 @@ final readonly class FileChanges implements StepProvider {
 	/**
 	 * A partial apply keeps all its journals. An interrupted maintenance marker is cleared. A
 	 * stopped undo records what it did before it stopped, with the entry at its cursor when a
-	 * record proves that the worker reverted it before the job document counted it.
+	 * record proves that the worker reverted it before the job document counted it, and as a
+	 * finished undo when its document then counts every entry.
 	 *
 	 * @param Job   $job Current job.
 	 * @param float $deadline Worker cleanup deadline.
@@ -988,10 +991,37 @@ final readonly class FileChanges implements StepProvider {
 			$this->reconcile( $job );
 			$apply = isset( $job->data['undo_counts'] ) ? $this->jobs->get( ApplyJournal::field( $job, 'apply' ) ) : null;
 			if ( null !== $apply ) {
-				$this->conclude( $job, $apply, false );
+				$this->conclude( $job, $apply, $this->counted_all( $job, $apply ) );
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Whether the document of a stopped undo counts every entry of its apply, as the document
+	 * of a finished undo does. A request to cancel that comes after the worker counted the last
+	 * entry, but before the runner saved the step after it, stops the undo before a step that
+	 * has nothing left to do; and the recording of a finished undo can fail. Such an undo is
+	 * recorded as a finished one is: undone when it kept nothing, partly undone with the
+	 * number of entries it kept otherwise. Anything that the document does not establish, a
+	 * cursor short of the apply's attempted entries, counts that do not add up to it, a journal
+	 * that cannot be read, leaves the apply partly undone without a number (fail closed).
+	 *
+	 * @param Job $job Stopped undo, after reconcile().
+	 * @param Job $apply Its apply.
+	 * @return bool Whether every attempted entry of the apply is counted.
+	 */
+	private function counted_all( Job $job, Job $apply ): bool {
+		$total = $job->progress['total'] ?? null;
+		if ( ! is_int( $total ) || $total < 1 || ( $job->progress['done'] ?? null ) !== $total ) {
+			return false;
+		}
+		try {
+			$counts = self::counts( $job );
+			return $this->journal->attempted( $apply ) === $total && $counts['restored'] + $counts['removed'] + $counts['unchanged'] + $counts['kept'] === $total;
+		} catch ( PluginException ) {
+			return false;
+		}
 	}
 
 	/**
