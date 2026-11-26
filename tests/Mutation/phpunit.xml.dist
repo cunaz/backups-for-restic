@@ -1,17 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    Configuration for mutation testing only (infection.json5.dist): the tests of the mutated
-    code, so that each mutant runs in seconds. Engine-level tests that also reach this code,
-    and the slow group with restic's real scrypt cost, stay with the main configuration. Kept
-    apart from phpunit.xml.dist because PHPUnit refuses a file in two suites of one file.
+    Configuration for mutation testing only (infection*.json5.dist): per gate the tests of the
+    mutated code, so that each mutant runs in seconds. Engine-level tests that also reach this
+    code, and the slow group with restic's real scrypt cost, stay with the main configuration.
+    Kept apart from phpunit.xml.dist so that its suites can share files; each gate selects one.
+    The database gate's suite, which needs more memory, is in database/phpunit.xml.dist.
 -->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="../../vendor/phpunit/phpunit/phpunit.xsd"
-         bootstrap="../bootstrap.php"
+         bootstrap="bootstrap.php"
          cacheDirectory="../../.phpunit.cache/mutation"
          colors="true"
          failOnRisky="true"
          failOnWarning="true"
+         failOnEmptyTestSuite="true"
          beStrictAboutOutputDuringTests="true">
     <php>
         <ini name="memory_limit" value="128M"/>
@@ -30,6 +32,15 @@
             <file>../Unit/Restore/ApplyPlanTest.php</file>
             <file>../Unit/Restore/PlannerPolicyTest.php</file>
             <file>../Unit/Restore/SiteLayoutTest.php</file>
+        </testsuite>
+        <!-- infection-restore.json5.dist and infection-apply.json5.dist. -->
+        <testsuite name="restore">
+            <directory>../Unit/Restore</directory>
+            <file>../Unit/Jobs/FileChangesTest.php</file>
+            <file>../Unit/Jobs/PlanBuildTest.php</file>
+        </testsuite>
+        <testsuite name="zip">
+            <directory>../Unit/Storage/Zip</directory>
         </testsuite>
     </testsuites>
     <groups>

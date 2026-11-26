@@ -1,0 +1,38 @@
+# The checks that must pass before a merge into main, as GitHub names the jobs of a pull request
+# (docs/04 §6). The ruleset of main requires these (docs/04 §7.1), and bin/check-release-gates.py
+# refuses a release while one of them is not required. tests/Release/test_release_gates.py
+# checks that every line names a job of ci.yml or integration.yml, so a renamed job is renamed
+# here in the same pull request. One check per line; a line that starts with # is a comment.
+
+# ci.yml
+Coding standards
+JavaScript (ESLint)
+Static analysis
+Plugin Check on the package
+Translation template (POT)
+Commits are signed off
+Unit tests (PHP 8.3)
+Unit tests (PHP 8.4)
+Unit tests (PHP 8.5)
+Unit tests (PHP 8.6)
+Unit tests (PHP 8.3, zstd)
+Database dump and restore (MySQL 8.4)
+Database dump and restore (MariaDB 11.4)
+Mutation testing (Crypto, Format, Forget, database import)
+Mutation testing (file apply planner)
+Mutation testing (file restore)
+Mutation testing (file apply jobs)
+Mutation testing (ZIP downloads)
+
+# integration.yml
+WordPress 7.1.5 on PHP 8.3
+WordPress 7.1.5 on PHP 8.5
+WordPress 7.1.5 on PHP 8.6
+WordPress 7.0.9 on PHP 8.3
+WordPress 7.0.9 on PHP 8.5
+WordPress 6.7.12 on PHP 8.3
+WordPress 6.7.12 on PHP 8.5
+WordPress memory (500000 blobs)
+WordPress memory (1000000 blobs)
+WordPress memory (2000000 blobs)
+Admin page in a browser

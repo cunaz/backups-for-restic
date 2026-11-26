@@ -23,6 +23,12 @@ use BackupsForRestic\Tests\Fuzz\Fuzzer;
 use BackupsForRestic\Tests\Fuzz\Targets;
 
 $options = getopt( '', [ 'seconds:', 'seed:', 'replay:' ], $rest );
+// The nightly job's name states the duration and the release gate reads it from there, so a
+// duration that PHP would read as zero, such as one in other than ASCII digits, is refused.
+if ( isset( $options['seconds'] ) && ( ! is_string( $options['seconds'] ) || 1 !== preg_match( '/\A[0-9]{1,6}(?:\.[0-9]{1,3})?\z/', $options['seconds'] ) ) ) {
+	fwrite( STDERR, "--seconds needs a number of seconds in ASCII digits, such as 120 or 0.5.\n" );
+	exit( 2 );
+}
 $seconds = isset( $options['seconds'] ) && is_string( $options['seconds'] ) ? max( 0.1, (float) $options['seconds'] ) : 10.0;
 $seed    = isset( $options['seed'] ) && is_string( $options['seed'] ) ? (int) $options['seed'] : random_int( 1, PHP_INT_MAX );
 $replay  = isset( $options['replay'] ) && is_string( $options['replay'] ) ? $options['replay'] : null;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A disposable WordPress site for integration and acceptance tests (docs/04 §5.3).
 #
-# Usage: bin/test-site.sh install|install-multisite|start|stop|reset
+# Usage: bin/test-site.sh install|install-multisite|start|stop|reset|check-logs
 #
 #   install  creates the database and its user, installs WordPress (pinned, checksum-verified),
 #            writes wp-config.php, runs the WordPress installer, links this plugin into
@@ -25,6 +25,10 @@
 #            verification off for the whole site while a test asks for it.
 #   stop     stops the web server.
 #   reset    stops the server and deletes both sites and their databases.
+#   check-logs
+#            fails if .tools/php-errors.log or the site's wp-content/debug.log holds an entry
+#            that names a file of the plugin: a notice, warning or deprecation that the plugin
+#            raises reaches neither a response nor a test, only these logs (docs/04 §5.3).
 #
 # Needs a running MySQL or MariaDB server. The database administrator defaults to root over
 # the local socket; set BFR_DB_ADMIN_USER and BFR_DB_ADMIN_PASSWORD (and BFR_DB_HOST) to
@@ -249,15 +253,45 @@ stop_server() {
 	fi
 }
 
+check_logs() {
+	# The plugin is installed as a copy under wp-content/plugins (BFR_TEST_PLUGIN_DIR) or linked
+	# to this checkout, whose files PHP names by their real path.
+	local paths=(/wp-content/plugins/backups-for-restic/ "$ROOT/src/" "$ROOT/backups-for-restic.php" "$ROOT/uninstall.php")
+	local log entries status total=0
+	for log in "$TOOLS/php-errors.log" "$SITE/wp-content/debug.log"; do
+		if [ ! -f "$log" ]; then
+			echo "No $log."
+			continue
+		fi
+		# grep exits with 1 when no line matches and with 2 when it cannot read the log.
+		status=0
+		entries="$(grep -c -F "${paths[@]/#/-e}" "$log")" || status=$?
+		if [ "$status" -gt 1 ]; then
+			echo "$log could not be read (grep exited with $status), so it was not checked." >&2
+			exit 1
+		fi
+		echo "Lines of $log that name a file of the plugin: $entries"
+		if [ "$entries" -gt 0 ]; then
+			grep -n -F "${paths[@]/#/-e}" "$log" | head -n 50 >&2
+			total=$((total + entries))
+		fi
+	done
+	if [ "$total" -gt 0 ]; then
+		echo "The plugin's code raised $total notices, warnings, deprecations or errors; see above." >&2
+		exit 1
+	fi
+}
+
 case "${1:-}" in
 	install) install_site ;;
 	install-multisite) install_multisite ;;
 	start) start_server ;;
 	stop) stop_server ;;
+	check-logs) check_logs ;;
 	reset)
 		stop_server
 		rm -rf "$SITE" "$MS_SITE"
 		admin_sql "DROP DATABASE IF EXISTS \`$DB_NAME\`; DROP DATABASE IF EXISTS \`$MS_DB_NAME\`;"
 		;;
-	*) echo "Usage: bin/test-site.sh install|install-multisite|start|stop|reset" >&2; exit 2 ;;
+	*) echo "Usage: bin/test-site.sh install|install-multisite|start|stop|reset|check-logs" >&2; exit 2 ;;
 esac

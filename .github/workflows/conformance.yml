@@ -26,9 +26,15 @@ on:
 permissions:
   contents: read
 
+# A pull request cancels its superseded runs. Runs on main never cancel each other: a push does
+# not cancel the nightly run, and every commit keeps the results that the release gate reads.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Composer verified against the SHA-256 of its release PHAR, as in ci.yml.
+  PHP_TOOLS: composer:2.11.2@sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
 
 jobs:
   restic:
@@ -54,7 +60,7 @@ jobs:
           extensions: ${{ matrix.zstd && 'mbstring, openssl, mysqli, zstd' || 'mbstring, openssl, mysqli' }}
           ini-values: opcache.enable_cli=0
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tools/bin
@@ -66,7 +72,12 @@ jobs:
       - name: Conformance suite
         env:
           FILTER: ${{ matrix.zstd && 'format_2' || '' }}
-        run: vendor/bin/phpunit --testsuite conformance ${FILTER:+--filter "$FILTER"}
+        run: vendor/bin/phpunit --testsuite conformance --log-junit "$RUNNER_TEMP/conformance.xml" ${FILTER:+--filter "$FILTER"}
+      # A class skips when restic, rest-server or the database is missing.
+      - name: Skipped tests are the expected ones
+        env:
+          EXPECTED: tests/Skips/conformance${{ matrix.zstd && '-zstd' || '' }}.txt
+        run: php bin/check-skipped-tests.php "$RUNNER_TEMP/conformance.xml" "$EXPECTED"
 
   benchmarks:
     name: Benchmarks with gates
@@ -80,7 +91,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: php -d opcache.enable_cli=0 bin/bench.php --slow | tee bench.txt
         shell: bash

@@ -52,12 +52,12 @@ The [release-candidate report](benchmarks/2026-11-20-release-candidate.md) recor
 | `phpunit/phpunit` 12 | unit, database, conformance and integration tests |
 | Node.js 22 with npm | runs ESLint; `node --check assets/js/admin.js` stays as a syntax check that needs no packages |
 | ESLint 10 with `@wordpress/eslint-plugin` 28 (two packages with exact versions in `package.json`; `package-lock.json` pins the about 400 packages they bring) | lints `assets/js` with the rulesets `esnext`, `custom` and `i18n` (§3); development only, nothing from npm ships |
-| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing of `Crypto`, `Format`, `Engine\Forget` and the database import filter; merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)) |
+| Infection 0.35 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh`) with pcov | mutation testing in six gates (§5.6): `Crypto`, `Format`, `Engine\Forget` and the database import filter as the merge gate ([ADR 0024](adr/0024-governance-and-quality-assurance.md)), the file restore code, ZIP downloads and, with a database, the import and exchange |
 | Built-in fuzzer (`bin/fuzz.php`, `tests/Fuzz/`) | structure-aware fuzzing of every parser that reads server data ([ADR 0028](adr/0028-built-in-fuzzer.md)) |
 | **restic CLI** 0.20.0, 0.19.1, 0.18.1 and 0.14.0 (upstream releases, checksum-verified by `bin/install-test-tools.sh`) | conformance oracle ([ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md)); never shipped |
 | **rest-server** 0.14.0 (upstream release, checksum-verified), with TLS, normal, `--append-only` and `--max-size` | local repository server for conformance and integration tests |
 | WordPress 7.1.5, 7.0.9 and 6.7.12 (checksum-pinned in `bin/test-site.sh`, selectable with `BFR_WP_VERSION`) | the real WordPress of the integration suite, served by PHP's built-in server. The project uses no WordPress test library, no function mocking and no `@wordpress/env`: the adapters are tested against a running WordPress or not at all ([ADR 0029](adr/0029-wordpress-free-core.md)) |
-| Plugin Check through `wordpress/plugin-check-action` (pinned SHA) | the WordPress.org review team's scanner, in CI on the built package (§5.8). The action installs the current Plugin Check and the current WordPress, so a new check can fail a pull request that did not cause it |
+| Plugin Check 2.2.0 (pinned and checked file by file by `.github/actions/check-package`) | the WordPress.org review team's scanner, in CI on the built package, through WP-CLI in a test site (§5.8) |
 | WP-CLI 2.12.0 (PHAR, pinned and checksum-verified by `bin/install-test-tools.sh wp-cli`) | `wp i18n make-pot` for the translation template (§5.8); it needs no WordPress for that |
 | `@playwright/test` 1.63.0 (pinned in `package.json`) | the browser tests of §5.5; its browser is installed in CI by the same version |
 | CodeQL | JavaScript analysis of the shipped admin interface on changes and weekly |
@@ -233,7 +233,10 @@ stand-in for `wpdb`, its encryption, the end of a table's transaction under ever
 `BackupJobTest` runs the whole backup job without WordPress against a TLS rest-server and
 the database.
 
-The CI database matrix uses MySQL 8.4 and MariaDB 11.4. Shadow-import tests compare table
+The CI database matrix uses MySQL 8.4.13 and MariaDB 11.4.13, pinned by image digest. Every
+test of the suite skips when no server answers, so CI compares the skipped tests with
+`tests/Skips` (§6): none may skip on MySQL, and on MariaDB exactly the eight cases of the
+atomic exchange, which is MySQL-only by design. Shadow-import tests compare table
 checksums, including invisible columns and expression defaults, and check that live tables
 stay unchanged. A parent sends SIGKILL at six DDL/transaction boundaries, then resumes the
 import and verifies duplicate rows exactly once. Foreign table collisions, an active
@@ -267,7 +270,13 @@ a user) they run PHP inside the site's WordPress on the command line, and for wh
 files show (a job's lease, its log) they read the private directory. `tests/Support/TestSite.php`
 is that access. The classes share one site and one repository, so
 `phpunit-integration.xml.dist` names the files in order. A class whose tool or site is not
-installed is skipped:
+installed, or does not answer, skips in `setUpBeforeClass()`. No skip is expected in this
+suite: the configuration fails a run in which a test skips (`failOnSkipped`), and because
+PHPUnit does not count a class that skips in `setUpBeforeClass()` there, CI also compares the
+JUnit log with the empty list `tests/Skips/integration.txt` (§6). After the suite, and after the
+browser tests of §5.5, `bin/test-site.sh check-logs` fails the job when `.tools/php-errors.log`
+or the site's `wp-content/debug.log` holds an entry that names a file of the plugin: a notice,
+warning or deprecation reaches neither a response nor a test, only these logs. The classes:
 
 - **`AccessTest`**: every route without credentials and as an editor; its list of routes is
   compared with what WordPress has registered, so a new route cannot go untested; the files
@@ -333,7 +342,9 @@ the nightly CI run uses 2048 and 300. The tests that catch a backup in the middl
 
 The integration tests request `wp-cron.php` directly to control the timing of jobs.
 A separate acceptance run on 2026-11-20 exercised visitor-triggered cron with the
-release ZIP (SHA-256 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`).
+release ZIP (SHA-256 `2416473f698ec9ff3a07494a934bce217abe522efec4db18140bf1964e09fde2`,
+the package of the commits from `5b9dbea` to `eec2a46`, not the one of `acaecdc` on `main`).
+It was a manual, one-off run that no workflow or script of the repository reproduces.
 It used WordPress 7.1.5, PHP 8.3.36, a 128 MiB memory limit, a 30-second request
 limit, a five-second tick budget and automatic loopback chaining. The fixture marked
 the previous daily backup slot as missed and waited for the heartbeat already on
@@ -407,31 +418,293 @@ and scheduled events come from the backup, or with the undo from the earlier dat
 
 ### 5.6 Mutation testing and fuzzing
 
-Infection runs on `Crypto`, `Format`, `Engine\Forget` and covered `Database\Restore` code;
-the covered mutation score
-indicator must stay at or above 90 % (`infection.json5.dist`). The run takes about 40
-minutes. It runs on every push to `main`, and on every pull request that changes a file the
-result can depend on: anything under `src/Crypto`, `src/Format`, `src/Engine`,
-`src/Support`, `src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets`, `src/Database` or `tests/`,
-or one of `infection.json5.dist`, `composer.json`, `composer.lock`, `phpunit.xml.dist`,
-`bin/install-test-tools.sh` and `.github/workflows/ci.yml`. The list is wider than the
-mutated code on purpose. On any other pull request the job says in a notice that it skipped
-the run, and ends green, so that it can stay a required check. When the job cannot list the
-files of a pull request, it runs.
+Infection runs in six gates, each with its own code, its own tests from
+`tests/Mutation/phpunit.xml.dist` and its own thresholds. The database gate's tests have a
+configuration of their own, `tests/Mutation/database/phpunit.xml.dist`, with a memory limit of
+256M instead of 128M: the initial run of a gate keeps the coverage of every test in one
+process, and beside it the 16 MiB row of `DatabaseDumpTest` does not always fit into 128M.
+The gate also leaves out the test of a batch beyond `max_allowed_packet` in
+`DatabaseExchangeTest`, which the database suite runs. It lowers the server's limit for a
+moment, and a mutant process killed inside it at the timeout, or one that connects meanwhile,
+leaves or meets a server on which large statements fail whatever the mutation: on 2026-11-23
+188 mutants counted as killed that way.
 
-A separate file-planner job runs on every pull request and push to `main`.
-`composer mutation:planner` exercises `Restore\ApplyPlan` and `Restore\SiteLayout`
-using the real filesystem and the planner PHPUnit suite. It sets its own minimum covered
-mutation score of 90 % in `infection-planner.json5.dist`. Each mutation job checks for a
-nonempty report. The planner log and score appear in the `planner-mutation-logs` artifact.
+| Gate (Composer script, configuration) | Mutated code | Runs in | MSI floor | Covered MSI |
+| --- | --- | --- | ---: | ---: |
+| Core (`mutation`, `infection.json5.dist`) | `Crypto`, `Format`, `Engine\Forget` and `Database\Restore` without the ten classes whose tests need the database server | `ci.yml` | 89 % | 92 % |
+| Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 87 % | 88 % |
+| File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 77 % | 81 % |
+| File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its database half: the three `Database*` classes and `ExchangeSite` | `ci.yml` | 79 % | 83 % |
+| ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 83 % | 84 % |
+| Database (`mutation:database`) | all of `Database\Restore` and the database half of `src/Jobs/Apply`, killed by `tests/Unit/Database`, the unit tests of `DatabaseChanges` and `DatabaseReview`, and `tests/Database` against MySQL | `database-mutation.yml` | 80 % | 84 % |
 
-The [built-in fuzzer](adr/0028-built-in-fuzzer.md) exercises 26 parsers. It covers
+Every script passes `--with-uncovered`. Without it Infection mutates only lines that a test
+covers, so code that no test reaches produced no mutant and counted nowhere: before
+2026-11-22 the core gate listed `Database\Restore`, but ten of its classes, reached only by
+the database suite, created no mutant at all. The MSI counts such code as not killed.
+Every threshold is a floor: the score measured on 2026-11-23 with `main` at `e40ab18` (below),
+rounded down, and never above the score over the mutants that every run of the gate killed.
+Pull requests merged after that keep them: a floor may only rise, and the pull request that
+adds the tests raises it. ADR 0024's 90 % is the minimum that the core's covered MSI may never
+fall below, and the goal for the other gates; the core's covered floor is its measured 92 %.
+The planner had a covered threshold of 90 % as well; it scores 88.99 % and has a floor like the
+others until tests raise it. Each gate's suite in `tests/Mutation` holds the unit tests of the
+classes it mutates, and a new one belongs there too: on 2026-11-23 three that `main` had gained
+since the gates were set up were missing (`PlanBuildTest`, `DatabaseChangesTest`,
+`DatabaseReviewTest`). Tests that reach the code from further away, such as the engine's, stay
+with the main configuration.
+
+**What a mutant process measures.** Infection runs each mutant in a PHPUnit process of its
+own and serves the mutated class there through a user-space `file://` stream wrapper in place
+of PHP's own. Until 2026-11-23 the tests ran under that wrapper, which differs from PHP's in
+two ways that fail tests whatever the mutation, and every mutant that such a test covers
+counted as killed:
+
+- `fsync()` fails on every stream it opens. Since 2026-11-22 every job document and journal
+  record is written durably ([ADR 0041](adr/0041-guarded-file-changes.md)), so each test that
+  saves one failed. The file restore gate reported 98 % covered and the apply gate 100 %.
+- Its `url_stat()` reports a path that it cannot read as missing: an unreadable file, or a
+  link whose target has been removed. Tests of unreadable files failed, and cleanups left
+  links and their directories behind and warned, which fails a run under `failOnWarning`.
+  The planner gate reported 98.48 % covered on `main` and the ZIP gate 99.87 %.
+
+Since then the mutation suites start with `tests/Mutation/bootstrap.php`
+(`tests/Support/MutationProcess.php`). In a mutant process it loads every class below the
+gates' source directories while the wrapper is in place, so that the mutated class is the one
+in memory, and then restores PHP's own wrapper. That costs about 16 ms and 3 MiB per process.
+A class first loaded after the restore is the original, so a gap in the list lowers a score
+instead of raising it. A mutated copy that does not compile keeps the wrapper, and the tests
+meet its syntax error as before. The initial test run has no such wrapper, and the bootstrap
+loads nothing there.
+
+The bootstrap never fails a mutant process, because Infection would count that as a kill.
+Silence fails the gate instead. Before it loads anything, every mutant process under Infection's
+interceptor reports in with a new file in a directory that `bin/mutation-gate.sh`, through which
+the Composer scripts and so CI run Infection, names in `BFR_MUTATION_REPORTS`, and each check
+then states there that it passed. After the restore the process states that it can write
+durably. When the mutated copy does not compile, it states which way: "does not compile" when
+the bootstrap caught the error and the tests go on to meet it, which Infection counts as killed
+or as a syntax error depending on which test meets it first; or "ended while the classes loaded"
+when a compile error that no catch sees ends the process with 255, which Infection counts as
+errored. When the process ends, its shutdown function states that it ended with PHP's own file
+wrapper, and after a fatal error whether PHPUnit was running a test: if it was, a shutdown
+function of PHPUnit's ends the process with status 2 and Infection counts the mutant as killed,
+as it did for three mutants of the ZIP gate whose tests ran out of memory; if not, the process
+exits with 255 and Infection counts it as errored. The bootstrap reads that from PHPUnit's own
+record of the running test, a private property of `PHPUnit\Runner\ShutdownHandler`; should that
+change, a fatal error counts as one in a test, the direction that passes, and the bootstrap's
+tests fail. After the run the script compares these with Infection's summary log. Reports, and
+lines that the process can write durably or that its copy does not compile, must each reach the
+mutants that Infection ran a test process for: killed, escaped, errored, timed out and syntax
+errors. Mutants that are not covered, skipped or ignored get no process, and Infection's initial
+test run has no interceptor and reports nothing. End lines, plain or after a fatal error in a
+test, must reach the killed and escaped mutants less the caught compile errors among them:
+Infection 0.35.10 counts a process that exits above 100 as errored and one that it stopped as
+timed out, so killed processes (exit 1 to 100, or 0 without PHPUnit's "OK") and escaped ones (0
+with it) ran their shutdown functions, while an end line after a fatal error outside a test
+comes from an errored process and does not count; and every syntax error comes from a caught
+copy, since no test of the gates prints a ParseError of its own, so the caught copies among the
+killed and escaped are the caught ones less the syntax errors:
+`needed = killed + escaped - max(0, caught - syntax errors)`. An errored process and a syntax
+error can therefore excuse no killed mutant without its end line, which the first version of the
+count let them do. A test that PHPUnit runs in a process of its own (`#[RunInSeparateProcess]`,
+as in `IndexTest`, `IndexFilePacksTest` and `DumpLimitsTest`) inherits the report of its mutant
+process and states nothing; before that, the core gate counted 4,764 reports for 4,630
+processes, and extra reports could stand in for missing ones. Each short count fails the gate
+with its own message, and so do a missing or unreadable summary and a configuration that names
+none; more lines than needed pass. On 2026-11-25 the counts matched Infection's exactly, and the
+end lines equalled what was needed: the planner gate had 736 reports and 736 statements that the
+process can write durably or that its copy does not compile, for 736 processes, and 733 end
+lines for 733 needed, its syntax error a caught copy; ZIP downloads 779, 779 and 765 for 765,
+three of them after a fatal error in a test; the apply gate 1,657, 1,657 and 1,655 for 1,655;
+file restore 3,529, 3,529 and 3,498 for 3,498, with three caught copies, two of them syntax
+errors, its errored mutant of `FileChange.php:427` ending while the classes loaded and three end
+lines after a fatal error in a test; the core 4,630, 4,630 and 4,561 for 4,561, with its errored
+mutant of `ZstdFrame.php:72` ending while the classes loaded and 19 end lines after a fatal
+error in a test. In CI the same day, under the first version of the count, the reports and
+statements of all six gates matched Infection's summary too, among them the first runs of the
+file restore gate (3,529 reports and 3,529 statements for 3,529 processes) and the database gate
+(4,081 reports and 4,081 statements for 4,081 processes) with these statements, and the end
+lines exceeded what that version needed by exactly the copies it deducted wrongly: the core had
+4,563 for 4,562, the planner 733 for 732 and file restore 3,498 for 3,495, while the database
+gate, with neither an errored mutant nor a syntax error, had 3,665 for 3,665. Under the present
+count each of them needs exactly the end lines it had. When `fsync()` still fails after the
+restore, or the user-space wrapper is back when the process ends, the process appends a line to
+its report, or when that cannot take it to a marker file, the one next to the reports or else
+`.tools/mutation-canary` on the disk of the checkout, and the script fails the gate on any such
+line whatever the score. A process whose report directory cannot take a new file is missing, and
+one whose check fails while neither its report nor a marker can take the line lacks the
+statement that the check passed. `tests/Unit/Tooling/MutationGatesTest.php` checks outside any
+mutant process that the bootstrap of every gate loads every directory the gate mutates, that
+loading them prints and defines nothing, that the canary fires under a user-space wrapper, what
+a mutant process states for a copy that compiles, one that does not parse, one that fails with a
+compile error that no catch sees, and one that ends with a fatal error in a test or outside one,
+that its isolated tests state nothing, and how the script decides on reports, statements,
+summaries and markers, with a real process whose report and markers cannot be written.
+
+The jobs keep the tests' temporary files on tmpfs (`.github/actions/mutation-tmpdir`): a gate
+measures the tests, not the disk, and on the runner's ext4 every `fsync()` of a durable write
+costs milliseconds, so the file restore gate would not finish within its job limit. Locally it
+took 55.5 minutes on ext4 against 15.0 on tmpfs, on the code of 2026-11-22.
+
+Measured on 2026-11-23 with `main` at `e40ab18` merged into the pull request that set these
+floors: PHP 8.3.37 with ext-zstd and pcov, 8 threads, the tests' temporary files on tmpfs as in
+CI, and MySQL 8.4.11 for the database gate. CI ran every gate on the same state (`210629e`) on
+four cores; its minutes are those of the Infection step.
+
+| Gate | Runs | Mutants | Not covered | Escaped | Timed out | MSI | Covered MSI | Minutes | CI: covered MSI, minutes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Core | 2 | 4,748 | 118 | 360 | 65 | 89.93 % | 92.22 % | 15.4, 15.7 | 92.22 %, 62.9 |
+| Planner | 1 | 749 | 13 | 81 | 2 | 87.45 % | 88.99 % | 1.1 | 88.99 %, 2.4 |
+| File restore | 1 | 3,707 | 178 | 641 | 27 | 77.91 % | 81.84 % | 28.4 | 81.81 %, 71.7 |
+| File apply jobs | 2 | 1,745 | 88 | 272 | 2 | 79.37 % | 83.58 % | 7.1, 7.1 | 83.52 %, 15.7 |
+| ZIP downloads | 1 | 794 | 15 | 117 | 14 | 83.38 % | 84.98 % | 0.5 | 84.98 %, 1.7 |
+| Database | 2 | 4,278 | 197 | 566, 567 | 9 | 82.16 %, 82.14 % | 86.13 %, 86.11 % | 52.5, 48.5 | 85.98 %, 107.3 |
+
+Under Infection's wrapper the gates had reported 90.39 % covered for the core and 79.20 % for
+the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore, 100 % for
+the apply jobs and 99.87 % for ZIP downloads on 2026-11-22.
+
+The planner and ZIP gates gave the same figures in every run on their current code, the local
+ones on three states of `main` and CI's two, mutant for mutant. The core and the apply gate gave
+the same figures in their two final runs, and CI's run on the final state gave the core's too,
+with five mutants of `Polynomial` timed out instead of killed. Two mutants of `PlanBuild` (the
+`0` of `$this->counts['rows'] ?? 0`, lowered) were killed in some runs and not in others, CI's
+included, and so were one mutant of `ApplyManifest` between two local runs of the file restore
+gate and one of `DirectorySpellings` (line 304) in CI's. So CI scored 79.31 % and 83.52 % for
+the apply gate and 77.88 % and 81.81 % for file restore, which are also the scores over the
+mutants that every run on the same code killed. On `662c8b1` CI scored the same for the planner,
+ZIP and core gates, 79.37 % and 83.58 % for the apply gate and 77.93 % and 81.86 % for file
+restore. The floors are the final figures rounded down, and none is above those.
+
+**The database scores are an upper bound.** The two final runs differ in 101 mutants that one
+run killed and the other did not, 100 of them through `DatabaseExchangeTest`. The exchange
+checks the other sessions of its account on the server, and Infection's processes share one
+server and account, so such a test can fail through another process whatever the mutation. In
+the run that killed them the tests failed on the session list (`performance_schema`, 14
+mutants), a dependency or grant refusal (17), a reviewed plan that changed or kept blockers
+(20), a table definition or identity that changed after the review (7), the exchange's check of
+the reviewed database (5), `database_exchange_changed` (4) and other assertions (34). So the
+scores, and with them the floors, can be above what the tests alone kill: one run's score lay
+1.2 points above the score over the mutants that both final runs killed (82.14 % against
+80.97 %, covered 86.11 % against 84.88 %), and about 1.5 points above the 80.67 % and 84.56 %
+that all three runs on this state killed, CI's included. On older code CI's four processes detected
+about a point less than eight did locally (76.57 % and 81.45 % against 77.37 % to 77.82 % and
+82.30 % to 82.78 %); on the final state CI scored 82.02 % and 85.98 %. The gate compares one CI
+run with its floors, not the score over several runs, so its floors are whole numbers like the
+others, 80 % and 84 %, within a point of the score over all three runs. A run below a floor is
+a failed gate, here as for every gate: its cause is looked for in the tests of the pull request
+first. A floor is lowered only by a change of its own that measures the same commit again and
+shows that the measurement was at fault, not the tests, with the mutants that came out
+differently named ([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
+
+One cause of such kills is checked after every run. A server whose Performance Schema cannot
+instrument a thread leaves that connection out of `performance_schema.processlist` while
+`Threads_connected` counts it, so the exchange's session check (`SwapCatalog::complete()`)
+fails whatever the mutation and the mutant counts as killed. `composer mutation:database`
+therefore asks the server that the gate used, after the gate, for
+`Performance_schema_thread_instances_lost` and `Performance_schema_thread_classes_lost`
+(`bin/check-performance-schema.php`) and fails when either is above zero, the Performance Schema
+is off or the server cannot be asked. Both counters start at zero with the server, so the check
+must ask the gate's own server, and `FLUSH STATUS` would reset them; no test runs it. The other
+causes stay: one database server, or at least one account, per mutant process is the follow-up
+that makes the floors true ones.
+
+Infection gives each mutant a timeout of five seconds plus five times what its covering test
+classes took in the initial run, at most the configured timeout; a mutant that runs into it
+counts as killed. It skips a mutant without running it when the quickest test class that covers
+it took at least the configured timeout in the initial run, which collects coverage and is
+slower. With 30 s that left all 255 mutants of `Restore\SnapshotBrowser` unmeasured: its tests
+take about 45 s with coverage and 6 s without. The file restore gate now allows 120 s and the
+apply gate 60 s, and no gate skipped a mutant on 2026-11-23. A run on a loaded machine still
+differs: on 2026-11-20 a run of the database gate during other test runs counted 530 timeouts
+instead of 8, and on 2026-11-25 CI's run on `662c8b1` counted 414 instead of 9 on a runner whose
+initial test run took 77.7 s instead of 46.6 s: the gate took 3 h 21 min instead of 1 h 47 min,
+218 mutants escaped instead of 572, and its 90.30 % and 94.66 % measured the runner, not the
+tests. Mutation testing is a merge gate for measured code
+([ADR 0024](adr/0024-governance-and-quality-assurance.md), point 3), so such a score must not
+pass a floor. When more than 5 % of the mutant processes timed out, `bin/mutation-gate.sh`
+therefore computes the scores again with every timed-out mutant counted as not detected, and
+otherwise as Infection 0.35.10 does: the mutants killed by the tests or by static analysis, the
+errored ones and the syntax errors, over all mutants less the skipped and ignored ones, and for
+the covered code MSI less those not covered as well, rounded half up to hundredths. It lets the
+run count only if that lower bound meets both floors too, `minMsi` and `minCoveredMsi` of the
+configuration or `--min-msi` and `--min-covered-msi`, and says so in a notice with both bounds;
+otherwise it fails the gate, as the score cannot be trusted on that machine, and the gate has to
+run again on a faster one. It reads the floors before Infection starts and fails when it cannot.
+It reads the configuration as JSON once JSON5's comments are taken out, and a floor counts as
+read only when it is a number with at most two decimals whose name is set once: `8e1`, which is
+80 to Infection, is read as 80 and not as 8, and a floor that is set twice, on two lines or on
+one, is refused, as is a configuration that is not JSON apart from its comments.
+Up to 5 % Infection's verdict stands: healthy runs of the six gates, locally and in CI, timed
+out 0.1 % to 1.8 % of their mutant processes, among them mutants that loop for good, whose
+timeout is a detection, and on such runs the lower bound lies below the floors of the ZIP and
+core gates (81.61 % against 83 %, 88.50 % against 89 %). The slow run of `662c8b1` timed out
+10.1 %, and its bounds, 80.62 % to 90.30 % and 84.51 % to 94.66 % covered, meet the database
+gate's floors of 80 % and 84 %: it would have counted on the mutants that its tests killed. On
+the last runs of the six gates, locally and in CI on `662c8b1`, the script's arithmetic gave
+Infection's scores to the hundredth. One mutant of the ZIP writer writes its checkpoint files
+into the working directory, and so do mutants of the file restore gate; delete `.head`, `.names`
+and `.state` there after a local run.
+
+The escaped mutants by class with `main` at `e40ab18`, the work of a later package:
+
+- Core: `Database\Restore\CreateStatement` 77, `Database\Restore\TableFile` 63,
+  `Engine\Forget\ForgetRun` 35, `Database\Restore\Manifest` 24, `Database\Restore\Session` 23,
+  `Format\Index\IndexSet` 22, `Engine\Forget\Forget` 20, `Crypto\Scrypt` 16,
+  `Format\ZstdFrame` 14, `Format\Index\IndexFile` 13 and 53 in fifteen other classes.
+- Planner: `ApplyPlan` 80, `SiteLayout` 1.
+- File restore: `FileChange` 146, `Staging` 97, `DiskFilePlan` 83, `DirectorySpellings` 53,
+  `ApplyManifest` 52, `FileMaintenance` 51, `LiveSpellings` 44, `KeptList` 32, `ChunkDigest` 28,
+  `SnapshotBrowser` 25, `FileVerification` 17, `FileSpace` 11, `StagedRestore` 2.
+- File apply jobs: `FileChanges` 128, `FilePlans` 76, `PlanBuild` 57, `ApplyJournal` 11.
+- ZIP downloads: `ZipWriter` 87, `ZipRecords` 29, `Crc32` 1. The last is equivalent: a 33rd
+  row of the matrix in `Crc32::power()`, which no 32-bit vector reads.
+- Database: `Jobs\Apply\DatabaseChanges` 99, `Jobs\Apply\DatabaseGeneration` 53,
+  `Jobs\Apply\DatabaseReview` 46, and in `Database\Restore` `CreateStatement` 59,
+  `RehearsalReport` 38, `SwapCatalog` 38, `OwnedTables` 31, `TableExchange` 31, `TableFile` 30,
+  `Manifest` 29, `WordPressState` 22, `Ledger` 20, `TableImporter` 17, `WriteBarrier` 14,
+  `ExchangePlan` 10, `InsertStatement` 8, `Session` 7, `SqlLexer` 6, `MysqliConnection` 5,
+  `PluginList` 2, `SessionDrain` 2 (the run with 567).
+
+The core job runs with ext-zstd since 2026-11-22, so the native decompression of format 2 is
+mutated and tested too. With it, 78 mutants of `Format\Compression` were covered on 2026-11-22
+and 44 of them escaped, and the covered MSI of the core fell from 91.21 % (4,210 covered
+mutants, the CI run of `acaecdc`) to 90.39 % (4,285), both under Infection's wrapper. Since the
+tests of #52, 105 of its mutants are covered and 5 escape. The run took 40 minutes on a runner
+on 2026-11-23. The core and the four restore gates run on every push to `main`, and on every
+pull request that changes a file their result can depend on (`.github/actions/mutation-scope`):
+for the core anything under `src/Crypto`, `src/Format`, `src/Engine`, `src/Support`,
+`src/Exception`, `src/Backend`, `src/Storage`, `src/Secrets`, `src/Database`, `src/Restore`,
+`src/Jobs` (whose classes every mutant process loads first) or `tests/`, or one of
+`infection.json5.dist`, `composer.json`, `composer.lock`, `phpunit.xml.dist`,
+`bin/install-test-tools.sh`, `bin/mutation-gate.sh`, the actions `mutation-scope` and
+`mutation-tmpdir` and `.github/workflows/ci.yml`; for the restore gates anything under `src/` or
+`tests/`, their configurations and the same tool files. The list is wider than the mutated code
+on purpose, and `tests/Unit/Tooling/MutationJobScopeTest.php` checks that it holds every file
+that the job's steps, gates, PHPUnit configurations and preloaded classes name. On any other
+pull request a job says in a notice that it skipped the run, and ends green, so that it can stay
+a required check. When the job cannot list the files of a pull request, or cannot match them
+against the list, it runs. Each job checks for a nonempty report and uploads its logs.
+
+The database gate needs a server and takes longer than a pull request should wait (about 50
+minutes with 8 threads locally, and 111 on a runner with four before #59). It runs in
+`database-mutation.yml` on every push to `main`, on pull requests that change `src/`, `tests/`
+or a file the job reads (its configuration, `phpunit.xml.dist`, the scripts it runs, Composer's
+files and the workflow; the same test checks that list), and on request. It is not a required
+check of a pull request; the release gate requires a successful run for the release commit (§7).
+
+The [built-in fuzzer](adr/0028-built-in-fuzzer.md) exercises 29 parsers. It covers
 repository metadata, pack framing and decryption, REST listings, persisted listings and
 chunks, Go quoting, timestamps, durations and IDs. Restore targets cover selections,
-snapshot paths, manifest locators, site manifests, and SQL dump schemas, rows and
-manifests. The unit suite runs 2,000 deterministic inputs per target. The nightly
+snapshot paths, manifest locators, site manifests, SQL dump schemas, rows and manifests,
+and the serialized values, roles and active plugins that a database exchange reads from the
+backup. The unit suite runs 2,000 deterministic inputs per target. The nightly
 workflow runs each target for two minutes. It saves each finding with a replay command
-so that a reproducible input can be added to `tests/Fixtures/fuzz/<target>/`.
+so that a reproducible input can be added to `tests/Fixtures/fuzz/<target>/`. The job's name
+states the seconds per target, and a run seeds the fuzzer with its run ID, so re-running a
+run that found a crash finds it again. The release gate requires a run of at least 120
+seconds per target for the release commit, and no run of that commit with a finding (§7).
 
 ### 5.7 Live smoke tests
 
@@ -441,15 +714,18 @@ The private smoke workflow runs on Monday at 04:43 UTC and on manual dispatch fr
 plugin's core it creates a backup under a lock, checks v2 listing sizes and ranged pack
 bytes, restores the canary and compares its contents. It confirms that deleting its own
 snapshot fails on the append-only server. A second append-only run verifies earlier
-test snapshots can remain in place. These checks have passed locally.
+test snapshots can remain in place. These checks have passed locally; the workflow had not run
+yet on 2026-11-22.
 
 The hosted job runs only after the local job passes and the operator enables
 `BFR_LIVE_SMOKE_ENABLED` as a repository variable. Configure the protected
 `live-smoke` environment with the `BFR_LIVE_REPOSITORIES` secret. Each provider needs
 a pair of dedicated, initialized repositories and the expected authenticated repository
 IDs. The job removes only objects it created in the normal fixture and leaves the
-append-only history in place. Dispatch the workflow on the candidate's `main` commit
-before a release and record the passing provider/mode pairs. On 2026-11-20 the same hosted command passed directly on the owner's normal and append-only BorgBase fixtures. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
+append-only history in place. The release gate requires a run for the release commit whose
+hosted job succeeded, not skipped (§7): dispatch the workflow on `main` before tagging. On
+2026-11-20 the same hosted command passed directly on the owner's normal and append-only
+BorgBase fixtures, in a manual run that no workflow recorded. [Operator setup](../tests/Live/README.md) · [Server evidence](adr/0025-repository-servers.md)
 
 ### 5.8 Checks on the package
 
@@ -457,9 +733,15 @@ before a release and record the passing provider/mode pairs. On 2026-11-20 the s
 that Git tracks, without the paths in `.distignore`, with the modes 0644 and 0755. A file
 that Git does not track cannot reach the package. Two CI jobs work on that directory.
 
-**Plugin Check.** The scanner of the WordPress.org review team runs through
-`wordpress/plugin-check-action`, in a WordPress that the action starts with `wp-env`.
-Errors fail the job, warnings are listed as annotations. The first run, with Plugin Check
+**Plugin Check.** The scanner of the WordPress.org review team runs through WP-CLI in a test
+site of `bin/test-site.sh` (`.github/actions/check-package`), with the package installed as a
+copy. Every part is pinned and checked: WordPress 7.1.5 by the checksum in `bin/test-site.sh`,
+WP-CLI 2.12.0 by the checksum in `bin/install-test-tools.sh`, and Plugin Check 2.2.0 by a
+digest of its 3,039 files, recorded after comparing each with the checksums that WordPress.org
+publishes for that version. Until 2026-11-22 the job used `wordpress/plugin-check-action`,
+which installs the latest `@wordpress/env` from npm and the latest WordPress and Plugin Check,
+unverified. A new version of each is a reviewed change now, as for restic. Errors fail the
+job, warnings are listed as annotations (`report.py` beside the action). The first run, with Plugin Check
 2.2.0 on 2026-11-10, reported 63 errors and 2 warnings. Two findings were fixed in the
 plugin. `readme.txt` said `Stable tag: trunk`; it now names the version of the plugin
 header, and the scanner reports it when the two differ. And the `ABSPATH` guard of
@@ -503,30 +785,71 @@ copy would only go stale.
 
 | Workflow | Trigger | Jobs |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package and the translation template built from it (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled; the database suite against MySQL and MariaDB; the repository mutation gate and a separate file-planner mutation gate (§5.6) |
+| `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package with the release rehearsal and the tests of the release gate, and the translation template built from the package (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled, and once more on PHP 8.3 with ext-zstd; the database suite against MySQL and MariaDB; the core mutation gate and the four restore gates (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
-| `fuzz.yml` | nightly, manual dispatch | two minutes of fuzzing per parser; findings uploaded as an artifact |
-| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; records with `strace` and core dumps how the server's PHP processes ended. **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5). |
+| `database-mutation.yml` | push to `main`, pull requests that change `src/`, `tests/` or a file the job reads, manual dispatch | the database mutation gate against MySQL (§5.6) |
+| `fuzz.yml` | nightly, manual dispatch | fuzzing per parser, two minutes each unless the dispatch says otherwise; the job's name states the seconds; findings uploaded as an artifact |
+| `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; their job names then end in "(acceptance size)". Records with `strace` and core dumps how the server's PHP processes ended, and fails when the PHP or WordPress log holds an entry from the plugin's files (§5.3). **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5) and the same log check. |
 | `live-servers.yml` | weekly and manual dispatch on main, manual pre-release verification | disposable TLS rest-server pair and opt-in operator-configured repository pairs (§5.7) |
-| `codeql.yml` | admin script changes on main or pull requests, weekly, manual dispatch | CodeQL against the shipped JavaScript in `assets/js` |
-| `deploy-wordpress-org.yml` | stable signed tag, manual retry | build with `.distignore`, Plugin Check, manual approval, SVN deploy (`trunk`, `tags/x.y.z`, `assets/`), post-deploy diff, GitHub release notes only |
+| `codeql.yml` | every push to `main`, admin script changes in pull requests, weekly, manual dispatch | CodeQL against the shipped JavaScript in `assets/js` |
+| `deploy-wordpress-org.yml` | a pushed tag `vX.Y.Z`; a retry by re-running the tag's run, or by a dispatch on the tag | verification of the tag, the repository's protections and the test results of the tagged commit, the versions and changelogs, the package and Plugin Check (§7); the owner's approval; SVN deploy (`trunk`, `tags/x.y.z`, `assets/`); post-deploy diff; GitHub release notes, once the tag is shown to name the deployed commit |
 
-The release workflow is prepared for the approved WordPress.org repository. Actions are pinned to commit SHAs;
-Dependabot proposes updates of the actions and of the Composer lock file every week. For
-npm it is set to the lock file only as well. `package.json` names exact versions, so that
-weekly run proposes no new version of ESLint or of its WordPress plugin: a new version is
-a change of `package.json` and the lock file by hand, like a new PHPStan or restic.
-Whether Dependabot's security updates, which can replace a vulnerable package in a lock
-file, are switched on is a setting of the repository that no file here records. The quality jobs use read-only repository access. CodeQL publishes its analysis to code scanning. The release workflow uses its protected environment for SVN and a separate write token for release notes. CI installs the npm packages with
-`npm ci --ignore-scripts`, so only what the lock file names is installed and no package
-runs a script while it is installed.
+**Runs on `main` never cancel each other.** Pull requests cancel their superseded runs, but a
+push to `main` cancels neither the nightly runs nor the runs of the commit before it: the
+concurrency group of a run on `main` is the run itself. Until 2026-11-22 a push could cancel
+the nightly acceptance run and the release commit's own runs, and the release gate then
+refused the release.
 
-Checks that must be green before a merge: lint, ESLint, analyse, unit and mutation
-testing, Plugin Check, the translation template and the sign-off check; conformance when
-`Crypto`, `Format`, `Backend` or `Engine` are touched; integration once it has passed for
-the first time. A `readme.txt` that names another version than the plugin header fails
-Plugin Check, which is the consistency check planned earlier; the check for a stale
-template has no subject, because the template is not committed.
+**A skip cannot turn a job green.** Every PHPUnit configuration fails a run that selected no
+test (`failOnEmptyTestSuite`). After each PHPUnit run CI compares the skipped tests of its
+JUnit log with a list in `tests/Skips` (`bin/check-skipped-tests.php`): the unit tests without
+ext-zstd (`unit.txt`) and with it (`unit-zstd.txt`), the database suite on MySQL
+(`database-mysql.txt`, empty) and on MariaDB (`database-mariadb.txt`), the two conformance
+jobs, and the integration suite (`integration.txt`, empty). A skip that is not listed fails the
+job, and so does a listed test that ran or no longer exists. A class that skips in
+`setUpBeforeClass()`, as the database and integration classes do without their server or site,
+runs none of its tests and fails the job whatever the list says; PHPUnit's own
+`failOnSkipped` counts only tests that skip one by one and would miss it. Change a list only
+together with the test, and say why in the pull request.
+
+**What is pinned.** Actions are pinned to commit SHAs. Composer is 2.11.2, checked by setup-php
+against the SHA-256 of its PHAR; the PHAR's OpenPGP signature by Composer's release key
+`161D FBE3 4288 9F01 DDAC 4E61 CBB3 D576 F2A0 946F` was checked when the pin was recorded. The
+PHPStan PHAR is checked by Composer against the SHA-1 in `composer.json` and `composer.lock`,
+the only checksum Composer offers for a package repository; its signature by PHPStan's release
+key `CA7C 2C7A 30C8 E8E1 274A 8476 51C6 7305 FFC2 E5C0` was checked when it was recorded, and
+the release asset equals the PHAR in PHPStan's repository at tag 2.3.5. The MySQL and MariaDB
+service images are pinned by digest (MySQL 8.4.13, MariaDB 11.4.13). WordPress, WP-CLI, Plugin
+Check, restic, rest-server and Infection are checked against checksums in the repository.
+Dependabot proposes updates of the actions and of the Composer and npm lock files every week;
+`package.json` names exact versions, so a new version of ESLint or of its WordPress plugin is a
+change by hand, like a new PHPStan, Composer, image, Plugin Check or restic. Not pinned: the
+runner image and the packages that jobs install with apt (Subversion, strace, gdb, Apache,
+nginx, PyYAML), the patch release of PHP that setup-php installs, the patch release of Node.js
+22, the browser that Playwright downloads for its pinned version, and the CodeQL bundle that
+`github/codeql-action` selects. CI installs the npm packages with `npm ci --ignore-scripts`, so
+only what the lock file names is installed and no package runs a script while it is installed.
+
+Whether Dependabot's security updates, which can replace a vulnerable package in a lock file,
+are switched on is a setting of the repository that no file here records. The quality jobs use
+read-only repository access. CodeQL publishes its analysis to code scanning. The release
+workflow uses its protected environment for SVN and a separate write token for release notes.
+
+Checks that must be green before a merge are listed in `.github/required-checks.txt`, as
+GitHub names the jobs of a pull request: coding standards, ESLint, static analysis, Plugin
+Check, the translation template, the sign-off check, the unit tests, the database suite on
+MySQL and MariaDB, mutation testing (core and the four restore gates), and the WordPress
+compatibility, memory and browser jobs of `integration.yml`; conformance when `Crypto`,
+`Format`, `Backend` or `Engine` are touched. The ruleset on `main` of §7.1 requires that list,
+and the release gate names every check of it that the ruleset does not require;
+`tests/Release/test_release_gates.py` checks that every line names a job of `ci.yml` or
+`integration.yml`. GitHub enforces this only through that ruleset: until the owner has created
+it, these checks are advice, and the release workflow refuses to deploy. Conformance cannot be a required check,
+because its path filter leaves a pull request without its result; the release gate requires it
+for the release commit instead, as it does the database mutation gate, which runs only on some
+pull requests. A `readme.txt` that names another version than the plugin header fails Plugin
+Check, which is the consistency check planned earlier; the check for a stale template has no
+subject, because the template is not committed.
 
 The job "Commits are signed off" runs on pull requests. It fails when a commit between the
 base and the head of the pull request, merge commits included, has no `Signed-off-by`
@@ -547,32 +870,149 @@ for an installable archive. CI runs Plugin Check against the packaged files. Dir
 lives in `.wordpress-org/` and is excluded from the plugin ZIP. The owner approves the
 listing artwork, signs the release tag and authorizes deployment to WordPress.org.
 
-After WordPress.org grants access to the plugin's SVN repository, configure the GitHub
-`wordpress-org` environment to require the owner's review. Store the dedicated credentials
-as environment secrets `WORDPRESS_ORG_SVN_USERNAME` and `WORDPRESS_ORG_SVN_PASSWORD`.
-Set the repository variable `RELEASE_SIGNING_PUBLIC_KEY` to the owner's ASCII-armored
-OpenPGP public key, including its signing subkeys. The workflow verifies the signature in
-an isolated keyring and checks that the tagged commit is on `main`. It verifies successful
-CI, conformance and integration runs for that exact commit on the repository's main branch.
-If conformance was skipped by path filters, dispatch it on the release revision before
-tagging. The deployment job rebuilds the ZIP
-after approval and compares its SHA-256 with the archive that passed Plugin Check. The
-SVN transaction publishes the package and listing together. Repeating a successful run
-verifies the existing tag. A different tag with a lower version is refused. [GitHub workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow).
+A pushed tag `vX.Y.Z` starts `deploy-wordpress-org.yml`; a release candidate such as
+`v0.3.0-rc.1` starts nothing. Before the owner is asked to approve, its check job verifies,
+with the copies of the scripts on `main`:
 
-`tests/Release/test-wordpress-org.sh` rehearses signing and publication with temporary
-local Git and SVN repositories, including changes and deletions between releases. It
-requires Git, GnuPG, Subversion, rsync and Python 3. [WordPress SVN handbook](https://developer.wordpress.org/plugins/wordpress-org/how-to-use-subversion/) · [GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+1. **The tag** (`bin/verify-release-tag.sh`): a stable version, annotated, its tag object
+   named as the tag, on a commit that is on `main`, and signed by the key in the repository
+   variable `RELEASE_SIGNING_PUBLIC_KEY`, whose primary fingerprint must be pinned in
+   `.github/release-signing-key.txt` as committed on `main`. Replacing the variable alone
+   therefore authorises no other key; a new key needs a reviewed pull request. A signature by a
+   signing subkey of the pinned key counts; an expired or revoked key does not. The script
+   reads GnuPG's status itself and requires `GOODSIG`: Git 2.56 on the runner accepts a
+   signature whose key has expired since, which Git 2.53 refused.
+2. **The protections** (`bin/check-release-gates.py protections`): an active ruleset on
+   `main` that requires pull requests and every check of `.github/required-checks.txt` and
+   blocks force pushes and deletion; an active tag ruleset that keeps the release tag from
+   being moved or deleted; and the `wordpress-org` environment with the owner as its only
+   required reviewer, self-review allowed, without administrator bypass, deploying only tags
+   that match `v*`. The job's own token reads these: rulesets
+   through the repository's metadata, the environment and its deployment policies with
+   `actions: read`. GitHub answers 404 for an environment that does not exist, and creates
+   it without protection on its first use; the check fails then too.
+3. **The test results** (`bin/check-release-gates.py evidence`): for the exact commit on
+   `main`, every run of `ci.yml`, `conformance.yml`, `integration.yml`,
+   `database-mutation.yml`, `live-servers.yml`, `fuzz.yml` and `codeql.yml` ended in
+   success, and among them are an integration run of the acceptance size, a live smoke whose
+   hosted job succeeded, a fuzz run of at least 120 seconds per target and a CodeQL run;
+   code scanning shows no open alert on `main`. A failed run is not outweighed by a later
+   successful one: re-run the failed run if the failure was not caused by the commit. "For
+   this commit" means the run's head commit and branch, its event and its repository; results
+   of a commit do not age, so no time limit applies.
+4. **Versions and changelogs** (`bin/prepare-wordpress-org.py --check-only`): the plugin
+   header, `Stable tag`, `Plugin::VERSION`, the newest entry of `CHANGELOG.md` and of the
+   readme's changelog name the release, and `CHANGELOG.md` has no unreleased entries left.
+5. **The package**: built from the tagged commit, checked by Plugin Check.
 
-1. Update `CHANGELOG.md` and the `== Changelog ==` section of `readme.txt`; bump the version
+The job lists every requirement that is not met. Then the deploy job waits for the owner's
+approval of the protected environment, rebuilds the ZIP and compares its SHA-256 with the
+archive that passed Plugin Check. The SVN transaction publishes the package and listing
+together. Repeating a successful run verifies the existing tag. A different tag with a lower
+version is refused. The notes job publishes the GitHub release only after the API shows that
+the tag still names the tag object and the commit that were verified and deployed.
+
+Before tagging, make sure the release commit has the results that only a schedule or a
+dispatch produces: dispatch **Integration** on `main` with *acceptance* (or wait for the
+nightly run), **Private repository smoke** and, unless the nightly runs have covered the
+commit, **Fuzzing** and, when its path filter left the commit out, **Conformance**. To retry a deployment, re-run the tag's own run; GitHub allows that for 30 days.
+After that, dispatch the workflow on the tag itself ("Use workflow from: Tags"); a dispatch on
+a branch is refused, and the environment would refuse it too.
+[GitHub workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow) ·
+[GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+
+`tests/Release/test-wordpress-org.sh` rehearses signing and publication with temporary local
+Git and SVN repositories, including changes and deletions between releases, and checks every
+refusal by its message: release candidates, a missing, unsigned or lightweight tag, a tag
+object stored under another name, a commit off `main`, an unpinned, expired or revoked key, a
+replaced key variable, a missing or empty fingerprint file, and versions or changelogs that do
+not name the release. `tests/Release/test_release_gates.py` checks the release gate against
+recorded GitHub responses. Both run in CI. They need Git, GnuPG, Subversion, rsync and Python
+3. [WordPress SVN handbook](https://developer.wordpress.org/plugins/wordpress-org/how-to-use-subversion/)
+
+What the workflow cannot verify, and the residual risk: GitHub returns the bypass list of a
+ruleset only to a caller with write access to it, which the workflow's token never has; the
+token cannot list secrets; and nothing on GitHub shows WordPress.org's settings. The owner
+checks these by hand (§7.1). Someone who holds the owner's GitHub credentials with
+administrator rights can change the rulesets, the environment, the variable and, through a
+pull request they merge themselves, the pinned fingerprint, and can approve the deployment.
+WordPress.org's release confirmation is the factor outside GitHub: each new release waits for
+a link that WordPress.org e-mails to the plugin's committers.
+
+### 7.1 Settings the owner makes
+
+The release workflow refuses to deploy until the first three are in place. They are settings of
+the repository, not files, so a pull request cannot make them.
+
+1. **Ruleset for `main`** (Settings → Rules → Rulesets → New branch ruleset): target the
+   default branch; enforcement *Active*; bypass list empty. Rules: *Restrict deletions*,
+   *Block force pushes*, *Require a pull request before merging* (no approval required: the
+   owner is the only maintainer, and the pull request is the record), and *Require status
+   checks to pass* with every check listed in `.github/required-checks.txt` (§6). Merge
+   through GitHub (the merge button or `gh pr merge`), because a merge pushed from a local
+   clone is refused.
+2. **Ruleset for release tags** (New tag ruleset): include the pattern `v*`, which GitHub
+   stores as `refs/tags/v*`, and exclude nothing; enforcement *Active*; bypass list empty.
+   Rules: *Restrict updates* and *Restrict deletions*. A published release tag can then neither
+   be moved nor deleted, not even by the owner, without first changing the ruleset. The release
+   gate counts a tag ruleset only when an include pattern reaches the tag the way GitHub
+   matches it, with `*` and `?` inside one segment of `refs/tags/<tag>`: `refs/tags/v*`,
+   `refs/tags/*` or `refs/**/*`, but not `refs/*`. An exclude pattern that could match the tag
+   even with `*` across segments takes the ruleset out.
+3. **Environment `wordpress-org`** (Settings → Environments), before the first tag: required
+   reviewer the owner and nobody else, because GitHub needs the approval of one listed reviewer
+   and another one could approve alone; *Prevent self-review* off, because the owner approves
+   the releases they tag;
+   *Allow administrators to bypass configured protection rules* off; deployment branches and
+   tags: *Selected branches and tags*, one rule of type *Tag* with the pattern `v*` and no
+   branch rule. Store the WordPress.org user name and a dedicated SVN password (generated in
+   the WordPress.org profile, never the account password) as the environment secrets
+   `WORDPRESS_ORG_SVN_USERNAME` and `WORDPRESS_ORG_SVN_PASSWORD`, never as repository secrets,
+   which every workflow on every branch could read. Rotate the password yearly and on
+   suspicion.
+4. **Release key**: add the primary key's fingerprint to `.github/release-signing-key.txt` in
+   a pull request, and set the repository variable `RELEASE_SIGNING_PUBLIC_KEY` to the
+   ASCII-armored public key with its signing subkeys. A renewed expiry date or a new signing
+   subkey changes only the variable; another key needs the pull request.
+5. **Live smoke**: the repository variable `BFR_LIVE_SMOKE_ENABLED` set to `true`, and the
+   `live-smoke` environment with the secret `BFR_LIVE_REPOSITORIES` ([operator
+   setup](../tests/Live/README.md)). Without them the hosted job is skipped and the release
+   gate refuses.
+6. **Tokens on development machines**: fine-grained personal access tokens for this
+   repository only, with the permissions daily work needs (for example *Contents* and *Pull
+   requests* write, *Actions* read) and no write access to *Administration*, *Actions*,
+   *Deployments*, *Environments*, *Secrets*, *Variables* or *Workflows*. No token with the
+   classic `repo` scope: the one that `gh auth login` obtains in the browser has it, so give
+   `gh auth login --with-token` a fine-grained token instead. A token with that scope can
+   replace variables, push to `main` and approve deployments through the API. Change rulesets,
+   environments, variables and secrets, and approve deployments, in the browser, with
+   two-factor authentication.
+7. **WordPress.org release confirmation**: once the plugin is in the directory, turn on
+   *Release Confirmation* for it, an opt-in setting of the directory. A new tag in SVN is then
+   released only after a committer confirms it on the Release Management dashboard through a
+   link that WordPress.org e-mails to all committers; committers must be able to receive
+   e-mail directly. The handbook does not describe how to turn it off again, so treat it as
+   permanent. After each deployment, confirm the release from that e-mail; an e-mail that no
+   deployment of yours explains means someone else published a tag.
+   [Release confirmation emails](https://developer.wordpress.org/plugins/wordpress-org/release-confirmation-emails/)
+8. **By hand before each release**, because the workflow cannot read them: the bypass lists of
+   both rulesets are empty, no repository secret named `WORDPRESS_ORG_SVN_*` exists, and
+   release confirmation is on.
+
+### 7.2 Release steps
+
+1. Update `CHANGELOG.md` and the `== Changelog ==` section of `readme.txt`, moving the
+   unreleased entries to the new version (the release workflow refuses changelogs that do
+   not start with it); bump the version
    in the plugin header, `readme.txt` (`Stable tag`) and `Plugin::VERSION`; verify `Tested up
    to`, `Requires PHP`, `Requires at least`; attach the benchmark results. Between releases
    the three places name the same prerelease version, for example `0.3.0-rc.1`.
 2. Pull request "Release x.y.z" with the completed release checklist (self-review, live
    smoke tests green, benchmarks attached); CI runs Plugin Check on the built package and
    the full conformance suite.
-3. Signed tag `vx.y.z` on `main`. `deploy-wordpress-org.yml` builds the package with
-   `.distignore`, waits for the manual approval of the protected environment, then commits
+3. Signed tag `vx.y.z` on `main`. `deploy-wordpress-org.yml` checks what §7 lists, builds the
+   package with `.distignore`, waits for the manual approval of the protected environment,
+   then commits
    to SVN `trunk`, creates `tags/x.y.z` and syncs `.wordpress-org/` to `assets/`. Credentials:
    the WordPress.org username and a dedicated SVN password (generated in the WordPress.org
    profile, never the account password), stored as environment secrets.
@@ -680,9 +1120,9 @@ for every point that applies, "not affected" for the others.
    the authorised, audited `recovery-kit` command. Redirected output requires `--force`.
 8. **Tests and gates.** A test fails without the change. For `Crypto`, `Format`, `Backend`
    or `Engine` the conformance run is green; for `Crypto`, `Format`, `Engine\Forget` and the
-   database import filter the
-   covered mutation score stays at or above 90 %. Documents and decision records say what
-   changed.
+   database import filter the covered mutation score stays at or above its floor, 92 % since
+   2026-11-23 and never below 90 %, and no mutation gate falls below its floors (§5.6).
+   Documents and decision records say what changed.
 9. **Cooling-off.** A change to `Crypto`, `Format` or `Engine` is merged no earlier than 24
    hours after the last commit that touches these namespaces, and the author reads the
    whole diff once more before merging.

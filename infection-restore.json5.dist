@@ -1,0 +1,40 @@
+// Mutation testing of file restore: staging, verification, the guarded file change, the disk
+// plan and the snapshot browser (docs/04 §5.6). composer mutation:restore counts code that no
+// test reaches (--with-uncovered). ApplyPlan and SiteLayout have their own 90 % gate in
+// infection-planner.json5.dist.
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": ["src/Restore"],
+        "excludes": ["ApplyPlan.php", "SiteLayout.php"]
+    },
+    "bootstrap": "tests/bootstrap.php",
+    "phpUnit": {
+        "configDir": "tests/Mutation"
+    },
+    "testFrameworkOptions": "--testsuite=restore",
+    // Infection skips a mutant without running it when its quickest covering test class took
+    // at least this long in the initial run, which collects coverage. SnapshotBrowserTest takes
+    // about 45 s that way (6 s without coverage), so with 30 s all 255 mutants of
+    // SnapshotBrowser were skipped on 2026-11-23.
+    "timeout": 120,
+    "tmpDir": ".tools/infection-restore-tmp",
+    "logs": {
+        "text": ".tools/infection-restore/infection.log",
+        "summary": ".tools/infection-restore/summary.log",
+        "github": true
+    },
+    // Floors at the scores measured on 2026-11-23 with main at e40ab18 and the tests' temporary
+    // files on tmpfs, as in CI (docs/04 §5.6): 77.91 % and 81.84 % covered locally, 77.88 % and
+    // 81.81 % in CI's run on the same state, where one more mutant of DirectorySpellings escaped;
+    // rounded down. They may only rise; ADR 0024's 90 % is the goal. The gate's true score is
+    // below the 80 % and 85 % that its floors promised before: since job documents and journal
+    // records are written durably (2026-11-22), fsync() failed under Infection's file wrapper in
+    // every test that writes one, and the gate counted their mutants as killed (98 % covered); and
+    // the mutants of SnapshotBrowser were never run (see the timeout above).
+    "minMsi": 77,
+    "minCoveredMsi": 81,
+    "mutators": {
+        "@default": true
+    }
+}

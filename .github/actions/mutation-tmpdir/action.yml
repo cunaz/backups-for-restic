@@ -1,0 +1,24 @@
+name: Temporary files of the mutation gates on tmpfs
+description: >-
+  Point TMPDIR at a new directory on /dev/shm for the rest of the job, after checking that it is
+  tmpfs with room for what the tests write. A mutation gate measures the tests, not the disk: on
+  the runner's ext4 every fsync() of a durable write costs milliseconds, and the file restore
+  gate would not finish within its job limit. The floors are measured with the tests' temporary
+  files on tmpfs as well (docs/04 §5.6).
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        dir=/dev/shm/bfr-mutation
+        mkdir -p "$dir"
+        type="$(stat -f -c %T "$dir")"
+        free="$(df --output=avail -k "$dir" | tail -n 1 | tr -d ' ')"
+        # The tests of the file restore gate kept a few hundred MiB there with 8 threads at
+        # most (docs/04 §5.6); a runner runs 4.
+        if [ "$type" != tmpfs ] || [ "$free" -lt 2097152 ]; then
+          echo "::error::The mutation gates need their temporary files on tmpfs with 2 GiB free; $dir is on $type with $free KiB free."
+          exit 1
+        fi
+        echo "TMPDIR=$dir" >> "$GITHUB_ENV"
+        echo "Temporary files go to $dir ($type, $((free / 1024)) MiB free)."

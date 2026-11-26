@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "c7b1cfacb294dd04c68ae9adc89696f3",
+    "content-hash": "81c757767126136fd261fe216eaee1eb",
     "packages": [],
     "packages-dev": [
         {
@@ -570,7 +570,8 @@
             "version": "2.3.5",
             "dist": {
                 "type": "file",
-                "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar"
+                "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar",
+                "shasum": "05eda8c51645fbb1cca6277a0bc2d2f9549d3f53"
             },
             "bin": [
                 "phpstan.phar"

@@ -14,6 +14,10 @@ concurrency:
   group: private-repository-smoke
   cancel-in-progress: false
 
+env:
+  # Composer verified against the SHA-256 of its release PHAR, as in ci.yml.
+  PHP_TOOLS: composer:2.11.2@sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
+
 jobs:
   local:
     name: Disposable private TLS rest-server
@@ -29,7 +33,7 @@ jobs:
           php-version: '8.3'
           extensions: curl, mbstring, openssl
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - run: bin/install-test-tools.sh rest-server
       - run: php tests/Live/run.php --local
@@ -50,7 +54,7 @@ jobs:
           php-version: '8.3'
           extensions: curl, mbstring, openssl, zstd
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - run: composer install --no-interaction --no-progress --prefer-dist
       - name: Exercise dedicated normal and append-only repositories
         env:

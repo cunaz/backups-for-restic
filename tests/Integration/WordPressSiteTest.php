@@ -140,13 +140,13 @@ final class WordPressSiteTest extends TestCase {
 		$in_repository = json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true );
 		self::assertIsArray( $in_repository );
 		$expected = array_map( 'strval', array_column( $in_repository, 'id' ) );
-		sort( $expected );
+		sort( $expected, SORT_STRING );
 
 		[ $status, $all, $raw ] = TestSite::api( 'GET', '/snapshots&scope=repository&fresh=1' );
 		self::assertSame( 200, $status, $raw );
 		self::assertSame( 'repository', $all['scope'] ?? null, $raw );
 		$listed = array_column( $all['snapshots'] ?? [], 'id' );
-		sort( $listed );
+		sort( $listed, SORT_STRING );
 		self::assertSame( $expected, $listed, $raw );
 
 		[ $status, $site, $raw ] = TestSite::api( 'GET', '/snapshots&fresh=1' );

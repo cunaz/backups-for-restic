@@ -258,8 +258,10 @@ final class CliTest extends TestCase {
 			}
 		}
 		$expected = array_map( static fn ( string $id ): string => substr( $id, 0, 8 ), self::snapshots() );
-		sort( $listed );
-		sort( $expected );
+		// As strings: a short ID such as 053e4943 or 7278e184 is also a number to PHP, and a sort
+		// that compares some IDs as numbers and others as strings depends on the order it starts from.
+		sort( $listed, SORT_STRING );
+		sort( $expected, SORT_STRING );
 		self::assertSame( $expected, $listed, $output );
 	}
 

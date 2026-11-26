@@ -1,5 +1,6 @@
 // Mutation testing (ADR 0024): the gate for the code whose bugs would damage repositories.
 // Run with: composer mutation (needs pcov or Xdebug, and bin/install-test-tools.sh infection).
+// The script passes --with-uncovered, so code that no test reaches counts against minMsi.
 {
     "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
     "source": {
@@ -8,6 +9,21 @@
             "src/Format",
             "src/Engine/Forget",
             "src/Database/Restore"
+        ],
+        // Classes of src/Database/Restore that tests/Database tests against a real server.
+        // infection-database.json5.dist measures them with a database; here they would mostly
+        // count as not covered (WordPressStateAuthorityTest reaches a part of WordPressState).
+        "excludes": [
+            "ExchangePlan.php",
+            "Ledger.php",
+            "MysqliConnection.php",
+            "OwnedTables.php",
+            "RehearsalReport.php",
+            "SwapCatalog.php",
+            "TableExchange.php",
+            "TableImporter.php",
+            "WordPressState.php",
+            "WriteBarrier.php"
         ]
     },
     // The source files end the request unless ABSPATH is defined; without this bootstrap,
@@ -26,7 +42,14 @@
         "summary": ".tools/infection/summary.log",
         "github": true
     },
-    "minCoveredMsi": 90,
+    // Floors at the scores measured on 2026-11-23 with ext-zstd and main at e40ab18 (89.93 %,
+    // 92.22 % covered, the same in two runs and in CI's; 87.99 % and 90.48 % before the compressed
+    // index files of #52, locally and in CI), rounded down; raise them as tests are added, never
+    // lower them. ADR 0024's 90 % is the minimum that the covered score may never fall below, and
+    // the goal for the score with uncovered code. Unlike the other gates' scores, this one barely
+    // moved when the tests stopped running under Infection's file wrapper (docs/04 §5.6).
+    "minCoveredMsi": 92,
+    "minMsi": 89,
     "mutators": {
         "@default": true
     }

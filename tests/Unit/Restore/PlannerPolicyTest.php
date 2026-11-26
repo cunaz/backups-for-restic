@@ -250,11 +250,15 @@ final class PlannerPolicyTest extends TestCase {
 		unlink( $this->live . '/file' );
 		mkdir( $this->live . '/file' );
 		self::assertSame( 'existing_directory', $plan->inspect( $this->files, $this->live . '/file' )['reason'] );
+		// A file that exists in a folder the process cannot write to cannot be replaced either.
+		file_put_contents( $this->live . '/file/old', 'live' );
 		chmod( $this->live . '/file', 0555 );
 		try {
 			if ( ! is_writable( $this->live . '/file' ) ) {
 				touch( $this->staged . '/file/new' );
 				self::assertSame( 'unwritable_destination', $plan->inspect( $this->files, $this->live . '/file/new' )['reason'] );
+				file_put_contents( $this->staged . '/file/old', 'staged' );
+				self::assertSame( 'unwritable_destination', $plan->inspect( $this->files, $this->live . '/file/old' )['reason'] );
 			}
 		} finally {
 			chmod( $this->live . '/file', 0700 );

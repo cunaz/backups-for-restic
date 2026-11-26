@@ -1,0 +1,32 @@
+// Mutation testing of the streamed ZIP writer of downloads (docs/04 §5.6). composer
+// mutation:zip counts code that no test reaches (--with-uncovered).
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": ["src/Storage/Zip"]
+    },
+    "bootstrap": "tests/bootstrap.php",
+    "phpUnit": {
+        "configDir": "tests/Mutation"
+    },
+    "testFrameworkOptions": "--testsuite=zip",
+    "timeout": 30,
+    "tmpDir": ".tools/infection-zip-tmp",
+    "logs": {
+        "text": ".tools/infection-zip/infection.log",
+        "summary": ".tools/infection-zip/summary.log",
+        "github": true
+    },
+    // Floors at the scores measured on 2026-11-23 with main at e40ab18 (83.38 % and 84.98 %
+    // covered, the same in every run of the day, on tmpfs and on ext4, and in CI), rounded
+    // down. They may only rise. The 97.98 % and 99.87 % of 2026-11-22 were measured while the
+    // tests ran under Infection's file wrapper, which reports a link to a removed file as
+    // missing: the cleanup after the link test left its directories behind and warned, and
+    // that failed every run of ZipWriterTest (docs/04 §5.6). The escape in Crc32::power() is
+    // equivalent: a 33rd row of the matrix, which no 32-bit vector reads.
+    "minMsi": 83,
+    "minCoveredMsi": 84,
+    "mutators": {
+        "@default": true
+    }
+}

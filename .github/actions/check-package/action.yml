@@ -1,34 +1,91 @@
 name: Check WordPress package
-description: Run Plugin Check against the exact plugin tree built for distribution.
+description: >-
+  Run Plugin Check, the scanner of the WordPress.org review team, against the exact plugin tree
+  built for distribution in build/backups-for-restic (docs/04 §5.8). It runs through WP-CLI in a
+  WordPress set up by bin/test-site.sh. WordPress, WP-CLI and Plugin Check are pinned and checked
+  against recorded checksums, and nothing comes from npm or a container image.
 runs:
   using: composite
   steps:
-    # Errors fail the job; warnings are listed as annotations and in the log.
-    - uses: WordPress/plugin-check-action@10857da14b6c2246d15402b3e69f777edcf8c12e # v1.1.9
+    # A new file at the top of the repository ships unless .distignore names it.
+    - name: The package holds only the plugin's files
+      shell: bash
+      run: |
+        expected='CHANGELOG.md LICENSE SECURITY.md assets backups-for-restic.php readme.txt src uninstall.php'
+        actual="$(ls -A build/backups-for-restic | LC_ALL=C sort | paste -sd ' ' -)"
+        if [[ "$actual" != "$expected" ]]; then
+          echo "::error::The package holds '$actual' at its top, not '$expected'. Add development files to .distignore."
+          exit 1
+        fi
+    - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
       with:
-        build-dir: build/backups-for-restic
-        # The action would use a token only to comment on the pull request, which the
-        # read-only token of this workflow cannot do.
-        repo-token: ''
-        # Native file functions and parse_url() in the WordPress-free core. The core must
-        # not call WordPress (ADR 0029), and it streams and renames files in ways that
+        php-version: '8.3'
+        extensions: mbstring, openssl, mysqli, curl
+        coverage: none
+        # This check runs no Composer.
+        tools: none
+    - name: Start MySQL
+      shell: bash
+      run: sudo systemctl start mysql.service
+    # WordPress 7.1.5 by its checksum in bin/test-site.sh, with a copy of the package installed
+    # and activated; WP-CLI by its checksum in bin/install-test-tools.sh.
+    - name: WordPress with the built package, and WP-CLI
+      shell: bash
+      env:
+        BFR_TEST_PLUGIN_DIR: ${{ github.workspace }}/build/backups-for-restic
+        BFR_SITE_TOOLS_DIR: ${{ runner.temp }}/plugin-check
+        BFR_DB_NAME: bfr_plugin_check
+        BFR_DB_HOST: 127.0.0.1
+        BFR_DB_ADMIN_USER: root
+        BFR_DB_ADMIN_PASSWORD: root
+      run: |
+        bin/install-test-tools.sh wp-cli
+        bin/test-site.sh install
+    - name: Plugin Check 2.2.0, checked file by file
+      shell: bash
+      env:
+        SITE: ${{ runner.temp }}/plugin-check/site
+        # SHA-256 over the sorted list of the SHA-256 values of the unpacked files, recorded on
+        # 2026-11-22 after comparing all 3,039 files with the values that WordPress.org publishes
+        # at https://downloads.wordpress.org/plugin-checksums/plugin-check/2.2.0.json. It does
+        # not depend on how the zip is packed. A new version is a reviewed change, like a new
+        # WP-CLI.
+        DIGEST: 1f0a6468b71d386efc3d1fb792eddcfe7e91e22bf5fb9a0658b3a24c24552660
+      run: |
+        work="$(mktemp -d)"
+        curl -fsSL --retry 3 -o "$work/plugin-check.zip" https://downloads.wordpress.org/plugin/plugin-check.2.2.0.zip
+        unzip -q "$work/plugin-check.zip" -d "$work/unpacked"
+        digest="$(cd "$work/unpacked/plugin-check" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1)"
+        others="$(find "$work/unpacked" -mindepth 1 -maxdepth 1 ! -name plugin-check; find "$work/unpacked/plugin-check" ! -type f ! -type d)"
+        if [[ "$digest" != "$DIGEST" || -n "$others" ]]; then
+          echo "::error::The download of Plugin Check 2.2.0 does not hold the files recorded for it (digest $digest)."
+          exit 1
+        fi
+        mv "$work/unpacked/plugin-check" "$SITE/wp-content/plugins/plugin-check"
+    # Errors fail the job; warnings are listed as annotations and in the log.
+    - name: Run Plugin Check
+      shell: bash
+      env:
+        SITE: ${{ runner.temp }}/plugin-check/site
+        # Native file functions and parse_url() in the WordPress-free core. The core must not
+        # call WordPress (ADR 0029), and it streams and renames files in ways that
         # WP_Filesystem does not offer. The project's own PHPCS run keeps this sniff on for
         # src/WordPress and src/Plugin.php (phpcs.xml.dist).
-        ignore-codes: |-
-          WordPress.WP.AlternativeFunctions.file_system_operations_chmod
-          WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-          WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-          WordPress.WP.AlternativeFunctions.file_system_operations_fread
-          WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
-          WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
-          WordPress.WP.AlternativeFunctions.file_system_operations_mkdir
-          WordPress.WP.AlternativeFunctions.file_system_operations_rmdir
-          WordPress.WP.AlternativeFunctions.file_system_operations_touch
-          WordPress.WP.AlternativeFunctions.parse_url_parse_url
-          WordPress.WP.AlternativeFunctions.rename_rename
-          WordPress.WP.AlternativeFunctions.unlink_unlink
-        # mb_chr() and mb_ord() in this file are PHP's own, from the mbstring extension that
-        # the plugin requires (readme.txt, Doctor). The check reports them as WordPress
-        # functions that need WordPress 7.1. The file is plain PHP without WordPress calls,
-        # so the check has nothing else to find in it.
-        exclude-files: src/Support/GoQuote.php
+        IGNORE_CODES: >-
+          WordPress.WP.AlternativeFunctions.file_system_operations_chmod,WordPress.WP.AlternativeFunctions.file_system_operations_fclose,WordPress.WP.AlternativeFunctions.file_system_operations_fopen,WordPress.WP.AlternativeFunctions.file_system_operations_fread,WordPress.WP.AlternativeFunctions.file_system_operations_fwrite,WordPress.WP.AlternativeFunctions.file_system_operations_is_writable,WordPress.WP.AlternativeFunctions.file_system_operations_mkdir,WordPress.WP.AlternativeFunctions.file_system_operations_rmdir,WordPress.WP.AlternativeFunctions.file_system_operations_touch,WordPress.WP.AlternativeFunctions.parse_url_parse_url,WordPress.WP.AlternativeFunctions.rename_rename,WordPress.WP.AlternativeFunctions.unlink_unlink
+        # mb_chr() and mb_ord() in this file are PHP's own, from the mbstring extension that the
+        # plugin requires (readme.txt, Doctor). The check reports them as WordPress functions
+        # that need WordPress 7.1. The file is plain PHP without WordPress calls, so the check
+        # has nothing else to find in it.
+        EXCLUDE_FILES: src/Support/GoQuote.php
+      run: |
+        # Plugin Check sets up its runtime checks before WordPress loads the plugins only when
+        # the command line begins with "plugin check" (CLI_Runner::is_plugin_check() reads the
+        # raw arguments 1 and 2), so --path comes after the subcommand.
+        wp() { php .tools/bin/wp "$@" --path="$SITE"; }
+        wp plugin activate plugin-check
+        wp plugin list --fields=name,status,version
+        wp plugin check backups-for-restic --format=strict-json --fields=file,line,column,type,code,message \
+          --ignore-codes="$IGNORE_CODES" --exclude-files="$EXCLUDE_FILES" \
+          --require="$SITE/wp-content/plugins/plugin-check/cli.php" > "$RUNNER_TEMP/plugin-check-results.txt"
+        python3 "$GITHUB_ACTION_PATH/report.py" "$RUNNER_TEMP/plugin-check-results.txt"

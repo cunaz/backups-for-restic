@@ -1,0 +1,4 @@
+# The format 2 tests of the conformance suite with the zstd extension (conformance.yml, "restic
+# with zstd", --filter format_2): the refusal without zstd cannot run there. See
+# tests/Skips/unit.txt for the format.
+BackupsForRestic\Tests\Conformance\ResticConformanceTest::test_format_2_repositories_from_restic_need_zstd

@@ -1,9 +1,10 @@
 name: CodeQL for the WordPress admin interface
 
 on:
+  # Every commit on main gets an analysis: the release gate requires one for the release
+  # commit (docs/04 §7). It takes a few minutes.
   push:
     branches: [main]
-    paths: ['assets/js/**', '.github/workflows/codeql.yml']
   pull_request:
     branches: [main]
     paths: ['assets/js/**', '.github/workflows/codeql.yml']

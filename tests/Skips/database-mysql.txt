@@ -1,0 +1,3 @@
+# The database suite on MySQL (ci.yml, "Database dump and restore (MySQL 8.4)"): no test may
+# skip. Every test of the suite skips when the server does not answer, and the job would be green.
+# See tests/Skips/unit.txt for the format.

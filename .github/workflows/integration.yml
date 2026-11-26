@@ -37,13 +37,22 @@ on:
 permissions:
   contents: read
 
+# A pull request cancels its superseded runs. Runs on main never cancel each other: a push does
+# not cancel the nightly run of the acceptance size, and every commit keeps the results that the
+# release gate reads (docs/04 §7).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Composer verified against the SHA-256 of its release PHAR, as in ci.yml.
+  PHP_TOOLS: composer:2.11.2@sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028
 
 jobs:
   wordpress:
-    name: WordPress ${{ matrix.wordpress }} on PHP ${{ matrix.php }}
+    # The release gate recognises a run of the acceptance size by this suffix; it is derived
+    # from the same condition as the fixture sizes below.
+    name: WordPress ${{ matrix.wordpress }} on PHP ${{ matrix.php }}${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && ' (acceptance size)' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     strategy:
@@ -79,7 +88,7 @@ jobs:
           extensions: mbstring, openssl, mysqli, curl
           ini-values: opcache.enable_cli=0
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - name: Start MySQL
         run: sudo systemctl start mysql.service
       - name: Install strace
@@ -118,7 +127,14 @@ jobs:
           BFR_SITE_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '2048' || '64' }}
           BFR_DB_FIXTURE_MB: ${{ matrix.large && (github.event_name == 'schedule' || inputs.acceptance) && '300' || '32' }}
         # The killed-tick test restarts the server from PHPUnit, which passes the limit on.
-        run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist
+        run: ulimit -c "$(ulimit -Hc)" && vendor/bin/phpunit -c phpunit-integration.xml.dist --log-junit "$RUNNER_TEMP/integration.xml"
+      # A class whose site or tool does not answer skips in setUpBeforeClass(), which PHPUnit's
+      # failOnSkipped does not count.
+      - name: No integration test skipped
+        run: php bin/check-skipped-tests.php "$RUNNER_TEMP/integration.xml" tests/Skips/integration.txt
+      # Notices, warnings and deprecations reach only the logs, never a response.
+      - name: The plugin's code left nothing in the PHP and WordPress logs
+        run: bin/test-site.sh check-logs
       - name: How the server's workers ended
         if: always()
         # Signals and exits other than the clean ones, from strace (BFR_SITE_TRACE).
@@ -181,7 +197,7 @@ jobs:
           extensions: mbstring, openssl, mysqli, curl
           ini-values: opcache.enable_cli=0
           coverage: none
-          tools: composer:v2
+          tools: ${{ env.PHP_TOOLS }}
       - name: Start MySQL
         run: sudo systemctl start mysql.service
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -230,6 +246,8 @@ jobs:
           extensions: mbstring, openssl, mysqli, curl
           ini-values: opcache.enable_cli=0
           coverage: none
+          # This job runs no Composer; without this, setup-php installs the latest unverified.
+          tools: none
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
@@ -258,6 +276,8 @@ jobs:
       - run: npx playwright install chromium
       - name: Browser tests
         run: npm run test:e2e
+      - name: The plugin's code left nothing in the PHP and WordPress logs
+        run: bin/test-site.sh check-logs
       - name: Collect logs
         if: failure()
         run: |

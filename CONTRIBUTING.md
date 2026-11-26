@@ -74,10 +74,19 @@ composer mutation
 `composer fuzz` fuzzes every parser for ten seconds. A finding is saved under
 `.tools/fuzz-findings/` with the command that replays it; after the fix, copy the input to
 `tests/Fixtures/fuzz/<target>/` so the unit suite replays it forever. `composer mutation`
-needs pcov or Xdebug. It requires a covered mutation score of at least 90 % across
-`Crypto`, `Format`, `Engine\Forget` and `Database\Restore`. In CI it runs on `main` and on pull requests
-that change the engine, the code below it, the tests or the tools
+needs pcov or Xdebug. It requires a covered mutation score of at least 92 % across
+`Crypto`, `Format`, `Engine\Forget` and the database import filter, its floor (90 % is the
+minimum it may never fall below), and counts code that no test reaches against a floor too.
+`composer mutation:planner`, `mutation:restore`, `mutation:apply`, `mutation:zip` and, with a
+database server, `mutation:database` are the other gates. In CI they run on `main` and on pull
+requests that change the code they depend on
 ([docs/04 §5.6](docs/04-development-and-quality.md#56-mutation-testing-and-fuzzing)).
+Each gate's configuration holds its floors, measured with `main` at `e40ab18`: a pull request
+keeps them, and one that adds tests may raise them. A new unit test of a class that a gate
+mutates goes into that gate's suite in `tests/Mutation`.
+The scripts run Infection through `bin/mutation-gate.sh`, which fails a gate when its mutant
+processes could not write durably or did not all state that they could; `.tools/bin/infection`
+alone does not check that.
 
 The package that would ship, and the translation template built from it:
 
@@ -120,7 +129,7 @@ string. The template is not committed.
   with a placeholder has a translator comment directly before the call. ESLint checks both.
 - Every change comes with tests. Changes to `Crypto`, `Format`, `Backend` or `Engine` also
   need a green conformance run. Changes to `Crypto`, `Format` or `Engine\Forget` must keep
-  the covered mutation score at or above 90 %.
+  the covered mutation score at or above its floor of 92 %.
 - Changes to `Crypto`, `Format` or `Engine` wait 24 hours after their last commit before
   they are merged, and the author reads the diff once more before merging (the cooling-off
   period of [ADR 0024](docs/adr/0024-governance-and-quality-assurance.md)).

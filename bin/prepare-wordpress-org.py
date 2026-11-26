@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare and verify one WordPress.org release in a new local SVN working copy."""
+"""Prepare and verify one WordPress.org release in a new local SVN working copy.
+
+With --check-only, only check that the built package identifies the release: the plugin
+header, the readme's Stable tag, Plugin::VERSION and both changelogs. The release workflow
+runs that check before it asks for the owner's approval.
+"""
 
 import argparse
 import filecmp
@@ -26,6 +31,31 @@ def require_version(package, version):
         match = re.search(pattern, (package / name).read_text(), re.MULTILINE)
         if match is None or match[1] != version:
             raise SystemExit(f"{name} must identify release {version}")
+
+
+def require_changelogs(package, version):
+    """Both shipped changelogs describe this release, and none still holds unreleased entries."""
+    # CHANGELOG.md follows Keep a Changelog: "## [Unreleased]" may stay, but empty, above
+    # "## [x.y.z] - date".
+    sections = re.split(r"^## ", (package / "CHANGELOG.md").read_text(), flags=re.MULTILINE)[1:]
+    names = [re.match(r"\[([^\]]*)\]", section) for section in sections]
+    releases = [name[1] for name in names if name is not None and name[1] != "Unreleased"]
+    if not releases or releases[0] != version:
+        raise SystemExit(f"CHANGELOG.md must describe release {version} in its newest entry")
+    for name, section in zip(names, sections):
+        if name is not None and name[1] == "Unreleased" and section.partition("\n")[2].strip():
+            raise SystemExit(f"CHANGELOG.md still lists unreleased changes; move them to {version}")
+    # The readme's changelog is what the directory listing shows.
+    readme = (package / "readme.txt").read_text()
+    log = re.search(r"^== Changelog ==$(.*?)(?=^== |\Z)", readme, re.MULTILINE | re.DOTALL)
+    headings = re.findall(r"^= (.+?) =\s*$", log[1] if log else "", re.MULTILINE)
+    if not headings or headings[0] != version or "Unreleased" in headings:
+        raise SystemExit(f"The changelog of readme.txt must start with release {version}")
+
+
+def require_release(package, version):
+    require_version(package, version)
+    require_changelogs(package, version)
 
 
 def entries(root):
@@ -70,21 +100,30 @@ def verify_export(source, url, directory):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--check-only", action="store_true", help="only check the versions and changelogs of the package")
     parser.add_argument("version")
     parser.add_argument("package", type=Path)
-    parser.add_argument("assets", type=Path)
-    parser.add_argument("repository", help="SVN URL of the plugin or a local file:// rehearsal repository")
-    parser.add_argument("checkout", type=Path, help="Working copy to create")
+    parser.add_argument("assets", type=Path, nargs="?")
+    parser.add_argument("repository", nargs="?", help="SVN URL of the plugin or a local file:// rehearsal repository")
+    parser.add_argument("checkout", type=Path, nargs="?", help="Working copy to create")
     args = parser.parse_args()
     if not VERSION.fullmatch(args.version):
         parser.error("a stable x.y.z version is required")
+    if args.check_only:
+        if args.assets is not None:
+            parser.error("--check-only takes only the version and the package")
+        require_release(args.package, args.version)
+        print(f"The package identifies release {args.version} in its header, readme and both changelogs")
+        return
+    if args.checkout is None:
+        parser.error("the listing asset directory, the repository URL and the new checkout are required")
     if not args.repository.startswith(("https://", "file://")):
         parser.error("an HTTPS or file repository URL is required")
     if args.checkout.exists() or not args.assets.is_dir():
         parser.error("use a new checkout and an existing listing asset directory")
 
-    require_version(args.package, args.version)
+    require_release(args.package, args.version)
     args.checkout = args.checkout.absolute()
     svn("checkout", "--depth", "immediates", "--ignore-externals", args.repository, args.checkout)
     trunk, tags, assets = (args.checkout / part for part in ("trunk", "tags", "assets"))

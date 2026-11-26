@@ -91,4 +91,56 @@ can operate.
 - A release review uses the [pre-release security checklist](../03-security-and-threat-model.md#15-pre-release-security-checklist)
   and the [publishing procedure](../04-development-and-quality.md). The release candidate's
   [verification record](../benchmarks/2026-11-20-release-candidate.md) records the local
-  results and outstanding operator approvals.
+  results and outstanding operator approvals, each with the package and commit it was
+  observed on and whether a workflow reproduces it.
+- 2026-11-22: point 6 and the merge gates were not enforced by the repository: `main` had no
+  ruleset and no branch protection, and the `wordpress-org` environment did not exist, so
+  GitHub would have created it without the owner's approval on the first release. The release
+  workflow now refuses to deploy until GitHub enforces what this decision relies on: a ruleset
+  on `main` with pull requests, the status checks of `.github/required-checks.txt` and no force
+  push, a ruleset that keeps release tags from being moved or deleted, and the environment
+  with the owner as its only reviewer, self-review allowed, without administrator bypass and
+  for `v*` tags only. It also requires, for the release
+  commit, every run of the test workflows to have succeeded, including the acceptance-size
+  integration run, the hosted live smoke, two minutes of fuzzing per parser and CodeQL. The
+  owner's settings are listed in the [development guide](../04-development-and-quality.md)
+  §7.1. The bypass lists of the rulesets cannot be read with the workflow's token; the owner
+  checks them by hand.
+- The trust anchor of a release is the fingerprint of the owner's key, pinned in
+  `.github/release-signing-key.txt` on `main`: the repository variable alone authorises no
+  other key, and a new key needs a pull request. A stolen session or token of the owner with
+  administrator rights can still change rulesets, the environment and the variable, merge such
+  a pull request and approve the deployment. Accepted residual risk; WordPress.org's release
+  confirmation, which waits for a link e-mailed to the committers, is the factor outside
+  GitHub, and the owner keeps only fine-grained tokens without administration, variable,
+  environment, deployment or workflow rights on development machines.
+- Point 3 is wider: six mutation gates count code that no test reaches (`--with-uncovered` and a
+  minimum MSI), and besides `Crypto`, `Format`, `Engine\Forget` and the database import filter
+  they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL, the import
+  and the atomic exchange. Every gate has floors at the scores measured on 2026-11-23 with
+  `main` at `e40ab18`, which later pull requests keep and may only raise; the core's covered
+  floor is its measured 92 %. A gate that falls below a floor is a regression of the pull
+  request that brought it there, and is answered with tests. A run in which more than 5 % of the
+  mutant processes timed out meets a floor only if it does so with its timed-out mutants counted
+  as not detected as well: Infection counts a timeout as detected, so a slow machine lifts the
+  score above what the tests kill ([development guide](../04-development-and-quality.md) §5.6).
+  A floor is lowered only by a change of its own that measures the same commit again and shows
+  that the measurement was at fault, as the database gate's kills through other processes on its
+  server can be; that change names the mutants that came out differently and is recorded here.
+  90 % stays the minimum that the core's covered score may never fall below, and the goal for
+  the other gates. The database gate is too slow for every pull request; the release gate
+  requires it.
+- 2026-11-23: the mutation gates had counted mutants as killed that no test killed. Infection
+  serves the mutated class through a `file://` wrapper of its own, and the tests ran under it:
+  `fsync()` fails on that wrapper, and it reports unreadable files and links to removed files as
+  missing. Tests that write a job document or journal record durably, read an unreadable file or
+  remove such a link therefore failed or warned whatever the mutation. The tests now run with
+  PHP's own wrapper, a canary fails a gate whose mutant processes still cannot write durably,
+  and the floors are the scores measured that way
+  ([development guide](../04-development-and-quality.md) §5.6). The file planner kills 88.99 %
+  of its covered mutants, not the 98.48 % its gate reported on `main`, and stays below this
+  decision's 90 % until tests are added. With `main` at `e40ab18`, the file restore gate scores
+  81.84 % covered against the 85 % its floor promised, the apply gate 83.58 % instead of 100 %,
+  the ZIP gate 84.98 % instead of 99.87 %, and the database gate 86.13 % and 86.11 % in two
+  runs, perhaps less. The core, the merge gate of point 3, barely moved under PHP's own wrapper
+  (90.48 %), and the tests of #52 and #59 raised it to 92.22 %.

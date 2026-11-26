@@ -1960,7 +1960,9 @@ final class FileChangesTest extends TestCase {
 			}
 			// The site policy cannot rule out another spelling of the file's name in the folder,
 			// and the folder cannot be told empty: both are kept, and the rest is reverted.
-			self::assertSame(
+			// A background plan lists the entries of a folder in the order in which the file
+			// system names them, so the folder and the file beside it come in either order.
+			self::assertEquals(
 				[
 					$folder . '/new.txt'        => [ 'keep', 'ambiguous_destination' ],
 					$folder                     => [ 'keep', 'changed_since_apply' ],
@@ -1968,6 +1970,10 @@ final class FileChangesTest extends TestCase {
 				],
 				$decisions
 			);
+			self::assertCount( 3, $decisions );
+			// What the apply put into the folder is reviewed before the folder itself.
+			$order = array_keys( $decisions );
+			self::assertLessThan( array_search( $folder, $order, true ), array_search( $folder . '/new.txt', $order, true ) );
 			$undo = $this->run_job( $this->changes->start_undo( $job->id, $review['digest'], '', $plan_job ) );
 			self::assertSame(
 				[

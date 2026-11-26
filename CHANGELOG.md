@@ -626,3 +626,17 @@ All notable changes are documented here. The format follows
   a reserve; otherwise it says so, and the files can be downloaded one by one.
 - The ticks of a restore use the index cache and no longer download the whole repository
   index again in every tick.
+- The mutation gates counted mutants as killed that no test killed. Infection serves the
+  mutated class through a file wrapper of its own, and the tests ran under it: `fsync()` fails
+  on that wrapper, and it reports unreadable files and links to removed files as missing. So
+  every test that writes a job document or journal record durably, reads an unreadable file or
+  removes a dangling link failed or warned whatever the mutation. On `main` the file planner
+  gate reported 98.48 % of its covered mutants killed (the CI run of `f0ea681`). With PHP's
+  own wrapper, and with the planner tests that this release adds, it kills 88.99 %, and
+  87.45 % counting code that no test reaches: below the 90 % it was meant to hold. The gates
+  added in this release reported 98 % covered for file restore, 100 % for the apply jobs and
+  99.87 % for ZIP downloads; they kill 81.84 %, 83.58 % and 84.98 %, and the database gate
+  about 86 %, which varies between runs. The tests of a mutant now run with PHP's own wrapper,
+  a canary fails a gate whose mutant processes cannot write durably, and the floors are the
+  measured scores. Section 5.6 of `docs/04-development-and-quality.md` lists the escaped
+  mutants by class.

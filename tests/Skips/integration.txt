@@ -1,0 +1,3 @@
+# The integration suite (integration.yml, "WordPress x on PHP y"): no test may skip. Every class
+# skips in setUpBeforeClass() when the site or a tool does not answer; PHPUnit's failOnSkipped
+# does not count such a class, this list's check does. See tests/Skips/unit.txt for the format.

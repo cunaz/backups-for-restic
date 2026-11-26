@@ -1,0 +1,52 @@
+// Mutation testing of the code that only a real database reaches: the import, the atomic
+// exchange and the database half of the apply jobs, killed by tests/Unit/Database and
+// tests/Database (docs/04 §5.6). Needs a MySQL server and the BFR_TEST_MYSQL_* variables of
+// the database suite; .github/workflows/database-mutation.yml provides both. composer
+// mutation:database counts code that no test reaches (--with-uncovered).
+{
+    "$schema": "https://raw.githubusercontent.com/infection/infection/0.35.10/resources/schema.json",
+    "source": {
+        "directories": ["src/Database/Restore", "src/Jobs/Apply"],
+        // The file half of the apply jobs has its own gate: infection-apply.json5.dist.
+        "excludes": ["ApplyJournal.php", "FileChanges.php", "FilePlans.php", "PlanBuild.php"]
+    },
+    "bootstrap": "tests/bootstrap.php",
+    // Its own PHPUnit configuration, for a higher memory limit than the other gates' 128M.
+    "phpUnit": {
+        "configDir": "tests/Mutation/database"
+    },
+    // One test lowers the server's max_allowed_packet for a moment. A mutant process killed
+    // inside it at the timeout never restores the limit, and a process that connects meanwhile
+    // gets it too; in either case large statements fail whatever the mutation, and on
+    // 2026-11-23 188 mutants counted as killed that way. The database suite runs that test.
+    "testFrameworkOptions": "--testsuite=database --exclude-filter=test_a_batch_beyond_max_allowed_packet_is_refused_before_it_is_sent",
+    "timeout": 60,
+    "tmpDir": ".tools/infection-database-tmp",
+    "logs": {
+        "text": ".tools/infection-database/infection.log",
+        "summary": ".tools/infection-database/summary.log",
+        "github": true
+    },
+    // Floors at the scores measured on 2026-11-23 with main at e40ab18 and the tests'
+    // temporary files on tmpfs, as in CI (docs/04 §5.6): 82.16 % and 86.13 % covered, and
+    // 82.14 % and 86.11 %, in two runs with 8 processes against MySQL 8.4.11; 82.02 % and
+    // 85.98 % in CI's run on the same state with 4. These scores, and so the floors, can be
+    // above what the tests alone kill: DatabaseExchangeTest checks the other sessions of its
+    // account, and Infection's processes share one server and account, so it can fail through
+    // another process whatever the mutation. 101 mutants were killed in one local run and not
+    // in the other, and the score over the mutants that all three runs killed is 80.67 % and
+    // 84.56 %, 1.5 points below one run's. The floors are whole numbers within a point of that,
+    // because the gate compares one CI run with them. A run below them fails the gate; they are
+    // lowered only as ADR 0024 says, by a change of its own that measures the same commit again
+    // and shows a defect of the measurement. composer mutation:database checks afterwards that
+    // the server's Performance Schema instrumented every thread, one cause of such kills
+    // (bin/check-performance-schema.php); one server per mutant process is the follow-up that
+    // makes the floors true ones. Otherwise they may only rise; ADR 0024's 90 % is the goal.
+    // The 73.75 % and 79.20 % of 2026-11-20 were measured on older code, under Infection's
+    // file wrapper, on which every durable write of a job document failed.
+    "minMsi": 80,
+    "minCoveredMsi": 84,
+    "mutators": {
+        "@default": true
+    }
+}

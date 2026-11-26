@@ -33,7 +33,8 @@
                 "description": "PHPStan from its release PHAR: GitHub source archives are not reachable from every CI and sandbox network.",
                 "dist": {
                     "type": "file",
-                    "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar"
+                    "url": "https://github.com/phpstan/phpstan/releases/download/2.3.5/phpstan.phar",
+                    "shasum": "05eda8c51645fbb1cca6277a0bc2d2f9549d3f53"
                 },
                 "bin": [
                     "phpstan.phar"
@@ -86,11 +87,28 @@
         ],
         "mutation": [
             "Composer\\Config::disableProcessTimeout",
-            ".tools/bin/infection --threads=max"
+            "bin/mutation-gate.sh --threads=max --with-uncovered"
         ],
         "mutation:planner": [
             "Composer\\Config::disableProcessTimeout",
-            ".tools/bin/infection --configuration=infection-planner.json5.dist --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"
+            "bin/mutation-gate.sh --configuration=infection-planner.json5.dist --threads=max --with-uncovered --only-covering-test-cases src/Restore/ApplyPlan.php src/Restore/SiteLayout.php"
+        ],
+        "mutation:restore": [
+            "Composer\\Config::disableProcessTimeout",
+            "bin/mutation-gate.sh --configuration=infection-restore.json5.dist --threads=max --with-uncovered --only-covering-test-cases"
+        ],
+        "mutation:apply": [
+            "Composer\\Config::disableProcessTimeout",
+            "bin/mutation-gate.sh --configuration=infection-apply.json5.dist --threads=max --with-uncovered --only-covering-test-cases"
+        ],
+        "mutation:zip": [
+            "Composer\\Config::disableProcessTimeout",
+            "bin/mutation-gate.sh --configuration=infection-zip.json5.dist --threads=max --with-uncovered"
+        ],
+        "mutation:database": [
+            "Composer\\Config::disableProcessTimeout",
+            "bin/mutation-gate.sh --configuration=infection-database.json5.dist --threads=max --with-uncovered --only-covering-test-cases",
+            "@php bin/check-performance-schema.php"
         ],
         "fuzz": "php bin/fuzz.php --seconds=10",
         "bench": "php -d opcache.enable_cli=0 bin/bench.php",

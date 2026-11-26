@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The tests of infection-database.json5.dist, which need a MySQL server. Kept apart from
+    ../phpunit.xml.dist for its memory limit: the initial run of a gate keeps the coverage of
+    every test in one process, and next to it the 16 MiB row of DatabaseDumpTest no longer fits
+    into 128M, depending on how late the shuffled order runs it. The other suites keep the unit
+    suite's 128M.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="../../../vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="../bootstrap.php"
+         cacheDirectory="../../../.phpunit.cache/mutation-database"
+         colors="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         failOnEmptyTestSuite="true"
+         beStrictAboutOutputDuringTests="true">
+    <php>
+        <ini name="memory_limit" value="256M"/>
+    </php>
+    <testsuites>
+        <testsuite name="database">
+            <directory>../../Unit/Database</directory>
+            <file>../../Unit/Jobs/DatabaseChangesTest.php</file>
+            <file>../../Unit/Jobs/DatabaseReviewTest.php</file>
+            <directory>../../Database</directory>
+        </testsuite>
+    </testsuites>
+    <groups>
+        <exclude>
+            <group>slow</group>
+        </exclude>
+    </groups>
+    <source>
+        <include>
+            <directory>../../../src</directory>
+        </include>
+    </source>
+</phpunit>
