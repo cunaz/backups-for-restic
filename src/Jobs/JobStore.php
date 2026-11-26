@@ -167,6 +167,7 @@ final class JobStore {
 	 * The job that is queued or running, if any.
 	 *
 	 * @return Job|null Active job.
+	 * @throws StorageFailed If the jobs directory cannot be listed safely.
 	 */
 	public function active(): ?Job {
 		foreach ( $this->ids() as $id ) {

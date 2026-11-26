@@ -264,9 +264,12 @@ database could not get rid of the binding. Since then:
   no job of its own: a database failure during its review or the discard itself is written to
   the log of the job that holds the binding and answered with `database_discard_failed`, which
   points there. Until 2026-11-26 such a failure was answered with the text of a failed backup,
-  "The log of the job contains the database error". A decision that cannot be recorded is
-  answered with `database_discard_unsaved`, a runner lock held by another request with
-  `database_discard_busy`.
+  "The log of the job contains the database error". A private directory whose jobs cannot be
+  read, or in which the decision cannot be recorded, is answered with
+  `database_discard_storage`, a runner lock held by another request with
+  `database_discard_busy`. Any other failure is unexpected: nothing records it, and
+  `database_discard_unexpected` says so and that WP-CLI prints its details, where it is
+  appended to the text.
 - WP-CLI prints the same review with its digest and asks for the site address, or takes
   `--site-url`, and `--digest` for a review that an earlier run printed. It does not ask for the
   WordPress password: whoever runs it can read and change the site's files. A WordPress user

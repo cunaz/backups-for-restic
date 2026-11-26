@@ -59,6 +59,15 @@ final readonly class DatabaseChanges implements StepProvider {
 	 */
 	public const array DISCARD_KEPT = [ 'live_database', 'private_tables', 'job_record' ];
 
+	/** Codes of a refused review or discard of a binding, which say what is the case. */
+	public const array DISCARD_REFUSALS = [ 'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'job_unreadable' ];
+
+	/**
+	 * Codes of a review or discard of a binding that failed, which say what failed: any other
+	 * failure is unexpected, and nothing records it.
+	 */
+	public const array DISCARD_FAILURES = [ 'database_binding_unreadable', 'database_discard_failed', 'database_discard_storage' ];
+
 	/** Version of what the review of a discard shows, which its digest covers (DatabaseReview::digest()). */
 	private const int DISCARD_VERSION = 1;
 
@@ -330,9 +339,14 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @return DiscardReview Review.
 	 * @throws JobConflict With the code database_binding_missing if no database apply with this ID holds a binding, job_unreadable if the job's document cannot be read, database_binding_discarded if its binding was discarded already, database_binding_busy while the job or an undo of it is queued or running, database_binding_verified if the connected database holds its tables, database_binding_unverified if the connected server does not say which server it is, and database_binding_unreadable if the record of the binding cannot be read.
 	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs in the private directory could not be read.
 	 */
 	public function discard_review( string $apply, int $user ): array {
-		return $this->discard_facts( $apply, $user )[1];
+		try {
+			return $this->discard_facts( $apply, $user )[1];
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
 	}
 
 	/**
@@ -351,7 +365,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @return Binding The discarded binding.
 	 * @throws JobConflict With the codes of discard_review(), and database_discard_changed if the binding is no longer as the confirmed review showed it.
 	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
-	 * @throws StorageFailed With the code database_discard_unsaved if the decision could not be recorded; the binding stays.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read or the decision could not be recorded; the binding stays.
 	 */
 	public function discard( string $apply, int $user, string $via, string $digest ): array {
 		try {
@@ -390,9 +404,21 @@ final readonly class DatabaseChanges implements StepProvider {
 				}
 			);
 		} catch ( StorageFailed $error ) {
-			// Staging's lock or the job document: the document still holds the binding.
-			StorageFailed::raise( 'The discard could not be recorded in the private directory.', [ 'code' => 'database_discard_unsaved' ], $error );
+			// The jobs, staging's lock or the job document: the document still holds the binding.
+			self::storage_failed( $error );
 		}
+	}
+
+	/**
+	 * Refuses a review or a discard for which the private directory could not be read or
+	 * written: the jobs could not be listed or read, staging's lock could not be taken, or the
+	 * decision could not be recorded. Nothing was discarded.
+	 *
+	 * @param StorageFailed $error What failed.
+	 * @throws StorageFailed Always, with the code database_discard_storage.
+	 */
+	private static function storage_failed( StorageFailed $error ): never {
+		StorageFailed::raise( 'The private directory could not be read or written, so the binding was not discarded.', [ 'code' => 'database_discard_storage' ], $error );
 	}
 
 	/**
@@ -404,6 +430,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @return array{Job,DiscardReview} The job and the review.
 	 * @throws JobConflict With the codes of discard_review().
 	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
+	 * @throws StorageFailed If the jobs in the private directory cannot be listed.
 	 */
 	private function discard_facts( string $apply, int $user ): array {
 		$owner = $this->jobs->get( $apply );

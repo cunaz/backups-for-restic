@@ -3,6 +3,9 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Unit\WordPress;
 
+use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\WordPress\Messages;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
@@ -86,5 +89,26 @@ final class DatabaseMessagesTest extends TestCase {
 		$record = self::text( 'database_admin_capabilities_unreadable' );
 		self::assertStringContainsString( 'stored more than once, longer than 64 KiB', $record );
 		self::assertSame( $record, self::text( 'database_admin_capabilities_unreadable', 'database_undo' ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_every_answer_of_a_discard_has_its_own_text_and_only_a_database_failure_points_to_a_log(): void {
+		require_once dirname( __DIR__, 2 ) . '/Fixtures/WordPress/translate.php';
+		$general = Messages::job_error( 'internal' );
+		foreach ( [ ...DatabaseChanges::DISCARD_REFUSALS, ...DatabaseChanges::DISCARD_FAILURES, 'database_discard_unexpected' ] as $code ) {
+			$texts = Messages::job_error( $code );
+			self::assertNotSame( $general, $texts, $code . ' has a text of its own.' );
+			if ( 'database_discard_unexpected' !== $code ) {
+				self::assertSame( $code, JobError::from_throwable( new JobConflict( 'Refused.', [ 'code' => $code ] ) )->code, $code . ' reaches the route and WP-CLI as it is.' );
+			}
+			if ( 'database_discard_failed' !== $code ) {
+				self::assertStringNotContainsString( 'names the database error', $texts['message'] . ' ' . $texts['hint'], $code );
+				self::assertStringNotContainsString( 'The log of', $texts['message'] . ' ' . $texts['hint'], $code );
+			}
+		}
+		$unexpected = self::text( 'database_discard_unexpected' );
+		self::assertStringContainsString( 'recorded nothing', $unexpected );
+		self::assertStringContainsString( 'wp backups-for-restic database-discard', $unexpected );
+		self::assertStringContainsString( 'Environment tab', self::text( 'database_discard_storage' ) );
 	}
 }

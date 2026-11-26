@@ -357,9 +357,13 @@ final class Messages {
 				'message' => __( 'The plugin could not ask the database server whether it holds the private tables of this database restore.', 'backups-for-restic' ),
 				'hint'    => __( 'Nothing was discarded. The log of that database restore job, on the Logs tab, names the database error. Once the site reaches its database server again, open the review of the discard again.', 'backups-for-restic' ),
 			],
-			'database_discard_unsaved' => [
-				'message' => __( 'The discard could not be recorded in the private working directory, so the binding was not discarded.', 'backups-for-restic' ),
-				'hint'    => __( 'Check the free disk space and the working directory on the Environment tab, then try again.', 'backups-for-restic' ),
+			'database_discard_storage' => [
+				'message' => __( 'The plugin could not read or write its private working directory, so the binding was not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the free disk space and the working directory on the Environment tab, then open the review of the discard again.', 'backups-for-restic' ),
+			],
+			'database_discard_unexpected' => [
+				'message' => __( 'An unexpected error stopped the review or the discard of this binding, so the binding was not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The plugin recorded nothing about this error. Open the review of the discard again; if the error comes back, "wp backups-for-restic database-discard" with the ID of the database restore job prints its details. Please report it.', 'backups-for-restic' ),
 			],
 			'database_discard_busy' => [
 				'message' => __( 'Another request is working on the jobs of the plugin right now, so the binding was not discarded.', 'backups-for-restic' ),

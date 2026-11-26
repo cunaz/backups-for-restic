@@ -13,6 +13,7 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
@@ -596,15 +597,17 @@ final class CliCommand {
 
 	/**
 	 * Ends the command with the text of a refused or failed review or discard, and for a
-	 * database failure with what the database raised.
+	 * database failure with what the database raised. A failure that the service does not name
+	 * is unexpected: nothing recorded it, so its own message follows.
 	 *
 	 * @param PluginException $refused Refusal or failure.
 	 * @return never
 	 */
 	private static function discard_refused( PluginException $refused ): never {
 		$code  = JobError::from_throwable( $refused )->code;
-		$texts = Messages::job_error( $code );
-		$cause = $refused->getPrevious();
+		$known = in_array( $code, [ ...DatabaseChanges::DISCARD_REFUSALS, ...DatabaseChanges::DISCARD_FAILURES ], true );
+		$texts = Messages::job_error( $known ? $code : 'database_discard_unexpected' );
+		$cause = $known ? $refused->getPrevious() : $refused;
 		$extra = '';
 		$error = $cause instanceof PluginException ? $cause->context()['code'] ?? null : null;
 		if ( $cause instanceof PluginException && null === $error ) {

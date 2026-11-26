@@ -751,7 +751,7 @@ final class DatabaseChangesTest extends TestCase {
 			$this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] );
 			self::fail( 'A discard was recorded in a read-only directory.' );
 		} catch ( StorageFailed $unsaved ) {
-			self::assertSame( 'database_discard_unsaved', $unsaved->context()['code'] ?? null );
+			self::assertSame( 'database_discard_storage', $unsaved->context()['code'] ?? null );
 		} finally {
 			chmod( $directory, 0700 );
 		}
@@ -889,5 +889,33 @@ final class DatabaseChangesTest extends TestCase {
 		self::refused( 'database_discard_changed', fn () => $this->changes( $this->server( self::UUID, "m\xF7bel" ) )->discard( $job->id, 7, 'rest', $review['digest'] ) );
 		self::assertSame( 'site', $this->changes( $server )->discard( $job->id, 7, 'rest', $review['digest'] )['database'] );
 		self::assertArrayNotHasKey( 'database_owner', $this->jobs->get( $job->id )?->data ?? [ 'database_owner' => true ] );
+	}
+
+	public function test_a_review_or_discard_whose_jobs_cannot_be_listed_says_so_and_points_to_no_log(): void {
+		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
+			self::markTestSkipped( 'Directory permissions do not bind root.' );
+		}
+		$job    = $this->stranded();
+		$review = $this->changes( $this->server() )->discard_review( $job->id, 7 );
+		// The job's own document can still be read; the list of the jobs cannot, and PHP warns about it.
+		chmod( $this->directory . '/jobs', 0300 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			foreach ( [ fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ), fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) ] as $work ) {
+				try {
+					$work();
+					self::fail( 'A review was made without the list of the jobs.' );
+				} catch ( StorageFailed $failure ) {
+					// Before, this was answered as a database failure that the log of the job names.
+					self::assertSame( 'database_discard_storage', $failure->context()['code'] ?? null );
+					self::assertContains( 'database_discard_storage', DatabaseChanges::DISCARD_FAILURES );
+				}
+			}
+		} finally {
+			restore_error_handler();
+			chmod( $this->directory . '/jobs', 0700 );
+		}
+		self::assertSame( [], $this->jobs->log( $job )->read(), 'Nothing was written to a log, and no answer points to one.' );
+		self::assertSame( $job->data, $this->jobs->get( $job->id )?->data, 'The binding stays.' );
 	}
 }

@@ -399,6 +399,42 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_a_failure_of_a_discard_that_the_service_does_not_name_is_answered_as_unexpected(): void {
+		// No failure that a site can cause reaches this answer any more, so the route's mapping is
+		// asked directly with failures as a defect, the private directory and a refusal raise them.
+		$output = TestSite::php(
+			'
+			$routes = new BackupsForRestic\WordPress\RestRoutes( new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ) );
+			$answer = static function ( Throwable $failure ) use ( $routes ): array {
+				$error = ( new ReflectionMethod( $routes, "discard_error" ) )->invoke( $routes, $failure );
+				return [ $error->get_error_code(), $error->get_error_data()["status"] ?? null, $error->get_error_message() . " " . ( $error->get_error_data()["hint"] ?? "" ) ];
+			};
+			echo "\n", wp_json_encode(
+				[
+					$answer( new BackupsForRestic\Exception\InvalidArgument( "A defect." ) ),
+					$answer( new BackupsForRestic\Exception\StorageFailed( "A file could not be read." ) ),
+					$answer( new BackupsForRestic\Exception\StorageFailed( "The jobs could not be listed.", [ "code" => "database_discard_storage" ] ) ),
+					$answer( new BackupsForRestic\Exception\DatabaseFailed( "The server could not be asked.", [ "code" => "database_discard_failed" ] ) ),
+					$answer( new BackupsForRestic\Exception\JobConflict( "Running.", [ "code" => "database_binding_busy" ] ) ),
+				]
+			);
+			'
+		);
+		[ $defect, $unnamed, $storage, $database, $busy ] = json_decode( TestSite::last_line( $output ), true );
+		// Before, each failure that the route did not list was answered as a database failure that the log of the job names.
+		foreach ( [ $defect, $unnamed ] as $unexpected ) {
+			self::assertSame( [ 'backups_for_restic_database_discard_unexpected', 500 ], [ $unexpected[0], $unexpected[1] ], $output );
+			self::assertStringContainsString( 'The plugin recorded nothing about this error.', $unexpected[2] );
+			self::assertStringNotContainsString( 'database error', $unexpected[2] );
+		}
+		self::assertSame( [ 'backups_for_restic_database_discard_storage', 500 ], [ $storage[0], $storage[1] ] );
+		self::assertStringContainsString( 'Environment tab', $storage[2] );
+		self::assertStringNotContainsString( 'The log of', $storage[2] );
+		self::assertSame( [ 'backups_for_restic_database_discard_failed', 500 ], [ $database[0], $database[1] ] );
+		self::assertStringContainsString( 'The log of that database restore job', $database[2] );
+		self::assertSame( [ 'backups_for_restic_database_binding_busy', 409 ], [ $busy[0], $busy[1] ] );
+	}
+
 	public function test_a_site_whose_database_name_is_not_utf8_reviews_and_discards_a_binding_and_the_answer_is_utf8(): void {
 		// As the reviewer found it: the site's connection in latin1, on a database whose name is not
 		// ASCII, so that the server reports the name as bytes that are not UTF-8.

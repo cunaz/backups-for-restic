@@ -16,6 +16,7 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
@@ -904,17 +905,18 @@ final class RestRoutes {
 	 * Answers a refused or failed review or discard of a database binding with what is the case.
 	 * The discard has no job of its own: no answer points to the log of a job that does not
 	 * exist, and a database failure names the log of the job that holds the binding, where the
-	 * service wrote it.
+	 * service wrote it. A failure that the service does not name is unexpected, and its answer
+	 * says that nothing recorded it.
 	 *
 	 * @param PluginException $refused Refusal or failure.
 	 * @return \WP_Error Error.
 	 */
 	private function discard_error( PluginException $refused ): \WP_Error {
 		$code = JobError::from_throwable( $refused )->code;
-		return match ( $code ) {
-			'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'job_unreadable' => $this->error( $code, 409 ),
-			'database_binding_unreadable', 'database_discard_unsaved' => $this->error( $code, 500 ),
-			default => $this->error( 'database_discard_failed', 500 ),
+		return match ( true ) {
+			in_array( $code, DatabaseChanges::DISCARD_REFUSALS, true ) => $this->error( $code, 409 ),
+			in_array( $code, DatabaseChanges::DISCARD_FAILURES, true ) => $this->error( $code, 500 ),
+			default => $this->error( 'database_discard_unexpected', 500 ),
 		};
 	}
 
