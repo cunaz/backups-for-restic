@@ -23,7 +23,16 @@
     // left lowered. From 2026-11-23 until then the gate left that test out, after 188 mutants
     // had counted as killed through it on one shared server.
     "testFrameworkOptions": "--testsuite=database",
-    "timeout": 60,
+    // Infection gives a mutant five seconds plus five times what its covering test classes took
+    // in the initial run on the same machine, at most this many seconds, and it skips a mutant
+    // whose quickest covering class took at least that long. At 60 seconds the limit, not the
+    // tests, set the timeout of 3,863 of the 4,081 tested mutants (the exchange's test class
+    // takes about 31 seconds with coverage on a runner), so a slow runner timed out mutants that
+    // the tests let escape, and on a machine twice as slow Infection skipped 1,297 of them
+    // (docs/04 §5.6). At 600 seconds the limit lies above five times the covering classes even
+    // on a runner at half its speed, about 260 seconds: the timeout follows the measured time of
+    // the tests.
+    "timeout": 600,
     "tmpDir": ".tools/infection-database-tmp",
     "logs": {
         "text": ".tools/infection-database/infection.log",
