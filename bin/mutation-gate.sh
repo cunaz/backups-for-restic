@@ -36,7 +36,9 @@
 #   mutant as killed, so it appends a line to its report, or when that cannot take it to the
 #   marker named by BFR_MUTATION_CANARY, next to the reports, or to .tools/mutation-canary on the
 #   disk of the checkout. Any such line fails the gate, whatever the score, so both markers must
-#   be writable before Infection starts.
+#   be writable before Infection starts. Besides the durable writes, the database gate's bootstrap
+#   leaves such a line for a process without a database server of its own
+#   (tests/Support/DatabaseServers.php).
 #
 # When more than 5 percent of the mutant processes timed out, Infection's score is an upper
 # bound: it counts a timed-out mutant as detected, and on a slow machine mutants time out that
@@ -171,7 +173,7 @@ rm -f "$fallback"
 lines="$(printf '%s\n' "$lines" | grep . || true)"
 if [[ -n "$lines" ]]; then
 	processes="$(printf '%s\n' "$lines" | cut -d: -f1 | sort -u | wc -l)"
-	echo "::error::Mutant processes that could not write durably: $processes. So the score above counts mutants as killed that the tests did not kill. First lines of their reports and the markers:"
+	echo "::error::Mutant processes whose checks failed: $processes. Their tests did not run as the gate measures them, as they could not write durably or had no database server of their own, so the score above cannot be trusted. First lines of their reports and the markers:"
 	printf '%s\n' "$lines" | head -n 20
 	exit 1
 fi
