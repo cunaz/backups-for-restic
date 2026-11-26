@@ -427,6 +427,15 @@ directory, created for that test from the same package. Where the database excha
 expected, its review must say what the exchange keeps from the site and that roles, plugins
 and scheduled events come from the backup, or with the undo from the earlier database.
 
+Every wait has a bound (`playwright.config.js`): a test 10 minutes and the two-installation
+test 20, an expectation and an action 30 seconds, a navigation 60, and the whole run 40
+minutes, so that it ends before the 45 minutes of the CI job and the job still collects its
+logs. A step that waits for a backup, a restore or an exchange names a longer timeout of its
+own. A command that a test or the global setup runs (PHP, `bin/test-site.sh`, `openssl`) is
+killed after a bound of its own and fails the test with an error that names it
+(`runCommand()` in `tests/E2E/site.js`): while the worker waits for it, not even the test's
+timeout fires.
+
 ### 5.6 Mutation testing and fuzzing
 
 Infection runs in six gates, each with its own code, its own tests from
