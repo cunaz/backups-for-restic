@@ -304,6 +304,15 @@ All notable changes are documented here. The format follows
   computer. A check reads its pieces the same way, and a sampled pack with a blob that does
   not fit becomes the warning `pack_memory` without being downloaded. With memory enough, a
   restore and a check send the requests they sent before, and staged files are unchanged.
+- What the memory budget lets a restore or a check read is no longer refused once it is
+  downloaded. The budget counted the lengths of the copies, and a blob read with that much
+  left could end a restore with `decompression_limit` after the download or with PHP's fatal
+  error, and a check reported it as damaged (`blob_corrupt`). The budget now counts what PHP
+  reserves for each copy, in whole pages and blocks of 2 MiB. A refusal that the decoder
+  still makes, for a frame without a declared size and with a large window, ends a restore
+  with `restore_blob_memory` and makes a check's pack the warning `pack_memory`; an index
+  file, a snapshot or a tree that a check cannot decode in the memory left stops it with
+  `decompression_limit` instead of being reported as unreadable or its blobs as missing.
 - A failed job is described as the kind of job it is, on the admin page, in the job list, in
   WP-CLI and in the failure e-mail. Before, every job got the texts of a backup: a restore
   that lost its repository key, or found the setup incomplete, said "The backup is not

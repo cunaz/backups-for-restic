@@ -67,7 +67,11 @@ algorithm deduplicates against snapshots written by restic.
   2 MiB for allocation rounding and for reporting the refusal.
   A job that reaches either limit reports `decompression_limit`. The exception is an index
   file that cannot be decoded beside the memory in use: the job's memory budget reports it
-  as `index_too_large` ([ADR 0031](0031-compact-index-and-memory-budget.md)).
+  as `index_too_large` ([ADR 0031](0031-compact-index-and-memory-budget.md)). Since
+  2026-11-26 a refusal for the memory left is an `InsufficientDecodingMemory`, which restore
+  and check keep apart from damage: a restore reports a data blob that it cannot decode as
+  `restore_blob_memory`, and a check reports the blob's pack as the warning `pack_memory`
+  ([ADR 0036](0036-selected-file-staging.md)).
 - What decoding takes was measured with ext-zstd 0.18.0 and libzstd 1.5.7 on PHP 8.3.36
   and 8.3.37. A frame that declares its size, as restic writes every object of 256 bytes or
   more, is decoded in one pass into a buffer of that size. The buffer is then copied into

@@ -114,7 +114,8 @@ ends the same way.
   `MemoryBudget::blob_room()` what the limit leaves beside the reserved memory, less 2 MiB. A
   range ends before a blob that would not fit; a restore whose next blob does not fit by
   itself is refused with `restore_blob_memory`, and a check reports such a pack as the
-  warning `pack_memory`. A full chunk takes 24 MiB, and the budget for the index leaves at
+  warning `pack_memory`. A full chunk takes about 24 MiB, 26.2 MiB counted as PHP reserves
+  each copy, in whole pages and blocks (ADR 0036), and the budget for the index leaves at
   least 32 MiB.
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.

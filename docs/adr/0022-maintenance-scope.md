@@ -38,12 +38,15 @@ a state every restic tool understands.
   piece is also no larger than the job's memory budget can take, as a restore's group
   (ADR 0036): the piece is let go when its last blob to be opened is taken out of it, and a
   pack with a blob that does not fit by itself becomes the warning `pack_memory` before
-  any of it is downloaded. Beside 94 MiB in use, the check before ended with PHP's fatal
-  error on a pack of full chunks in format 2. PHP cannot carry
-  a SHA-256 state into the next request without `unserialize()`, which the plugin does not
-  use, so one pack is verified within one request; a marker written before the read counts
-  requests that end during it, and after three the pack becomes the warning
-  `pack_unverified` instead of stopping the check for good. Errors raise a persistent
+  any of it is downloaded. A blob that cannot be decoded in the memory left once it is
+  downloaded makes its pack the same warning, not `blob_corrupt`, and an index file, a
+  snapshot or a tree that cannot be decoded in the memory left stops the check with
+  `decompression_limit` (2026-11-26). Beside 94 MiB in use, the check before ended with
+  PHP's fatal error on a pack of full chunks in format 2. PHP cannot carry a SHA-256 state
+  into the next request without `unserialize()`, which the plugin does not use, so one
+  pack is verified within one request; a marker written before the read counts requests
+  that end during it, and after three the pack becomes the warning `pack_unverified`
+  instead of stopping the check for good. Errors raise a persistent
   critical notice; warnings are kept with the result but raise no notice, because they
   call for no action on the site: restic itself only prints them as hints (for example a
   pack no index lists, which the next `restic prune` removes, or a sampled pack that could

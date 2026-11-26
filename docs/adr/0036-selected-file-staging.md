@@ -164,27 +164,41 @@ Final-head CI remains the merge gate.
   every step:
   - while the response arrives, three times the group: WordPress' HTTP API keeps the body it
     collects, the raw response with the headers in front, and the body cut out of that
-    (3.0 times the body with cURL and with fsockopen; `MemoryBudget::RESPONSE_COPIES`);
+    (3.0 times the body with cURL and with fsockopen; `MemoryBudget::RESPONSE_COPIES`), with
+    up to 16 KiB of status line and headers;
   - then, for each blob but the last, the group beside what opening the blob takes: three
-    times its stored length while it is decrypted (the slice, the ciphertext without nonce and
-    tag, the plaintext), and for a compressed blob the decrypted frame and twice its content
-    while it is decoded. `PackReader::open_blob()` lets the slice go before the frame is
-    decoded (`MemoryBudget::opening()`);
+    copies of its stored length while it is decrypted (the slice, the ciphertext without
+    nonce and tag, the plaintext), and for a compressed blob the decrypted frame and twice
+    its content while it is decoded. `PackReader::open_blob()` lets the slice go before the
+    frame is decoded (`MemoryBudget::opening()`);
   - the last blob alone: it takes the group with it (`MemoryBudget::slice()`).
 
-  The plaintext of a blob is handed to the writer, which keeps no reference to it, and is let
-  go before the next blob is opened. Until 2026-11 a generator yielded it, and its value and
-  the caller's loop variable kept it while the next blob was decoded: one more chunk of up to
-  8 MiB at the peak. Before each download the run asks the budget what the memory left can
-  take (`MemoryBudget::blob_room()`): the limit less the memory reserved and 2 MiB. The group
-  ends before a blob that would not fit (`MemoryBudget::range()`), down to one blob; a first
-  blob that does not fit by itself is refused before anything is downloaded, with
-  `IndexTooLarge` and the code `restore_blob_memory`. A full chunk takes 24 MiB, three
-  times its size, both while it arrives and while it is opened. The index budget leaves at
-  least 32 MiB once the index has loaded, so the refusal comes only when other memory was
-  taken after that. A restore with memory enough sends the requests it sent before: beside
-  WordPress and an index of 500,000 blobs every group is as large as before
-  (`ReadMemoryTest`). The staged files are the same byte for byte.
+  Since 2026-11-26 each copy counts as what PHP reserves for it at most
+  (`MemoryBudget::footprint()`), not by its length: a string smaller than 2 MiB less 4 KiB
+  goes into one of PHP's blocks of 2 MiB, which in a process whose blocks are full or cut
+  up is a new one; a larger string gets memory of its own in whole pages of the system, of
+  which the budget assumes the largest, 64 KiB (on Windows PHP rounds to 2 MiB). Each step
+  also counts one block, for the small allocations of the read, or for the empty block that
+  PHP keeps for reuse once a request let go of many small strings and that a string with
+  memory of its own cannot use. So counted, a full chunk stored uncompressed takes
+  26.2 MiB, three times 129 pages and a block, and a full chunk that restic stored
+  compressed in 2.5 MiB takes 20.7 MiB, most of it for twice its content
+  (`MemoryBudgetTest`).
+
+  The plaintext of a blob is handed to the writer, which keeps no reference to it, and is
+  let go before the next blob is opened. Until 2026-11 a generator yielded it, and its
+  value and the caller's loop variable kept it while the next blob was decoded: one more
+  chunk of up to 8 MiB at the peak. Before each download the run asks the budget what the
+  memory left can take (`MemoryBudget::blob_room()`): the limit less the memory reserved
+  and 2 MiB. The group ends before a blob that would not fit (`MemoryBudget::range()`),
+  down to one blob; a first blob that does not fit by itself is refused before anything is
+  downloaded, with `IndexTooLarge` and the code `restore_blob_memory`. A full chunk takes
+  about 24 MiB, three times its size, both while it arrives and while it is opened, and
+  26.2 MiB as the budget counts it. The index budget leaves at least 32 MiB once the index
+  has loaded, so the refusal comes only when other memory was taken after that. A restore
+  with memory enough sends the requests it sent before: beside WordPress and an index of
+  500,000 blobs every group is as large as before (`ReadMemoryTest`). The staged files are
+  the same byte for byte.
 
   | Peak reserved under 128 MiB, in MiB | 500,000 blobs, before | 500,000 blobs, now | 1,000,000 blobs, before | 1,000,000 blobs, now |
   | --- | ---: | ---: | ---: | ---: |
@@ -200,6 +214,42 @@ Final-head CI remains the merge gate.
   64.5 MiB were reserved beside 500,000 blobs, and 92.5 MiB (before) or 94.5 MiB (now)
   beside 1,000,000 blobs. An index of 2,000,000 blobs does not fit under 128 MiB and is
   refused with `index_too_large` before a blob is read, before and now.
+
+- What the budget lets through is decoded without a refusal for memory (2026-11-26). Until
+  then the budget counted lengths. The decoder, which measures the memory left once more
+  before it decodes (ADR 0019), could then find less than the budget had left for it: PHP
+  had reserved more for the copies than their lengths, kept the pages of small strings that
+  the request had let go, or put a string of about 1 MiB into a block of its own. A blob
+  read with exactly what the budget says it takes left beside the memory in use
+  (`ReadMemoryTest`, `tests/Fixtures/memory/boundary.php`) ended a restore after its
+  download, and a check reported it as damage:
+
+  | Blob read at the boundary of the budget | Restore before | Check before | Both now |
+  | --- | --- | --- | --- |
+  | Full chunk in raw zstd blocks | `decompression_limit` | `blob_corrupt` | read |
+  | The same, small strings made and let go while it arrives | fatal error in `Cipher::open()` | `blob_corrupt` | read |
+  | Full chunk that compresses three times | `decompression_limit` | `blob_corrupt` | read |
+  | The same, small strings while it arrives | `decompression_limit` | `blob_corrupt` | read |
+  | 1.5 MiB that compresses, small strings while it arrives | `decompression_limit` | `blob_corrupt` | read |
+  | 1.5 MiB that compresses, blocks cut up by strings of 1 MiB | read | read | read |
+  | 1.1 MiB uncompressed, blocks cut up | fatal error in `Cipher::open()` | fatal error | read |
+  | 200 bytes in a frame without a declared size, as restic writes it | `decompression_limit` | `blob_corrupt` | read |
+
+  Now the budget counts what PHP reserves, and `PackReader::open_blob()` lets PHP give back
+  the pages that freed strings keep before the decoder measures, as PHP does itself before
+  it refuses an allocation; the decoder then finds what the budget found before the
+  download, less what is alive now. A refusal that the decoder still makes is an
+  `InsufficientDecodingMemory`, a limit of the host and not damage: for a frame without a
+  declared size whose window takes more than the budget counted for its content (restic
+  writes such frames only for blobs below 256 bytes, with a window of 1 KiB), or for a
+  compressed blob beside memory that other code took while it arrived. A restore reports it
+  as `restore_blob_memory`, after the download, and a check reports the pack as the warning
+  `pack_memory`. An index file, a snapshot or a tree that a check cannot decode in the
+  memory left stops it with `decompression_limit`, as an index that does not fit stops it,
+  instead of a finding of damage; an index file is not left out of the index either, which
+  would report its blobs as missing. The decompression limit of ADR 0019 is unchanged:
+  content beyond 128 MiB, and a frame that declares more, are refused before they are
+  decoded.
 
 ## Remaining release work
 This engine is not yet a WordPress restore feature. Jobs, the browser, downloads and expiry
