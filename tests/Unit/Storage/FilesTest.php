@@ -127,6 +127,25 @@ final class FilesTest extends TestCase {
 		self::assertNull( Files::marker( $this->directory . '/linked/gone/marker' ) );
 	}
 
+	public function test_a_marker_below_a_link_further_up_is_neither_there_nor_missing(): void {
+		mkdir( $this->directory . '/real/sub/deeper', 0700, true );
+		file_put_contents( $this->directory . '/real/sub/present', '1' );
+		symlink( $this->directory . '/real', $this->directory . '/linked' );
+		// The folder that holds the name is a real folder, but not at its canonical path: the link
+		// two levels up may lead anywhere, so neither answer holds. Before, only a link as the
+		// immediate parent was tested, which never reached the canonical check of a folder.
+		self::assertNull( Files::marker( $this->directory . '/linked/sub/present' ) );
+		self::assertNull( Files::marker( $this->directory . '/linked/sub/missing' ) );
+		self::assertFalse( Files::missing( $this->directory . '/linked/sub/missing' ) );
+		self::assertNull( Files::marker( $this->directory . '/linked/sub/deeper/missing' ) );
+		self::assertNull( Files::marker( $this->directory . '/linked/sub/gone/missing' ) );
+		// The same names at their canonical paths are answered.
+		self::assertTrue( Files::marker( $this->directory . '/real/sub/present' ) );
+		self::assertFalse( Files::marker( $this->directory . '/real/sub/missing' ) );
+		self::assertTrue( Files::missing( $this->directory . '/real/sub/deeper/missing' ) );
+		self::assertTrue( Files::missing( $this->directory . '/real/sub/gone/missing' ) );
+	}
+
 	public function test_a_marker_below_a_folder_that_cannot_be_searched_is_neither_there_nor_missing(): void {
 		$folder = $this->directory . '/records';
 		mkdir( $folder, 0700 );
