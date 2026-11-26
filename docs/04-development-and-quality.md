@@ -631,7 +631,9 @@ the covered code MSI less those not covered as well, rounded half up to hundredt
 run count only if that lower bound meets both floors too, `minMsi` and `minCoveredMsi` of the
 configuration or `--min-msi` and `--min-covered-msi`, and says so in a notice with both bounds;
 otherwise it fails the gate, as the score cannot be trusted on that machine, and the gate has to
-run again on a faster one. It reads the floors before Infection starts and fails when it cannot.
+run again on a faster one. It reads the floors before Infection starts and fails when it cannot:
+a floor counts as read only when it is set once, in plain digits with at most two decimals, so
+that a value such as `8e1`, which is 80 to Infection, is refused and not read as 8.
 Up to 5 % Infection's verdict stands: healthy runs of the six gates, locally and in CI, timed
 out 0.1 % to 1.8 % of their mutant processes, among them mutants that loop for good, whose
 timeout is a detection, and on such runs the lower bound lies below the floors of the ZIP and

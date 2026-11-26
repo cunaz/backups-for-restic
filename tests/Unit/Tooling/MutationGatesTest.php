@@ -447,6 +447,13 @@ final class MutationGatesTest extends TestCase {
 			'no covered floor'                 => [ "    \"minMsi\": 80,\n", [], '::error::The floors of infection.json5.dist cannot be read (minMsi "80", minCoveredMsi "")', false ],
 			'a floor with three decimals'      => [ "    \"minMsi\": 80.125,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "80.125", minCoveredMsi "84")', false ],
 			'a floor in a comment'             => [ "    // \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "", minCoveredMsi "84")', false ],
+			'a floor in exponent notation'     => [ "    \"minMsi\": 8e1,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "8e1", minCoveredMsi "84")', false ],
+			'a floor in hexadecimal'           => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 0x54,\n", [], '(minMsi "80", minCoveredMsi "0x54")', false ],
+			'a floor with a sign'              => [ "    \"minMsi\": +80,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "+80", minCoveredMsi "84")', false ],
+			'a floor as a string'              => [ "    \"minMsi\": \"80\",\n    \"minCoveredMsi\": 84,\n", [], '(minMsi ""80"", minCoveredMsi "84")', false ],
+			'a floor set twice'                => [ "    \"minMsi\": 80,\n    \"minMsi\": 8,\n    \"minCoveredMsi\": 84,\n", [], '(minMsi "80 8", minCoveredMsi "84")', false ],
+			'floors before comments'           => [ "    \"minMsi\": 86, // measured\n    \"minCoveredMsi\": 84/* measured */,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
+			'floors on one line'               => [ "    \"minMsi\": 86, \"minCoveredMsi\": 84,\n", [], 'against the floors 86.00 % and 84.00 %', true ],
 			'floors on the command line'       => [ '', [ '--min-msi=86', '--min-covered-msi', '84.5' ], 'against the floors 86.00 % and 84.50 %', true ],
 			'the command line before the file' => [ "    \"minMsi\": 80,\n    \"minCoveredMsi\": 84,\n", [ '--min-msi=86' ], 'against the floors 86.00 % and 84.00 %', true ],
 		];
@@ -470,7 +477,7 @@ final class MutationGatesTest extends TestCase {
 			self::assertSame( 1, $status, $output );
 			self::assertStringContainsString( $printed, $output );
 			if ( $started ) {
-				self::assertStringContainsString( 'infection ' . implode( ' ', $options ) . ' --threads=2', $output );
+				self::assertStringContainsString( implode( ' ', array_merge( [ 'infection' ], $options, [ '--threads=2' ] ) ), $output );
 			} else {
 				self::assertStringNotContainsString( 'infection --threads=2', $output, 'Infection did not start.' );
 			}

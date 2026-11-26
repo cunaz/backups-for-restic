@@ -43,7 +43,8 @@
 # the tests would let escape. The script then computes the scores as Infection 0.35.10 does, but
 # with the timed-out mutants counted as not detected, and fails the gate unless that lower bound
 # meets both floors too: minMsi and minCoveredMsi of the configuration, or --min-msi and
-# --min-covered-msi, which it reads before Infection starts and without which it fails. Up to 5
+# --min-covered-msi, which it reads before Infection starts and without which it fails. A floor
+# counts as read only when it is set once, in plain digits with at most two decimals. Up to 5
 # percent Infection's verdict stands, as some mutants loop for good and their timeout is a
 # detection.
 #
@@ -90,20 +91,28 @@ if [[ -z "$summary" ]]; then
 fi
 [[ "$summary" == /* ]] || summary="$(dirname "$config")/$summary"
 rm -f "$summary"
+# What the configuration gives a key: the whole value up to the comma, blank, brace or comment
+# that ends it, and every value when the key is set more than once. hundredths() then refuses
+# what it does not take as a whole (8e1, which is 80 to Infection, 0x50, "80", two values)
+# instead of reading its first digits as a lower floor.
+configured() {
+	sed -n 's/^[^/]*"'"$1"'"[[:space:]]*:[[:space:]]*\([^,[:space:]}/]*\).*/\1/p' "$config" | paste -s -d ' ' -
+}
 if [[ -z "$min_msi" ]]; then
-	min_msi="$(sed -n 's/^[^/]*"minMsi"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' "$config" | head -n 1)"
+	min_msi="$(configured minMsi)"
 fi
 if [[ -z "$min_covered" ]]; then
-	min_covered="$(sed -n 's/^[^/]*"minCoveredMsi"[[:space:]]*:[[:space:]]*\([0-9.]*\).*/\1/p' "$config" | head -n 1)"
+	min_covered="$(configured minCoveredMsi)"
 fi
-# A percentage with at most two decimals, in hundredths: 80 is 8000, 80.5 is 8050.
+# A percentage in plain digits with at most two decimals, in hundredths: 80 is 8000, 80.5 is
+# 8050.
 hundredths() {
 	[[ "$1" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?$ ]] || return 1
 	local decimals="${BASH_REMATCH[3]}00"
 	echo $((10#${BASH_REMATCH[1]} * 100 + 10#${decimals:0:2}))
 }
 if ! msi_floor="$(hundredths "$min_msi")" || ! covered_floor="$(hundredths "$min_covered")" || ((msi_floor > 10000 || covered_floor > 10000)); then
-	echo "::error::The floors of $config cannot be read (minMsi \"$min_msi\", minCoveredMsi \"$min_covered\"): each must be a percentage with at most two decimals, in the configuration or as --min-msi and --min-covered-msi, or a run whose timeouts make its score an upper bound could not be held to them."
+	echo "::error::The floors of $config cannot be read (minMsi \"$min_msi\", minCoveredMsi \"$min_covered\"): each must be set once, as a percentage in plain digits with at most two decimals, in the configuration or as --min-msi and --min-covered-msi, or a run whose timeouts make its score an upper bound could not be held to them."
 	exit 1
 fi
 
