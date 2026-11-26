@@ -21,7 +21,7 @@ const BOUNDED = path.join( __dirname, 'bounded-command.js' );
  * the test's timeout: a command that hangs would block the run until CI's job limit. After the
  * bound the command is stopped together with everything it started and still waits for
  * (bounded-command.js, and here if that program does not get to it), and the test fails with
- * an error that names it. Stopping the command
+ * an error that names it and says whether it was stopped. Stopping the command
  * alone would leave, for example, the database client of an installation that hangs running
  * beside the clean-up that follows.
  *
@@ -39,17 +39,21 @@ function runCommand( name, file, args, seconds, options = {} ) {
 		// The second bound, five seconds later, is for a wrapper that does not end by itself.
 		return execFileSync( process.execPath, [ BOUNDED, String( seconds ), record, file, ...args ], { ...options, timeout: ( seconds + 5 ) * 1000, killSignal: 'SIGKILL' } );
 	} catch ( error ) {
+		let stopped = 124 === error.status;
 		if ( 'ETIMEDOUT' === error.code ) {
 			// The wrapper did not stop the command and was stopped itself: the group it noted
-			// is stopped here. Without a note, the command had not started.
+			// is stopped here. Without a note the command had not started, or the wrapper
+			// stalled between its start and the note (bounded-command.js).
 			try {
 				process.kill( -Number( fs.readFileSync( record, 'utf8' ) ), 'SIGKILL' );
-			} catch {
-				// No note, or the group ended in this moment.
+				stopped = true;
+			} catch ( failure ) {
+				// A group that ended in this moment is stopped as well.
+				stopped = 'ESRCH' === failure.code;
 			}
 		}
 		if ( 124 === error.status || 'ETIMEDOUT' === error.code ) {
-			throw new Error( name + ' did not finish within ' + seconds + ' seconds and was stopped.' );
+			throw new Error( name + ' did not finish within ' + seconds + ' seconds' + ( stopped ? ' and was stopped.' : '; its wrapper was stopped, and nothing says whether the command itself still runs.' ) );
 		}
 		throw error;
 	} finally {
