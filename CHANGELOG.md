@@ -355,8 +355,9 @@ All notable changes are documented here. The format follows
   could not leave maintenance mode, shows that failure on the admin page beside its state and
   its counts, and WP-CLI's report of a cancelled undo names it too. Before, only a failed job
   showed its error, and the page said "Cancelled" while the maintenance page stayed up.
-- While a stored job cannot be read, no staging and no sealed review expires. Such a job may
-  be an apply within its recovery window: before, the staging of its restore expired with its
+- While a stored job cannot be read, no staging and no sealed review expires, and no undo
+  journal of an apply is deleted. Such a job may be an undo that still runs, whose apply's
+  journal must stay beyond the window, or an apply within its recovery window: before, the staging of its restore expired with its
   own hours and its sealed review after one, while its journal stayed, so that once the job
   could be read again the apply was offered for undo and the undo refused with
   `file_staging_gone`.

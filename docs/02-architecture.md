@@ -910,9 +910,10 @@ due are removed first, each on its own: one that the file system refuses is coun
 tried again, and never keeps staging from expiring. An undo workspace loses its count of
 attempted changes first, synchronised, so that a deletion that stops part way leaves the
 window of its apply closed. While any stored job cannot be read
-(`JobStore::unreadable()`), the heartbeat sets no staging aside and removes no sealed review:
-that job may be an apply within its recovery window whose undo needs them, and its document
-cannot say which. What was set aside before is still deleted.
+(`JobStore::unreadable()`), the heartbeat sets no staging aside, removes no sealed review and
+deletes no undo journal: that job may be an apply within its recovery window whose undo needs
+them, or an undo that still runs, and its document cannot say which. What was set aside
+before is still deleted.
 
 The plugin uses the private directory by its canonical path, every symbolic link on the way
 resolved, and everything above is below that path ([ADR 0007](adr/0007-private-directory.md)).

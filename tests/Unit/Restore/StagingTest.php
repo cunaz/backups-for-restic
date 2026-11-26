@@ -542,6 +542,26 @@ final class StagingTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $undo );
 	}
 
+	public function test_the_undo_workspace_of_an_apply_stays_beyond_its_window_while_a_stored_job_cannot_be_read(): void {
+		// An apply whose window ended an hour ago, with the journal of a change that no undo reverted.
+		$apply = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		// Any job: what it is cannot be read, so it may be an undo of this apply that was queued
+		// within the window and still runs, which keeps the journal as long as it is active.
+		$unreadable = $this->job( JobState::Running, $this->clock->seconds );
+		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
+		self::assertNull( $this->jobs->active() );
+		self::assertSame( $unreadable->id, $this->jobs->unreadable() );
+		// Before, the journal went with the end of the window, and the saved originals with it.
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertFileExists( $undo . '/attempted' );
+		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryDoesNotExist( $undo );
+	}
+
 	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
 		$target = $this->directory . '/elsewhere';
 		mkdir( $target . '/files', 0700, true );

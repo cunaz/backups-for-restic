@@ -380,8 +380,11 @@ final class Staging {
 	 * sealed review is removed: that job may be an apply within its recovery window whose undo
 	 * needs them. Before, the staging of its restore expired with its own hours and the sealed
 	 * review after one, while the apply's journal stayed, so that the undo offered once the
-	 * document could be read again was refused with file_staging_gone. Undo workspaces are
-	 * decided by their own apply's records, as before, and what was set aside is deleted.
+	 * document could be read again was refused with file_staging_gone. No undo workspace goes
+	 * either while that lasts: the job that cannot be read may be an undo that is queued or
+	 * running, whose apply's journal stays beyond the window as long as that undo is active.
+	 * Otherwise undo workspaces are decided by their own apply's records, as before, and what
+	 * was set aside is deleted.
 	 *
 	 * @param int   $hours Staging lifetime.
 	 * @param float $deadline Deletion deadline.
@@ -406,6 +409,11 @@ final class Staging {
 				}
 			} catch ( PluginException ) {
 				++$failed;
+			}
+			if ( $held ) {
+				// The job that cannot be read may be an undo of this apply that is queued or
+				// running, which active() does not see: no journal goes while that lasts.
+				continue;
 			}
 			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) || ( JobType::FilePlan === $active?->type && true === ( $active->data['undo'] ?? false ) && $job->id === ( $active->data['subject'] ?? null ) ) ) {
 				continue;

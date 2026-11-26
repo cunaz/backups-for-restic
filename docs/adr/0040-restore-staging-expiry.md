@@ -103,10 +103,12 @@ packages must never be offered a tree that is half gone.
   undo had reverted, so that an apply undone completely was offered for undo again until its
   24 hours ended. tmpfs lists the newest entry, the undone marker, first.
 - While any stored job cannot be read (`JobStore::unreadable()`), the heartbeat sets no
-  staging aside and removes no sealed review, whatever their own hours say; what was set aside
-  before goes on being deleted, and the undo workspaces of applies that can be read are decided
-  as before. Such a job may be an apply within its window whose undo needs the staging of its
-  restore and its sealed review, and its document cannot say which. Before (until 2026-11-26),
+  staging aside and removes no sealed review, whatever their own hours say, and deletes no
+  undo workspace of an apply; what was set aside before goes on being deleted. Such a job may
+  be an apply within its window whose undo needs the staging of its restore and its sealed
+  review, and its document cannot say which. It may also be an undo that was queued within
+  the window and still runs: an active undo keeps its apply's journal beyond the window, and
+  one whose document cannot be read is not seen as active. Before (until 2026-11-26),
   they expired with their own hours while the apply's journal stayed, so that once the document
   could be read again the apply was offered for undo and the undo refused with
   `file_staging_gone`. A hold of 24 hours from the time in the job's ID was not chosen: the
