@@ -1597,7 +1597,7 @@
 	 * `lost`, the text for an answer that did not arrive.
 	 *
 	 * @param {Object} plan    Authorized preview.
-	 * @param {Object} options Submit label, endpoint, job type, operation-specific arguments and UI callbacks; optionally `reviewedLabel`, `done`, `lost` and `recheck` (called after a lost answer).
+	 * @param {Object} options Submit label, endpoint, job type, operation-specific arguments and UI callbacks; optionally `reviewedLabel`, `done`, `lost`, `recheck` (called after a lost answer) and `retry` (codes of a 409 that keep the form).
 	 * @return {Element} Confirmation form.
 	 */
 	function reviewConfirmation( plan, options ) {
@@ -1654,7 +1654,8 @@
 					return;
 				}
 				options.busy( false );
-				if ( 409 === error.data.status ) {
+				// A refusal that leaves the review valid, such as a lock held for a moment, keeps the form.
+				if ( 409 === error.data.status && ! ( options.retry || [] ).includes( error.code ) ) {
 					options.stale( error );
 				} else {
 					submit.disabled = false;
@@ -2274,6 +2275,7 @@
 					submitLabel: __( 'Discard binding', 'backups-for-restic' ),
 					reviewedLabel: __( 'I have reviewed what this discard forgets and noted the table names.', 'backups-for-restic' ),
 					path: base + '/discard', data: {}, busy,
+					retry: [ 'backups_for_restic_database_discard_busy' ],
 					done( response ) {
 						busy( false );
 						replace( body, [] );

@@ -5,6 +5,7 @@
  * verify maintenance, public posts and retained configuration after the jobs complete.
  */
 const fs = require( 'node:fs' );
+const { spawn } = require( 'node:child_process' );
 const { URL } = require( 'node:url' );
 const path = require( 'node:path' );
 const { test, expect } = require( '@playwright/test' );
@@ -997,6 +998,22 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( foreign( job ) ).toContainText( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded.' );
 		await asked;
 		await expect( foreign( job ).locator( '.bfr-database-discard-tables code' ) ).toHaveCount( 7 );
+		expect( stored( job ).data ).toHaveProperty( 'database_owner' );
+		// Another request holds the runner lock: the review stays valid, and so does the form as it
+		// was filled in. Before, the page removed it as if the review had changed.
+		const holder = spawn( 'php', [ '-r', '$lock = fopen( $argv[1], "c" ); flock( $lock, LOCK_EX ); echo "held\n"; fgets( STDIN );', path.join( siteRoot(), 'wp-content/backups-for-restic/runner.lock' ) ], { stdio: [ 'pipe', 'pipe', 'inherit' ] } );
+		const released = new Promise( ( resolve ) => holder.once( 'exit', resolve ) );
+		await new Promise( ( resolve ) => holder.stdout.once( 'data', resolve ) );
+		try {
+			await confirm( job, url, ADMIN.password );
+			await expect( foreign( job ) ).toContainText( 'The review is still valid: confirm it again in a moment.' );
+		} finally {
+			holder.stdin.end();
+			await released;
+		}
+		await expect( foreign( job ).getByLabel( 'I have reviewed what this discard forgets and noted the table names.' ) ).toBeChecked();
+		await expect( foreign( job ).getByLabel( 'Type the site address to confirm' ) ).toHaveValue( url );
+		await expect( foreign( job ).getByLabel( 'Your WordPress password' ) ).toBeFocused();
 		expect( stored( job ).data ).toHaveProperty( 'database_owner' );
 
 		// The list that the page reads after the discard says that this account may not end it.

@@ -374,7 +374,7 @@ final class Messages {
 			],
 			'database_discard_busy' => [
 				'message' => __( 'Another request is working on the jobs of the plugin right now, so the binding was not discarded.', 'backups-for-restic' ),
-				'hint'    => __( 'Try again in a moment.', 'backups-for-restic' ),
+				'hint'    => __( 'The review is still valid: confirm it again in a moment.', 'backups-for-restic' ),
 			],
 			'database_exchange_rebuilt' => [
 				'message' => __( 'A private table kept for the database undo was rebuilt and has a new physical identity.', 'backups-for-restic' ),

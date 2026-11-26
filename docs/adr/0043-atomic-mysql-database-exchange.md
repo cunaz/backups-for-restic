@@ -306,6 +306,10 @@ database could not get rid of the binding. Since then:
   refuses it. The guard stays as strong as the undo's. The review and the list say why an
   account may not confirm (`write_lacking`, `file_mods_disallowed`), and the page says it in
   its words and names the WP-CLI command, which needs neither when it runs without `--user`.
+- A runner lock held by another request (409 `database_discard_busy`) leaves the review
+  valid: the page keeps the confirmation as it was filled in, except the password, and says to
+  confirm it again in a moment. Other refusals of the confirmation (409) mean that the review
+  changed, and the page removes it.
 
 ### Lost replies
 

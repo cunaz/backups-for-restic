@@ -158,7 +158,9 @@ All notable changes are documented here. The format follows
   card opens. After a lost answer to the confirmation, the page shows the result of a discard
   that the server recorded. On a site under `DISALLOW_FILE_MODS`, where WordPress gives no
   account the capability `update_core` that a discard needs, the page says so and names the
-  WP-CLI command that can, instead of only saying that the account cannot.
+  WP-CLI command that can, instead of only saying that the account cannot. A discard that meets
+  another request's lock of the job runner keeps its confirmation form and says that the review
+  is still valid.
 - Backups for restic requires 64-bit PHP. On 32-bit PHP, activation stops before the
   first backup. Existing installations retain their settings and local restore data.
 - The snapshot list of the admin page shows the snapshots of this site; those of other
