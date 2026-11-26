@@ -23,6 +23,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Restore\RestoreServices;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Storage\FileLock;
+use BackupsForRestic\Storage\Files;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -407,7 +408,8 @@ final class Staging {
 			}
 			try {
 				$undo = $this->jobs->directory( $job ) . '/undo';
-				if ( $job->finished_at + 86400 <= $this->clock->now()[0] || is_file( $undo . '/reverted' ) || ! is_file( $undo . '/attempted' ) ) {
+				// Only an ended window, or records that establish that none is open, let the journal go.
+				if ( $job->finished_at + 86400 <= $this->clock->now()[0] || false === $this->jobs->undo_open( $job ) ) {
 					$this->delete( $undo, $deadline );
 				}
 			} catch ( PluginException ) {
@@ -474,7 +476,7 @@ final class Staging {
 				continue;
 			}
 			$job = $this->jobs->get( $name );
-			if ( null === $job ? $this->jobs->has_document( $name ) : ! $job->state->is_terminal() ) {
+			if ( null === $job ? $this->jobs->has_document( $name ) || self::undecided( $this->directory . '/' . $name ) : ! $job->state->is_terminal() ) {
 				continue;
 			}
 			$staged = $this->describe( $name, $job, $hours );
@@ -543,6 +545,21 @@ final class Staging {
 			$database_report,
 			true === ( $job->data['fresh_install'] ?? false )
 		);
+	}
+
+	/**
+	 * Whether the staging directory of a job whose document is gone cannot be told from a
+	 * leftover: a directory in which its report can neither be found as a file nor be missing
+	 * (Files::marker()), because this process cannot search it, or because something other than
+	 * a file has the report's name. Such a directory is not touched, as one whose job document
+	 * cannot be read; before, it was removed at once as a leftover without a report.
+	 *
+	 * @param string $path Staging directory.
+	 * @return bool Whether its report can neither be found nor be missing.
+	 */
+	private static function undecided( string $path ): bool {
+		clearstatcache( true, $path );
+		return ! is_link( $path ) && is_dir( $path ) && null === Files::marker( $path . '/' . RestoreServices::REPORT );
 	}
 
 	/**

@@ -37,16 +37,23 @@ final readonly class ApplyJournal {
 	}
 
 	/**
-	 * Checks the undo window. An undo already queued in the window may finish after it.
+	 * Checks the undo window. An undo already queued in the window may finish after it. An
+	 * apply whose undo records cannot be established is refused with a code of its own, not as
+	 * one past its window: its staging and journal are kept while the window lasts (window()).
 	 *
 	 * @param string $id Apply ID.
 	 * @param bool   $active The current runner is undoing this apply.
 	 * @return Job Apply job.
-	 * @throws JobConflict If the recovery window has closed.
+	 * @throws JobConflict If the recovery window has closed, or with the code
+	 *                     `undo_records_unreadable` if the records of its undo cannot be established.
 	 */
 	public function original( string $id, bool $active = false ): Job {
-		$job = $this->jobs->get( $id );
-		if ( null === $job || ! $this->eligible( $job, $active ) ) {
+		$job    = $this->jobs->get( $id );
+		$window = null === $job ? false : $this->window( $job, $active );
+		if ( null === $window ) {
+			JobConflict::raise( 'The records of this apply\'s undo cannot be looked up; its journal and staged files are kept while its recovery window lasts.', [ 'code' => 'undo_records_unreadable' ] );
+		}
+		if ( ! $window ) {
 			JobConflict::raise( 'This apply has no available undo.', [ 'code' => 'undo_unavailable' ] );
 		}
 		return $job;
@@ -54,28 +61,39 @@ final readonly class ApplyJournal {
 
 
 	/**
-	 * Checks for an unreverted attempted change.
+	 * Whether an apply can be undone: one that has ended, within its window unless an undo of it
+	 * is already running, whose records show an attempted change that no undo reverted
+	 * completely. Null where those records cannot be established (JobStore::undo_open()): the
+	 * apply is neither offered for undo nor taken for one whose window is over.
 	 *
 	 * @param Job  $job Candidate.
 	 * @param bool $active Undo is already running.
-	 * @return bool Eligible.
+	 * @return bool|null Whether it can be undone, or null where its records cannot be established.
 	 */
-	public function eligible( Job $job, bool $active = false ): bool {
-		return JobType::Apply === $job->type && $job->state->is_terminal() && ( $active || $job->finished_at + 86400 > $this->clock->now()[0] ) && is_file( $this->workspace( $job ) . '/attempted' ) && ! is_file( $this->workspace( $job ) . '/reverted' );
+	public function window( Job $job, bool $active = false ): ?bool {
+		if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( ! $active && $job->finished_at + 86400 <= $this->clock->now()[0] ) ) {
+			return false;
+		}
+		return $this->jobs->undo_open( $job );
 	}
 
 
 	/**
-	 * Reads the count recorded before attempting the latest ordinal.
+	 * Reads the count recorded before attempting the latest ordinal: zero only where it is
+	 * established that the apply recorded none (Files::marker()).
 	 *
 	 * @param Job $job Apply.
 	 * @return int Count.
-	 * @throws StorageFailed If the recovery cursor is invalid.
+	 * @throws StorageFailed If the recovery cursor is invalid or cannot be looked up.
 	 */
 	public function attempted( Job $job ): int {
-		$file = $this->workspace( $job ) . '/attempted';
-		if ( ! is_file( $file ) ) {
+		$file  = $this->workspace( $job ) . '/attempted';
+		$found = Files::marker( $file );
+		if ( false === $found ) {
 			return 0;
+		}
+		if ( null === $found ) {
+			throw new StorageFailed( 'The undo cursor cannot be looked up.' );
 		}
 		$count = file_get_contents( $file, false, null, 0, 16 );
 		if ( ! is_string( $count ) || 1 !== preg_match( '/\A[1-9][0-9]{0,6}\z/', $count ) || (int) $count > DiskFilePlan::MAX_ENTRIES ) {

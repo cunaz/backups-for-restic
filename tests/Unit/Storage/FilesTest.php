@@ -105,4 +105,46 @@ final class FilesTest extends TestCase {
 		self::assertTrue( Files::write_atomic_pieces( $file, [ 'first' ], 5 ) );
 		self::assertSame( 'first', file_get_contents( $file ) );
 	}
+
+	public function test_a_marker_is_there_or_missing_only_where_its_folder_establishes_it(): void {
+		$folder = $this->directory . '/records';
+		mkdir( $folder, 0700 );
+		file_put_contents( $folder . '/marker', '1' );
+		self::assertTrue( Files::marker( $folder . '/marker' ) );
+		self::assertFalse( Files::marker( $folder . '/missing' ) );
+		// Nothing is below a folder that is missing, also several levels down, nor below a file.
+		self::assertFalse( Files::marker( $this->directory . '/gone/deeper/marker' ) );
+		self::assertFalse( Files::marker( $folder . '/marker/below' ) );
+		// What is no regular file is no marker that the plugin wrote.
+		mkdir( $folder . '/directory', 0700 );
+		self::assertNull( Files::marker( $folder . '/directory' ) );
+		symlink( $folder . '/marker', $folder . '/link' );
+		self::assertNull( Files::marker( $folder . '/link' ) );
+		// Below a link, the folder that holds the name may be anywhere: neither answer holds.
+		symlink( $folder, $this->directory . '/linked' );
+		self::assertNull( Files::marker( $this->directory . '/linked/marker' ) );
+		self::assertNull( Files::marker( $this->directory . '/linked/missing' ) );
+		self::assertNull( Files::marker( $this->directory . '/linked/gone/marker' ) );
+	}
+
+	public function test_a_marker_below_a_folder_that_cannot_be_searched_is_neither_there_nor_missing(): void {
+		$folder = $this->directory . '/records';
+		mkdir( $folder, 0700 );
+		file_put_contents( $folder . '/marker', '1' );
+		chmod( $folder, 0600 );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// PHP's is_file() answers false for both, as for a name that is missing.
+			self::assertNull( Files::marker( $folder . '/marker' ) );
+			self::assertNull( Files::marker( $folder . '/missing' ) );
+			self::assertNull( Files::marker( $folder . '/missing/below' ) );
+			self::assertFalse( Files::missing( $folder . '/missing' ) );
+		} finally {
+			chmod( $folder, 0700 );
+		}
+		self::assertTrue( Files::missing( $folder . '/missing' ) );
+		self::assertFalse( Files::missing( $folder . '/marker' ) );
+	}
 }

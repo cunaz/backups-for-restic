@@ -210,6 +210,61 @@ final class JobDocumentTest extends TestCase {
 		$this->assert_blocks_changes( $store, $job );
 	}
 
+	/**
+	 * Documents that cannot be looked up, and how to put each in place in a job's directory.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function documents_that_cannot_be_looked_up(): array {
+		return [
+			'below a job directory that cannot be searched' => [ 'unsearchable' ],
+			'a folder at the name of the document' => [ 'folder' ],
+		];
+	}
+
+	#[DataProvider( 'documents_that_cannot_be_looked_up' )]
+	public function test_a_document_that_cannot_be_looked_up_counts_as_one_that_cannot_be_read( string $document_case ): void {
+		$store      = $this->store();
+		$job        = $store->create( JobType::Restore, 'manual', 1767225600, [ 'database_binding' => [ 'pending' => true ] ] );
+		$job->state = JobState::Succeeded;
+		$store->save( $job );
+		$folder   = $this->directory . '/' . $job->id;
+		$document = $folder . '/job.json';
+		if ( 'folder' === $document_case ) {
+			rename( $document, $folder . '/job.saved' );
+			mkdir( $document, 0700 );
+		} else {
+			chmod( $folder, 0600 );
+		}
+		try {
+			if ( 'unsearchable' === $document_case && is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			self::assertNull( $store->get( $job->id ) );
+			// Before, is_file() answered false: the job counted as gone, and nothing stopped a new
+			// job or an uninstall that would remove what this one holds.
+			self::assertTrue( $store->has_document( $job->id ) );
+			$this->assert_blocks_changes( $store, $job );
+			try {
+				iterator_to_array( $store->pending_database_cleanups( true ) );
+				self::fail( 'An uninstall went past a job that may hold private tables.' );
+			} catch ( StorageFailed $refused ) {
+				self::assertSame( 'An unreadable job must be recovered before uninstalling.', $refused->getMessage() );
+			}
+		} finally {
+			if ( 'folder' === $document_case ) {
+				rmdir( $document );
+				rename( $folder . '/job.saved', $document );
+			} else {
+				chmod( $folder, 0700 );
+			}
+		}
+		self::assertSame( $job->id, $store->get( $job->id )?->id );
+		// A name that is missing from the job's directory is a document that is gone.
+		unlink( $document );
+		self::assertFalse( $store->has_document( $job->id ) );
+	}
+
 	public function test_a_directory_without_a_document_does_not_block_a_new_job(): void {
 		$store = $this->store();
 		$job   = $store->create( JobType::Backup, 'manual', 1767225600 );

@@ -116,9 +116,9 @@ final class JobMessagesTest extends TestCase {
 		'check'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'internal' ],
 		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'internal' ],
-		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'internal' ],
+		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'undo_records_unreadable', 'internal' ],
 		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
-		'undo'           => [ 'file_undo_failed', 'file_staging_gone', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'undo_unavailable', 'undo_review_required', 'internal' ],
+		'undo'           => [ 'file_undo_failed', 'file_staging_gone', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'undo_unavailable', 'undo_records_unreadable', 'undo_review_required', 'internal' ],
 		'database_apply' => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_review_required', 'database_restore_packet', 'database_restore_busy', 'database_restore_prefix', 'database_preview_missing', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'database_wordpress_version', 'environment', 'configuration', 'internal' ],
 		'database_undo'  => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_restore_busy', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'environment', 'configuration', 'internal' ],
 	];
@@ -178,6 +178,17 @@ final class JobMessagesTest extends TestCase {
 		self::assertSame( 'The backup is not configured completely.', Messages::job_error( 'configuration' )['message'] );
 		self::assertSame( Messages::job_error( 'environment' ), Messages::job_error( 'environment', 'backup' ) );
 		self::assertStringContainsString( 'Connect to it with its password instead of creating a new one.', Messages::job_error( 'repository_exists' )['hint'] );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_an_apply_whose_undo_records_cannot_be_read_is_not_said_to_be_past_its_window(): void {
+		self::text( 'internal' );
+		$texts = Messages::job_error( 'undo_records_unreadable' );
+		self::assertSame( 'The plugin cannot tell whether this apply can still be undone.', $texts['message'] );
+		self::assertStringContainsString( 'keeps the saved original files and the staged files', $texts['hint'] );
+		self::assertStringContainsString( 'offers the undo again once it can read the records', $texts['hint'] );
+		self::assertNotSame( Messages::job_error( 'undo_unavailable' ), $texts );
+		self::assertSame( $texts, Messages::job_error( 'undo_records_unreadable', 'undo' ) );
 	}
 
 	#[RunInSeparateProcess]

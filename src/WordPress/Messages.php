@@ -161,6 +161,10 @@ final class Messages {
 				'message' => __( 'This apply can no longer be undone.', 'backups-for-restic' ),
 				'hint'    => __( 'An apply can be undone for 24 hours after it ended, and no longer once an undo reverted it completely. The Restores tab lists what can still be undone.', 'backups-for-restic' ),
 			],
+			'undo_records_unreadable'        => [
+				'message' => __( 'The plugin cannot tell whether this apply can still be undone.', 'backups-for-restic' ),
+				'hint'    => __( 'A record of its undo in the plugin\'s private working directory cannot be looked up, or is not a file that the plugin wrote. Until the 24 hours of its recovery window are over, the plugin keeps the saved original files and the staged files, and it offers the undo again once it can read the records. Check that the PHP user owns the private working directory and can read and open every folder in it.', 'backups-for-restic' ),
+			],
 			'maintenance_busy'               => [
 				'message' => __( 'WordPress is in maintenance mode for another update, so the file changes did not start.', 'backups-for-restic' ),
 				'hint'    => __( 'Wait until that update has finished. If none is running, delete the file .maintenance in the WordPress directory. Then open a new preview and confirm it again.', 'backups-for-restic' ),

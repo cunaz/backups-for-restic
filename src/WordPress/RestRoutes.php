@@ -1072,7 +1072,7 @@ final class RestRoutes {
 			return $this->error( 'live_plan_changed', 409 );
 		}
 		if ( $refused instanceof JobConflict ) {
-			return $this->error( in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'file_preview_expired', 'job_unreadable' ], true ) ? $code : 'live_plan_conflict', 409 );
+			return $this->error( in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'undo_records_unreadable', 'file_preview_expired', 'job_unreadable' ], true ) ? $code : 'live_plan_conflict', 409 );
 		}
 		if ( $refused instanceof InvalidArgument ) {
 			return $this->error( in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 );

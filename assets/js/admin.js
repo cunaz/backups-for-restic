@@ -488,12 +488,16 @@
 	}
 
 	/**
-	 * Says that an apply is partly undone, and what is left of it.
+	 * Says that an apply is partly undone, and what is left of it, or that the records of its
+	 * undo cannot be read.
 	 *
 	 * @param {Object} job Undo opportunity.
 	 * @return {?Element} Notice, or null for an apply that no undo has changed.
 	 */
 	function undoState( job ) {
+		if ( 'unreadable' === job.state ) {
+			return notice( 'error', __( 'The plugin cannot read the records of this apply\'s undo, so it does not offer the undo now. It keeps the saved original files and the staged files until the time above, and offers the undo again once it can read the records. Check that the PHP user owns the plugin\'s private working directory and can read and open every folder in it.', 'backups-for-restic' ) );
+		}
 		if ( 'partly_undone' !== job.state ) {
 			return null;
 		}
@@ -2330,7 +2334,8 @@
 					sprintf( __( 'Original files available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
 				] ),
 				undoState( job ),
-				liveChange( job.job, true ),
+				// An undo whose records cannot be read is refused: the list offers it again once they can.
+				'unreadable' === job.state ? null : liveChange( job.job, true ),
 			] );
 		}
 		function databaseCard( job ) {

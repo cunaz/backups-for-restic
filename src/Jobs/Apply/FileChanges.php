@@ -219,23 +219,28 @@ final readonly class FileChanges implements StepProvider {
 
 	/**
 	 * Lists undoable apply jobs, including a failed or cancelled partial apply and an apply
-	 * that an undo reverted in part: its kept entries stay undoable until the window ends.
+	 * that an undo reverted in part: its kept entries stay undoable until the window ends. An
+	 * apply within its window whose undo records cannot be established is listed as
+	 * `unreadable`: its files are kept until the window ends, and its undo is refused until the
+	 * records can be read.
 	 *
-	 * @return list<array{job:string,restore:string,expires:int,state:string,kept:int|null}> Undo opportunities, with applied or partly_undone and the number of entries the last undo kept, null when it stopped before it finished.
+	 * @return list<array{job:string,restore:string,expires:int,state:string,kept:int|null}> Undo opportunities, with applied, partly_undone or unreadable and the number of entries the last undo kept, null when it stopped before it finished or the records cannot be read.
 	 */
 	public function undoable(): array {
 		$list = [];
 		foreach ( $this->jobs->file_changes() as $job ) {
-			if ( $this->journal->eligible( $job ) ) {
-				$kept   = $job->result['undo_kept'] ?? null;
-				$list[] = [
-					'job'     => $job->id,
-					'restore' => ApplyJournal::field( $job, 'restore' ),
-					'expires' => $job->finished_at + 86400,
-					'state'   => 'partly_undone' === ( $job->result['undo_state'] ?? null ) ? 'partly_undone' : 'applied',
-					'kept'    => is_int( $kept ) ? $kept : null,
-				];
+			$window = $this->journal->window( $job );
+			if ( false === $window ) {
+				continue;
 			}
+			$kept   = $job->result['undo_kept'] ?? null;
+			$list[] = [
+				'job'     => $job->id,
+				'restore' => ApplyJournal::field( $job, 'restore' ),
+				'expires' => $job->finished_at + 86400,
+				'state'   => null === $window ? 'unreadable' : ( 'partly_undone' === ( $job->result['undo_state'] ?? null ) ? 'partly_undone' : 'applied' ),
+				'kept'    => null !== $window && is_int( $kept ) ? $kept : null,
+			];
 		}
 		return $list;
 	}
@@ -1052,8 +1057,9 @@ final readonly class FileChanges implements StepProvider {
 		} catch ( PluginException $failure ) {
 			// Only the record of a fully undone apply needs more than the documents: its
 			// marker. With the marker the apply is undone; with entries kept, a stopped
-			// undo is recorded through the same documents as a finished one.
-			if ( ! $finished || self::counts( $job )['kept'] > 0 || is_file( $this->journal->workspace( $apply ) . '/reverted' ) ) {
+			// undo is recorded through the same documents as a finished one. A marker that
+			// cannot be established counts as missing here: the apply stays open.
+			if ( ! $finished || self::counts( $job )['kept'] > 0 || true === Files::marker( $this->journal->workspace( $apply ) . '/reverted' ) ) {
 				throw $failure;
 			}
 			// Without its marker the apply is not undone, whatever the undo counted. It is

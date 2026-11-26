@@ -214,17 +214,40 @@ final class JobStore {
 	}
 
 	/**
-	 * Whether a document is stored for a job ID, readable by this version or not. Together
-	 * with get() it tells a job that is gone from one whose state cannot be established.
+	 * Whether a document is stored for a job ID, readable by this version or not, or cannot be
+	 * ruled out. Together with get() it tells a job that is gone from one whose state cannot be
+	 * established. A document is gone only where its name is missing from the job's directory,
+	 * or the directory is missing (Files::marker()); one that cannot be looked up, below a job
+	 * directory that this process cannot search, counts as stored, and so does anything other
+	 * than a regular file under its name. Before, is_file() counted them as gone.
 	 *
 	 * @param string $id Job ID.
-	 * @return bool True if the job has a document.
+	 * @return bool True if the job has a document, or may have one.
 	 */
 	public function has_document( string $id ): bool {
-		$file = $this->directory . '/' . $id . '/job.json';
-		// Jobs are created and pruned by other requests: never answer from PHP's stat cache.
-		clearstatcache( true, $file );
-		return 1 === preg_match( self::ID_PATTERN, $id ) && is_file( $file );
+		// Jobs are created and pruned by other requests: Files::marker() never answers from PHP's stat cache.
+		return 1 === preg_match( self::ID_PATTERN, $id ) && false !== Files::marker( $this->directory . '/' . $id . '/job.json' );
+	}
+
+	/**
+	 * Whether the records of an apply's undo hold its recovery window open, by their presence:
+	 * true while `undo/attempted` shows an attempted change and no `undo/reverted` marks it as
+	 * undone completely, false where it is established that the apply attempted no change or was
+	 * undone completely, and null where a record cannot be established (Files::marker()). Null
+	 * keeps what the window keeps, the staging, the sealed plan and the journal, and the undo is
+	 * refused while it lasts. The 24 hours of the window are the caller's to check.
+	 *
+	 * @param Job $apply Apply.
+	 * @return bool|null Whether the records hold the window open, or null where they cannot be established.
+	 */
+	public function undo_open( Job $apply ): ?bool {
+		$workspace = $this->directory . '/' . $apply->id . '/undo';
+		$reverted  = Files::marker( $workspace . '/reverted' );
+		$attempted = Files::marker( $workspace . '/attempted' );
+		if ( true === $reverted || false === $attempted ) {
+			return false;
+		}
+		return true === $attempted && false === $reverted ? true : null;
 	}
 
 	/**
@@ -415,7 +438,8 @@ final class JobStore {
 	/**
 	 * The restores of pinned_restores() with the reason each one is kept: null while a job
 	 * that uses its staging has not ended, otherwise the time at which the undo window of the
-	 * latest apply of it ends, 24 hours after that apply ended.
+	 * latest apply of it ends, 24 hours after that apply ended. An apply whose undo records
+	 * cannot be established keeps its staging as an open window does (undo_open()).
 	 *
 	 * @param int $now Current timestamp.
 	 * @return array<string, int|null> End of the undo window by restore ID, null for a staging in use.
@@ -429,7 +453,7 @@ final class JobStore {
 			}
 			if ( ! $job->state->is_terminal() ) {
 				$pins[ $id ] = null;
-			} elseif ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $this->directory . '/' . $job->id . '/undo/attempted' ) && ! is_file( $this->directory . '/' . $job->id . '/undo/reverted' ) && ( ! array_key_exists( $id, $pins ) || ( null !== $pins[ $id ] && $pins[ $id ] < $job->finished_at + 86400 ) ) ) {
+			} elseif ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job ) && ( ! array_key_exists( $id, $pins ) || ( null !== $pins[ $id ] && $pins[ $id ] < $job->finished_at + 86400 ) ) ) {
 				$pins[ $id ] = $job->finished_at + 86400;
 			}
 		}
@@ -437,7 +461,8 @@ final class JobStore {
 	}
 
 	/**
-	 * Sealed disk plans in use by an active apply, its undo preview or the undo window.
+	 * Sealed disk plans in use by an active apply, its undo preview or the undo window, also
+	 * that of an apply whose undo records cannot be established (undo_open()).
 	 *
 	 * @param int $now Current time.
 	 * @return array<string,true> Pinned plan IDs.
@@ -451,8 +476,7 @@ final class JobStore {
 			if ( ! is_string( $plan ) ) {
 				continue;
 			}
-			$workspace = $this->directory . '/' . $job->id . '/undo';
-			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $workspace . '/attempted' ) && ! is_file( $workspace . '/reverted' ) ) ) {
+			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job ) ) ) {
 				$pins[ $plan ] = true;
 			}
 		}
@@ -532,9 +556,10 @@ final class JobStore {
 	}
 
 	/**
-	 * Requires a store with no active job and no unreadable job document. Called while the
-	 * creation lock holds. An unknown layout cannot prove that a job has finished, even if
-	 * its raw state field looks familiar; no part of that layout is interpreted here.
+	 * Requires a store with no active job and no unreadable job document, which includes a
+	 * document that cannot be looked up (has_document()). Called while the creation lock holds.
+	 * An unknown layout cannot prove that a job has finished, even if its raw state field looks
+	 * familiar; no part of that layout is interpreted here.
 	 *
 	 * The private tables of a database restore that belong to another database server are
 	 * not on this one, so they cannot reach a backup and need no cleanup here. Only a new
@@ -546,7 +571,7 @@ final class JobStore {
 	private function require_idle( ?JobType $type = null ): void {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
-			if ( null === $job && is_file( $this->directory . '/' . $id . '/job.json' ) ) {
+			if ( null === $job && $this->has_document( $id ) ) {
 				JobConflict::raise(
 					'A stored job cannot be read by this version of the plugin.',
 					[
