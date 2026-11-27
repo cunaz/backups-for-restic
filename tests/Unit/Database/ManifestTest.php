@@ -218,6 +218,15 @@ final class ManifestTest extends TestCase {
 			'unassigned'                  => [ "\u{0378}", '\\u0378' ],
 			'noncharacter'                => [ "\u{FFFE}", '\\ufffe' ],
 		];
+		// The ASCII control characters, with Go's escapes; before, the check of the characters
+		// of a path refused them without naming the table.
+		$characters += [
+			'tab'       => [ "\t", '\\t' ],
+			'line feed' => [ "\n", '\\n' ],
+			'NUL'       => [ "\0", '\\x00' ],
+			'escape'    => [ "\x1b", '\\x1b' ],
+			'delete'    => [ "\x7f", '\\x7f' ],
+		];
 		foreach ( $characters as $kind => [ $character, $escape ] ) {
 			yield $kind => [ 'wp_po' . $character . 'sts', '"wp_po' . $escape . 'sts"' ];
 		}
@@ -242,6 +251,29 @@ final class ManifestTest extends TestCase {
 			self::assertStringNotContainsString( $name, $refused->getMessage() );
 		}
 		self::assertFalse( Manifest::printable( $name ) );
+	}
+
+	/** @return iterable<string, array{string}> */
+	public static function names_with_the_characters_of_a_path(): iterable {
+		yield 'a dot' => [ 'wp_other.posts' ];
+		yield 'a slash' => [ 'wp_other/posts' ];
+		yield 'a backslash' => [ 'wp_other\\posts' ];
+	}
+
+	/** They print as themselves; the staged file layout does not take them. */
+	#[DataProvider( 'names_with_the_characters_of_a_path' )]
+	public function test_a_name_with_the_characters_of_a_path_is_refused_as_outside_the_format( string $name ): void {
+		$data                      = self::data();
+		$data['tables'][0]['name'] = $name;
+		$data['tables'][0]['file'] = ( new \BackupsForRestic\Database\Dump\Table( $name, '', [], null, [] ) )->file();
+		try {
+			Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' );
+			self::fail( 'A table name with the characters of a path was accepted.' );
+		} catch ( FormatException $refused ) {
+			self::assertSame( 'The database dump contains a table name outside this site or the supported name format.', $refused->getMessage() );
+			self::assertArrayNotHasKey( 'code', $refused->context() );
+		}
+		self::assertTrue( Manifest::printable( $name ) );
 	}
 
 	public function test_a_view_whose_name_does_not_print_as_itself_is_refused_too(): void {

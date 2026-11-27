@@ -183,9 +183,11 @@ final readonly class Manifest {
 	 * @throws FormatException If the name is invalid or belongs to another table prefix.
 	 */
 	private static function name( string $name, string $prefix ): void {
-		if ( ! str_starts_with( $name, $prefix ) || ! mb_check_encoding( $name, 'UTF-8' ) || mb_strlen( $name, 'UTF-8' ) > 64 || 1 === preg_match( '/[.\\\\\/\x00-\x1f\x7f]/', $name ) ) {
+		if ( ! str_starts_with( $name, $prefix ) || ! mb_check_encoding( $name, 'UTF-8' ) || mb_strlen( $name, 'UTF-8' ) > 64 ) {
 			throw new FormatException( 'The database dump contains a table name outside this site or the supported name format.' );
 		}
+		// Before the characters of a path: an ASCII control character does not print as itself
+		// either, and the refusal of such a name names the table escaped.
 		if ( ! self::printable( $name ) ) {
 			FormatException::raise(
 				'The database dump contains a table or view whose name has a character that does not print as itself; it is not restored.',
@@ -194,6 +196,9 @@ final readonly class Manifest {
 					'table' => self::quoted( $name ),
 				]
 			);
+		}
+		if ( 1 === preg_match( '/[.\\\\\/]/', $name ) ) {
+			throw new FormatException( 'The database dump contains a table name outside this site or the supported name format.' );
 		}
 	}
 

@@ -212,7 +212,8 @@ A table or view name of a restore is accepted when every character prints as its
 - and the name does not end with a space, which MySQL refuses for a table name.
 
 So format characters (category Cf: U+00AD, U+061C, U+180E, U+200B to U+200F, U+202A to
-U+202E, U+2060 to U+206F, U+FEFF and others), the C1 controls U+0080 to U+009F, spaces other
+U+202E, U+2060 to U+206F, U+FEFF and others), the ASCII controls U+0000 to U+001F and U+007F
+and the C1 controls U+0080 to U+009F, spaces other
 than U+0020, line and paragraph separators, private-use, unassigned and noncharacter code
 points are refused, wherever they stand in the name. Names in other scripts, Cyrillic, CJK,
 Arabic, Hebrew, Devanagari or Thai with their combining marks among them, and the ASCII names
@@ -225,13 +226,17 @@ The refusal has the code `database_restore_name`. It comes from `Manifest::parse
 the rehearsal or the apply sends a statement. Its context names the table as the page shows
 such a name, in double quotes with Go's escapes and the invisible characters above escaped
 as well (`Manifest::quoted()`), so that the log shows only printable characters; the
-rehearsal's job keeps that name, and its texts give it. A rehearsal or a review made before
-the change meets the same refusal when the review or the apply reads the staged manifest
-again. A site that needs such a table restores the database by hand with the command-line
-client, which imports any name that MySQL accepts, or renames the table, or leaves it out
-of its backups, before the next backup (docs/06). Confusable letters of different scripts, a
-Cyrillic "а" for a Latin "a", print as themselves and are not refused; the page isolates
-each name's writing direction (`<bdi>`) and shows it as text.
+rehearsal's job keeps that name, and its texts give it. The older check of the characters of
+a path comes after the check of printable characters: `.`, `/` and `\`, which print as
+themselves, are refused as outside the format of the staged files, without the code. Until
+the review of this change that check also held the ASCII controls and ran first, so that a
+name with a tab was refused without the code and without its name. A rehearsal or a review
+made before the change meets the same refusal when the review or the apply reads the staged
+manifest again. A site that needs such a table restores the database by hand with the
+command-line client, which imports any name that MySQL accepts, or renames the table, or
+leaves it out of its backups, before the next backup (docs/06). Confusable letters of
+different scripts, a Cyrillic "а" for a Latin "a", print as themselves and are not refused;
+the page isolates each name's writing direction (`<bdi>`) and shows it as text.
 
 ## Verification
 Unit tests cover the SQL grammar and limits, unsafe commands, trailer and source replacement
