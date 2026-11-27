@@ -710,6 +710,66 @@ final class DatabaseChangesTest extends TestCase {
 		self::refused( 'database_binding_discarded', fn () => $this->changes( $this->server() )->discard( $running->id, 7, 'rest', $digest ) );
 	}
 
+	public function test_a_binding_whose_saved_plan_names_another_place_than_its_owner_is_not_offered_for_a_discard(): void {
+		$pair = static fn ( string $name, int $id ): array => [
+			'name'          => $name,
+			'before'        => (string) $id,
+			'after'         => (string) ( $id + 1 ),
+			'before_schema' => str_repeat( 'a', 64 ),
+			'after_schema'  => str_repeat( 'b', 64 ),
+		];
+		$plan = static fn ( string $database, string $uuid, int $tables = 3 ): array => [
+			'version'  => 1,
+			'database' => $database,
+			'uuid'     => $uuid,
+			'prefix'   => 'wp_',
+			'witness'  => '1',
+			'pairs'    => array_slice( [ $pair( 'wp_options', 2 ), $pair( 'wp_users', 4 ), $pair( 'wp_usermeta', 6 ), $pair( 'wp_posts', 8 ) ], 0, $tables ),
+		];
+		// An exchange in another database of this server, as the plugin saves it: the plan names
+		// the database, the server and the number of tables that the owner names.
+		$job     = $this->owner(
+			'20260101T000001Z-aaaaaa',
+			[
+				'database_owner' => array_replace( self::binding( str_repeat( 'c', 32 ), self::UUID, 'other' ), [ 'count' => 3 ] ),
+				'exchange_plan'  => $plan( 'other', self::UUID ),
+			]
+		);
+		$changes = $this->changes( $this->server() );
+		$review  = $changes->discard_review( $job->id, 7 );
+		self::assertSame( [ 'other', self::UUID, true ], [ $review['database'], $review['server'], $review['applicable'] ], 'A plan that agrees with its owner is reviewed.' );
+		self::assertSame( [ $job->id ], array_column( $changes->foreign_bindings()['jobs'], 'job' ) );
+		self::assertTrue( DatabaseGeneration::readable( $job ) );
+		$home = $this->server( self::UUID, 'other' );
+		self::assertSame( 'other', DatabaseGeneration::load( $home, $job )->plan?->document['database'], 'Where the site uses that database, the binding is its own.' );
+		// Records that only a change outside the plugin leaves.
+		foreach ( [
+			'the connected database'   => $plan( 'site', self::UUID ),
+			'another server'           => $plan( 'other', self::OTHER ),
+			'another number of tables' => $plan( 'other', self::UUID, 4 ),
+			'no list of tables'        => [ 'pairs' => 3 ] + $plan( 'other', self::UUID ),
+			'no plan that can be read' => 'lost',
+		] as $case => $saved ) {
+			$damaged                        = clone $job;
+			$damaged->data['exchange_plan'] = $saved;
+			$this->jobs->save( $damaged );
+			self::assertFalse( DatabaseGeneration::readable( $damaged ), $case );
+			// Before, the first of them counted as another database's, because the plan was never
+			// compared with the owner: its review was offered, and the discard forgot the owner
+			// and the plan, whose tables the connected database may hold.
+			self::refused( 'database_binding_unreadable', fn () => $changes->discard_review( $job->id, 7 ) );
+			self::refused( 'database_binding_unreadable', fn () => $changes->discard( $job->id, 7, 'rest', $review['digest'] ) );
+			self::assertSame( [], $changes->foreign_bindings()['jobs'], $case );
+			self::assertSame( $damaged->data, $this->jobs->get( $job->id )?->data, $case . ': nothing was forgotten.' );
+			// Where the owner's database is connected, the record is refused for the same reason,
+			// before the server is asked, and a backup excludes none of its tables.
+			self::refused( 'database_binding_unreadable', static fn () => DatabaseGeneration::load( $home, $damaged ) );
+			self::assertSame( [], DatabaseGeneration::exclusions( $home, $damaged ), $case );
+		}
+		$this->jobs->save( $job );
+		self::assertSame( $review, $changes->discard_review( $job->id, 7 ) );
+	}
+
 	public function test_a_database_failure_is_written_to_the_log_of_the_job_that_holds_the_binding(): void {
 		$job = $this->stranded();
 		// The server does not answer at all, and one that answers who it is once and then fails.

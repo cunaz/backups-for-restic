@@ -51,20 +51,24 @@ final readonly class DatabaseGeneration {
 	 * A server that names itself differently, a MariaDB server or another database is
 	 * reported with the code database_exchange_foreign; a server without a readable UUID
 	 * cannot be told apart and is reported without it. A binding whose saved identity is
-	 * missing or malformed, or whose token or fingerprint cannot name its tables, is reported
-	 * with the code database_binding_unreadable, before the server is asked: nothing can tell
-	 * where its tables are (readable()).
+	 * missing or malformed, whose token or fingerprint cannot name its tables, or whose saved
+	 * exchange plan names another database, server or number of tables than the binding does,
+	 * is reported with the code database_binding_unreadable, before the server is asked:
+	 * nothing can tell where its tables are (readable()). Before, the plan was compared with
+	 * the connected server, and only for a binding of that server: one whose owner named
+	 * another database than its plan counted as another database's where the plan's was
+	 * connected, and its discard would have forgotten both.
 	 *
 	 * @param Connection $connection Current SQL connection.
 	 * @param Job        $job Owning apply.
 	 * @return self Validated ownership binding.
 	 * @throws FormatException If the filesystem document is corrupted.
-	 * @throws DatabaseFailed If this is a different server, database or object map.
+	 * @throws DatabaseFailed If this is a different server or database, or the record contradicts itself.
 	 */
 	public static function load( Connection $connection, Job $job ): self {
 		$data = self::binding( $job );
-		if ( null === self::identity( $data ) || ! OwnedTables::valid( $data['fingerprint'], $data['token'] ) ) {
-			DatabaseFailed::raise( 'The database restore lost the identity of the server and the database that hold its private tables, or the names of those tables.', [ 'code' => 'database_binding_unreadable' ] );
+		if ( ! self::readable( $job ) ) {
+			DatabaseFailed::raise( 'The record of the database restore does not say where its private tables are: the identity of their server and database or their names are lost, or its saved exchange plan names another database, server or number of tables.', [ 'code' => 'database_binding_unreadable' ] );
 		}
 		$facts = ( new SwapCatalog( $connection ) )->facts();
 		$place = self::place( $facts, $job );
@@ -72,11 +76,8 @@ final readonly class DatabaseGeneration {
 			DatabaseFailed::raise( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.', 'foreign' === $place ? [ 'code' => 'database_exchange_foreign' ] : [] );
 		}
 		$owned = new OwnedTables( $connection, $data['prefix'], $data['fingerprint'], $data['token'] );
-		$plan  = isset( $job->data['exchange_plan'] ) ? ExchangePlan::load( $job->data['exchange_plan'], $owned, $data['prefix'] ) : null;
-		if ( null !== $plan && ( count( $plan->document['pairs'] ) !== $data['count'] || $plan->document['database'] !== $facts['database'] || $plan->document['uuid'] !== $facts['uuid'] ) ) {
-			throw new DatabaseFailed( 'The saved physical exchange plan has a conflicting ownership binding.' );
-		}
-		return new self( $owned, $data['count'], $data['prefix'], $plan );
+		// A plan that is there names this server, this database and the binding's count (planned()).
+		return new self( $owned, $data['count'], $data['prefix'], isset( $job->data['exchange_plan'] ) ? ExchangePlan::load( $job->data['exchange_plan'], $owned, $data['prefix'] ) : null );
 	}
 
 	/**
@@ -108,10 +109,11 @@ final readonly class DatabaseGeneration {
 	/**
 	 * Whether the record of a binding can be read as the plugin saves it: its fields, the
 	 * identity of the server and the database that held its private tables when it was made, a
-	 * server UUID and a database name, and the token and fingerprint that name those tables.
-	 * Where it cannot, it was changed outside the plugin, and where its tables are cannot be
-	 * told: load() refuses it with database_binding_unreadable, and place() calls one without
-	 * its identity unknown.
+	 * server UUID and a database name, the token and fingerprint that name those tables, and a
+	 * saved exchange plan, if there is one, that names the same database, server and number of
+	 * tables (planned()). Where it cannot, it was changed outside the plugin, and where its
+	 * tables are cannot be told: load() refuses it with database_binding_unreadable, and place()
+	 * calls one without its identity unknown.
 	 *
 	 * @param Job $job Owning apply.
 	 * @return bool Whether the record can be read.
@@ -122,7 +124,29 @@ final readonly class DatabaseGeneration {
 		} catch ( FormatException ) {
 			return false;
 		}
-		return null !== self::identity( $data ) && OwnedTables::valid( $data['fingerprint'], $data['token'] );
+		$saved = self::identity( $data );
+		return null !== $saved && OwnedTables::valid( $data['fingerprint'], $data['token'] ) && self::planned( $job, $saved, $data['count'] );
+	}
+
+	/**
+	 * Whether the saved exchange plan of a binding, if there is one, names the database, the
+	 * server and as many tables as the binding does. The plugin saves a plan only for a binding
+	 * that load() accepted, with the identity of the server that it asked then. A plan that
+	 * names another place was changed outside the plugin, and so was a binding beside it:
+	 * neither says where the private tables are. Whether the plan is valid in everything else
+	 * is for ExchangePlan::load(), where it is used.
+	 *
+	 * @param Job                                $job Owning apply.
+	 * @param array{database:string,uuid:string} $saved Saved identity of the binding (identity()).
+	 * @param int                                $count Saved number of tables of the binding.
+	 * @return bool Whether there is no plan, or one that agrees with the binding.
+	 */
+	private static function planned( Job $job, array $saved, int $count ): bool {
+		if ( ! isset( $job->data['exchange_plan'] ) ) {
+			return true;
+		}
+		$plan = $job->data['exchange_plan'];
+		return is_array( $plan ) && $saved['database'] === ( $plan['database'] ?? null ) && $saved['uuid'] === ( $plan['uuid'] ?? null ) && is_array( $plan['pairs'] ?? null ) && count( $plan['pairs'] ) === $count;
 	}
 
 	/**

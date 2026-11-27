@@ -265,10 +265,17 @@ database could not get rid of the binding. Since then:
   connected server positively disowns, each asked about as its review asks. Where the server
   cannot be asked or identified, it lists those whose job recorded `database_foreign` and
   says that the list may be incomplete (`complete: false`). A binding whose record its review
-  refuses as unreadable is not listed in any case: one without its saved identity, or whose
-  token or fingerprint cannot name its tables (`DatabaseGeneration::readable()`, with the
-  rules of `OwnedTables::valid()`). `load()` refuses such a record with
-  `database_binding_unreadable` before it asks the server.
+  refuses as unreadable is not listed in any case: one without its saved identity, one whose
+  token or fingerprint cannot name its tables, or one whose saved exchange plan names another
+  database, server or number of tables than the binding does (`DatabaseGeneration::readable()`,
+  with the rules of `OwnedTables::valid()`). `load()` refuses such a record with
+  `database_binding_unreadable` before it asks the server. The plugin saves a plan only for a
+  binding that `load()` accepted, with the identity of the server that it asked then, so a
+  plan and a binding that disagree were changed outside the plugin, and neither says where
+  the private tables are. Until 2026-11-27 the plan was compared with the connected server,
+  and only for a binding of that server: a binding that named another database than its plan
+  counted as another database's where the plan's was connected, and its discard would have
+  forgotten the binding and the plan.
 - `POST /database-changes/{id}/discard-review` (`DatabaseChanges::discard_review()`) says what
   a discard forgets and what stays: the job and its restore, the database and server UUID that
   the binding names, the database and server UUID that the site uses now (`connected`), the

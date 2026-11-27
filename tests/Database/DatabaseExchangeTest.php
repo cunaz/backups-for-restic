@@ -2284,6 +2284,55 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertNotContains( 'database_exchange_foreign', $blockers );
 	}
 
+	public function test_a_binding_whose_owner_names_another_place_than_its_saved_plan_is_never_foreign_on_its_own_server(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		// An exchange whose retained tables are on this server, in this database, which is
+		// connected, with the plan that the plugin saved for it.
+		$applied  = self::applied( $services );
+		$private  = $this->private_tables();
+		$document = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $document );
+		self::assertNotSame( [], $private );
+		self::assertSame( $this->database, $document->data['exchange_plan']['database'] ?? null );
+		foreach ( [
+			'another database' => [ 'database' => 'elsewhere' ],
+			'another server'   => [ 'uuid' => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' ],
+		] as $case => $owner ) {
+			$damaged                         = clone $document;
+			$damaged->data['database_owner'] = $owner + $damaged->data['database_owner'];
+			$services['jobs']->save( $damaged );
+			// Before, place() found the owner's database or server unlike the connected one and
+			// called the binding foreign, and the plan that names this database was never compared
+			// with it: the review was offered, and the discard forgot the retained tables here.
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
+			self::assertNotContains( $applied->id, array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ), $case );
+			// A new database apply waits, but not for a discard.
+			$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+			self::assertContains( 'database_binding_unreadable', $blockers, $case );
+			self::assertNotContains( 'database_exchange_foreign', $blockers, $case );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->preview_undo( $applied->id, 1 ) );
+			// A backup keeps every table, as for a binding whose saved identity is gone.
+			self::assertSame( [], DatabaseGeneration::exclusions( $this->direct, $damaged ), $case );
+			// Its expiry is deferred and reported, and records no other server.
+			$expired                         = clone $damaged;
+			$expired->data['retained_until'] = $services['clock']->seconds - 1;
+			$services['jobs']->save( $expired );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->expire( false, microtime( true ) + 5 ) );
+			$saved = $services['jobs']->get( $applied->id );
+			self::assertArrayNotHasKey( 'database_foreign', $saved?->data ?? [], $case );
+			self::assertArrayHasKey( 'database_owner', $saved?->data ?? [], $case );
+			self::assertArrayHasKey( 'exchange_plan', $saved?->data ?? [], $case );
+			self::assertTrue( $saved?->result['database_cleanup_pending'] ?? false, $case );
+			self::assertSame( $private, $this->private_tables(), $case . ': nothing was dropped.' );
+		}
+		// The record as the plugin saved it is the binding of this database, as before.
+		$services['jobs']->save( $document );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+		self::assertNotContains( 'database_binding_unreadable', $services['changes']->preview( $services['source']->id, 1 )['blockers'] );
+	}
+
 	public function test_the_block_of_a_new_apply_the_list_and_the_review_follow_what_the_server_says_now(): void {
 		$this->mysql_only();
 		$server          = new \stdClass();
