@@ -36,6 +36,7 @@ use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Clock;
+use BackupsForRestic\Support\Decoded;
 use BackupsForRestic\Support\GoQuote;
 
 defined( 'ABSPATH' ) || exit;
@@ -552,7 +553,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	private static function listed( Job $job, int $now ): ?array {
 		$until  = JobStore::discard_listed_until( $job );
 		$record = $job->data['database_discarded'] ?? null;
-		if ( null === $until || $until <= $now || ! is_array( $record ) || ! is_int( $record['at'] ?? null ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
+		if ( null === $until || $until <= $now || ! is_array( $record ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
 			return null;
 		}
 		// A record that names no table leaves nothing to remove by hand and nothing to mark.
@@ -564,7 +565,7 @@ final readonly class DatabaseChanges implements StepProvider {
 			'job'      => $job->id,
 			'restore'  => self::text( $job, 'restore' ),
 			// The time that the record states: an end without a date is no time to count back from.
-			'at'       => $record['at'],
+			'at'       => Decoded::int( $record['at'] ),
 			'via'      => is_string( $record['via'] ?? null ) ? $record['via'] : '',
 			'database' => $record['database'],
 			'server'   => $record['server'],

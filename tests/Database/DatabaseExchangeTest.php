@@ -2296,15 +2296,18 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertNotSame( [], $private );
 		self::assertSame( $this->database, $document->data['exchange_plan']['database'] ?? null );
 		foreach ( [
-			'another database' => [ 'database' => 'elsewhere' ],
-			'another server'   => [ 'uuid' => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' ],
+			'another database'         => [ 'database' => 'elsewhere' ],
+			'another server'           => [ 'uuid' => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' ],
+			'another number of tables' => [ 'count' => $document->data['database_owner']['count'] + 1 ],
 		] as $case => $owner ) {
 			$damaged                         = clone $document;
 			$damaged->data['database_owner'] = $owner + $damaged->data['database_owner'];
 			$services['jobs']->save( $damaged );
 			// Before, place() found the owner's database or server unlike the connected one and
 			// called the binding foreign, and the plan that names this database was never compared
-			// with it: the review was offered, and the discard forgot the retained tables here.
+			// with it: the review was offered, and the discard forgot the retained tables here. A
+			// count unlike the plan's was found only after the server had been asked, and without
+			// the code of a record that cannot be read.
 			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
 			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
 			self::assertNotContains( $applied->id, array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ), $case );

@@ -748,6 +748,9 @@ final class DatabaseChangesTest extends TestCase {
 			'another server'           => $plan( 'other', self::OTHER ),
 			'another number of tables' => $plan( 'other', self::UUID, 4 ),
 			'no list of tables'        => [ 'pairs' => 3 ] + $plan( 'other', self::UUID ),
+			'no database'              => array_diff_key( $plan( 'other', self::UUID ), [ 'database' => true ] ),
+			'no server'                => array_diff_key( $plan( 'other', self::UUID ), [ 'uuid' => true ] ),
+			'no tables'                => array_diff_key( $plan( 'other', self::UUID ), [ 'pairs' => true ] ),
 			'no plan that can be read' => 'lost',
 		] as $case => $saved ) {
 			$damaged                        = clone $job;
