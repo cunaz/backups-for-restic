@@ -75,9 +75,10 @@ explains how to proceed.
 Database backups never leave out a row. A row too large to share an SQL statement is
 written as a statement of its own, whatever its size, and the database manifest records
 each table's largest statement; binary and escaped values can be larger in SQL than in the
-source table. The plugin's importer reads statements up to 16 MiB: restore a table with a
-larger one with a command-line client, as the [recovery guide](docs/06-disaster-recovery.md)
-describes. A row stops the backup, with `database_dump_row_memory` naming its table, only
+source table. The plugin's importer reads statements up to 16 MiB, and it refuses a dump
+with a larger one, or with one larger than the database server's `max_allowed_packet`, before
+it imports anything: restore such a table with a command-line client, as the
+[recovery guide](docs/06-disaster-recovery.md) describes. A row stops the backup, with `database_dump_row_memory` naming its table, only
 when the row and its SQL do not fit into the PHP memory limit.
 
 ## Documents
