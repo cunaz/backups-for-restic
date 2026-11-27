@@ -85,6 +85,12 @@ final class CheckTest extends TestCase {
 		foreach ( $this->cleanup as $path ) {
 			TempDir::remove( $path );
 		}
+		// PHPUnit keeps every test object to the end of the run, and a run whose backend's hook
+		// holds its repository (check_with_budget(), read_one_pack()) is a cycle that PHP frees
+		// only when its collector runs: the repository of each test would stay in memory
+		// beside the tests that follow.
+		unset( $this->backend, $this->repository );
+		gc_collect_cycles();
 	}
 
 	/**
