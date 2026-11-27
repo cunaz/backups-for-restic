@@ -112,6 +112,11 @@ final class ManifestTest extends TestCase {
 		self::assertSame( array_slice( $data['tables'][1], 0, 4 ), $manifest->tables[1] );
 		$data['tables'][1]['key'] = [];
 		self::assertSame( [], Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' )->reads[1]['key'] ?? null );
+		// A table without rows has no INSERT, so its largest statement has no bytes.
+		$data['tables'][1]['rows']              = 0;
+		$data['tables'][1]['largest_statement'] = 0;
+		$data['tables'][1]['restarts']          = 0;
+		self::assertSame( 0, Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' )->reads[1]['largest_statement'] ?? null );
 	}
 
 	/** @return iterable<string, array{array<string,mixed>}> */
