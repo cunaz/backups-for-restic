@@ -67,3 +67,9 @@ BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_the_review_of_a_disca
 BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_a_binding_of_the_connected_database_or_none_is_not_discarded
 BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_a_binding_that_changed_after_the_review_of_its_discard_is_not_discarded
 BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_rebuilt_tables_are_named_also_in_an_apply_that_holds_as_many_warnings_as_it_keeps
+# Where a binding is placed by what the connected server says (a saved server UUID that is
+# missing or malformed; the block of a new apply, the list and the review in every placement; an
+# import back on its own server): MariaDB has no server UUID, so they call mysql_only() too.
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_a_binding_whose_saved_server_uuid_is_missing_or_malformed_is_never_foreign_on_its_own_server
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_the_block_of_a_new_apply_the_list_and_the_review_follow_what_the_server_says_now
+BackupsForRestic\Tests\Database\DatabaseExchangeTest::test_an_interrupted_import_back_on_its_server_holds_a_new_apply_until_it_is_removed
