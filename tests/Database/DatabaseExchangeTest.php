@@ -2058,16 +2058,22 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( [], array_values( array_filter( $this->private_tables(), static fn ( string $name ): bool => str_contains( $name, $token ) ) ), 'Expiry dropped every table of the generation.' );
 	}
 
+	/** On both servers: MariaDB applies the limit to SHOW as well, and its review runs as MySQL's. */
 	public function test_a_row_limit_left_on_the_session_does_not_hide_a_live_table_from_the_review(): void {
-		$this->mysql_only();
 		// A live table under the name of a table of the backup that the InnoDB dictionary does
 		// not hold: the exchange could not move it aside.
 		$this->db->execute( 'CREATE TABLE wp_snapshot_only (id INT PRIMARY KEY) ENGINE=MyISAM' );
 		$services = $this->services();
+		$expected = $services['changes']->preview( $services['source']->id, 1 );
 		$this->db->execute( 'SET SESSION sql_select_limit = 1' );
 		$preview = $services['changes']->preview( $services['source']->id, 1 );
+		$limit   = $this->db->rows( 'SELECT @@SESSION.sql_select_limit AS rows_limit' )[0]['rows_limit'];
 		$this->db->execute( 'SET SESSION sql_select_limit = DEFAULT' );
-		self::assertSame( [ 'live_object_identity' ], $preview['blockers'] );
+		self::assertSame( '1', $limit, 'The review gives the session its own limit back.' );
+		self::assertSame( $expected, $preview );
+		// MariaDB refuses the exchange under WRITE locks as well (ADR 0043).
+		$mariadb = ( new SwapCatalog( $this->direct ) )->facts()['mariadb'];
+		self::assertSame( $mariadb ? [ 'live_object_identity', 'write_locked_rename' ] : [ 'live_object_identity' ], $preview['blockers'] );
 		// The rehearsal's report, read without a limit, carries what its inspection found.
 		self::assertContains( 'live_object_identity', self::report( $services )['swap_preflight']['blockers'] );
 	}
