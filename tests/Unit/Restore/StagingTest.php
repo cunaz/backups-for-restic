@@ -738,6 +738,22 @@ final class StagingTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $undo );
 	}
 
+	public function test_an_apply_that_cannot_be_read_after_the_expiry_s_reading_keeps_the_staging_that_it_pinned_there(): void {
+		// The staging of a restore whose hours are over, which an apply keeps for its undo.
+		$restore = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$apply   = $this->pinning_apply( $restore );
+		$saved   = (string) file_get_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json' );
+		// The apply can be read when the expiry reads the job documents, and no longer from the
+		// next listing of them on.
+		$this->turning_at_the_second_listing( $apply, $saved, '{', fn (): array => $this->staging->remove_due( 24, self::NO_DEADLINE ) );
+		// The expiry decides with the pins of its one reading, which found no job that cannot be
+		// read: pins read afresh after it would not hold this staging, and neither would the
+		// census, so it would be deleted.
+		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
+		self::assertSame( 0, array_sum( $this->staging->remove_due( 24, self::NO_DEADLINE ) ), 'Held while the apply cannot be read.' );
+		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
+	}
+
 	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
 		$target = $this->directory . '/elsewhere';
 		mkdir( $target . '/files', 0700, true );
