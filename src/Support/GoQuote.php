@@ -30,9 +30,11 @@ final class GoQuote {
 	 * Quotes a name like strconv.Quote() and strips the surrounding quotes.
 	 *
 	 * @param string $name Raw file name bytes.
-	 * @return string Escaped name as stored in restic trees.
+	 * @param string $also Non-ASCII runes to escape although Go prints them, as the body of a
+	 *                     PCRE character class; '' for Go's escapes alone, as restic stores them.
+	 * @return string Escaped name as stored in restic trees, or with $also escaped as well.
 	 */
-	public static function quote( string $name ): string {
+	public static function quote( string $name, string $also = '' ): string {
 		// Fast path: printable ASCII without quote or backslash. The D modifier keeps "$"
 		// from matching before a final line break, which has to be escaped.
 		if ( 1 === preg_match( '/^[\x20\x21\x23-\x5B\x5D-\x7E]*$/D', $name ) ) {
@@ -53,7 +55,7 @@ final class GoQuote {
 
 			$character = substr( $name, $offset, $width );
 			$offset   += $width;
-			$result   .= self::escape_rune( $character );
+			$result   .= self::escape_rune( $character, $also );
 		}
 		return $result;
 	}
@@ -157,15 +159,16 @@ final class GoQuote {
 	 * Escapes one valid UTF-8 encoded rune.
 	 *
 	 * @param string $character One rune.
+	 * @param string $also      Non-ASCII runes to escape although Go prints them, or ''.
 	 * @return string Escaped form.
 	 */
-	private static function escape_rune( string $character ): string {
+	private static function escape_rune( string $character, string $also ): string {
 		if ( '"' === $character || '\\' === $character ) {
 			return '\\' . $character;
 		}
 
 		$codepoint = mb_ord( $character, 'UTF-8' );
-		if ( self::is_print( $codepoint, $character ) ) {
+		if ( self::is_print( $codepoint, $character ) && ( '' === $also || 1 !== preg_match( '/\A[' . $also . ']\z/u', $character ) ) ) {
 			return $character;
 		}
 

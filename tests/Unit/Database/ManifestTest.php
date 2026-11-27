@@ -262,5 +262,7 @@ final class ManifestTest extends TestCase {
 			self::assertMatchesRegularExpression( '/\A"[\x20-\x7e]*"\z/', $quoted, $name );
 		}
 		self::assertSame( '"wp_\\"quoted\\\\"', Manifest::quoted( 'wp_"quoted\\' ) );
+		// Each invisible character as Go escapes a rune of the Basic Multilingual Plane.
+		self::assertSame( '"wp_\\ufe0f\\u3164\\u034fx\\u202e"', Manifest::quoted( "wp_\u{FE0F}\u{3164}\u{034F}x\u{202E}" ) );
 	}
 }

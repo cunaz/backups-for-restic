@@ -217,12 +217,12 @@ final readonly class Manifest {
 	/**
 	 * A name as the admin page and the command line show one that does not print as itself: in
 	 * double quotes with Go's escapes (GoQuote), and the invisible characters that Go prints
-	 * escaped as well.
+	 * escaped as well. GoQuote reads the code points; it is the one place that does.
 	 *
 	 * @param string $name Table or view name, valid UTF-8.
 	 * @return string Text of printable characters only.
 	 */
 	public static function quoted( string $name ): string {
-		return '"' . (string) preg_replace_callback( '/[' . self::INVISIBLE . ']/u', static fn ( array $character ): string => sprintf( '\\u%04x', mb_ord( $character[0], 'UTF-8' ) ), GoQuote::quote( $name ) ) . '"';
+		return '"' . GoQuote::quote( $name, self::INVISIBLE ) . '"';
 	}
 }

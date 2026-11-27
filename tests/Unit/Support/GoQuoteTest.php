@@ -39,6 +39,17 @@ final class GoQuoteTest extends TestCase {
 		self::assertSame( $json, GoJson::encode_string( $input ) );
 	}
 
+	/**
+	 * Runes that Go prints can be escaped as well, the way Go escapes a rune it does not print;
+	 * the others keep Go's form, and without them the quoting is restic's.
+	 */
+	public function test_quote_escapes_the_runes_asked_for_as_go_escapes_a_rune_it_does_not_print(): void {
+		$name = "a\u{034F}b\u{FE0F}\t\u{1F600}\u{00E9}";
+		self::assertSame( 'a\\u034fb\\ufe0f\\t' . "\u{1F600}\u{00E9}", GoQuote::quote( $name, '\x{034F}\x{FE00}-\x{FE0F}' ) );
+		self::assertSame( "a\u{034F}b\u{FE0F}\\t\u{1F600}\u{00E9}", GoQuote::quote( $name ) );
+		self::assertSame( 'plain', GoQuote::quote( 'plain', '\x{034F}' ) );
+	}
+
 	public function test_quote_escapes_a_line_break_at_the_end_of_a_name(): void {
 		self::assertSame( 'abc\n', GoQuote::quote( "abc\n" ) );
 		self::assertSame( "abc\n", GoQuote::unquote( 'abc\n' ) );
