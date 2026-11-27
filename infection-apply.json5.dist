@@ -27,12 +27,12 @@
     },
     // Floors at the scores measured on 2026-11-27 with main at 3651682, the tests of
     // tests/Unit/Jobs/Apply and the tests' temporary files on tmpfs, as in CI: 94.77 % and 95.25 %
-    // covered, rounded down; provisional until CI's run of this state. Before those tests the same
-    // code scored 80.59 % and 84.10 % covered (80.65 % and 84.16 % in CI). They may only rise; the
-    // covered floor is above ADR 0024's goal of 90 %. Since job documents and journal records are
-    // written durably (2026-11-22), fsync() failed under Infection's file wrapper in every test
-    // that writes one, and the gate counted their mutants as killed: it reported 100 % covered
-    // (docs/04 §5.6).
+    // covered, rounded down; CI's run of the same tests (799b180) left the same mutants. Before
+    // those tests the same code scored 80.59 % and 84.10 % covered (80.65 % and 84.16 % in CI).
+    // They may only rise; the covered floor is above ADR 0024's goal of 90 %. Since job documents
+    // and journal records are written durably (2026-11-22), fsync() failed under Infection's file
+    // wrapper in every test that writes one, and the gate counted their mutants as killed: it
+    // reported 100 % covered (docs/04 §5.6).
     "minMsi": 94,
     "minCoveredMsi": 95,
     "mutators": {

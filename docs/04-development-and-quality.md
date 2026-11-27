@@ -584,18 +584,18 @@ four cores; its minutes are those of the Infection step.
 | Core | 2 | 4,748 | 118 | 360 | 65 | 89.93 % | 92.22 % | 15.4, 15.7 | 92.22 %, 62.9 |
 | Planner | 1 | 749 | 13 | 81 | 2 | 87.45 % | 88.99 % | 1.1 | 88.99 %, 2.4 |
 | File restore | 1 | 3,707 | 178 | 641 | 27 | 77.91 % | 81.84 % | 28.4 | 81.81 %, 71.7 |
-| File apply jobs | 1 | 1,798 | 9 | 85 | 3 | 94.77 % | 95.25 % | 14.0 | – |
+| File apply jobs | 1 | 1,798 | 9 | 85 | 3 | 94.77 % | 95.25 % | 14.0 | 95.25 %, 15.6 |
 | ZIP downloads | 1 | 794 | 15 | 117 | 14 | 83.38 % | 84.98 % | 0.5 | 84.98 %, 1.7 |
 | Database | 2 | 4,278 | 197 | 566, 567 | 9 | 82.16 %, 82.14 % | 86.13 %, 86.11 % | 52.5, 48.5 | 85.98 %, 107.3 |
 
 The file apply jobs were measured again on 2026-11-27, with `main` at `3651682` and the tests of
-`tests/Unit/Jobs/Apply`, on three threads instead of eight: their row gives that run. CI's
-figures for that state are not in the row yet, and the floors, that run's scores rounded down,
-are provisional until CI's run of the pull request that added those tests confirms them. Before
-those tests, the same code had 1,798 mutants, 75 of them not covered, 274 escaped and 3 timed
-out: 80.59 % and 84.10 % covered in 27.8 minutes on three threads, and 80.65 % and 84.16 % in
-CI's run of `5308b0b` (27 minutes). The gate takes less time with the tests: a mutant that a
-test kills stops at that test, while an escaped one runs every test that covers it.
+`tests/Unit/Jobs/Apply`, on three threads instead of eight: their row gives that run, and its
+last column CI's run of the same tests (`799b180`), which left the same mutants escaped, not
+covered and timed out. The floors are those scores rounded down. Before those tests, the same
+code had 1,798 mutants, 75 of them not covered, 274 escaped and 3 timed out: 80.59 % and
+84.10 % covered in 27.8 minutes on three threads, and 80.65 % and 84.16 % in CI's run of
+`5308b0b` (27 minutes). The gate takes less time with the tests: a mutant that a test kills
+stops at that test, while an escaped one runs every test that covers it.
 
 Under Infection's wrapper the gates had reported 90.39 % covered for the core and 79.20 % for
 the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore, 100 % for
