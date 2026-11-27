@@ -2429,7 +2429,7 @@
 	 * names, until when they are listed, the log of the job and the control that ends the listing.
 	 *
 	 * @param {Object}     entry    Entry of the list of discarded bindings, with the list's `write_allowed`, `write_lacking` and `file_mods_disallowed`.
-	 * @param {() => void} reloaded Called when the listing ended.
+	 * @param {() => void} reloaded Called when the listing ended, or may have: the page reads the lists again.
 	 * @return {Element} Card.
 	 */
 	function discardedCard( entry, reloaded ) {
@@ -2438,7 +2438,12 @@
 			done.disabled = true;
 			api( '/database-changes/' + encodeURIComponent( entry.job ) + '/discarded-done', { method: 'POST' } ).then( reloaded ).catch( function ( error ) {
 				done.disabled = false;
-				replace( message, [ notice( 'error', errorText( error ), false ) ] );
+				const lost = ! error || ! error.data || 'number' !== typeof error.data.status;
+				replace( message, [ notice( 'error', lost ? __( 'The answer did not arrive, so the tables may or may not be marked as taken care of. This tab asks the server again: if they were, this binding is no longer listed; if not, mark them again.', 'backups-for-restic' ) : errorText( error ), false ) ] );
+				// A lost answer, or an end that another request made: the lists say what is the case.
+				if ( lost || 'backups_for_restic_database_discarded_missing' === error.code ) {
+					reloaded();
+				}
 			} );
 		} ) : notice( 'info', discardRefused( entry, true, entry.job ), false );
 		return el( 'section', { className: 'bfr-card bfr-discarded-binding' }, [

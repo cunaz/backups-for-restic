@@ -1120,6 +1120,16 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( listed( job ) ).toHaveCount( 0 );
 		await expect( listed( other ) ).toHaveCount( 1 );
 		expect( stored( job ).data.database_discarded.done.via ).toBe( 'rest' );
+		// The answer is lost after the server recorded the end of the listing: the page asks again.
+		// Before, it kept the card, and a second click was refused for a listing that had ended.
+		const isDone = ( requestURL ) => /\/database-changes\/[^/?&]+\/discarded-done(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		await page.route( isDone, async ( route ) => {
+			await route.fetch();
+			await route.abort( 'connectionreset' );
+		}, { times: 1 } );
+		await listed( other ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ).click();
+		await expect( listed( other ) ).toHaveCount( 0 );
+		expect( stored( other ).data.database_discarded.done.via ).toBe( 'rest' );
 	} finally {
 		for ( const id of [ job, other ] ) {
 			fs.rmSync( path.join( jobs, id ), { recursive: true, force: true } );
