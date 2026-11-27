@@ -81,13 +81,17 @@ final class MutationProcess {
 	 * Run by the bootstrap of the mutation suites, after tests/bootstrap.php. Throws nothing.
 	 *
 	 * @param string $root The repository's root directory.
+	 * @return bool Whether this is a mutant process itself: not Infection's initial test run, not
+	 *              PHPUnit alone, and not a test that PHPUnit runs in a process of its own.
 	 */
-	public static function prepare( string $root ): void {
+	public static function prepare( string $root ): bool {
 		$markers = self::markers( $root );
 		$own     = null;
+		$mutant  = false;
 		if ( self::intercepted() ) {
 			$inherited = getenv( self::REPORTED_VARIABLE );
 			if ( false === $inherited || '' === $inherited ) {
+				$mutant = true;
 				$report = self::report_in( getenv( self::REPORT_VARIABLE ) );
 				$own    = $report;
 				// PHPUnit hands an isolated test either this process's environment or one built
@@ -124,7 +128,7 @@ final class MutationProcess {
 				if ( null !== $own ) {
 					self::state( $own, 'does not compile: ' . $error->getMessage() );
 				}
-				return;
+				return $mutant;
 			} catch ( Throwable $error ) {
 				self::leave( $markers, 'The classes under mutation could not be loaded: ' . $error->getMessage() );
 			}
@@ -135,6 +139,27 @@ final class MutationProcess {
 			self::state( $own, 'can write durably.' );
 		}
 		register_shutdown_function( [ self::class, 'finish' ], $markers, $own );
+		return $mutant;
+	}
+
+	/**
+	 * Leaves what a check of a gate's own bootstrap found wrong in this process, as a failed canary
+	 * does: in the report of its mutant process, or in a marker when that cannot take the line.
+	 * bin/mutation-gate.sh fails the gate on it, whatever the score. The database gate's bootstrap
+	 * reports so a mutant process without a database server of its own (DatabaseServers). Throws
+	 * nothing.
+	 *
+	 * @param string $root    The repository's root directory.
+	 * @param string $problem What went wrong.
+	 * @return bool Whether a report or marker took the line.
+	 */
+	public static function problem( string $root, string $problem ): bool {
+		$markers = self::markers( $root );
+		$report  = getenv( self::REPORTED_VARIABLE );
+		if ( is_string( $report ) && '' !== $report && '-' !== $report ) {
+			array_unshift( $markers, $report );
+		}
+		return self::leave( $markers, $problem );
 	}
 
 	/**
