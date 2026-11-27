@@ -277,11 +277,13 @@ final class DatabaseChangesTest extends TestCase {
 		$saved = $this->jobs->get( $owner->id );
 		self::assertNotNull( $saved );
 		self::assertArrayNotHasKey( 'database_owner', $saved->data );
+		// The confirmed digest is kept with the decision, not only in the log, which is written at best effort.
 		self::assertSame(
 			[
-				'at'   => $this->clock->seconds,
-				'user' => 7,
-				'via'  => 'rest',
+				'at'     => $this->clock->seconds,
+				'user'   => 7,
+				'via'    => 'rest',
+				'digest' => $preview['digest'],
 			] + array_diff_key( $discarded, [ 'until' => true ] ),
 			$saved->data['database_discarded'] ?? null
 		);

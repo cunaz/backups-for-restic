@@ -293,8 +293,9 @@ database could not get rid of the binding. Since then:
   runner lock. Under it and under staging's guard the service makes the review again, and a
   digest that is not the current review's is refused with `database_discard_changed`: a
   binding whose record changed, a site that moved on to another database, an undo window that
-  ended or a review of another user is not discarded. The job records who confirmed it and
-  how (`database_discarded`), its log line names the digest, and its warning the tables; the
+  ended or a review of another user is not discarded. The job records who confirmed it, how
+  and with which digest (`database_discarded`; the log line, which is written at best effort,
+  names the digest as well), and its warning names the tables; the
   limit of a job's warnings does not drop that warning.
 - The names of the tables that are left to remove by hand stay available to the
   administrator after the discard, whatever the job history does: for 90 days
