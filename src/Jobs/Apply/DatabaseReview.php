@@ -23,6 +23,7 @@ use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Jobs\Restore\RestoreSteps;
 use BackupsForRestic\Jobs\Restore\StagedDatabase;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Bytes;
@@ -96,6 +97,10 @@ final readonly class DatabaseReview {
 		$job   = $this->jobs->get( $restore );
 		$sha   = $job?->result['database_report_sha256'] ?? '';
 		$files = $this->staging->files_directory( $restore, $this->hours, $retained );
+		if ( null !== $job && JobType::Restore === $job->type && RestoreSteps::NO_DATABASE === $job->error?->code ) {
+			// The rehearsal found that the snapshot holds no database dump: a new one would too.
+			JobConflict::raise( 'The snapshot of this restore holds no database dump.', [ 'code' => RestoreSteps::NO_DATABASE ] );
+		}
 		if ( null === $job || JobType::Restore !== $job->type || JobState::Succeeded !== $job->state || ! is_string( $sha ) || 1 !== preg_match( '/\A[a-f0-9]{64}\z/', $sha ) || null === $files ) {
 			JobConflict::raise( 'Stage and rehearse the complete database before applying it.', [ 'code' => 'database_review_required' ] );
 		}

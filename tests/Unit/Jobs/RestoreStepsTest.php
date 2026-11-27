@@ -184,6 +184,51 @@ final class RestoreStepsTest extends TestCase {
 		return $this->directory . '/private/restores/' . $job->id;
 	}
 
+	/** @return iterable<string, array{bool}> */
+	public static function snapshots_without_a_database(): iterable {
+		yield 'without a site manifest' => [ false ];
+		yield 'whose site manifest says that its backup left the database out' => [ true ];
+	}
+
+	#[DataProvider( 'snapshots_without_a_database' )]
+	public function test_a_rehearsal_of_a_snapshot_without_a_database_says_so_before_a_file_is_staged( bool $manifest ): void {
+		if ( $manifest ) {
+			mkdir( $this->site . '/spool', 0700 );
+			file_put_contents(
+				$this->site . '/spool/manifest.json',
+				json_encode(
+					[
+						'format'     => 'backups-for-restic-site/1',
+						'created'    => '2026-11-27T00:00:00Z',
+						'home_url'   => 'https://example.com',
+						'abspath'    => $this->site . '/',
+						'content'    => $this->site . '/wp-content',
+						'uploads'    => $this->site . '/wp-content/uploads',
+						'roots'      => [],
+						'excludes'   => [],
+						'prefix'     => 'wp_',
+						'database'   => false,
+						'versions'   => [
+							'plugin'    => '0.3.0',
+							'wordpress' => '7.1',
+							'php'       => PHP_VERSION,
+						],
+						'repository' => [ 'format' => 2 ],
+					],
+					JSON_THROW_ON_ERROR
+				)
+			);
+		}
+		$snapshot = $this->backup();
+		$job      = $this->drive( $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, RestoreRequest::from_input( $snapshot, null, false, true )->to_data() ) );
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'database_not_in_snapshot', $job->error?->code, (string) $job->error?->message );
+		$messages = array_column( $this->jobs->log( $job )->read( 50 ), 'message' );
+		self::assertNotContains( 'Restore started.', $messages, 'Nothing was staged for the rehearsal.' );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+		self::assertSame( [], $this->locks() );
+	}
+
 	public function test_a_rehearsal_whose_dump_has_a_table_name_that_does_not_print_as_itself_keeps_the_name_escaped(): void {
 		$job  = $this->restore_job( str_repeat( 'ab', 32 ), [ '/site' ] );
 		$dump = $this->staging( $job ) . '/files/site/spool/database';

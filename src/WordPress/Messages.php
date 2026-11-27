@@ -245,6 +245,10 @@ final class Messages {
 				'message' => __( 'The staged selection does not contain the complete database dump.', 'backups-for-restic' ),
 				'hint'    => __( 'Select the whole database directory or restore the whole snapshot.', 'backups-for-restic' ),
 			],
+			'database_not_in_snapshot'       => [
+				'message' => __( 'This snapshot holds no database dump, so there is no database to rehearse or restore.', 'backups-for-restic' ),
+				'hint'    => __( 'The backup that made it ran with the database switched off in its settings, or another program made the snapshot. The details of a snapshot say whether it includes the database. Restore its files without the database rehearsal, or choose a snapshot that includes the database.', 'backups-for-restic' ),
+			],
 			'database_restore_prefix'        => [
 				'message' => __( 'The database dump uses another table prefix.', 'backups-for-restic' ),
 				'hint'    => __( 'Rehearse on a site with the original table prefix. For a manual import, open the snapshot again, stage the database directory with rehearsal disabled, and download the SQL files or request a ZIP.', 'backups-for-restic' ),

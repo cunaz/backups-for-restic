@@ -11,6 +11,7 @@ use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
@@ -252,6 +253,18 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertArrayNotHasKey( 'database_foreign', $saved?->data ?? [] );
 		self::assertTrue( $saved?->result['database_cleanup_pending'] ?? false );
 		self::refused( 'database_exchange_cleanup', fn () => $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds ) );
+	}
+
+	public function test_the_review_and_the_apply_of_a_restore_whose_snapshot_holds_no_database_say_so(): void {
+		$restore        = $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, [ 'snapshot' => str_repeat( 'a', 64 ) ] );
+		$restore->state = JobState::Failed;
+		$restore->error = new JobError( 'database_not_in_snapshot', 'The snapshot has no site manifest, so it holds no database dump of this plugin to rehearse.', false );
+		$this->jobs->save( $restore );
+		$changes = $this->changes( $this->server() );
+		// As the rehearsal said: a new rehearsal would find the same, so none is asked for.
+		self::refused( 'database_not_in_snapshot', fn () => $changes->preview( $restore->id, 1 ) );
+		self::refused( 'database_not_in_snapshot', fn () => $changes->start_apply( $restore->id, 1, str_repeat( 'b', 64 ) ) );
+		self::assertSame( 'database_not_in_snapshot', JobError::from_throwable( new JobConflict( 'Refused.', [ 'code' => 'database_not_in_snapshot' ] ) )->code, 'The routes answer with the code.' );
 	}
 
 	public function test_a_foreign_binding_is_discarded_with_its_private_names_and_nothing_is_dropped(): void {
