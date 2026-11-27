@@ -96,10 +96,10 @@ final class MutationJobScopeTest extends TestCase {
 
 	/**
 	 * The files that the job reads: the workflow, its local actions, the scripts, skip lists and
-	 * PHPUnit configurations its steps name, Composer's files, and for every gate it runs the
-	 * configuration, the source directories, the PHPUnit configuration with its bootstrap and
-	 * test directories, and the classes that every mutant process loads first. A directory
-	 * stands for a file in it.
+	 * PHPUnit configurations its steps name, the scripts that those name, Composer's files, and
+	 * for every gate it runs the configuration, the source directories, the PHPUnit configuration
+	 * with its bootstrap and test directories, and the classes that every mutant process loads
+	 * first. A directory stands for a file in it.
 	 *
 	 * @return list<string>
 	 */
@@ -138,6 +138,12 @@ final class MutationJobScopeTest extends TestCase {
 		}
 		foreach ( self::commands( $root, $job ) as $command ) {
 			preg_match_all( '#(?<![\w/])(bin/[\w.-]+)#', $command, $named );
+			array_push( $paths, ...$named[1] );
+		}
+		// A shell script that the job runs reads what it names in turn, as bin/database-servers.sh
+		// runs bin/check-database-servers.php.
+		foreach ( array_filter( $paths, static fn ( string $path ): bool => 1 === preg_match( '#^bin/[\w.-]+\.sh$#', $path ) ) as $script ) {
+			preg_match_all( '#(?<![\w/])(bin/[\w.-]+)#', (string) file_get_contents( $root . '/' . $script ), $named );
 			array_push( $paths, ...$named[1] );
 		}
 		foreach ( MutationProcess::DIRECTORIES as $directory ) {

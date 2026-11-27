@@ -36,18 +36,24 @@
 #   mutant as killed, so it appends a line to its report, or when that cannot take it to the
 #   marker named by BFR_MUTATION_CANARY, next to the reports, or to .tools/mutation-canary on the
 #   disk of the checkout. Any such line fails the gate, whatever the score, so both markers must
-#   be writable before Infection starts.
+#   be writable before Infection starts. Besides the durable writes, the database gate's bootstrap
+#   leaves such a line for a process without a database server of its own
+#   (tests/Support/DatabaseServers.php).
 #
 # When more than 5 percent of the mutant processes timed out, Infection's score is an upper
 # bound: it counts a timed-out mutant as detected, and on a slow machine mutants time out that
-# the tests would let escape. The script then computes the scores as Infection 0.35.10 does, but
-# with the timed-out mutants counted as not detected, and fails the gate unless that lower bound
-# meets both floors too: minMsi and minCoveredMsi of the configuration, or --min-msi and
-# --min-covered-msi, which it reads before Infection starts and without which it fails. A floor
-# of the configuration counts as read only when it is a number that is set once, with at most
-# two decimals, in a file that is JSON apart from its comments. Up to 5
-# percent Infection's verdict stands, as some mutants loop for good and their timeout is a
-# detection.
+# the tests would let escape. So it is when Infection skipped a mutant: it leaves one out of the
+# scores whose quickest covering test class took at least the configured timeout in the initial
+# run, or that ran into a timeout which its covering classes' time already reached, and on a
+# slow machine those are mostly mutants that the tests would let escape. The script then
+# computes the scores as Infection 0.35.10 does, but with the timed-out mutants counted as not
+# detected, beyond 5 percent, and the skipped ones as tested and not detected, and fails the gate
+# unless that lower bound meets both floors too: minMsi and minCoveredMsi of the configuration,
+# or --min-msi and --min-covered-msi, which it reads before Infection starts and without which it
+# fails. A floor of the configuration counts as read only when it is a number that is set once,
+# with at most two decimals, in a file that is JSON apart from its comments. Up to 5 percent of
+# timed-out processes, and without a skipped mutant, Infection's verdict stands, as some mutants
+# loop for good and their timeout is a detection.
 #
 # Infection's own exit status does not stop the script (|| status=$?): the reports and markers
 # are checked after a failed run as well, and their failure takes precedence.
@@ -171,7 +177,7 @@ rm -f "$fallback"
 lines="$(printf '%s\n' "$lines" | grep . || true)"
 if [[ -n "$lines" ]]; then
 	processes="$(printf '%s\n' "$lines" | cut -d: -f1 | sort -u | wc -l)"
-	echo "::error::Mutant processes that could not write durably: $processes. So the score above counts mutants as killed that the tests did not kill. First lines of their reports and the markers:"
+	echo "::error::Mutant processes whose checks failed: $processes. Their tests did not run as the gate measures them, as they could not write durably or had no database server of their own, so the score above cannot be trusted. First lines of their reports and the markers:"
 	printf '%s\n' "$lines" | head -n 20
 	exit 1
 fi
@@ -233,20 +239,35 @@ percent() {
 	printf '%d.%02d %%' $(($1 / 100)) $(($1 % 100))
 }
 # Healthy runs of the six gates, locally and in CI, timed out 0.1 to 1.8 percent of their mutant
-# processes, where the lower bound lies below the floors of the ZIP and core gates; the database
-# gate on a slow runner 10.1 percent (414 of 4,081), between 80.62 and 90.30 percent.
-if ((timed * 20 > processes)); then
+# processes, where the lower bound lies below the floors of the ZIP and core gates, and skipped
+# none; the database gate on a slow runner timed out 10.1 percent (414 of 4,081), between 80.62
+# and 90.30 percent, and with a limit of 60 seconds on a machine twice as slow Infection skipped
+# 131 of 423 of its mutants and scored 95.89 instead of 82.27 percent, without a timeout.
+if ((timed * 20 > processes || skipped > 0)); then
 	tested=$((total - skipped - ignored))
 	detected=$((killed + static + errored + syntax))
-	msi_low="$(score "$detected" "$tested")"
+	low=$((detected + timed))
+	reason=""
+	counted=""
+	if ((timed * 20 > processes)); then
+		low=$detected
+		reason="$timed of the $processes mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected"
+		counted="Counted as not detected, the timed-out mutants"
+	fi
+	if ((skipped > 0)); then
+		reason="${reason:+$reason, and }Infection skipped $skipped mutants whose covering tests took at least the configured timeout, and leaves them out of the scores"
+		counted="${counted:+$counted and, as tested, the skipped ones}"
+		counted="${counted:-Counted as tested and not detected, the skipped mutants}"
+	fi
+	msi_low="$(score "$low" $((total - ignored)))"
 	msi_high="$(score $((detected + timed)) "$tested")"
-	covered_low="$(score "$detected" $((tested - uncovered)))"
+	covered_low="$(score "$low" $((total - ignored - uncovered)))"
 	covered_high="$(score $((detected + timed)) $((tested - uncovered)))"
 	bounds="MSI between $(percent "$msi_low") and $(percent "$msi_high"), covered code MSI between $(percent "$covered_low") and $(percent "$covered_high"), against the floors $(percent "$msi_floor") and $(percent "$covered_floor")"
 	if ((msi_low >= msi_floor && covered_low >= covered_floor)); then
-		echo "::notice::$timed of the $processes mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: $bounds. Counted as not detected, the timed-out mutants still leave both scores at their floors, so the run counts."
+		echo "::notice::$reason: $bounds. $counted still leave both scores at their floors, so the run counts."
 	else
-		echo "::error::$timed of the $processes mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected: $bounds. Counted as not detected, the timed-out mutants leave a score below its floor, so the score cannot be trusted on this machine: run the gate again on a faster one."
+		echo "::error::$reason: $bounds. $counted leave a score below its floor, so the score cannot be trusted on this machine: run the gate again on a faster one."
 		short=1
 	fi
 fi

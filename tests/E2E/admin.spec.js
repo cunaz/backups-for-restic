@@ -5,6 +5,7 @@
  * verify maintenance, public posts and retained configuration after the jobs complete.
  */
 const fs = require( 'node:fs' );
+const { spawn } = require( 'node:child_process' );
 const { URL } = require( 'node:url' );
 const path = require( 'node:path' );
 const { test, expect } = require( '@playwright/test' );
@@ -970,5 +971,211 @@ test( 'a restore of a snapshot that another client forgot says so', async ( { pa
 		await expect( failed ).not.toContainText( 'started over' );
 	} finally {
 		fs.renameSync( aside, path.join( snapshots, file ) );
+	}
+} );
+
+test( 'a binding to private tables on another database server is reviewed and discarded on the Restores tab', async ( { page } ) => {
+	// A database restore that keeps the earlier tables for its undo, on a database server that
+	// the site no longer uses, as after a failover. The name of its database holds a right-to-left
+	// override, which the page shows escaped. A second one has no undo left.
+	const job = '20261126T140000Z-0d1700';
+	const other = '20261126T140000Z-0d1701';
+	const jobs = path.join( siteRoot(), 'wp-content/backups-for-restic/jobs' );
+	const stored = ( id ) => JSON.parse( fs.readFileSync( path.join( jobs, id, 'job.json' ), 'utf8' ) );
+	const create = 'global $wpdb; $container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); $apply = new BackupsForRestic\\Jobs\\Job( $argv[2], BackupsForRestic\\Jobs\\JobType::DatabaseApply, "manual", time() - 120 ); $apply->state = BackupsForRestic\\Jobs\\JobState::Succeeded; $apply->finished_at = time() - 60; $apply->data = [ "restore" => "20261126T130000Z-0d16ff", "user" => 1, "digest" => str_repeat( "d", 64 ), "database_owner" => [ "version" => 1, "prefix" => $wpdb->prefix, "fingerprint" => str_repeat( "f", 64 ), "count" => 2, "token" => str_repeat( $argv[4], 32 ), "database" => $argv[3], "uuid" => "7c4dd2a2-d1b4-11f1-9b6f-0242ac120002" ] ] + ( "c" === $argv[4] ? [ "database_generation" => "applied", "retained_until" => time() + 3600 ] : [] ); $container->jobs()->save( $apply );';
+	wordpress( siteRoot(), create, [ job, 'bfr_‮site', 'c' ] );
+	wordpress( siteRoot(), create, [ other, 'bfr_moved', 'e' ] );
+	// Request interception stays on for the whole test (see the test of live apply and undo).
+	await page.route( '**/*', ( route ) => route.fallback() );
+	const url = new URL( page.url() ).origin;
+	const undo = card( page, job ).filter( { has: page.getByRole( 'button', { name: 'Preview database undo' } ) } );
+	const foreign = ( id ) => card( page, id ).filter( { has: page.getByRole( 'button', { name: 'Review the discard of this binding' } ) } ).filter( { hasNot: page.getByRole( 'button', { name: 'Preview database undo' } ) } );
+	const listed = ( id ) => page.locator( '.bfr-discarded-binding' ).filter( { has: page.getByRole( 'heading', { name: id, exact: true } ) } );
+	async function confirm( id, address, password ) {
+		await foreign( id ).getByLabel( 'I have reviewed what this discard forgets and noted the table names.' ).check();
+		await foreign( id ).getByLabel( 'Type the site address to confirm' ).fill( address );
+		await foreign( id ).getByLabel( 'Your WordPress password' ).fill( password );
+		await foreign( id ).getByRole( 'button', { name: 'Discard binding', exact: true } ).click();
+	}
+	const isDiscard = ( requestURL ) => /\/database-changes\/[^/?&]+\/discard(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+	const isReview = ( requestURL ) => /\/database-changes\/[^/?&]+\/discard-review(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+	const isList = ( requestURL ) => /\/database-changes\/foreign(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+	// What the answers say on a site that allows no changes to its files, as under DISALLOW_FILE_MODS.
+	const refused = { write_allowed: false, write_lacking: [ 'update_core' ], file_mods_disallowed: true };
+	try {
+		await openBackups( page, 'restores' );
+		await expect( page.getByRole( 'heading', { name: 'Private tables on another database server', exact: true } ) ).toBeVisible();
+		// The undo of the exchange cannot be reviewed while its tables are elsewhere; its card offers the discard.
+		await undo.getByRole( 'button', { name: 'Preview database undo' } ).click();
+		await expect( undo ).toContainText( 'A database restore keeps private tables on another database server or in another database.' );
+		await expect( undo.getByRole( 'button', { name: 'Review the discard of this binding' } ) ).toBeVisible();
+
+		await foreign( job ).getByRole( 'button', { name: 'Review the discard of this binding' } ).click();
+		const review = foreign( job ).locator( '.bfr-database-discard' );
+		await expect( review.locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
+		await expect( review ).not.toContainText( '‮' );
+		await expect( review ).toContainText( '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' );
+		const tables = foreign( job ).locator( '.bfr-database-discard-tables code' );
+		await expect( tables ).toHaveCount( 7 );
+		await expect( tables.first() ).toHaveText( '_bfr_r_' + 'c'.repeat( 32 ) + '_p' );
+		await expect( foreign( job ) ).toContainText( 'The discard ends the undo of this database restore for good.' );
+		await expect( foreign( job ).locator( '.bfr-discard-kept li' ) ).toHaveText( [
+			'The database that this site uses now: the discard changes none of its tables.',
+			'The private tables, wherever they are: the plugin drops none of them, now or later.',
+			'The database restore job and its log, which record the discard, who confirmed it and these table names. For 90 days after the discard, or until you mark the tables as taken care of, the job history keeps them, and the Restores tab and "wp backups-for-restic database-discarded" list these table names.',
+		] );
+
+		await confirm( job, url + '/another-site', ADMIN.password );
+		await expect( foreign( job ) ).toContainText( 'type the exact site address' );
+		await expect( foreign( job ).getByLabel( 'Type the site address to confirm' ) ).toBeFocused();
+		await confirm( job, url, 'incorrect' );
+		await expect( foreign( job ) ).toContainText( 'Your WordPress password was not correct.' );
+		await expect( foreign( job ).getByLabel( 'Your WordPress password' ) ).toBeFocused();
+		// The answer is lost before the request reaches the server: nothing is discarded, the page
+		// asks again and the binding stays listed with its review. The answer to that request for
+		// the lists is held back until a newer one has arrived, as on a slow connection. The page
+		// counts its requests for the lists whose answer it has not handled yet: a request leaves
+		// the count one task after its answer settled, when the handler that the page attached to
+		// it has run, which is attached after this one and runs in the same turn.
+		await page.evaluate( () => {
+			const send = globalThis.wp.apiFetch;
+			globalThis.bfrListsUnhandled = 0;
+			globalThis.wp.apiFetch = Object.assign( function ( options ) {
+				const answer = send.apply( this, arguments );
+				if ( options && 'string' === typeof options.path && /\/database-changes\/foreign(?:[?&]|$)/.test( options.path ) ) {
+					globalThis.bfrListsUnhandled++;
+					const handled = () => setTimeout( () => globalThis.bfrListsUnhandled--, 0 );
+					answer.then( handled, handled );
+				}
+				return answer;
+			}, send );
+		} );
+		const unhandled = () => page.evaluate( () => globalThis.bfrListsUnhandled );
+		let release;
+		const held = new Promise( ( resolve ) => {
+			release = resolve;
+		} );
+		let delivered;
+		const late = new Promise( ( resolve ) => {
+			delivered = resolve;
+		} );
+		await page.route( isList, async ( route ) => {
+			const response = await route.fetch();
+			await held;
+			await route.fulfill( { response } );
+			delivered();
+		}, { times: 1 } );
+		await page.route( isDiscard, ( route ) => route.abort( 'connectionreset' ), { times: 1 } );
+		await confirm( job, url, ADMIN.password );
+		await expect( foreign( job ) ).toContainText( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded.' );
+		await expect( foreign( job ).locator( '.bfr-database-discard-tables code' ) ).toHaveCount( 7 );
+		expect( stored( job ).data ).toHaveProperty( 'database_owner' );
+		// Another request holds the runner lock: the review stays valid, and so does the form as it
+		// was filled in. Before, the page removed it as if the review had changed.
+		const holder = spawn( 'php', [ '-r', '$lock = fopen( $argv[1], "c" ); flock( $lock, LOCK_EX ); echo "held\n"; fgets( STDIN );', path.join( siteRoot(), 'wp-content/backups-for-restic/runner.lock' ) ], { stdio: [ 'pipe', 'pipe', 'inherit' ] } );
+		const released = new Promise( ( resolve ) => holder.once( 'exit', resolve ) );
+		await new Promise( ( resolve ) => holder.stdout.once( 'data', resolve ) );
+		try {
+			await confirm( job, url, ADMIN.password );
+			await expect( foreign( job ) ).toContainText( 'The review is still valid: confirm it again in a moment.' );
+		} finally {
+			holder.stdin.end();
+			await released;
+		}
+		await expect( foreign( job ).getByLabel( 'I have reviewed what this discard forgets and noted the table names.' ) ).toBeChecked();
+		await expect( foreign( job ).getByLabel( 'Type the site address to confirm' ) ).toHaveValue( url );
+		await expect( foreign( job ).getByLabel( 'Your WordPress password' ) ).toBeFocused();
+		expect( stored( job ).data ).toHaveProperty( 'database_owner' );
+
+		// The list that the page reads after the discard says that this account may not end it.
+		await page.route( isList, async ( route ) => {
+			const response = await route.fetch();
+			await route.fulfill( { response, json: { ...( await response.json() ), ...refused } } );
+		}, { times: 1 } );
+		await confirm( job, url, ADMIN.password );
+		const result = page.locator( '.bfr-discarded' );
+		await expect( result ).toContainText( 'The binding was discarded. Nothing was dropped.' );
+		await expect( result ).toBeFocused();
+		await expect( result.locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
+		await expect( result.locator( '.bfr-database-discarded-tables code' ) ).toHaveCount( 7 );
+		// The binding leaves the list of those to discard; its tables stay listed until they are taken care of.
+		await expect( foreign( job ) ).toHaveCount( 0 );
+		await expect( undo ).toHaveCount( 0 );
+		await expect( listed( job ).locator( '.bfr-discarded-binding-tables code' ) ).toHaveCount( 7 );
+		await expect( listed( job ).locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
+		await expect( listed( job ) ).toContainText( 'so this page cannot mark these tables as taken care of here. On the command line, "wp backups-for-restic database-discarded ' + job + ' --done" can, run without --user.' );
+		await expect( listed( job ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ) ).toHaveCount( 0 );
+		// The older answer, from before the discard, arrives now and changes nothing. Before, it
+		// put the binding back among those to discard and took it from the discarded ones. The
+		// page has handled every newer answer, and then that one: no wait of a fixed length, which
+		// a slow page would outlast with the lists still as they were.
+		await expect.poll( unhandled, { message: 'only the request whose answer is held back is open', timeout: 30 * 1000 } ).toBe( 1 );
+		release();
+		await late;
+		await expect.poll( unhandled, { message: 'the page has handled the answer that was held back', timeout: 30 * 1000 } ).toBe( 0 );
+		await expect( foreign( job ) ).toHaveCount( 0 );
+		await expect( listed( job ).locator( '.bfr-discarded-binding-tables code' ) ).toHaveCount( 7 );
+		// The answer to the confirmation arrived, so the one lost before leaves nothing to find
+		// out: the newer list does not call this discard one whose answer was lost.
+		await expect( result ).toContainText( 'The binding was discarded. Nothing was dropped.' );
+		await expect( result ).toBeVisible();
+		const recorded = stored( job );
+		expect( recorded.data ).not.toHaveProperty( 'database_owner' );
+		expect( recorded.data.database_discarded.via ).toBe( 'rest' );
+		expect( recorded.warnings.at( -1 ) ).toContain( '_bfr_r_' + 'c'.repeat( 32 ) + '_b1' );
+		// A log that cannot be read is announced: the focus stays on the button. Before, its
+		// notice had no role, and a screen reader said nothing.
+		const isLog = ( requestURL ) => /\/jobs\/[^/?&]+\/log(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		await page.route( isLog, ( route ) => route.fulfill( { status: 500, json: { code: 'backups_for_restic_environment', message: 'The log could not be read.', data: { status: 500, hint: '' } } } ), { times: 1 } );
+		await listed( job ).getByRole( 'button', { name: 'Show the log of this job' } ).click();
+		await expect( listed( job ).locator( '.bfr-job-log' ).getByRole( 'alert' ) ).toContainText( 'The log could not be read.' );
+		// The log of that job opens here, whether or not the Logs tab still lists the job.
+		await listed( job ).getByRole( 'button', { name: 'Show the log of this job' } ).click();
+		await expect( listed( job ).locator( '.bfr-log' ) ).toContainText( 'Database restore binding discarded.' );
+
+		// On a site that allows no changes to its files, the review says why this page cannot discard
+		// and names the command that can. Before, it said only that the account could not.
+		await page.route( isReview, async ( route ) => {
+			const response = await route.fetch();
+			await route.fulfill( { response, json: { ...( await response.json() ), ...refused, review_token: null } } );
+		}, { times: 1 } );
+		await foreign( other ).getByRole( 'button', { name: 'Review the discard of this binding' } ).click();
+		await expect( foreign( other ) ).toContainText( 'This site does not allow changes to its files (DISALLOW_FILE_MODS, or a filter of file_mod_allowed).' );
+		await expect( foreign( other ) ).toContainText( 'On the command line, "wp backups-for-restic database-discard ' + other + '" can, run without --user.' );
+		await expect( foreign( other ).getByRole( 'button', { name: 'Discard binding', exact: true } ) ).toHaveCount( 0 );
+		// The answer is lost after the server recorded the discard: the page asks again and shows the result.
+		await foreign( other ).getByRole( 'button', { name: 'Review the discard of this binding' } ).click();
+		await expect( foreign( other ).locator( '.bfr-database-discard-tables code' ) ).toHaveCount( 7 );
+		await page.route( isDiscard, async ( route ) => {
+			await route.fetch();
+			await route.abort( 'connectionreset' );
+		}, { times: 1 } );
+		await confirm( other, url, ADMIN.password );
+		await expect( result ).toContainText( 'The answer to the confirmation was lost, but the binding was discarded. Nothing was dropped.' );
+		await expect( result ).toBeFocused();
+		await expect( result.locator( '.bfr-database-discarded-tables code' ).first() ).toHaveText( '_bfr_r_' + 'e'.repeat( 32 ) + '_p' );
+		await expect( foreign( other ) ).toHaveCount( 0 );
+		await expect( listed( other ).locator( '.bfr-discarded-binding-tables code' ) ).toHaveCount( 7 );
+		expect( stored( other ).data ).not.toHaveProperty( 'database_owner' );
+
+		// Taken care of: the tables are no longer listed, and the job history prunes the job as any other.
+		await listed( job ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ).click();
+		await expect( listed( job ) ).toHaveCount( 0 );
+		await expect( listed( other ) ).toHaveCount( 1 );
+		expect( stored( job ).data.database_discarded.done.via ).toBe( 'rest' );
+		// The answer is lost after the server recorded the end of the listing: the page asks again.
+		// Before, it kept the card, and a second click was refused for a listing that had ended.
+		const isDone = ( requestURL ) => /\/database-changes\/[^/?&]+\/discarded-done(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		await page.route( isDone, async ( route ) => {
+			await route.fetch();
+			await route.abort( 'connectionreset' );
+		}, { times: 1 } );
+		await listed( other ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ).click();
+		await expect( listed( other ) ).toHaveCount( 0 );
+		expect( stored( other ).data.database_discarded.done.via ).toBe( 'rest' );
+	} finally {
+		for ( const id of [ job, other ] ) {
+			fs.rmSync( path.join( jobs, id ), { recursive: true, force: true } );
+		}
 	}
 } );

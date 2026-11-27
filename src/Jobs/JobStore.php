@@ -43,6 +43,12 @@ final class JobStore {
 	public const string ID_PATTERN = '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/';
 
 	/**
+	 * Days for which a database apply lists the private tables of its discarded binding, unless
+	 * the administrator marks them as taken care of before (ADR 0043).
+	 */
+	public const int DISCARD_LISTED_DAYS = 90;
+
+	/**
 	 * Whether while_idle() holds the lock of create() in this process.
 	 *
 	 * @var bool
@@ -83,7 +89,7 @@ final class JobStore {
 	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
 		$lock = $this->held ? null : $this->lock();
 		try {
-			$this->require_idle( $type );
+			$this->require_idle();
 			$job       = new Job( $this->reserve_id( $now ), $type, $trigger, $now );
 			$job->data = $data;
 			try {
@@ -167,6 +173,7 @@ final class JobStore {
 	 * The job that is queued or running, if any.
 	 *
 	 * @return Job|null Active job.
+	 * @throws StorageFailed If the jobs directory cannot be listed safely.
 	 */
 	public function active(): ?Job {
 		foreach ( $this->ids() as $id ) {
@@ -176,6 +183,30 @@ final class JobStore {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * The job that is queued or running, as active() finds it, in one pass that refuses a stored
+	 * job whose state cannot be established (refuse_unreadable()): such a job may be the one that
+	 * is queued or running. One pass, because a document that becomes readable or unreadable
+	 * between two passes would be missed by both.
+	 *
+	 * @return Job|null Active job.
+	 * @throws JobConflict With the code job_unreadable or job_inaccessible and the job's ID.
+	 * @throws StorageFailed If the jobs directory cannot be listed safely.
+	 */
+	public function active_or_refuse(): ?Job {
+		$active = null;
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null === $job && $this->has_document( $id ) ) {
+				$this->refuse_unreadable( $id );
+			}
+			if ( null === $active && null !== $job && ! $job->state->is_terminal() ) {
+				$active = $job;
+			}
+		}
+		return $active;
 	}
 
 	/**
@@ -541,19 +572,43 @@ final class JobStore {
 	}
 
 	/**
+	 * Until when a database apply lists the private tables of its discarded binding, which a
+	 * database administrator removes by hand where they are: DISCARD_LISTED_DAYS after the
+	 * discard, unless the administrator marked them as taken care of. prune() keeps the job, its
+	 * record of the discard and its log until then. A time of the discard that the plugin did
+	 * not write can be so late that the days no longer fit into an integer after it: the tables
+	 * are then listed with no end, PHP_INT_MAX, until they are marked as taken care of. Before,
+	 * the sum was a float, which this function may not return, and the TypeError ended both
+	 * lists of bindings and the cleanup of the job history at that job, for every job after it.
+	 *
+	 * @param Job $job Job.
+	 * @return int|null Unix time, PHP_INT_MAX for no end, or null if the job lists no such tables.
+	 */
+	public static function discard_listed_until( Job $job ): ?int {
+		$discarded = $job->data['database_discarded'] ?? null;
+		if ( JobType::DatabaseApply !== $job->type || ! is_array( $discarded ) || isset( $discarded['done'] ) || ! is_int( $discarded['at'] ?? null ) ) {
+			return null;
+		}
+		$listed = self::DISCARD_LISTED_DAYS * 86400;
+		return $discarded['at'] > PHP_INT_MAX - $listed ? PHP_INT_MAX : $discarded['at'] + $listed;
+	}
+
+	/**
 	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
-	 * know whether its job has finished.
+	 * know whether its job has finished. So is a job that something still needs, such as the
+	 * tables of a discarded database binding that it lists (discard_listed_until()).
 	 *
 	 * @param int      $keep Number of jobs to keep.
 	 * @param int|null $now Current Unix time.
 	 * @return int Number of deleted jobs.
 	 */
 	public function prune( int $keep, ?int $now = null ): int {
+		$now   ??= time();
 		$deleted = 0;
-		$pins    = $this->pinned_restores( $now ?? time() );
+		$pins    = $this->pinned_restores( $now );
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
+			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( self::discard_listed_until( $job ) ?? 0 ) <= $now && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}
@@ -627,28 +682,22 @@ final class JobStore {
 	 * familiar; no part of that layout is interpreted here.
 	 *
 	 * The private tables of a database restore that belong to another database server are
-	 * not on this one, so they cannot reach a backup and need no cleanup here. Only a new
-	 * database apply waits until an administrator has discarded that binding.
+	 * not on this one, so they cannot reach a backup and need no cleanup here. Whether a new
+	 * database apply waits for that binding is for what the connected server says now, which
+	 * this store cannot ask: the review of that apply decides it (DatabaseChanges::blockers()).
 	 *
-	 * @param JobType|null $type Type of the job about to be created, if any.
 	 * @throws JobConflict If a job is active or its state cannot be established.
 	 */
-	private function require_idle( ?JobType $type = null ): void {
+	private function require_idle(): void {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( null === $job && $this->has_document( $id ) ) {
 				$this->refuse_unreadable( $id );
 			}
+			// A binding that the heartbeat found on another server holds no other job. Whether it holds
+			// a new database apply is for what the server says now, which the review of that apply
+			// asks right before it is created (DatabaseChanges::start_apply()); this store cannot.
 			if ( null !== $job && $job->state->is_terminal() && isset( $job->data['database_owner'], $job->data['database_foreign'] ) ) {
-				if ( JobType::DatabaseApply === $type ) {
-					JobConflict::raise(
-						'A database restore still holds private tables on another database server. Discard its binding before applying another database.',
-						[
-							'job'  => $id,
-							'code' => 'database_exchange_foreign',
-						]
-					);
-				}
 				continue;
 			}
 			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {

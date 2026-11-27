@@ -196,19 +196,54 @@ It now reports a different valid server UUID, a MariaDB server or another databa
 the code `database_exchange_foreign`. A server without a readable UUID cannot be told apart
 from the original one and counts as unreachable, as before.
 
+The plugin saves a binding with the server UUID and the database name of the server that holds
+its tables. A binding whose saved UUID or database name is missing or malformed was changed
+outside the plugin, and nothing can tell it apart from this server's: it is never `foreign`
+(`DatabaseGeneration::place()` answers `unknown`), and `load()` refuses it with
+`database_binding_unreadable` before it asks the server. Until 2026-11-26 such a binding was
+compared with `null`, counted as another server's, and offered for a discard that would have
+forgotten private tables on this very server. Now its discard and its undo are refused, the
+list of bindings to discard leaves it out, a new database apply waits with the blocker
+`database_binding_unreadable`, its expiry is deferred and reported on its job and uninstall
+waits for it, and an all-tables backup excludes none of its tables, as for a binding of
+another server.
+
 - The job's cleanup and the heartbeat record such a binding once on its job
-  (`database_foreign`) with what to do: run the discard command below, which shows the
-  database, the server UUID and the table names and drops nothing, and drop the tables by
-  hand only where they can be verified. Backups and all other jobs start again; only a new
-  database apply waits, in `JobStore::create()` and as the review blocker
+  (`database_foreign`) with what to do: review its discard on the Restores tab or with the
+  command below, which show the database, the server UUID and the table names and drop
+  nothing, and drop the tables by hand only where they can be verified. Backups and all other
+  jobs start again; only a new database apply waits, as its review's blocker
   `database_exchange_foreign`. A binding whose server answers again is cleaned up as usual.
-- `wp backups-for-restic database-discard <apply-job>` and
-  `POST /database-changes/{id}/discard`, with the WordPress password in the JSON body, forget
-  a binding that the connected server positively disowns. Both name the database, the server
-  UUID and every private table name the binding can own (`_p`, `_a`, `_u`, and `_t<n>` and
-  `_b<n>` per table), record the decision in the job (`database_discarded`) and drop
-  nothing. None of these names starts with the site's prefix; a database administrator drops
-  those that exist on the server that holds them.
+- The block of a new database apply follows what the connected server says now, not the mark
+  of an earlier request: its review (`DatabaseChanges::blockers()`) asks the server once, when
+  there is a finished binding, and `start_apply()` makes that review right before it creates
+  the job, so that the block, the list of bindings to discard and the review of a discard
+  agree in every state. A binding on this server blocks nothing, except an interrupted import,
+  whose tables the heartbeat removes first (`database_exchange_cleanup`); one of another server
+  or database blocks with `database_exchange_foreign`; one that a server without a readable
+  UUID cannot place with `database_binding_unverified`; one whose record cannot be read with
+  `database_binding_unreadable`; and a server that cannot be asked who it is ends the review
+  with a refusal of its own (`database_binding_unasked`): its tables may be on that server, and
+  a review has no job whose log could name the database error, which the text of a failed
+  dump that it gave until 2026-11-27 pointed to. Until
+  2026-11-27 the mark alone blocked, in the review and in `JobStore::create()`, which cannot ask
+  the server: once the original database was connected again, a new apply was refused with the
+  advice to discard a binding that the list did not offer and the review refused as verified,
+  until a heartbeat had cleaned it up, which a cleanup that keeps failing never does. The mark
+  still lets every other job start, and the list shows a marked binding while the server
+  cannot be asked or identified.
+- A discard forgets a binding that the connected server positively disowns, after a review
+  and a confirmation like those of an undo (below), on the Restores tab, through
+  `POST /database-changes/{id}/discard` or with `wp backups-for-restic database-discard
+  <apply-job>`. The review names the database, the server UUID and every private table name
+  the binding can own (`_p`, `_a`, `_u`, and `_t<n>` and `_b<n>` per table); the discard
+  records the decision in the job (`database_discarded`, and the table names in its warning,
+  which the limit of 50 warnings neither drops nor counts: `Job::warn_kept()` adds it after
+  the limit and takes the place of no other warning, and `Job::warn()` keeps 50 of its own
+  besides such warnings, also after a save, as job.json keeps their number as
+  `warnings_kept`) and drops nothing. The rebuilt tables that an expiry keeps are named the
+  same way. None of these names starts with the site's prefix; a database
+  administrator drops those that exist on the server that holds them.
 - Uninstall forgets such a binding without dropping anything: its tables are not on this
   server, and a table here with one of its names cannot be proven to be its copy. Private
   tables elsewhere keep names that begin with `_bfr_r_` or `bfr_r_`.
@@ -216,6 +251,130 @@ from the original one and counts as unreachable, as before.
   binding it excludes nothing, so tables that a migration copied under these names stay in
   the backup. An unfinished import of this server excludes the shadows and the ledger that
   still carry its ownership comment.
+
+### The review and confirmation of a discard
+
+Until 2026-11-26 the discard was confirmed with the WordPress password alone through the REST
+route, and with a prompt or `--yes` in WP-CLI: no review bound the decision to what the
+administrator had seen, no site address was typed, and no route told the admin page which
+binding exists and which tables it names, so the page had no control for it (reported with
+pull request 58). An administrator without shell access whose site had moved to another
+database could not get rid of the binding. Since then:
+
+- `GET /database-changes/foreign` lists the finished database applies whose binding the
+  connected server positively disowns, each asked about as its review asks. Where the server
+  cannot be asked or identified, it lists those whose job recorded `database_foreign` and
+  says that the list may be incomplete (`complete: false`). A binding whose record its review
+  refuses as unreadable is not listed in any case: one without its saved identity, one whose
+  token or fingerprint cannot name its tables, or one whose saved exchange plan names another
+  database, server or number of tables than the binding does (`DatabaseGeneration::readable()`,
+  with the rules of `OwnedTables::valid()`). `load()` refuses such a record with
+  `database_binding_unreadable` before it asks the server. The plugin saves a plan only for a
+  binding that `load()` accepted, with the identity of the server that it asked then, so a
+  plan and a binding that disagree were changed outside the plugin, and neither says where
+  the private tables are. Until 2026-11-27 the plan was compared with the connected server,
+  and only for a binding of that server: a binding that named another database than its plan
+  counted as another database's where the plan's was connected, and its discard would have
+  forgotten the binding and the plan.
+- `POST /database-changes/{id}/discard-review` (`DatabaseChanges::discard_review()`) says what
+  a discard forgets and what stays: the job and its restore, the database and server UUID that
+  the binding names, the database and server UUID that the site uses now (`connected`), the
+  private table names, the generation and the end of the window that the job recorded,
+  whether the undo of that exchange ends with the discard (`undo_until`: an undo still in its
+  window, which the site could review again once it uses the database that holds the tables),
+  and what stays (`kept`: the database that the site uses, whose tables the discard does not
+  touch; the private tables wherever they are; the job and its log). Nothing is asked of the
+  database beyond its identity. The digest is built as the exchange's
+  (`DatabaseReview::digest()`, whose version 2 the exchange and its undo keep): version 1 of
+  this review, the kind `discard`, the confirming user and everything that the review shows.
+  The answer carries a review token bound to the session, the site address, the operation
+  `discard`, the job and the digest.
+- A connection in latin1 reports the name of a database such as `möbel` as bytes that are not
+  UTF-8, which JSON cannot encode; until 2026-11-26 such a name ended the review of a discard,
+  and that of an exchange into such a database, in an uncaught `JsonException`. Facts that
+  JSON cannot encode are hashed with every key and string as hexadecimal, after the version
+  followed by `:hex`, so their digest covers the bytes; every fact that JSON can encode keeps
+  the digest that it had, version 2 of the exchange's review included, and a test pins both
+  forms. The REST answer of a database review has U+FFFD in place of each byte that is not part
+  of a valid sequence, as the snapshot routes answer names (`SnapshotBrowser::text()`); the
+  confirmation carries the digest, not the name, so it confirms the review of the bytes. WP-CLI
+  prints such a name with Go's escapes. An exchange into such a database is still refused
+  (`dictionary_names`).
+- The confirmation is that of an undo (`RestRoutes::confirmed_plan()`): `reviewed`, the typed
+  `site_url`, the digest and the review token, and last the WordPress password through the one
+  throttled check. The route needs `database_writes_allowed`, as the undo does, and takes the
+  runner lock. Under it and under staging's guard the service makes the review again, and a
+  digest that is not the current review's is refused with `database_discard_changed`: a
+  binding whose record changed, a site that moved on to another database, an undo window that
+  ended or a review of another user is not discarded. The job records who confirmed it, how
+  and with which digest (`database_discarded`; the log line, which is written at best effort,
+  names the digest as well), and its warning names the tables, which the limit of a job's
+  warnings neither drops nor counts.
+- The names of the tables that are left to remove by hand stay available to the
+  administrator after the discard, whatever the job history does: for 90 days
+  (`JobStore::DISCARD_LISTED_DAYS`, counted from the discard's own time) or until the
+  administrator marks them as taken care of (`POST /database-changes/{id}/discarded-done`,
+  `wp backups-for-restic database-discarded <apply-job> --done`, which record who did and when
+  under `database_discarded.done`, under the runner lock, so that the pruning of the job
+  history cannot remove the job between the check and the save). Until then `JobStore::prune()` keeps the job, and the
+  Restores tab lists the binding under "Discarded bindings" with its names, from the answer of
+  `GET /database-changes/foreign` (`discarded`), as `wp backups-for-restic database-discarded`
+  prints them. Both lists of that answer come from one reading of the jobs, made before the
+  server is asked, so that a discard that another request records meanwhile leaves its
+  binding in one of them, never in neither. A time of the discard that only a change outside
+  the plugin leaves, so late that the 90 days no longer fit into an integer after it, lists
+  the tables with no end (`PHP_INT_MAX`) until they are marked as taken care of: the job
+  stays, and neither list nor the pruning stops at it. The job is kept rather than the names copied into a record of their own,
+  because the discard then stays one atomic write of one document: a second record could be
+  lost after the binding was forgotten, or written for a discard that did not happen, and it
+  would need a cleanup of its own. The texts that send the administrator to that job's log
+  point to something that can be opened: its card, and the card of the review, have "Show the
+  log of this job", and WP-CLI names `wp backups-for-restic logs`; the Logs tab lists only the
+  latest jobs. After a lost answer to a confirmation the page reads the lists again and shows
+  the result of a discard that the server recorded. Uninstall forgets the listing with every
+  job.
+- A binding that cannot be discarded is answered with what is the case:
+  `database_binding_missing` (no database apply with a binding of this ID), `job_unreadable`
+  or `job_inaccessible` with the ID of a stored job whose document cannot be read, this one's
+  or any other's (`JobStore::active_or_refuse()`: such a job may be a queued undo of this
+  binding, which the discard would take away; one pass over the jobs finds both, so that a
+  document that becomes readable or unreadable in between is not missed),
+  `database_binding_discarded`, `database_binding_busy` (the job or an undo of it has not
+  ended), `database_binding_verified` (the connected database holds the tables),
+  `database_binding_unverified` (a server without a server UUID, which cannot be told apart
+  from the original one) and `database_binding_unreadable` (a damaged record). The discard has
+  no job of its own: a database failure during its review or the discard itself is written to
+  the log of the job that holds the binding and answered with `database_discard_failed`, which
+  points there. Until 2026-11-26 such a failure was answered with the text of a failed backup,
+  "The log of the job contains the database error". A private directory whose jobs cannot be
+  read, or in which the decision cannot be recorded, is answered with
+  `database_discard_storage`, a runner lock held by another request with
+  `database_discard_busy`. Any other failure is unexpected: nothing records it, and
+  `database_discard_unexpected` says so and that WP-CLI prints its details, where it is
+  appended to the text.
+- WP-CLI prints the same review with its digest and asks for the site address on a terminal; it
+  refuses where there is no terminal to ask, after the review, which gives a script its digest.
+  A script confirms with both `--site-url` and `--digest`, the digest of a review that an
+  earlier run printed: `--site-url` without `--digest`, and a `--digest` without a value, empty
+  or not 64 lower-case hexadecimal characters, are refused before the review, so a script whose
+  digest variable came out empty does not confirm the review of the same run. Both are declared
+  with an optional value, so that WP-CLI hands over a bare flag instead of dropping it with a
+  warning. It does not ask for the WordPress password: whoever runs it can read and change the
+  site's files. A WordPress user selected with `--user` needs the capabilities of
+  `database_writes_allowed`. `--yes`, which skipped the only confirmation before, is refused with
+  an error that says so.
+- The admin page lists these bindings on the Restores tab under "Private tables on another
+  database server", and the card of an undo whose review answers `database_exchange_foreign`
+  offers the same review. Every name is shown as text, escaped where it does not print.
+- The discard needs the capabilities of an undo, `update_core` among them, and WordPress gives
+  that capability to no account under `DISALLOW_FILE_MODS` or a `file_mod_allowed` filter that
+  refuses it. The guard stays as strong as the undo's. The review and the list say why an
+  account may not confirm (`write_lacking`, `file_mods_disallowed`), and the page says it in
+  its words and names the WP-CLI command, which needs neither when it runs without `--user`.
+- A runner lock held by another request (409 `database_discard_busy`) leaves the review
+  valid: the page keeps the confirmation as it was filled in, except the password, and says to
+  confirm it again in a moment. Other refusals of the confirmation (409) mean that the review
+  changed, and the page removes it.
 
 ### Lost replies
 
@@ -484,7 +643,11 @@ restore also verified authentication state, addresses, active plugins and the he
 After the review of 0.3.0-rc.1 the MySQL tests also cover: a second session that keeps a
 unit of work open across the swap, the same with a reconnect during maintenance, and one
 that outlasts the wait; a binding with another
-server UUID during an apply, with a backup, a review, the discard and uninstall; a lost reply
+server UUID during an apply, with a backup, a review, the discard and uninstall; since
+2026-11-26 also the review of a discard on MySQL for a binding of another server, one of the
+connected database, none, and one that changed after its review, and an unfinished import of
+another server on MySQL and MariaDB, each refusal of its routes and of the command against a
+real WordPress, and its flow on the admin page in a browser; a lost reply
 to the undo's RENAME followed by cleanup in the same request, a later tick and the heartbeat;
 `OPTIMIZE TABLE` on a live table, on the witness and on a retained table inside the window;
 a stuck newer generation in front of an expired older one; statement-based logging and
