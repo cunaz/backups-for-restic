@@ -391,11 +391,15 @@ final class AccessTest extends TestCase {
 			[ $status, $answer, $raw ] = self::unless_busy( static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) ) );
 			self::assertSame( 200, $status, $raw );
 			// The Restores tab lists the tables, whatever the job history does, until they are taken care of.
-			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
-			self::assertSame( 200, $status, $raw );
-			self::assertTrue( $listed['write_allowed'] ?? null, $raw );
-			$entry = array_values( array_filter( $listed['discarded'] ?? [], static fn ( array $entry ): bool => $job === ( $entry['job'] ?? null ) ) );
-			self::assertCount( 1, $entry, $raw );
+			$listed = static function (): array {
+				[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
+				self::assertSame( 200, $status, $raw );
+				self::assertIsArray( $listed['discarded'] ?? null, $raw );
+				self::assertTrue( $listed['write_allowed'] ?? null, $raw );
+				return $listed['discarded'];
+			};
+			$entry  = array_values( array_filter( $listed(), static fn ( array $entry ): bool => $job === ( $entry['job'] ?? null ) ) );
+			self::assertCount( 1, $entry );
 			self::assertSame( [ $review['tables'], $answer['discarded']['until'] ?? null ], [ $entry[0]['tables'] ?? null, $entry[0]['until'] ?? null ] );
 			[ $status, $done, $raw ] = TestSite::api( 'POST', $route . '/discarded-done', [] );
 			self::assertSame( 200, $status, $raw );
@@ -403,8 +407,8 @@ final class AccessTest extends TestCase {
 			self::assertSame( 1, TestSite::job_document( $job )['data']['database_discarded']['done']['user'] ?? null );
 			[ $status, $error ] = TestSite::api( 'POST', $route . '/discarded-done', [] );
 			self::assertSame( [ 409, 'backups_for_restic_database_discarded_missing' ], [ $status, $error['code'] ?? null ] );
-			[ , $listed ] = TestSite::api( 'GET', '/database-changes/foreign' );
-			self::assertNotContains( $job, array_column( $listed['discarded'] ?? [], 'job' ) );
+			// Before, a failed answer of the list passed here as one without the binding.
+			self::assertNotContains( $job, array_column( $listed(), 'job' ) );
 		} finally {
 			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
 		}
