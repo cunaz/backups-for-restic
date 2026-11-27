@@ -339,6 +339,13 @@ All notable changes are documented here. The format follows
   (`database_discard_unexpected`). While a stored job cannot be read, no binding is reviewed or
   discarded: that job may be a queued undo of the binding (`job_unreadable` or
   `job_inaccessible`, with its ID).
+- After the site's original database was connected again, a new database restore stayed
+  blocked with the advice to discard a binding that the Restores tab did not list and whose
+  review said that the connected database holds its tables, until a heartbeat had cleaned it
+  up. The review of a new database restore now asks the server what is the case each time, as
+  the list and the review of a discard do: another server, a server that does not say which
+  one it is, a record that cannot be read and an interrupted import on this server each block
+  with a text of their own, and nothing else blocks.
 - The review of a discard, and that of a database restore into such a database, no longer end
   in a fatal error on a site whose connection reports its database name in bytes that are not
   UTF-8, such as a connection in latin1 to a database named `möbel`. The REST API answers such a

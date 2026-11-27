@@ -89,7 +89,7 @@ final class JobStore {
 	public function create( JobType $type, string $trigger, int $now, array $data = [] ): Job {
 		$lock = $this->held ? null : $this->lock();
 		try {
-			$this->require_idle( $type );
+			$this->require_idle();
 			$job       = new Job( $this->reserve_id( $now ), $type, $trigger, $now );
 			$job->data = $data;
 			try {
@@ -677,28 +677,22 @@ final class JobStore {
 	 * familiar; no part of that layout is interpreted here.
 	 *
 	 * The private tables of a database restore that belong to another database server are
-	 * not on this one, so they cannot reach a backup and need no cleanup here. Only a new
-	 * database apply waits until an administrator has discarded that binding.
+	 * not on this one, so they cannot reach a backup and need no cleanup here. Whether a new
+	 * database apply waits for that binding is for what the connected server says now, which
+	 * this store cannot ask: the review of that apply decides it (DatabaseChanges::blockers()).
 	 *
-	 * @param JobType|null $type Type of the job about to be created, if any.
 	 * @throws JobConflict If a job is active or its state cannot be established.
 	 */
-	private function require_idle( ?JobType $type = null ): void {
+	private function require_idle(): void {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( null === $job && $this->has_document( $id ) ) {
 				$this->refuse_unreadable( $id );
 			}
+			// A binding that the heartbeat found on another server holds no other job. Whether it holds
+			// a new database apply is for what the server says now, which the review of that apply
+			// asks right before it is created (DatabaseChanges::start_apply()); this store cannot.
 			if ( null !== $job && $job->state->is_terminal() && isset( $job->data['database_owner'], $job->data['database_foreign'] ) ) {
-				if ( JobType::DatabaseApply === $type ) {
-					JobConflict::raise(
-						'A database restore still holds private tables on another database server. Discard its binding before applying another database.',
-						[
-							'job'  => $id,
-							'code' => 'database_exchange_foreign',
-						]
-					);
-				}
 				continue;
 			}
 			if ( null !== $job && $job->state->is_terminal() && ( isset( $job->data['database_binding'] ) || ( isset( $job->data['database_owner'] ) && ! isset( $job->data['retained_until'] ) ) ) ) {

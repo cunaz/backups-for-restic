@@ -147,39 +147,47 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Site blockers of a new database apply. A binding whose private tables are on another
-	 * server or database waits for the administrator's decision first, and one whose record
-	 * cannot be read, which no decision of the plugin can settle, waits for that record.
+	 * Site blockers of a new database apply, from what the connected server says now about each
+	 * finished binding, whatever an earlier request recorded of it (`database_foreign`), so that
+	 * the block agrees with the list of bindings to discard and with the review of a discard:
+	 * one of another server or database waits for the administrator's decision
+	 * (`database_exchange_foreign`); one that a server without a readable UUID cannot place
+	 * waits too (`database_binding_unverified`); an interrupted import on this server waits for
+	 * the heartbeat to remove its tables (`database_exchange_cleanup`); and one whose record
+	 * cannot be read, which no decision of the plugin can settle, waits for that record
+	 * (`database_binding_unreadable`). One identity serves every binding, asked only where
+	 * there is one; a server that cannot be asked ends the review, as the review itself would.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param int        $user Confirming user.
 	 * @return list<string> Blocker codes.
+	 * @throws DatabaseFailed If the connected server cannot be identified.
 	 */
 	private function blockers( Connection $connection, int $user ): array {
 		$blockers = ( $this->policy )( $user );
+		$owners   = [];
 		foreach ( $this->jobs->database_owners() as $owner ) {
-			if ( ! $owner->state->is_terminal() ) {
+			if ( $owner->state->is_terminal() ) {
+				$owners[] = $owner;
+			}
+		}
+		if ( [] === $owners ) {
+			return array_values( array_unique( $blockers ) );
+		}
+		$facts = ( new SwapCatalog( $connection ) )->facts();
+		foreach ( $owners as $owner ) {
+			if ( ! DatabaseGeneration::readable( $owner ) ) {
+				$blockers[] = 'database_binding_unreadable';
 				continue;
 			}
-			try {
-				if ( ! DatabaseGeneration::readable( $owner ) ) {
-					// Not foreign, as it was counted before: where its tables are cannot be told.
-					$blockers[] = 'database_binding_unreadable';
-					continue;
-				}
-				if ( isset( $owner->data['database_foreign'] ) ) {
-					$blockers[] = 'database_exchange_foreign';
-					continue;
-				}
-				DatabaseGeneration::load( $connection, $owner );
-			} catch ( DatabaseFailed $error ) {
-				if ( 'database_exchange_foreign' === ( $error->context()['code'] ?? null ) ) {
-					$blockers[] = 'database_exchange_foreign';
-				}
-			} catch ( FormatException ) {
-				// A record that cannot be read at all: the heartbeat reports it on its own job, and
-				// where its tables are cannot be told either.
-				$blockers[] = 'database_binding_unreadable';
+			$place = DatabaseGeneration::place( $facts, $owner );
+			if ( 'foreign' === $place ) {
+				$blockers[] = 'database_exchange_foreign';
+			} elseif ( 'unknown' === $place ) {
+				// The record names a server; this one does not say whether it is that one.
+				$blockers[] = 'database_binding_unverified';
+			} elseif ( ! isset( $owner->data['retained_until'] ) ) {
+				$blockers[] = 'database_exchange_cleanup';
 			}
 		}
 		return array_values( array_unique( $blockers ) );

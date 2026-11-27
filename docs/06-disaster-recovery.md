@@ -503,7 +503,9 @@ restore of the database server's data directory gives the server a new identity,
 that was pointed at another database has moved as well. A database restore that still keeps
 private tables then reports on its job that they are on another server or in another database.
 Backups go on. Another database restore waits until you decide, and the undo of that restore
-cannot be reviewed while the site uses the other database. On the Restores tab, under
+cannot be reviewed while the site uses the other database. If you connect the site to the
+original database again instead, nothing waits for a decision: the review of a new database
+restore asks the server each time, and the heartbeat cleans up as usual. On the Restores tab, under
 **Private tables on another database server**, review the discard of its binding. The review
 names the database and the server UUID of the private tables, the database and server that the
 site uses now, the table names, whether the discard ends an undo that would still be possible

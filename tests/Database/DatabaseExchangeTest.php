@@ -714,12 +714,14 @@ final class DatabaseExchangeTest extends TestCase {
 		$preview = $services['changes']->preview( $services['source']->id, 1 );
 		self::assertFalse( $preview['applicable'] );
 		self::assertContains( 'database_exchange_foreign', $preview['blockers'] );
+		// The review of the new apply asks the server right before the apply is created.
 		try {
-			$services['jobs']->create( JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+			$services['changes']->start_apply( $services['source']->id, 1, $preview['digest'] );
 			self::fail( 'A new database apply started before the old binding was settled.' );
 		} catch ( JobConflict $refused ) {
-			self::assertSame( 'database_exchange_foreign', $refused->context()['code'] ?? null );
+			self::assertSame( 'database_exchange_changed', $refused->context()['code'] ?? null );
 		}
+		self::assertNull( $services['jobs']->active() );
 		$discarded = $services['changes']->discard( $failed->id, 1, 'wp-cli', $services['changes']->discard_review( $failed->id, 1 )['digest'] );
 		$own       = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $failed->data['database_owner']['token'] . '_' ) ) );
 		self::assertNotSame( [], $own );
@@ -2279,5 +2281,94 @@ final class DatabaseExchangeTest extends TestCase {
 		$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
 		self::assertContains( 'database_binding_unreadable', $blockers );
 		self::assertNotContains( 'database_exchange_foreign', $blockers );
+	}
+
+	public function test_the_block_of_a_new_apply_the_list_and_the_review_follow_what_the_server_says_now(): void {
+		$this->mysql_only();
+		$server         = new \stdClass();
+		$server->hidden = false;
+		$server->asked  = 0;
+		$direct         = $this->direct;
+		// The suite's server, which can hide its UUID and counts how often it is asked who it is.
+		$services = $this->services(
+			connection: static fn (): Connection => new class( $direct, $server ) implements Connection {
+				public function __construct( private Connection $direct, private \stdClass $server ) {}
+
+				public function rows( string $sql ): array {
+					if ( str_starts_with( $sql, 'SELECT DATABASE() AS db' ) ) {
+						++$this->server->asked;
+					}
+					return $this->server->hidden && "SHOW VARIABLES LIKE 'server_uuid'" === $sql ? [ [ 'Value' => '' ] ] : $this->direct->rows( $sql );
+				}
+
+				public function execute( string $sql ): int {
+					return $this->direct->execute( $sql );
+				}
+			}
+		);
+		// Without a binding, the review of a new apply asks the server who it is once, as it did.
+		self::assertTrue( $services['changes']->preview( $services['source']->id, 1 )['applicable'] );
+		self::assertSame( 1, $server->asked );
+		$applied = self::applied( $services );
+		$state   = static function () use ( $services, $applied ): array {
+			$blockers = array_values( array_intersect( $services['changes']->preview( $services['source']->id, 1 )['blockers'], [ 'database_exchange_foreign', 'database_binding_unverified', 'database_binding_unreadable', 'database_exchange_cleanup' ] ) );
+			$listed   = $services['changes']->foreign_bindings();
+			try {
+				$services['changes']->discard_review( $applied->id, 1 );
+				$review = 'reviewed';
+			} catch ( JobConflict | DatabaseFailed $refused ) {
+				$review = $refused->context()['code'] ?? null;
+			}
+			return [ $blockers, in_array( $applied->id, array_column( $listed['jobs'], 'job' ), true ), $listed['complete'], $review ];
+		};
+		// An earlier request found the tables on another server and marked the binding; the
+		// original database is connected again. Before, the mark blocked a new apply with the
+		// advice to discard, which the list did not offer and the review refused.
+		$marked = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $marked );
+		$marked->data['database_foreign'] = $services['clock']->seconds;
+		$services['jobs']->save( $marked );
+		self::assertSame( [ [], false, true, 'database_binding_verified' ], $state() );
+		// The new apply is created: the store refuses it no longer for the mark alone.
+		$queued = $services['changes']->start_apply( $services['source']->id, 1, $services['changes']->preview( $services['source']->id, 1 )['digest'] );
+		self::assertSame( [ JobType::DatabaseApply, JobState::Queued ], [ $queued->type, $queued->state ] );
+		TempDir::remove( $services['jobs']->directory( $queued ) );
+		// A server that does not say which one it is.
+		$server->hidden = true;
+		self::assertSame( [ [ 'database_binding_unverified' ], true, false, 'database_binding_unverified' ], $state() );
+		// Another server.
+		$server->hidden = false;
+		self::failover( $services['jobs'], $marked );
+		self::assertSame( [ [ 'database_exchange_foreign' ], true, true, 'reviewed' ], $state() );
+	}
+
+	public function test_an_interrupted_import_back_on_its_server_holds_a_new_apply_until_it_is_removed(): void {
+		$this->mysql_only();
+		$services      = $this->services();
+		$import        = new Job( '20260101T000001Z-0a0b0f', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$import->state = JobState::Failed;
+		$import->data  = [
+			'restore'          => $services['source']->id,
+			'user'             => 1,
+			'digest'           => str_repeat( 'd', 64 ),
+			'database_owner'   => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => count( $this->manifest->tables ),
+				'token'       => explode( ':', $this->importer->tables->owner )[1],
+				'database'    => $this->database,
+				'uuid'        => ( new SwapCatalog( $this->direct ) )->facts()['uuid'],
+			],
+			// Marked when its server could not be told apart from another one.
+			'database_foreign' => $services['clock']->seconds,
+		];
+		$services['jobs']->save( $import );
+		$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+		// Before, it blocked as another server's, with the advice to discard.
+		self::assertContains( 'database_exchange_cleanup', $blockers );
+		self::assertNotContains( 'database_exchange_foreign', $blockers );
+		self::assertSame( [], $services['changes']->foreign_bindings()['jobs'] );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard_review( $import->id, 1 ) );
 	}
 }

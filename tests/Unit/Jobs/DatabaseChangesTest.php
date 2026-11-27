@@ -215,7 +215,8 @@ final class DatabaseChangesTest extends TestCase {
 		// The command shows what to drop; it drops nothing itself, so it comes first.
 		self::assertStringContainsString( 'drops nothing', $saved->warnings[0] );
 		self::assertLessThan( strpos( $saved->warnings[0], 'by hand' ), strpos( $saved->warnings[0], 'database-discard' ) );
-		self::refused( 'database_exchange_foreign', fn () => $this->jobs->create( JobType::DatabaseApply, 'manual', $this->clock->seconds ) );
+		// Whether a new database apply waits is for its review, which asks the server
+		// (DatabaseExchangeTest); the mark of another server holds no other job.
 		self::assertTrue( $this->jobs->while_idle( static fn (): bool => true ) );
 		$backup = $this->jobs->create( JobType::Backup, 'schedule', $this->clock->seconds );
 		self::assertSame( JobState::Queued, $backup->state );

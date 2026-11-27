@@ -212,9 +212,23 @@ another server.
   (`database_foreign`) with what to do: review its discard on the Restores tab or with the
   command below, which show the database, the server UUID and the table names and drop
   nothing, and drop the tables by hand only where they can be verified. Backups and all other
-  jobs start again; only a new database apply waits, in `JobStore::create()` and as the review
-  blocker `database_exchange_foreign`. A binding whose server answers again is cleaned up as
-  usual.
+  jobs start again; only a new database apply waits, as its review's blocker
+  `database_exchange_foreign`. A binding whose server answers again is cleaned up as usual.
+- The block of a new database apply follows what the connected server says now, not the mark
+  of an earlier request: its review (`DatabaseChanges::blockers()`) asks the server once, when
+  there is a finished binding, and `start_apply()` makes that review right before it creates
+  the job, so that the block, the list of bindings to discard and the review of a discard
+  agree in every state. A binding on this server blocks nothing, except an interrupted import,
+  whose tables the heartbeat removes first (`database_exchange_cleanup`); one of another server
+  or database blocks with `database_exchange_foreign`; one that a server without a readable
+  UUID cannot place with `database_binding_unverified`; one whose record cannot be read with
+  `database_binding_unreadable`; and a server that cannot be asked ends the review. Until
+  2026-11-27 the mark alone blocked, in the review and in `JobStore::create()`, which cannot ask
+  the server: once the original database was connected again, a new apply was refused with the
+  advice to discard a binding that the list did not offer and the review refused as verified,
+  until a heartbeat had cleaned it up, which a cleanup that keeps failing never does. The mark
+  still lets every other job start, and the list shows a marked binding while the server
+  cannot be asked or identified.
 - A discard forgets a binding that the connected server positively disowns, after a review
   and a confirmation like those of an undo (below), on the Restores tab, through
   `POST /database-changes/{id}/discard` or with `wp backups-for-restic database-discard
