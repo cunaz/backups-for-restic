@@ -213,6 +213,30 @@ final class JobDocumentTest extends TestCase {
 		self::assertSame( [ '20260103T000000Z-0a0002' ], $store->unreadable_ids( 1 ) );
 		self::assertSame( '20260103T000000Z-0a0002', $store->unreadable() );
 		self::assertSame( [ $read->id ], array_map( static fn ( Job $job ): string => $job->id, $store->latest( 10 ) ) );
+		self::assertSame(
+			[
+				'active'     => null,
+				'unreadable' => [ '20260103T000000Z-0a0002', '20260102T000000Z-0a0001' ],
+			],
+			$store->overview()
+		);
+	}
+
+	public function test_the_overview_gives_the_active_job_and_every_job_that_cannot_be_read_from_one_reading(): void {
+		$store        = $this->store();
+		$ended        = $store->create( JobType::Backup, 'manual', 1767225600 );
+		$ended->state = JobState::Succeeded;
+		$store->save( $ended );
+		$active = $store->create( JobType::Check, 'manual', 1767225660 );
+		// Newer than the active job, and older: every one is found, not only those before it.
+		foreach ( [ '20260102T000000Z-0a0001', '20251231T000000Z-0a0002' ] as $id ) {
+			mkdir( $this->directory . '/' . $id, 0700 );
+			file_put_contents( $this->directory . '/' . $id . '/job.json', '{' );
+		}
+		$overview = $store->overview();
+		self::assertSame( [ $active->id, [ '20260102T000000Z-0a0001', '20251231T000000Z-0a0002' ] ], [ $overview['active']?->id, $overview['unreadable'] ] );
+		self::assertSame( $store->active()?->id, $overview['active']?->id );
+		self::assertSame( $store->unreadable_ids(), $overview['unreadable'] );
 	}
 
 	public function test_no_job_is_pruned_while_a_stored_job_cannot_be_read(): void {

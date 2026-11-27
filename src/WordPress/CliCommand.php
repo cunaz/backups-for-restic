@@ -290,12 +290,13 @@ final class CliCommand {
 	 * texts, as the page shows them, and how many more there are.
 	 */
 	public function status(): void {
-		$jobs   = $this->container->jobs();
-		$last   = $this->container->state()->get( 'last_backup' );
-		$active = $jobs->active();
+		$jobs     = $this->container->jobs();
+		$last     = $this->container->state()->get( 'last_backup' );
+		$overview = $jobs->overview();
+		$active   = $overview['active'];
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Last backup', 'backups-for-restic' ), is_int( $last['finished'] ?? null ) ? gmdate( 'Y-m-d H:i:s', $last['finished'] ) . ' UTC' : '-' ) );
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Active job', 'backups-for-restic' ), null === $active ? '-' : $active->id . ' (' . Messages::step( $active->step ) . ')' ) );
-		$unreadable = $jobs->unreadable_ids();
+		$unreadable = $overview['unreadable'];
 		foreach ( array_slice( $unreadable, 0, self::UNREADABLE_SHOWN ) as $id ) {
 			$texts = Messages::stored_job( $jobs->unreadable_code( $id ), $id );
 			\WP_CLI::line( sprintf( '%s: %s', __( 'Stored job that cannot be read', 'backups-for-restic' ), $id ) );

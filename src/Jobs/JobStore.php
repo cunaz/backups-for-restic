@@ -210,6 +210,36 @@ final class JobStore {
 	}
 
 	/**
+	 * The job that is queued or running, as active() finds it, and the stored jobs that get()
+	 * does not load although has_document() counts their document, newest first, as
+	 * unreadable_ids() finds them: from one reading of the documents, for the dashboard and
+	 * WP-CLI's status, which show both. Before, they read every document twice when no job was
+	 * active, and a document that turned readable between the two readings was shown as
+	 * neither.
+	 *
+	 * @return array{active: Job|null, unreadable: list<string>} The active job, or null, and the IDs of the jobs that cannot be read.
+	 * @throws StorageFailed If the jobs directory cannot be listed safely.
+	 */
+	public function overview(): array {
+		$active     = null;
+		$unreadable = [];
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null === $job ) {
+				if ( $this->has_document( $id ) ) {
+					$unreadable[] = $id;
+				}
+			} elseif ( null === $active && ! $job->state->is_terminal() ) {
+				$active = $job;
+			}
+		}
+		return [
+			'active'     => $active,
+			'unreadable' => $unreadable,
+		];
+	}
+
+	/**
 	 * Loads a job. A request to cancel that the job document does not show yet
 	 * (request_cancel()) is part of what is loaded.
 	 *

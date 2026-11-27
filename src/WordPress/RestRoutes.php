@@ -195,7 +195,8 @@ final class RestRoutes {
 	public function status(): \WP_REST_Response {
 		$settings = $this->container->settings();
 		$state    = $this->container->state();
-		$active   = $this->container->jobs()->active();
+		$jobs     = $this->container->jobs()->overview();
+		$active   = $jobs['active'];
 		$zone     = wp_timezone();
 		return $this->respond(
 			[
@@ -214,7 +215,7 @@ final class RestRoutes {
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),
 				'next_backup'     => SchedulePolicy::next_backup_slot( $settings, $zone, time() ),
 				'recent_jobs'     => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 5 ) ),
-				...$this->unreadable_jobs(),
+				...$this->unreadable_jobs( $jobs['unreadable'] ),
 				'retention'       => [
 					'mode'           => $settings->string( 'retention.mode' ),
 					'after_backup'   => $settings->bool( 'retention.run_forget_after_backup' ),
@@ -357,7 +358,7 @@ final class RestRoutes {
 		return $this->respond(
 			[
 				'jobs' => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ),
-				...$this->unreadable_jobs(),
+				...$this->unreadable_jobs( $this->container->jobs()->unreadable_ids() ),
 			]
 		);
 	}
@@ -367,11 +368,11 @@ final class RestRoutes {
 	 * its code and the texts that name it (Messages::stored_job()), and how many there are:
 	 * they block every new job, scheduled backups included, and no list of jobs can show them.
 	 *
+	 * @param list<string> $ids IDs of the stored jobs that cannot be read, newest first (JobStore::unreadable_ids()).
 	 * @return array{unreadable_jobs: list<array{id: string, code: string, message: string, hint: string}>, unreadable_total: int} Jobs and their number.
 	 */
-	private function unreadable_jobs(): array {
+	private function unreadable_jobs( array $ids ): array {
 		$jobs = $this->container->jobs();
-		$ids  = $jobs->unreadable_ids();
 		return [
 			'unreadable_jobs'  => array_map(
 				static function ( string $id ) use ( $jobs ): array {
