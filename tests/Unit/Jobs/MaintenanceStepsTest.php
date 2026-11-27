@@ -36,12 +36,15 @@ use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 use BackupsForRestic\Tests\Support\InMemoryRestServer;
+use BackupsForRestic\Tests\Support\RoomOfARequest;
 use BackupsForRestic\Tests\Support\TempDir;
 
 /**
  * What a maintenance job remembers once its work is done.
  */
 final class MaintenanceStepsTest extends TestCase {
+
+	use RoomOfARequest;
 
 	private const string PASSWORD = 'repository password';
 

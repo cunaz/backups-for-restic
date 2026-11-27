@@ -3,6 +3,9 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Unit\WordPress;
 
+use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\WordPress\Messages;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
@@ -32,6 +35,14 @@ final class DatabaseMessagesTest extends TestCase {
 			self::assertDoesNotMatchRegularExpression( '/tries again|retries|next attempt/', $text, $code );
 		}
 		self::assertStringContainsString( 'review and confirm the database change again', self::text( 'database_exchange_sessions' ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_server_that_cannot_be_asked_about_a_binding_stops_a_new_restore_and_points_to_no_log(): void {
+		$text = self::text( 'database_binding_unasked' );
+		self::assertStringContainsString( 'so no database restore can start now', $text );
+		self::assertStringContainsString( 'Nothing was changed.', $text );
+		self::assertStringNotContainsString( 'log', $text );
 	}
 
 	#[RunInSeparateProcess]
@@ -86,5 +97,29 @@ final class DatabaseMessagesTest extends TestCase {
 		$record = self::text( 'database_admin_capabilities_unreadable' );
 		self::assertStringContainsString( 'stored more than once, longer than 64 KiB', $record );
 		self::assertSame( $record, self::text( 'database_admin_capabilities_unreadable', 'database_undo' ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_every_answer_of_a_discard_has_its_own_text_and_only_a_database_failure_points_to_a_log(): void {
+		require_once dirname( __DIR__, 2 ) . '/Fixtures/WordPress/translate.php';
+		$general = Messages::job_error( 'internal' );
+		foreach ( [ ...DatabaseChanges::DISCARD_REFUSALS, ...DatabaseChanges::DISCARD_FAILURES, 'database_discard_unexpected' ] as $code ) {
+			$texts = Messages::job_error( $code );
+			self::assertNotSame( $general, $texts, $code . ' has a text of its own.' );
+			if ( 'database_discard_unexpected' !== $code ) {
+				self::assertSame( $code, JobError::from_throwable( new JobConflict( 'Refused.', [ 'code' => $code ] ) )->code, $code . ' reaches the route and WP-CLI as it is.' );
+			}
+			if ( 'database_discard_failed' !== $code ) {
+				self::assertStringNotContainsString( 'names the database error', $texts['message'] . ' ' . $texts['hint'], $code );
+				self::assertStringNotContainsString( 'The log of', $texts['message'] . ' ' . $texts['hint'], $code );
+			}
+		}
+		$unexpected = self::text( 'database_discard_unexpected' );
+		self::assertStringContainsString( 'recorded nothing', $unexpected );
+		self::assertStringContainsString( 'wp backups-for-restic database-discard', $unexpected );
+		self::assertStringContainsString( 'Environment tab', self::text( 'database_discard_storage' ) );
+		// The list of discarded bindings and the end of a listing answer it too: it claims no discard.
+		self::assertStringNotContainsString( 'discarded.', self::text( 'database_discard_storage' ) );
+		self::assertStringContainsString( 'show what is recorded', self::text( 'database_discard_storage' ) );
 	}
 }

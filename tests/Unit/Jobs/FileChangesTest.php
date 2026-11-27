@@ -150,6 +150,12 @@ final class FileChangesTest extends TestCase {
 
 	protected function tearDown(): void {
 		TempDir::remove( $this->directory );
+		// The closures of the services refer to this test. Without this every finished test
+		// would leave a cycle that only PHP's cycle collector frees, and the memory of the
+		// suite would grow until it runs.
+		$this->plans      = [];
+		$this->job_writes = null;
+		unset( $this->runner, $this->changes, $this->staging, $this->jobs );
 	}
 
 	private function start(): Job {

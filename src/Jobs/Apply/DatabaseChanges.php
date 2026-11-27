@@ -14,6 +14,7 @@ use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\Continuity;
 use BackupsForRestic\Database\Restore\ExchangePlan;
 use BackupsForRestic\Database\Restore\SessionDrain;
+use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\TableExchange;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Database\Restore\WordPressState;
@@ -22,6 +23,7 @@ use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\ClosureStep;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
@@ -34,6 +36,8 @@ use BackupsForRestic\Jobs\StepProvider;
 use BackupsForRestic\Restore\FileMaintenance;
 use BackupsForRestic\Restore\Staging;
 use BackupsForRestic\Support\Clock;
+use BackupsForRestic\Support\Decoded;
+use BackupsForRestic\Support\GoQuote;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -42,8 +46,33 @@ defined( 'ABSPATH' ) || exit;
  * state first. The MySQL witness records the outcome even if the request is then killed.
  *
  * @phpstan-import-type Preview from DatabaseReview
+ * @phpstan-import-type Facts from SwapCatalog
+ * @phpstan-type Binding array{job:string,database:string,server:string,tables:list<string>}
+ * @phpstan-type Forgotten array{job:string,database:string,server:string,tables:list<string>,until:int}
+ * @phpstan-type Discarded array{job:string,restore:string,at:int,via:string,database:string,server:string,tables:list<string>,until:int}
+ * @phpstan-type Foreign array{job:string,restore:string,generation:'applied'|'undone'|null,retained_until:int|null}
+ * @phpstan-type DiscardReview array{job:string,restore:string,database:string,server:string,connected:array{database:string,server:string},tables:list<string>,generation:'applied'|'undone'|null,retained_until:int|null,undo_until:int|null,kept:list<string>,digest:string,applicable:true}
  */
 final readonly class DatabaseChanges implements StepProvider {
+
+	/**
+	 * What a discard of a binding leaves as it is: the database that the site uses now, whose
+	 * tables it does not touch; the private tables wherever they are, of which it drops none; and
+	 * the job of the database restore with its log, which record the discard.
+	 */
+	public const array DISCARD_KEPT = [ 'live_database', 'private_tables', 'job_record' ];
+
+	/** Codes of a refused review or discard of a binding, or of the end of its listing, which say what is the case. */
+	public const array DISCARD_REFUSALS = [ 'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'database_discarded_missing', 'job_unreadable', 'job_inaccessible' ];
+
+	/**
+	 * Codes of a review or discard of a binding that failed, which say what failed: any other
+	 * failure is unexpected, and nothing records it.
+	 */
+	public const array DISCARD_FAILURES = [ 'database_binding_unreadable', 'database_discard_failed', 'database_discard_storage' ];
+
+	/** Version of what the review of a discard shows, which its digest covers (DatabaseReview::digest()). */
+	private const int DISCARD_VERSION = 1;
 
 	/**
 	 * Errors after which a session is gone and its last statement's outcome unknown: the
@@ -112,6 +141,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param string $restore Restore job ID.
 	 * @param int    $user Confirming user.
 	 * @return Preview Review.
+	 * @throws DatabaseFailed With the code database_binding_unasked if the server cannot be asked about a finished binding.
 	 */
 	public function preview( string $restore, int $user ): array {
 		$connection = ( $this->connection )();
@@ -119,32 +149,53 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Site blockers of a new database apply. A binding whose private tables are on another
-	 * server or database waits for the administrator's decision first.
+	 * Site blockers of a new database apply, from what the connected server says now about each
+	 * finished binding, whatever an earlier request recorded of it (`database_foreign`), so that
+	 * the block agrees with the list of bindings to discard and with the review of a discard:
+	 * one of another server or database waits for the administrator's decision
+	 * (`database_exchange_foreign`); one that a server without a readable UUID cannot place
+	 * waits too (`database_binding_unverified`); an interrupted import on this server waits for
+	 * the heartbeat to remove its tables (`database_exchange_cleanup`); and one whose record
+	 * cannot be read, which no decision of the plugin can settle, waits for that record
+	 * (`database_binding_unreadable`). One identity serves every binding, asked only where
+	 * there is one. A server that cannot be asked who it is ends the review with a refusal of
+	 * its own (`database_binding_unasked`): the tables may be on it, so nothing may start, and
+	 * the review has no job whose log could name the database error.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param int        $user Confirming user.
 	 * @return list<string> Blocker codes.
+	 * @throws DatabaseFailed With the code database_binding_unasked if the connected server cannot be identified.
 	 */
 	private function blockers( Connection $connection, int $user ): array {
 		$blockers = ( $this->policy )( $user );
+		$owners   = [];
 		foreach ( $this->jobs->database_owners() as $owner ) {
-			if ( ! $owner->state->is_terminal() ) {
+			if ( $owner->state->is_terminal() ) {
+				$owners[] = $owner;
+			}
+		}
+		if ( [] === $owners ) {
+			return array_values( array_unique( $blockers ) );
+		}
+		try {
+			$facts = ( new SwapCatalog( $connection ) )->facts();
+		} catch ( DatabaseFailed $error ) {
+			DatabaseFailed::raise( 'The database server could not be asked whether it holds the private tables of a finished database restore.', [ 'code' => 'database_binding_unasked' ], $error );
+		}
+		foreach ( $owners as $owner ) {
+			if ( ! DatabaseGeneration::readable( $owner ) ) {
+				$blockers[] = 'database_binding_unreadable';
 				continue;
 			}
-			if ( isset( $owner->data['database_foreign'] ) ) {
+			$place = DatabaseGeneration::place( $facts, $owner );
+			if ( 'foreign' === $place ) {
 				$blockers[] = 'database_exchange_foreign';
-				continue;
-			}
-			try {
-				DatabaseGeneration::load( $connection, $owner );
-			} catch ( DatabaseFailed $error ) {
-				if ( 'database_exchange_foreign' === ( $error->context()['code'] ?? null ) ) {
-					$blockers[] = 'database_exchange_foreign';
-				}
-			} catch ( FormatException ) {
-				// The heartbeat reports a damaged ownership record on its own job.
-				continue;
+			} elseif ( 'unknown' === $place ) {
+				// The record names a server; this one does not say whether it is that one.
+				$blockers[] = 'database_binding_unverified';
+			} elseif ( ! isset( $owner->data['retained_until'] ) ) {
+				$blockers[] = 'database_exchange_cleanup';
 			}
 		}
 		return array_values( array_unique( $blockers ) );
@@ -237,86 +288,451 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Describes a binding whose private tables the connected server positively identifies
-	 * as another server's or another database's. Read-only; nothing is asked of the
-	 * database beyond its identity.
+	 * The finished database applies whose binding the connected server positively disowns: what
+	 * the Restores tab offers to discard. Each binding is asked about as its review asks
+	 * (discard_review()). One whose server cannot be asked or identified now is listed if its job
+	 * recorded that its tables were found on another server or in another database
+	 * (`database_foreign`), and the list says that it may be incomplete. A binding whose record
+	 * cannot be read is not listed: its review names that, and the heartbeat reports it on its
+	 * job. Nothing is asked of the database beyond its identity, once for all of them.
+	 *
+	 * The discarded bindings whose tables are still listed (discarded_bindings()) come from the
+	 * same reading of each job, which is made before the server is asked: a discard that another
+	 * request records meanwhile leaves its binding in one of the two lists, never in neither.
+	 *
+	 * @return array{jobs:list<Foreign>,complete:bool,discarded:list<Discarded>} The bindings, whether every one could be asked about, and the discarded ones.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read.
+	 */
+	public function foreign_bindings(): array {
+		$now       = $this->clock->now()[0];
+		$owners    = [];
+		$discarded = [];
+		try {
+			foreach ( $this->jobs->file_changes() as $job ) {
+				$entry = self::listed( $job, $now );
+				if ( null !== $entry ) {
+					$discarded[] = $entry;
+				}
+				if ( JobType::DatabaseApply === $job->type && isset( $job->data['database_owner'] ) && $job->state->is_terminal() ) {
+					$owners[] = $job;
+				}
+			}
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
+		$listed   = [];
+		$complete = true;
+		if ( [] === $owners ) {
+			return [
+				'jobs'      => $listed,
+				'complete'  => $complete,
+				'discarded' => $discarded,
+			];
+		}
+		try {
+			// One identity of the server for every binding: the list is read on each load of the page.
+			$facts = ( new SwapCatalog( ( $this->connection )() ) )->facts();
+		} catch ( DatabaseFailed ) {
+			$facts = null;
+		}
+		foreach ( $owners as $owner ) {
+			if ( ! DatabaseGeneration::readable( $owner ) ) {
+				// Its review refuses it as a record that cannot be read, whatever the server says.
+				continue;
+			}
+			$foreign = null;
+			if ( null !== $facts ) {
+				$place   = DatabaseGeneration::place( $facts, $owner );
+				$foreign = 'unknown' === $place ? null : 'foreign' === $place;
+			}
+			if ( null === $foreign ) {
+				$complete = false;
+				$foreign  = isset( $owner->data['database_foreign'] );
+			}
+			if ( $foreign ) {
+				$listed[] = [
+					'job'            => $owner->id,
+					'restore'        => self::text( $owner, 'restore' ),
+					'generation'     => self::generation( $owner ),
+					'retained_until' => is_int( $owner->data['retained_until'] ?? null ) ? $owner->data['retained_until'] : null,
+				];
+			}
+		}
+		return [
+			'jobs'      => $listed,
+			'complete'  => $complete,
+			'discarded' => $discarded,
+		];
+	}
+
+	/**
+	 * Reviews the discard of a binding whose private tables the connected server positively
+	 * identifies as another server's or another database's (ADR 0043): the job, the database
+	 * and the server UUID that the binding names, the database and server that the site uses
+	 * now, the private table names to remove by hand where they are, whether the undo of that
+	 * exchange ends with it, and what stays. Its digest covers all of it and the confirming user,
+	 * built as the digest of an exchange's review (DatabaseReview::digest()); the discard names
+	 * it (discard()). Nothing is asked of the database beyond its identity, and nothing is
+	 * changed. The discard has no job of its own: a database failure is written to the log of
+	 * the job that holds the binding, which the refusal points to.
 	 *
 	 * @param string $apply Owning database apply.
-	 * @return array{job:string,database:string,server:string,tables:list<string>} Where the tables are and their names.
-	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 * @param int    $user Confirming WordPress user, 0 for WP-CLI without a selected user.
+	 * @return DiscardReview Review.
+	 * @throws JobConflict With the code database_binding_missing if no database apply with this ID holds a binding, job_unreadable or job_inaccessible (JobStore::refuse_unreadable()) if the job's document or that of any other stored job cannot be read, database_binding_discarded if its binding was discarded already, database_binding_busy while the job or an undo of it is queued or running, database_binding_verified if the connected database holds its tables, database_binding_unverified if the connected server does not say which server it is, and database_binding_unreadable if the record of the binding cannot be read.
+	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs in the private directory could not be read.
 	 */
-	public function foreign_binding( string $apply ): array {
-		return $this->foreign_owner( $apply )[1];
+	public function discard_review( string $apply, int $user ): array {
+		try {
+			return $this->discard_facts( $apply, $user )[1];
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
 	}
 
 	/**
 	 * Forgets a binding whose private tables are on another server or in another database,
-	 * after the administrator confirmed it. Nothing is dropped anywhere: the result names the
-	 * tables to remove by hand where they are. The caller holds the runner lock; staging's
-	 * guard keeps an undo of this binding from being queued at the same time.
+	 * after the administrator confirmed the review of its discard by that review's digest.
+	 * Under staging's guard, which keeps an undo of this binding from being queued at the same
+	 * time, the review is made again; a binding that changed since, or a digest of another
+	 * review, is refused. Nothing is dropped anywhere: the job records the decision, who
+	 * confirmed it, the digest and the table names to remove by hand where they are. The caller
+	 * holds the runner lock.
 	 *
 	 * @param string $apply Owning database apply.
 	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.
 	 * @param string $via Where it was confirmed: rest or wp-cli.
-	 * @return array{job:string,database:string,server:string,tables:list<string>} The discarded binding.
-	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
+	 * @param string $digest Digest of the confirmed review (discard_review()).
+	 * @return Forgotten The discarded binding, and until when the Restores tab and WP-CLI list its tables (JobStore::discard_listed_until()).
+	 * @throws JobConflict With the codes of discard_review(), and database_discard_changed if the binding is no longer as the confirmed review showed it.
+	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read or the decision could not be recorded; the binding stays.
 	 */
-	public function discard( string $apply, int $user, string $via ): array {
-		return $this->staging->guard(
-			function () use ( $apply, $user, $via ): array {
-				$active = $this->jobs->active();
-				if ( JobType::DatabaseUndo === $active?->type && $apply === ( $active->data['apply'] ?? null ) ) {
-					JobConflict::raise( 'An undo of this database restore is still queued or running.', [ 'code' => 'job_conflict' ] );
+	public function discard( string $apply, int $user, string $via, string $digest ): array {
+		try {
+			return $this->staging->guard(
+				function () use ( $apply, $user, $via, $digest ): array {
+					[ $owner, $review ] = $this->discard_facts( $apply, $user );
+					if ( ! hash_equals( $review['digest'], $digest ) ) {
+						JobConflict::raise( 'The binding is no longer as the confirmed review showed it.', [ 'code' => 'database_discard_changed' ] );
+					}
+					$binding = [
+						'job'      => $review['job'],
+						'database' => $review['database'],
+						'server'   => $review['server'],
+						'tables'   => $review['tables'],
+					];
+					DatabaseGeneration::forget( $owner );
+					$at = $this->clock->now()[0];
+					// The confirmed digest goes with the decision: the log is written at best effort.
+					$owner->data['database_discarded'] = [
+						'at'     => $at,
+						'user'   => $user,
+						'via'    => $via,
+						'digest' => $digest,
+					] + $binding;
+					// The names are what is left to do by hand: the limit of a job's warnings must not drop them.
+					$owner->warn_kept( sprintf( 'The binding to %1$d private table names in the database %2$s on the server %3$s was discarded. Nothing was dropped. Remove by hand only those that exist there and that you can verify as this restore\'s copies: a table with one of these names may be another one, such as a copy of the site\'s data on a new server: %4$s', count( $binding['tables'] ), self::printable( $binding['database'] ), self::printable( $binding['server'] ), implode( ', ', $binding['tables'] ) ) );
+					$this->jobs->save( $owner );
+					$this->jobs->log( $owner )->write(
+						'warning',
+						'Database restore binding discarded.',
+						[
+							'user'   => $user,
+							'via'    => $via,
+							'digest' => $digest,
+							'code'   => 'database_exchange_foreign',
+						]
+					);
+					return $binding + [ 'until' => $at + JobStore::DISCARD_LISTED_DAYS * 86400 ];
 				}
-				[ $owner, $binding ] = $this->foreign_owner( $apply );
-				DatabaseGeneration::forget( $owner );
-				$owner->data['database_discarded'] = [
-					'at'   => $this->clock->now()[0],
-					'user' => $user,
-					'via'  => $via,
-				] + $binding;
-				$owner->warn( sprintf( 'The binding to %1$d private table names in the database %2$s on the server %3$s was discarded. Nothing was dropped; remove the tables that exist there by hand.', count( $binding['tables'] ), $binding['database'], $binding['server'] ) );
-				$this->jobs->save( $owner );
-				$this->jobs->log( $owner )->write(
-					'warning',
-					'Database restore binding discarded.',
-					[
-						'user' => $user,
-						'via'  => $via,
-						'code' => 'database_exchange_foreign',
-					]
-				);
-				return $binding;
-			}
-		);
+			);
+		} catch ( StorageFailed $error ) {
+			// The jobs, staging's lock or the job document: the document still holds the binding.
+			self::storage_failed( $error );
+		}
 	}
 
 	/**
-	 * Finds a finished apply whose binding the connected server positively disowns.
+	 * Refuses a review, a discard, the list of discarded bindings or the end of a listing for
+	 * which the private directory could not be read or written: the jobs could not be listed or
+	 * read, staging's lock could not be taken, or a decision could not be recorded. The text
+	 * says what failed and where to see what is recorded, as it fits each of them.
+	 *
+	 * @param StorageFailed $error What failed.
+	 * @throws StorageFailed Always, with the code database_discard_storage.
+	 */
+	private static function storage_failed( StorageFailed $error ): never {
+		StorageFailed::raise( 'The jobs in the private directory could not be read or written.', [ 'code' => 'database_discard_storage' ], $error );
+	}
+
+	/**
+	 * The discarded bindings whose private tables are still listed for removal by hand, newest
+	 * first: for JobStore::DISCARD_LISTED_DAYS after each discard, unless the administrator
+	 * marked them as taken care of (discarded_done()). The job history keeps their jobs until
+	 * then, whatever else it prunes; the Restores tab and WP-CLI read them here.
+	 *
+	 * @return list<Discarded> The discarded bindings with their table names.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read.
+	 */
+	public function discarded_bindings(): array {
+		$now    = $this->clock->now()[0];
+		$listed = [];
+		try {
+			foreach ( $this->jobs->file_changes() as $job ) {
+				$entry = self::listed( $job, $now );
+				if ( null !== $entry ) {
+					$listed[] = $entry;
+				}
+			}
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
+		return $listed;
+	}
+
+	/**
+	 * Ends the listing of the private tables of a discarded binding: the administrator says
+	 * that they are taken care of. The job records who said so and when; after that the job
+	 * history prunes the job as any other, with its record of the discard and its log. The
+	 * caller holds the runner lock, so that the pruning, which runs under it, cannot remove the
+	 * job between the check and the save, which would leave a job folder with the document alone.
+	 *
+	 * @param string $apply Database apply whose binding was discarded.
+	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.
+	 * @param string $via Where it was confirmed: rest or wp-cli.
+	 * @return Discarded The entry that is no longer listed.
+	 * @throws JobConflict With the code database_discarded_missing if the job lists no such tables.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read or the decision could not be recorded.
+	 */
+	public function discarded_done( string $apply, int $user, string $via ): array {
+		try {
+			return $this->staging->guard(
+				function () use ( $apply, $user, $via ): array {
+					$job   = $this->jobs->get( $apply );
+					$entry = null === $job ? null : self::listed( $job, $this->clock->now()[0] );
+					if ( null === $job || null === $entry ) {
+						JobConflict::raise( 'This job lists no private tables of a discarded binding.', [ 'code' => 'database_discarded_missing' ] );
+					}
+					$record                          = $job->data['database_discarded'];
+					$job->data['database_discarded'] = [
+						'done' => [
+							'at'   => $this->clock->now()[0],
+							'user' => $user,
+							'via'  => $via,
+						],
+					] + ( is_array( $record ) ? $record : [] );
+					$this->jobs->save( $job );
+					$this->jobs->log( $job )->write(
+						'info',
+						'The private tables of the discarded binding were marked as taken care of.',
+						[
+							'user' => $user,
+							'via'  => $via,
+						]
+					);
+					return $entry;
+				}
+			);
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
+		}
+	}
+
+	/**
+	 * The entry of a database apply in the list of discarded bindings: while it lists the tables
+	 * of its discarded binding (JobStore::discard_listed_until()), and if its record names the
+	 * database, the server and at least one table; an entry of the list that is no table name is
+	 * left out.
+	 *
+	 * @param Job $job Database apply.
+	 * @param int $now Unix time.
+	 * @return Discarded|null The entry, or null if the job lists no such tables now.
+	 */
+	private static function listed( Job $job, int $now ): ?array {
+		$until  = JobStore::discard_listed_until( $job );
+		$record = $job->data['database_discarded'] ?? null;
+		if ( null === $until || $until <= $now || ! is_array( $record ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
+			return null;
+		}
+		// A record that names no table leaves nothing to remove by hand and nothing to mark.
+		$tables = array_values( array_filter( $record['tables'], static fn ( mixed $name ): bool => is_string( $name ) && '' !== $name ) );
+		if ( [] === $tables ) {
+			return null;
+		}
+		return [
+			'job'      => $job->id,
+			'restore'  => self::text( $job, 'restore' ),
+			// The time that the record states: an end without a date is no time to count back from.
+			'at'       => Decoded::int( $record['at'] ),
+			'via'      => is_string( $record['via'] ?? null ) ? $record['via'] : '',
+			'database' => $record['database'],
+			'server'   => $record['server'],
+			'tables'   => $tables,
+			'until'    => $until,
+		];
+	}
+
+	/**
+	 * The finished database apply that holds a binding to another server or database, and the
+	 * review of its discard (discard_review()).
 	 *
 	 * @param string $apply Owning database apply.
-	 * @return array{Job,array{job:string,database:string,server:string,tables:list<string>}} The job and its binding.
-	 * @throws JobConflict If no finished job holds such a binding, or it belongs to this database.
-	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 * @param int    $user Confirming WordPress user.
+	 * @return array{Job,DiscardReview} The job and the review.
+	 * @throws JobConflict With the codes of discard_review().
+	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
+	 * @throws StorageFailed If the jobs in the private directory cannot be listed.
 	 */
-	private function foreign_owner( string $apply ): array {
+	private function discard_facts( string $apply, int $user ): array {
 		$owner = $this->jobs->get( $apply );
-		if ( null === $owner || JobType::DatabaseApply !== $owner->type || ! isset( $owner->data['database_owner'] ) ) {
+		if ( null === $owner && $this->jobs->has_document( $apply ) ) {
+			// With its code, job_unreadable or job_inaccessible, and the job's ID.
+			$this->jobs->refuse_unreadable( $apply );
+		}
+		if ( null === $owner || JobType::DatabaseApply !== $owner->type ) {
 			JobConflict::raise( 'This job holds no database restore binding.', [ 'code' => 'database_binding_missing' ] );
 		}
-		if ( ! $owner->state->is_terminal() ) {
-			JobConflict::raise( 'The database restore that holds this binding is still running.', [ 'code' => 'job_conflict' ] );
+		if ( ! isset( $owner->data['database_owner'] ) ) {
+			if ( isset( $owner->data['database_discarded'] ) ) {
+				JobConflict::raise( 'The binding of this database restore was discarded already.', [ 'code' => 'database_binding_discarded' ] );
+			}
+			JobConflict::raise( 'This job holds no database restore binding.', [ 'code' => 'database_binding_missing' ] );
 		}
-		$connection = ( $this->connection )();
+		// A stored job whose state cannot be established may be a queued undo of this binding,
+		// which the discard would take away: nothing is reviewed or discarded while there is one.
+		$active = $this->jobs->active_or_refuse();
+		if ( ! $owner->state->is_terminal() || ( JobType::DatabaseUndo === $active?->type && $apply === ( $active->data['apply'] ?? null ) ) ) {
+			JobConflict::raise( 'The database restore that holds this binding, or an undo of it, is still queued or running.', [ 'code' => 'database_binding_busy' ] );
+		}
+		try {
+			$connection = ( $this->connection )();
+			$facts      = ( new SwapCatalog( $connection ) )->facts();
+		} catch ( DatabaseFailed $error ) {
+			$this->discard_failed( $owner, $error );
+		}
 		try {
 			DatabaseGeneration::load( $connection, $owner );
 		} catch ( DatabaseFailed $error ) {
-			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
-				throw $error;
+			$code = $error->context()['code'] ?? null;
+			if ( 'database_exchange_foreign' === $code ) {
+				return [ $owner, $this->discard_summary( $owner, $user, $connection, $facts ) ];
 			}
-			return [ $owner, DatabaseGeneration::names( $connection, $owner ) ];
+			if ( 'database_binding_unreadable' === $code ) {
+				// The saved identity is gone: its tables may be on this server, so nothing is discarded.
+				JobConflict::raise( 'The record of the private tables of this database restore cannot be read.', [ 'code' => 'database_binding_unreadable' ] );
+			}
+			if ( null !== $code ) {
+				$this->discard_failed( $owner, $error );
+			}
+			if ( ! $facts['mariadb'] && 1 !== preg_match( DatabaseGeneration::UUID, $facts['uuid'] ) ) {
+				// Without a server UUID the connected server cannot be told apart from the original one.
+				JobConflict::raise( 'The connected database server does not report a server UUID.', [ 'code' => 'database_binding_unverified' ] );
+			}
+			// The recorded server answers, and the saved exchange plan contradicts the binding.
+			JobConflict::raise( 'The record of the private tables of this database restore cannot be read.', [ 'code' => 'database_binding_unreadable' ] );
+		} catch ( FormatException ) {
+			JobConflict::raise( 'The record of the private tables of this database restore cannot be read.', [ 'code' => 'database_binding_unreadable' ] );
 		}
 		JobConflict::raise( 'This binding belongs to the connected database. The heartbeat removes its private tables when they expire.', [ 'code' => 'database_binding_verified' ] );
+	}
+
+	/**
+	 * The review of a discard, with its digest.
+	 *
+	 * @param Job        $owner Owning database apply, whose binding the connected server disowns.
+	 * @param int        $user Confirming WordPress user.
+	 * @param Connection $connection Current SQL session; only names are derived from it.
+	 * @param Facts      $facts Identity of the connected server.
+	 * @return DiscardReview Review.
+	 * @throws JobConflict With the code database_binding_unreadable if the binding's record cannot be read.
+	 */
+	private function discard_summary( Job $owner, int $user, Connection $connection, array $facts ): array {
+		try {
+			$binding = DatabaseGeneration::names( $connection, $owner );
+		} catch ( FormatException ) {
+			JobConflict::raise( 'The record of the private tables of this database restore cannot be read.', [ 'code' => 'database_binding_unreadable' ] );
+		}
+		$retained = is_int( $owner->data['retained_until'] ?? null ) ? $owner->data['retained_until'] : null;
+		$review   = [
+			'job'            => $owner->id,
+			'restore'        => self::text( $owner, 'restore' ),
+			'database'       => $binding['database'],
+			'server'         => $binding['server'],
+			'connected'      => [
+				'database' => $facts['database'],
+				'server'   => $facts['uuid'],
+			],
+			'tables'         => $binding['tables'],
+			'generation'     => self::generation( $owner ),
+			'retained_until' => $retained,
+			// The undo that a discard ends for good: one that the site could still review once it
+			// uses the database that holds these tables again.
+			'undo_until'     => $this->eligible( $owner, $this->clock->now()[0] ) ? $retained : null,
+			'kept'           => self::DISCARD_KEPT,
+		];
+		return $review + [
+			'digest'     => DatabaseReview::digest( self::DISCARD_VERSION, [ 'discard', $user, $review ] ),
+			'applicable' => true,
+		];
+	}
+
+	/**
+	 * Refuses a review or a discard whose database server could not be asked, after writing what
+	 * the database raised to the log of the job that holds the binding: the discard has no job of
+	 * its own, and the administrator reads the error there.
+	 *
+	 * @param Job             $owner Owning database apply.
+	 * @param PluginException $error What the database raised.
+	 * @throws DatabaseFailed Always, with the code database_discard_failed.
+	 */
+	private function discard_failed( Job $owner, PluginException $error ): never {
+		$this->jobs->log( $owner )->write(
+			'error',
+			'The database server could not be asked whether it holds the private tables of this database restore, so their binding was not discarded.',
+			[
+				'code'  => 'database_discard_failed',
+				'cause' => $error->getMessage(),
+				'error' => $error->context()['code'] ?? null,
+			]
+		);
+		DatabaseFailed::raise( 'The database server could not be asked whether it holds the private tables of this database restore.', [ 'code' => 'database_discard_failed' ], $error );
+	}
+
+	/**
+	 * Which generation a database apply recorded as live: applied or undone, or none.
+	 *
+	 * @param Job $owner Database apply.
+	 * @return 'applied'|'undone'|null Generation.
+	 */
+	private static function generation( Job $owner ): ?string {
+		$generation = $owner->data['database_generation'] ?? null;
+		return 'applied' === $generation || 'undone' === $generation ? $generation : null;
+	}
+
+	/**
+	 * An optional text field of a job, empty if it has none.
+	 *
+	 * @param Job    $job Job.
+	 * @param string $name Field.
+	 * @return string Its value.
+	 */
+	private static function text( Job $job, string $name ): string {
+		$value = $job->data[ $name ] ?? null;
+		return is_string( $value ) ? $value : '';
+	}
+
+	/**
+	 * A name that another database or server chose, as a log line or a warning shows it: as it is
+	 * when every character prints, otherwise in double quotes with Go's escapes.
+	 *
+	 * @param string $name Name.
+	 * @return string What to show.
+	 */
+	private static function printable( string $name ): string {
+		$quoted = GoQuote::quote( $name );
+		return $quoted === $name ? $name : '"' . $quoted . '"';
 	}
 
 	/**
@@ -817,7 +1233,7 @@ final readonly class DatabaseChanges implements StepProvider {
 			return;
 		}
 		$owner->data['database_foreign'] = $this->clock->now()[0];
-		$owner->warn( sprintf( 'The private tables of this database restore are on another database server or in another database. Run "wp backups-for-restic database-discard %s" to see the database, the server UUID and the table names; confirming forgets the binding and drops nothing. Drop the tables by hand only where you can verify them.', $owner->id ) );
+		$owner->warn( sprintf( 'The private tables of this database restore are on another database server or in another database. Review the discard of its binding on the Restores tab, or run "wp backups-for-restic database-discard %s": both show the database, the server UUID and the table names, and confirming forgets the binding and drops nothing. Drop the tables by hand only where you can verify them.', $owner->id ) );
 		$this->jobs->save( $owner );
 		$this->jobs->log( $owner )->write( 'warning', 'The database restore binding belongs to another server or database.', [ 'code' => 'database_exchange_foreign' ] );
 	}

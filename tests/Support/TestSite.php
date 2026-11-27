@@ -725,4 +725,141 @@ final class TestSite {
 			[ self::PLUGIN, $active ? '1' : '0' ]
 		);
 	}
+
+	/**
+	 * Writes a finished database apply that holds a binding to private tables, as a database
+	 * restore leaves it: with `$foreign` the binding names another MySQL server than the site's,
+	 * as after a migration or a failover, otherwise the site's own server and database. The
+	 * review of a discard reads only this document and the server's identity, so no exchange
+	 * has to run on the test site.
+	 *
+	 * @param string              $id      Job ID.
+	 * @param bool                $foreign Whether the binding names another server.
+	 * @param array<string,mixed> $data    Job data that replaces the defaults, such as database_generation.
+	 * @param string              $state   State of the job: failed, succeeded, running or another.
+	 */
+	public static function database_binding( string $id, bool $foreign, array $data = [], string $state = 'failed' ): void {
+		self::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			global $wpdb;
+			$job              = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::DatabaseApply, "manual", time() - 120 );
+			$job->state       = BackupsForRestic\Jobs\JobState::from( $arguments[3] );
+			$job->finished_at = time() - 60;
+			$job->data        = array_replace(
+				[
+					"restore"        => "20261120T000000Z-0d0e01",
+					"user"           => 1,
+					"digest"         => str_repeat( "d", 64 ),
+					"database_owner" => [
+						"version"     => 1,
+						"prefix"      => $wpdb->prefix,
+						"fingerprint" => str_repeat( "f", 64 ),
+						"count"       => 2,
+						"token"       => str_repeat( "c", 32 ),
+						"database"    => $wpdb->get_var( "SELECT DATABASE()" ),
+						"uuid"        => "1" === $arguments[1] ? "7c4dd2a2-d1b4-11f1-9b6f-0242ac120002" : $wpdb->get_row( "SHOW VARIABLES LIKE \'server_uuid\'", ARRAY_N )[1],
+					],
+				],
+				json_decode( $arguments[2], true )
+			);
+			$container->jobs()->save( $job );
+			',
+			[ $id, $foreign ? '1' : '0', (string) json_encode( (object) $data ), $state ]
+		);
+	}
+
+	/**
+	 * Runs a WP-CLI command as wp() does, with what an administrator types as its standard input;
+	 * the input ends after it, as a closed terminal does.
+	 *
+	 * @param list<string> $arguments Command and arguments.
+	 * @param string       $input     Standard input.
+	 * @return array{int, string} Exit status and everything the command printed.
+	 */
+	public static function wp_input( array $arguments, string $input ): array {
+		$command = [ 'php', '-d', 'opcache.jit=disable', '-d', 'memory_limit=512M', self::wp_cli(), '--no-color', '--path=' . self::root(), ...$arguments ];
+		$process = proc_open(
+			$command,
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'redirect', 1 ],
+			],
+			$pipes
+		);
+		Assert::assertIsResource( $process );
+		fwrite( $pipes[0], $input );
+		fclose( $pipes[0] );
+		$output = (string) stream_get_contents( $pipes[1] );
+		fclose( $pipes[1] );
+		return [ proc_close( $process ), rtrim( $output, "\n" ) ];
+	}
+
+	/**
+	 * Runs a WP-CLI command as wp_input() does, but on a terminal of its own: script(1) gives it
+	 * a pseudo-terminal, which forwards what an administrator types and ends with the input.
+	 * The output has the terminal's line ends and the echo of the input.
+	 *
+	 * @param list<string> $arguments Command and arguments.
+	 * @param string       $input     What is typed.
+	 * @return array{int, string} Exit status and everything the command printed, with "\n" line ends.
+	 */
+	public static function wp_terminal( array $arguments, string $input ): array {
+		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( self::wp_cli() ) . ' --no-color --path=' . escapeshellarg( self::root() );
+		foreach ( $arguments as $argument ) {
+			$command .= ' ' . escapeshellarg( $argument );
+		}
+		$process = proc_open(
+			[ 'script', '--quiet', '--return', '--command', $command, '/dev/null' ],
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'redirect', 1 ],
+			],
+			$pipes
+		);
+		Assert::assertIsResource( $process );
+		fwrite( $pipes[0], $input );
+		fclose( $pipes[0] );
+		$output = (string) stream_get_contents( $pipes[1] );
+		fclose( $pipes[1] );
+		return [ proc_close( $process ), rtrim( str_replace( "\r\n", "\n", $output ), "\n" ) ];
+	}
+
+	/**
+	 * Runs work while a database whose name has a letter that is not ASCII exists beside the
+	 * site's own, as the review found it: a connection in latin1 to it reports the name as bytes
+	 * that are not UTF-8. Its WordPress tables are views of the site's own, so that WordPress
+	 * keeps working there, and the site's account may read and write them. The work gets the
+	 * name in UTF-8; the database is dropped afterwards. Needs BFR_TEST_MYSQL_* for an account
+	 * that may create databases and grant.
+	 *
+	 * @template T
+	 * @param \Closure(string): T $work Work.
+	 * @return T What the work returns.
+	 */
+	public static function in_latin1_database( \Closure $work ): mixed {
+		$admin = MysqliConnection::connect();
+		Assert::assertNotNull( $admin, 'This test needs BFR_TEST_MYSQL_* for an account that may create databases.' );
+		$account = MysqliConnection::environment( 'BFR_DB_USER', 'bfr_site' );
+		$site    = MysqliConnection::environment( 'BFR_DB_NAME', 'bfr_site' );
+		$name    = $site . '_möbel';
+		$admin->execute( 'CREATE DATABASE IF NOT EXISTS `' . $name . '`' );
+		try {
+			foreach ( $admin->rows( "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '" . $admin->mysqli->real_escape_string( $site ) . "' AND TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME LIKE 'wp\\_%'" ) as $row ) {
+				$admin->execute( 'CREATE VIEW `' . $name . '`.`' . $row['TABLE_NAME'] . '` AS SELECT * FROM `' . $site . '`.`' . $row['TABLE_NAME'] . '`' );
+			}
+			foreach ( [ 'localhost', '%' ] as $host ) {
+				$admin->execute( 'GRANT SELECT, INSERT, UPDATE, DELETE ON `' . $name . "`.* TO '" . $account . "'@'" . $host . "'" );
+			}
+			return $work( $name );
+		} finally {
+			foreach ( [ 'localhost', '%' ] as $host ) {
+				$admin->mysqli->query( 'REVOKE ALL PRIVILEGES ON `' . $name . "`.* FROM '" . $account . "'@'" . $host . "'" );
+			}
+			$admin->execute( 'DROP DATABASE IF EXISTS `' . $name . '`' );
+		}
+	}
 }

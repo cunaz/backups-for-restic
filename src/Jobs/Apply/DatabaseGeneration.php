@@ -22,13 +22,17 @@ use BackupsForRestic\Jobs\JobType;
 
 defined( 'ABSPATH' ) || exit;
 
-/** A validated operation belongs to a single MySQL server, schema and random namespace. */
+/**
+ * A validated operation belongs to a single MySQL server, schema and random namespace.
+ *
+ * @phpstan-import-type Facts from SwapCatalog
+ */
 final readonly class DatabaseGeneration {
 
 	public const int WINDOW = 86400;
 
 	/** A MySQL server UUID as SHOW VARIABLES reports it. */
-	private const string UUID = '/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/';
+	public const string UUID = '/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/';
 
 	/**
 	 * Keeps the validated durable ownership binding.
@@ -46,27 +50,121 @@ final readonly class DatabaseGeneration {
 	 * failover to an identically named empty database cannot complete cleanup by mistake.
 	 * A server that names itself differently, a MariaDB server or another database is
 	 * reported with the code database_exchange_foreign; a server without a readable UUID
-	 * cannot be told apart and is reported without it.
+	 * cannot be told apart and is reported without it. A binding whose saved identity is
+	 * missing or malformed, whose token or fingerprint cannot name its tables, or whose saved
+	 * exchange plan names another database, server or number of tables than the binding does,
+	 * is reported with the code database_binding_unreadable, before the server is asked:
+	 * nothing can tell where its tables are (readable()). Before, the plan was compared with
+	 * the connected server, and only for a binding of that server: one whose owner named
+	 * another database than its plan counted as another database's where the plan's was
+	 * connected, and its discard would have forgotten both.
 	 *
 	 * @param Connection $connection Current SQL connection.
 	 * @param Job        $job Owning apply.
 	 * @return self Validated ownership binding.
 	 * @throws FormatException If the filesystem document is corrupted.
-	 * @throws DatabaseFailed If this is a different server, database or object map.
+	 * @throws DatabaseFailed If this is a different server or database, or the record contradicts itself.
 	 */
 	public static function load( Connection $connection, Job $job ): self {
-		$data  = self::binding( $job );
+		$data = self::binding( $job );
+		if ( ! self::readable( $job ) ) {
+			DatabaseFailed::raise( 'The record of the database restore does not say where its private tables are: the identity of their server and database or their names are lost, or its saved exchange plan names another database, server or number of tables.', [ 'code' => 'database_binding_unreadable' ] );
+		}
 		$facts = ( new SwapCatalog( $connection ) )->facts();
-		if ( $facts['mariadb'] || '' === $facts['uuid'] || $facts['uuid'] !== ( $data['uuid'] ?? null ) || $facts['database'] !== ( $data['database'] ?? null ) ) {
-			$foreign = $facts['mariadb'] || $facts['database'] !== ( $data['database'] ?? null ) || ( 1 === preg_match( self::UUID, $facts['uuid'] ) && $facts['uuid'] !== ( $data['uuid'] ?? null ) );
-			DatabaseFailed::raise( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.', $foreign ? [ 'code' => 'database_exchange_foreign' ] : [] );
+		$place = self::place( $facts, $job );
+		if ( 'here' !== $place ) {
+			DatabaseFailed::raise( 'The database restore belongs to another server or database. Reconnect its original database to recover its private tables.', 'foreign' === $place ? [ 'code' => 'database_exchange_foreign' ] : [] );
 		}
 		$owned = new OwnedTables( $connection, $data['prefix'], $data['fingerprint'], $data['token'] );
-		$plan  = isset( $job->data['exchange_plan'] ) ? ExchangePlan::load( $job->data['exchange_plan'], $owned, $data['prefix'] ) : null;
-		if ( null !== $plan && ( count( $plan->document['pairs'] ) !== $data['count'] || $plan->document['database'] !== $facts['database'] || $plan->document['uuid'] !== $facts['uuid'] ) ) {
-			throw new DatabaseFailed( 'The saved physical exchange plan has a conflicting ownership binding.' );
+		// A plan that is there names this server, this database and the binding's count (planned()).
+		return new self( $owned, $data['count'], $data['prefix'], isset( $job->data['exchange_plan'] ) ? ExchangePlan::load( $job->data['exchange_plan'], $owned, $data['prefix'] ) : null );
+	}
+
+	/**
+	 * Where the private tables of a binding are, by the identity of the connected server, as
+	 * load() decides it: on this server and in this database (`here`); positively elsewhere
+	 * (`foreign`: a MariaDB server, another database name, or another valid server UUID); or
+	 * not to be told (`unknown`: a server without a readable UUID cannot be told apart from the
+	 * original one, and a binding whose saved identity is missing or malformed names no server
+	 * to tell this one apart from). Nothing is asked of the database: one identity serves every
+	 * binding.
+	 *
+	 * @param Facts $facts Identity of the connected server (SwapCatalog::facts()).
+	 * @param Job   $job Owning apply.
+	 * @return 'here'|'foreign'|'unknown' Place.
+	 * @throws FormatException If the filesystem document is corrupted.
+	 */
+	public static function place( array $facts, Job $job ): string {
+		$saved = self::identity( self::binding( $job ) );
+		if ( null === $saved ) {
+			return 'unknown';
 		}
-		return new self( $owned, $data['count'], $data['prefix'], $plan );
+		if ( ! $facts['mariadb'] && $facts['uuid'] === $saved['uuid'] && $facts['database'] === $saved['database'] ) {
+			return 'here';
+		}
+		// Not here: in the same database of a MySQL server, only another valid server UUID is a fact.
+		return $facts['mariadb'] || $facts['database'] !== $saved['database'] || 1 === preg_match( self::UUID, $facts['uuid'] ) ? 'foreign' : 'unknown';
+	}
+
+	/**
+	 * Whether the record of a binding can be read as the plugin saves it: its fields, the
+	 * identity of the server and the database that held its private tables when it was made, a
+	 * server UUID and a database name, the token and fingerprint that name those tables, and a
+	 * saved exchange plan, if there is one, that names the same database, server and number of
+	 * tables (planned()). Where it cannot, it was changed outside the plugin, and where its
+	 * tables are cannot be told: load() refuses it with database_binding_unreadable, and place()
+	 * calls one without its identity unknown.
+	 *
+	 * @param Job $job Owning apply.
+	 * @return bool Whether the record can be read.
+	 */
+	public static function readable( Job $job ): bool {
+		try {
+			$data = self::binding( $job );
+		} catch ( FormatException ) {
+			return false;
+		}
+		$saved = self::identity( $data );
+		return null !== $saved && OwnedTables::valid( $data['fingerprint'], $data['token'] ) && self::planned( $job, $saved, $data['count'] );
+	}
+
+	/**
+	 * Whether the saved exchange plan of a binding, if there is one, names the database, the
+	 * server and as many tables as the binding does. The plugin saves a plan only for a binding
+	 * that load() accepted, with the identity of the server that it asked then. A plan that
+	 * names another place was changed outside the plugin, and so was a binding beside it:
+	 * neither says where the private tables are. Whether the plan is valid in everything else
+	 * is for ExchangePlan::load(), where it is used.
+	 *
+	 * @param Job                                $job Owning apply.
+	 * @param array{database:string,uuid:string} $saved Saved identity of the binding (identity()).
+	 * @param int                                $count Saved number of tables of the binding.
+	 * @return bool Whether there is no plan, or one that agrees with the binding.
+	 */
+	private static function planned( Job $job, array $saved, int $count ): bool {
+		if ( ! isset( $job->data['exchange_plan'] ) ) {
+			return true;
+		}
+		$plan = $job->data['exchange_plan'];
+		return is_array( $plan ) && $saved['database'] === ( $plan['database'] ?? null ) && $saved['uuid'] === ( $plan['uuid'] ?? null ) && is_array( $plan['pairs'] ?? null ) && count( $plan['pairs'] ) === $count;
+	}
+
+	/**
+	 * The saved identity of a binding, or null where it is missing or malformed.
+	 *
+	 * @param array<string,mixed> $data Saved binding (binding()).
+	 * @return array{database:string,uuid:string}|null Database name and server UUID.
+	 */
+	private static function identity( array $data ): ?array {
+		$database = $data['database'] ?? null;
+		$uuid     = $data['uuid'] ?? null;
+		if ( ! is_string( $database ) || '' === $database || ! is_string( $uuid ) || 1 !== preg_match( self::UUID, $uuid ) ) {
+			return null;
+		}
+		return [
+			'database' => $database,
+			'uuid'     => $uuid,
+		];
 	}
 
 	/**
@@ -288,7 +386,8 @@ final readonly class DatabaseGeneration {
 			return;
 		}
 		$job->data['database_rebuilt'] = [ ...$known, ...$new ];
-		$job->warn( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $new ), implode( ', ', $new ) ) );
+		// What is left to do by hand: the limit of a job's warnings must not drop it.
+		$job->warn_kept( sprintf( '%1$d private tables of this database restore were rebuilt after the exchange, for example by OPTIMIZE TABLE, and have new physical identities. They cannot be proven to be its copies and are kept; check them and drop them by hand: %2$s', count( $new ), implode( ', ', $new ) ) );
 		$jobs->log( $job )->write( 'warning', 'Rebuilt private tables were kept.', [ 'code' => 'database_exchange_rebuilt' ] );
 	}
 
@@ -296,7 +395,8 @@ final readonly class DatabaseGeneration {
 	 * Excludes verified private generations from all-tables SQL dumps. If a DBA has
 	 * replaced a generated name with their own table, that replacement stays in the backup.
 	 * A binding of another server or database proves nothing about the tables here, even
-	 * if a migration copied tables with these names: they all stay in the backup.
+	 * if a migration copied tables with these names, and neither does one whose saved identity
+	 * is missing or malformed: they all stay in the backup.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param Job        $job Owning job.
@@ -307,7 +407,8 @@ final readonly class DatabaseGeneration {
 		try {
 			$binding = self::load( $connection, $job );
 		} catch ( DatabaseFailed $error ) {
-			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+			// Neither a binding of another server or database nor one whose saved identity is gone.
+			if ( ! in_array( $error->context()['code'] ?? null, [ 'database_exchange_foreign', 'database_binding_unreadable' ], true ) ) {
 				throw $error;
 			}
 			return [];

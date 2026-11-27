@@ -39,6 +39,27 @@ final class CliTest extends TestCase {
 	}
 
 	/**
+	 * Runs a command of the plugin again while another request holds the runner lock, at most 40
+	 * times with a quarter of a second between them. An earlier command or request of the test
+	 * can start WP-Cron, whose heartbeat holds that lock for a moment; the discard of a binding
+	 * and the marking of its tables as taken care of then refuse before they look at the job,
+	 * and change nothing. The test checks the first other answer; the busy answer itself is
+	 * checked with a lock that the test holds.
+	 *
+	 * @param list<string> $arguments Subcommand and options.
+	 * @return array{int, string} Exit status and output of the first run that the lock did not refuse, or of the last one.
+	 */
+	private static function unless_busy( array $arguments ): array {
+		for ( $attempt = 1; ; ++$attempt ) {
+			$answer = self::command( $arguments );
+			if ( ! str_contains( $answer[1], 'Error: Another request is working on the jobs of the plugin right now' ) || $attempt >= 40 ) {
+				return $answer;
+			}
+			usleep( 250000 );
+		}
+	}
+
+	/**
 	 * The ID of the job that a command said it created.
 	 */
 	private static function created( string $output ): string {
@@ -680,5 +701,169 @@ final class CliTest extends TestCase {
 		self::assertStringContainsString( 'The restore stopped and kept no files.', (string) ( $job['error']['hint'] ?? '' ) );
 		self::assertDirectoryDoesNotExist( TestSite::private_dir() . '/restores/' . $id );
 		self::assertSame( '', trim( TestSite::restic()->must( [ 'list', 'locks', '--no-lock' ] ) ) );
+	}
+
+	public function test_database_discard_prints_its_review_and_needs_the_typed_site_address(): void {
+		$jobs     = [ '20261126T130000Z-0d1600', '20261126T130000Z-0d1601', '20261126T130000Z-0d1602' ];
+		$here     = '20261126T130000Z-0d1603';
+		$other    = '--digest=' . str_repeat( 'e', 64 );
+		$terminal = static fn ( string $job, string $input ): array => TestSite::wp_terminal( [ 'backups-for-restic', 'database-discard', $job ], $input );
+		$kept     = static function ( string $job ): void {
+			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [], 'Nothing was discarded.' );
+		};
+		foreach ( $jobs as $job ) {
+			TestSite::database_binding( $job, true );
+		}
+		TestSite::database_binding( $here, false );
+		try {
+			// A script of the earlier form gets an error, not a discard.
+			[ $status, $output ] = self::command( [ 'database-discard', $jobs[0], '--yes' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: database-discard no longer takes --yes, and nothing was discarded.', $output );
+			$kept( $jobs[0] );
+			// Without a terminal to ask, it prints the review and its digest, and discards nothing.
+			[ $status, $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $jobs[0] ], TestSite::url() . "\n" );
+			self::assertSame( 1, $status, $output );
+			foreach ( [ 'Its private tables are in the database ', ' on the server 7c4dd2a2-d1b4-11f1-9b6f-0242ac120002.', '  _bfr_r_' . str_repeat( 'c', 32 ) . '_b1', 'What stays:', '  The database that this site uses now: the discard changes none of its tables.', 'This database restore recorded no completed exchange.' ] as $part ) {
+				self::assertStringContainsString( $part, $output );
+			}
+			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $printed ), $output );
+			self::assertStringContainsString( 'Error: There is no terminal to ask for the site address, so nothing was discarded.', $output );
+			self::assertStringNotContainsString( 'Type the site address', $output );
+			$kept( $jobs[0] );
+			// On a terminal, an empty answer and the answer to the prompt of the earlier form are no site address.
+			foreach ( [ "\n", "y\n" ] as $answer ) {
+				[ $status, $output ] = $terminal( $jobs[0], $answer );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( 'Type the site address, ' . TestSite::url() . ', to discard this binding, or press Enter to keep it:', $output );
+				self::assertStringContainsString( 'Error: The typed address is not the site address, ' . TestSite::url() . '. Nothing was discarded.', $output );
+				$kept( $jobs[0] );
+			}
+			// A script names both the address and a digest. Before, a digest variable that came out
+			// empty, or --site-url alone, confirmed the review of the same run without a prompt.
+			foreach ( [
+				[ [ '--site-url=' . TestSite::url(), '--digest' ], 'Error: --digest needs the digest that an earlier run of this command printed' ],
+				[ [ '--site-url=' . TestSite::url(), '--digest=' ], 'Error: --digest needs the digest that an earlier run of this command printed' ],
+				[ [ '--site-url=' . TestSite::url(), '--digest=' . strtoupper( $printed[1] ) ], 'Error: --digest needs the digest that an earlier run of this command printed' ],
+				[ [ '--site-url=' . TestSite::url() ], 'Error: --site-url needs --digest with the digest that an earlier run of this command printed' ],
+				[ [ '--site-url', '--digest=' . $printed[1] ], 'Error: The typed address is not the site address, ' . TestSite::url() . '. Nothing was discarded.' ],
+				[ [ '--site-url=' . TestSite::url(), $other ], 'Error: The binding of this database restore is no longer as its review showed it, so it was not discarded.' ],
+			] as [ $options, $error ] ) {
+				[ $status, $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $jobs[0], ...$options ], TestSite::url() . "\n" );
+				self::assertSame( 1, $status, implode( ' ', $options ) . ': ' . $output );
+				self::assertStringContainsString( $error, $output, implode( ' ', $options ) );
+				self::assertStringNotContainsString( 'Success', $output );
+				$kept( $jobs[0] );
+			}
+			// Typed on a terminal, by the shell operator without a WordPress user.
+			[ $status, $output ] = $terminal( $jobs[0], TestSite::url() . "\n" );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Success: The binding was discarded and nothing was dropped. Remove those of the 7 tables listed above that exist in the database ', $output );
+			$recorded = TestSite::job_document( $jobs[0] )['data']['database_discarded'] ?? [];
+			self::assertSame( [ 0, 'wp-cli' ], [ $recorded['user'] ?? null, $recorded['via'] ?? null ] );
+			// A script names the address and the digest of a review that it was shown before.
+			[ , $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $jobs[1] ], '' );
+			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $digest ), $output );
+			[ $status, $output ] = self::unless_busy( [ 'database-discard', $jobs[1], '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
+			self::assertSame( 0, $status, $output );
+			self::assertArrayNotHasKey( 'database_owner', TestSite::job_document( $jobs[1] )['data'] ?? [ 'database_owner' => true ] );
+			// What cannot be discarded says what is the case.
+			[ $status, $output ] = self::command( [ 'database-discard', $jobs[0], '--site-url=' . TestSite::url(), $other ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The binding of this database restore was discarded already.', $output );
+			[ $status, $output ] = self::command( [ 'database-discard', $here, '--site-url=' . TestSite::url(), $other ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The private tables of this database restore are in the connected database, so its binding is not discarded.', $output );
+			$kept( $here );
+			// A selected WordPress user who may not change the database.
+			TestSite::user( 'bfr-cli-editor', 'editor' );
+			[ $status, $output ] = self::command( [ 'database-discard', $jobs[2], '--site-url=' . TestSite::url(), $other, '--user=bfr-cli-editor' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The selected WordPress user may not change the database of this site.', $output );
+			$kept( $jobs[2] );
+		} finally {
+			foreach ( [ ...$jobs, $here ] as $job ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+			}
+			TestSite::wp( [ 'user', 'delete', 'bfr-cli-editor', '--yes' ] );
+		}
+	}
+
+	public function test_database_discarded_lists_the_tables_of_a_discarded_binding_until_they_are_taken_care_of(): void {
+		$job = '20261126T130000Z-0d1604';
+		TestSite::database_binding( $job, true );
+		try {
+			[ $status, $output ] = self::command( [ 'database-discarded' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringNotContainsString( $job, $output );
+			[ , $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $job ], '' );
+			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $digest ), $output );
+			[ $status, $output ] = self::unless_busy( [ 'database-discard', $job, '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( '"wp backups-for-restic database-discarded" lists them.', $output );
+			// Before, the warnings of the job were the only place of the names, and the job history pruned the job.
+			foreach ( [ [ 'database-discarded' ], [ 'database-discarded', $job ] ] as $arguments ) {
+				[ $status, $output ] = self::command( $arguments );
+				self::assertSame( 0, $status, $output );
+				foreach ( [ 'Database restore ' . $job . ', discarded on ', ' on the server 7c4dd2a2-d1b4-11f1-9b6f-0242ac120002 (listed until ', '  _bfr_r_' . str_repeat( 'c', 32 ) . '_b1' ] as $part ) {
+					self::assertStringContainsString( $part, $output );
+				}
+			}
+			[ $status, $output ] = self::command( [ 'database-discarded', '--done' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: --done needs the ID of the database apply job whose tables are taken care of. Nothing was changed.', $output );
+			TestSite::user( 'bfr-cli-editor', 'editor' );
+			[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done', '--user=bfr-cli-editor' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'Error: The selected WordPress user may not change the database of this site.', $output );
+			// Another request holds the runner lock, as the pruning of the job history does.
+			$lock = fopen( TestSite::private_dir() . '/runner.lock', 'c' );
+			self::assertIsResource( $lock );
+			self::assertTrue( flock( $lock, LOCK_EX ) );
+			try {
+				[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done' ] );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( 'Error: Another request is working on the jobs of the plugin right now, so the tables were not marked as taken care of.', $output );
+				self::assertArrayNotHasKey( 'done', TestSite::job_document( $job )['data']['database_discarded'] ?? [] );
+			} finally {
+				flock( $lock, LOCK_UN );
+				fclose( $lock );
+			}
+			// Once the test lets go of the lock, a heartbeat may hold it for a moment.
+			[ $status, $output ] = self::unless_busy( [ 'database-discarded', $job, '--done' ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'Success: The 7 private tables of the discarded binding of ' . $job . ' are no longer listed.', $output );
+			self::assertSame( [ 0, 'wp-cli' ], [ TestSite::job_document( $job )['data']['database_discarded']['done']['user'] ?? null, TestSite::job_document( $job )['data']['database_discarded']['done']['via'] ?? null ] );
+			foreach ( [ [ 'database-discarded', $job ], [ 'database-discarded', $job, '--done' ] ] as $arguments ) {
+				[ $status, $output ] = self::unless_busy( $arguments );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( 'Error: This database restore lists no private tables of a discarded binding.', $output );
+			}
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+			TestSite::wp( [ 'user', 'delete', 'bfr-cli-editor', '--yes' ] );
+		}
+	}
+
+	public function test_database_discard_prints_a_database_name_that_is_not_utf8_with_go_escapes(): void {
+		$job = '20261126T130000Z-0d1605';
+		TestSite::database_binding( $job, true );
+		try {
+			// After WordPress loaded, the command's connection uses latin1 on a database whose name is not ASCII.
+			[ $status, $output, $name ] = TestSite::in_latin1_database(
+				static fn ( string $name ): array => [
+					...TestSite::wp_input( [ '--exec=WP_CLI::add_hook( "after_wp_load", static function (): void { global $wpdb; $wpdb->dbh->set_charset( "latin1" ); $wpdb->dbh->select_db( mb_convert_encoding( ' . var_export( $name, true ) . ', "ISO-8859-1", "UTF-8" ) ); } );', 'backups-for-restic', 'database-discard', $job ], '' ),
+					$name,
+				]
+			);
+			self::assertSame( 1, $status, $output );
+			// Before, the review ended in a JsonException. The name is printed with Go's escapes, as names in snapshots are.
+			self::assertStringContainsString( 'This site uses the database "' . str_replace( 'ö', '\xf6', $name ) . '" on the server ', $output );
+			self::assertSame( 1, preg_match( '/^Digest of this review: [0-9a-f]{64}$/m', $output ), $output );
+			self::assertStringContainsString( 'Error: There is no terminal to ask for the site address, so nothing was discarded.', $output );
+			self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [] );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+		}
 	}
 }
