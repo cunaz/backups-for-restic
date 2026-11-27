@@ -111,12 +111,14 @@ ends the same way.
 - Restore and check read stored blobs beside the index within the same budget
   (2026-11-26, ADR 0036): `MemoryBudget::range()` says what reading a range of blobs takes,
   from three copies of the response while it arrives and what opening each blob takes, and
-  `MemoryBudget::blob_room()` what the limit leaves beside the reserved memory, less 2 MiB. A
-  range ends before a blob that would not fit; a restore whose next blob does not fit by
-  itself is refused with `restore_blob_memory`, and a check reports such a pack as the
-  warning `pack_memory`. A full chunk takes about 24 MiB, 26.2 MiB counted as PHP reserves
-  each copy, in whole pages and blocks (ADR 0036), and the budget for the index leaves at
-  least 32 MiB.
+  `MemoryBudget::measure()` what the limit leaves beside the reserved memory. Each copy
+  counts as what PHP reserves for it and no more (2026-11-27): memory of its own in whole
+  pages of the system for a string larger than a block, a share of a new block for a smaller
+  one, or none where PHP finds free pages for it in the blocks it holds. A range ends before
+  a blob that would not fit; a restore whose next blob does not fit by itself is refused with
+  `restore_blob_memory`, and a check reads such a blob's pack for its hash and header but
+  does not open the blob (`pack_memory`). A full chunk takes 24.0 MiB so counted (ADR 0036),
+  and the budget for the index leaves at least 32 MiB.
 - The cache file has a new layout. A cache of the old layout is not recognised and is built
   again, once.
 - Prune and check now examine and rewrite index files pack by pack. Per-file summaries are

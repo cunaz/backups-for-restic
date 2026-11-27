@@ -36,10 +36,18 @@ a state every restic tool understands.
   pieces of 8 MiB that never split a blob, so memory stays bounded by the piece and the
   largest blob, not by the pack size (restic allows packs of up to 128 MiB). Since 2026-11 a
   piece is also no larger than the job's memory budget can take, as a restore's group
-  (ADR 0036): the piece is let go when its last blob to be opened is taken out of it, and a
-  pack with a blob that does not fit by itself becomes the warning `pack_memory` before
-  any of it is downloaded. A blob that cannot be decoded in the memory left once it is
-  downloaded makes its pack the same warning, not `blob_corrupt`, and an index file, a
+  (ADR 0036): the piece is let go when its last blob to be opened is taken out of it. Memory
+  keeps a blob from being opened, never the pack from being read (2026-11-27): after the
+  length of the header and the header, every byte of the pack is read, in pieces that are
+  halved while they do not fit, down to 64 KiB, and the hash and the header are compared
+  whatever memory is left. Damage is reported as before. A blob that does not fit, or that
+  cannot be decoded in the memory left, is hashed but not opened; a pack whose name and
+  header are right then reports the warning `pack_memory`, which says how many of its blobs
+  were not verified (they may still be damaged), not `blob_corrupt`. A pack of which not
+  even the smallest piece fits is the warning `pack_unread`, beside the damage that its
+  header and the blobs read before showed. Until 2026-11-27 a pack with a blob, or a rest
+  after its blobs, that did not fit became `pack_memory` before it was read, so a pack whose
+  header damage made the rest larger could come out as that warning. An index file, a
   snapshot or a tree that cannot be decoded in the memory left stops the check with
   `decompression_limit` (2026-11-26). Beside 94 MiB in use, the check before ended with
   PHP's fatal error on a pack of full chunks in format 2. PHP cannot carry a SHA-256 state

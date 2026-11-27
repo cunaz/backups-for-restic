@@ -163,42 +163,115 @@ Final-head CI remains the merge gate.
   copies that exist at once, measured on PHP 8.3.37 in 2026-11 and the same in a census of
   every step:
   - while the response arrives, three times the group: WordPress' HTTP API keeps the body it
-    collects, the raw response with the headers in front, and the body cut out of that
-    (3.0 times the body with cURL and with fsockopen; `MemoryBudget::RESPONSE_COPIES`), with
-    up to 16 KiB of status line and headers;
+    collects, the raw response with the status line and headers in front, and the body cut
+    out of that (3.0 times the body with cURL and with fsockopen;
+    `MemoryBudget::RESPONSE_COPIES`);
   - then, for each blob but the last, the group beside what opening the blob takes: three
     copies of its stored length while it is decrypted (the slice, the ciphertext without
-    nonce and tag, the plaintext), and for a compressed blob the decrypted frame and twice
-    its content while it is decoded. `PackReader::open_blob()` lets the slice go before the
-    frame is decoded (`MemoryBudget::opening()`);
+    nonce and tag, the plaintext), and for a compressed blob the decrypted frame and what the
+    decoder requires while it is decoded. `PackReader::open_blob()` lets the slice go before
+    the frame is decoded (`MemoryBudget::opening()`);
   - the last blob alone: it takes the group with it (`MemoryBudget::slice()`).
 
-  Since 2026-11-26 each copy counts as what PHP reserves for it at most
-  (`MemoryBudget::footprint()`), not by its length: a string smaller than 2 MiB less 4 KiB
-  goes into one of PHP's blocks of 2 MiB, which in a process whose blocks are full or cut
-  up is a new one; a larger string gets memory of its own in whole pages of the system, of
-  which the budget assumes the largest, 64 KiB (on Windows PHP rounds to 2 MiB). Each step
-  also counts one block, for the small allocations of the read, or for the empty block that
-  PHP keeps for reuse once a request let go of many small strings and that a string with
-  memory of its own cannot use. So counted, a full chunk stored uncompressed takes
-  26.2 MiB, three times 129 pages and a block, and a full chunk that restic stored
-  compressed in 2.5 MiB takes 20.7 MiB, most of it for twice its content
-  (`MemoryBudgetTest`).
+  Each copy counts as what PHP reserves for it, and no more (`MemoryBudget::reserves()`,
+  since 2026-11-27; the margins of the day before refused restores that fit, see below). A
+  string of more than 2 MiB less 4 KiB gets memory of its own: its length and header,
+  rounded up to the page that the system gives PHP (4 KiB on x86-64 Linux, 16 or 64 KiB on
+  some arm64 and ppc64 kernels; read with `posix_sysconf()`, or measured once without the
+  POSIX extension; PHP on Windows rounds to 2 MiB). The smaller strings of a step go into
+  new blocks of 2 MiB, in the order they are made and together where they fit into the 511
+  pages of one: the three copies of a response of 40 KiB take one block. Where PHP has free
+  pages in the blocks it holds, the smaller strings take nothing more; PHP does not report
+  its free pages, though (the gap between the memory reserved and the memory in use is
+  mostly free slots of small allocations, not free pages). So when what
+  the new blocks would take does not fit, and at least a block is left, PHP is asked: the
+  strings are made and let go again (`MemoryBudget::placed()`), which takes at most one new
+  block. A compressed blob needs what the decoder requires free beside the memory in use
+  before it decodes: twice the declared content, or four times the window of 1 KiB with
+  which restic writes content below 256 bytes, and the 2 MiB that the decoder keeps free
+  (`MemoryBudget::decoding()`). The raw copy of a response counts one page for the status
+  line and headers (`MemoryBudget::RESPONSE_HEAD`), what a head of up to 4 KiB adds at most.
+
+  Nothing else is counted: no reserve beside the read, no block per step, and no pages for
+  the small allocations of a step, such as the headers of a response or the nonce and tag of
+  a blob. Each counted term has a memory test that fails without it, at the boundary of the
+  budget (`ReadMemoryTest`, `tests/Fixtures/memory/boundary.php`): with two copies of a
+  response instead of three, a group of exactly 16 MiB read through WordPress' copies, from
+  a pack with bytes after it, runs into PHP's limit, and so does, without the page for the
+  head, a group whose raw copy takes a page more than its body; with the smaller strings
+  counted by their length, a blob of 1.1 MiB in blocks cut up by strings of 1 MiB is refused
+  once it has arrived; without the decoder's 2 MiB, the decoder refuses what the budget let
+  through. No memory test needs pages for the small allocations of a step: with none kept
+  free, every boundary case that reads with 16 pages kept free in each new block reads as
+  well, in every state of the allocator that the tests produce (quiet, small strings made
+  and let go while the response arrives, blocks cut up), so none are counted. So counted, a
+  full chunk stored uncompressed takes 24.0 MiB, two copies of 2,049 pages and the raw copy
+  of 2,050, and a full chunk that restic stored compressed in 2.5 MiB takes 20.5 MiB, most
+  of it for twice its content (`MemoryBudgetTest`).
 
   The plaintext of a blob is handed to the writer, which keeps no reference to it, and is
-  let go before the next blob is opened. Until 2026-11 a generator yielded it, and its
-  value and the caller's loop variable kept it while the next blob was decoded: one more
-  chunk of up to 8 MiB at the peak. Before each download the run asks the budget what the
-  memory left can take (`MemoryBudget::blob_room()`): the limit less the memory reserved
-  and 2 MiB. The group ends before a blob that would not fit (`MemoryBudget::range()`),
-  down to one blob; a first blob that does not fit by itself is refused before anything is
-  downloaded, with `IndexTooLarge` and the code `restore_blob_memory`. A full chunk takes
-  about 24 MiB, three times its size, both while it arrives and while it is opened, and
-  26.2 MiB as the budget counts it. The index budget leaves at least 32 MiB once the index
-  has loaded, so the refusal comes only when other memory was taken after that. A restore
-  with memory enough sends the requests it sent before: beside WordPress and an index of
-  500,000 blobs every group is as large as before (`ReadMemoryTest`). The staged files are
-  the same byte for byte.
+  let go before the next blob is opened. Until 2026-11 a generator yielded it, and its value
+  and the caller's loop variable kept it while the next blob was decoded: one more chunk of
+  up to 8 MiB at the peak. Before each download the run measures what the limit leaves
+  beside the reserved memory (`MemoryBudget::measure()`). The group ends before a blob that
+  would not fit (`MemoryBudget::range()`), down to one blob; a first blob that does not fit
+  by itself is refused before any of it is downloaded, with `IndexTooLarge` and the code
+  `restore_blob_memory`. Only when a group would be cut or refused does PHP first give back
+  the pages that freed strings keep for reuse (`gc_mem_caches()`), as it does itself before
+  it refuses an allocation: that call walks every free slot of the heap and took up to 5 ms
+  in a heap that many small strings had cut up; on 2026-11-26 it ran for every compressed
+  blob and every group. `PackReader::open_blob()` asks for it only when the decoder would
+  otherwise find too little memory free. In a heap of 64 MiB that 88,000 freed small strings
+  had cut up, a restore of small files took 1.06 to 1.52 ms per blob and a check 0.13 to
+  0.67 ms, as with 198645a (1.06 to 1.58 and 0.13 to 0.67 ms; on 2026-11-26: 4.72 to 7.67
+  and 1.26 to 3.85 ms), with the review's benchmark (`bench_read.php`) on a quiet machine.
+
+  Once the group has arrived, the run looks whether other code kept memory while the
+  response arrived, as a plugin that keeps the HTTP API's answers would. When PHP has
+  reserved no more than the group takes and holds in use no more than the group, nothing
+  else was kept, and the blobs are opened as planned (`MemoryBudget::arrived_alone()`).
+  Otherwise the run measures again before each blob is opened, with the group counted as
+  held and as given back by the last blob (`MemoryBudget::rest()`), and refuses a blob whose
+  opening no longer fits with `restore_blob_memory`, after the group was downloaded, instead
+  of running into PHP's limit. Measuring again when nothing else was kept would refuse what
+  fits: with less than a block left PHP is not asked, and the copies of a small blob would
+  count a new block although they find room in the block that the group took. What cannot be
+  caught is memory that other code takes while the response itself arrives, before the run
+  can measure again: when that leaves less than the last copy of the response needs, PHP
+  ends the request with its fatal error, for an uncompressed part as for a compressed one.
+  The decoder still measures before it decodes, and a refusal by it is `restore_blob_memory`
+  as well: for a frame without a declared size whose window takes more than its content,
+  which restic writes only below 256 bytes, with a window of 1 KiB. The index budget leaves
+  at least 32 MiB once the index has loaded, more than a full chunk takes, so a refusal
+  comes only when other memory was taken after that. A restore with memory enough sends the
+  requests it sent before: beside WordPress and an index of 500,000 blobs every group is as
+  large as before (`ReadMemoryTest`). The staged files are the same byte for byte.
+
+  In the review's windows no restore that 198645a completed under 128 MiB is refused now.
+  The windows (`read_window.py` with `tests/Fixtures/memory/read.php`, and
+  `restic_window.php` on a repository that restic 0.20.0 wrote in format 2) fill the memory
+  to a given reserved figure once the restore has planned, in steps of 2 MiB from 88 to 126
+  MiB, and read with every response held as WordPress holds it; each cell is the largest
+  figure at which the restore completed, and what came above it. On 2026-11-26 a file of
+  full chunks was refused from 100 MiB and 250 small files from 118 MiB, which 198645a
+  restored.
+
+  | File, 128 MiB, every response held three times | 198645a | Now |
+  | --- | --- | --- |
+  | Format 1, full chunks | up to 102 MiB; fatal error from 104 | up to 102 MiB; `restore_blob_memory` from 104 |
+  | Format 1, two chunks just under 8 MiB, one group of 16 MiB | fatal error from 88 | up to 102 MiB; `restore_blob_memory` from 104 |
+  | Format 1, many small blobs | up to 112 MiB; fatal error from 114 | up to 122 MiB; `restore_blob_memory` from 124 |
+  | Format 2, full chunks that do not compress | up to 92 MiB; `decompression_limit` from 94, fatal error from 104 | up to 100 MiB; `restore_blob_memory` from 102 |
+  | Format 2, full chunks that compress three times | 88 MiB; `decompression_limit` from 90, fatal error from 106 | up to 106 MiB; `restore_blob_memory` from 108 |
+  | Format 2, many small blobs | up to 120 MiB; fatal error from 122 | up to 122 MiB; `restore_blob_memory` from 124 |
+  | restic 0.20.0, 250 small files | up to 124 MiB; `decompression_limit` at 126 | the same |
+  | restic 0.20.0, files of 24 MiB, 30 MiB of text and 8 MiB | up to 110 MiB; `decompression_limit` from 112, fatal error from 120, `decompression_limit` at 126 | up to 114 MiB; `restore_blob_memory` from 116, `decompression_limit` at 126 |
+  | Check, format 1 | up to 94 MiB; `index_too_large` from 96 | the same |
+  | Check, format 2 | up to 92 MiB; fatal error at 94, `index_too_large` from 96 | up to 94 MiB; `index_too_large` from 96 |
+
+  Every file was restored byte for byte wherever it completed. `restore_blob_memory` came
+  before the part it refused was downloaded; `decompression_limit` at 126 MiB is a tree or a
+  snapshot that does not decode beside so much memory in use, before and now.
 
   | Peak reserved under 128 MiB, in MiB | 500,000 blobs, before | 500,000 blobs, now | 1,000,000 blobs, before | 1,000,000 blobs, now |
   | --- | ---: | ---: | ---: | ---: |
@@ -213,7 +286,8 @@ Final-head CI remains the merge gate.
   the cache, with every response held as WordPress holds it. Before the first blob was read,
   64.5 MiB were reserved beside 500,000 blobs, and 92.5 MiB (before) or 94.5 MiB (now)
   beside 1,000,000 blobs. An index of 2,000,000 blobs does not fit under 128 MiB and is
-  refused with `index_too_large` before a blob is read, before and now.
+  refused with `index_too_large` before a blob is read, before and now. Measured again on
+  2026-11-27, with the count of each copy as PHP reserves it: the same figures.
 
 - What the budget lets through is decoded without a refusal for memory (2026-11-26). Until
   then the budget counted lengths. The decoder, which measures the memory left once more
@@ -235,21 +309,57 @@ Final-head CI remains the merge gate.
   | 1.1 MiB uncompressed, blocks cut up | fatal error in `Cipher::open()` | fatal error | read |
   | 200 bytes in a frame without a declared size, as restic writes it | `decompression_limit` | `blob_corrupt` | read |
 
-  Now the budget counts what PHP reserves, and `PackReader::open_blob()` lets PHP give back
-  the pages that freed strings keep before the decoder measures, as PHP does itself before
-  it refuses an allocation; the decoder then finds what the budget found before the
-  download, less what is alive now. A refusal that the decoder still makes is an
-  `InsufficientDecodingMemory`, a limit of the host and not damage: for a frame without a
-  declared size whose window takes more than the budget counted for its content (restic
-  writes such frames only for blobs below 256 bytes, with a window of 1 KiB), or for a
-  compressed blob beside memory that other code took while it arrived. A restore reports it
-  as `restore_blob_memory`, after the download, and a check reports the pack as the warning
-  `pack_memory`. An index file, a snapshot or a tree that a check cannot decode in the
-  memory left stops it with `decompression_limit`, as an index that does not fit stops it,
-  instead of a finding of damage; an index file is not left out of the index either, which
-  would report its blobs as missing. The decompression limit of ADR 0019 is unchanged:
-  content beyond 128 MiB, and a frame that declares more, are refused before they are
-  decoded.
+  Now the budget counts what PHP reserves, and the decoder finds what the budget found
+  before the download, less what is alive now. A refusal that the decoder still makes is an
+  `InsufficientDecodingMemory`, a limit of the host and not damage. A restore reports it as
+  `restore_blob_memory`, after the download. A check leaves that blob unverified and goes on
+  reading the pack (below). An index file, a snapshot or a tree that a check cannot decode
+  in the memory left stops it with `decompression_limit`, as an index that does not fit
+  stops it, instead of a finding of damage; an index file is not left out of the index
+  either, which would report its blobs as missing. The decompression limit of ADR 0019 is
+  unchanged: content beyond 128 MiB, and a frame that declares more, are refused before they
+  are decoded. A data blob whose header entry claims more than restic's chunks of 8 MiB is
+  damage: the restore refuses it before the download (`repository_damaged`), and a check
+  reports it as `blob_corrupt` (2026-11-27; it was counted as a blob too large for the
+  memory left).
+
+- A check reads its sampled packs in the same budget, and memory keeps a blob from being
+  opened, never a pack from being read (2026-11-27). Until then a check that found a blob,
+  or the rest of the pack after its blobs, too large for the memory left reported the pack
+  as the warning `pack_memory` before reading it. The rest grows with damage: a pack whose
+  header could not be read, or whose length was wrong, was read as one rest, so with 12 MiB
+  left a damaged pack became the warning where the same pack undamaged was verified (the
+  review of 2026-11-27, `damaged_pack.php`). A warning raises no notice (ADR 0022). Now the
+  length of the header and the header are read first, as before, and then every byte of the
+  pack, in pieces of up to 8 MiB that are halved while three copies of a piece do not fit,
+  down to 64 KiB (`CheckRun::SMALLEST_PIECE`), measured before each piece. A blob is opened
+  when it fits; one that does not fit by itself, or no longer fits once its piece has
+  arrived, or that the decoder cannot decode in the memory left, is read with the bytes
+  around it and hashed, but not opened. The findings are the ones of before, in their
+  order: `pack_hash` alone when the content does not match the pack's name, then a header
+  that cannot be read, then what the header and the blobs show, each blob that failed as
+  `blob_corrupt`. Only a pack whose name and header are right reports the blobs it did not
+  open, as the warning `pack_memory` ("1 of the 21 blobs of the pack could not be opened in
+  the memory that PHP has left and were not verified"); those blobs may still be damaged.
+  When not even a piece of 64 KiB fits, the read ends there: the pack is the warning
+  `pack_unread`, with a text of its own for a pack of which nothing beyond the header was
+  read, beside the damage that its header and the blobs read before showed.
+
+  | One pack, room left for it | 198645a | 2026-11-26 | Now |
+  | --- | --- | --- | --- |
+  | 40 blobs of 400 KiB, no damage, 12 MiB | nothing found, 41 blobs verified | the same | the same |
+  | The same, a bit flipped in the sealed header, 12 MiB | `pack_hash` | `pack_memory`, no error | `pack_hash` |
+  | The same, a wrong header length, 12 MiB | `pack_hash` | `pack_memory`, no error | `pack_hash` |
+  | The same, cut short by 64 bytes, 12 MiB | `pack_size`, `pack_hash` | `pack_size`, `pack_memory` | `pack_size`, `pack_hash` |
+  | The same, 8 MiB appended, 12 MiB | `pack_size`, `pack_hash` | `pack_size`, `pack_memory` | `pack_size`, `pack_hash` |
+  | 20 small blobs and a full chunk, a bit flipped in a small blob, 20 MiB | `pack_hash` | `pack_memory`, no error | `pack_hash` |
+
+  With PHP's own limit at the budget's limit and every response held three times,
+  198645a ended with PHP's fatal error for every one of these packs with less than 30 MiB
+  left, damaged or not; now the damage is found as in the table, and a pack without damage
+  is verified whole, but for the full chunk with 20 MiB left, which is not opened
+  (`pack_memory`, 21 of 22 blobs verified). With PHP's limit above the budget's, 198645a
+  opened that chunk in memory that the budget does not give.
 
 ## Remaining release work
 This engine is not yet a WordPress restore feature. Jobs, the browser, downloads and expiry

@@ -825,30 +825,46 @@ The index measurements and their limits are documented in
 
 A restore reads a file in parts of up to 8 MiB. Reading one takes, beside the index, three
 copies of its stored size while it arrives and while it is decrypted, and for a part that
-restic stored compressed also twice its decoded size while it is decoded. A full part that
-is not compressed takes about 24 MiB, three times its size; counted as PHP reserves memory,
-in whole pages and blocks, the restore expects 26.2 MiB for it. A full part of 8 MiB that
-restic stored compressed in 2.5 MiB takes 20.7 MiB, most of it for the decoded size. With
-little memory left the restore reads the parts one at a time. `restore_blob_memory` means
-that not even one part fits into what PHP has left; the restore stops before that part is
-downloaded and keeps no files. The same code can come once a part is downloaded, in the two
-cases that the restore cannot foresee: a compressed part whose frame does not declare its
-size and decodes through a larger window than the part (restic declares the size of every
-part of 256 bytes or more), or, for a compressed part, memory that other code took while it
-arrived. The restore then stops in the same way. It is the same capacity limit as
-`index_too_large`, not damage, and the same guidance applies: raise the memory limit for
-WordPress (`WP_MAX_MEMORY_LIMIT`) or PHP's `memory_limit`, deactivate plugins that hold
-much memory, or restore the snapshot with restic and the recovery kit on another computer
-(Scenario B, steps 1 to 3).
+restic stored compressed also twice its decoded size and 2 MiB that the decompressor keeps
+free. Counted as PHP reserves memory, a full part that is not compressed takes 24.0 MiB, and
+a full part of 8 MiB that restic stored compressed in 2.5 MiB takes 20.5 MiB, most of it for
+the decoded size. PHP takes memory for smaller strings in blocks of 2 MiB, so even a part of
+a few kilobytes can need 2 MiB, or 4 MiB when it is compressed, unless PHP has room in the
+blocks it already holds. With little memory left the restore reads the parts one at a time.
+Under 128 MiB, with every response held as WordPress holds it, a file of full chunks is
+restored while up to 102 MiB are in use when the restore starts reading, a file of chunks
+that compress up to 106 MiB, and a file of small blobs up to 122 MiB; every restore that the
+version before completed in these measurements still completes, and above these figures the
+restore stops with `restore_blob_memory`, where that version ended with PHP's fatal error or
+refused with `decompression_limit` ([ADR 0036](adr/0036-selected-file-staging.md) has the
+measurements).
 
-A check that cannot read a sampled pack in the memory left reports it as the warning
-`pack_memory` and goes on, both when it sees that before the download and when a blob of
-the pack cannot be decoded in the memory left once it is downloaded; it never reports such
-a pack as damaged. `restic check --read-data` on another computer verifies that pack
-([ADR 0036](adr/0036-selected-file-staging.md)). An index file, a snapshot or a tree that
-the check cannot decode in the memory left stops the check with `decompression_limit`,
-since it cannot go on without them; the same guidance applies: raise the memory limit, or
-check the repository with restic on another computer.
+`restore_blob_memory` means that not even one part fits into what PHP has left; the restore
+stops before that part is downloaded and keeps no files. The same code can come once a part
+is downloaded: when the memory left no longer takes what opening the part takes, because
+other code took memory while the part arrived, or when the decompressor finds that a part
+needs more than its size says (a frame without a declared size that decodes through a
+larger window; restic declares the size of every part of 256 bytes or more). The restore
+then stops in the same way. Memory that other code takes while the response itself
+arrives cannot be measured in time: if it leaves less than the last copy of the response
+needs, PHP ends the request with its fatal error, for a compressed part as for one that is
+not compressed. It is the same capacity limit as `index_too_large`, not damage, and the
+same guidance applies: raise the memory limit for WordPress (`WP_MAX_MEMORY_LIMIT`) or
+PHP's `memory_limit`, deactivate plugins that hold much memory, or restore the snapshot
+with restic and the recovery kit on another computer (Scenario B, steps 1 to 3).
+
+A check downloads every sampled pack completely, in pieces that fit into the memory left,
+down to 64 KiB, and compares its content with its name and its header with the index
+whatever memory is left; damage is reported as errors, as before. Memory keeps the check
+only from opening a blob. When blobs of a pack whose name and header are right could not
+be opened, the check reports the warning `pack_memory`: those blobs were not verified, and
+they may still be damaged. When not even the smallest piece fits, the read of the pack ends
+there and the check reports the warning `pack_unread`, beside any damage it found before;
+the pack was not verified. `restic check --read-data` on another computer verifies such a
+pack ([ADR 0036](adr/0036-selected-file-staging.md)). An index file, a snapshot or a tree
+that the check cannot decode in the memory left stops the check with
+`decompression_limit`, since it cannot go on without them; the same guidance applies: raise
+the memory limit, or check the repository with restic on another computer.
 
 ## Scenario J — the plugin is inactive after a downgrade
 
