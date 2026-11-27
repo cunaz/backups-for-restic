@@ -1060,6 +1060,47 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertNull( JobStore::discard_listed_until( $job ) );
 	}
 
+	public function test_a_discard_time_too_late_for_the_days_of_the_listing_lists_its_tables_with_no_end(): void {
+		$listed = JobStore::DISCARD_LISTED_DAYS * 86400;
+		$record = [
+			'user'     => 1,
+			'via'      => 'rest',
+			'database' => 'site',
+			'server'   => self::OTHER,
+			'tables'   => [ 'bfr_r_x' ],
+		];
+		// The older job has the time of a discard as the plugin writes it, the newer one a time
+		// that only a change outside the plugin leaves: the days no longer fit into an integer.
+		$older                             = $this->stranded( '20251201T000001Z-aaaaab' );
+		$older->data['database_discarded'] = [ 'at' => $this->clock->seconds ] + $record;
+		$job                               = $this->stranded();
+		foreach ( [ $older, $job ] as $discarded ) {
+			unset( $discarded->data['database_owner'] );
+			$this->jobs->save( $discarded );
+		}
+		$backup        = new Job( '20260102T000000Z-bbbbbb', JobType::Backup, 'schedule', $this->clock->seconds );
+		$backup->state = JobState::Succeeded;
+		$this->jobs->save( $backup );
+		$changes = $this->changes( $this->server() );
+		foreach ( [ PHP_INT_MAX - $listed, PHP_INT_MAX - $listed + 1, PHP_INT_MAX ] as $at ) {
+			$job->data['database_discarded'] = [ 'at' => $at ] + $record;
+			$this->jobs->save( $job );
+			self::assertSame( PHP_INT_MAX, JobStore::discard_listed_until( $job ), 'No end, as an integer.' );
+			// Before, the sum was a float: a TypeError ended the lists at this job, before the older one.
+			$entries = $changes->discarded_bindings();
+			self::assertSame( [ [ $job->id, $at, PHP_INT_MAX ], [ $older->id, $this->clock->seconds, $this->clock->seconds + $listed ] ], array_map( static fn ( array $entry ): array => [ $entry['job'], $entry['at'], $entry['until'] ], $entries ) );
+			self::assertSame( $entries, $changes->foreign_bindings()['discarded'] );
+			// Nor did the cleanup of the job history get past it; it keeps both records.
+			self::assertSame( 0, $this->jobs->prune( 1, $this->clock->seconds ) );
+		}
+		// The listing ends as any other: the administrator says that the tables are taken care of.
+		self::assertSame( [ $job->id, PHP_INT_MAX ], array_values( array_intersect_key( $changes->discarded_done( $job->id, 9, 'rest' ), array_flip( [ 'job', 'until' ] ) ) ) );
+		self::assertSame( [ $older->id ], array_column( $changes->discarded_bindings(), 'job' ) );
+		self::assertSame( 1, $this->jobs->prune( 1, $this->clock->seconds ), 'Then the job history prunes it, and keeps the one still listed.' );
+		self::assertNull( $this->jobs->get( $job->id ) );
+		self::assertNotNull( $this->jobs->get( $older->id ) );
+	}
+
 	public function test_a_discarded_binding_whose_record_does_not_name_its_tables_is_not_listed_and_cannot_be_marked(): void {
 		$record = [
 			'at'       => $this->clock->seconds,

@@ -575,17 +575,22 @@ final class JobStore {
 	 * Until when a database apply lists the private tables of its discarded binding, which a
 	 * database administrator removes by hand where they are: DISCARD_LISTED_DAYS after the
 	 * discard, unless the administrator marked them as taken care of. prune() keeps the job, its
-	 * record of the discard and its log until then.
+	 * record of the discard and its log until then. A time of the discard that the plugin did
+	 * not write can be so late that the days no longer fit into an integer after it: the tables
+	 * are then listed with no end, PHP_INT_MAX, until they are marked as taken care of. Before,
+	 * the sum was a float, which this function may not return, and the TypeError ended both
+	 * lists of bindings and the cleanup of the job history at that job, for every job after it.
 	 *
 	 * @param Job $job Job.
-	 * @return int|null Unix time, or null if the job lists no such tables.
+	 * @return int|null Unix time, PHP_INT_MAX for no end, or null if the job lists no such tables.
 	 */
 	public static function discard_listed_until( Job $job ): ?int {
 		$discarded = $job->data['database_discarded'] ?? null;
 		if ( JobType::DatabaseApply !== $job->type || ! is_array( $discarded ) || isset( $discarded['done'] ) || ! is_int( $discarded['at'] ?? null ) ) {
 			return null;
 		}
-		return $discarded['at'] + self::DISCARD_LISTED_DAYS * 86400;
+		$listed = self::DISCARD_LISTED_DAYS * 86400;
+		return $discarded['at'] > PHP_INT_MAX - $listed ? PHP_INT_MAX : $discarded['at'] + $listed;
 	}
 
 	/**

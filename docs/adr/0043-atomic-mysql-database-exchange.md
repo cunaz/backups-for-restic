@@ -314,7 +314,10 @@ database could not get rid of the binding. Since then:
   `GET /database-changes/foreign` (`discarded`), as `wp backups-for-restic database-discarded`
   prints them. Both lists of that answer come from one reading of the jobs, made before the
   server is asked, so that a discard that another request records meanwhile leaves its
-  binding in one of them, never in neither. The job is kept rather than the names copied into a record of their own,
+  binding in one of them, never in neither. A time of the discard that only a change outside
+  the plugin leaves, so late that the 90 days no longer fit into an integer after it, lists
+  the tables with no end (`PHP_INT_MAX`) until they are marked as taken care of: the job
+  stays, and neither list nor the pruning stops at it. The job is kept rather than the names copied into a record of their own,
   because the discard then stays one atomic write of one document: a second record could be
   lost after the binding was forgotten, or written for a discard that did not happen, and it
   would need a cleanup of its own. The texts that send the administrator to that job's log
