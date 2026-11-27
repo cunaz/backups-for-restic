@@ -733,29 +733,30 @@ All notable changes are documented here. The format follows
   time of the tests. On the same code the gate kills 80.69 % of its mutants and 84.59 % of the
   covered ones, where it reported 81.58 % to 81.86 % and 85.52 % to 85.81 %.
 - The database restore sets what the site's database session could otherwise change without
-  an error. A row limit that the server's settings, an account's `init_connect` or code earlier
-  in the request left on the session cut what the review, the exchange and expiry read: the
-  review named missing privileges and InnoDB table locks that were there, and the rehearsal's
-  report lost the backup's role map. A completion type of `CHAIN` left the site's session in a
-  transaction after a rehearsal tick, so that WordPress's later writes in that request were not
-  committed, and `RELEASE` closed the connection. Notes that did not count as warnings let a
-  value that the server changed be imported; on MariaDB the restore makes them count through
-  `note_verbosity`, and it stops with `database_restore_notes` on a session whose `sql_notes`
-  is off, since MariaDB warns whenever `sql_notes` is set. The safe-updates mode refused the
-  exchange's copy of the protected options. The review and the wait for other connections read table and
-  account names as bytes, so that a latin1 connection no longer turns a name in another script
-  into question marks.
+  an error. A row limit that the server's settings, an account's `init_connect` or code
+  earlier in the request left on the session cut what the review, the exchange and expiry
+  read: the review named missing privileges and InnoDB table locks that were there, and the
+  rehearsal's report lost the backup's role map. A completion type of `CHAIN` left the
+  site's session in a transaction after a rehearsal tick, so that WordPress's later writes
+  in that request were not committed, and `RELEASE` closed the connection. Notes that did
+  not count as warnings let a value that the server changed be imported; on MariaDB the
+  restore makes them count through `note_verbosity`, and it stops with
+  `database_restore_notes` on a session whose `sql_notes` is off, since MariaDB warns
+  whenever `sql_notes` is set. The safe-updates mode refused the exchange's copy of the
+  protected options. The review and the wait for other connections read table and account
+  names as bytes, so that a latin1 connection no longer turns a name in another script into
+  question marks.
 - The database import uses what the dump's manifest records about each table. A dump with a
   statement larger than the 16 MiB that the import reads, or than the database server's
   `max_allowed_packet` takes, is refused before the first statement
   (`database_restore_too_large`, `database_restore_packet_limit`), with the limit that the
   largest statement needs, instead of stopping in the middle of the rehearsal. A table whose
   definition (CREATE) does not fit `max_allowed_packet` is refused the same way, before the
-  import creates anything: the manifest records the size of INSERT statements only. A duplicate key
-  names its table and says whether the backup read it at more than one moment
-  (`database_restore_duplicate`), and the rehearsal's report marks a table that the backup read
-  by position at more than one moment. A backup made before the manifest recorded this imports
-  as before, with every batch checked before it is sent.
+  import creates anything: the manifest records the size of INSERT statements only. A
+  duplicate key names its table and says whether the backup read it at more than one moment
+  (`database_restore_duplicate`), and the rehearsal's report marks a table that the backup
+  read by position at more than one moment. A backup made before the manifest recorded this
+  imports as before, with every batch checked before it is sent.
 - A database rehearsal of a snapshot without a database dump says so
   (`database_not_in_snapshot`) before it stages a file, on the admin page, in REST and in
   WP-CLI. Before, it staged the whole selection and then said that the job log contained the
