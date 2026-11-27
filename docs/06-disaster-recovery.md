@@ -119,8 +119,10 @@ The site records each delivery. Store the file with the other offline recovery m
    recorded also when the site could not leave maintenance mode at its end, which the undo
    then reports: delete the file `.maintenance` in the WordPress directory if no update is
    running. An entry in a folder with more than 2,048 names that keeps changing while the
-   preview reads it is kept with "Conflicting names at the destination"; preview the undo
-   again once the folder is quiet, before the expiry time.
+   preview reads it is kept with "The folder kept changing while the review read its names"
+   (WP-CLI: reason `destination_changing`, "the folder that holds it kept changing while the
+   review read its names"); preview the undo again once the folder is quiet, before the expiry
+   time.
    An apply whose undo records the plugin cannot read, for example after the permissions of
    its private directory were changed, is listed with a notice and without **Preview undo**.
    Its saved original files and staged files are kept until the expiry time. Give the PHP user
