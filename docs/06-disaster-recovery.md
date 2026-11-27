@@ -524,8 +524,10 @@ many newer jobs there are; **Show the log of this job** on its card opens the lo
 `wp backups-for-restic logs <apply-job-id>`. When the tables are taken care of, choose **Mark
 these tables as taken care of**, or run
 `wp backups-for-restic database-discarded <apply-job-id> --done`: the binding is no longer
-listed, and the job history prunes its job as any other. After 90 days the listing ends by
-itself. If you have not removed the tables by then, note their names before that date.
+listed, and the job history prunes its job as any other. While another request is working on
+the plugin's jobs, both say so and change nothing; try again in a moment. After 90 days the
+listing ends by itself. If you have not removed the tables by then, note their names before
+that date.
 Deleting the plugin forgets the listing with everything else.
 
 Drop the tables by hand only on the server and in the database where you can verify them:

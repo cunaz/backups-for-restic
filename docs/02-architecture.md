@@ -1412,8 +1412,10 @@ database restore. `--yes`, which skipped the only confirmation until 2026-11-26,
 `database-discarded [<apply-job>] [--done]` prints the discarded bindings whose private tables
 are still to be removed by hand, with their database, server UUID and table names, for 90 days
 after each discard; `--done` with the ID of the job ends the listing of that binding, after
-which the job history prunes its job as any other. The recovery guide includes the
-`--skip-plugins` procedure for a site whose active plugin prevents normal startup.
+which the job history prunes its job as any other. `--done` takes the runner lock, as the
+REST route does, and stops with an error and changes nothing while another request holds it.
+The recovery guide includes the `--skip-plugins` procedure for a site whose active plugin
+prevents normal startup.
 While a file job holds WordPress maintenance, the plugin's own commands boot like its
 workers, with only this plugin and without the theme. Every other WP-CLI command runs with
 the site's plugins, as during core's maintenance ([ADR 0041](adr/0041-guarded-file-changes.md)).
