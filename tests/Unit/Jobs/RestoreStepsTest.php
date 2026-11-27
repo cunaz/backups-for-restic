@@ -10,9 +10,12 @@ use BackupsForRestic\Backend\Http\HttpResponse;
 use BackupsForRestic\Connection\RepositoryAccess;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
+use BackupsForRestic\Database\Dump\Table;
+use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Engine\Backup\BackupPlan;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Repository;
+use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Jobs\Backup\BackupServices;
@@ -22,6 +25,7 @@ use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobSteps;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
+use BackupsForRestic\Jobs\Restore\DatabasePreview;
 use BackupsForRestic\Jobs\Restore\RestoreRequest;
 use BackupsForRestic\Jobs\Restore\RestoreServices;
 use BackupsForRestic\Jobs\Restore\RestoreSteps;
@@ -37,6 +41,7 @@ use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 use BackupsForRestic\Tests\Support\InMemoryRestServer;
+use BackupsForRestic\Tests\Support\StagedDump;
 use BackupsForRestic\Tests\Support\TempDir;
 
 /**
@@ -177,6 +182,84 @@ final class RestoreStepsTest extends TestCase {
 
 	private function staging( Job $job ): string {
 		return $this->directory . '/private/restores/' . $job->id;
+	}
+
+	/** @return iterable<string, array{bool}> */
+	public static function snapshots_without_a_database(): iterable {
+		yield 'without a site manifest' => [ false ];
+		yield 'whose site manifest says that its backup left the database out' => [ true ];
+	}
+
+	#[DataProvider( 'snapshots_without_a_database' )]
+	public function test_a_rehearsal_of_a_snapshot_without_a_database_says_so_before_a_file_is_staged( bool $manifest ): void {
+		if ( $manifest ) {
+			mkdir( $this->site . '/spool', 0700 );
+			file_put_contents(
+				$this->site . '/spool/manifest.json',
+				json_encode(
+					[
+						'format'     => 'backups-for-restic-site/1',
+						'created'    => '2026-11-27T00:00:00Z',
+						'home_url'   => 'https://example.com',
+						'abspath'    => $this->site . '/',
+						'content'    => $this->site . '/wp-content',
+						'uploads'    => $this->site . '/wp-content/uploads',
+						'roots'      => [],
+						'excludes'   => [],
+						'prefix'     => 'wp_',
+						'database'   => false,
+						'versions'   => [
+							'plugin'    => '0.3.0',
+							'wordpress' => '7.1',
+							'php'       => PHP_VERSION,
+						],
+						'repository' => [ 'format' => 2 ],
+					],
+					JSON_THROW_ON_ERROR
+				)
+			);
+		}
+		$snapshot = $this->backup();
+		$job      = $this->drive( $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, RestoreRequest::from_input( $snapshot, null, false, true )->to_data() ) );
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'database_not_in_snapshot', $job->error?->code, (string) $job->error?->message );
+		$messages = array_column( $this->jobs->log( $job )->read( 50 ), 'message' );
+		self::assertNotContains( 'Restore started.', $messages, 'Nothing was staged for the rehearsal.' );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+		self::assertSame( [], $this->locks() );
+	}
+
+	public function test_a_rehearsal_whose_dump_has_a_table_name_that_does_not_print_as_itself_keeps_the_name_escaped(): void {
+		$job  = $this->restore_job( str_repeat( 'ab', 32 ), [ '/site' ] );
+		$dump = $this->staging( $job ) . '/files/site/spool/database';
+		mkdir( $dump, 0700, true );
+		StagedDump::write( $dump );
+		$name                          = "wp_ro\u{202E}ws";
+		$manifest                      = json_decode( (string) file_get_contents( $dump . '/manifest.json' ), true, flags: JSON_THROW_ON_ERROR );
+		$manifest['tables'][0]['name'] = $name;
+		$manifest['tables'][0]['file'] = ( new Table( $name, '', [], null, [] ) )->file();
+		file_put_contents( $dump . '/manifest.json', json_encode( $manifest, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE ) );
+		// The manifest is refused before the rehearsal asks the database anything.
+		$preview = new DatabasePreview(
+			new class() implements Connection {
+				public function rows( string $sql ): array {
+					throw new \LogicException( 'The rehearsal asked the database: ' . $sql );
+				}
+
+				public function execute( string $sql ): int {
+					throw new \LogicException( 'The rehearsal changed the database: ' . $sql );
+				}
+			},
+			'wp_'
+		);
+		try {
+			$preview->bind( $this->services(), $job, '/site/spool/manifest.json', 'https://example.com', null );
+			self::fail( 'A dump with a table name that does not print as itself was rehearsed.' );
+		} catch ( FormatException $refused ) {
+			self::assertSame( 'database_restore_name', $refused->context()['code'] ?? null );
+		}
+		self::assertSame( '"wp_ro\\u202ews"', $job->data['database_refused_name'] ?? null );
+		self::assertArrayNotHasKey( 'database_binding', $job->data );
 	}
 
 	public function test_a_zip_of_selected_files_is_built_in_resumable_ticks(): void {
@@ -418,6 +501,20 @@ final class RestoreStepsTest extends TestCase {
 		self::assertSame( JobState::Failed, $job->state );
 		// Its own code: not "Another program kept changing the repository", "started over three times".
 		self::assertSame( 'restore_snapshot_missing', $job->error?->code );
+		self::assertFalse( $job->error?->retryable );
+		self::assertArrayNotHasKey( 'resumptions', $job->data, 'A snapshot that is not there is not a lost lock.' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
+	/** The rehearsal reads the snapshot's site manifest before it stages a file: the same code. */
+	public function test_a_rehearsal_of_a_snapshot_that_the_repository_does_not_hold_fails_with_the_same_code(): void {
+		$this->backup();
+
+		$job = $this->drive( $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, RestoreRequest::from_input( str_repeat( 'ab', 32 ), null, false, true )->to_data() ) );
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'restore_snapshot_missing', $job->error?->code, (string) $job->error?->message );
 		self::assertFalse( $job->error?->retryable );
 		self::assertArrayNotHasKey( 'resumptions', $job->data, 'A snapshot that is not there is not a lost lock.' );
 		self::assertSame( [], $this->locks() );

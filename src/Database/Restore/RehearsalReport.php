@@ -24,6 +24,12 @@ defined( 'ABSPATH' ) || exit;
 final readonly class RehearsalReport {
 
 	/**
+	 * Findings that describe the backup's rows and do not hold up an exchange, so that the
+	 * preflight's blockers leave them out.
+	 */
+	private const array NOTES = [ 'read_by_position' ];
+
+	/**
 	 * Opens the metadata service on the same SQL connection as the import.
 	 *
 	 * @param Connection $connection Non-reconnecting session.
@@ -129,6 +135,16 @@ final readonly class RehearsalReport {
 							'table' => $name,
 						];
 					}
+					// A table without a key to order its pages that the dump read at more than one
+					// moment: rows added or removed in between can be missing or in it twice
+					// (ADR 0021). The backup's job warned; the exchange is not held up by it.
+					$read = $manifest->reads[ $number ] ?? null;
+					if ( null !== $read && [] === $read['key'] && false === $read['snapshot'] ) {
+						$findings[] = [
+							'code'  => 'read_by_position',
+							'table' => $name,
+						];
+					}
 					if ( null !== $rows[ $name ]['live_type'] && 'BASE TABLE' !== $rows[ $name ]['live_type'] ) {
 						$findings[] = [
 							'code'  => 'live_object_type',
@@ -165,7 +181,7 @@ final readonly class RehearsalReport {
 					'wordpress_state'    => $this->wordpress_state( $manifest, $owned ),
 					'content_digest'     => Ledger::content_digest( $this->connection, $owned, $manifest ),
 					'swap_preflight'     => [
-						'blockers'                     => array_values( array_unique( [ ...$inspection['blockers'], ...array_column( $findings, 'code' ) ] ) ),
+						'blockers'                     => array_values( array_unique( [ ...$inspection['blockers'], ...array_diff( array_column( $findings, 'code' ), self::NOTES ) ] ) ),
 						'missing_privileges'           => $inspection['missing_privileges'],
 						'required_database_privileges' => SwapCatalog::PRIVILEGES,
 						'required_global_privileges'   => [ 'PROCESS' ],

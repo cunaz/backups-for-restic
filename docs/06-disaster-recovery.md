@@ -407,6 +407,74 @@ the snapshot's table prefix. Confirm its home URL, administrator login and conte
 before switching production. A manual SQL import restores the source accounts and
 options. Use the destination's recovery kit to reconnect backups if its salts differ.
 
+### When a rehearsal refuses the dump
+
+A rehearsal checks the dump before it imports a row, and it refuses some dumps. The restore
+job says why, and its log has the details. Each case has a way on:
+
+- **No database in the snapshot** (`database_not_in_snapshot`): the backup ran with the
+  database switched off in its settings, or another program made the snapshot. The job stops
+  before it stages a file. The details of a snapshot on the Snapshots tab say whether it
+  includes the database. Restore its files without the rehearsal, or choose a snapshot that
+  includes the database.
+- **A table name that does not print as itself** (`database_restore_name`): a table or view
+  name with a right-to-left override, a zero-width space or another invisible character, a
+  control character, a space other than the ordinary one, a character beyond the Basic
+  Multilingual Plane, or a space at its end. Such a name can read as another one wherever it
+  is shown, so since 2026-11-27 the plugin does not import such a dump; earlier versions did.
+  The job's message and its log name the table in double quotes with escapes such as
+  `\u202e`. Names in other scripts, with their accents and marks, are not affected. If the
+  site needs that table, import the database by hand as above: open the snapshot again,
+  stage its database directory with the rehearsal switched off, and download the SQL files
+  or request a ZIP; the command-line client imports any name that MySQL accepts. Otherwise
+  rename the table on the site, or leave it out of backups under **Settings → Tables to leave
+  out, one per line**, so that later backups can be rehearsed and applied. To rename it, find
+  its name by its beginning, before the first escaped character, and by its bytes, then
+  rename it through a prepared statement, which needs no typing of the invisible character:
+
+  ```sql
+  SELECT TABLE_NAME, HEX(TABLE_NAME) FROM information_schema.TABLES
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'wp\_po%';
+  SET @old = (SELECT TABLE_NAME FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = DATABASE() AND HEX(TABLE_NAME) = '77705F706FE280AE737473');
+  SET @rename = CONCAT('RENAME TABLE `', REPLACE(@old, '`', '``'), '` TO `wp_posts_archive`');
+  PREPARE rename_table FROM @rename;
+  EXECUTE rename_table;
+  DEALLOCATE PREPARE rename_table;
+  ```
+
+  Replace the beginning, the hex value from the first query and the new name with your own.
+  A plugin that created the table under that name expects it there: rename it only when you
+  know what uses it.
+- **A statement too large for the import or the server** (`database_restore_too_large`,
+  `database_restore_packet_limit`): the backup holds a row whose statement is larger than the
+  16 MiB that the plugin's import reads, or than the database server's `max_allowed_packet`.
+  The rehearsal stops before it sends a statement, and the log names the table, the size and
+  the `max_allowed_packet` that the import needs. A table's definition (its CREATE) that is
+  larger than `max_allowed_packet` stops it the same way. Ask the host to raise `max_allowed_packet`
+  and rehearse again, or import by hand with a client and a server whose packet limit is at
+  least as large (step 5 of Scenario B).
+- **A duplicate key** (`database_restore_duplicate`): two rows of a table have the same value
+  in a unique key. The log names the table and says whether the backup read it at more than
+  one moment; a row that was deleted and inserted again with a new key in between is then in
+  the dump twice. Import by hand and reconcile that table first, as step 5 of Scenario B
+  describes.
+
+- **Notes switched off on a MariaDB server** (`database_restore_notes`): the site's database
+  session has `sql_notes` off. A note is how the server reports a value that it changed, as a
+  time that a date column drops, and the restore refuses such a value; MariaDB records no
+  note while `sql_notes` is off and warns whenever `sql_notes` is set, so the plugin does not
+  switch it on. The rehearsal, a database change or its undo stops before its next statement.
+  Find what switches it off, usually `SET sql_notes = 0` in the database account's
+  `init_connect` (`SELECT @@GLOBAL.init_connect;`), a `SET GLOBAL sql_notes = 0`, or code
+  that runs before the job, remove it, and start again. `note_verbosity`, MariaDB's own
+  switch for notes, needs no change: the plugin sets it for its own statements.
+
+The rehearsal's report also marks a table that the backup read without a key at more than one
+moment (`read_by_position`): rows that were added or removed while it was read can be missing
+from it or be in it twice; the backup job warned about it when it ran. This does not stop the
+rehearsal or the exchange. Check that table after the restore.
+
 ### Applying a rehearsed database on a running installation
 
 Open the successful database rehearsal under **Backups > Restores** and review the

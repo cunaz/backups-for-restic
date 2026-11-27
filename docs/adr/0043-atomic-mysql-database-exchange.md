@@ -279,7 +279,93 @@ binary log format nor on Galera or the Performance Schema (`SwapCatalog::EXCHANG
 The importer reads the session's `max_allowed_packet` once per tick and refuses a batch that
 would not fit before sending it (`database_restore_packet`, ADR 0035). The refusal names the
 batch's SQL size, the limit it needs and the session's limit. The needed limit is a multiple
-of 1024, because MySQL 8.4.11 rounded a larger value down to one without a warning.
+of 1024, because MySQL 8.4.11 rounded a larger value down to one without a warning. Since
+2026-11-27 it compares the largest statement that the manifest records for each table with
+that limit before the first statement of the tick, and refuses with
+`database_restore_packet_limit`, which names the limit that the largest one needs; a table
+without the record is still checked batch by batch (ADR 0035).
+
+### Session settings
+
+The restore works on the site's own connection, the one that WordPress opened. What the
+server's settings, the account's `init_connect` or code that ran earlier in the request
+left on that session can change the result of a statement without an error, or make a
+statement fail. The restore sets each setting of the first kind, in one place: the
+`Session` that these parts of the restore run in: the import's ticks, the rehearsal's report,
+the review's inspection (`SwapCatalog::review()`), the plan of the exchange, the exchange and
+its undo, cleanup and expiry; some reads run outside it (below). `Session` saves the
+session's values first and gives them
+back when it ends, so neither WordPress nor other code meets the restore's settings. Until
+2026-11-27 it set only the character set, the SQL mode, the time zone and the checks of the
+import. On MySQL 8.4.11, with the setting below on the session, the restore without it did
+what each line says; the database suite shows each case, on MariaDB 11.4.13 as well where a
+line names it. Every setting is one that both servers take without a warning, which the
+restore port refuses like any other: where they differ, `Session` asks the server which
+variable it has instead of trying one and ignoring its error.
+
+- `sql_select_limit` is set to its largest value, the server's default; `DEFAULT` would be
+  the server's own setting again. A limit cuts `SELECT` and, on MySQL 8 and MariaDB, `SHOW`
+  short without an error, unless a statement has a `LIMIT` of its own. With a limit of 1 the review saw one
+  of the account's grants and one of its session settings and named missing privileges and
+  disabled InnoDB table locks that were there; the plan of the exchange, the exchange itself
+  and an expiry refused for the same reasons, and the rehearsal's report lost the backup's
+  role map and list of active plugins (the columns of its options table were cut to the
+  first) and all but one of the tables with a CHECK constraint. The list of live tables that
+  the check against the InnoDB dictionary compares had no `LIMIT` either, so a limit above
+  the number of grants could hide a live table from it.
+- `completion_type` is set to `NO_CHAIN`, and the `Session`'s own `ROLLBACK` statements say
+  `AND NO CHAIN NO RELEASE`. With `CHAIN` the guard's `ROLLBACK` began a new transaction: the
+  next `Session` of the same request refused with error 1568, and the site's session stayed
+  in a transaction, so that what WordPress wrote afterwards in that request was never
+  committed. With `RELEASE` the guard's `ROLLBACK` closed the connection.
+- Notes count as warnings. With `sql_notes` at 0 a note does not count as a warning, which
+  the restore port refuses: a value that the server changed with a note, as a time that a
+  DATE column drops, was imported. MySQL has `sql_notes` only, and `Session` sets it to 1.
+  MariaDB has `note_verbosity` as well (from 10.6.16), records a note only when both let it,
+  and answers every `SET` of `sql_notes` with warning 1287, deprecated (11.4.13): setting
+  `sql_notes` there, as the first version of this did, refused every import on MariaDB.
+  `Session` asks with `SHOW SESSION VARIABLES WHERE Variable_name IN ('note_verbosity',
+  'sql_notes')`, once the row limit is lifted, and on a server with `note_verbosity` sets that
+  to `basic`, the notes that MariaDB gave before it; `unusable_keys` and `explain` add notes
+  about keys that a statement cannot use. With `note_verbosity` empty, MariaDB's documented
+  way to switch notes off, the restore without it imported the changed value. `sql_notes` is
+  left alone there: if it is off, nothing switches notes on without the warning, and
+  `Session` refuses with `database_restore_notes` before the step's first statement and gives
+  every setting back. A server that reports neither variable, or a value other than `ON` or
+  `OFF`, is refused as well.
+- `sql_safe_updates` is set to 0. With 1 the copy of the protected options, which selects by a
+  part of their names that no key serves, was refused with error 1175 under the write locks.
+
+The settings of the second kind stay the server's. A statement that one of them stops ends
+the operation with an error, as a lost connection does, and nothing is left half done:
+`max_execution_time` (MySQL) and `max_statement_time` (MariaDB), `max_join_size` and
+`sql_big_selects`, `group_concat_max_len`, which no statement of the restore uses, and
+`lock_wait_timeout` and `innodb_lock_wait_timeout` outside the write barrier, which sets
+both to three seconds. Neither kind are the settings that no statement of the restore depends
+on, which were checked one by one: `max_sort_length` (on MySQL 8.4.11 the restore's `ORDER BY`
+of table names and numbers stayed in order at its minimum of 4; on MariaDB a value below the
+length of two names that begin alike can only change the order in which the rehearsal
+report lists them), the connection's collation (every comparison of the restore has a column
+or a binary string on one side), the transaction isolation level and the time zone outside an
+import (no statement of the review or the exchange reads a TIMESTAMP).
+
+Some reads run on the site's session outside a `Session`, with the site's own settings, as
+WordPress reads: the review's list of the live tables; the running site's role map, list of
+active plugins and the approving administrator's own roles and capabilities
+(`DatabaseReview::state()`, in the review of an apply and of an undo); the administrator's
+authority (`WordPressState::authority()`), which the exchange reads again inside its
+`Session` under the write lock and compares before it changes anything; the server's facts
+behind a stored binding (`SwapCatalog::facts()`); the packet limit that the importer reads
+before it takes its lock; and the drain's lookup of its own account and its list of sessions
+(above). Each returns one row or has a `LIMIT` of its own, so a row limit of 1 or more cuts
+none of them, which the review under a limit of 1 shows on both servers; under a limit of 0
+they find nothing, and the read or the `Session` of the same request refuses. The live
+tables and the account are read as bytes (`CAST(… AS BINARY)`): a site whose connection uses
+latin1 would otherwise get a table or account name in another script as question marks, so
+that the review listed a live table under a name it does not have and the drain matched no
+session of an account whose name is not in latin1, and waited for none. The authority's
+fingerprints are computed by the server; the role map, the plugins and the capabilities come
+in the connection's character set, as WordPress reads them.
 
 ### Several generations
 

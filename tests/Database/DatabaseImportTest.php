@@ -8,11 +8,14 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\SqlFormatter;
+use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\Ledger;
 use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\RehearsalReport;
 use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\MysqliConnection as RestoreConnection;
+use BackupsForRestic\Database\Restore\Session as RestoreSession;
+use BackupsForRestic\Database\Restore\TableFile;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
@@ -455,5 +458,318 @@ final class DatabaseImportTest extends TestCase {
 			$rows
 		);
 		self::assertTrue( $importer->tick()['done'] );
+	}
+
+	/**
+	 * A row limit as the server's settings, an account's init_connect or code that ran earlier
+	 * in the request leave it on the site's session. Each test has a connection of its own, so
+	 * what a test sets ends with it.
+	 */
+	public function test_a_row_limit_left_on_the_session_leaves_the_rehearsal_report_complete(): void {
+		$this->db->execute( "CREATE TABLE wp_options (option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, option_name VARCHAR(191) NOT NULL UNIQUE, option_value LONGTEXT NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes') ENGINE=InnoDB" );
+		$this->db->execute( "INSERT INTO wp_options (option_name, option_value) VALUES ('wp_user_roles', 'a:0:{}'), ('active_plugins', 'a:0:{}')" );
+		$this->db->execute( 'CREATE TABLE wp_checked (id INT PRIMARY KEY, CONSTRAINT wp_checked_positive CHECK (id > 0)) ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE wp_rechecked (id INT PRIMARY KEY, CONSTRAINT wp_rechecked_positive CHECK (id > 0)) ENGINE=InnoDB' );
+		$manifest = $this->stage_dump();
+		// CHECK constraint names are unique in a schema: the shadows take them over.
+		$this->db->execute( 'DROP TABLE wp_checked, wp_rechecked' );
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$connection = new RestoreConnection( $this->db->mysqli );
+		$expected   = ( new RehearsalReport( $connection ) )->read( $manifest, $importer->tables );
+		$this->db->execute( 'SET SESSION sql_select_limit = 1' );
+		$limited = ( new RehearsalReport( $connection ) )->read( $manifest, $importer->tables );
+		$limit   = $this->db->rows( 'SELECT @@SESSION.sql_select_limit AS rows_limit' )[0]['rows_limit'];
+		$this->db->execute( 'SET SESSION sql_select_limit = DEFAULT' );
+		self::assertSame( '1', $limit, 'The report gives the session its own limit back.' );
+		// The columns of the snapshot's options table and the tables with a CHECK constraint
+		// were cut to one row before, without an error.
+		self::assertSame( $expected, $limited );
+		self::assertSame( base64_encode( 'a:0:{}' ), $limited['wordpress_state']['user_roles'] );
+		// In the order that the server joins them: MariaDB lists the second first.
+		$checked = array_column( array_filter( $limited['findings'], static fn ( array $finding ): bool => 'snapshot_check' === $finding['code'] ), 'table' );
+		sort( $checked, SORT_STRING );
+		self::assertSame( [ 'wp_checked', 'wp_rechecked' ], $checked );
+		// Two findings of each code, for two tables each, and one blocker of each.
+		$blockers = $limited['swap_preflight']['blockers'];
+		self::assertTrue( array_is_list( $blockers ) );
+		self::assertSame( array_values( array_unique( $blockers ) ), $blockers );
+		self::assertContains( 'snapshot_check', $blockers );
+		self::assertContains( 'wordpress_tables', $blockers );
+	}
+
+	/** @return iterable<string, array{string}> */
+	public static function completions(): iterable {
+		yield 'chained' => [ 'CHAIN' ];
+		yield 'released' => [ 'RELEASE' ];
+	}
+
+	#[DataProvider( 'completions' )]
+	public function test_a_completion_type_of_the_session_neither_chains_a_transaction_nor_closes_the_connection( string $completion ): void {
+		$this->db->execute( 'CREATE TABLE wp_after (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$manifest = StagedDump::write( $this->directory );
+		$this->db->execute( "SET SESSION completion_type = '" . $completion . "'" );
+		$importer = $this->importer( $manifest );
+		// Every tick and the report open a Session of their own on the one connection, as a
+		// request does that runs several ticks.
+		$this->finish( $importer );
+		$report = ( new RehearsalReport( new RestoreConnection( $this->db->mysqli ) ) )->read( $manifest, $importer->tables );
+		// A write of WordPress after the restore's work is committed, as without the restore.
+		$this->db->execute( 'INSERT INTO wp_after VALUES (1)' );
+		$other = MysqliConnection::connect( $this->database );
+		self::assertNotNull( $other );
+		self::assertSame( [ [ 'id' => '1' ] ], $other->rows( 'SELECT id FROM wp_after' ), 'The site\'s session is not left in a transaction.' );
+		self::assertSame( $completion, $this->db->rows( 'SELECT @@SESSION.completion_type AS completion' )[0]['completion'] );
+		self::assertSame( 4, $report['rows'] );
+		self::assertSame( '4', $other->rows( 'SELECT COUNT(*) AS n FROM `' . $importer->tables->shadow( 0 ) . '`' )[0]['n'] );
+	}
+
+	/** An importer whose first tick created the table; its row changes with a note when it is inserted. */
+	private function noted(): TableImporter {
+		$sql = "-- backups-for-restic-dump/1 table `wp_rows`\n"
+			. "SET NAMES utf8mb4;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n"
+			. "SET SESSION time_zone = '+00:00';\nSET FOREIGN_KEY_CHECKS = 0;\nSET UNIQUE_CHECKS = 0;\n"
+			. "DROP TABLE IF EXISTS `wp_rows`;\n"
+			. "CREATE TABLE `wp_rows` (`a` int, `b` date) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+			// A DATE column drops the time with a note, not a warning.
+			. "INSERT INTO `wp_rows` (`a`,`b`) VALUES (1,'2026-01-01 10:00:00');\n"
+			. "-- end table rows=1 bytes=0\n";
+		$importer = $this->importer( StagedDump::write( $this->directory, StagedDump::with_updated_trailer( $sql, 1 ), 1 ) );
+		$importer->tick( 1 );
+		return $importer;
+	}
+
+	/** Whether the server has MariaDB's note_verbosity, which decides about notes next to sql_notes. */
+	private function verbosity(): bool {
+		return [] !== $this->db->rows( "SHOW SESSION VARIABLES LIKE 'note_verbosity'" );
+	}
+
+	private function assert_nothing_imported( TableImporter $importer ): void {
+		self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( '0', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
+	}
+
+	/**
+	 * Each server's own switch for notes: sql_notes on MySQL, note_verbosity on MariaDB, which
+	 * its configuration file can set for every session. MariaDB warns that sql_notes is
+	 * deprecated whenever it is set (11.4.13), and that warning refused every import.
+	 */
+	public function test_a_note_refuses_its_batch_also_when_the_session_does_not_count_notes(): void {
+		$importer                   = $this->noted();
+		[ $switch, $off, $literal ] = $this->verbosity() ? [ 'note_verbosity', '', "''" ] : [ 'sql_notes', '0', '0' ];
+		$this->db->execute( 'SET SESSION ' . $switch . ' = ' . $literal );
+		try {
+			$importer->tick( 1 );
+			self::fail( 'A value that the server changed with a note was imported.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 1, $refused->context()['warnings'] ?? null, $refused->getMessage() );
+		}
+		self::assertSame( $off, $this->db->rows( 'SELECT @@SESSION.' . $switch . ' AS notes' )[0]['notes'] );
+		$this->assert_nothing_imported( $importer );
+	}
+
+	/**
+	 * MariaDB records a note only when sql_notes lets it as well, and the restore cannot switch
+	 * sql_notes on without the warning: it refuses with a code of its own before a batch.
+	 */
+	public function test_sql_notes_off_refuses_on_mariadb_and_makes_the_note_count_on_mysql(): void {
+		$importer = $this->noted();
+		$mariadb  = $this->verbosity();
+		$this->db->execute( 'SET SESSION sql_notes = 0' );
+		try {
+			$importer->tick( 1 );
+			self::fail( 'A value that the server changed with a note was imported.' );
+		} catch ( DatabaseFailed $refused ) {
+			$context = $refused->context();
+			self::assertSame( $mariadb ? [ 'code' => 'database_restore_notes' ] : [ 'warnings' => 1 ], $context, $refused->getMessage() );
+		}
+		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_notes AS notes' )[0]['notes'] );
+		$this->assert_nothing_imported( $importer );
+	}
+
+	/** 20 columns with comments of 1,024 characters: about 21 KiB of definition. */
+	private static function columns(): string {
+		$columns = [];
+		for ( $column = 0; $column < 20; ++$column ) {
+			$columns[] = 'c' . $column . " INT COMMENT '" . str_repeat( 'x', 1024 ) . "'";
+		}
+		return '(' . implode( ', ', $columns ) . ')';
+	}
+
+	/**
+	 * A small table and a table without rows whose definition is larger than 16 KiB: 20
+	 * columns with comments of 1,024 characters (MariaDB keeps the comments of a table's
+	 * columns below 64 KiB in all). The dump records the size of INSERT statements only, so
+	 * the manifest says nothing about that definition.
+	 */
+	private function wide(): Manifest {
+		$this->db->execute( 'CREATE TABLE wp_aaa (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$this->db->execute( 'INSERT INTO wp_aaa VALUES (1),(2)' );
+		$this->db->execute( 'CREATE TABLE wp_wide ' . self::columns() . ' ENGINE=InnoDB' );
+		$manifest = $this->stage_dump();
+		self::assertSame( [ 'wp_aaa', 'wp_wide' ], array_column( $manifest->tables, 'name' ) );
+		self::assertSame( 0, $manifest->reads[1]['largest_statement'] ?? null, 'The dump records no statement of a table without rows.' );
+		return $manifest;
+	}
+
+	/**
+	 * The site's connection as a server reports a max_allowed_packet of 16 KiB on it. The importer
+	 * only reads the limit, so the tests need no change of the server's own one, which would hold
+	 * for every session that connects meanwhile until it is set back. With the server's global
+	 * limit at 16 KiB, MySQL 8.4.11 and MariaDB 11.4.13 refused the definition with error 1153
+	 * after the ledger and the first table were created.
+	 */
+	private function reporting_16_kib(): Connection {
+		return new class( new RestoreConnection( $this->db->mysqli ) ) implements Connection {
+			public function __construct( private Connection $site ) {}
+
+			public function rows( string $sql ): array {
+				return 'SELECT @@SESSION.max_allowed_packet AS packet' === $sql ? [ [ 'packet' => '16384' ] ] : $this->site->rows( $sql );
+			}
+
+			public function execute( string $sql ): int {
+				return $this->site->execute( $sql );
+			}
+		};
+	}
+
+	private function present( string $table ): bool {
+		return [] !== $this->db->rows( 'SELECT 1 AS present FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=' . RestoreSession::literal( $table ) );
+	}
+
+	/** Before, the import created its ledger and the first table and sent the definition. */
+	public function test_a_definition_beyond_max_allowed_packet_is_refused_before_the_ledger_and_any_table(): void {
+		$importer = new TableImporter( $this->reporting_16_kib(), $this->wide(), $this->directory, $this->token );
+		try {
+			$importer->tick( 16 );
+			self::fail( 'The import of a definition beyond the packet limit began.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+			self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
+			self::assertMatchesRegularExpression( '/\AThe CREATE statement of a table of the dump needs 2[0-9]{4} bytes of SQL and a max_allowed_packet of at least 2[0-9]{4} bytes; the database server allows 16384 bytes\. It was not sent\.\z/', $refused->getMessage() );
+		}
+		self::assertFalse( $this->present( $importer->tables->progress() ), 'The ledger was not created.' );
+		self::assertFalse( $this->present( $importer->tables->shadow( 0 ) ), 'No table was imported.' );
+	}
+
+	/** Before, the import sent the definition. */
+	public function test_a_definition_beyond_the_limit_of_a_later_session_is_refused_before_it_is_sent(): void {
+		$manifest = $this->wide();
+		// Under the server's own limit, the first tick creates the ledger and the first shadow.
+		$this->importer( $manifest )->tick( 1 );
+		$importer = new TableImporter( $this->reporting_16_kib(), $manifest, $this->directory, $this->token );
+		try {
+			for ( $tick = 0; $tick < 10; ++$tick ) {
+				$importer->tick( 16 );
+			}
+			self::fail( 'The definition beyond the packet limit was sent.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+			self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
+		}
+		self::assertSame( [ [ 'id' => '1' ], [ 'id' => '2' ] ], $this->db->rows( 'SELECT id FROM `' . $importer->tables->shadow( 0 ) . '` ORDER BY id' ) );
+		self::assertFalse( $this->present( $importer->tables->shadow( 1 ) ) );
+	}
+
+	/** As for the largest statement: of two definitions of the same size the first table is named. */
+	public function test_of_two_definitions_of_the_same_size_beyond_the_limit_the_first_table_is_named(): void {
+		$this->db->execute( 'CREATE TABLE wp_wide1 ' . self::columns() . ' ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE wp_wide2 ' . self::columns() . ' ENGINE=InnoDB' );
+		$manifest = $this->stage_dump();
+		$importer = new TableImporter( $this->reporting_16_kib(), $manifest, $this->directory, $this->token );
+		$lengths  = [];
+		foreach ( [ 0, 1 ] as $number ) {
+			$file      = new TableFile( $this->directory, $manifest, $number, $importer->tables->shadow( $number ), $importer->tables->owner );
+			$lengths[] = strlen( $file->create->sql );
+			$file->close();
+		}
+		self::assertSame( $lengths[0], $lengths[1], 'The two definitions are of the same size.' );
+		try {
+			$importer->tick( 16 );
+			self::fail( 'The import of a definition beyond the packet limit began.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+			self::assertSame( 'wp_wide1', $refused->context()['table'] ?? null );
+		}
+	}
+
+	/** @return iterable<string, array{array<string,mixed>|null, string}> */
+	public static function duplicate_reads(): iterable {
+		$read = [
+			'key'               => [ 'a' ],
+			'restarts'          => 0,
+			'largest_statement' => 50,
+		];
+		yield 'read at more than one moment' => [ [ 'snapshot' => false ] + $read, 'the dump read it at more than one moment, so a row that was deleted and inserted again with a new key in between can be in it twice.' ];
+		yield 'read in one read view' => [ [ 'snapshot' => true ] + $read, 'the dump read all of its rows from one read view' ];
+		yield 'not recorded' => [ null, 'the dump\'s manifest does not record how it read the table' ];
+	}
+
+	/** @param array<string,mixed>|null $read */
+	#[DataProvider( 'duplicate_reads' )]
+	public function test_a_duplicate_key_names_its_table_and_says_how_the_dump_read_it( ?array $read, string $explanation ): void {
+		$sql = "-- backups-for-restic-dump/1 table `wp_rows`\n"
+			. "SET NAMES utf8mb4;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n"
+			. "SET SESSION time_zone = '+00:00';\nSET FOREIGN_KEY_CHECKS = 0;\nSET UNIQUE_CHECKS = 0;\n"
+			. "DROP TABLE IF EXISTS `wp_rows`;\n"
+			. "CREATE TABLE `wp_rows` (`a` int NOT NULL, `b` longtext, UNIQUE KEY `a` (`a`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+			. "INSERT INTO `wp_rows` (`a`,`b`) VALUES (1,'first-value');\n"
+			// The same key again, as a row deleted and inserted again with a new primary key.
+			. "INSERT INTO `wp_rows` (`a`,`b`) VALUES (1,'second-value');\n"
+			. "-- end table rows=2 bytes=0\n";
+		$importer = $this->importer( StagedDump::write( $this->directory, StagedDump::with_updated_trailer( $sql, 2 ), 2, $read ) );
+		$importer->tick( 1 );
+		$importer->tick( 1 );
+		try {
+			$importer->tick( 1 );
+			self::fail( 'A duplicate key was imported.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_duplicate', $refused->context()['code'] ?? null );
+			self::assertSame( 'wp_rows', $refused->context()['table'] ?? null );
+			self::assertStringStartsWith( 'Two rows of a table of the dump have the same value in a unique key; ', $refused->getMessage() );
+			self::assertStringContainsString( $explanation, $refused->getMessage() );
+			self::assertStringNotContainsString( 'value', strtolower( (string) json_encode( $refused->context() ) ) );
+			self::assertNull( $refused->getPrevious() );
+		}
+		self::assertSame( [ [ 'b' => 'first-value' ] ], $this->db->rows( 'SELECT b FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( '1', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
+	}
+
+	/** @return iterable<string, array{list<string>, bool, bool}> */
+	public static function position_reads(): iterable {
+		yield 'without a key, at more than one moment' => [ [], false, true ];
+		yield 'without a key, in one statement' => [ [], true, false ];
+		yield 'by its key, at more than one moment' => [ [ 'a' ], false, false ];
+	}
+
+	/** @param list<string> $key */
+	#[DataProvider( 'position_reads' )]
+	public function test_the_report_names_a_table_that_the_dump_read_by_position_at_more_than_one_moment( array $key, bool $snapshot, bool $named ): void {
+		$manifest = StagedDump::write(
+			$this->directory,
+			null,
+			4,
+			[
+				'key'               => $key,
+				'snapshot'          => $snapshot,
+				'restarts'          => 0,
+				'largest_statement' => 60,
+			]
+		);
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$report = ( new RehearsalReport( new RestoreConnection( $this->db->mysqli ) ) )->read( $manifest, $importer->tables );
+		self::assertSame(
+			$named,
+			in_array(
+				[
+					'code'  => 'read_by_position',
+					'table' => 'wp_rows',
+				],
+				$report['findings'],
+				true
+			)
+		);
+		self::assertNotContains( 'read_by_position', $report['swap_preflight']['blockers'], 'The finding describes the backup; it does not hold up the exchange.' );
 	}
 }

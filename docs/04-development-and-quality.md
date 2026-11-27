@@ -252,7 +252,15 @@ checksums, including invisible columns and expression defaults, and check that l
 stay unchanged. A parent sends SIGKILL at six DDL/transaction boundaries, then resumes the
 import and verifies duplicate rows exactly once. Foreign table collisions, an active
 transaction, session restoration, truncation warnings and wrong INSERT destinations are
-also exercised ([ADR 0035](adr/0035-transactional-shadow-import.md)).
+also exercised ([ADR 0035](adr/0035-transactional-shadow-import.md)), and so are the
+settings that a server, an account's `init_connect` or earlier code can leave on the site's
+session: a row limit through rehearsal, review, exchange, undo and expiry, a completion type
+that chains or releases, notes that do not count as warnings (switched off with each
+server's own variable, and `sql_notes` off on MariaDB, which is refused), the safe-updates
+mode and a latin1 connection ([ADR 0043](adr/0043-atomic-mysql-database-exchange.md),
+"Session settings"). A dump whose largest statement or one of whose CREATE statements the
+server cannot take is refused before the progress table exists, and a duplicate key names
+its table.
 
 The **integration suite** (`phpunit-integration.xml.dist`) uses real WordPress installations.
 `bin/test-site.sh install` downloads a pinned, checksum-verified WordPress, creates its

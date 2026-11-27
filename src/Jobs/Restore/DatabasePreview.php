@@ -46,10 +46,16 @@ final readonly class DatabasePreview {
 	 * @param string          $path Absolute snapshot path of the site manifest.
 	 * @param string          $site Original site address.
 	 * @param mixed           $versions Original WordPress, plugin and PHP versions.
+	 * @throws FormatException If the staged database or its manifest is refused.
 	 */
 	public function bind( RestoreServices $services, Job $job, string $path, string $site, mixed $versions ): void {
-		$subdir          = rtrim( dirname( $path ), '/' ) . '/database';
-		$manifest        = $this->source( $services, $job, $subdir )->manifest;
+		$subdir = rtrim( dirname( $path ), '/' ) . '/database';
+		try {
+			$manifest = $this->source( $services, $job, $subdir )->manifest;
+		} catch ( FormatException $refused ) {
+			self::refused( $job, $refused );
+			throw $refused;
+		}
 		$source_versions = [];
 		foreach ( [ 'wordpress', 'plugin', 'php' ] as $key ) {
 			if ( is_array( $versions ) && is_string( $versions[ $key ] ?? null ) ) {
@@ -120,7 +126,9 @@ final readonly class DatabasePreview {
 	/**
 	 * Gives a failed rehearsal statement the code the administrator can act on. A batch
 	 * beyond the server's packet limit is refused before it is sent; a server that closes
-	 * the session for one anyway reports 1153.
+	 * the session for one anyway reports 1153. The importer's own refusals keep their codes:
+	 * a statement of the dump that the import cannot read or the server cannot take, found
+	 * before the first one is sent, and a duplicate key.
 	 *
 	 * @param DatabaseFailed $error Failure of the import.
 	 * @return DatabaseFailed Failure with a job error code.
@@ -128,7 +136,7 @@ final readonly class DatabasePreview {
 	public static function classified( DatabaseFailed $error ): DatabaseFailed {
 		$code = $error->context()['code'] ?? null;
 		return match ( true ) {
-			'database_restore_packet' === $code => $error,
+			in_array( $code, [ 'database_restore_packet', 'database_restore_packet_limit', 'database_restore_too_large', 'database_restore_duplicate', 'database_restore_notes' ], true ) => $error,
 			1153 === $code => new DatabaseFailed( 'A statement of the snapshot is larger than the database server\'s max_allowed_packet.', [ 'code' => 'database_restore_packet' ] ),
 			in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) => new DatabaseFailed( 'The database rehearsal is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] ),
 			in_array( $code, [ 1115, 1253, 1273 ], true ) => new DatabaseFailed( 'The destination database cannot use a character set or collation required by the snapshot.', [ 'code' => 'database_restore_collation' ] ),
@@ -154,6 +162,20 @@ final readonly class DatabasePreview {
 		}
 		unset( $job->data['database_binding'], $job->data['database_cleanup'] );
 		return true;
+	}
+
+	/**
+	 * Keeps the name of a table that the manifest's check refused for the texts of the job,
+	 * which name it (database_restore_name): escaped, as the check gives it.
+	 *
+	 * @param Job             $job Restore job.
+	 * @param FormatException $refused Refusal of the manifest.
+	 */
+	private static function refused( Job $job, FormatException $refused ): void {
+		$name = $refused->context()['table'] ?? null;
+		if ( 'database_restore_name' === ( $refused->context()['code'] ?? null ) && is_string( $name ) ) {
+			$job->data['database_refused_name'] = $name;
+		}
 	}
 
 	/**

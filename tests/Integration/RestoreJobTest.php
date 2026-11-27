@@ -419,4 +419,115 @@ final class RestoreJobTest extends TestCase {
 			TestSite::idle( 600 );
 		}
 	}
+
+	/**
+	 * Backs up the site with the database switched off.
+	 *
+	 * @return string ID of the snapshot, which holds no database dump.
+	 */
+	private static function backup_without_the_database(): string {
+		TestSite::idle( 600 );
+		[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'backup.database.enabled' => false ] ] );
+		self::assertSame( 200, $status, $raw );
+		try {
+			$job = TestSite::wait_for( TestSite::start(), 1800 );
+		} finally {
+			[ $status, , $raw ] = TestSite::api( 'PUT', '/settings', [ 'values' => [ 'backup.database.enabled' => true ] ] );
+			self::assertSame( 200, $status, $raw );
+		}
+		self::assertSame( 'succeeded', $job['state'], (string) json_encode( $job['error'] ) );
+		TestSite::idle( 600 );
+		return (string) $job['result']['snapshot'];
+	}
+
+	/**
+	 * A rehearsal of a snapshot that holds no database dump says so before it stages a file,
+	 * in REST and in WP-CLI, and the review of that restore gives the same answer instead of
+	 * asking for a new rehearsal. Before, the job said that its log held a database error.
+	 *
+	 * @param string $snapshot A snapshot with the database, whose rehearsal works.
+	 */
+	#[Depends( 'test_a_backup_for_the_restore' )]
+	public function test_a_rehearsal_of_a_snapshot_without_a_database_says_so_and_so_does_its_review( string $snapshot ): void {
+		$without = self::backup_without_the_database();
+		self::assertNotSame( $snapshot, $without );
+		[ $status, $started, $raw ] = TestSite::api(
+			'POST',
+			'/jobs',
+			[
+				'type'             => 'restore',
+				'snapshot'         => $without,
+				'database_preview' => true,
+			]
+		);
+		self::assertSame( 201, $status, $raw );
+		$id  = (string) $started['job']['id'];
+		$job = TestSite::wait_for( $id, 1800 );
+		self::assertSame( 'failed', $job['state'] );
+		self::assertSame( 'database_not_in_snapshot', $job['error']['code'] ?? null, (string) json_encode( $job['error'] ) );
+		self::assertSame( 'This snapshot holds no database dump, so there is no database to rehearse or restore.', $job['error']['message'] );
+		self::assertStringContainsString( 'Restore its files without the database rehearsal, or choose a snapshot that includes the database.', $job['error']['hint'] );
+		self::assertStringNotContainsString( 'database error', $job['error']['hint'] );
+		self::assertStringNotContainsString( 'Restore started.', TestSite::job_log( $id ), 'Nothing was staged for the rehearsal.' );
+		self::assertDirectoryDoesNotExist( TestSite::private_dir() . '/restores/' . $id );
+		[ $status, $review, $raw ] = TestSite::api( 'POST', '/restores/' . $id . '/database/plan' );
+		self::assertSame( 409, $status, $raw );
+		self::assertSame( 'backups_for_restic_database_not_in_snapshot', $review['code'] ?? null, $raw );
+		self::assertSame( $job['error']['message'], $review['message'] ?? null );
+		if ( TestSite::has_wp_cli() ) {
+			[ $exit, $printed ] = TestSite::wp( [ 'backups-for-restic', 'restore', $without, '--database-preview', '--wait' ] );
+			self::assertNotSame( 0, $exit, $printed );
+			self::assertStringContainsString( 'Error: This snapshot holds no database dump, so there is no database to rehearse or restore.', $printed );
+			TestSite::idle( 600 );
+		}
+	}
+
+	/**
+	 * A table whose name has a right-to-left override: the rehearsal refuses the dump before it
+	 * imports a row and names the table escaped, in REST and in WP-CLI.
+	 *
+	 * @param string $snapshot A snapshot before the table existed.
+	 */
+	#[Depends( 'test_a_backup_for_the_restore' )]
+	public function test_a_rehearsal_of_a_table_whose_name_does_not_print_as_itself_names_it_escaped( string $snapshot ): void {
+		TestSite::idle( 600 );
+		$db = MysqliConnection::connect( MysqliConnection::environment( 'BFR_DB_NAME', 'bfr_site' ) );
+		self::assertNotNull( $db );
+		$name = "wp_bfr_po\u{202E}sts";
+		$db->execute( 'CREATE TABLE `' . $name . '` (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		try {
+			$backup = TestSite::wait_for( TestSite::start(), 1800 );
+		} finally {
+			$db->execute( 'DROP TABLE `' . $name . '`' );
+		}
+		self::assertSame( 'succeeded', $backup['state'], (string) json_encode( $backup['error'] ) );
+		self::assertNotSame( $snapshot, $backup['result']['snapshot'] );
+		TestSite::idle( 600 );
+		$database                   = TestSite::private_dir() . '/spool/database';
+		$expected                   = 'The database dump of this backup has a table or view named "wp_bfr_po\u202ests", with a character that does not print as itself, so the database rehearsal did not import it.';
+		[ $status, $started, $raw ] = TestSite::api(
+			'POST',
+			'/jobs',
+			[
+				'type'             => 'restore',
+				'snapshot'         => (string) $backup['result']['snapshot'],
+				'paths'            => [ $database ],
+				'database_preview' => true,
+			]
+		);
+		self::assertSame( 201, $status, $raw );
+		$job = TestSite::wait_for( (string) $started['job']['id'], 1800 );
+		self::assertSame( 'failed', $job['state'] );
+		self::assertSame( 'database_restore_name', $job['error']['code'] ?? null, (string) json_encode( $job['error'] ) );
+		self::assertSame( $expected, $job['error']['message'] );
+		self::assertStringContainsString( 'restore the database by hand with the command-line client', $job['error']['hint'] );
+		self::assertSame( [], $db->rows( "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_COMMENT LIKE 'backups-for-restic-restore/1:%'" ), 'No private table was created.' );
+		if ( TestSite::has_wp_cli() ) {
+			[ $exit, $printed ] = TestSite::wp( [ 'backups-for-restic', 'restore', (string) $backup['result']['snapshot'], $database, '--database-preview', '--wait' ] );
+			self::assertNotSame( 0, $exit, $printed );
+			self::assertStringContainsString( 'Error: ' . $expected, $printed );
+			self::assertStringNotContainsString( "\u{202E}", $printed, 'The terminal gets the name escaped.' );
+			TestSite::idle( 600 );
+		}
+	}
 }

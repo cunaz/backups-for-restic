@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Jobs\Restore;
 
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Snapshot\Reader;
 use BackupsForRestic\Engine\Restore\Files as StagingFiles;
@@ -58,6 +59,12 @@ final class RestoreSteps implements StepProvider {
 	 * The code of a restore whose snapshot the repository does not hold, or no longer holds.
 	 */
 	public const string SNAPSHOT_MISSING = 'restore_snapshot_missing';
+
+	/**
+	 * The code of a database rehearsal of a snapshot that holds no database dump: one without a
+	 * site manifest, or whose manifest says that its backup did not include the database.
+	 */
+	public const string NO_DATABASE = 'database_not_in_snapshot';
 
 	/**
 	 * Free space that building an archive leaves on the volume. The archive is a second copy
@@ -192,19 +199,54 @@ final class RestoreSteps implements StepProvider {
 			]
 		);
 		if ( RestoreRequest::from_job( $job )->database_preview ) {
-			$common     = $this->services->common;
-			$repository = $this->repository();
-			$reader     = new Reader( $repository, $common->identity, $common->clock, $common->index_cache( $repository ) );
-			$manifest   = $reader->manifest( Id::from_hex( RestoreRequest::from_job( $job )->snapshot ) );
-			if ( null === $manifest || true !== ( $manifest['data']['database'] ?? null ) || ! is_string( $manifest['data']['home_url'] ?? null ) ) {
-				throw new DatabaseFailed( 'This snapshot has no complete site manifest with a database.' );
-			}
-			$this->preview()->bind( $this->services, $job, $manifest['path'], $manifest['data']['home_url'], $manifest['data']['versions'] ?? null );
+			$manifest = $this->database_manifest( $this->repository(), RestoreRequest::from_job( $job )->snapshot );
+			$this->preview()->bind( $this->services, $job, $manifest['path'], $manifest['site'], $manifest['versions'] );
 			$job->progress['phase'] = 'database_import';
 			// Returning before DDL ensures the runner persists the cleanup identity first.
 			return false;
 		}
 		return $this->after_staging( $job, $log );
+	}
+
+	/**
+	 * The site manifest of a snapshot whose database a restore rehearses: it has to say that
+	 * the snapshot holds a database dump. A snapshot without one, of a backup with the database
+	 * switched off or of another program, fails the job with NO_DATABASE: there is nothing to
+	 * rehearse, and no database error that the log could name. A snapshot that the repository
+	 * does not hold fails it with SNAPSHOT_MISSING, as the run finds it (RestoreRun), not with
+	 * the missing object of the read: this runs before the run, outside advance().
+	 *
+	 * @param Repository $repository Opened repository.
+	 * @param string     $snapshot   Snapshot ID.
+	 * @return array{path: string, site: string, versions: mixed} Location of the site manifest, the site's address and versions.
+	 * @throws DatabaseFailed With the code NO_DATABASE if the snapshot holds no database dump.
+	 * @throws RepositoryChanged With the code SNAPSHOT_MISSING if the repository does not hold the snapshot.
+	 */
+	private function database_manifest( Repository $repository, string $snapshot ): array {
+		if ( null === $repository->backend()->size( ObjectType::Snapshots, $snapshot ) ) {
+			RepositoryChanged::raise(
+				'The selected snapshot no longer exists.',
+				[
+					'code'  => self::SNAPSHOT_MISSING,
+					'cause' => RestoreRun::SNAPSHOT_MISSING,
+				]
+			);
+		}
+		$common   = $this->services->common;
+		$reader   = new Reader( $repository, $common->identity, $common->clock, $common->index_cache( $repository ) );
+		$manifest = $reader->manifest( Id::from_hex( $snapshot ) );
+		if ( null === $manifest ) {
+			DatabaseFailed::raise( 'The snapshot has no site manifest, so it holds no database dump of this plugin to rehearse.', [ 'code' => self::NO_DATABASE ] );
+		}
+		$site = $manifest['data']['home_url'] ?? null;
+		if ( true !== ( $manifest['data']['database'] ?? null ) || ! is_string( $site ) ) {
+			DatabaseFailed::raise( 'The site manifest of the snapshot says that its backup did not include the database, so there is no database dump to rehearse.', [ 'code' => self::NO_DATABASE ] );
+		}
+		return [
+			'path'     => $manifest['path'],
+			'site'     => $site,
+			'versions' => $manifest['data']['versions'] ?? null,
+		];
 	}
 
 	/**
@@ -554,6 +596,8 @@ final class RestoreSteps implements StepProvider {
 	 * @return RestoreRun Run.
 	 * @throws InvalidArgument If the master key is missing or the job holds no valid request.
 	 * @throws StorageFailed If the staging directory cannot be created.
+	 * @throws DatabaseFailed If a rehearsal is asked for and the snapshot holds no database dump.
+	 * @throws RepositoryChanged If a rehearsal is asked for and the repository does not hold the snapshot.
 	 */
 	private function run( Job $job, EventLog $log ): RestoreRun {
 		$services   = $this->services->common;
@@ -562,6 +606,11 @@ final class RestoreSteps implements StepProvider {
 		$request    = RestoreRequest::from_job( $job );
 		$resume     = is_file( $work . '/' . RestoreServices::CHECKPOINT );
 		$paths      = $request->paths;
+		if ( ! $resume && $request->database_preview ) {
+			// Before the first file is staged: a rehearsal of a snapshot without a database dump
+			// would otherwise stage the whole selection and then fail.
+			$this->database_manifest( $repository, $request->snapshot );
+		}
 		if ( $request->fresh_install && ( ! $resume || ! isset( $job->data['site_layout'] ) ) ) {
 			// A worker can stop after creating the engine checkpoint and before saving the
 			// job. Re-read the same immutable snapshot in that case to recover the binding.
