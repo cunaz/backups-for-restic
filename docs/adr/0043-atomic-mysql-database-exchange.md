@@ -302,7 +302,8 @@ database could not get rid of the binding. Since then:
   (`JobStore::DISCARD_LISTED_DAYS`, counted from the discard's own time) or until the
   administrator marks them as taken care of (`POST /database-changes/{id}/discarded-done`,
   `wp backups-for-restic database-discarded <apply-job> --done`, which record who did and when
-  under `database_discarded.done`). Until then `JobStore::prune()` keeps the job, and the
+  under `database_discarded.done`, under the runner lock, so that the pruning of the job
+  history cannot remove the job between the check and the save). Until then `JobStore::prune()` keeps the job, and the
   Restores tab lists the binding under "Discarded bindings" with its names, from the answer of
   `GET /database-changes/foreign` (`discarded`), as `wp backups-for-restic database-discarded`
   prints them. The job is kept rather than the names copied into a record of their own,

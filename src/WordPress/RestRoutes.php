@@ -904,10 +904,18 @@ final class RestRoutes {
 	 */
 	public function discarded_done( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$id = Decoded::string( $request->get_url_params()['id'] ?? null );
+		// Under the runner lock, as every write of a job document: the pruning of the job history,
+		// which runs under it, cannot remove the job between the check and the save.
+		$lock = $this->container->runner_lock();
+		if ( ! $lock->acquire() ) {
+			return $this->error( 'database_discarded_busy', 409 );
+		}
 		try {
 			$entry = $this->container->database_changes()->discarded_done( $id, get_current_user_id(), 'rest' );
 		} catch ( PluginException $refused ) {
 			return $this->discard_error( $refused );
+		} finally {
+			$lock->release();
 		}
 		return $this->respond( [ 'done' => $entry ], 200, true );
 	}

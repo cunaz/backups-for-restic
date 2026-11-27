@@ -469,7 +469,9 @@ final readonly class DatabaseChanges implements StepProvider {
 	/**
 	 * Ends the listing of the private tables of a discarded binding: the administrator says
 	 * that they are taken care of. The job records who said so and when; after that the job
-	 * history prunes the job as any other, with its record of the discard and its log.
+	 * history prunes the job as any other, with its record of the discard and its log. The
+	 * caller holds the runner lock, so that the pruning, which runs under it, cannot remove the
+	 * job between the check and the save, which would leave a job folder with the document alone.
 	 *
 	 * @param string $apply Database apply whose binding was discarded.
 	 * @param int    $user Confirming WordPress user, 0 from WP-CLI without a user.

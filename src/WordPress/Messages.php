@@ -410,6 +410,10 @@ final class Messages {
 				'message' => __( 'An unexpected error stopped the review or the discard of this binding, so the binding was not discarded.', 'backups-for-restic' ),
 				'hint'    => __( 'The plugin recorded nothing about this error. Open the review of the discard again; if the error comes back, "wp backups-for-restic database-discard" with the ID of the database restore job prints its details. Please report it.', 'backups-for-restic' ),
 			],
+			'database_discarded_busy' => [
+				'message' => __( 'Another request is working on the jobs of the plugin right now, so the tables were not marked as taken care of.', 'backups-for-restic' ),
+				'hint'    => __( 'Try again in a moment.', 'backups-for-restic' ),
+			],
 			'database_discard_busy' => [
 				'message' => __( 'Another request is working on the jobs of the plugin right now, so the binding was not discarded.', 'backups-for-restic' ),
 				'hint'    => __( 'The review is still valid: confirm it again in a moment.', 'backups-for-restic' ),

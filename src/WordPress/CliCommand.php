@@ -606,10 +606,17 @@ final class CliCommand {
 			if ( $user > 0 && ! RestRoutes::database_writes_allowed() ) {
 				\WP_CLI::error( __( 'The selected WordPress user may not change the database of this site.', 'backups-for-restic' ) );
 			}
+			$lock = $this->container->runner_lock();
+			if ( ! $lock->acquire() ) {
+				$texts = Messages::job_error( 'database_discarded_busy' );
+				\WP_CLI::error( $texts['message'] . ' ' . $texts['hint'] );
+			}
 			try {
 				$entry = $service->discarded_done( $id, $user, 'wp-cli' );
 			} catch ( PluginException $refused ) {
 				self::discard_refused( $refused );
+			} finally {
+				$lock->release();
 			}
 			/* translators: 1: number of private table names, 2: ID of the database apply job. */
 			\WP_CLI::success( sprintf( __( 'The %1$d private tables of the discarded binding of %2$s are no longer listed.', 'backups-for-restic' ), count( $entry['tables'] ), $entry['job'] ) );

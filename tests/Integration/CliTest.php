@@ -795,6 +795,19 @@ final class CliTest extends TestCase {
 			[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done', '--user=bfr-cli-editor' ] );
 			self::assertSame( 1, $status, $output );
 			self::assertStringContainsString( 'Error: The selected WordPress user may not change the database of this site.', $output );
+			// Another request holds the runner lock, as the pruning of the job history does.
+			$lock = fopen( TestSite::private_dir() . '/runner.lock', 'c' );
+			self::assertIsResource( $lock );
+			self::assertTrue( flock( $lock, LOCK_EX ) );
+			try {
+				[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done' ] );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( 'Error: Another request is working on the jobs of the plugin right now, so the tables were not marked as taken care of.', $output );
+				self::assertArrayNotHasKey( 'done', TestSite::job_document( $job )['data']['database_discarded'] ?? [] );
+			} finally {
+				flock( $lock, LOCK_UN );
+				fclose( $lock );
+			}
 			[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done' ] );
 			self::assertSame( 0, $status, $output );
 			self::assertStringContainsString( 'Success: The 7 private tables of the discarded binding of ' . $job . ' are no longer listed.', $output );

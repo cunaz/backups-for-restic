@@ -493,6 +493,48 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_tables_are_marked_as_taken_care_of_only_under_the_runner_lock(): void {
+		$job = '20261126T120000Z-0d1506';
+		TestSite::database_binding(
+			$job,
+			true,
+			[
+				'database_owner'     => null,
+				'database_discarded' => [
+					'at'       => time(),
+					'user'     => 1,
+					'via'      => 'rest',
+					'job'      => $job,
+					'database' => 'elsewhere',
+					'server'   => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002',
+					'tables'   => [ '_bfr_r_' . str_repeat( 'c', 32 ) . '_p' ],
+				],
+			],
+			'succeeded'
+		);
+		$route = '/database-changes/' . $job . '/discarded-done';
+		try {
+			// Another request holds the runner lock, as the pruning of the job history does.
+			$lock = fopen( TestSite::private_dir() . '/runner.lock', 'c' );
+			self::assertIsResource( $lock );
+			self::assertTrue( flock( $lock, LOCK_EX ) );
+			try {
+				[ $status, $error ] = TestSite::api( 'POST', $route, [] );
+				// Before, the job document was saved without the lock.
+				self::assertSame( [ 409, 'backups_for_restic_database_discarded_busy' ], [ $status, $error['code'] ?? null ] );
+				self::assertArrayNotHasKey( 'done', TestSite::job_document( $job )['data']['database_discarded'] ?? [] );
+			} finally {
+				flock( $lock, LOCK_UN );
+				fclose( $lock );
+			}
+			[ $status, $done, $raw ] = TestSite::api( 'POST', $route, [] );
+			self::assertSame( 200, $status, $raw );
+			self::assertSame( $job, $done['done']['job'] ?? null );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+		}
+	}
+
 	public function test_a_failure_of_a_discard_that_the_service_does_not_name_is_answered_as_unexpected(): void {
 		// No failure that a site can cause reaches this answer any more, so the route's mapping is
 		// asked directly with failures as a defect, the private directory and a refusal raise them.
