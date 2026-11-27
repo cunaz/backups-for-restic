@@ -12,7 +12,8 @@
     "phpUnit": {
         "configDir": "tests/Mutation"
     },
-    "testFrameworkOptions": "--testsuite=restore",
+    // The restore suite and the tests of the apply jobs' own classes (tests/Mutation/phpunit.xml.dist).
+    "testFrameworkOptions": "--testsuite=apply",
     // Well above the time the durably writing test classes take under coverage (up to 11 s
     // on tmpfs and 18 s on ext4 on 2026-11-23), so that a slower runner skips none of their
     // mutants: Infection skips a mutant whose quickest covering test class took at least the
