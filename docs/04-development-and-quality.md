@@ -433,7 +433,9 @@ on one site, without retries:
 - a database restore whose private tables are on another database server: the undo card and
   the list on the Restores tab offer the review of its discard, which shows a database name
   with a right-to-left override escaped and the table names; a wrong site address, a wrong
-  password and a lost answer discard nothing, and the confirmed discard says what it forgot.
+  password and a lost answer discard nothing, and the confirmed discard says what it forgot,
+  also when an older answer to the lists arrives after it; a log that cannot be read is
+  announced, and a lost answer to marking the tables as taken care of reads the lists again.
 
 The restore tests download the selected file, ZIP and report, and a restore of a snapshot
 that another client forgot after the page listed it says so in the restore's own words. On a
