@@ -246,6 +246,42 @@ final class FileChangesUndoTest extends TestCase {
 		self::assertSame( [ 'remove', 'undo_journal' ], [ array_column( $this->site->changes->preview_undo( $apply->id )['entries'], 'action', 'path' )[ $file ], array_column( $this->site->changes->preview_undo( $apply->id )['entries'], 'reason', 'path' )[ $file ] ] );
 	}
 
+	public function test_an_entry_with_nothing_left_to_revert_whose_check_takes_several_ticks_is_kept_once_it_came_back(): void {
+		$big     = $this->site->live . '/big.bin';
+		$restore = $this->site->second_restore(
+			[
+				$big                          => str_repeat( 'b', 2 * 1048576 + 1 ),
+				$this->site->live . '/c1.txt' => 'one',
+			]
+		);
+		$staged  = $this->site->jobs->get( $restore ) ?? self::fail( 'The restore is gone.' );
+		// A background review, whose digests of large files a tick without budget cannot finish.
+		$staged->result['files'] = DiskFilePlan::PAGE + 1;
+		$this->site->jobs->save( $staged );
+		$plan  = $this->site->run_job( $this->site->changes->request_preview( $restore, false, false ) );
+		$apply = $this->site->run_job( $this->site->changes->start_apply( $restore, false, $plan->result['digest'], '', $plan->id ) );
+		rename( $big, $this->site->directory . '/aside' );
+		$review = $this->site->run_job( $this->site->changes->request_preview( $apply->id, true, false ) );
+		self::assertSame( [ 0, 1, 1, 1 ], [ $review->result['restore'], $review->result['remove'], $review->result['keep'], $review->result['settled'] ] );
+		$undo = $this->site->changes->start_undo( $apply->id, $review->result['digest'], '', $review->id );
+		// The file is back as the apply left it before the worker comes.
+		rename( $this->site->directory . '/aside', $big );
+		$done = $this->site->tick_until_end( $undo, 0.0 );
+		self::assertSame(
+			[
+				'restored'             => 0,
+				'removed'              => 1,
+				'unchanged'            => 0,
+				'kept'                 => 1,
+				'changed_after_review' => 1,
+				'apply_state'          => 'partly_undone',
+			],
+			ApplySite::outcomes( $done )
+		);
+		self::assertSame( [ $big => 'changed_since_apply' ], $this->site->kept( $done ) );
+		self::assertFileExists( $big );
+	}
+
 	public function test_a_background_undo_whose_sealed_review_lacks_a_total_is_reviewed_again(): void {
 		$plan   = $this->site->run_job( $this->site->queue_large_preview() );
 		$apply  = $this->site->run_job( $this->site->changes->start_apply( $this->site->restore, false, $plan->result['digest'], '', $plan->id ) );

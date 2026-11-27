@@ -203,6 +203,26 @@ final class ApplySite {
 		Assert::fail( 'The file change job did not finish.' );
 	}
 
+	/**
+	 * Ticks a job with the given budget until it ends, for at most the given seconds of the
+	 * wall clock: a tick without budget can wait for the second of a file's or folder's
+	 * last change to pass, so a count of ticks does not bound such a run.
+	 */
+	public function tick_until_end( Job $job, float $budget, float $seconds = 10.0 ): Job {
+		$until = microtime( true ) + $seconds;
+		do {
+			$run = $this->runner->tick( $budget )->job;
+			Assert::assertNotNull( $run );
+			Assert::assertSame( $job->id, $run->id );
+			if ( $run->state->is_terminal() ) {
+				Assert::assertFileDoesNotExist( $this->live . '/.maintenance' );
+				return $run;
+			}
+			usleep( 2000 );
+		} while ( microtime( true ) < $until );
+		Assert::fail( 'The job did not end within ' . $seconds . ' seconds.' );
+	}
+
 	/** Reviews the undo of an apply inline, confirms it and runs it. */
 	public function undo( Job $apply ): Job {
 		$plan = $this->changes->preview_undo( $apply->id );
