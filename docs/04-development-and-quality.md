@@ -565,9 +565,9 @@ four cores; its minutes are those of the Infection step.
 
 The database gate's figures in this table come from one server that all its processes shared;
 with a server per process the same code scores 80.69 % and 84.59 % ("One server per process",
-below). Under Infection's wrapper the gates had reported 90.39 % covered for the core and 79.20 % for
-the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore, 100 % for
-the apply jobs and 99.87 % for ZIP downloads on 2026-11-22.
+below). Under Infection's wrapper the gates had reported 90.39 % covered for the core and
+79.20 % for the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore,
+100 % for the apply jobs and 99.87 % for ZIP downloads on 2026-11-22.
 
 The planner and ZIP gates gave the same figures in every run on their current code, the local
 ones on three states of `main` and CI's two, mutant for mutant. The core and the apply gate gave
@@ -641,8 +641,9 @@ escape all of the 630 but two, and one more:
   `test_killing_the_worker_on_either_side_of_rename_resumes_from_the_physical_witness`, whose
   worker, a program of its own that runs the unmutated code, did not reach its `RENAME` within
   the test's 30 seconds. Of the 2,079 processes that ran this test it failed in this one.
-- `DatabaseReview.php:136` (DecrementInteger, `LIMIT 10000` where the review asks for 10,001
-  tables) escaped, which all three shared runs had killed; no test reaches 10,000 tables.
+- `DatabaseReview.php:136` (DecrementInteger: the review reads 10,000 tables instead of 10,001,
+  so it never sees more than the limit) escaped, which all three shared runs had killed; no test
+  reaches 10,000 tables.
 
 So each run on the shared server had killed 40 to 52 mutants that its tests let escape, and the
 80.67 % and 84.56 % over the mutants that all three runs of 2026-11-23 killed came within 0.03
@@ -652,10 +653,10 @@ to 5, came out as the full run for every one of them; on these files the runs wi
 process let escape exactly the mutants that at least one of CI's three runs let escape. On one
 shared server, with the same timeout of 600 s and `main`'s code, the same 423 mutants came out
 with 3 kills more (82.98 % against 82.27 %): `SwapCatalog.php:70` and `:118` and
-`WriteBarrier.php:42`, which two of CI's three runs had let escape. Two runs of the same code now differ only
-where a test keeps a deadline of its own that a heavily loaded machine can miss, as the worker's
-30 seconds above, in one process of 4,081 there. The floors stay at the whole numbers below,
-80 % and 84 %, but now below what the tests kill, not below an upper bound.
+`WriteBarrier.php:42`, which two of CI's three runs had let escape. Two runs of the same code
+now differ only where a test keeps a deadline of its own that a heavily loaded machine can miss,
+as the worker's 30 seconds above, in one process of 4,081 there. The floors stay at the whole
+numbers below, 80 % and 84 %, but now below what the tests kill, not below an upper bound.
 
 Infection gives each mutant a timeout of five seconds plus five times what its covering test
 classes took in the initial run, at most the configured timeout; a mutant that runs into it
@@ -671,22 +672,21 @@ takes about 31 s with coverage on a runner, and five times that is far above 60 
 loaded machine timed out mutants that the tests let escape. On 2026-11-20 a run during other
 test runs counted 530 timeouts instead of 8; CI's runs of `662c8b1` and `06a00d4` counted 414
 and 390 and took 3 h 21 min and 3 h 18 min, where the runs with 9 to 11 timeouts took 1 h 51 min
-to 2 h 25 min. Of the 390, 277 were
-mutants that all three runs of the same code on runners of usual speed let escape, and on
-`662c8b1` 218 mutants escaped instead of 572: its 90.30 % and 94.66 % measured the runner, not
-the tests. On a machine twice as slow as a runner, where the exchange's class took 65 s with
-coverage, Infection skipped 1,297 mutants without running them, as their quickest covering
-class took longer than the limit; a skipped mutant leaves the scores altogether. Since
-2026-11-26 the database gate allows 600 s, above five times the covering classes of every
-mutant even on a runner at half its usual speed (about 260 s): the timeout of each mutant
-follows the time that its tests took on the machine that runs them, and a slower machine gives
-them more time. In the run with a server per process above, at a load of 5 to 15, the initial
-run took 162 s and the exchange's class 89.5 s, so the timeouts went up to 489 s; the 8 mutants
-that timed out are the ones that loop for good (`WriteBarrier` 5, `SqlLexer` 2,
-`DatabaseChanges` 1), and of the 4,068 other processes whose covering classes are known none used
-more than 31 % of its timeout. Of the 629 escaped mutants 333 had run longer than 60 s there.
-Under a CPU quota of 40 % for the gate and its servers, which slowed the initial run 1.5 times
-and the mutant processes 3.5 times, the 423 mutants of `SwapCatalog`, `WriteBarrier` and
+to 2 h 25 min. Of the 390, 277 were mutants that all three runs of the same code on runners of
+usual speed let escape, and on `662c8b1` 218 mutants escaped instead of 572: its 90.30 % and
+94.66 % measured the runner, not the tests. On a machine twice as slow as a runner, where the
+exchange's class took 65 s with coverage, Infection skipped 1,297 mutants without running them,
+as their quickest covering class took longer than the limit; a skipped mutant leaves the scores
+altogether. Since 2026-11-26 the database gate allows 600 s, above five times the covering
+classes of every mutant even on a runner at half its usual speed (about 260 s): the timeout of
+each mutant follows the time that its tests took on the machine that runs them, and a slower
+machine gives them more time. In the run with a server per process above, at a load of 5 to 15,
+the initial run took 162 s and the exchange's class 89.5 s, so the timeouts went up to 489 s;
+the 8 mutants that timed out are the ones that loop for good (`WriteBarrier` 5, `SqlLexer` 2,
+`DatabaseChanges` 1), and of the 4,068 other processes whose covering classes are known none
+used more than 31 % of its timeout. Of the 629 escaped mutants 333 had run longer than 60 s
+there. Under a CPU quota of 40 % for the gate and its servers, which slowed the initial run 1.5
+times and the mutant processes 3.5 times, the 423 mutants of `SwapCatalog`, `WriteBarrier` and
 `SessionDrain` came out as in the full run, every one of them, in 2 h 1 min instead of 42 min:
 the longest escaped process ran 364 s of its 450, where it had run 105 s.
 
@@ -712,7 +712,9 @@ core gates (81.61 % against 83 %, 88.50 % against 89 %). The slow run of `662c8b
 10.1 %, and its bounds, 80.62 % to 90.30 % and 84.51 % to 94.66 % covered, meet the database
 gate's floors of 80 % and 84 %: it would have counted on the mutants that its tests killed. On
 the last runs of the six gates, locally and in CI on `662c8b1`, the script's arithmetic gave
-Infection's scores to the hundredth.
+Infection's scores to the hundredth. One mutant of the ZIP writer writes its checkpoint files
+into the working directory, and so do mutants of the file restore gate; delete `.head`, `.names`
+and `.state` there after a local run.
 
 A skipped mutant lifts a score as well, and since 2026-11-26 the script holds a run with one to
 the same bound: Infection leaves out of both scores a mutant whose quickest covering class took
@@ -729,14 +731,12 @@ with servers of their own and 600 s kills 82.27 % and 84.47 % covered with 5 tim
 
 The first run did not time out a single mutant, so the 5 % rule alone would have passed its
 95.89 %. When a run has a skipped mutant, the script therefore computes the lower bound with the
-skipped mutants counted as tested and not detected, beside the timed-out ones beyond 5 %, and the
-run counts only if that bound meets both floors too. Separate servers did not remove these
+skipped mutants counted as tested and not detected, beside the timed-out ones beyond 5 %, and
+the run counts only if that bound meets both floors too. Separate servers did not remove these
 timeouts and skips, nor reliably reduce them: which mutants a fixed limit times out or skips
 follows the speed of the machine. The exchange's class took 69.0 s in the first run's initial
 run and 58.3 s in the second's, so the first skipped 94 mutants without running them and 37
-after they ran into the limit, and the second none without running them and 34 after it. One mutant of the ZIP writer writes its checkpoint files
-into the working directory, and so do mutants of the file restore gate; delete `.head`, `.names`
-and `.state` there after a local run.
+after they ran into the limit, and the second none without running them and 34 after it.
 
 The escaped mutants by class with `main` at `e40ab18`, the work of a later package:
 
