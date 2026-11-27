@@ -779,7 +779,9 @@ final class DatabaseChangesTest extends TestCase {
 	}
 
 	public function test_the_list_of_bindings_to_discard_asks_about_each_finished_binding_as_its_review_does(): void {
-		// Without a binding the database is not asked, nor its connection opened.
+		// Without a binding the database is not asked, nor its connection opened, also not for a
+		// finished database restore whose binding has ended.
+		$this->owner( '20251231T000001Z-0f0f0f', [], JobState::Succeeded );
 		self::assertSame(
 			[
 				'jobs'      => [],
@@ -944,10 +946,10 @@ final class DatabaseChangesTest extends TestCase {
 		chmod( $this->directory . '/jobs', 0300 );
 		set_error_handler( static fn (): bool => true, E_WARNING );
 		try {
-			foreach ( [ fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ), fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ), fn () => $this->changes( $this->server() )->discarded_bindings() ] as $work ) {
+			foreach ( [ fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ), fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ), fn () => $this->changes( $this->server() )->discarded_bindings(), fn () => $this->changes( $this->server() )->foreign_bindings() ] as $work ) {
 				try {
 					$work();
-					self::fail( 'A review was made without the list of the jobs.' );
+					self::fail( 'An answer was made without the list of the jobs.' );
 				} catch ( StorageFailed $failure ) {
 					// Before, this was answered as a database failure that the log of the job names.
 					self::assertSame( 'database_discard_storage', $failure->context()['code'] ?? null );
@@ -1024,9 +1026,12 @@ final class DatabaseChangesTest extends TestCase {
 		// The other is listed until its stated time has passed.
 		$this->clock->advance( JobStore::DISCARD_LISTED_DAYS * 86400 - 1 );
 		self::assertSame( [ $older->id ], array_column( $changes->discarded_bindings(), 'job' ) );
+		// The Restores tab reads the same list, with the bindings to discard.
+		self::assertSame( $changes->discarded_bindings(), $changes->foreign_bindings()['discarded'] );
 		self::assertSame( 0, $this->jobs->prune( 30, $this->clock->seconds ) );
 		$this->clock->advance( 1 );
 		self::assertSame( [], $changes->discarded_bindings() );
+		self::assertSame( [], $changes->foreign_bindings()['discarded'] );
 		self::refused( 'database_discarded_missing', fn () => $changes->discarded_done( $older->id, 9, 'rest' ) );
 		self::assertSame( 1, $this->jobs->prune( 30, $this->clock->seconds ) );
 	}
