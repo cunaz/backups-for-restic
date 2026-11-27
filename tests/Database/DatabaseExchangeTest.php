@@ -714,13 +714,15 @@ final class DatabaseExchangeTest extends TestCase {
 		$preview = $services['changes']->preview( $services['source']->id, 1 );
 		self::assertFalse( $preview['applicable'] );
 		self::assertContains( 'database_exchange_foreign', $preview['blockers'] );
+		// The review of the new apply asks the server right before the apply is created.
 		try {
-			$services['jobs']->create( JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+			$services['changes']->start_apply( $services['source']->id, 1, $preview['digest'] );
 			self::fail( 'A new database apply started before the old binding was settled.' );
 		} catch ( JobConflict $refused ) {
-			self::assertSame( 'database_exchange_foreign', $refused->context()['code'] ?? null );
+			self::assertSame( 'database_exchange_changed', $refused->context()['code'] ?? null );
 		}
-		$discarded = $services['changes']->discard( $failed->id, 1, 'wp-cli' );
+		self::assertNull( $services['jobs']->active() );
+		$discarded = $services['changes']->discard( $failed->id, 1, 'wp-cli', $services['changes']->discard_review( $failed->id, 1 )['digest'] );
 		$own       = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $failed->data['database_owner']['token'] . '_' ) ) );
 		self::assertNotSame( [], $own );
 		self::assertSame( [], array_diff( $own, $discarded['tables'] ), 'Every private table of the binding is named for the administrator.' );
@@ -2001,5 +2003,440 @@ final class DatabaseExchangeTest extends TestCase {
 		$failed     = self::advance( $services['runner'], $undo );
 		self::assertSame( 'database_exchange_changed', $failed->error?->code );
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+	}
+
+	/**
+	 * Expects a review or discard of a binding to be refused with a code.
+	 *
+	 * @param \Closure():mixed $work Review or discard.
+	 */
+	private static function not_discarded( string $code, \Closure $work ): void {
+		try {
+			$work();
+			self::fail( 'Expected the refusal ' . $code );
+		} catch ( JobConflict | DatabaseFailed $refused ) {
+			self::assertSame( $code, $refused->context()['code'] ?? null, $refused->getMessage() );
+		}
+	}
+
+	public function test_the_review_of_a_discard_names_the_private_tables_that_another_server_holds_and_the_discard_drops_none(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$moved    = self::failover( $services['jobs'], $applied );
+		$private  = $this->private_tables();
+		$facts    = ( new SwapCatalog( $this->direct ) )->facts();
+		$review   = $services['changes']->discard_review( $moved->id, 1 );
+		$own      = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $moved->data['database_owner']['token'] . '_' ) ) );
+		self::assertNotSame( [], $own );
+		self::assertSame( [], array_diff( $own, $review['tables'] ), 'Every private table of the binding on the server is named.' );
+		self::assertSame( [ $this->database, '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' ], [ $review['database'], $review['server'] ] );
+		self::assertSame(
+			[
+				'database' => $facts['database'],
+				'server'   => $facts['uuid'],
+			],
+			$review['connected']
+		);
+		self::assertSame( [ 'applied', $applied->result['retained_until'], $applied->result['retained_until'] ], [ $review['generation'], $review['retained_until'], $review['undo_until'] ] );
+		self::assertSame( $private, $this->private_tables(), 'The review drops nothing.' );
+		// The undo of that exchange is offered until the discard, and no longer afterwards.
+		self::assertSame( [ $moved->id ], array_column( $services['changes']->undoable(), 'job' ) );
+		self::assertSame( [ $moved->id ], array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ) );
+		$discarded = $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] );
+		self::assertSame( $review['tables'], $discarded['tables'] );
+		self::assertSame( $private, $this->private_tables(), 'Nothing is dropped on a server that cannot be verified.' );
+		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'], 'The live database stays as the exchange left it.' );
+		self::assertSame( [], $services['changes']->undoable() );
+		self::assertSame( [], $services['changes']->foreign_bindings()['jobs'] );
+		self::not_discarded( 'database_binding_discarded', fn () => $services['changes']->discard_review( $moved->id, 1 ) );
+	}
+
+	public function test_a_binding_of_the_connected_database_or_none_is_not_discarded(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$private  = $this->private_tables();
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
+		self::assertSame(
+			[
+				'jobs'      => [],
+				'complete'  => true,
+				'discarded' => [],
+			],
+			$services['changes']->foreign_bindings()
+		);
+		self::assertSame( $private, $this->private_tables() );
+		self::assertArrayHasKey( 'database_owner', $services['jobs']->get( $applied->id )?->data ?? [] );
+		self::assertTrue( $services['changes']->preview_undo( $applied->id, 1 )['applicable'], 'The undo stays as it was.' );
+		// No such job, and a job that is no database apply.
+		self::not_discarded( 'database_binding_missing', fn () => $services['changes']->discard_review( '20991231T235959Z-ffffff', 1 ) );
+		self::not_discarded( 'database_binding_missing', fn () => $services['changes']->discard_review( $services['source']->id, 1 ) );
+	}
+
+	public function test_a_binding_that_changed_after_the_review_of_its_discard_is_not_discarded(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::applied( $services );
+		$moved    = self::failover( $services['jobs'], $applied );
+		$private  = $this->private_tables();
+		$review   = $services['changes']->discard_review( $moved->id, 1 );
+		// The site's connection moved on to another database of the server.
+		$other = $this->database . '_moved';
+		$this->admin->execute( 'CREATE DATABASE `' . $other . '`' );
+		try {
+			$this->db->execute( 'USE `' . $other . '`' );
+			self::not_discarded( 'database_discard_changed', fn () => $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] ) );
+		} finally {
+			$this->db->execute( 'USE `' . $this->database . '`' );
+			$this->admin->execute( 'DROP DATABASE `' . $other . '`' );
+		}
+		// The undo window ended before the confirmation.
+		$now                        = $services['clock']->seconds;
+		$services['clock']->seconds = $applied->result['retained_until'];
+		self::not_discarded( 'database_discard_changed', fn () => $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] ) );
+		$services['clock']->seconds = $now;
+		// The original server answers again: the binding is this database's.
+		$services['jobs']->save( $applied );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard( $moved->id, 1, 'rest', $review['digest'] ) );
+		$services['jobs']->save( $moved );
+		self::assertSame( $moved->data, $services['jobs']->get( $moved->id )?->data, 'Nothing was forgotten.' );
+		self::assertSame( $private, $this->private_tables() );
+		// The review of what the binding is now can be confirmed.
+		$services['changes']->discard( $moved->id, 1, 'rest', $services['changes']->discard_review( $moved->id, 1 )['digest'] );
+		self::assertSame( $private, $this->private_tables() );
+	}
+
+	public function test_an_unfinished_import_of_another_server_is_reviewed_and_discarded_without_dropping_its_tables(): void {
+		$services     = $this->services();
+		$token        = explode( ':', $this->importer->tables->owner )[1];
+		$owner        = new Job( '20260101T000001Z-0a0b0c', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$owner->state = JobState::Failed;
+		$owner->data  = [
+			'restore'        => $services['source']->id,
+			'user'           => 1,
+			'digest'         => str_repeat( 'd', 64 ),
+			'database_owner' => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => count( $this->manifest->tables ),
+				'token'       => $token,
+				'database'    => $this->database,
+				'uuid'        => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002',
+			],
+		];
+		$services['jobs']->save( $owner );
+		$private = $this->private_tables();
+		// The shadow tables and the ledger of this suite's import, on MySQL and on MariaDB.
+		$own = array_values( array_filter( $private, static fn ( string $name ): bool => str_starts_with( $name, '_bfr_r_' . $token . '_' ) ) );
+		self::assertNotSame( [], $own );
+		$review = $services['changes']->discard_review( $owner->id, 1 );
+		self::assertSame( [], array_diff( $own, $review['tables'] ) );
+		self::assertSame( [ null, null ], [ $review['generation'], $review['undo_until'] ] );
+		self::assertSame( [ $owner->id ], array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ) );
+		$services['changes']->discard( $owner->id, 1, 'wp-cli', $review['digest'] );
+		self::assertSame( $private, $this->private_tables(), 'The import is not dropped from a server that cannot be verified.' );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $owner->id )?->data ?? [ 'database_owner' => true ] );
+	}
+
+	public function test_rebuilt_tables_are_named_also_in_an_apply_that_holds_as_many_warnings_as_it_keeps(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$applied  = self::advance( $services['runner'], self::before_swap( $services ) );
+		$retained = trim( $this->holder( $applied, 'wp_posts', 'retained' ), '`' );
+		$this->optimize( $retained );
+		$full = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $full );
+		for ( $number = count( $full->warnings ); $number < Job::MAX_WARNINGS; ++$number ) {
+			$full->warn( 'An earlier warning ' . $number );
+		}
+		self::assertCount( Job::MAX_WARNINGS, $full->warnings );
+		$services['jobs']->save( $full );
+		$services['clock']->seconds = $applied->data['retained_until'] + 1;
+		$expired                    = self::expire_all( $services, $applied );
+		// Before, a job at its limit of warnings dropped the one that names the tables to drop by hand.
+		self::assertCount( Job::MAX_WARNINGS + 1, $expired->warnings );
+		self::assertStringContainsString( 'check them and drop them by hand: ' . $retained, $expired->warnings[ Job::MAX_WARNINGS ] );
+	}
+
+	/**
+	 * Runs work while the suite's connection uses latin1 in a database whose name has a letter
+	 * that is not ASCII: the server then reports the name as latin1 bytes, which are not UTF-8.
+	 *
+	 * @template T
+	 * @param \Closure(string):T $work Gets the name as the connection reports it.
+	 * @return T What the work returns.
+	 */
+	private function in_latin1_database( \Closure $work ): mixed {
+		$name = $this->database . '_möbel';
+		$this->admin->execute( 'CREATE DATABASE `' . $name . '`' );
+		try {
+			$this->db->mysqli->set_charset( 'latin1' );
+			$bytes = (string) mb_convert_encoding( $name, 'ISO-8859-1', 'UTF-8' );
+			self::assertTrue( $this->db->mysqli->select_db( $bytes ) );
+			self::assertSame( [ [ 'name' => $bytes ] ], $this->db->rows( 'SELECT DATABASE() AS name' ) );
+			self::assertFalse( mb_check_encoding( $bytes, 'UTF-8' ) );
+			return $work( $bytes );
+		} finally {
+			$this->db->mysqli->set_charset( 'utf8mb4' );
+			$this->db->mysqli->select_db( $this->database );
+			$this->admin->execute( 'DROP DATABASE `' . $name . '`' );
+		}
+	}
+
+	public function test_a_binding_is_reviewed_and_discarded_while_the_site_uses_a_database_whose_name_is_not_utf8(): void {
+		$services     = $this->services();
+		$owner        = new Job( '20260101T000001Z-0a0b0d', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$owner->state = JobState::Failed;
+		$owner->data  = [
+			'restore'        => $services['source']->id,
+			'user'           => 1,
+			'digest'         => str_repeat( 'd', 64 ),
+			'database_owner' => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => count( $this->manifest->tables ),
+				'token'       => explode( ':', $this->importer->tables->owner )[1],
+				'database'    => $this->database,
+				'uuid'        => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002',
+			],
+		];
+		$services['jobs']->save( $owner );
+		$private = $this->private_tables();
+		// Before, the digest of the review could not encode the name and ended in a JsonException.
+		$this->in_latin1_database(
+			static function ( string $bytes ) use ( $services, $owner ): void {
+				$review = $services['changes']->discard_review( $owner->id, 1 );
+				self::assertSame( $bytes, $review['connected']['database'] );
+				$services['changes']->discard( $owner->id, 1, 'wp-cli', $review['digest'] );
+			}
+		);
+		self::assertSame( $private, $this->private_tables(), 'Nothing was dropped.' );
+		self::assertArrayNotHasKey( 'database_owner', $services['jobs']->get( $owner->id )?->data ?? [ 'database_owner' => true ] );
+	}
+
+	public function test_the_review_of_an_exchange_into_a_database_whose_name_is_not_utf8_names_its_blocker(): void {
+		$services = $this->services();
+		// Before, the digest of the review could not encode the name and ended in a JsonException.
+		$review = $this->in_latin1_database( static fn (): array => $services['changes']->preview( $services['source']->id, 1 ) );
+		self::assertFalse( $review['applicable'] );
+		self::assertContains( 'dictionary_names', $review['blockers'] );
+		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] );
+	}
+
+	public function test_a_binding_whose_saved_server_uuid_is_missing_or_malformed_is_never_foreign_on_its_own_server(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		// An exchange whose retained tables are on this server, in this database, which is connected.
+		$applied  = self::applied( $services );
+		$private  = $this->private_tables();
+		$document = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $document );
+		self::assertNotSame( [], $private );
+		foreach ( [
+			'missing'      => null,
+			'not a string' => 5,
+			'not a UUID'   => 'not-a-uuid',
+		] as $case => $uuid ) {
+			$damaged = clone $document;
+			if ( null === $uuid ) {
+				unset( $damaged->data['database_owner']['uuid'] );
+			} else {
+				$damaged->data['database_owner']['uuid'] = $uuid;
+			}
+			$services['jobs']->save( $damaged );
+			// Before, place() compared the connected UUID with that value, found them unequal and
+			// called the binding foreign: its review was offered, and the discard forgot it.
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
+			self::assertNotContains( $applied->id, array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ), $case );
+			// A new database apply waits, as it did, but not for a discard.
+			$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+			self::assertContains( 'database_binding_unreadable', $blockers, $case );
+			self::assertNotContains( 'database_exchange_foreign', $blockers, $case );
+			// The undo of the exchange is refused, as it was, but without the offer of a discard.
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->preview_undo( $applied->id, 1 ) );
+			// A backup keeps every table, as it did for a binding of another server.
+			self::assertSame( [], DatabaseGeneration::exclusions( $this->direct, $damaged ), $case );
+			// Its expiry is deferred and reported, and records no other server.
+			$expired                         = clone $damaged;
+			$expired->data['retained_until'] = $services['clock']->seconds - 1;
+			$services['jobs']->save( $expired );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->expire( false, microtime( true ) + 5 ) );
+			$saved = $services['jobs']->get( $applied->id );
+			self::assertArrayNotHasKey( 'database_foreign', $saved?->data ?? [], $case );
+			self::assertArrayHasKey( 'database_owner', $saved?->data ?? [], $case );
+			self::assertTrue( $saved?->result['database_cleanup_pending'] ?? false, $case );
+			self::assertSame( $private, $this->private_tables(), $case . ': nothing was dropped.' );
+		}
+		// A record that cannot be read at all blocks the same way, also one that an earlier
+		// request marked as another server's, which blocked as foreign before.
+		$broken                                    = clone $document;
+		$broken->data['database_owner']['version'] = 2;
+		$broken->data['database_foreign']          = $services['clock']->seconds;
+		$services['jobs']->save( $broken );
+		$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+		self::assertContains( 'database_binding_unreadable', $blockers );
+		self::assertNotContains( 'database_exchange_foreign', $blockers );
+	}
+
+	public function test_a_binding_whose_owner_names_another_place_than_its_saved_plan_is_never_foreign_on_its_own_server(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		// An exchange whose retained tables are on this server, in this database, which is
+		// connected, with the plan that the plugin saved for it.
+		$applied  = self::applied( $services );
+		$private  = $this->private_tables();
+		$document = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $document );
+		self::assertNotSame( [], $private );
+		self::assertSame( $this->database, $document->data['exchange_plan']['database'] ?? null );
+		foreach ( [
+			'another database'         => [ 'database' => 'elsewhere' ],
+			'another server'           => [ 'uuid' => '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002' ],
+			'another number of tables' => [ 'count' => $document->data['database_owner']['count'] + 1 ],
+		] as $case => $owner ) {
+			$damaged                         = clone $document;
+			$damaged->data['database_owner'] = $owner + $damaged->data['database_owner'];
+			$services['jobs']->save( $damaged );
+			// Before, place() found the owner's database or server unlike the connected one and
+			// called the binding foreign, and the plan that names this database was never compared
+			// with it: the review was offered, and the discard forgot the retained tables here. A
+			// count unlike the plan's was found only after the server had been asked, and without
+			// the code of a record that cannot be read.
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
+			self::assertNotContains( $applied->id, array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ), $case );
+			// A new database apply waits, but not for a discard.
+			$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+			self::assertContains( 'database_binding_unreadable', $blockers, $case );
+			self::assertNotContains( 'database_exchange_foreign', $blockers, $case );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->preview_undo( $applied->id, 1 ) );
+			// A backup keeps every table, as for a binding whose saved identity is gone.
+			self::assertSame( [], DatabaseGeneration::exclusions( $this->direct, $damaged ), $case );
+			// Its expiry is deferred and reported, and records no other server.
+			$expired                         = clone $damaged;
+			$expired->data['retained_until'] = $services['clock']->seconds - 1;
+			$services['jobs']->save( $expired );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->expire( false, microtime( true ) + 5 ) );
+			$saved = $services['jobs']->get( $applied->id );
+			self::assertArrayNotHasKey( 'database_foreign', $saved?->data ?? [], $case );
+			self::assertArrayHasKey( 'database_owner', $saved?->data ?? [], $case );
+			self::assertArrayHasKey( 'exchange_plan', $saved?->data ?? [], $case );
+			self::assertTrue( $saved?->result['database_cleanup_pending'] ?? false, $case );
+			self::assertSame( $private, $this->private_tables(), $case . ': nothing was dropped.' );
+		}
+		// The record as the plugin saved it is the binding of this database, as before.
+		$services['jobs']->save( $document );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+		self::assertNotContains( 'database_binding_unreadable', $services['changes']->preview( $services['source']->id, 1 )['blockers'] );
+	}
+
+	public function test_the_block_of_a_new_apply_the_list_and_the_review_follow_what_the_server_says_now(): void {
+		$this->mysql_only();
+		$server          = new \stdClass();
+		$server->hidden  = false;
+		$server->failing = false;
+		$server->asked   = 0;
+		$direct          = $this->direct;
+		// The suite's server, which can hide its UUID or fail to say who it is, and counts how
+		// often it is asked.
+		$services = $this->services(
+			connection: static fn (): Connection => new class( $direct, $server ) implements Connection {
+				public function __construct( private Connection $direct, private \stdClass $server ) {}
+
+				public function rows( string $sql ): array {
+					if ( str_starts_with( $sql, 'SELECT DATABASE() AS db' ) ) {
+						++$this->server->asked;
+						if ( $this->server->failing ) {
+							throw new DatabaseFailed( 'Lost connection to the server.', [ 'code' => 2013 ] );
+						}
+					}
+					return $this->server->hidden && "SHOW VARIABLES LIKE 'server_uuid'" === $sql ? [ [ 'Value' => '' ] ] : $this->direct->rows( $sql );
+				}
+
+				public function execute( string $sql ): int {
+					return $this->direct->execute( $sql );
+				}
+			}
+		);
+		// Without a binding, the review of a new apply asks the server who it is once, as it did.
+		self::assertTrue( $services['changes']->preview( $services['source']->id, 1 )['applicable'] );
+		self::assertSame( 1, $server->asked );
+		$applied = self::applied( $services );
+		$state   = static function () use ( $services, $applied ): array {
+			try {
+				$blockers = array_values( array_intersect( $services['changes']->preview( $services['source']->id, 1 )['blockers'], [ 'database_exchange_foreign', 'database_binding_unverified', 'database_binding_unreadable', 'database_exchange_cleanup' ] ) );
+			} catch ( DatabaseFailed $refused ) {
+				$blockers = $refused->context()['code'] ?? null;
+			}
+			$listed = $services['changes']->foreign_bindings();
+			try {
+				$services['changes']->discard_review( $applied->id, 1 );
+				$review = 'reviewed';
+			} catch ( JobConflict | DatabaseFailed $refused ) {
+				$review = $refused->context()['code'] ?? null;
+			}
+			return [ $blockers, in_array( $applied->id, array_column( $listed['jobs'], 'job' ), true ), $listed['complete'], $review ];
+		};
+		// An earlier request found the tables on another server and marked the binding; the
+		// original database is connected again. Before, the mark blocked a new apply with the
+		// advice to discard, which the list did not offer and the review refused.
+		$marked = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $marked );
+		$marked->data['database_foreign'] = $services['clock']->seconds;
+		$services['jobs']->save( $marked );
+		self::assertSame( [ [], false, true, 'database_binding_verified' ], $state() );
+		// The new apply is created: the store refuses it no longer for the mark alone.
+		$queued = $services['changes']->start_apply( $services['source']->id, 1, $services['changes']->preview( $services['source']->id, 1 )['digest'] );
+		self::assertSame( [ JobType::DatabaseApply, JobState::Queued ], [ $queued->type, $queued->state ] );
+		TempDir::remove( $services['jobs']->directory( $queued ) );
+		// A server that does not say which one it is.
+		$server->hidden = true;
+		self::assertSame( [ [ 'database_binding_unverified' ], true, false, 'database_binding_unverified' ], $state() );
+		// A server that cannot be asked who it is: nothing starts, the list says that it may be
+		// incomplete, and the review of the discard names the database failure.
+		$server->hidden  = false;
+		$server->failing = true;
+		self::assertSame( [ 'database_binding_unasked', true, false, 'database_discard_failed' ], $state() );
+		$server->failing = false;
+		// Another server.
+		$server->hidden = false;
+		self::failover( $services['jobs'], $marked );
+		self::assertSame( [ [ 'database_exchange_foreign' ], true, true, 'reviewed' ], $state() );
+	}
+
+	public function test_an_interrupted_import_back_on_its_server_holds_a_new_apply_until_it_is_removed(): void {
+		$this->mysql_only();
+		$services      = $this->services();
+		$import        = new Job( '20260101T000001Z-0a0b0f', JobType::DatabaseApply, 'manual', $services['clock']->seconds );
+		$import->state = JobState::Failed;
+		$import->data  = [
+			'restore'          => $services['source']->id,
+			'user'             => 1,
+			'digest'           => str_repeat( 'd', 64 ),
+			'database_owner'   => [
+				'version'     => 1,
+				'prefix'      => 'wp_',
+				'fingerprint' => $this->manifest->fingerprint,
+				'count'       => count( $this->manifest->tables ),
+				'token'       => explode( ':', $this->importer->tables->owner )[1],
+				'database'    => $this->database,
+				'uuid'        => ( new SwapCatalog( $this->direct ) )->facts()['uuid'],
+			],
+			// Marked when its server could not be told apart from another one.
+			'database_foreign' => $services['clock']->seconds,
+		];
+		$services['jobs']->save( $import );
+		$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+		// Before, it blocked as another server's, with the advice to discard.
+		self::assertContains( 'database_exchange_cleanup', $blockers );
+		self::assertNotContains( 'database_exchange_foreign', $blockers );
+		self::assertSame( [], $services['changes']->foreign_bindings()['jobs'] );
+		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard_review( $import->id, 1 ) );
 	}
 }

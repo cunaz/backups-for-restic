@@ -147,6 +147,23 @@ All notable changes are documented here. The format follows
   that keeps the engine core free of WordPress, and CI workflows.
 
 ### Changed
+- The Restores tab lists the database restores whose private tables are on another database
+  server or in another database (`GET /database-changes/foreign`) and offers the review and
+  discard of their binding, also from the undo of such a restore, so that a site that moved to
+  another database can start a database restore again without shell access. Every name is
+  shown as text, escaped where it does not print. After a discard, the Restores tab lists the
+  binding under "Discarded bindings" with the private tables that are left to remove by hand,
+  and `wp backups-for-restic database-discarded` prints them, for 90 days or until they are
+  marked as taken care of; until then the job history keeps that job and its log, which its
+  card opens. While another request holds the lock of the job runner, marking them changes
+  nothing and says so. After a lost answer to the confirmation, the page shows the result of a
+  discard that the server recorded, and after a lost answer to marking the tables it reads the
+  lists again; an older answer to the lists that arrives after a newer one changes nothing.
+  On a site under `DISALLOW_FILE_MODS`, where WordPress gives no
+  account the capability `update_core` that a discard needs, the page says so and names the
+  WP-CLI command that can, instead of only saying that the account cannot. A discard that meets
+  another request's lock of the job runner keeps its confirmation form and says that the review
+  is still valid.
 - Backups for restic requires 64-bit PHP. On 32-bit PHP, activation stops before the
   first backup. Existing installations retain their settings and local restore data.
 - The snapshot list of the admin page shows the snapshots of this site; those of other
@@ -189,6 +206,31 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- The discard of a database restore binding whose private tables are on another database
+  server or in another database is reviewed and confirmed as an undo is. Before, the REST
+  route forgot the binding, and with it the undo of that restore, after the WordPress password
+  alone, and WP-CLI after a prompt or `--yes`: nothing bound the decision to what the
+  administrator had seen, and no site address was typed. Now
+  `POST /database-changes/<id>/discard-review` says what the discard forgets and what stays:
+  the database and server of the private tables and those that the site uses now, the table
+  names, and whether the undo ends with it. Its digest and review token have to be confirmed
+  with the typed site address and the WordPress password, and a binding that changed after the
+  review is not discarded. `wp backups-for-restic database-discard` prints the same review and
+  asks for the site address on a terminal; a script passes both `--site-url` and the `--digest`
+  of a review that an earlier run printed, and one without the other, or a digest without a
+  value, is refused. `--yes` is refused, so a script of the earlier form stops with an error and
+  discards nothing. The discard still drops nothing.
+- A database restore binding whose saved server UUID or database name is missing or malformed,
+  which only a change outside the plugin leaves, was counted as one of another server, so its
+  discard was offered and would have forgotten private tables on this very server. Nothing
+  can tell such a binding apart from this server's: its discard and its undo are refused
+  (`database_binding_unreadable`), it is not listed for a discard, a new database restore waits
+  with that blocker, and its expiry is deferred and reported on its job. The same holds for a
+  binding whose token or fingerprint cannot name its tables, which the list of bindings to
+  discard offered although its review refused it, and for one whose saved exchange plan names
+  another database, server or number of tables than the binding itself: where the plan's
+  database was connected and the binding named another, the discard was offered and would have
+  forgotten both.
 - A live database restore brings back the roles, the active plugins and the scheduled events
   of the backup. Before, it kept those of the running site, so a change made after the
   backup survived the restore: a capability given to a role reached every restored account,
@@ -292,6 +334,33 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- The review and the discard of a database binding answer what is the case: a binding that was
+  discarded already, one whose job or undo has not ended, a server that reports no server UUID,
+  a damaged record and an unreadable job document each have a code and text of their own, and a
+  database failure says that nothing was discarded and that the log of that database restore
+  job names the error, where it is written. Before, the route answered with a backup's text
+  that pointed to "the log of the job", which a discard does not have. A private directory
+  whose jobs cannot be read is answered as such (`database_discard_storage`), and any other
+  failure as unexpected, recorded nowhere, with its details in WP-CLI
+  (`database_discard_unexpected`). While a stored job cannot be read, no binding is reviewed or
+  discarded: that job may be a queued undo of the binding (`job_unreadable` or
+  `job_inaccessible`, with its ID).
+- After the site's original database was connected again, a new database restore stayed
+  blocked with the advice to discard a binding that the Restores tab did not list and whose
+  review said that the connected database holds its tables, until a heartbeat had cleaned it
+  up. The review of a new database restore now asks the server what is the case each time, as
+  the list and the review of a discard do: another server, a server that does not say which
+  one it is, a record that cannot be read and an interrupted import on this server each block
+  with a text of their own, and nothing else blocks. A server that cannot be asked who it is
+  ends that review with a text of its own (`database_binding_unasked`); before, the review
+  answered with the text of a failed dump, which points to the log of a job that a review
+  does not have.
+- The review of a discard, and that of a database restore into such a database, no longer end
+  in a fatal error on a site whose connection reports its database name in bytes that are not
+  UTF-8, such as a connection in latin1 to a database named `möbel`. The REST API answers such a
+  name with U+FFFD in place of each of those bytes, and WP-CLI prints it with Go's escapes; the
+  digest of the review covers the bytes, and that of every review that could be made before
+  stays the same.
 - A failed job is described as the kind of job it is, on the admin page, in the job list, in
   WP-CLI and in the failure e-mail. Before, every job got the texts of a backup: a restore
   that lost its repository key, or found the setup incomplete, said "The backup is not

@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\WordPress;
 
+use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Plugin;
 
 defined( 'ABSPATH' ) || exit;
@@ -109,8 +110,9 @@ final class AdminPage {
 			'backups-for-restic-admin',
 			'window.backupsForRestic = ' . wp_json_encode(
 				[
-					'setupCompleted' => $container->settings()->bool( 'setup.completed' ),
-					'pageUrl'        => admin_url( 'admin.php?page=' . self::SLUG ),
+					'setupCompleted'    => $container->settings()->bool( 'setup.completed' ),
+					'pageUrl'           => admin_url( 'admin.php?page=' . self::SLUG ),
+					'discardListedDays' => JobStore::DISCARD_LISTED_DAYS,
 				]
 			) . ';',
 			'before'
