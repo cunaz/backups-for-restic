@@ -118,15 +118,19 @@ can operate.
   minimum MSI), and besides `Crypto`, `Format`, `Engine\Forget` and the database import filter
   they cover the file restore code, the apply jobs, ZIP downloads and, against MySQL, the import
   and the atomic exchange. Every gate has floors at the scores measured on 2026-11-23 with
-  `main` at `e40ab18`, which later pull requests keep and may only raise; the core's covered
-  floor is its measured 92 %. A gate that falls below a floor is a regression of the pull
+  `main` at `e40ab18`, the database gate at those of 2026-11-26 with one server per process on
+  the same code, which later pull requests keep and may only raise; the core's covered floor is
+  its measured 92 %. A gate that falls below a floor is a regression of the pull
   request that brought it there, and is answered with tests. A run in which more than 5 % of the
   mutant processes timed out meets a floor only if it does so with its timed-out mutants counted
-  as not detected as well: Infection counts a timeout as detected, so a slow machine lifts the
-  score above what the tests kill ([development guide](../04-development-and-quality.md) §5.6).
+  as not detected as well, and a run in which Infection skipped a mutant only if it does so with
+  the skipped mutants counted as tested and not detected: Infection counts a timeout as detected
+  and leaves a skipped mutant out of the score, so a slow machine lifts the score above what the
+  tests kill ([development guide](../04-development-and-quality.md) §5.6).
   A floor is lowered only by a change of its own that measures the same commit again and shows
-  that the measurement was at fault, as the database gate's kills through other processes on its
-  server can be; that change names the mutants that came out differently and is recorded here.
+  that the measurement was at fault, as the database gate's kills through other processes on one
+  shared server were until 2026-11-26; that change names the mutants that came out differently
+  and is recorded here.
   90 % stays the minimum that the core's covered score may never fall below, and the goal for
   the other gates. The database gate is too slow for every pull request; the release gate
   requires it.
@@ -144,3 +148,15 @@ can operate.
   the ZIP gate 84.98 % instead of 99.87 %, and the database gate 86.13 % and 86.11 % in two
   runs, perhaps less. The core, the merge gate of point 3, barely moved under PHP's own wrapper
   (90.48 %), and the tests of #52 and #59 raised it to 92.22 %.
+- 2026-11-26: the database gate's processes had shared one MySQL server, and the tests of the
+  exchange look at the whole server, so a test could fail through another process whatever the
+  mutation: three CI runs of the same code differed in 127 mutants, and each killed 40 to 52
+  that its tests let escape. Its limit of 60 seconds, not its tests, also set the timeout of
+  3,863 of its 4,081 tested mutants, so on slow runners 390 and 414 mutants timed out, most of
+  which the tests let escape, and Infection counts a timeout as detected. Each mutant process now
+  has a server of its own, the test that lowers `max_allowed_packet` runs in the gate again, and
+  the limit of 600 seconds lets each timeout follow the time of its tests
+  ([development guide](../04-development-and-quality.md) §5.6). On the same code the gate kills
+  80.69 % of its mutants and 84.59 % of the covered ones, not the 81.58 % to 81.86 % and 85.52 %
+  to 85.81 % that CI reported, and the floors of 80 % and 84 % stay, now below what the tests
+  kill instead of below an upper bound.
