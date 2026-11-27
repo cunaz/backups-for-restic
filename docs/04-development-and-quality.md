@@ -648,7 +648,11 @@ So each run on the shared server had killed 40 to 52 mutants that its tests let 
 80.67 % and 84.56 % over the mutants that all three runs of 2026-11-23 killed came within 0.03
 points of the scores of the tests alone. A second run of the 423 mutants of `SwapCatalog`,
 `WriteBarrier` and `SessionDrain`, with the tests' files on ext4 and the machine at a load of 2
-to 5, came out as the full run for every one of them. Two runs of the same code now differ only
+to 5, came out as the full run for every one of them; on these files the runs with a server per
+process let escape exactly the mutants that at least one of CI's three runs let escape. On one
+shared server, with the same timeout of 600 s and `main`'s code, the same 423 mutants came out
+with 3 kills more (82.98 % against 82.27 %): `SwapCatalog.php:70` and `:118` and
+`WriteBarrier.php:42`, which two of CI's three runs had let escape. Two runs of the same code now differ only
 where a test keeps a deadline of its own that a heavily loaded machine can miss, as the worker's
 30 seconds above, in one process of 4,081 there. The floors stay at the whole numbers below,
 80 % and 84 %, but now below what the tests kill, not below an upper bound.
