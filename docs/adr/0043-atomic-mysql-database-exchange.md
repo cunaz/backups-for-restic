@@ -284,7 +284,11 @@ database could not get rid of the binding. Since then:
   the result of a discard that the server recorded. Uninstall forgets the listing with every
   job.
 - A binding that cannot be discarded is answered with what is the case:
-  `database_binding_missing` (no database apply with a binding of this ID), `job_unreadable`,
+  `database_binding_missing` (no database apply with a binding of this ID), `job_unreadable`
+  or `job_inaccessible` with the ID of a stored job whose document cannot be read, this one's
+  or any other's (`JobStore::active_or_refuse()`: such a job may be a queued undo of this
+  binding, which the discard would take away; one pass over the jobs finds both, so that a
+  document that becomes readable or unreadable in between is not missed),
   `database_binding_discarded`, `database_binding_busy` (the job or an undo of it has not
   ended), `database_binding_verified` (the connected database holds the tables),
   `database_binding_unverified` (a server without a server UUID, which cannot be told apart

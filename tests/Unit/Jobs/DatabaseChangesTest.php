@@ -648,6 +648,10 @@ final class DatabaseChangesTest extends TestCase {
 		} catch ( JobConflict $refusal ) {
 			self::assertSame( [ 'job_inaccessible', '20260101T000005Z-abcabc' ], [ $refusal->context()['code'] ?? null, $refusal->context()['job'] ?? null ] );
 		}
+		// While a stored job cannot be read, no binding is reviewed at all: the cases below need them gone.
+		unlink( $this->directory . '/jobs/20260101T000005Z-abcabc/job.json' );
+		rmdir( $this->directory . '/jobs/20260101T000005Z-abcabc' );
+		TempDir::remove( $this->directory . '/jobs/20260101T000006Z-abcabc' );
 		// A binding of this database, and a server that does not say which one it is.
 		$here = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ] );
 		self::refused( 'database_binding_verified', $review( $here->id ) );
@@ -1074,5 +1078,46 @@ final class DatabaseChangesTest extends TestCase {
 			chmod( $directory, 0700 );
 		}
 		self::assertSame( [ $job->id ], array_column( $changes->discarded_bindings(), 'job' ), 'It is still listed.' );
+	}
+
+	public function test_a_binding_is_neither_reviewed_nor_discarded_while_a_stored_job_cannot_be_read(): void {
+		$job    = $this->stranded();
+		$review = $this->changes( $this->server() )->discard_review( $job->id, 7 );
+		// A queued undo of this apply, whose document can no longer be read after the review.
+		$undo       = new Job( '20260101T000002Z-bbbbbb', JobType::DatabaseUndo, 'manual', $this->clock->seconds );
+		$undo->data = [ 'apply' => $job->id ];
+		$this->jobs->save( $undo );
+		$document = $this->jobs->directory( $undo ) . '/job.json';
+		$readable = (string) file_get_contents( $document );
+		file_put_contents( $document, '{"schema":9999}' );
+		$refusal = function ( \Closure $work ): array {
+			try {
+				$work();
+			} catch ( JobConflict $refused ) {
+				return [ $refused->context()['code'] ?? null, $refused->context()['job'] ?? null ];
+			}
+			return [];
+		};
+		// Before, JobStore::active() did not see the undo, and the discard forgot the binding that it needs.
+		foreach ( [ fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ), fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) ] as $work ) {
+			self::assertSame( [ 'job_unreadable', $undo->id ], $refusal( $work ) );
+		}
+		self::assertArrayHasKey( 'database_owner', $this->jobs->get( $job->id )?->data ?? [] );
+		if ( ! function_exists( 'posix_geteuid' ) || 0 !== posix_geteuid() ) {
+			// A document that the PHP user cannot open is refused the same way, with its own code.
+			file_put_contents( $document, $readable );
+			chmod( $document, 0000 );
+			set_error_handler( static fn (): bool => true, E_WARNING );
+			try {
+				self::assertSame( [ 'job_inaccessible', $undo->id ], $refusal( fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) ) );
+			} finally {
+				restore_error_handler();
+				chmod( $document, 0600 );
+			}
+		}
+		// Once it can be read again, the undo of this binding is what keeps it.
+		file_put_contents( $document, $readable );
+		self::refused( 'database_binding_busy', fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) );
+		self::assertArrayHasKey( 'database_owner', $this->jobs->get( $job->id )?->data ?? [] );
 	}
 }

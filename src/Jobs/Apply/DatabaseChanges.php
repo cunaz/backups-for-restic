@@ -339,7 +339,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param string $apply Owning database apply.
 	 * @param int    $user Confirming WordPress user, 0 for WP-CLI without a selected user.
 	 * @return DiscardReview Review.
-	 * @throws JobConflict With the code database_binding_missing if no database apply with this ID holds a binding, job_unreadable or job_inaccessible (JobStore::refuse_unreadable()) if the job's document cannot be read, database_binding_discarded if its binding was discarded already, database_binding_busy while the job or an undo of it is queued or running, database_binding_verified if the connected database holds its tables, database_binding_unverified if the connected server does not say which server it is, and database_binding_unreadable if the record of the binding cannot be read.
+	 * @throws JobConflict With the code database_binding_missing if no database apply with this ID holds a binding, job_unreadable or job_inaccessible (JobStore::refuse_unreadable()) if the job's document or that of any other stored job cannot be read, database_binding_discarded if its binding was discarded already, database_binding_busy while the job or an undo of it is queued or running, database_binding_verified if the connected database holds its tables, database_binding_unverified if the connected server does not say which server it is, and database_binding_unreadable if the record of the binding cannot be read.
 	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
 	 * @throws StorageFailed With the code database_discard_storage if the jobs in the private directory could not be read.
 	 */
@@ -548,7 +548,9 @@ final readonly class DatabaseChanges implements StepProvider {
 			}
 			JobConflict::raise( 'This job holds no database restore binding.', [ 'code' => 'database_binding_missing' ] );
 		}
-		$active = $this->jobs->active();
+		// A stored job whose state cannot be established may be a queued undo of this binding,
+		// which the discard would take away: nothing is reviewed or discarded while there is one.
+		$active = $this->jobs->active_or_refuse();
 		if ( ! $owner->state->is_terminal() || ( JobType::DatabaseUndo === $active?->type && $apply === ( $active->data['apply'] ?? null ) ) ) {
 			JobConflict::raise( 'The database restore that holds this binding, or an undo of it, is still queued or running.', [ 'code' => 'database_binding_busy' ] );
 		}

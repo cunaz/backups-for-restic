@@ -328,7 +328,9 @@ All notable changes are documented here. The format follows
   that pointed to "the log of the job", which a discard does not have. A private directory
   whose jobs cannot be read is answered as such (`database_discard_storage`), and any other
   failure as unexpected, recorded nowhere, with its details in WP-CLI
-  (`database_discard_unexpected`).
+  (`database_discard_unexpected`). While a stored job cannot be read, no binding is reviewed or
+  discarded: that job may be a queued undo of the binding (`job_unreadable` or
+  `job_inaccessible`, with its ID).
 - The review of a discard, and that of a database restore into such a database, no longer end
   in a fatal error on a site whose connection reports its database name in bytes that are not
   UTF-8, such as a connection in latin1 to a database named `möbel`. The REST API answers such a

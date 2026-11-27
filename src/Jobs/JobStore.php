@@ -186,6 +186,30 @@ final class JobStore {
 	}
 
 	/**
+	 * The job that is queued or running, as active() finds it, in one pass that refuses a stored
+	 * job whose state cannot be established (refuse_unreadable()): such a job may be the one that
+	 * is queued or running. One pass, because a document that becomes readable or unreadable
+	 * between two passes would be missed by both.
+	 *
+	 * @return Job|null Active job.
+	 * @throws JobConflict With the code job_unreadable or job_inaccessible and the job's ID.
+	 * @throws StorageFailed If the jobs directory cannot be listed safely.
+	 */
+	public function active_or_refuse(): ?Job {
+		$active = null;
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null === $job && $this->has_document( $id ) ) {
+				$this->refuse_unreadable( $id );
+			}
+			if ( null === $active && null !== $job && ! $job->state->is_terminal() ) {
+				$active = $job;
+			}
+		}
+		return $active;
+	}
+
+	/**
 	 * Loads a job. A request to cancel that the job document does not show yet
 	 * (request_cancel()) is part of what is loaded.
 	 *
