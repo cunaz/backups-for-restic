@@ -613,12 +613,11 @@ final class DatabaseImportTest extends TestCase {
 	}
 
 	/**
-	 * The site's connection as a server reports a max_allowed_packet of 16 KiB on it. The tests
-	 * do not lower the server's own limit: the database mutation gate runs the suite in parallel
-	 * processes, and a process that connects meanwhile would get the small limit as well (see
-	 * test_a_batch_beyond_max_allowed_packet_is_refused_before_it_is_sent). With the server's
-	 * global limit at 16 KiB, MySQL 8.4.11 and MariaDB 11.4.13 refused the definition with error
-	 * 1153 after the ledger and the first table were created.
+	 * The site's connection as a server reports a max_allowed_packet of 16 KiB on it. The importer
+	 * only reads the limit, so the tests need no change of the server's own one, which would hold
+	 * for every session that connects meanwhile until it is set back. With the server's global
+	 * limit at 16 KiB, MySQL 8.4.11 and MariaDB 11.4.13 refused the definition with error 1153
+	 * after the ledger and the first table were created.
 	 */
 	private function reporting_16_kib(): Connection {
 		return new class( new RestoreConnection( $this->db->mysqli ) ) implements Connection {
