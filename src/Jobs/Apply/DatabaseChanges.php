@@ -140,6 +140,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param string $restore Restore job ID.
 	 * @param int    $user Confirming user.
 	 * @return Preview Review.
+	 * @throws DatabaseFailed With the code database_binding_unasked if the server cannot be asked about a finished binding.
 	 */
 	public function preview( string $restore, int $user ): array {
 		$connection = ( $this->connection )();
@@ -156,12 +157,14 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * the heartbeat to remove its tables (`database_exchange_cleanup`); and one whose record
 	 * cannot be read, which no decision of the plugin can settle, waits for that record
 	 * (`database_binding_unreadable`). One identity serves every binding, asked only where
-	 * there is one; a server that cannot be asked ends the review, as the review itself would.
+	 * there is one. A server that cannot be asked who it is ends the review with a refusal of
+	 * its own (`database_binding_unasked`): the tables may be on it, so nothing may start, and
+	 * the review has no job whose log could name the database error.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param int        $user Confirming user.
 	 * @return list<string> Blocker codes.
-	 * @throws DatabaseFailed If the connected server cannot be identified.
+	 * @throws DatabaseFailed With the code database_binding_unasked if the connected server cannot be identified.
 	 */
 	private function blockers( Connection $connection, int $user ): array {
 		$blockers = ( $this->policy )( $user );
@@ -174,7 +177,11 @@ final readonly class DatabaseChanges implements StepProvider {
 		if ( [] === $owners ) {
 			return array_values( array_unique( $blockers ) );
 		}
-		$facts = ( new SwapCatalog( $connection ) )->facts();
+		try {
+			$facts = ( new SwapCatalog( $connection ) )->facts();
+		} catch ( DatabaseFailed $error ) {
+			DatabaseFailed::raise( 'The database server could not be asked whether it holds the private tables of a finished database restore.', [ 'code' => 'database_binding_unasked' ], $error );
+		}
 		foreach ( $owners as $owner ) {
 			if ( ! DatabaseGeneration::readable( $owner ) ) {
 				$blockers[] = 'database_binding_unreadable';

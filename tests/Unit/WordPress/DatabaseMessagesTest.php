@@ -38,6 +38,14 @@ final class DatabaseMessagesTest extends TestCase {
 	}
 
 	#[RunInSeparateProcess]
+	public function test_a_server_that_cannot_be_asked_about_a_binding_stops_a_new_restore_and_points_to_no_log(): void {
+		$text = self::text( 'database_binding_unasked' );
+		self::assertStringContainsString( 'so no database restore can start now', $text );
+		self::assertStringContainsString( 'Nothing was changed.', $text );
+		self::assertStringNotContainsString( 'log', $text );
+	}
+
+	#[RunInSeparateProcess]
 	public function test_the_packet_hint_says_how_to_get_the_sql_and_which_limits_count(): void {
 		$text = self::text( 'database_restore_packet' );
 		self::assertStringContainsString( 'stage the snapshot’s database directory again with the rehearsal switched off', $text );

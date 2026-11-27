@@ -14,6 +14,7 @@ use BackupsForRestic\Jobs\Apply\DatabaseGeneration;
 use BackupsForRestic\Jobs\Apply\DatabaseReview;
 use BackupsForRestic\Jobs\Apply\ExchangeSite;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
@@ -1199,6 +1200,23 @@ final class DatabaseChangesTest extends TestCase {
 			$facts            = ( new SwapCatalog( $this->server( $uuid, $database ) ) )->facts();
 			$facts['mariadb'] = $mariadb;
 			self::assertSame( $place, DatabaseGeneration::place( $facts, $job ), $case );
+		}
+	}
+
+	public function test_a_new_database_apply_waits_with_a_refusal_of_its_own_while_the_server_cannot_be_asked_about_a_binding(): void {
+		$this->stranded();
+		foreach ( [
+			'a lost connection'                       => $this->lost( new \ArrayObject() ),
+			'a server that names no current database' => $this->server( self::UUID, '' ),
+		] as $case => $server ) {
+			try {
+				$this->changes( $server )->preview( '20251231T000000Z-000000', 1 );
+				self::fail( 'A new database apply was reviewed without asking the server about the binding.' );
+			} catch ( DatabaseFailed $refused ) {
+				// Before, the failure had no code of its own, and the review was answered with the
+				// text of a failed dump, which points to the log of a job that a review does not have.
+				self::assertSame( 'database_binding_unasked', JobError::from_throwable( $refused )->code, $case );
+			}
 		}
 	}
 

@@ -348,7 +348,10 @@ All notable changes are documented here. The format follows
   up. The review of a new database restore now asks the server what is the case each time, as
   the list and the review of a discard do: another server, a server that does not say which
   one it is, a record that cannot be read and an interrupted import on this server each block
-  with a text of their own, and nothing else blocks.
+  with a text of their own, and nothing else blocks. A server that cannot be asked who it is
+  ends that review with a text of its own (`database_binding_unasked`); before, the review
+  answered with the text of a failed dump, which points to the log of a job that a review
+  does not have.
 - The review of a discard, and that of a database restore into such a database, no longer end
   in a fatal error on a site whose connection reports its database name in bytes that are not
   UTF-8, such as a connection in latin1 to a database named `möbel`. The REST API answers such a

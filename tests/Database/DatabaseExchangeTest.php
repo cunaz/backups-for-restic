@@ -2286,11 +2286,13 @@ final class DatabaseExchangeTest extends TestCase {
 
 	public function test_the_block_of_a_new_apply_the_list_and_the_review_follow_what_the_server_says_now(): void {
 		$this->mysql_only();
-		$server         = new \stdClass();
-		$server->hidden = false;
-		$server->asked  = 0;
-		$direct         = $this->direct;
-		// The suite's server, which can hide its UUID and counts how often it is asked who it is.
+		$server          = new \stdClass();
+		$server->hidden  = false;
+		$server->failing = false;
+		$server->asked   = 0;
+		$direct          = $this->direct;
+		// The suite's server, which can hide its UUID or fail to say who it is, and counts how
+		// often it is asked.
 		$services = $this->services(
 			connection: static fn (): Connection => new class( $direct, $server ) implements Connection {
 				public function __construct( private Connection $direct, private \stdClass $server ) {}
@@ -2298,6 +2300,9 @@ final class DatabaseExchangeTest extends TestCase {
 				public function rows( string $sql ): array {
 					if ( str_starts_with( $sql, 'SELECT DATABASE() AS db' ) ) {
 						++$this->server->asked;
+						if ( $this->server->failing ) {
+							throw new DatabaseFailed( 'Lost connection to the server.', [ 'code' => 2013 ] );
+						}
 					}
 					return $this->server->hidden && "SHOW VARIABLES LIKE 'server_uuid'" === $sql ? [ [ 'Value' => '' ] ] : $this->direct->rows( $sql );
 				}
@@ -2312,8 +2317,12 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 1, $server->asked );
 		$applied = self::applied( $services );
 		$state   = static function () use ( $services, $applied ): array {
-			$blockers = array_values( array_intersect( $services['changes']->preview( $services['source']->id, 1 )['blockers'], [ 'database_exchange_foreign', 'database_binding_unverified', 'database_binding_unreadable', 'database_exchange_cleanup' ] ) );
-			$listed   = $services['changes']->foreign_bindings();
+			try {
+				$blockers = array_values( array_intersect( $services['changes']->preview( $services['source']->id, 1 )['blockers'], [ 'database_exchange_foreign', 'database_binding_unverified', 'database_binding_unreadable', 'database_exchange_cleanup' ] ) );
+			} catch ( DatabaseFailed $refused ) {
+				$blockers = $refused->context()['code'] ?? null;
+			}
+			$listed = $services['changes']->foreign_bindings();
 			try {
 				$services['changes']->discard_review( $applied->id, 1 );
 				$review = 'reviewed';
@@ -2337,6 +2346,12 @@ final class DatabaseExchangeTest extends TestCase {
 		// A server that does not say which one it is.
 		$server->hidden = true;
 		self::assertSame( [ [ 'database_binding_unverified' ], true, false, 'database_binding_unverified' ], $state() );
+		// A server that cannot be asked who it is: nothing starts, the list says that it may be
+		// incomplete, and the review of the discard names the database failure.
+		$server->hidden  = false;
+		$server->failing = true;
+		self::assertSame( [ 'database_binding_unasked', true, false, 'database_discard_failed' ], $state() );
+		$server->failing = false;
 		// Another server.
 		$server->hidden = false;
 		self::failover( $services['jobs'], $marked );

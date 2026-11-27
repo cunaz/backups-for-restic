@@ -389,6 +389,10 @@ final class Messages {
 				'message' => __( 'The record of the private tables of this database restore cannot be read, so the plugin cannot name them.', 'backups-for-restic' ),
 				'hint'    => __( 'Nothing was discarded. The document of that database restore job in the private working directory was changed or damaged outside the plugin. A database administrator can find its private tables by their names, which begin with _bfr_r_ or bfr_r_.', 'backups-for-restic' ),
 			],
+			'database_binding_unasked' => [
+				'message' => __( 'The plugin could not ask the database server whether it holds the private tables of an earlier database restore, so no database restore can start now.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was changed. Those tables may be on this server, so the plugin starts no database restore until it can ask. Review the restore again once the database server answers.', 'backups-for-restic' ),
+			],
 			'database_discard_changed' => [
 				'message' => __( 'The binding of this database restore is no longer as its review showed it, so it was not discarded.', 'backups-for-restic' ),
 				'hint'    => __( 'The job, the database that the site uses or the undo window changed after the review, or the confirmation does not name this review. Open the review of the discard again and check what it names now.', 'backups-for-restic' ),

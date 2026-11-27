@@ -222,7 +222,10 @@ another server.
   whose tables the heartbeat removes first (`database_exchange_cleanup`); one of another server
   or database blocks with `database_exchange_foreign`; one that a server without a readable
   UUID cannot place with `database_binding_unverified`; one whose record cannot be read with
-  `database_binding_unreadable`; and a server that cannot be asked ends the review. Until
+  `database_binding_unreadable`; and a server that cannot be asked who it is ends the review
+  with a refusal of its own (`database_binding_unasked`): its tables may be on that server, and
+  a review has no job whose log could name the database error, which the text of a failed
+  dump that it gave until 2026-11-27 pointed to. Until
   2026-11-27 the mark alone blocked, in the review and in `JobStore::create()`, which cannot ask
   the server: once the original database was connected again, a new apply was refused with the
   advice to discard a binding that the list did not offer and the review refused as verified,
