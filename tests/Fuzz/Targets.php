@@ -121,7 +121,11 @@ final class Targets {
 				}
 			),
 			'dump-manifest'      => static fn (): Target => new Target(
-				[ '{"format":"backups-for-restic-dump/1","created":"2026-01-01T00:00:00Z","server":"fixture","charset":"utf8mb4","time_zone":"+00:00","prefix":"wp_","tables":[{"name":"wp_rows","file":"010-wp_rows.sql","rows":4,"bytes":500}],"views":[]}' ],
+				[
+					'{"format":"backups-for-restic-dump/1","created":"2026-01-01T00:00:00Z","server":"fixture","charset":"utf8mb4","time_zone":"+00:00","prefix":"wp_","tables":[{"name":"wp_rows","file":"010-wp_rows.sql","rows":4,"bytes":500}],"views":[]}',
+					// How the dump read each table, and a name in another script that the name check accepts.
+					'{"format":"backups-for-restic-dump/1","created":"2026-01-01T00:00:00Z","server":"fixture","charset":"utf8mb4","time_zone":"+00:00","prefix":"wp_","tables":[{"name":"wp_rows","file":"010-wp_rows.sql","rows":4,"bytes":500,"key":["id"],"snapshot":false,"restarts":0,"largest_statement":120},{"name":"wp_\u0430\u0440\u0445\u0438\u0432","file":"010-wp_%D0%B0%D1%80%D1%85%D0%B8%D0%B2.sql","rows":1,"bytes":200,"key":[],"snapshot":true,"restarts":1,"largest_statement":60}],"views":[]}',
+				],
 				true,
 				static function ( string $input ): void {
 					DumpManifest::parse( $input, 'wp_' );
