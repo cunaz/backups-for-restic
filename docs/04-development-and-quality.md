@@ -299,7 +299,11 @@ warning or deprecation reaches neither a response nor a test, only these logs. T
   exact site address, a review token and digest of its own review or the right password,
   while another request holds the runner lock and after the binding changed; its review names
   a binding of this database, a damaged record and a database failure with codes of their own,
-  and the failure's error in the log of the job that holds the binding.
+  and the failure's error in the log of the job that holds the binding. A discard that meets
+  the runner lock keeps the binding and its review; the confirmed one records its digest, and
+  its tables stay listed, read from answers that succeeded, until they are marked as taken care
+  of, which needs the runner lock as well. A stopped apply and its undo answer with their
+  state, their counts and their error.
 - **`WordPressSiteTest`**: the wizard through the REST API against a TLS rest-server with its
   CA certificate, then a backup driven only by requests to `wp-cron.php`, `restic check
   --read-data`, a restore of the fixture's uploads directory, a database import with
