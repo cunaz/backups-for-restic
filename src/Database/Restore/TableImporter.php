@@ -138,9 +138,9 @@ final readonly class TableImporter {
 				]
 			);
 		}
-		if ( null !== $needed && $needed[1] + InsertStatement::PACKET_MARGIN > $packet ) {
+		if ( null !== $needed && self::beyond( $needed[1], $packet ) ) {
 			DatabaseFailed::raise(
-				sprintf( 'The largest statement of the dump needs %1$d bytes of SQL and a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes. No statement was sent.', $needed[1], intdiv( $needed[1] + InsertStatement::PACKET_MARGIN + 1023, 1024 ) * 1024, $packet ),
+				sprintf( 'The largest statement of the dump needs %1$d bytes of SQL and a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes. No statement was sent.', $needed[1], self::needs( $needed[1] ), $packet ),
 				[
 					'code'  => 'database_restore_packet_limit',
 					'table' => $needed[0],
@@ -184,15 +184,38 @@ final readonly class TableImporter {
 	 * @throws DatabaseFailed With code database_restore_packet_limit if it does not fit.
 	 */
 	private static function sendable( int $length, int $packet, string $table ): void {
-		if ( $length + InsertStatement::PACKET_MARGIN > $packet ) {
+		if ( self::beyond( $length, $packet ) ) {
 			DatabaseFailed::raise(
-				sprintf( 'The CREATE statement of a table of the dump needs %1$d bytes of SQL and a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes. It was not sent.', $length, intdiv( $length + InsertStatement::PACKET_MARGIN + 1023, 1024 ) * 1024, $packet ),
+				sprintf( 'The CREATE statement of a table of the dump needs %1$d bytes of SQL and a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes. It was not sent.', $length, self::needs( $length ), $packet ),
 				[
 					'code'  => 'database_restore_packet_limit',
 					'table' => $table,
 				]
 			);
 		}
+	}
+
+	/**
+	 * Whether a statement does not fit the session's max_allowed_packet, with the margin that its
+	 * packet needs besides the SQL.
+	 *
+	 * @param int $length Bytes of the statement as it is sent.
+	 * @param int $packet The session's max_allowed_packet.
+	 * @return bool Whether the server would refuse it.
+	 */
+	private static function beyond( int $length, int $packet ): bool {
+		return $length + InsertStatement::PACKET_MARGIN > $packet;
+	}
+
+	/**
+	 * The max_allowed_packet that a statement needs, rounded up to a multiple of 1024: the
+	 * servers round a value of the setting down to one.
+	 *
+	 * @param int $length Bytes of the statement as it is sent.
+	 * @return int Bytes.
+	 */
+	private static function needs( int $length ): int {
+		return intdiv( $length + InsertStatement::PACKET_MARGIN + 1023, 1024 ) * 1024;
 	}
 
 	/**
