@@ -452,6 +452,31 @@ final class StagingTest extends TestCase {
 		self::assertFileExists( $path . '/files/site/one.txt' );
 	}
 
+	public function test_no_staging_is_removed_on_request_while_another_stored_job_cannot_be_read(): void {
+		$restore = $this->restored( $this->clock->seconds - 60 );
+		$path    = $this->restores . '/' . $restore->id;
+		// Any other job: what it is cannot be read, so it may be an apply within its window whose
+		// undo needs this staging.
+		$unreadable = $this->job( JobState::Succeeded, $this->clock->seconds );
+		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
+		try {
+			$this->staging->remove( $restore->id, self::NO_DEADLINE );
+			self::fail( 'A staging was removed while a stored job cannot be read.' );
+		} catch ( JobConflict $conflict ) {
+			// Before, it was removed, and that apply's undo was refused with file_staging_gone
+			// once its document could be read again.
+			self::assertSame( [ 'job_unreadable', $unreadable->id ], [ JobError::from_throwable( $conflict )->code, $conflict->context()['job'] ?? null ] );
+		}
+		// Nothing was set aside.
+		self::assertSame( [ $restore->id ], $this->names() );
+		self::assertFileExists( $path . '/files/site/one.txt' );
+		// Nothing staged under an ID is still answered as nothing staged.
+		self::assertNull( $this->staging->remove( '20251229T000000Z-0d0e0f', self::NO_DEADLINE ) );
+		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
+		self::assertTrue( $this->staging->remove( $restore->id, self::NO_DEADLINE ) );
+		self::assertSame( [], $this->names() );
+	}
+
 	public function test_a_job_document_that_cannot_be_looked_up_keeps_its_staging(): void {
 		$job    = $this->restored( $this->clock->seconds - 3 * 86400 );
 		$folder = $this->directory . '/private/jobs/' . $job->id;
@@ -482,7 +507,7 @@ final class StagingTest extends TestCase {
 	}
 
 	public function test_no_staging_expires_while_a_stored_job_cannot_be_read(): void {
-		$expired  = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$expired = $this->restored( $this->clock->seconds - 3 * 86400 );
 		// A leftover: no job accounts for it and it holds no report, so it would go at once.
 		$leftover = '20251230T000000Z-0a1b2c';
 		$this->stage( $leftover, false );

@@ -234,7 +234,8 @@ final class Staging {
 	 *                   null if nothing is staged for the job.
 	 * @throws InvalidArgument With the code invalid_job_id if the ID is not one of a job.
 	 * @throws JobConflict If the job is a restore that has not ended, or with the code
-	 *                     job_unreadable or job_inaccessible if its document cannot be read
+	 *                     job_unreadable or job_inaccessible and that job's ID if its document,
+	 *                     or that of any other stored job, cannot be read
 	 *                     (JobStore::refuse_unreadable()).
 	 * @throws StorageFailed If the directory cannot be set aside or deleted.
 	 */
@@ -283,15 +284,24 @@ final class Staging {
 		if ( null !== $job && JobType::Restore === $job->type && ! $job->state->is_terminal() ) {
 			JobConflict::raise( 'The restore job has not ended.', [ 'job' => $id ] );
 		}
-		$aside = $this->directory . '/' . self::REMOVING . $id;
-		if ( self::exists( $this->directory . '/' . $id ) ) {
+		$aside  = $this->directory . '/' . self::REMOVING . $id;
+		$staged = self::exists( $this->directory . '/' . $id );
+		if ( ! $staged && ! self::exists( $aside ) ) {
+			return null;
+		}
+		// Another stored job that cannot be read may be an apply within its recovery window whose
+		// undo needs this staging, which no pin can say: the heartbeat holds it (expire()), and
+		// a request does not remove it either, before anything is renamed.
+		$unreadable = $this->jobs->unreadable();
+		if ( null !== $unreadable ) {
+			$this->jobs->refuse_unreadable( $unreadable );
+		}
+		if ( $staged ) {
 			// What an earlier removal under this name left goes first: its place is needed.
 			if ( ! $this->delete( $aside, $deadline ) ) {
 				return false;
 			}
 			$this->set_aside( $id );
-		} elseif ( ! self::exists( $aside ) ) {
-			return null;
 		}
 		return $this->delete( $aside, $deadline );
 	}

@@ -115,5 +115,9 @@ packages must never be offered a tree that is half gone.
   window ends 24 hours after the apply ended, which the ID does not give, so it would end early
   for an apply that ran long, and for a document of a newer version the meaning of its window is
   not known. The hold lasts only as long as a state that blocks every new job, backups
-  included, and whose refusal names the job; staged files past their hours stay meanwhile, and
-  `DELETE /restores/{id}` still removes one on request.
+  included, and whose refusal names the job; staged files past their hours stay meanwhile.
+  Since 2026-11-27 `DELETE /restores/{id}` does not remove one either: it is refused with the
+  code and the ID of the job that cannot be read, before anything is renamed, so that the
+  administrator's way out is the one that the texts of that code name. Before, a request removed
+  the staging, and the undo of an apply whose document could not be read at that moment was
+  refused with `file_staging_gone` once it could.
