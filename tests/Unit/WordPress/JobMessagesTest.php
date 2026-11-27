@@ -254,6 +254,7 @@ final class JobMessagesTest extends TestCase {
 		self::assertSame( 'PHP has too little memory left to restore the next part of a file.', $memory['message'] );
 		self::assertStringContainsString( 'Raise the memory limit for WordPress (WP_MAX_MEMORY_LIMIT) or ask your host to increase memory_limit, then start the restore again.', $memory['hint'] );
 		self::assertStringContainsString( 'restore the snapshot with restic on another computer', $memory['hint'] );
+		self::assertStringContainsString( 'so even a part of a few kilobytes can need up to 4 MiB', $memory['hint'], 'What a small part takes, which is what refuses it.' );
 		// A restore takes up its work again after a lock that did not hold; it never starts over.
 		self::assertStringContainsString( 'took up its work again three times', Messages::job_error( 'repository_changed', 'restore' )['hint'] );
 		self::assertStringContainsString( 'started over three times', Messages::job_error( 'repository_changed', 'prune' )['hint'] );
@@ -284,6 +285,9 @@ final class JobMessagesTest extends TestCase {
 		self::text( 'internal' );
 		$label = Messages::check_finding( 'pack_memory' );
 		self::assertNotSame( Messages::check_finding( 'some_other_finding' ), $label );
-		self::assertSame( 'A sampled pack could not be verified in the memory that PHP has left; "restic check --read-data" on another computer verifies it.', $label );
+		self::assertSame( 'Some blobs of a sampled pack could not be verified in the memory that PHP has left. The pack matches its name, but those blobs may still be damaged; "restic check --read-data" on another computer verifies them.', $label );
+		$unread = Messages::check_finding( 'pack_unread' );
+		self::assertNotSame( Messages::check_finding( 'some_other_finding' ), $unread );
+		self::assertSame( 'A sampled pack could not be read in the memory that PHP has left and was not verified; "restic check --read-data" on another computer verifies it.', $unread );
 	}
 }

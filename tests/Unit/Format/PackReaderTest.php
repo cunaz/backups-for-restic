@@ -207,4 +207,30 @@ final class PackReaderTest extends TestCase {
 			ini_set( 'memory_limit', $limit );
 		}
 	}
+
+	/**
+	 * In a process of its own, as the test above.
+	 */
+	#[RunInSeparateProcess]
+	public function test_the_pages_that_let_go_strings_keep_are_not_given_back_when_the_decoder_has_room(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$cipher  = Vectors::cipher();
+		$content = str_repeat( 'a text that compresses ', 200000 );
+		$id      = Id::of( $content );
+		$sealed  = $cipher->seal( (string) zstd_compress( $content, 3 ) );
+		$entry   = new PackEntry( BlobType::Data, $id, 0, strlen( $sealed ), strlen( $content ) );
+		unset( $content );
+		$small = [];
+		for ( $i = 0; $i < 200000; ++$i ) {
+			$small[] = str_repeat( 's', 40 ) . $i;
+		}
+		unset( $small );
+		$kept  = memory_get_usage( true );
+		$plain = PackReader::open_blob( $cipher, $entry, $sealed );
+		self::assertTrue( Id::of( $plain )->equals( $id ) );
+		unset( $plain );
+		self::assertSame( $kept, memory_get_usage( true ), 'With room enough, giving back what PHP keeps would only cost time.' );
+	}
 }

@@ -13,9 +13,14 @@ use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\LockConflict;
+use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
+use BackupsForRestic\Format\Index\IndexFile;
 use BackupsForRestic\Format\Lock;
+use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Format\Snapshot;
+use BackupsForRestic\Format\Tree\TreeCodec;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\TempDir;
@@ -203,6 +208,41 @@ final class LockingTest extends TestCase {
 		self::assertNull( Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, $id ) )->parent_id, 'A snapshot names no parent that does not exist.' );
 		self::assertSame( [ 'The previous snapshot is gone; every file is read again.' ], $run->warnings() );
 		self::assertSame( [], $this->locks() );
+	}
+
+	public function test_a_backup_whose_parent_folder_cannot_be_decoded_in_the_memory_left_says_so(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$this->cleanup[] = $site = TempDir::create( 'site' );
+		TempDir::fixture( $site, 1048576 );
+		$this->cleanup[] = $work = TempDir::create( 'work' );
+		$plan            = new BackupPlan( [ $site ], [ 'backups-for-restic' ] );
+		// A parent whose root tree is stored in a zstd frame without a declared size and with a
+		// window of 64 MiB: the decoder counts four times the window, more than PHP's limit leaves.
+		$tree   = TreeCodec::encode( [] );
+		$cipher = $this->repository->cipher();
+		$sealed = $cipher->seal( "\x28\xb5\x2f\xfd\x00\x80" . substr( pack( 'V', strlen( $tree ) << 3 | 1 ), 0, 3 ) . $tree );
+		$id     = Id::of( $tree );
+		$header = $cipher->seal( chr( 3 ) . pack( 'VV', strlen( $sealed ), strlen( $tree ) ) . $id->bytes() );
+		$body   = $sealed . $header . pack( 'V', strlen( $header ) );
+		$this->backend->save( ObjectType::Data, Id::of( $body )->hex(), $body );
+		$this->repository->save_unpacked( ObjectType::Index, IndexFile::encode( [ Id::of( $body )->hex() => [ new PackEntry( BlobType::Tree, $id, 0, strlen( $sealed ), strlen( $tree ) ) ] ] ) );
+		$parent = $this->repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( '2026-01-01T00:00:00Z', $id, [ $site ] ) )->to_json() );
+		$limit  = (string) ini_get( 'memory_limit' );
+		try {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The decoder reads PHP's own limit; this test without WordPress sets it as a host would.
+			self::assertNotFalse( ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 64 * 1048576 ) ) );
+			$run = BackupRun::start( $this->repository, $plan, $work . '/run', $this->identity, $this->clock, $parent, 262144 );
+			while ( ! $run->advance( INF ) ) {
+				continue;
+			}
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+			ini_set( 'memory_limit', $limit );
+		}
+		self::assertNotNull( $run->snapshot_id(), 'The backup is made, reading every file again.' );
+		self::assertSame( [ 'A folder of the parent snapshot could not be decoded in the memory that PHP has left; its files are read again.' ], $run->warnings(), 'Not damage of the parent snapshot.' );
 	}
 
 	public function test_a_backup_paused_for_too_long_takes_its_lock_again_and_notices_a_conflict(): void {

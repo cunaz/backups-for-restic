@@ -1,21 +1,36 @@
 <?php
 /**
- * Reads one blob at the exact boundary of the job's memory budget, for ReadMemoryTest: PHP's
- * memory limit leaves, beside the memory reserved before the read and the two MiB that the
- * budget keeps free, exactly what the budget says that reading the blob takes. The budget lets
- * the blob through; what happens then is printed.
+ * Reads a group of blobs at the exact boundary of the job's memory budget, for
+ * ReadMemoryTest: PHP's memory limit leaves, beside the memory reserved before the read,
+ * exactly what the budget says that reading the group takes (MemoryBudget::range()). The
+ * budget lets the group through by zero bytes; what happens then is printed.
  *
- * The request names the job (a restore through BlobBatch, or a check that verifies the blob's
- * pack), the blob and a state of PHP's allocator, produced before or during the read:
+ * The request names the job (a restore through BlobBatch, or a check that verifies the
+ * group's pack), the blobs, whether every response is held three times as WordPress holds it
+ * (tests/Support/WordPressResponses.php), and a state of PHP's allocator, produced before or
+ * during the read:
  *
  * - quiet: nothing more;
  * - churn: while a range arrives, small strings are made and let go again, as a request may do
  *   with its headers and hooks; PHP keeps their pages until it gives them back;
  * - fragmented: before the read, strings of 1 MiB fill PHP's blocks of 2 MiB so that none has
- *   room left for a string of more than 1 MiB, and each such string needs a block of its own.
+ *   room left for a string of more than 1 MiB, and each such string needs a block of its own;
+ * - taken: once a range has arrived, other code keeps 4 MiB, which the budget could not count
+ *   before the download (the reader measures again before it opens a blob);
+ * - short (a check only): when the pack is read, the limit leaves less than a new block, which
+ *   three copies of the smallest piece may take.
  *
- * Usage: php boundary.php <request.json>. Prints JSON: what ended the read ("read" when the
- * blob was read and matched), and for a check the findings.
+ * The pack holds bytes after the blobs, as a pack's header follows its blobs: a range of the
+ * blobs is then a new string, as a server's response is.
+ *
+ * Blobs are given as kind:bytes: raw (stored uncompressed, random), zraw (random in raw zstd
+ * blocks, as restic stores a chunk that does not compress), ztext (text that compresses
+ * about three times, zstd level 3), ztiny (no declared size and a window of 1 KiB, as restic
+ * 0.20.0 writes a blob below 256 bytes).
+ *
+ * Usage: php boundary.php <request.json>. Prints JSON: what ended the read ("read" when every
+ * blob of the group was read in one range and matched), and for a check the findings and the
+ * blobs verified.
  *
  * @package BackupsForRestic\Tests
  */
@@ -26,6 +41,7 @@ $request = json_decode( (string) file_get_contents( $argv[1] ), true, 32, JSON_T
 define( 'ABSPATH', $request['root'] . '/' );
 require $request['root'] . '/vendor/autoload.php';
 
+use BackupsForRestic\Backend\Backend;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\ScryptParameters;
 use BackupsForRestic\Crypto\SystemRandom;
@@ -50,6 +66,53 @@ use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\HookedBackend;
 use BackupsForRestic\Tests\Support\InMemoryBackend;
 use BackupsForRestic\Tests\Support\ResticFrame;
+use BackupsForRestic\Tests\Support\WordPressResponses;
+
+/**
+ * Passes every request on; once the first range of the given pack that holds a blob has
+ * arrived, other code keeps memory of the given size, as a plugin that keeps the HTTP API's
+ * answers would.
+ */
+final class Taking implements Backend {
+
+	/** @var list<string> */
+	public static array $kept = [];
+
+	public function __construct( private readonly Backend $inner, private readonly string $pack, private readonly int $bytes ) {
+	}
+
+	public function create(): void {
+		$this->inner->create();
+	}
+
+	public function size( ObjectType $type, string $name ): ?int {
+		return $this->inner->size( $type, $name );
+	}
+
+	public function load( ObjectType $type, string $name, int $offset = 0, ?int $length = null ): string {
+		$bytes = $this->inner->load( $type, $name, $offset, $length );
+		if ( [] === self::$kept && ObjectType::Data === $type && $this->pack === $name && 0 === $offset ) {
+			self::$kept[] = str_repeat( 'k', $this->bytes );
+		}
+		return $bytes;
+	}
+
+	public function save( ObjectType $type, string $name, string $body ): void {
+		$this->inner->save( $type, $name, $body );
+	}
+
+	public function delete( ObjectType $type, string $name ): void {
+		$this->inner->delete( $type, $name );
+	}
+
+	public function list( ObjectType $type ): array {
+		return $this->inner->list( $type );
+	}
+
+	public function list_to_file( ObjectType $type, string $file ): void {
+		$this->inner->list_to_file( $type, $file );
+	}
+}
 
 $result = [ 'outcome' => 'read' ];
 // A fatal error ends the process with the status 255 and this line.
@@ -66,8 +129,8 @@ register_shutdown_function(
 /**
  * Words of a small vocabulary, which zstd compresses about three times.
  */
-function text( int $size ): string {
-	mt_srand( $size );
+function text( int $size, int $seed ): string {
+	mt_srand( $seed );
 	$words = [];
 	for ( $i = 0; $i < 4096; ++$i ) {
 		$words[] = bin2hex( random_bytes( 1 + $i % 6 ) );
@@ -79,66 +142,52 @@ function text( int $size ): string {
 	return substr( $text, 0, $size );
 }
 
-// The blob, its stored form and its pack entry.
-[ $content, $frame ] = match ( $request['blob'] ) {
-	// A full chunk that does not compress, in raw zstd blocks as restic stores it.
-	'chunk' => ( static function (): array {
-		$chunk = random_bytes( 8388608 );
-		return [ $chunk, ResticFrame::raw( $chunk ) ];
-	} )(),
-	// A full chunk that compresses about three times.
-	'text'  => ( static function (): array {
-		$chunk = text( 8388608 );
-		return [ $chunk, (string) zstd_compress( $chunk, 3 ) ];
-	} )(),
-	// A chunk of 1.1 MiB that does not compress, uncompressed as format 1 stores it.
-	'plain' => [ random_bytes( 1153434 ), null ],
-	// A chunk of 1.5 MiB that compresses, smaller than a block of PHP's.
-	'part'  => ( static function (): array {
-		$chunk = text( 1572864 );
-		return [ $chunk, (string) zstd_compress( $chunk, 3 ) ];
-	} )(),
-	// A blob of 200 bytes in the frame restic 0.20.0 writes for it: no declared size, a window
-	// of 1 KiB and one raw block.
-	'tiny'  => ( static function (): array {
-		$blob = random_bytes( 200 );
-		return [ $blob, "\x28\xb5\x2f\xfd\x00\x00" . substr( pack( 'V', 200 << 3 | 1 ), 0, 3 ) . $blob ];
-	} )(),
-};
 $backend    = new InMemoryBackend();
 $repository = Repository::initialize( $backend, 'boundary password', new Identity( 'example.com' ), new SystemRandom(), new ScryptParameters( 1024, 8, 1 ) );
 $cipher     = $repository->cipher();
-$sealed     = $cipher->seal( $frame ?? $content );
-$id         = Id::of( $content );
-$entry      = new PackEntry( BlobType::Data, $id, 0, strlen( $sealed ), null === $frame ? 0 : strlen( $content ) );
-$digest     = hash( 'sha256', $content );
-$header     = $cipher->seal( ( null === $frame ? chr( 0 ) . pack( 'V', $entry->length ) : chr( 2 ) . pack( 'VV', $entry->length, $entry->uncompressed_length ) ) . $id->bytes() );
-$pack_bytes = $sealed . $header . pack( 'V', strlen( $header ) );
-$pack       = Id::of( $pack_bytes );
-$backend->save( ObjectType::Data, $pack->hex(), $pack_bytes );
-$repository->save_unpacked( ObjectType::Index, IndexFile::encode( [ $pack->hex() => [ $entry ] ] ) );
-// A snapshot of the blob as a file: a check walks its tree and so loads its index before it
+$body       = '';
+$header     = '';
+$entries    = [];
+$digests    = [];
+foreach ( $request['blobs'] as $number => $blob ) {
+	[ $kind, $size ] = explode( ':', $blob );
+	$size            = (int) $size;
+	$content         = 'ztext' === $kind ? text( $size, $number ) : random_bytes( $size );
+	$frame           = match ( $kind ) {
+		'raw'   => null,
+		'zraw'  => ResticFrame::raw( $content ),
+		'ztext' => (string) zstd_compress( $content, 3 ),
+		'ztiny' => "\x28\xb5\x2f\xfd\x00\x00" . substr( pack( 'V', $size << 3 | 1 ), 0, 3 ) . $content,
+	};
+	$sealed    = $cipher->seal( $frame ?? $content );
+	$id        = Id::of( $content );
+	$entries[] = new PackEntry( BlobType::Data, $id, strlen( $body ), strlen( $sealed ), null === $frame ? 0 : $size );
+	$header   .= ( null === $frame ? chr( 0 ) . pack( 'V', strlen( $sealed ) ) : chr( 2 ) . pack( 'VV', strlen( $sealed ), $size ) ) . $id->bytes();
+	$digests[] = hash( 'sha256', $content );
+	$body     .= $sealed;
+	unset( $content, $frame, $sealed );
+}
+$header = $cipher->seal( $header );
+$body  .= $header . pack( 'V', strlen( $header ) );
+$pack   = Id::of( $body );
+$backend->save( ObjectType::Data, $pack->hex(), $body );
+$repository->save_unpacked( ObjectType::Index, IndexFile::encode( [ $pack->hex() => $entries ] ) );
+// A snapshot of the blobs as a file: a check walks its tree and so loads its index before it
 // reads any pack, as it does in a job.
 $trees = new BlobStore( $repository, new IndexSet() );
-$tree  = $trees->save( BlobType::Tree, TreeCodec::encode( [ new Node( 'file.bin', NodeType::File, 0644, '2026-01-01T00:00:00Z', size: strlen( $content ), content: [ $id ] ) ] ) );
+$tree  = $trees->save( BlobType::Tree, TreeCodec::encode( [ new Node( 'file.bin', NodeType::File, 0644, '2026-01-01T00:00:00Z', size: 0, content: array_map( static fn ( PackEntry $entry ): Id => $entry->id, $entries ) ) ] ) );
 $trees->flush();
 $trees->write_index();
 $repository->save_unpacked( ObjectType::Snapshots, ( new Snapshot( '2026-01-01T00:00:00Z', $tree, [ '/' ] ) )->to_json() );
-unset( $content, $frame, $sealed, $header, $pack_bytes, $trees );
-
-// What reading the blob takes, as the budget says it; and the rest of its pack, for a check.
-$need = MemoryBudget::range( $entry->length, 0, MemoryBudget::opening( $entry ) );
-if ( 'check' === $request['job'] ) {
-	$need = max( $need, MemoryBudget::range( (int) $backend->size( ObjectType::Data, $pack->hex() ) - $entry->length, 0, 0 ) );
-}
+unset( $body, $header, $trees );
 
 $churn = 'churn' === $request['state'];
 $read  = new HookedBackend(
-	$backend,
-	static function ( string $method, ?ObjectType $type, string $name = '', int $offset = 0, ?int $length = null ) use ( $churn, $pack, $entry ): void {
+	new Taking( $request['wordpress'] ? new WordPressResponses( $backend ) : $backend, 'taken' === $request['state'] ? $pack->hex() : '', 4194304 ),
+	static function ( string $method, ?ObjectType $type, string $name = '', int $offset = 0, ?int $length = null ) use ( $churn, $pack, $entries ): void {
 		// After the hook the backend answers; the small strings go before it does, as a
 		// request's own do before its answer is handed on.
-		if ( $churn && 'load' === $method && ObjectType::Data === $type && $pack->hex() === $name && 0 === $offset && $entry->length === $length ) {
+		if ( $churn && 'load' === $method && ObjectType::Data === $type && $pack->hex() === $name && $entries[0]->offset === $offset && null !== $length && $length >= $entries[0]->length ) {
 			$small = [];
 			for ( $i = 0; $i < 60000; ++$i ) {
 				$small[] = str_repeat( 's', 60 ) . $i;
@@ -159,32 +208,59 @@ if ( 'fragmented' === $request['state'] ) {
 }
 
 /**
- * Sets PHP's limit, and the job's budget from it, to leave exactly $need beside the memory
- * reserved now.
+ * The most that the budget says that reading takes beside the memory in use (it asks PHP only
+ * when that does not fit): for a restore the whole group as BlobBatch plans it, for a check
+ * each blob by itself, since the check reads the rest of the pack in pieces that fit.
  */
-$tighten = static function ( Repository $repository ) use ( $need ): void {
+$need = static function () use ( $request, $entries ): int {
+	if ( 'check' === $request['job'] ) {
+		return max( array_map( static fn ( PackEntry $entry ): int => MemoryBudget::range( $entry->length, null, $entry ), $entries ) );
+	}
+	$length = 0;
+	$before = null;
+	$latest = null;
+	foreach ( $entries as $entry ) {
+		$length += $entry->length;
+		$prior   = MemoryBudget::larger( $before, $latest );
+		$before  = $prior;
+		$latest  = $entry;
+	}
+	return MemoryBudget::range( $length, $before, $latest );
+};
+
+/**
+ * Sets PHP's limit, and the job's budget from it, to leave exactly what reading takes beside
+ * the memory reserved now.
+ */
+$tighten = static function ( Repository $repository ) use ( $need, $request ): void {
 	gc_mem_caches();
+	$limit = memory_get_usage( true ) + $need();
+	if ( 'short' === $request['state'] ) {
+		$limit = memory_get_usage( true ) + MemoryBudget::BLOCK - 1;
+	}
 	// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The budget reads PHP's own limit; this process sets it as a host would.
-	ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + 2097152 + $need ) );
+	ini_set( 'memory_limit', (string) $limit );
 	$repository->limit_memory( MemoryBudget::from_ini( (string) ini_get( 'memory_limit' ) ) );
 };
 
 try {
 	if ( 'restore' === $request['job'] ) {
 		$index = new IndexSet();
-		$index->add_pack( $pack, [ $entry ] );
-		$read_digest = null;
+		$index->add_pack( $pack, $entries );
+		$written = [];
 		$tighten( $reader );
 		BlobBatch::read(
 			$reader,
 			$index,
-			[ $id ],
+			array_map( static fn ( PackEntry $entry ): Id => $entry->id, $entries ),
 			0,
-			static function ( int $number, string $plain ) use ( &$read_digest ): void {
-				$read_digest = hash( 'sha256', $plain );
+			static function ( int $number, string $plain ) use ( &$written, $digests ): void {
+				$written[ $number ] = hash( 'sha256', $plain ) === $digests[ $number ];
 			}
 		);
-		if ( $digest !== $read_digest ) {
+		if ( count( $written ) !== count( $entries ) ) {
+			$result['outcome'] = 'group cut after ' . count( $written ) . ' blobs';
+		} elseif ( in_array( false, $written, true ) ) {
 			$result['outcome'] = 'different bytes';
 		}
 	} else {

@@ -525,4 +525,19 @@ final class CompressionTest extends TestCase {
 			}
 		}
 	}
+
+	public function test_decoding_takes_twice_the_content_or_four_times_the_window_of_a_small_frame(): void {
+		self::assertSame( 2 * 8388608, Compression::decoding( 8388608 ), 'restic declares the size of content of 256 bytes or more.' );
+		// Below 256 bytes restic writes no size and a window of 1 KiB, which the decoder counts four times.
+		self::assertSame( 4096, Compression::decoding( 200 ) );
+		self::assertSame( 4096, Compression::decoding( 2048 ) );
+		self::assertSame( 4098, Compression::decoding( 2049 ) );
+	}
+
+	public function test_the_memory_left_for_a_decoder_is_what_the_limit_leaves_less_the_reserve(): void {
+		self::leave_free( 1048576 );
+		self::assertSame( 1048576, Compression::free_memory() );
+		self::limit_memory( -1 );
+		self::assertSame( PHP_INT_MAX, Compression::free_memory(), 'Without a limit, nothing to measure.' );
+	}
 }

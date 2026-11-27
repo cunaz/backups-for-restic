@@ -90,10 +90,10 @@ final class PackReader {
 	 *
 	 * The stored bytes are let go once they are decrypted: when the caller passes them as a
 	 * temporary value, such as a slice of a downloaded range, a compressed blob is decoded
-	 * beside its plaintext alone. Before the decoder measures the memory left, PHP gives back
-	 * the pages that strings freed since keep for reuse, as it does before it refuses an
-	 * allocation; the decoder then measures what the job's memory budget measured before the
-	 * download (Engine\MemoryBudget), less what is alive now.
+	 * beside its plaintext alone. When the decoder would find too little memory left, PHP first
+	 * gives back the pages that strings freed since keep for reuse, as it does itself before it
+	 * refuses an allocation, and the decoder measures after that; giving them back costs time
+	 * in a heap of many small strings, so it is done only then.
 	 *
 	 * @param Cipher    $cipher Cipher with the master key.
 	 * @param PackEntry $entry  Header entry.
@@ -110,7 +110,9 @@ final class PackReader {
 		$plaintext = $cipher->open( $sealed );
 		unset( $sealed );
 		if ( $entry->uncompressed_length > 0 ) {
-			gc_mem_caches();
+			if ( Compression::decoding( $entry->uncompressed_length ) > Compression::free_memory() ) {
+				gc_mem_caches();
+			}
 			$plaintext = Compression::decompress( $plaintext, $entry->uncompressed_length );
 		}
 

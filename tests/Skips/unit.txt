@@ -41,7 +41,7 @@ BackupsForRestic\Tests\Unit\Engine\CompressedChunkRestoreTest::test_restore_writ
 # Restore and check read blobs within the job's memory budget, and a refusal for memory is no
 # damage (2026-11-26, ADR 0036). These cases read compressed blobs, index files or snapshots of
 # format 2, which PHP decodes only with ext-zstd.
-BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_compressed_blob_needs_room_for_twice_its_content_before_the_check_reads_it
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_compressed_blob_needs_room_for_twice_its_content_before_the_check_opens_it
 BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_blob_that_the_decoder_cannot_decode_in_the_memory_left_is_a_warning_and_no_damage
 BackupsForRestic\Tests\Unit\Engine\CheckTest::test_what_the_check_cannot_decode_in_the_memory_left_ends_it_and_is_no_damage with data set "an index file"
 BackupsForRestic\Tests\Unit\Engine\CheckTest::test_what_the_check_cannot_decode_in_the_memory_left_ends_it_and_is_no_damage with data set "a snapshot"
@@ -74,3 +74,7 @@ BackupsForRestic\Tests\Unit\Engine\RestoreBlobBatchTest::test_a_blob_that_the_de
 BackupsForRestic\Tests\Unit\Format\PackReaderTest::test_the_stored_bytes_of_a_compressed_blob_are_let_go_before_it_is_decoded
 BackupsForRestic\Tests\Unit\Format\PackReaderTest::test_the_pages_that_let_go_strings_keep_are_given_back_before_a_blob_is_decoded
 BackupsForRestic\Tests\Unit\Format\CompressionTest::test_a_refusal_for_the_memory_left_is_told_apart_from_one_beyond_the_limit
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_refusal_for_memory_keeps_the_damage_found_before_it_in_the_same_pack
+BackupsForRestic\Tests\Unit\Engine\LockingTest::test_a_backup_whose_parent_folder_cannot_be_decoded_in_the_memory_left_says_so
+BackupsForRestic\Tests\Unit\Format\PackReaderTest::test_the_pages_that_let_go_strings_keep_are_not_given_back_when_the_decoder_has_room
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_compressed_chunk_of_restics_largest_size_is_no_damage

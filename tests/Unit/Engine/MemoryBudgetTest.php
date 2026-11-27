@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Engine;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Crypto\Cipher;
@@ -47,11 +48,6 @@ final class MemoryBudgetTest extends TestCase {
 	/** PHP reserves memory in blocks of this size, so the reserved figure moves in such steps. */
 	private const int BLOCK = 2 * self::MIB;
 
-	/**
-	 * The pages that MemoryBudget rounds a large string to outside Windows, where PHP gives it
-	 * memory of its own in the system's pages: 64 KiB, the largest of them.
-	 */
-	private const int PAGE = 65536;
 
 	/**
 	 * What WordPress 7.1.5 on PHP 8.3 had reserved once it was loaded, in every tick of the CI
@@ -477,56 +473,233 @@ final class MemoryBudgetTest extends TestCase {
 		self::assertCount( 2, $backend->list( ObjectType::Data ) );
 	}
 
-	public function test_a_string_takes_a_block_of_its_own_or_memory_of_its_own_in_whole_pages(): void {
-		self::assertSame( self::BLOCK, MemoryBudget::footprint( 0 ), 'In a process whose blocks are full, even a small string takes a new block.' );
-		self::assertSame( self::BLOCK, MemoryBudget::footprint( 1572864 ) );
-		self::assertSame( self::BLOCK, MemoryBudget::footprint( self::BLOCK - 4096 - 32 ), 'The largest string that PHP puts into a block.' );
-		// With its header, a string of 2 MiB does not fit into 32 pages.
-		self::assertSame( 33 * self::PAGE, MemoryBudget::footprint( self::BLOCK - 31 ) );
-		self::assertSame( 33 * self::PAGE, MemoryBudget::footprint( self::BLOCK ) );
-		self::assertSame( 64 * self::PAGE, MemoryBudget::footprint( 64 * self::PAGE - 32 ) );
-		self::assertSame( 65 * self::PAGE, MemoryBudget::footprint( 64 * self::PAGE - 31 ) );
-		self::assertSame( 129 * self::PAGE, MemoryBudget::footprint( 8 * self::MIB ) );
+	/**
+	 * What PHP reserves for a string with memory of its own: its size in the page that
+	 * MemoryBudget uses (MemoryBudget::page()).
+	 */
+	private static function pages( int $bytes ): int {
+		$page = MemoryBudget::page();
+		return intdiv( MemoryBudget::string_size( $bytes ) + $page - 1, $page ) * $page;
 	}
 
 	/**
-	 * What opening a blob takes, for blobs of each kind: three strings while it is decrypted,
-	 * the frame and two strings of its content while a compressed one is decoded, each as PHP
-	 * reserves it (MemoryBudget::footprint()), and a block for the small allocations.
+	 * The longest string that takes no more than the given pages of 4 KiB inside a block.
+	 */
+	private static function filling( int $pages ): int {
+		return $pages * 4096 - 32;
+	}
+
+	/**
+	 * Makes once what the questions to PHP and the assertions below make, so that the slots of
+	 * their small allocations are free when they are asked again: they then take no page.
+	 */
+	private static function warm(): void {
+		MemoryBudget::placed( [ 1 ] );
+		MemoryBudget::response( self::filling( 300 ), 3 * self::BLOCK - 1 );
+		MemoryBudget::opening( new PackEntry( BlobType::Data, Id::of( 'warm' ), 0, self::filling( 300 ), self::MIB ), 3 * self::MIB, self::BLOCK );
+		self::assertTrue( true );
+		self::assertFalse( false );
+		self::assertSame( 0, 0 );
+	}
+
+	/**
+	 * Fills every run of 16 free pages in PHP's blocks with strings of 16 pages, until PHP
+	 * reserves a new block for one: that block is then the only one with such a run, of the 495
+	 * pages after the string. PHP takes a new block from the system only when it keeps none for
+	 * reuse, so it keeps none then.
 	 *
-	 * @return iterable<string, array{PackEntry, int}>
+	 * @param array<int, string> $fill Room for the strings, made before, so that keeping them takes no page.
+	 * @return bool Whether PHP reserved the new block before the room ran out.
+	 */
+	private static function fill_runs( array &$fill ): bool {
+		$before = memory_get_usage( true );
+		$made   = 0;
+		while ( $made < 4096 && memory_get_usage( true ) === $before ) {
+			$fill[ $made ] = str_repeat( 'f', self::filling( 16 ) );
+			++$made;
+		}
+		return memory_get_usage( true ) !== $before;
+	}
+
+	public function test_the_page_is_what_php_rounds_memory_of_its_own_up_to(): void {
+		$page = MemoryBudget::page();
+		self::assertSame( 0, $page & ( $page - 1 ), 'A power of two.' );
+		if ( function_exists( 'posix_sysconf' ) && defined( 'POSIX_SC_PAGESIZE' ) && 'Windows' !== PHP_OS_FAMILY ) {
+			self::assertSame( posix_sysconf( POSIX_SC_PAGESIZE ), $page );
+		}
+		gc_mem_caches();
+		$before = memory_get_usage( true );
+		$string = str_repeat( 'p', 3 * self::MIB + 1 );
+		self::assertSame( self::pages( 3 * self::MIB + 1 ), memory_get_usage( true ) - $before, 'What PHP reserved for the string.' );
+		unset( $string );
+	}
+
+	public function test_without_the_posix_extension_the_page_is_measured_while_two_blocks_are_left(): void {
+		if ( 'Windows' === PHP_OS_FAMILY ) {
+			self::markTestSkipped( 'PHP on Windows rounds memory of its own to whole blocks.' );
+		}
+		$measure = new \ReflectionMethod( MemoryBudget::class, 'measure_page' );
+		self::limit_memory( -1 );
+		self::assertSame( MemoryBudget::page(), $measure->invoke( null ), 'By what a string of a block reserves.' );
+		self::limit_memory( memory_get_usage( true ) + 2 * self::BLOCK );
+		self::assertSame( MemoryBudget::page(), $measure->invoke( null ), 'Two blocks left take the string.' );
+		self::limit_memory( memory_get_usage( true ) + 2 * self::BLOCK - 4096 );
+		self::assertSame( 65536, $measure->invoke( null ), 'With less, the largest page that Linux uses is assumed.' );
+	}
+
+	public function test_a_string_takes_a_header_and_a_closing_byte_aligned_to_eight(): void {
+		self::assertSame( 32, MemoryBudget::string_size( 0 ) );
+		self::assertSame( 32, MemoryBudget::string_size( 7 ) );
+		self::assertSame( 40, MemoryBudget::string_size( 8 ) );
+		self::assertSame( 8388640, MemoryBudget::string_size( 8388608 ) );
+	}
+
+	public function test_strings_that_exist_at_once_take_pages_of_their_own_or_new_blocks_together(): void {
+		self::assertSame( self::pages( 8 * self::MIB ), MemoryBudget::reserves( [ 8 * self::MIB ] ), 'Too large for a block: memory of its own.' );
+		self::assertSame( 3 * self::pages( 8 * self::MIB ), MemoryBudget::reserves( [ 8 * self::MIB, 8 * self::MIB, 8 * self::MIB ] ) );
+		self::assertSame( self::BLOCK, MemoryBudget::reserves( [ self::filling( 511 ) ] ), 'The largest string that PHP puts into a block.' );
+		self::assertSame( self::pages( self::filling( 511 ) + 8 ), MemoryBudget::reserves( [ self::filling( 511 ) + 8 ] ), 'Eight bytes more, and it has memory of its own.' );
+		// The smaller strings go into new blocks in the order they are made, together where they
+		// fit into the 511 pages of one.
+		self::assertSame( self::BLOCK, MemoryBudget::reserves( [ 40000, 40000, 40000 ] ) );
+		self::assertSame( self::BLOCK, MemoryBudget::reserves( [ self::filling( 255 ), self::filling( 256 ) ] ), 'Together they fill a block.' );
+		self::assertSame( 2 * self::BLOCK, MemoryBudget::reserves( [ self::filling( 256 ), self::filling( 256 ) ] ), 'One page more does not fit.' );
+		self::assertSame( 2 * self::BLOCK, MemoryBudget::reserves( [ self::filling( 400 ), self::filling( 200 ), self::filling( 95 ) ] ), 'The third one fits beside the first.' );
+		self::assertSame( 3 * self::BLOCK, MemoryBudget::reserves( [ self::MIB, self::MIB, self::MIB ] ), 'Strings of 257 pages: one in each block.' );
+		self::assertSame( 2 * self::BLOCK, MemoryBudget::reserves( [ self::filling( 511 ), 1 ] ), 'A full block takes nothing more.' );
+		self::assertSame( self::pages( 3 * self::MIB ) + self::BLOCK, MemoryBudget::reserves( [ 40000, 3 * self::MIB, 40000 ] ) );
+	}
+
+	/**
+	 * In a process of its own, whose blocks hold no strings that other tests let go.
+	 */
+	#[RunInSeparateProcess]
+	public function test_php_is_asked_whether_the_smaller_strings_of_a_step_find_free_pages_in_its_blocks(): void {
+		self::warm();
+		$fill = array_fill( 0, 4096, '' );
+		$new  = self::fill_runs( $fill );
+		// One block has 495 free pages in a run, no other has a run of 16.
+		self::assertTrue( MemoryBudget::placed( [ self::filling( 495 ) ] ), 'A string of the 495 pages.' );
+		self::assertTrue( MemoryBudget::placed( [ self::filling( 300 ), self::filling( 195 ) ] ), 'Two strings, one after the other.' );
+		self::assertFalse( MemoryBudget::placed( [ self::filling( 300 ), self::filling( 196 ) ] ), 'One page more: PHP reserves a new block for the second.' );
+		self::assertFalse( MemoryBudget::placed( [ self::filling( 496 ) ] ) );
+		self::assertTrue( $new, 'PHP reserved a new block before the room for the strings ran out.' );
+	}
+
+	/**
+	 * In a process of its own, whose blocks hold no strings that other tests let go.
+	 */
+	#[RunInSeparateProcess]
+	public function test_when_the_most_that_a_step_can_take_does_not_fit_php_is_asked_with_a_block_left(): void {
+		self::warm();
+		$entry  = new PackEntry( BlobType::Data, Id::of( 'blob' ), 0, self::filling( 300 ) );
+		$packed = new PackEntry( BlobType::Data, Id::of( 'packed' ), 0, self::filling( 300 ), self::MIB );
+		$fill   = array_fill( 0, 4096, '' );
+		$new    = self::fill_runs( $fill );
+		// Three blocks with 495 free pages each: the first, filled with a string of 495 pages, then
+		// a string of 16 pages that takes the second, and so on; the strings of 495 pages go again.
+		$first  = str_repeat( 'x', self::filling( 495 ) );
+		$taken  = str_repeat( 'f', self::filling( 16 ) );
+		$second = str_repeat( 'x', self::filling( 495 ) );
+		$third  = str_repeat( 'f', self::filling( 16 ) );
+		unset( $first, $second );
+
+		$range = self::filling( 300 );
+		// Three copies of 300 or 301 pages: one new block each, at most.
+		self::assertSame( 3 * self::BLOCK, MemoryBudget::response( $range ) );
+		self::assertSame( 3 * self::BLOCK, MemoryBudget::response( $range, 3 * self::BLOCK ), 'The most fits: PHP is not asked.' );
+		self::assertSame( 0, MemoryBudget::response( $range, 3 * self::BLOCK - 1 ), 'It does not: PHP finds them free pages.' );
+		self::assertSame( 0, MemoryBudget::response( $range, self::BLOCK ) );
+		self::assertSame( 3 * self::BLOCK, MemoryBudget::response( $range, self::BLOCK - 1 ), 'Asking may take a block: with less left PHP is not asked.' );
+		// Beside a range of 3 MiB, which has memory of its own, and a decoder.
+		$room = self::pages( 3 * self::MIB ) + 3 * self::BLOCK - 1;
+		self::assertSame( self::pages( 3 * self::MIB ), MemoryBudget::opening( $entry, 3 * self::MIB, $room ) );
+		self::assertSame( self::pages( 3 * self::MIB ) + MemoryBudget::decoding( self::MIB ), MemoryBudget::opening( $packed, 3 * self::MIB, $room ) );
+		// No string smaller than a block: nothing to ask, and asking makes a string of 16 pages.
+		memory_reset_peak_usage();
+		$used = memory_get_usage();
+		self::assertSame( MemoryBudget::response( 8 * self::MIB ), MemoryBudget::response( 8 * self::MIB, self::BLOCK ) );
+		self::assertLessThan( $used + self::filling( 16 ), memory_get_peak_usage() );
+		self::assertTrue( $new, 'PHP reserved a new block before the room for the strings ran out.' );
+		// Last, since PHP may keep the block it took when asked: copies of 500 pages find no free run.
+		self::assertSame( 3 * self::BLOCK, MemoryBudget::response( self::filling( 500 ), 3 * self::BLOCK - 1 ), 'Copies that find no free pages count as new blocks.' );
+	}
+
+	public function test_a_response_is_held_three_times_with_its_headers_in_one_copy(): void {
+		self::assertSame( 2 * self::pages( 8 * self::MIB ) + self::pages( 8 * self::MIB + MemoryBudget::RESPONSE_HEAD ), MemoryBudget::response( 8 * self::MIB ) );
+		self::assertSame( self::BLOCK, MemoryBudget::response( 40000 ), 'Three small copies fill one new block together.' );
+	}
+
+	public function test_decoding_takes_twice_the_content_or_a_small_frames_window_and_the_decoders_reserve(): void {
+		self::assertSame( 2 * 8 * self::MIB + Compression::RESERVE, MemoryBudget::decoding( 8 * self::MIB ) );
+		// restic writes content below 256 bytes without a declared size and with a window of 1 KiB.
+		self::assertSame( 4096 + Compression::RESERVE, MemoryBudget::decoding( 200 ) );
+		self::assertSame( 4096 + Compression::RESERVE, MemoryBudget::decoding( 2048 ) );
+		self::assertSame( 4098 + Compression::RESERVE, MemoryBudget::decoding( 2049 ) );
+	}
+
+	/**
+	 * What opening a blob takes at most: three strings while it is decrypted, the frame and what
+	 * the decoder requires while a compressed one is decoded.
+	 *
+	 * @return iterable<string, array{PackEntry, \Closure(): int}>
 	 */
 	public static function openings(): iterable {
 		$id = Id::of( 'blob' );
-		// The stored bytes, the ciphertext and the plaintext of 8 MiB take 129 pages each.
-		yield 'a full chunk, uncompressed' => [ new PackEntry( BlobType::Data, $id, 0, 8388640 ), 3 * 129 * self::PAGE + self::BLOCK ];
+		yield 'a full chunk, uncompressed' => [ new PackEntry( BlobType::Data, $id, 0, 8388640 ), static fn (): int => self::pages( 8388640 ) + 2 * self::pages( 8388608 ) ];
 		// restic stores a full chunk that does not compress 202 bytes longer than the chunk.
-		yield 'a full chunk in raw zstd blocks' => [ new PackEntry( BlobType::Data, $id, 0, 8388842, 8388608 ), 3 * 129 * self::PAGE + self::BLOCK ];
-		// A frame of 2.5 MiB, then the decoder's buffer and its output.
-		yield 'a full chunk that compresses' => [ new PackEntry( BlobType::Data, $id, 0, 2654000, 8388608 ), 41 * self::PAGE + 2 * 129 * self::PAGE + self::BLOCK ];
-		yield 'a small blob, where decrypting and decoding take the same' => [ new PackEntry( BlobType::Data, $id, 0, 100, 116 ), 4 * self::BLOCK ];
-		// Decrypting 4 MiB takes three times 65 pages, decoding the frame into 3 MiB 65 and twice 49.
-		yield 'a blob that compresses little' => [ new PackEntry( BlobType::Data, $id, 0, 4194336, 3145728 ), 3 * 65 * self::PAGE + self::BLOCK ];
-		// Its ciphertext without nonce and tag fills 64 pages exactly; the stored bytes take 65.
-		yield 'a blob whose ciphertext fills whole pages' => [ new PackEntry( BlobType::Data, $id, 0, 4194304, 3145728 ), ( 65 + 2 * 64 ) * self::PAGE + self::BLOCK ];
-		yield 'a blob that claims more than Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE + 1 ), 4 * self::BLOCK ];
-		yield 'a blob that claims exactly what Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE ), self::BLOCK + 2 * 2049 * self::PAGE + self::BLOCK ];
+		yield 'a full chunk in raw zstd blocks' => [ new PackEntry( BlobType::Data, $id, 0, 8388842, 8388608 ), static fn (): int => self::pages( 8388810 ) + MemoryBudget::decoding( 8388608 ) ];
+		yield 'a full chunk that compresses' => [ new PackEntry( BlobType::Data, $id, 0, 2654000, 8388608 ), static fn (): int => self::pages( 2653968 ) + MemoryBudget::decoding( 8388608 ) ];
+		yield 'a small blob, its copies in a new block' => [ new PackEntry( BlobType::Data, $id, 0, 40032 ), static fn (): int => self::BLOCK ];
+		yield 'a small compressed blob, its frame in a new block' => [ new PackEntry( BlobType::Data, $id, 0, 20032, 40000 ), static fn (): int => self::BLOCK + MemoryBudget::decoding( 40000 ) ];
+		yield 'a blob that claims more than Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE + 1 ), static fn (): int => self::BLOCK ];
+		yield 'a blob that claims exactly what Compression decodes' => [ new PackEntry( BlobType::Tree, $id, 0, 1000, Compression::MAX_DECOMPRESSED_SIZE ), static fn (): int => self::BLOCK + MemoryBudget::decoding( Compression::MAX_DECOMPRESSED_SIZE ) ];
 	}
 
+	/**
+	 * @param \Closure(): int $bytes What it takes.
+	 */
 	#[DataProvider( 'openings' )]
-	public function test_opening_a_blob_takes_three_copies_of_it_and_a_compressed_one_two_of_its_content( PackEntry $entry, int $bytes ): void {
-		self::assertSame( $bytes, MemoryBudget::opening( $entry ) );
+	public function test_opening_a_blob_takes_three_copies_of_it_or_what_decoding_it_takes( PackEntry $entry, \Closure $bytes ): void {
+		self::assertSame( $bytes(), MemoryBudget::opening( $entry, 0 ) );
 	}
 
 	public function test_reading_a_range_takes_its_response_then_each_blob_beside_the_range_and_the_last_alone(): void {
-		// A response of 16 MiB and its headers: 257 pages, three times, and a block for the request.
-		self::assertSame( 3 * 257 * self::PAGE + self::BLOCK, MemoryBudget::range( 16 * self::MIB, 24 * self::MIB, 24 * self::MIB ), 'The response is held three times while it arrives.' );
-		self::assertSame( 129 * self::PAGE + 20 * self::MIB, MemoryBudget::range( 8 * self::MIB, 20 * self::MIB, 16 * self::MIB ), 'A blob before the last is opened beside the whole range.' );
-		self::assertSame( 30 * self::MIB, MemoryBudget::range( 8 * self::MIB, 0, 30 * self::MIB ), 'The last blob is opened by itself.' );
-		self::assertSame( 4 * self::BLOCK, MemoryBudget::range( self::MIB, 0, 0 ), 'A small response takes a block for each copy.' );
-		// Beside its body a response holds up to 16 KiB of status line and headers.
-		self::assertSame( 3 * 128 * self::PAGE + self::BLOCK, MemoryBudget::range( 128 * self::PAGE - 16384 - 32, 0, 0 ) );
-		self::assertSame( 3 * 129 * self::PAGE + self::BLOCK, MemoryBudget::range( 128 * self::PAGE - 16384 - 31, 0, 0 ) );
+		$id    = Id::of( 'blob' );
+		$chunk = new PackEntry( BlobType::Data, $id, 0, 8388640 );
+		$text  = new PackEntry( BlobType::Data, $id, 0, 2654000, 8388608 );
+		self::assertSame( MemoryBudget::response( 2 * 8388640 ), MemoryBudget::range( 2 * 8388640, $chunk, $chunk ), 'Two full chunks: the response is held three times while it arrives.' );
+		self::assertSame( self::pages( 2 * 2654000 ) + MemoryBudget::opening( $text, 0 ), MemoryBudget::range( 2 * 2654000, $text, $text ), 'A blob before the last is opened beside the whole range.' );
+		self::assertSame( MemoryBudget::opening( $text, 0 ), MemoryBudget::range( 2654000, null, $text ), 'The last blob is opened by itself.' );
+		self::assertSame( MemoryBudget::response( 1000 ), MemoryBudget::range( 1000, null, null ), 'A range without a blob to open takes its response.' );
+	}
+
+	public function test_once_a_range_has_arrived_the_rest_of_opening_a_blob_is_counted_beside_it(): void {
+		$id    = Id::of( 'blob' );
+		$chunk = new PackEntry( BlobType::Data, $id, 0, 8388640 );
+		$text  = new PackEntry( BlobType::Data, $id, 0, 8388842, 8388608 );
+		self::assertSame( self::pages( 8388640 ) + 2 * self::pages( 8388608 ), MemoryBudget::rest( $chunk, 3 * 8388640, false ), 'Before the last blob the range stays.' );
+		self::assertSame( 2 * self::pages( 8388608 ), MemoryBudget::rest( $chunk, 8388640, true ), 'A blob that is the whole range: its stored bytes are held already.' );
+		self::assertSame( self::pages( 8388640 ) + 2 * self::pages( 8388608 ) - self::pages( 2 * 8388640 ), MemoryBudget::rest( $chunk, 2 * 8388640, true ), 'The last blob gives back the range once it is taken out.' );
+		self::assertSame( self::pages( 8388640 ), MemoryBudget::rest( $chunk, 3 * 8388640, true ), 'At the least the copy that takes it out, beside the range.' );
+		self::assertSame( self::pages( 8388810 ) + MemoryBudget::decoding( 8388608 ) - self::pages( 8388842 ), MemoryBudget::rest( $text, 8388842, true ), 'A compressed blob is decoded once the range is let go.' );
+		$small = new PackEntry( BlobType::Data, $id, 0, self::filling( 225 ) );
+		self::assertSame( 2 * self::BLOCK, MemoryBudget::rest( $small, self::filling( 225 ) + 100000, true ), 'A range in a block gives back nothing to count on: its pages stay with PHP.' );
+		$filled = new PackEntry( BlobType::Data, $id, 0, self::filling( 200 ) );
+		self::assertSame( 2 * self::BLOCK, MemoryBudget::rest( $filled, self::filling( 511 ), true ), 'Nor does a range that fills a block.' );
+		$third = new PackEntry( BlobType::Data, $id, 0, self::filling( 170 ) );
+		self::assertSame( self::BLOCK, MemoryBudget::rest( $third, self::filling( 170 ) + 100000, false ), 'The stored bytes and two copies without nonce and tag share a block.' );
+	}
+
+	public function test_of_two_blobs_the_one_whose_opening_takes_the_most_counts(): void {
+		$id    = Id::of( 'blob' );
+		$small = new PackEntry( BlobType::Data, $id, 0, 40032 );
+		$chunk = new PackEntry( BlobType::Data, $id, 0, 8388640 );
+		self::assertSame( $chunk, MemoryBudget::larger( $small, $chunk ) );
+		self::assertSame( $chunk, MemoryBudget::larger( $chunk, $small ) );
+		self::assertSame( $small, MemoryBudget::larger( null, $small ) );
+		self::assertSame( $small, MemoryBudget::larger( $small, null ) );
+		self::assertNull( MemoryBudget::larger( null, null ) );
 	}
 
 	public function test_a_blob_is_taken_out_of_its_range_and_the_last_takes_the_range_with_it(): void {
@@ -537,19 +710,46 @@ final class MemoryBudgetTest extends TestCase {
 		self::assertSame( '', $range, 'The last blob lets the range go.' );
 	}
 
-	public function test_the_room_for_blobs_is_what_the_limit_leaves_beside_the_reserved_memory_less_two_mib(): void {
+	public function test_a_range_arrived_alone_when_php_reserved_and_holds_no_more_than_the_range(): void {
+		$reserved = memory_get_usage( true );
+		$used     = memory_get_usage();
+		$range    = str_repeat( 'r', 3 * self::MIB );
+		self::assertTrue( MemoryBudget::arrived_alone( $reserved, $used, 3 * self::MIB ), 'A range with memory of its own, and nothing else.' );
+		$kept = str_repeat( 'k', 100000 );
+		self::assertFalse( MemoryBudget::arrived_alone( $reserved, $used, 3 * self::MIB ), 'Other code keeps a string beside it.' );
+		unset( $range, $kept );
+
+		$reserved = memory_get_usage( true );
+		$used     = memory_get_usage();
+		$range    = str_repeat( 'r', 600000 );
+		self::assertTrue( MemoryBudget::arrived_alone( $reserved, $used, 600000 ), 'A range smaller than a block, in a new block or in free pages.' );
+		$kept = str_repeat( 'k', 100000 );
+		self::assertFalse( MemoryBudget::arrived_alone( $reserved, $used, 600000 ), 'Beside it, other code keeps a string that the same block may hold.' );
+		unset( $kept );
+		$kept = str_repeat( 'k', 3 * self::MIB );
+		self::assertFalse( MemoryBudget::arrived_alone( $reserved, $used, 600000 ), 'Or one with memory of its own.' );
+		unset( $range, $kept );
+	}
+
+	public function test_the_room_for_blobs_is_what_the_limit_leaves_beside_the_reserved_memory(): void {
 		$reserved = self::reserved();
-		$budget   = new MemoryBudget( $reserved + 2 * self::MIB + 30 * self::MIB );
-		self::assertSame( 30 * self::MIB, $budget->available() );
-		self::assertSame( 30 * self::MIB, $budget->blob_room( 30 * self::MIB ), 'A first blob that takes exactly what is left fits.' );
+		$budget   = new MemoryBudget( $reserved + 30 * self::MIB );
+		$room     = $budget->measure();
+		self::assertSame( 30 * self::MIB, $room );
+		self::assertSame( 0, ( new MemoryBudget( $reserved - self::BLOCK ) )->measure(), 'Never less than nothing.' );
 		try {
-			$budget->blob_room( 30 * self::MIB + 1 );
-			self::fail( 'A first blob that takes one byte more does not fit.' );
+			MemoryBudget::refuse_blob(
+				[
+					'memory_limit' => $budget->limit,
+					'available'    => $room,
+					'blob_bytes'   => $room + 1,
+				]
+			);
 		} catch ( IndexTooLarge $error ) {
 			self::assertSame( 'The next blob of the restore does not fit beside the memory already in use.', $error->getMessage() );
 			self::assertSame(
 				[
-					'memory_limit' => $reserved + 32 * self::MIB,
+					'memory_limit' => $reserved + 30 * self::MIB,
 					'available'    => 30 * self::MIB,
 					'blob_bytes'   => 30 * self::MIB + 1,
 					'code'         => 'restore_blob_memory',
@@ -557,6 +757,24 @@ final class MemoryBudgetTest extends TestCase {
 				$error->context()
 			);
 		}
-		self::assertSame( 0, ( new MemoryBudget( $reserved ) )->available(), 'Never less than nothing.' );
+	}
+
+	/**
+	 * In a process of its own: the let-go strings must take blocks of their own.
+	 */
+	#[RunInSeparateProcess]
+	public function test_php_gives_back_what_it_keeps_only_when_asked_to(): void {
+		$budget = new MemoryBudget( PHP_INT_MAX );
+		gc_mem_caches();
+		$small = [];
+		for ( $i = 0; $i < 100000; ++$i ) {
+			$small[] = str_repeat( 's', 60 ) . $i;
+		}
+		unset( $small );
+		$kept = memory_get_usage( true );
+		$budget->measure();
+		self::assertSame( $kept, memory_get_usage( true ), 'Measuring alone gives nothing back.' );
+		$budget->measure( true );
+		self::assertLessThan( $kept, memory_get_usage( true ), 'Asked to, PHP gives back the blocks that the let-go strings left.' );
 	}
 }

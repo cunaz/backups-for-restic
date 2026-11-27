@@ -14,6 +14,7 @@ use BackupsForRestic\Engine\Restore\BlobBatch;
 use BackupsForRestic\Engine\Restore\RestoreRun;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\NotFound;
+use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
 use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Compression;
@@ -101,8 +102,9 @@ final class CompressedChunkRestoreTest extends TestCase {
 	/** @return iterable<string, array{int, string, int}> */
 	public static function compressed_lengths(): iterable {
 		$limit = Compression::bound( RabinChunker::MAX_SIZE ) + Cipher::OVERHEAD;
-		// Within the limit, the blob is asked for and its pack is missing.
-		yield 'the largest frame of a chunk' => [ $limit, NotFound::class, 1 ];
+		// Within the limit, the blob is asked for and its pack is missing; without the zstd
+		// extension the restore refuses the compressed blob before it asks for it.
+		yield 'the largest frame of a chunk' => Compression::available() ? [ $limit, NotFound::class, 1 ] : [ $limit, UnsupportedRepository::class, 0 ];
 		// Beyond it, nothing is asked for.
 		yield 'one byte more' => [ $limit + 1, FormatException::class, 0 ];
 	}
@@ -118,7 +120,7 @@ final class CompressedChunkRestoreTest extends TestCase {
 		try {
 			BlobBatch::read( $this->repository, $index, [ $id ], 0, static function (): void {} );
 			self::fail( 'The pack does not exist.' );
-		} catch ( NotFound | FormatException $raised ) {
+		} catch ( NotFound | FormatException | UnsupportedRepository $raised ) {
 			self::assertSame( $error, $raised::class );
 			self::assertSame( $requests, $this->counted->loads['data'] ?? 0 );
 		}

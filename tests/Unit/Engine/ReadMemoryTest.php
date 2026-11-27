@@ -29,7 +29,10 @@ final class ReadMemoryTest extends TestCase {
 	/** PHP's memory limit of the measured processes. */
 	private const int LIMIT = 128 * self::MIB;
 
-	/** How far below the limit a peak must stay at least: the budget keeps 2 MiB free. */
+	/**
+	 * How far below the limit a peak must stay at least. The budget keeps nothing free beside a
+	 * read (MemoryBudget); beside 94 MiB the peaks of these files stay 8 MiB below the limit.
+	 */
 	private const int MARGIN = 2 * self::MIB;
 
 	/** What WordPress and an index of 500,000 blobs had reserved. */
@@ -204,8 +207,8 @@ final class ReadMemoryTest extends TestCase {
 
 	/**
 	 * The report of #52: 104.5 MiB reserved before a full chunk is read. One chunk takes three
-	 * times its size while it arrives and while it is decrypted, 26.2 MiB as PHP reserves it, and
-	 * 21.5 MiB are left beside the 2 MiB that the budget keeps free.
+	 * times its size while it arrives and while it is decrypted, 24.0 MiB as PHP reserves it, and
+	 * 23.5 MiB are left.
 	 */
 	public function test_a_chunk_that_does_not_fit_beside_the_memory_in_use_is_refused_before_it_is_downloaded(): void {
 		$repository = self::repository( 1 );
@@ -251,34 +254,15 @@ final class ReadMemoryTest extends TestCase {
 	}
 
 	/**
-	 * Blobs that the budget lets through with exactly what it says they take
-	 * (tests/Fixtures/memory/boundary.php), as a restore reads them and as a check does, in the
-	 * states of PHP's allocator that a request can leave: small strings made and let go while
-	 * the blob arrives, whose pages PHP keeps, or blocks of 2 MiB cut up by strings of 1 MiB.
-	 * Before the budget counted what PHP reserves, a restore refused such a blob after it was
-	 * downloaded (decompression_limit) or ended with PHP's fatal error, and a check reported it
-	 * as damaged (blob_corrupt).
+	 * Runs tests/Fixtures/memory/boundary.php in a process of its own.
 	 *
-	 * @return iterable<string, array{string, string, string}>
+	 * @param string       $job       restore or check.
+	 * @param list<string> $blobs     The blobs, as kind:bytes.
+	 * @param string       $state     The state of PHP's allocator.
+	 * @param bool         $wordpress Whether every response is held three times, as WordPress holds it.
+	 * @return array{outcome: string, findings?: list<string>, verified?: int}
 	 */
-	public static function boundaries(): iterable {
-		foreach ( [ 'restore', 'check' ] as $job ) {
-			yield $job . ': full chunk in raw blocks' => [ $job, 'chunk', 'quiet' ];
-			yield $job . ': full chunk in raw blocks, small strings while it arrives' => [ $job, 'chunk', 'churn' ];
-			yield $job . ': full chunk that compresses' => [ $job, 'text', 'quiet' ];
-			yield $job . ': full chunk that compresses, small strings while it arrives' => [ $job, 'text', 'churn' ];
-			yield $job . ': chunk of 1.5 MiB that compresses, small strings while it arrives' => [ $job, 'part', 'churn' ];
-			yield $job . ': chunk of 1.5 MiB that compresses, blocks cut up' => [ $job, 'part', 'fragmented' ];
-			yield $job . ': uncompressed chunk of 1.1 MiB, blocks cut up' => [ $job, 'plain', 'fragmented' ];
-			yield $job . ': blob of 200 bytes without a declared size' => [ $job, 'tiny', 'quiet' ];
-		}
-	}
-
-	#[DataProvider( 'boundaries' )]
-	public function test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded( string $job, string $blob, string $state ): void {
-		if ( 'plain' !== $blob && ! Compression::available() ) {
-			self::markTestSkipped( 'Needs the zstd extension.' );
-		}
+	private static function boundary( string $job, array $blobs, string $state, bool $wordpress ): array {
 		$directory = TempDir::create( 'read-memory-boundary' );
 		try {
 			$file = $directory . '/request.json';
@@ -286,11 +270,12 @@ final class ReadMemoryTest extends TestCase {
 				$file,
 				json_encode(
 					[
-						'root'  => dirname( __DIR__, 3 ),
-						'job'   => $job,
-						'blob'  => $blob,
-						'state' => $state,
-						'work'  => $directory . '/work',
+						'root'      => dirname( __DIR__, 3 ),
+						'job'       => $job,
+						'blobs'     => $blobs,
+						'state'     => $state,
+						'wordpress' => $wordpress,
+						'work'      => $directory . '/work',
 					],
 					JSON_THROW_ON_ERROR
 				)
@@ -309,13 +294,78 @@ final class ReadMemoryTest extends TestCase {
 			proc_close( $process );
 			$result = json_decode( $output, true );
 			self::assertIsArray( $result, $output . $errors );
-			self::assertSame( 'read', $result['outcome'], $output . $errors );
-			if ( 'check' === $job ) {
-				self::assertSame( [], $result['findings'], 'Nothing is reported as damaged.' );
-				self::assertSame( 2, $result['verified'], 'The tree and the blob were verified.' );
-			}
+			return $result;
 		} finally {
 			TempDir::remove( $directory );
 		}
+	}
+
+	/**
+	 * Blobs that the budget lets through with exactly the most it says they take
+	 * (tests/Fixtures/memory/boundary.php), as a restore reads them and as a check does, in the
+	 * states of PHP's allocator that a request can leave: small strings made and let go while
+	 * the blob arrives, whose pages PHP keeps, or blocks of 2 MiB cut up by strings of 1 MiB.
+	 * Before the budget counted what PHP reserves, a restore refused such a blob after it was
+	 * downloaded (decompression_limit) or ended with PHP's fatal error, and a check reported it
+	 * as damaged (blob_corrupt). A group of two chunks that fills MAX_BYTES, from a pack with
+	 * bytes after it, is read through three copies of its response as WordPress holds them; so
+	 * is a group whose raw copy, with the response's head in front, takes a page more than its
+	 * body, which ran into PHP's limit before the budget counted that head
+	 * (MemoryBudget::RESPONSE_HEAD).
+	 *
+	 * @return iterable<string, array{string, list<string>, string, bool}>
+	 */
+	public static function boundaries(): iterable {
+		foreach ( [ 'restore', 'check' ] as $job ) {
+			yield $job . ': full chunk in raw blocks' => [ $job, [ 'zraw:8388608' ], 'quiet', false ];
+			yield $job . ': full chunk in raw blocks, small strings while it arrives' => [ $job, [ 'zraw:8388608' ], 'churn', false ];
+			yield $job . ': full chunk that compresses' => [ $job, [ 'ztext:8388608' ], 'quiet', false ];
+			yield $job . ': full chunk that compresses, small strings while it arrives' => [ $job, [ 'ztext:8388608' ], 'churn', false ];
+			yield $job . ': chunk of 1.5 MiB that compresses, small strings while it arrives' => [ $job, [ 'ztext:1572864' ], 'churn', false ];
+			yield $job . ': chunk of 1.5 MiB that compresses, blocks cut up' => [ $job, [ 'ztext:1572864' ], 'fragmented', false ];
+			yield $job . ': uncompressed chunk of 1.1 MiB, blocks cut up' => [ $job, [ 'raw:1153434' ], 'fragmented', false ];
+			yield $job . ': blob of 200 bytes without a declared size' => [ $job, [ 'ztiny:200' ], 'quiet', false ];
+		}
+		foreach ( [ 'quiet', 'churn', 'fragmented' ] as $state ) {
+			yield 'restore: two chunks that fill a group, three copies of the response, ' . $state => [ 'restore', [ 'raw:8388576', 'raw:8388576' ], $state, true ];
+			yield 'restore: two chunks whose response head takes a page more, ' . $state => [ 'restore', [ 'raw:8388556', 'raw:8388556' ], $state, true ];
+		}
+	}
+
+	/**
+	 * @param list<string> $blobs The blobs, as kind:bytes.
+	 */
+	#[DataProvider( 'boundaries' )]
+	public function test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded( string $job, array $blobs, string $state, bool $wordpress ): void {
+		if ( [] !== array_filter( $blobs, static fn ( string $blob ): bool => ! str_starts_with( $blob, 'raw:' ) ) && ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$result = self::boundary( $job, $blobs, $state, $wordpress );
+		self::assertSame( 'read', $result['outcome'], (string) json_encode( $result ) );
+		if ( 'check' === $job ) {
+			self::assertSame( [], $result['findings'] ?? null, 'Nothing is reported as damaged.' );
+			self::assertSame( count( $blobs ) + 1, $result['verified'] ?? null, 'The tree and the blobs were verified.' );
+		}
+	}
+
+	/**
+	 * Memory that other code keeps once a range has arrived, which the budget could not count
+	 * before the download: the reader measures again before it opens a blob. A restore refuses
+	 * the blob, a check verifies the pack's hash and header and reports the blob as not
+	 * verified, where each ran into PHP's limit before.
+	 */
+	public function test_memory_that_other_code_takes_once_a_range_has_arrived_is_refused_and_not_run_into(): void {
+		$restore = self::boundary( 'restore', [ 'raw:8388608' ], 'taken', true );
+		self::assertSame( 'restore_blob_memory: The next blob of the restore does not fit beside the memory already in use.', $restore['outcome'] );
+		$check = self::boundary( 'check', [ 'raw:8388608' ], 'taken', true );
+		self::assertSame( 'read', $check['outcome'], (string) json_encode( $check ) );
+		self::assertSame( [ 'warning:pack_memory: 1 of the 1 blobs of the pack could not be opened in the memory that PHP has left and were not verified; the pack matches its name and its header the index. Run restic check --read-data from another computer to verify them.' ], $check['findings'] ?? null );
+		self::assertSame( 1, $check['verified'] ?? null, 'Only the tree.' );
+	}
+
+	public function test_a_check_with_less_than_a_block_left_says_that_it_could_not_read_the_pack(): void {
+		$result = self::boundary( 'check', [ 'raw:1048576' ], 'short', true );
+		self::assertSame( 'read', $result['outcome'], (string) json_encode( $result ) );
+		self::assertSame( [ 'warning:pack_unread: Beyond its header, the pack could not be read at all in the memory that PHP has left: not even its smallest piece fits. It was not verified; run restic check --read-data from another computer to verify it.' ], $result['findings'] ?? null );
 	}
 }

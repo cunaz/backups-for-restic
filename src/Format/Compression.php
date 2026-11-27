@@ -115,6 +115,19 @@ final class Compression {
 	}
 
 	/**
+	 * What decoding content of the given length takes beside the memory in use, in a frame as
+	 * restic writes it: twice its declared size. restic writes content of less than 256 bytes
+	 * without a declared size and with a window of 1 KiB, which counts four times (needed()).
+	 * A frame of another writer can take more; decompress() measures it before it decodes.
+	 *
+	 * @param int $content Uncompressed length.
+	 * @return int Bytes.
+	 */
+	public static function decoding( int $content ): int {
+		return max( 2 * $content, 4096 );
+	}
+
+	/**
 	 * The bytes that decoding a frame takes beside the memory in use. The decoder takes twice
 	 * a declared size, or four times the larger of the window and the block bound of a frame
 	 * without one. A frame that is not the whole input is copied out of it first, and appending
@@ -136,7 +149,7 @@ final class Compression {
 	 *
 	 * @return int Bytes, negative when less than the reserve is left; PHP_INT_MAX if PHP does not limit memory.
 	 */
-	private static function free_memory(): int {
+	public static function free_memory(): int {
 		$limit = ini_parse_quantity( ini_get( 'memory_limit' ) );
 		if ( $limit <= 0 ) {
 			return PHP_INT_MAX;
