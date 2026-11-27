@@ -206,11 +206,12 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
-- The undo of live file changes through WP-CLI is confirmed by someone who read its review:
-  on a terminal, `wp backups-for-restic undo` prints the review and asks; without one it
-  undoes only with `--digest` and the digest of a review that an earlier run printed, and only
-  while the live files are as that review found them. Before, `--yes` or a piped `y` confirmed
-  it, so a script could undo without anyone having seen the review. For a script: `--yes` is
+- The undo of live file changes through WP-CLI is bound to a review that the command printed,
+  on a terminal or by its digest: on a terminal, `wp backups-for-restic undo` prints the review
+  and asks; without one it undoes only with `--digest` and the digest of a review that an
+  earlier run printed, and only while the review made again has that digest, which it keeps
+  while every entry is decided as before. Before, `--yes` or a piped `y` confirmed it, bound to
+  no review: a script undid whatever the review said. For a script: `--yes` is
   refused and the command undoes nothing; run it once, take the digest that the review prints
   (`Digest of this review: …`), and run it again with `--digest=<digest>`. A bare or empty
   `--digest` is refused too.

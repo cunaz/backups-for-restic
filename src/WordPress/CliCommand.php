@@ -428,7 +428,8 @@ final class CliCommand {
 	 *
 	 * [--digest[=<digest>]]
 	 * : The digest that an earlier run printed for the review that you confirm. The undo then
-	 * starts without a prompt, and only while the live files are as that review found them.
+	 * starts without a prompt, and only while the review made again has that digest: while
+	 * every entry is decided as before.
 	 * Without it, the command asks on a terminal, and refuses where there is none.
 	 *
 	 * [--yes]
@@ -510,7 +511,7 @@ final class CliCommand {
 					\WP_CLI::error( __( 'The live files are not as the review with this digest found them, so nothing was undone. The review above is the current one: confirm it on a terminal, or pass its digest.', 'backups-for-restic' ) );
 				}
 			} elseif ( ! stream_isatty( STDIN ) ) {
-				// Piped input is no one who read the review.
+				// Piped input is bound to no review that it was shown.
 				\WP_CLI::error( __( 'There is no terminal to confirm the undo, so nothing was undone. Run the command on a terminal, or run it again with --digest and the digest that this review printed.', 'backups-for-restic' ) );
 			} else {
 				\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ) );

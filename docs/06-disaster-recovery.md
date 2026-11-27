@@ -163,9 +163,9 @@ review's digest.
    wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID --digest=DIGEST
    ```
 
-   The second run reviews again and undoes only while the live files are as the review that
-   you read found them; otherwise it prints the current review and stops, and you confirm
-   that one the same way.
+   The second run reviews again and undoes only while it decides every entry as the review
+   that you read did, which then has the same digest; otherwise it prints the current review
+   and stops, and you confirm that one the same way.
 
 Afterwards the command lists the entries it kept, with their reasons.
 
