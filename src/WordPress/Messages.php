@@ -398,8 +398,8 @@ final class Messages {
 				'hint'    => __( 'Nothing was discarded. The log of that database restore job names the database error: “Show the log of this job” beside the review of the discard opens it, and so does "wp backups-for-restic logs" with the ID of the job. Once the site reaches its database server again, open the review of the discard again.', 'backups-for-restic' ),
 			],
 			'database_discard_storage' => [
-				'message' => __( 'The plugin could not read or write its private working directory, so the binding was not discarded.', 'backups-for-restic' ),
-				'hint'    => __( 'Check the free disk space and the working directory on the Environment tab, then open the review of the discard again.', 'backups-for-restic' ),
+				'message' => __( 'The plugin could not read or write the jobs in its private working directory.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the free disk space and the working directory on the Environment tab, then try again. The lists under “Private tables on another database server” on the Restores tab, and "wp backups-for-restic database-discarded", show what is recorded.', 'backups-for-restic' ),
 			],
 			'database_discarded_missing' => [
 				'message' => __( 'This database restore lists no private tables of a discarded binding.', 'backups-for-restic' ),

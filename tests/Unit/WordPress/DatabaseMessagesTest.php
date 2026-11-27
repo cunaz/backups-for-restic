@@ -110,5 +110,8 @@ final class DatabaseMessagesTest extends TestCase {
 		self::assertStringContainsString( 'recorded nothing', $unexpected );
 		self::assertStringContainsString( 'wp backups-for-restic database-discard', $unexpected );
 		self::assertStringContainsString( 'Environment tab', self::text( 'database_discard_storage' ) );
+		// The list of discarded bindings and the end of a listing answer it too: it claims no discard.
+		self::assertStringNotContainsString( 'discarded.', self::text( 'database_discard_storage' ) );
+		self::assertStringContainsString( 'show what is recorded', self::text( 'database_discard_storage' ) );
 	}
 }

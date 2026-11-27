@@ -430,15 +430,16 @@ final readonly class DatabaseChanges implements StepProvider {
 	}
 
 	/**
-	 * Refuses a review or a discard for which the private directory could not be read or
-	 * written: the jobs could not be listed or read, staging's lock could not be taken, or the
-	 * decision could not be recorded. Nothing was discarded.
+	 * Refuses a review, a discard, the list of discarded bindings or the end of a listing for
+	 * which the private directory could not be read or written: the jobs could not be listed or
+	 * read, staging's lock could not be taken, or a decision could not be recorded. The text
+	 * says what failed and where to see what is recorded, as it fits each of them.
 	 *
 	 * @param StorageFailed $error What failed.
 	 * @throws StorageFailed Always, with the code database_discard_storage.
 	 */
 	private static function storage_failed( StorageFailed $error ): never {
-		StorageFailed::raise( 'The private directory could not be read or written, so the binding was not discarded.', [ 'code' => 'database_discard_storage' ], $error );
+		StorageFailed::raise( 'The jobs in the private directory could not be read or written.', [ 'code' => 'database_discard_storage' ], $error );
 	}
 
 	/**
