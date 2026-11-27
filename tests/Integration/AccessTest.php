@@ -882,7 +882,7 @@ final class AccessTest extends TestCase {
 				[
 					$running    => [ 409, 'backups_for_restic_undo_not_ended', 'This undo has not ended yet.', 'The entries that it keeps are listed once it has ended.' ],
 					$backup     => [ 404, 'backups_for_restic_not_an_undo', 'This job is not an undo of live file changes.', 'Only an undo keeps entries that it could not revert, and it lists them once it has ended.' ],
-					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.', 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.' ],
+					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.', 'A newer version of the plugin may have written it: install that version. If no version reads it, its document is damaged: once the job cannot be running any more, move its folder, which has the job\'s ID as its name, out of jobs/ in the private working directory and keep that copy. Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ],
 				],
 				$answers
 			);
@@ -935,7 +935,7 @@ final class AccessTest extends TestCase {
 			// A document that this version cannot parse keeps its code, and now names its job as well.
 			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $unreadable );
 			self::assertSame( [ 409, 'backups_for_restic_job_unreadable', $unreadable ], [ $status, $error['code'] ?? null, $error['data']['job'] ?? null ], $raw );
-			self::assertSame( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', $error['data']['hint'] ?? null );
+			self::assertSame( 'A newer version of the plugin may have written it: install that version. If no version reads it, its document is damaged: once the job cannot be running any more, move its folder, which has the job\'s ID as its name, out of jobs/ in the private working directory and keep that copy. Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.', $error['data']['hint'] ?? null );
 			[ $status, , $raw ] = TestSite::api( 'GET', '/jobs/20261126T150000Z-0c2003' );
 			self::assertSame( 404, $status, 'An ID that no job has: ' . $raw );
 		} finally {
@@ -980,7 +980,7 @@ final class AccessTest extends TestCase {
 				$listed = array_map( static fn ( array $job ): array => [ $job['id'] ?? null, $job['code'] ?? null, $job['message'] ?? null ], (array) ( $answer['unreadable_jobs'] ?? [] ) );
 				self::assertSame( $expected, $listed, $route );
 				self::assertStringContainsString( 'Give the PHP user back ownership of that folder', (string) ( $answer['unreadable_jobs'][0]['hint'] ?? '' ) );
-				self::assertStringContainsString( 'Install a plugin version that can read the job.', (string) ( $answer['unreadable_jobs'][1]['hint'] ?? '' ) );
+				self::assertStringContainsString( 'A newer version of the plugin may have written it: install that version.', (string) ( $answer['unreadable_jobs'][1]['hint'] ?? '' ) );
 			}
 			[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'status' ] );
 			self::assertSame( 0, $status, $output );
@@ -988,7 +988,8 @@ final class AccessTest extends TestCase {
 				self::assertStringContainsString( 'Stored job that cannot be read: ' . $id, $output );
 				self::assertStringContainsString( $message, $output );
 			}
-			self::assertStringContainsString( 'No backup starts while it cannot be read, the scheduled ones included.', $output );
+			// Each warning says what waits meanwhile, scheduled backups included.
+			self::assertSame( 2, substr_count( $output, 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ), $output );
 		} finally {
 			chmod( $folder, 0700 );
 			foreach ( [ $unreadable, $inaccessible ] as $id ) {

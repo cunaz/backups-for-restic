@@ -288,8 +288,9 @@ test( 'a stored job that cannot be read is named on the dashboard and in the log
 			const alert = page.locator( '#backups-for-restic-app .bfr-unreadable-job' );
 			await expect( alert ).toHaveCount( 1 );
 			await expect( alert ).toContainText( 'This version of the plugin cannot read the stored job ' + id + '.' );
-			await expect( alert ).toContainText( 'Install a plugin version that can read the job.' );
-			await expect( alert ).toContainText( 'No backup starts while it cannot be read, the scheduled ones included.' );
+			await expect( alert ).toContainText( 'A newer version of the plugin may have written it: install that version.' );
+			await expect( alert ).toContainText( 'If no version reads it, its document is damaged: once the job cannot be running any more, move its folder' );
+			await expect( alert ).toContainText( 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' );
 		}
 	} finally {
 		wordpress( siteRoot(), container + 'BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $argv[2] );', [ id ] );

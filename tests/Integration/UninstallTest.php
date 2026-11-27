@@ -88,11 +88,12 @@ final class UninstallTest extends TestCase {
 			$refusal = $delete();
 			self::assertStringStartsWith( 'refused: Backups for restic cannot be deleted yet: the PHP user cannot open the stored job ' . $inaccessible . '.', $refusal );
 			self::assertStringContainsString( 'Give the PHP user back ownership of that folder', $refusal );
+			self::assertStringContainsString( 'Where they cannot be put back, move what is in their place out of jobs/ once the job cannot be running any more, and keep that copy.', $refusal );
 			self::assertStringEndsWith( 'Then retry deletion.', $refusal );
 			chmod( $folder, 0700 );
 			mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
 			file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
-			self::assertSame( 'refused: Backups for restic cannot be deleted yet: this version cannot read the stored job ' . $unreadable . '. Install a plugin version that can read the job, let it finish the job&#039;s cleanup, then retry deletion.', $delete() );
+			self::assertSame( 'refused: Backups for restic cannot be deleted yet: this version cannot read the stored job ' . $unreadable . '. A newer version of the plugin may have written it: install that version, let it finish the job&#039;s cleanup, then retry deletion. If no version reads it, its document is damaged: once the job cannot be running any more, move its folder out of jobs/ in the private working directory, keep that copy, then retry deletion.', $delete() );
 			self::assertSame( $stored, self::stored(), 'Options, transients and cron events stay.' );
 		} finally {
 			chmod( $folder, 0700 );

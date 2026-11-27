@@ -79,7 +79,18 @@ final class Messages {
 	 * @return string Hint.
 	 */
 	private static function inaccessible_hint(): string {
-		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link is in the place of the folder, or something other than a regular file is in the place of job.json: put the job\'s own files back. Until the job can be read, its files are kept, and new jobs and repository changes stay blocked.', 'backups-for-restic' );
+		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link is in the place of the folder, or something other than a regular file is in the place of job.json: put the job\'s own files back, or where they cannot be put back, move what is in their place out of jobs/ once the job cannot be running any more, and keep that copy.', 'backups-for-restic' ) . ' ' . self::stored_job_hold();
+	}
+
+	/**
+	 * What waits while a stored job cannot be read, which the hints of job_unreadable and
+	 * job_inaccessible end with: that job may be an apply within its recovery window whose undo
+	 * needs the staged files, the sealed review and the job documents (JobStore::unreadable()).
+	 *
+	 * @return string Text.
+	 */
+	private static function stored_job_hold(): string {
+		return __( 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.', 'backups-for-restic' );
 	}
 
 	/**
@@ -459,7 +470,7 @@ final class Messages {
 			],
 			'job_unreadable'                 => [
 				'message' => __( 'A stored job cannot be read by this version of the plugin.', 'backups-for-restic' ),
-				'hint'    => __( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', 'backups-for-restic' ),
+				'hint'    => __( 'A newer version of the plugin may have written it: install that version. If no version reads it, its document is damaged: once the job cannot be running any more, move its folder, which has the job\'s ID as its name, out of jobs/ in the private working directory and keep that copy.', 'backups-for-restic' ) . ' ' . self::stored_job_hold(),
 			],
 			'job_inaccessible'               => [
 				'message' => __( 'The PHP user cannot open a stored job in the private working directory.', 'backups-for-restic' ),

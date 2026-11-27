@@ -132,7 +132,8 @@ The site records each delivery. Store the file with the other offline recovery m
    preview says so and the apply is no longer listed; an undo that could only keep changed
    entries is refused. Restore files that should not stay as they are offline as in
    step 4. Use **Delete staged files** to remove the private downloads when you are
-   finished.
+   finished. While a stored job cannot be read, the plugin refuses that and keeps them past
+   their expiry; Scenario J says what to do.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.
@@ -896,10 +897,33 @@ The options and job documents have separate layout numbers. An unreadable job pr
 are compatible, and when the discard of a database restore's binding is reviewed or
 confirmed, since that job may be a queued undo that needs the binding. The plugin keeps
 every unreadable job document, including one whose raw status looks finished, because it
-cannot safely interpret that status. Install a version
-that can read the job. If that version still refuses it, keep a copy of the private job
-directory when investigating damaged files; do not remove the job just to unblock changes
-while it may still be running.
+cannot safely interpret that status: it may be an apply within its recovery window whose
+undo needs the staged files of its restore. While such a job is stored, new jobs and
+scheduled backups wait, and so do the removal of staged files, both **Delete staged files**
+on the Restores tab and their expiry, and the pruning of the job history. Staged files, which
+can hold `wp-config.php` and database dumps, then stay past their expiry.
+
+A newer version of the plugin may have written the job: install that version. If no version
+reads it, the document is damaged, for example cut off or emptied by a failure of the disk or
+the file system, without its type, or filed under another job's ID. Do not delete it, and do
+not remove a job just to unblock changes while it may still be running: move its folder out
+of `jobs/` once the job cannot be running any more, and keep that copy. A job runs only in a
+tick, which holds the runner lock, and no tick takes up a job whose document it cannot read:
+only a tick that was working on the job when its document became unreadable can still be
+running it. So stop any `wp backups-for-restic` command that still runs, then, as the PHP user
+and in the private working directory (`BACKUPS_FOR_RESTIC_PRIVATE_DIR`, by default
+`wp-content/backups-for-restic/`), move the folder while holding the runner lock:
+
+```sh
+cd /path/to/private-working-directory
+sudo -u www-data flock --nonblock runner.lock \
+  mv jobs/<job-id> /path/outside/the/private-working-directory/
+```
+
+While a tick holds the lock, `flock` fails and moves nothing; run it again a little later.
+Keep the copy: the folder holds the job's log and, for an apply, the journal with the saved
+original files. Once no stored job is left that cannot be read, new jobs start again, and the
+next heartbeat removes the staged files that expired meanwhile.
 
 A job that the PHP user cannot open blocks new jobs, repository changes and the discard of a
 binding in the same way, with `job_inaccessible`, whatever the plugin version. The refusal
@@ -911,11 +935,14 @@ user back ownership of that folder and of everything in it, with permission to r
 search them, for example with `chown -R` to the web server's user. Run WP-CLI as that user
 from then on (`sudo -u www-data wp …`) rather than with `--allow-root`. If ownership and
 permissions are in order, a link is in the place of the folder, or something other than a
-regular file in the place of its `job.json`: put the job's own files back. Uninstalling is
-refused for the same job until it can be read. `GET /jobs/{id}`, its log and
+regular file in the place of its `job.json`: put the job's own files back, or where they
+cannot be put back, move what is in their place out of `jobs/` as above, once the job cannot
+be running any more, and keep that copy. Uninstalling is refused for the same job until it
+can be read or is moved. `GET /jobs/{id}`, its log and
 `wp backups-for-restic logs <id>` answer for that job with the same code and texts, and the
 dashboard, the Logs tab and `wp backups-for-restic status` name every such job while it lasts,
-with the note that no backup starts meanwhile, scheduled ones included. The same holds for a
+with what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on
+request and at their expiry, and the pruning of the job history. The same holds for a
 document that this version cannot read (`job_unreadable`), whose texts name the job too.
 
 A different notice says that the first settings layout number could not be saved. Check

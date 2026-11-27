@@ -522,7 +522,7 @@ final class WordPressSiteTest extends TestCase {
 				[ $status, $answer, $raw ] = TestSite::api( 'POST', $route, $body );
 				self::assertSame( 409, $status, $raw );
 				self::assertSame( 'backups_for_restic_job_unreadable', $answer['code'] ?? null, $raw );
-				self::assertStringContainsString( 'Install a plugin version', $answer['data']['hint'] ?? '', $raw );
+				self::assertStringContainsString( 'A newer version of the plugin may have written it: install that version.', $answer['data']['hint'] ?? '', $raw );
 			}
 		} finally {
 			TestSite::php(

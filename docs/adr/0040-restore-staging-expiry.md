@@ -123,6 +123,11 @@ packages must never be offered a tree that is half gone.
   included, and whose refusal names the job; staged files past their hours stay meanwhile.
   Since 2026-11-27 `DELETE /restores/{id}` does not remove one either: it is refused with the
   code and the ID of the job that cannot be read, before anything is renamed, so that the
-  administrator's way out is the one that the texts of that code name. Before, a request removed
+  administrator's way out is the one that the texts of that code name: the version that wrote
+  the job, ownership and permissions put right, or, for a document that no version reads and
+  for job files that cannot be put back, the job's folder moved out of `jobs/` once the job
+  cannot be running any more, with a copy kept (docs/06, Scenario J). The texts say too that
+  staged files are kept meanwhile, past their expiry, and that the job history is not pruned.
+  Before, a request removed
   the staging, and the undo of an apply whose document could not be read at that moment was
   refused with `file_staging_gone` once it could.

@@ -437,11 +437,18 @@ All notable changes are documented here. The format follows
   has no available undo.".
 - A stored job that cannot be read is shown on the dashboard and in the Logs tab, and
   `wp backups-for-restic status` lists it, each with the texts that name the job, and they say
-  that no backup starts meanwhile, scheduled ones included. `GET /status` and `GET /jobs`
+  what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on request
+  and at their expiry, and the pruning of the job history. `GET /status` and `GET /jobs`
   return them as `unreadable_jobs`. The texts of `job_unreadable` name the job as well. Before,
   only the refusal of a new job named one, no list of jobs showed it, and a scheduled backup
   that it kept from starting was reported only by the stale notice once no backup had
   succeeded for long enough.
+- The texts of `job_unreadable` and `job_inaccessible`, and the refusal of uninstalling, say
+  what to do with a job document that no version reads, such as one cut off or filed under
+  another job's ID, and with job files that cannot be put back: once the job cannot be running
+  any more, move its folder out of `jobs/` and keep that copy. Scenario J of the recovery
+  guide gives the commands. Before, they named only a version that can read the job, or
+  putting the job's files back, and neither exists for such a document.
 - A staging, preview or undo workspace with a folder that the PHP user can list but not
   search is counted as a removal that failed, and the heartbeat moves on. Before, every name
   in that folder counted as removed, because it could not be looked up after its removal

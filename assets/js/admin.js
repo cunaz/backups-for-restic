@@ -629,7 +629,6 @@
 			return el( 'div', { className: 'notice notice-error inline bfr-alert bfr-unreadable-job' }, [
 				el( 'p', {}, [ el( 'strong', {}, [ job.message ] ) ] ),
 				el( 'p', {}, [ job.hint ] ),
-				el( 'p', {}, [ __( 'No backup starts while it cannot be read, the scheduled ones included.', 'backups-for-restic' ) ] ),
 			] );
 		} );
 	}

@@ -1748,11 +1748,15 @@ and schedules are slots in the site's time zone.
   that this version reads but cannot parse, `job_inaccessible` for a document that the PHP
   user cannot look up or read, below a job directory that it may not search or as a file
   that it may not read, or for a link in the place of the job's directory or anything other
-  than a regular file in the place of its document (`JobStore::unreadable_code()`). The first needs a
-  version that can read the job; the second needs ownership and permissions put right, for
-  example after a WP-CLI command that ran as root created the job's directory, which
-  `reserve_id()` makes with mode 0700. A directory without a job document does not block
-  changes.
+  than a regular file in the place of its document (`JobStore::unreadable_code()`). The first needs
+  the version that wrote the job, or, for a document that no version reads, such as one cut
+  off or filed under another job's ID, the job's directory moved out of `jobs/` once the job
+  cannot be running any more (docs/06, Scenario J); the second needs ownership and
+  permissions put right, for example after a WP-CLI command that ran as root created the
+  job's directory, which `reserve_id()` makes with mode 0700, or the same move where the job's
+  own files cannot be put back. The texts of both say so, and what waits meanwhile: new jobs
+  and scheduled backups, the removal of staged files, on request and at their expiry, and the
+  pruning of the job history. A directory without a job document does not block changes.
   Unknown or invalid stored settings of the same layout fall back to their defaults field
   by field.
 - Deactivation unschedules the two cron events (`Cron::unschedule()`) and ends the active

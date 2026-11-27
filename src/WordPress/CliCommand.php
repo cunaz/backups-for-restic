@@ -294,7 +294,7 @@ final class CliCommand {
 		foreach ( $jobs->unreadable_ids() as $id ) {
 			$texts = Messages::stored_job( $jobs->unreadable_code( $id ), $id );
 			\WP_CLI::line( sprintf( '%s: %s', __( 'Stored job that cannot be read', 'backups-for-restic' ), $id ) );
-			\WP_CLI::warning( $texts['message'] . ' ' . $texts['hint'] . ' ' . __( 'No backup starts while it cannot be read, the scheduled ones included.', 'backups-for-restic' ) );
+			\WP_CLI::warning( $texts['message'] . ' ' . $texts['hint'] );
 		}
 	}
 
