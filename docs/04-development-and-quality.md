@@ -446,12 +446,13 @@ Infection runs in six gates, each with its own code, its own tests from
 `tests/Mutation/phpunit.xml.dist` and its own thresholds. The database gate's tests have a
 configuration of their own, `tests/Mutation/database/phpunit.xml.dist`, with a memory limit of
 256M instead of 128M: the initial run of a gate keeps the coverage of every test in one
-process, and beside it the 16 MiB row of `DatabaseDumpTest` does not always fit into 128M.
-The gate also leaves out the test of a batch beyond `max_allowed_packet` in
-`DatabaseExchangeTest`, which the database suite runs. It lowers the server's limit for a
-moment, and a mutant process killed inside it at the timeout, or one that connects meanwhile,
-leaves or meets a server on which large statements fail whatever the mutation: on 2026-11-23
-188 mutants counted as killed that way.
+process, and beside it the 16 MiB row of `DatabaseDumpTest` does not always fit into 128M. Its
+bootstrap gives each mutant process a database server of its own ("One server per process",
+below). From 2026-11-23 until then the gate left out the test of a batch beyond
+`max_allowed_packet` in `DatabaseExchangeTest`, which lowers the server's limit for a moment: a
+mutant process stopped inside it at the timeout, or one that connected meanwhile, left or met a
+server on which large statements failed whatever the mutation, and on 2026-11-23 188 mutants
+counted as killed that way. The gate runs that test again.
 
 | Gate (Composer script, configuration) | Mutated code | Runs in | MSI floor | Covered MSI |
 | --- | --- | --- | ---: | ---: |
@@ -467,7 +468,8 @@ covers, so code that no test reaches produced no mutant and counted nowhere: bef
 2026-11-22 the core gate listed `Database\Restore`, but ten of its classes, reached only by
 the database suite, created no mutant at all. The MSI counts such code as not killed.
 Every threshold is a floor: the score measured on 2026-11-23 with `main` at `e40ab18` (below),
-rounded down, and never above the score over the mutants that every run of the gate killed.
+or for the database gate on 2026-11-26 with one server per process on the same code, rounded
+down, and never above the score over the mutants that every run of the gate killed.
 Pull requests merged after that keep them: a floor may only rise, and the pull request that
 adds the tests raises it. ADR 0024's 90 % is the minimum that the core's covered MSI may never
 fall below, and the goal for the other gates; the core's covered floor is its measured 92 %.
@@ -597,9 +599,11 @@ code had 1,798 mutants, 75 of them not covered, 274 escaped and 3 timed out: 80.
 `5308b0b` (27 minutes). The gate takes less time with the tests: a mutant that a test kills
 stops at that test, while an escaped one runs every test that covers it.
 
-Under Infection's wrapper the gates had reported 90.39 % covered for the core and 79.20 % for
-the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore, 100 % for
-the apply jobs and 99.87 % for ZIP downloads on 2026-11-22.
+The database gate's figures in this table come from one server that all its processes shared;
+with a server per process the same code scores 80.69 % and 84.59 % ("One server per process",
+below). Under Infection's wrapper the gates had reported 90.39 % covered for the core and
+79.20 % for the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore,
+100 % for the apply jobs and 99.87 % for ZIP downloads on 2026-11-22.
 
 The planner and ZIP gates gave the same figures in every run on their current code, the local
 ones on three states of `main` and CI's two, mutant for mutant. The core and the apply gate gave
@@ -616,38 +620,86 @@ mutants that every run on the same code killed. On `662c8b1` CI scored the same 
 ZIP and core gates, 79.37 % and 83.58 % for the apply gate and 77.93 % and 81.86 % for file
 restore. The floors are the final figures rounded down, and none is above those.
 
-**The database scores are an upper bound.** The two final runs differ in 101 mutants that one
-run killed and the other did not, 100 of them through `DatabaseExchangeTest`. The exchange
-checks the other sessions of its account on the server, and Infection's processes share one
-server and account, so such a test can fail through another process whatever the mutation. In
-the run that killed them the tests failed on the session list (`performance_schema`, 14
-mutants), a dependency or grant refusal (17), a reviewed plan that changed or kept blockers
+**One server per process.** Until 2026-11-26 Infection ran the database gate's processes against
+one MySQL server and account, and the exchange's tests look at the whole server: `SwapCatalog`
+compares the server's `Threads_connected` with the sessions that the Performance Schema lists,
+the session drain waits for a quiet interval of the account, and one test lowers the global
+`max_allowed_packet`. A test could therefore fail through what another process did at that
+moment, whatever the mutation, and its mutant counted as killed. The two final runs of
+2026-11-23 differed in 101 mutants that one run killed and the other did not, 100 of them
+through `DatabaseExchangeTest`: the killing run failed on the session list (`performance_schema`,
+14 mutants), a dependency or grant refusal (17), a reviewed plan that changed or kept blockers
 (20), a table definition or identity that changed after the review (7), the exchange's check of
-the reviewed database (5), `database_exchange_changed` (4) and other assertions (34). So the
-scores, and with them the floors, can be above what the tests alone kill: one run's score lay
-1.2 points above the score over the mutants that both final runs killed (82.14 % against
-80.97 %, covered 86.11 % against 84.88 %), and about 1.5 points above the 80.67 % and 84.56 %
-that all three runs on this state killed, CI's included. On older code CI's four processes detected
-about a point less than eight did locally (76.57 % and 81.45 % against 77.37 % to 77.82 % and
-82.30 % to 82.78 %); on the final state CI scored 82.02 % and 85.98 %. The gate compares one CI
-run with its floors, not the score over several runs, so its floors are whole numbers like the
-others, 80 % and 84 %, within a point of the score over all three runs. A run below a floor is
-a failed gate, here as for every gate: its cause is looked for in the tests of the pull request
-first. A floor is lowered only by a change of its own that measures the same commit again and
-shows that the measurement was at fault, not the tests, with the mutants that came out
-differently named ([ADR 0024](adr/0024-governance-and-quality-assurance.md)).
+the reviewed database (5), `database_exchange_changed` (4) and other assertions (34). Three CI
+runs of the same code on 2026-11-26, on runners of usual speed, differed in 127. So the scores of
+that time, and the floors set from them, were an upper bound.
 
-One cause of such kills is checked after every run. A server whose Performance Schema cannot
-instrument a thread leaves that connection out of `performance_schema.processlist` while
-`Threads_connected` counts it, so the exchange's session check (`SwapCatalog::complete()`)
-fails whatever the mutation and the mutant counts as killed. `composer mutation:database`
-therefore asks the server that the gate used, after the gate, for
-`Performance_schema_thread_instances_lost` and `Performance_schema_thread_classes_lost`
-(`bin/check-performance-schema.php`) and fails when either is above zero, the Performance Schema
-is off or the server cannot be asked. Both counters start at zero with the server, so the check
-must ask the gate's own server, and `FLUSH STATUS` would reset them; no test runs it. The other
-causes stay: one database server, or at least one account, per mutant process is the follow-up
-that makes the floors true ones.
+Now `BFR_TEST_MYSQL_HOSTS` names one server per Infection thread, as `host:port` separated by
+spaces, and `composer mutation:database` runs the gate through `bin/database-servers.sh`, which
+runs as many threads as it names and refuses a thread count of its own. Infection numbers its
+threads from 1 and gives each mutant process the number of its thread in `TEST_TOKEN`, and a
+thread starts its next process only when the last one has ended. The gate's bootstrap
+(`tests/Mutation/database/bootstrap.php`, `tests/Support/DatabaseServers.php`) points
+`BFR_TEST_MYSQL_HOST`, through which the database suite connects, at the server of the process's
+thread, for the process and for the programs it starts. Before any test it ends every other
+session on that server and sets `max_allowed_packet` back to the default: a process that
+Infection stopped at its timeout can leave behind sessions of the programs it started, which
+outlive it, and the lowered limit of the test it was in. A test that PHPUnit runs in a process of
+its own uses the same server and clears nothing, as its mutant process still holds its sessions.
+A process whose thread has no server reaches none: its tests skip, and the line that it leaves in
+its report fails the gate (`bin/mutation-gate.sh`), so nothing falls back to a shared server.
+Infection's initial test run, which runs alone and without `TEST_TOKEN`, uses the first server,
+and the plain database suite reads only `BFR_TEST_MYSQL_HOST`, as before.
+
+`bin/check-database-servers.php` checks the servers before the gate: every one answers, no two
+are one server (`server_uuid`), all run the version of the first, and their Performance Schema
+is on. It then clears the first server as a mutant process clears its own, because the initial
+test run has no such process: a gate that was stopped while a test had lowered
+`max_allowed_packet` would otherwise fail the next one's initial run. After the gate, a failed
+one too, it checks that every server ran through it without a restart (`Uptime`, held to the
+time of that server's own answer), which would have failed or skipped the tests on it and reset
+its counters,
+and that its Performance Schema could instrument every thread: a server out of thread instances
+leaves connections out of `performance_schema.processlist` while `Threads_connected` counts
+them, and the exchange's session check (`SwapCatalog::complete()`) then fails whatever the
+mutation. Both counters start at zero with the server, so the check asks the gate's own servers,
+and `FLUSH STATUS` would reset them; no test runs it. Each failed check fails the gate. In CI,
+`database-mutation.yml` starts four services of the MySQL image of the database job in `ci.yml`,
+by digest, each with its data on tmpfs, and `DatabaseServersTest` checks that the services and
+the list agree.
+
+Measured so on 2026-11-26 with `main` at `932d979`, whose code under mutation and whose tests
+are those of `e40ab18`: PHP 8.3.37 with ext-zstd and pcov, three threads on three MySQL 8.4.11
+servers, the tests' temporary files on tmpfs, and a machine that other work loaded to a load
+average of 5 to 15. All 4,081 mutant processes reported in and passed, and no server restarted
+or lost a thread. The gate killed 3,444 mutants, timed out 8 and let 629 escape: 80.69 % and
+84.59 % covered, where CI's three runs of the same code on one shared server that day scored
+81.58 % to 81.86 % and 85.52 % to 85.81 %, letting 579 to 591 escape. Between them those three
+runs let 630 mutants escape, 506 of them in all three. The run with a server per process let
+escape all of the 630 but two, and one more:
+
+- `TableImporter.php:142` (MethodCallRemoval) is killed by the test of a batch beyond
+  `max_allowed_packet`, which the gate runs again.
+- `WordPressState.php:124` (ConcatOperandRemoval) was killed by
+  `test_killing_the_worker_on_either_side_of_rename_resumes_from_the_physical_witness`, whose
+  worker, a program of its own that runs the unmutated code, did not reach its `RENAME` within
+  the test's 30 seconds. Of the 2,079 processes that ran this test it failed in this one.
+- `DatabaseReview.php:136` (DecrementInteger: the review reads 10,000 tables instead of 10,001,
+  so it never sees more than the limit) escaped, which all three shared runs had killed; no test
+  reaches 10,000 tables.
+
+So each run on the shared server had killed 40 to 52 mutants that its tests let escape, and the
+80.67 % and 84.56 % over the mutants that all three runs of 2026-11-23 killed came within 0.03
+points of the scores of the tests alone. A second run of the 423 mutants of `SwapCatalog`,
+`WriteBarrier` and `SessionDrain`, with the tests' files on ext4 and the machine at a load of 2
+to 5, came out as the full run for every one of them; on these files the runs with a server per
+process let escape exactly the mutants that at least one of CI's three runs let escape. On one
+shared server, with the same timeout of 600 s and `main`'s code, the same 423 mutants came out
+with 3 kills more (82.98 % against 82.27 %): `SwapCatalog.php:70` and `:118` and
+`WriteBarrier.php:42`, which two of CI's three runs had let escape. Two runs of the same code
+now differ only where a test keeps a deadline of its own that a heavily loaded machine can miss,
+as the worker's 30 seconds above, in one process of 4,081 there. The floors stay at the whole
+numbers below, 80 % and 84 %, but now below what the tests kill, not below an upper bound.
 
 Infection gives each mutant a timeout of five seconds plus five times what its covering test
 classes took in the initial run, at most the configured timeout; a mutant that runs into it
@@ -655,12 +707,33 @@ counts as killed. It skips a mutant without running it when the quickest test cl
 it took at least the configured timeout in the initial run, which collects coverage and is
 slower. With 30 s that left all 255 mutants of `Restore\SnapshotBrowser` unmeasured: its tests
 take about 45 s with coverage and 6 s without. The file restore gate now allows 120 s and the
-apply gate 60 s, and no gate skipped a mutant on 2026-11-23. A run on a loaded machine still
-differs: on 2026-11-20 a run of the database gate during other test runs counted 530 timeouts
-instead of 8, and on 2026-11-25 CI's run on `662c8b1` counted 414 instead of 9 on a runner whose
-initial test run took 77.7 s instead of 46.6 s: the gate took 3 h 21 min instead of 1 h 47 min,
-218 mutants escaped instead of 572, and its 90.30 % and 94.66 % measured the runner, not the
-tests. Mutation testing is a merge gate for measured code
+apply gate 60 s, and no gate skipped a mutant on 2026-11-23.
+
+The database gate allowed 60 s until 2026-11-26, and there the limit, not the tests, set the
+timeout of 3,863 of its 4,081 tested mutants: `DatabaseExchangeTest`, which covers most of them,
+takes about 31 s with coverage on a runner, and five times that is far above 60 s. So a run on a
+loaded machine timed out mutants that the tests let escape. On 2026-11-20 a run during other
+test runs counted 530 timeouts instead of 8; CI's runs of `662c8b1` and `06a00d4` counted 414
+and 390 and took 3 h 21 min and 3 h 18 min, where the runs with 9 to 11 timeouts took 1 h 51 min
+to 2 h 25 min. Of the 390, 277 were mutants that all three runs of the same code on runners of
+usual speed let escape, and on `662c8b1` 218 mutants escaped instead of 572: its 90.30 % and
+94.66 % measured the runner, not the tests. On a machine twice as slow as a runner, where the
+exchange's class took 65 s with coverage, Infection skipped 1,297 mutants without running them,
+as their quickest covering class took longer than the limit; a skipped mutant leaves the scores
+altogether. Since 2026-11-26 the database gate allows 600 s, above five times the covering
+classes of every mutant even on a runner at half its usual speed (about 260 s): the timeout of
+each mutant follows the time that its tests took on the machine that runs them, and a slower
+machine gives them more time. In the run with a server per process above, at a load of 5 to 15,
+the initial run took 162 s and the exchange's class 89.5 s, so the timeouts went up to 489 s;
+the 8 mutants that timed out are the ones that loop for good (`WriteBarrier` 5, `SqlLexer` 2,
+`DatabaseChanges` 1), and of the 4,068 other processes whose covering classes are known none
+used more than 31 % of its timeout. Of the 629 escaped mutants 333 had run longer than 60 s
+there. Under a CPU quota of 40 % for the gate and its servers, which slowed the initial run 1.5
+times and the mutant processes 3.5 times, the 423 mutants of `SwapCatalog`, `WriteBarrier` and
+`SessionDrain` came out as in the full run, every one of them, in 2 h 1 min instead of 42 min:
+the longest escaped process ran 364 s of its 450, where it had run 105 s.
+
+Mutation testing is a merge gate for measured code
 ([ADR 0024](adr/0024-governance-and-quality-assurance.md), point 3), so such a score must not
 pass a floor. When more than 5 % of the mutant processes timed out, `bin/mutation-gate.sh`
 therefore computes the scores again with every timed-out mutant counted as not detected, and
@@ -686,6 +759,28 @@ Infection's scores to the hundredth. One mutant of the ZIP writer writes its che
 into the working directory, and so do mutants of the file restore gate; delete `.head`, `.names`
 and `.state` there after a local run.
 
+A skipped mutant lifts a score as well, and since 2026-11-26 the script holds a run with one to
+the same bound: Infection leaves out of both scores a mutant whose quickest covering class took
+at least the configured timeout in the initial run, and one that ran into a timeout which its
+covering classes' time already reached. Healthy runs of the six gates skip none. With the
+database gate's former 60 s on a machine twice as slow as a runner, at the load of that evening,
+the 423 mutants of `SwapCatalog`, `WriteBarrier` and `SessionDrain` came out so, where the run
+with servers of their own and 600 s kills 82.27 % and 84.47 % covered with 5 timeouts:
+
+| Run | Servers | Killed | Escaped | Timed out | Skipped | MSI | Covered MSI | Bound of the script |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 60 s | one per process | 280 | 1 | 0 | 131 | 95.89 % | 99.64 % | 66.19 %, 67.96 %: fails |
+| 60 s, `main` | one shared | 348 | 8 | 22 | 34 | 95.12 % | 97.88 % | 82.27 %, 84.47 %: counts |
+
+The first run did not time out a single mutant, so the 5 % rule alone would have passed its
+95.89 %. When a run has a skipped mutant, the script therefore computes the lower bound with the
+skipped mutants counted as tested and not detected, beside the timed-out ones beyond 5 %, and
+the run counts only if that bound meets both floors too. Separate servers did not remove these
+timeouts and skips, nor reliably reduce them: which mutants a fixed limit times out or skips
+follows the speed of the machine. The exchange's class took 69.0 s in the first run's initial
+run and 58.3 s in the second's, so the first skipped 94 mutants without running them and 37
+after they ran into the limit, and the second none without running them and 34 after it.
+
 The escaped mutants by class with `main` at `e40ab18`, the work of a later package:
 
 - Core: `Database\Restore\CreateStatement` 77, `Database\Restore\TableFile` 63,
@@ -702,12 +797,13 @@ The escaped mutants by class with `main` at `e40ab18`, the work of a later packa
   what a test would need.
 - ZIP downloads: `ZipWriter` 87, `ZipRecords` 29, `Crc32` 1. The last is equivalent: a 33rd
   row of the matrix in `Crc32::power()`, which no 32-bit vector reads.
-- Database: `Jobs\Apply\DatabaseChanges` 99, `Jobs\Apply\DatabaseGeneration` 53,
-  `Jobs\Apply\DatabaseReview` 46, and in `Database\Restore` `CreateStatement` 59,
-  `RehearsalReport` 38, `SwapCatalog` 38, `OwnedTables` 31, `TableExchange` 31, `TableFile` 30,
-  `Manifest` 29, `WordPressState` 22, `Ledger` 20, `TableImporter` 17, `WriteBarrier` 14,
-  `ExchangePlan` 10, `InsertStatement` 8, `Session` 7, `SqlLexer` 6, `MysqliConnection` 5,
-  `PluginList` 2, `SessionDrain` 2 (the run with 567).
+- Database, with one server per process (2026-11-26, the same code): `Jobs\Apply\DatabaseChanges`
+  100, `Jobs\Apply\DatabaseGeneration` 54, `Jobs\Apply\DatabaseReview` 47, and in
+  `Database\Restore` `CreateStatement` 67, `SwapCatalog` 46, `RehearsalReport` 40,
+  `TableExchange` 36, `Manifest` 34, `OwnedTables` 33, `TableFile` 33, `WordPressState` 29,
+  `Ledger` 26, `TableImporter` 18, `WriteBarrier` 16, `ExchangePlan` 12, `InsertStatement` 10,
+  `Session` 10, `SqlLexer` 7, `MysqliConnection` 6, `PluginList` 2, `SessionDrain` 2,
+  `SerializedValue` 1: 629, where the run of 2026-11-23 on one shared server let 567 escape.
 
 The core job runs with ext-zstd since 2026-11-22, so the native decompression of format 2 is
 mutated and tested too. With it, 78 mutants of `Format\Compression` were covered on 2026-11-22
@@ -729,8 +825,10 @@ pull request a job says in a notice that it skipped the run, and ends green, so 
 a required check. When the job cannot list the files of a pull request, or cannot match them
 against the list, it runs. Each job checks for a nonempty report and uploads its logs.
 
-The database gate needs a server and takes longer than a pull request should wait (about 50
-minutes with 8 threads locally, and 111 on a runner with four before #59). It runs in
+The database gate needs one server per thread and takes longer than a pull request should
+wait: on a runner with three threads on one server it took 1 h 51 min to 2 h 25 min on
+2026-11-26, and 3 h 18 min on a slow one; on the machine of the measurement above, three threads
+on three servers took 4 h 14 min. In CI it runs four threads on four servers. It runs in
 `database-mutation.yml` on every push to `main`, on pull requests that change `src/`, `tests/`
 or a file the job reads (its configuration, `phpunit.xml.dist`, the scripts it runs, Composer's
 files and the workflow; the same test checks that list), and on request. It is not a required
@@ -829,7 +927,7 @@ copy would only go stale.
 | --- | --- | --- |
 | `ci.yml` | push to `main`, pull request | PHPCS and `node --check assets/js/admin.js`; ESLint for `assets/js` and the browser tests; PHPStan with the project's three rules; Plugin Check on the built package with the release rehearsal and the tests of the release gate, and the translation template built from the package (§5.8); on pull requests the check that the commits are signed off; unit tests on PHP 8.3, 8.4, 8.5 and 8.6 with CLI OPcache and JIT disabled, and once more on PHP 8.3 with ext-zstd; the database suite against MySQL and MariaDB; the core mutation gate and the four restore gates (§5.6) |
 | `conformance.yml` | push to `main` and pull requests that change `src/`, `tests/`, `bin/install-test-tools.sh`, `bin/bench.php`, `composer.lock` or the workflow; nightly; manual dispatch | oracle suite with the restic CLI and rest-server; the format 2 tests again with `ext-zstd`; benchmarks with gates |
-| `database-mutation.yml` | push to `main`, pull requests that change `src/`, `tests/` or a file the job reads, manual dispatch | the database mutation gate against MySQL (§5.6) |
+| `database-mutation.yml` | push to `main`, pull requests that change `src/`, `tests/` or a file the job reads, manual dispatch | the database mutation gate against one MySQL server per thread (§5.6) |
 | `fuzz.yml` | nightly, manual dispatch | fuzzing per parser, two minutes each unless the dispatch says otherwise; the job's name states the seconds; findings uploaded as an artifact |
 | `integration.yml` | push to `main`, pull request, nightly, manual dispatch | three groups of jobs, each on a site of its own. **WordPress compatibility** runs 7.1.5, 7.0.9 and 6.7.12 on both PHP 8.3 and 8.5, with a 96 MiB job on 6.7.12. It also runs WordPress 7.1.5 on PHP 8.6 with 128 MiB. That job lints every packaged PHP file with all diagnostics enabled and fails on deprecations. Three combinations repeat the large fixture nightly and on request; their job names then end in "(acceptance size)". Records with `strace` and core dumps how the server's PHP processes ended, and fails when the PHP or WordPress log holds an entry from the plugin's files (§5.3). **WordPress memory**, a matrix of three sizes (500,000, 1,000,000 and 2,000,000 blobs) that runs with every trigger: `bin/bench-wordpress-memory.php` builds a repository history of that size, then drives a complete backup, check and prune job of the plugin, every tick in a new PHP process with `memory_limit=128M`, `max_execution_time=30`, `set_time_limit()` disabled and a full WordPress. The site is installed with `BFR_DISABLE_WP_CRON=1`, so that no request starts a tick that is not measured; the script refuses any other site. A size passes if no tick crashes, changes these limits or reserves more than 128 MiB, every job ends within 600 ticks and leaves no repository lock, a prune that succeeds deletes a pack, a check that succeeds finds no error, and `restic check --read-data` accepts the repository before and after. At 500,000 blobs all three jobs must succeed; at the larger sizes each must succeed or fail with `index_too_large`. The reports of every tick and the logs are uploaded as the artifact `wordpress-memory-<blobs>`, also when the job fails ([measurements](benchmarks/2026-11-12-job-memory.md)). **Admin page in a browser** runs the browser tests (§5.5) and the same log check. |
 | `live-servers.yml` | weekly and manual dispatch on main, manual pre-release verification | disposable TLS rest-server pair and opt-in operator-configured repository pairs (§5.7) |

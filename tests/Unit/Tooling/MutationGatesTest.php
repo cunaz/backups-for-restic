@@ -42,7 +42,9 @@ final class MutationGatesTest extends TestCase {
 		self::assertTrue( @$phpunit->load( $root . '/' . $config_dir . '/phpunit.xml.dist' ), $gate . ': no phpunit.xml.dist in ' . $config_dir . '.' );
 		$xpath     = new DOMXPath( $phpunit );
 		$bootstrap = realpath( $root . '/' . $config_dir . '/' . $xpath->evaluate( 'string(/phpunit/@bootstrap)' ) );
-		self::assertSame( realpath( $root . '/tests/Mutation/bootstrap.php' ), $bootstrap, $gate . ' runs its tests without tests/Mutation/bootstrap.php.' );
+		// The bootstrap of the mutation suites, or one of the gate's own beside its configuration
+		// that does what that one does first, as the database gate's does.
+		self::assertContains( $bootstrap, [ realpath( $root . '/tests/Mutation/bootstrap.php' ), realpath( $root . '/' . $config_dir . '/bootstrap.php' ) ], $gate . ' runs its tests without tests/Mutation/bootstrap.php.' );
 		self::assertStringContainsString( 'MutationProcess::prepare(', (string) file_get_contents( (string) $bootstrap ) );
 
 		$options = $config['testFrameworkOptions'] ?? '';
@@ -76,7 +78,8 @@ final class MutationGatesTest extends TestCase {
 			foreach ( (array) $commands as $command ) {
 				self::assertIsString( $command );
 				self::assertStringNotContainsString( '.tools/bin/infection', $command, 'composer ' . $name . ' runs Infection without bin/mutation-gate.sh, which fails the gate when the canary fires.' );
-				if ( str_starts_with( $command, 'bin/mutation-gate.sh ' ) ) {
+				// The database gate runs it with one database server per thread.
+				if ( 1 === preg_match( '#^(?:bin/database-servers\.sh )?bin/mutation-gate\.sh #', $command ) ) {
 					$configured[] = 1 === preg_match( '/--configuration=(\S+)/', $command, $match ) ? $match[1] : 'infection.json5.dist';
 				}
 			}
@@ -307,8 +310,10 @@ final class MutationGatesTest extends TestCase {
 					'FAKE_MARK'   => 'variable',
 				],
 				1,
-				'::error::Mutant processes that could not write durably: 2.',
+				'::error::Mutant processes whose checks failed: 2.',
 			],
+			// The database gate's bootstrap reports so a process that has no server of its own.
+			'a process had no database server'           => [ [ 'FAKE_MARK' => 'server' ], 1, "::error::Mutant processes whose checks failed: 1. Their tests did not run as the gate measures them, as they could not write durably or had no database server of their own, so the score above cannot be trusted. First lines of their reports and the markers:\nProcess 9: Thread 4 has no database server of its own: BFR_TEST_MYSQL_HOSTS names 3." ],
 			'a process could write only the fallback'    => [ [ 'FAKE_MARK' => 'fallback' ], 1, 'Process 7: fsync() failed' ],
 			'every process stated what it must'          => [ [], 0, "Mutant processes: 6 ran tests, 4 of them to their end; 6 reported in, 6 could write durably or did not compile (1 caught, 1 counted as syntax errors, 0 ended while the classes loaded), 4 ended with PHP's own file wrapper (needed: 4), 0 of them after a fatal error in a test, and 0 more after a fatal error outside a test, which do not count." ],
 			'more reports than processes pass'           => [
@@ -381,9 +386,9 @@ final class MutationGatesTest extends TestCase {
 	}
 
 	/**
-	 * Runs whose mutant processes timed out, against the floors 80 % and 84 %: the counts "killed
-	 * errored syntax escaped timed-out not-covered", Infection's exit status, the script's, and
-	 * the annotation that it prints, if any.
+	 * Runs whose mutant processes timed out or whose mutants Infection skipped, against the floors
+	 * 80 % and 84 %: the counts "killed errored syntax escaped timed-out not-covered [skipped]",
+	 * Infection's exit status, the script's, and the annotation that it prints, if any.
 	 *
 	 * @return array<string, array{string, string, int, string}>
 	 */
@@ -399,15 +404,25 @@ final class MutationGatesTest extends TestCase {
 			// Infection's verdict stands, although 80 % covered without the timed-out mutants is below 84 %.
 			'exactly 5 percent timed out'          => [ '80 0 0 15 5 0', '0', 0, '' ],
 			'1 of 40 timed out'                    => [ '29 0 0 10 1 0', '0', 0, '' ],
+			// 5 skipped of 95: Infection scores 85 of 90, the bound 85 of 95.
+			'skipped mutants that the bound meets' => [ '85 0 0 5 0 0 5', '0', 0, '::notice::Infection skipped 5 mutants whose covering tests took at least the configured timeout, and leaves them out of the scores: MSI between 89.47 % and 94.44 %, covered code MSI between 89.47 % and 94.44 %, against the floors 80.00 % and 84.00 %. Counted as tested and not detected, the skipped mutants still leave both scores at their floors, so the run counts.' ],
+			// The database gate's subset of 423 mutants with a limit of 60 seconds on a machine twice
+			// as slow as a runner, on 2026-11-26: not one timeout, and 95.89 % where the tests kill
+			// 82.27 %.
+			'skipped mutants without a timeout'    => [ '280 0 0 1 0 11 131', '0', 1, '::error::Infection skipped 131 mutants whose covering tests took at least the configured timeout, and leaves them out of the scores: MSI between 66.19 % and 95.89 %, covered code MSI between 67.96 % and 99.64 %, against the floors 80.00 % and 84.00 %. Counted as tested and not detected, the skipped mutants leave a score below its floor, so the score cannot be trusted on this machine: run the gate again on a faster one.' ],
+			// The same with one shared server and main's code: 22 of 378 timed out and 34 skipped.
+			'timed-out and skipped mutants'        => [ '348 0 0 8 22 11 34', '0', 0, '::notice::22 of the 378 mutant processes timed out, more than 5 percent, and Infection counts a timed-out mutant as detected, and Infection skipped 34 mutants whose covering tests took at least the configured timeout, and leaves them out of the scores: MSI between 82.27 % and 95.12 %, covered code MSI between 84.47 % and 97.88 %, against the floors 80.00 % and 84.00 %. Counted as not detected, the timed-out mutants and, as tested, the skipped ones still leave both scores at their floors, so the run counts.' ],
 		];
 	}
 
 	/**
 	 * Above 5 percent of timed-out mutant processes Infection's score is an upper bound, as it
 	 * counts a timeout as detected: the database gate on a slow runner timed out 414 of 4,081.
-	 * The run then counts only if the score with the timed-out mutants counted as not detected
-	 * meets both floors as well. Up to 5 percent Infection's verdict stands: healthy runs of the
-	 * six gates timed out 0.1 to 1.8 percent.
+	 * So it is with a skipped mutant, which Infection leaves out of the scores. The run then
+	 * counts only if the score with the timed-out mutants counted as not detected, and the skipped
+	 * ones as tested and not detected, meets both floors as well. Up to 5 percent and without a
+	 * skipped mutant Infection's verdict stands: healthy runs of the six gates timed out 0.1 to 1.8
+	 * percent and skipped none.
 	 *
 	 * @param string $counts     The summary's counts.
 	 * @param string $infection  Infection's exit status.
@@ -695,12 +710,13 @@ final class MutationGatesTest extends TestCase {
 
 	/**
 	 * A copy of bin/mutation-gate.sh in a temporary checkout, with a stand-in for Infection that
-	 * prints its arguments, writes the markers that FAKE_MARK names, and leaves FAKE_REPORTS
+	 * prints its arguments, writes the markers that FAKE_MARK names (or, for "report" and
+	 * "server", a report with a failed check), and leaves FAKE_REPORTS
 	 * reports (6): the first FAKE_PASSES (5) say they can write durably, the next FAKE_UNCOMPILED
 	 * (1) that their copy does not compile, and the first FAKE_ENDS (4) how they ended. It writes
 	 * the summary that FAKE_SUMMARY names (full: 3 killed, 1 escaped, 1 timed out, 1 syntax error,
 	 * 3 not covered; killed-compile: the syntax error counted as killed; counts: FAKE_COUNTS, as
-	 * "killed errored syntax escaped timed-out [not-covered]"). FAKE_LINES adds reports whose
+	 * "killed errored syntax escaped timed-out [not-covered [skipped]]"). FAKE_LINES adds reports whose
 	 * statements it names, one report per ";" (pass, caught, loading, end, fatal-in-test,
 	 * fatal-outside). The stand-in locks the reports and .tools when FAKE_LOCK is "before", runs
 	 * FAKE_CHILD with FAKE_PHP, and exits with FAKE_STATUS. The configuration has the floors given,
@@ -724,6 +740,7 @@ final class MutationGatesTest extends TestCase {
 				variable) printf 'Process 7: fsync() failed\nProcess 7: still user-space\nProcess 8: fsync() failed\n' >> "$BFR_MUTATION_CANARY" ;;
 				fallback) printf 'Process 7: fsync() failed\n' >> "$tools/mutation-canary" ;;
 				report) printf 'Process 9 reported in.\nProcess 9: fsync() failed\n' > "$BFR_MUTATION_REPORTS/report-9-x" ;;
+				server) printf 'Process 9 reported in.\nProcess 9 can write durably.\nProcess 9: Thread 4 has no database server of its own: BFR_TEST_MYSQL_HOSTS names 3. The tests of this process reach no server.\n' > "$BFR_MUTATION_REPORTS/report-9-x" ;;
 			esac
 			passes=${FAKE_PASSES:-5}
 			for ((n = 0; n < ${FAKE_REPORTS:-6}; n++)); do
@@ -764,8 +781,8 @@ final class MutationGatesTest extends TestCase {
 				killed-compile) printf 'Total: 9\n\nKilled by Test Framework: 4\nKilled by Static Analysis: 0\nErrored: 0\nSyntax Errors: 0\nEscaped: 1\nTimed Out: 1\nSkipped: 0\nIgnored: 0\nNot Covered: 3\n' > "$tools/infection/summary.log" ;;
 				partial) printf 'Total: 9\n\nKilled by Test Framework: 3\n' > "$tools/infection/summary.log" ;;
 				counts)
-					read -r killed errored syntax escaped timed uncovered <<< "$FAKE_COUNTS"
-					printf 'Total: %d\n\nKilled by Test Framework: %d\nKilled by Static Analysis: 0\nErrored: %d\nSyntax Errors: %d\nEscaped: %d\nTimed Out: %d\nSkipped: 0\nIgnored: 0\nNot Covered: %d\n' "$((killed + errored + syntax + escaped + timed + ${uncovered:-0}))" "$killed" "$errored" "$syntax" "$escaped" "$timed" "${uncovered:-0}" > "$tools/infection/summary.log"
+					read -r killed errored syntax escaped timed uncovered skipped <<< "$FAKE_COUNTS"
+					printf 'Total: %d\n\nKilled by Test Framework: %d\nKilled by Static Analysis: 0\nErrored: %d\nSyntax Errors: %d\nEscaped: %d\nTimed Out: %d\nSkipped: %d\nIgnored: 0\nNot Covered: %d\n' "$((killed + errored + syntax + escaped + timed + ${uncovered:-0} + ${skipped:-0}))" "$killed" "$errored" "$syntax" "$escaped" "$timed" "${skipped:-0}" "${uncovered:-0}" > "$tools/infection/summary.log"
 					;;
 			esac
 			if [[ "${FAKE_LOCK:-}" == before ]]; then

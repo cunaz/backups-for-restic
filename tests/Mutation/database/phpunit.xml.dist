@@ -4,11 +4,12 @@
     ../phpunit.xml.dist for its memory limit: the initial run of a gate keeps the coverage of
     every test in one process, and next to it the 16 MiB row of DatabaseDumpTest no longer fits
     into 128M, depending on how late the shuffled order runs it. The other suites keep the unit
-    suite's 128M.
+    suite's 128M. Its bootstrap gives each mutant process the database server of its Infection
+    thread (bootstrap.php).
 -->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="../../../vendor/phpunit/phpunit/phpunit.xsd"
-         bootstrap="../bootstrap.php"
+         bootstrap="bootstrap.php"
          cacheDirectory="../../../.phpunit.cache/mutation-database"
          colors="true"
          failOnRisky="true"
