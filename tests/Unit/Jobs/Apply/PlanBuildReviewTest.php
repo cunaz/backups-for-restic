@@ -400,24 +400,34 @@ final class PlanBuildReviewTest extends TestCase {
 
 	public function test_a_reading_begun_in_the_second_of_the_folders_last_change_waits_for_that_second_to_pass(): void {
 		[ $disk, $folder ] = $this->created_folder( 'first', 'second' );
-		// The folder changes in a new second, well after its start, as the clock of the
-		// file system can lag PHP's: the reading below begins in that second.
-		$second = time();
-		while ( time() === $second ) {
-			usleep( 10000 );
+		// What the two readings answer counts only if both lay in the second of the folder's
+		// last change. A process that the machine holds back for the rest of that second has
+		// observed nothing, and observes again: before, such a pause failed the test.
+		for ( $attempt = 1; ; ++$attempt ) {
+			// The folder changes in a new second, well after its start, as the clock of the
+			// file system can lag PHP's: the reading below begins in that second.
+			$second = time();
+			while ( time() === $second ) {
+				usleep( 10000 );
+			}
+			usleep( 250000 );
+			touch( $folder . '/changed' );
+			unlink( $folder . '/changed' );
+			clearstatcache();
+			$changed = filectime( $folder );
+			$cursor  = [];
+			$first   = PlanBuild::children_removable( $disk, $folder, 0.0, $cursor );
+			$stable  = $cursor['stable'] ?? null;
+			// While that second lasts, the reading waits, whatever time is left.
+			$waiting = PlanBuild::children_removable( $disk, $folder, INF, $cursor );
+			if ( time() === $changed ) {
+				break;
+			}
+			self::assertLessThan( 5, $attempt, 'Five observations in a row took longer than the rest of their second.' );
 		}
-		usleep( 250000 );
-		touch( $folder . '/changed' );
-		unlink( $folder . '/changed' );
-		clearstatcache();
-		$changed = filectime( $folder );
-		self::assertSame( time(), $changed, 'The folder\'s change time is not the current second.' );
-		$cursor = [];
-		self::assertNull( PlanBuild::children_removable( $disk, $folder, 0.0, $cursor ) );
-		self::assertFalse( $cursor['stable'] );
-		// While that second lasts, the reading waits, whatever time is left.
-		self::assertNull( PlanBuild::children_removable( $disk, $folder, INF, $cursor ) );
-		self::assertSame( $changed, time(), 'The test took longer than the rest of a second.' );
+		self::assertNull( $first );
+		self::assertFalse( $stable );
+		self::assertNull( $waiting );
 		while ( time() <= $changed ) {
 			usleep( 10000 );
 		}
