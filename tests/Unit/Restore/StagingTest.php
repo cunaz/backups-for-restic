@@ -588,6 +588,64 @@ final class StagingTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $undo );
 	}
 
+	/**
+	 * Jobs that keep the journal of the apply they undo, or review the undo of, while they run.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function jobs_that_keep_a_journal(): array {
+		return [
+			'an undo'               => [ 'undo' ],
+			'the review of an undo' => [ 'review' ],
+		];
+	}
+
+	#[DataProvider( 'jobs_that_keep_a_journal' )]
+	public function test_an_undo_that_can_be_read_again_during_the_expiry_keeps_its_apply_s_journal( string $kind ): void {
+		// An apply whose window ended an hour ago, with the journal of a change that no undo reverted.
+		$apply = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		// An undo of it that was queued within the window, or the review of one, still running.
+		$running       = $this->job( JobState::Running, 0, [], 'undo' === $kind ? JobType::Undo : JobType::FilePlan );
+		$running->data = 'undo' === $kind ? [ 'apply' => $apply->id ] : [
+			'undo'    => true,
+			'subject' => $apply->id,
+		];
+		$this->jobs->save( $running );
+		// Its document cannot be read for a moment, and can be again once the expiry first reads
+		// the clock, which it did between two readings of the job documents.
+		$document = $this->directory . '/private/jobs/' . $running->id . '/job.json';
+		$saved    = (string) file_get_contents( $document );
+		file_put_contents( $document, '{' );
+		$clock = new class( $this->clock, static fn () => file_put_contents( $document, $saved ) ) implements Clock {
+			/**
+			 * @param FrozenClock $base     Clock of the test.
+			 * @param \Closure    $readable Makes the document readable again, once.
+			 */
+			public function __construct( private FrozenClock $base, private ?\Closure $readable ) {
+			}
+
+			public function now(): array {
+				if ( null !== $this->readable ) {
+					( $this->readable )();
+					$this->readable = null;
+				}
+				return $this->base->now();
+			}
+		};
+		( new Staging( $this->restores, $this->jobs, $clock ) )->remove_due( 24, self::NO_DEADLINE );
+		// Before, the active job was read before that moment and the job that cannot be read after
+		// it: the undo was neither, and the journal of its apply went with the end of the window.
+		self::assertFileExists( $undo . '/attempted' );
+		// Once it has ended, the journal goes.
+		$running->state = JobState::Succeeded;
+		$this->jobs->save( $running );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryDoesNotExist( $undo );
+	}
+
 	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
 		$target = $this->directory . '/elsewhere';
 		mkdir( $target . '/files', 0700, true );

@@ -913,7 +913,9 @@ window of its apply closed. While any stored job cannot be read
 (`JobStore::unreadable()`), the heartbeat sets no staging aside, removes no sealed review and
 deletes no undo journal: that job may be an apply within its recovery window whose undo needs
 them, or an undo that still runs, and its document cannot say which. What was set aside
-before is still deleted.
+before is still deleted. The heartbeat takes all of this from one reading of the job documents
+(`JobStore::census()`): the job that cannot be read, the applies whose journal an undo or its
+review keeps while it runs, and the sealed reviews and stagings in use or kept for an undo.
 
 The plugin uses the private directory by its canonical path, every symbolic link on the way
 resolved, and everything above is below that path ([ADR 0007](adr/0007-private-directory.md)).

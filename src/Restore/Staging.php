@@ -401,17 +401,18 @@ final class Staging {
 	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
 	 */
 	private function expire( int $hours, float $deadline ): array {
-		$active       = $this->jobs->active();
-		$now          = $this->clock->now()[0];
-		$pinned_plans = $this->jobs->pinned_file_plans( $now );
-		$held         = null !== $this->jobs->unreadable();
-		$failed       = 0;
+		$now = $this->clock->now()[0];
+		// One reading of every job document: a job that cannot be read in it holds everything of
+		// this pass, and an undo or its review that it finds keeps its apply's journal.
+		$census = $this->jobs->census( $now );
+		$held   = null !== $census['unreadable'];
+		$failed = 0;
 		foreach ( $this->jobs->file_changes() as $job ) {
 			if ( $this->late( $deadline ) ) {
 				break;
 			}
 			try {
-				if ( ! $held && JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
+				if ( ! $held && JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $census['plans'][ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
 					if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
 						unset( $job->data['plan_retained'] );
 						$this->jobs->save( $job );
@@ -422,10 +423,10 @@ final class Staging {
 			}
 			if ( $held ) {
 				// The job that cannot be read may be an undo of this apply that is queued or
-				// running, which active() does not see: no journal goes while that lasts.
+				// running: no journal goes while that lasts.
 				continue;
 			}
-			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) || ( JobType::FilePlan === $active?->type && true === ( $active->data['undo'] ?? false ) && $job->id === ( $active->data['subject'] ?? null ) ) ) {
+			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || isset( $census['undoing'][ $job->id ] ) ) {
 				continue;
 			}
 			try {
@@ -439,7 +440,7 @@ final class Staging {
 				++$failed;
 			}
 		}
-		$survey  = $this->survey( $hours );
+		$survey  = $this->survey( $hours, $census['restores'] );
 		$removed = 0;
 		$pending = 0;
 		$aside   = $survey['removing'];
@@ -480,16 +481,17 @@ final class Staging {
 	 * none of the three, and neither are names that are not those of jobs: they are not this
 	 * class's to judge.
 	 *
-	 * @param int $hours Hours a staging directory is kept after its job finished.
+	 * @param int                          $hours Hours a staging directory is kept after its job finished.
+	 * @param array<string, int|null>|null $pins  Restore pins of the expiry's census (JobStore::census()), or null to read them.
 	 * @return array{kept: list<StagedRestore>, due: list<string>, removing: list<string>} Listed directories, job IDs of due ones, and names of those set aside.
 	 * @throws StorageFailed If restores/ cannot be listed.
 	 */
-	private function survey( int $hours ): array {
+	private function survey( int $hours, ?array $pins = null ): array {
 		$kept     = [];
 		$due      = [];
 		$removing = [];
 		$now      = $this->clock->now()[0];
-		$pins     = $this->jobs->pinned_restores( $now );
+		$pins   ??= $this->jobs->restore_pins( $now );
 		foreach ( $this->entries() as $name ) {
 			if ( str_starts_with( $name, self::REMOVING ) && 1 === preg_match( JobStore::ID_PATTERN, substr( $name, strlen( self::REMOVING ) ) ) ) {
 				$removing[] = $name;
@@ -504,7 +506,8 @@ final class Staging {
 			}
 			$staged = $this->describe( $name, $job, $hours );
 			if ( null === $staged || $now >= $staged->expires ) {
-				if ( ! isset( $pins[ $name ] ) ) {
+				// A pin for a staging in use has no end: its value is null.
+				if ( ! array_key_exists( $name, $pins ) ) {
 					$due[] = $name;
 				}
 			} else {
