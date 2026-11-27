@@ -272,9 +272,14 @@ final class AccessTest extends TestCase {
 		);
 	}
 
-	public function test_the_discard_of_a_database_binding_is_confirmed_as_an_undo_is(): void {
-		$job   = '20261126T120000Z-0d1500';
-		$route = '/database-changes/' . $job;
+	/**
+	 * A finished database apply within its undo window whose binding names another server, and
+	 * the review of its discard.
+	 *
+	 * @param string $job Job ID.
+	 * @return array{string, array<string, mixed>} The route of the job and the review.
+	 */
+	private static function reviewed_binding( string $job ): array {
 		TestSite::database_binding(
 			$job,
 			true,
@@ -284,22 +289,28 @@ final class AccessTest extends TestCase {
 			],
 			'succeeded'
 		);
+		$route                     = '/database-changes/' . $job;
+		[ $status, $review, $raw ] = TestSite::api( 'POST', $route . '/discard-review', [] );
+		self::assertSame( 200, $status, $raw );
+		return [ $route, $review ];
+	}
+
+	public function test_the_discard_of_a_database_binding_is_confirmed_as_an_undo_is(): void {
+		$job = '20261126T120000Z-0d1500';
 		try {
+			[ $route, $review ]        = self::reviewed_binding( $job );
 			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
 			self::assertSame( 200, $status, $raw );
 			self::assertContains( $job, array_column( $listed['jobs'] ?? [], 'job' ), $raw );
-			[ $status, $review, $raw ] = TestSite::api( 'POST', $route . '/discard-review', [] );
-			self::assertSame( 200, $status, $raw );
-			self::assertTrue( $review['write_allowed'] ?? null, $raw );
-			self::assertSame( [ [], false ], [ $review['write_lacking'] ?? null, $review['file_mods_disallowed'] ?? null ], $raw );
-			self::assertIsString( $review['review_token'] ?? null, $raw );
+			self::assertTrue( $review['write_allowed'] ?? null );
+			self::assertSame( [ [], false ], [ $review['write_lacking'] ?? null, $review['file_mods_disallowed'] ?? null ] );
+			self::assertIsString( $review['review_token'] ?? null );
 			self::assertSame( TestSite::url(), $review['site_url'] ?? null );
 			self::assertSame( '7c4dd2a2-d1b4-11f1-9b6f-0242ac120002', $review['server'] ?? null );
 			self::assertCount( 7, $review['tables'] ?? [] );
 			self::assertIsInt( $review['undo_until'] ?? null );
-			$refused = static function ( array $changes, bool $locked = false ) use ( $route, $review ): array {
-				$send               = static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review, $changes ) );
-				[ $status, $error ] = $locked ? $send() : self::unless_busy( $send );
+			$refused = static function ( array $changes ) use ( $route, $review ): array {
+				[ $status, $error ] = self::unless_busy( static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review, $changes ) ) );
 				return [ $status, $error['code'] ?? null ];
 			};
 			$token   = static fn ( string $operation, string $digest ): string => TestSite::php(
@@ -323,16 +334,6 @@ final class AccessTest extends TestCase {
 				)
 			);
 			self::assertSame( [ 403, 'backups_for_restic_wrong_user_password' ], $refused( [ 'user_password' => 'wrong-password-test-only' ] ) );
-			// Another request holds the runner lock.
-			$lock = fopen( TestSite::private_dir() . '/runner.lock', 'c' );
-			self::assertIsResource( $lock );
-			self::assertTrue( flock( $lock, LOCK_EX ) );
-			try {
-				self::assertSame( [ 409, 'backups_for_restic_database_discard_busy' ], $refused( [], true ) );
-			} finally {
-				flock( $lock, LOCK_UN );
-				fclose( $lock );
-			}
 			// The binding changed after the review: its undo window ended.
 			$file     = TestSite::private_dir() . '/jobs/' . $job . '/job.json';
 			$document = (string) file_get_contents( $file );
@@ -355,6 +356,40 @@ final class AccessTest extends TestCase {
 			[ $status, $error ] = TestSite::api( 'POST', $route . '/discard-review', [] );
 			self::assertSame( [ 409, 'backups_for_restic_database_binding_discarded' ], [ $status, $error['code'] ?? null ] );
 			self::assertStringContainsString( '“Discarded bindings”', $error['data']['hint'] ?? '' );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+		}
+	}
+
+	public function test_a_discard_waits_for_another_request_that_holds_the_runner_lock(): void {
+		$job = '20261126T120000Z-0d1507';
+		try {
+			[ $route, $review ] = self::reviewed_binding( $job );
+			$lock               = fopen( TestSite::private_dir() . '/runner.lock', 'c' );
+			self::assertIsResource( $lock );
+			self::assertTrue( flock( $lock, LOCK_EX ) );
+			try {
+				[ $status, $error ] = TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) );
+				self::assertSame( [ 409, 'backups_for_restic_database_discard_busy' ], [ $status, $error['code'] ?? null ] );
+				self::assertArrayHasKey( 'database_owner', TestSite::job_document( $job )['data'] ?? [] );
+			} finally {
+				flock( $lock, LOCK_UN );
+				fclose( $lock );
+			}
+			// The review is still valid once the lock is free.
+			[ $status, , $raw ] = self::unless_busy( static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) ) );
+			self::assertSame( 200, $status, $raw );
+		} finally {
+			TempDir::remove( TestSite::private_dir() . '/jobs/' . $job );
+		}
+	}
+
+	public function test_the_tables_of_a_discarded_binding_are_listed_until_they_are_taken_care_of(): void {
+		$job = '20261126T120000Z-0d1508';
+		try {
+			[ $route, $review ]        = self::reviewed_binding( $job );
+			[ $status, $answer, $raw ] = self::unless_busy( static fn (): array => TestSite::api( 'POST', $route . '/discard', self::discard_confirmation( $review ) ) );
+			self::assertSame( 200, $status, $raw );
 			// The Restores tab lists the tables, whatever the job history does, until they are taken care of.
 			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/database-changes/foreign' );
 			self::assertSame( 200, $status, $raw );
