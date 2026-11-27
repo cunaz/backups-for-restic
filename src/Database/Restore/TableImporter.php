@@ -75,6 +75,9 @@ final readonly class TableImporter {
 		$state = $this->tables->locked(
 			$this->manifest,
 			function () use ( $maximum_units, $maximum_seconds, $packet ): array {
+				if ( ! $this->tables->exists( $this->tables->progress() ) ) {
+					$this->creatable( $packet );
+				}
 				$ledger   = new Ledger( $this->connection, $this->tables, $this->manifest, $this->directory );
 				$state    = $ledger->read();
 				$deadline = microtime( true ) + $maximum_seconds;
@@ -147,6 +150,52 @@ final readonly class TableImporter {
 	}
 
 	/**
+	 * Refuses an import whose CREATE of a table, with the shadow's name and the ownership
+	 * comment, would not fit the session's max_allowed_packet, before the ledger is created
+	 * and before a table is imported: the dump records the size of its INSERT statements only
+	 * (ADR 0021), and a table without rows records none, while a definition takes up to
+	 * CreateStatement::MAX_BYTES. Reads the header of each staged table file once, on the
+	 * first tick; unit() checks each CREATE again before it is sent.
+	 *
+	 * @param int $packet The session's max_allowed_packet.
+	 * @throws DatabaseFailed With the table in its context if a CREATE cannot be sent.
+	 * @throws \Throwable If a staged file cannot be read or its header differs from the format.
+	 */
+	private function creatable( int $packet ): void {
+		$largest = null;
+		foreach ( $this->manifest->tables as $number => $table ) {
+			$file = new TableFile( $this->directory, $this->manifest, $number, $this->tables->shadow( $number ), $this->tables->owner );
+			$file->close();
+			if ( null === $largest || strlen( $file->create->sql ) > $largest[1] ) {
+				$largest = [ $table['name'], strlen( $file->create->sql ) ];
+			}
+		}
+		if ( null !== $largest ) {
+			self::sendable( $largest[1], $packet, $largest[0] );
+		}
+	}
+
+	/**
+	 * Refuses a CREATE that the server would refuse with error 1153, a packet beyond its limit.
+	 *
+	 * @param int    $length Bytes of the CREATE as it is sent.
+	 * @param int    $packet The session's max_allowed_packet.
+	 * @param string $table  The table of the dump.
+	 * @throws DatabaseFailed With code database_restore_packet_limit if it does not fit.
+	 */
+	private static function sendable( int $length, int $packet, string $table ): void {
+		if ( $length + InsertStatement::PACKET_MARGIN > $packet ) {
+			DatabaseFailed::raise(
+				sprintf( 'The CREATE statement of a table of the dump needs %1$d bytes of SQL and a max_allowed_packet of at least %2$d bytes; the database server allows %3$d bytes. It was not sent.', $length, intdiv( $length + InsertStatement::PACKET_MARGIN + 1023, 1024 ) * 1024, $packet ),
+				[
+					'code'  => 'database_restore_packet_limit',
+					'table' => $table,
+				]
+			);
+		}
+	}
+
+	/**
 	 * Reads the session's packet limit, which the server fixes when the session starts.
 	 *
 	 * @return int Bytes.
@@ -175,6 +224,8 @@ final readonly class TableImporter {
 		try {
 			$exists = $this->tables->exists( $shadow );
 			if ( 'preparing' === $state['phase'] ) {
+				// Also on an import that a smaller limit takes up again.
+				self::sendable( strlen( $file->create->sql ), $packet, $this->manifest->tables[ $state['table'] ]['name'] );
 				if ( $exists ) {
 					$this->connection->execute( 'DROP TABLE ' . SqlFormatter::identifier( $shadow ) );
 				}

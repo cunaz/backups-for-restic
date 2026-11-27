@@ -13,6 +13,7 @@ use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\RehearsalReport;
 use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\MysqliConnection as RestoreConnection;
+use BackupsForRestic\Database\Restore\Session as RestoreSession;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
@@ -582,6 +583,94 @@ final class DatabaseImportTest extends TestCase {
 		}
 		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_notes AS notes' )[0]['notes'] );
 		$this->assert_nothing_imported( $importer );
+	}
+
+	/**
+	 * A small table and a table without rows whose definition is larger than 16 KiB: 20
+	 * columns with comments of 1,024 characters (MariaDB keeps the comments of a table's
+	 * columns below 64 KiB in all). The dump records the size of INSERT statements only, so
+	 * the manifest says nothing about that definition.
+	 */
+	private function wide(): Manifest {
+		$columns = [];
+		for ( $column = 0; $column < 20; ++$column ) {
+			$columns[] = 'c' . $column . " INT COMMENT '" . str_repeat( 'x', 1024 ) . "'";
+		}
+		$this->db->execute( 'CREATE TABLE wp_aaa (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$this->db->execute( 'INSERT INTO wp_aaa VALUES (1),(2)' );
+		$this->db->execute( 'CREATE TABLE wp_wide (' . implode( ', ', $columns ) . ') ENGINE=InnoDB' );
+		$manifest = $this->stage_dump();
+		self::assertSame( [ 'wp_aaa', 'wp_wide' ], array_column( $manifest->tables, 'name' ) );
+		self::assertSame( 0, $manifest->reads[1]['largest_statement'] ?? null, 'The dump records no statement of a table without rows.' );
+		return $manifest;
+	}
+
+	/**
+	 * Runs the work on a connection that the server opened under a max_allowed_packet of 16 KiB.
+	 *
+	 * @param \Closure(MysqliConnection): void $work Work on the connection.
+	 */
+	private function small_packet( \Closure $work ): void {
+		$original = self::$admin?->rows( 'SELECT @@GLOBAL.max_allowed_packet AS packet' )[0]['packet'] ?? '';
+		self::assertMatchesRegularExpression( '/\A[0-9]+\z/', $original );
+		self::$admin?->execute( 'SET GLOBAL max_allowed_packet = 16384' );
+		try {
+			// The limit applies to sessions opened after the change.
+			$small = MysqliConnection::connect( $this->database );
+			self::assertNotNull( $small );
+			$work( $small );
+		} finally {
+			self::$admin?->execute( 'SET GLOBAL max_allowed_packet = ' . $original );
+		}
+	}
+
+	private function present( string $table ): bool {
+		return [] !== $this->db->rows( 'SELECT 1 AS present FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=' . RestoreSession::literal( $table ) );
+	}
+
+	/** Before, the import began, and the server closed the connection at that definition. */
+	public function test_a_definition_beyond_max_allowed_packet_is_refused_before_the_ledger_and_any_table(): void {
+		$manifest = $this->wide();
+		$this->small_packet(
+			function ( MysqliConnection $small ) use ( $manifest ): void {
+				$importer = new TableImporter( new RestoreConnection( $small->mysqli ), $manifest, $this->directory, $this->token );
+				try {
+					$importer->tick( 16 );
+					self::fail( 'The import of a definition beyond the packet limit began.' );
+				} catch ( DatabaseFailed $refused ) {
+					self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+					self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
+					self::assertMatchesRegularExpression( '/\AThe CREATE statement of a table of the dump needs 2[0-9]{4} bytes of SQL and a max_allowed_packet of at least 2[0-9]{4} bytes; the database server allows 16384 bytes\. It was not sent\.\z/', $refused->getMessage() );
+				}
+				self::assertFalse( $this->present( $importer->tables->progress() ), 'The ledger was not created.' );
+				self::assertFalse( $this->present( $importer->tables->shadow( 0 ) ), 'No table was imported.' );
+				self::assertSame( [ [ 'open' => '1' ] ], $small->rows( 'SELECT 1 AS open' ), 'The connection is still open.' );
+			}
+		);
+	}
+
+	/** Before, the server closed the connection at that definition. */
+	public function test_a_definition_beyond_the_limit_of_a_later_session_is_refused_before_it_is_sent(): void {
+		$manifest = $this->wide();
+		// Under the server's own limit, the first tick creates the ledger and the first shadow.
+		$this->importer( $manifest )->tick( 1 );
+		$this->small_packet(
+			function ( MysqliConnection $small ) use ( $manifest ): void {
+				$importer = new TableImporter( new RestoreConnection( $small->mysqli ), $manifest, $this->directory, $this->token );
+				try {
+					for ( $tick = 0; $tick < 10; ++$tick ) {
+						$importer->tick( 16 );
+					}
+					self::fail( 'The definition beyond the packet limit was sent.' );
+				} catch ( DatabaseFailed $refused ) {
+					self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+					self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
+				}
+				self::assertSame( [ [ 'id' => '1' ], [ 'id' => '2' ] ], $small->rows( 'SELECT id FROM `' . $importer->tables->shadow( 0 ) . '` ORDER BY id' ) );
+				self::assertFalse( $this->present( $importer->tables->shadow( 1 ) ) );
+				self::assertSame( [ [ 'open' => '1' ] ], $small->rows( 'SELECT 1 AS open' ), 'The connection is still open.' );
+			}
+		);
 	}
 
 	/** @return iterable<string, array{array<string,mixed>|null, string}> */
