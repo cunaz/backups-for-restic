@@ -1072,12 +1072,58 @@ final class AccessTest extends TestCase {
 	}
 
 	public function test_the_command_line_says_of_a_refused_undo_what_the_page_says(): void {
-		// No apply has this ID: the undo is refused as one that can no longer be undone.
-		[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', '20261127T110000Z-0c7001' ] );
-		self::assertSame( 1, $status, $output );
-		// Before: "This apply has no available undo.", the exception's technical message.
-		self::assertStringContainsString( 'Error: This apply can no longer be undone. An apply can be undone for 24 hours after it ended', $output );
-		self::assertStringNotContainsString( 'no available undo', $output );
+		$over    = '20261127T110000Z-0c7002';
+		$running = '20261127T110000Z-0c7003';
+		$backup  = '20261127T110000Z-0c7004';
+		// An apply that ended two days ago, one at work, whose tick holds the lease, and a backup.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$jobs  = $container->jobs();
+			$ended = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Apply, "cli", time() - 2 * 86400 - 120 );
+			$ended->data        = [ "restore" => "20261120T000000Z-0a0c01" ];
+			$ended->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$ended->finished_at = time() - 2 * 86400;
+			$jobs->save( $ended );
+			$apply = new BackupsForRestic\Jobs\Job( $arguments[1], BackupsForRestic\Jobs\JobType::Apply, "cli", time() - 60 );
+			$apply->data             = [ "restore" => "20261120T000000Z-0a0c02" ];
+			$apply->state            = BackupsForRestic\Jobs\JobState::Running;
+			$apply->step             = "applying";
+			$apply->started_at       = time() - 30;
+			$apply->lease_owner      = "0123456789abcdef";
+			$apply->lease_expires_at = time() + 3600;
+			$jobs->save( $apply );
+			$backup = new BackupsForRestic\Jobs\Job( $arguments[2], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$jobs->save( $backup );
+			',
+			[ $over, $running, $backup ]
+		);
+		try {
+			$answers = [];
+			foreach ( [ '20261127T110000Z-0c7001', $backup, $running, $over ] as $id ) {
+				[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', $id ] );
+				self::assertSame( 1, $status, $output );
+				$answers[ $id ] = trim( $output );
+			}
+			// Before, each of them was refused as an apply that can no longer be undone, an ID that
+			// no job has too, and earlier with the exception's message, "This apply has no available undo.".
+			self::assertSame(
+				[
+					'20261127T110000Z-0c7001' => 'Error: The job does not exist.',
+					$backup                   => 'Error: This job is not an apply of staged files, so there is nothing to undo. The Restores tab lists the applies that can still be undone.',
+					$running                  => 'Error: This apply has not ended yet. Once it has ended, it can be undone for 24 hours.',
+					$over                     => 'Error: This apply can no longer be undone. An apply can be undone for 24 hours after it ended, and no longer once an undo reverted it completely. The Restores tab lists what can still be undone.',
+				],
+				$answers
+			);
+		} finally {
+			foreach ( [ $over, $running, $backup ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
 	}
 
 	public function test_a_cancelled_job_whose_cleanup_failed_is_answered_with_its_state_its_counts_and_its_error(): void {

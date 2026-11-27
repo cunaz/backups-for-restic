@@ -452,7 +452,19 @@ final class CliCommand {
 		if ( null !== $given && ( ! is_string( $given ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $given ) ) ) {
 			\WP_CLI::error( __( '--digest needs the digest that an earlier run of this command printed: 64 characters, the digits 0 to 9 and the letters a to f. Nothing was undone.', 'backups-for-restic' ) );
 		}
-		$id      = $args[0] ?? '';
+		$id    = $args[0] ?? '';
+		$apply = $this->container->jobs()->get( $id );
+		if ( null === $apply ) {
+			// As logs and cancel answer it. Before, an ID that no job has, such as a mistyped one,
+			// was answered as an apply whose undo is over.
+			$this->missing_job( $id );
+		}
+		if ( JobType::Apply !== $apply->type ) {
+			\WP_CLI::error( __( 'This job is not an apply of staged files, so there is nothing to undo. The Restores tab lists the applies that can still be undone.', 'backups-for-restic' ) );
+		}
+		if ( ! $apply->state->is_terminal() ) {
+			\WP_CLI::error( __( 'This apply has not ended yet. Once it has ended, it can be undone for 24 hours.', 'backups-for-restic' ) );
+		}
 		$service = $this->container->file_changes();
 		try {
 			$preview = $service->request_preview( $id, true, false );

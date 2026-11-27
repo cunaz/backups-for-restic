@@ -434,7 +434,9 @@ All notable changes are documented here. The format follows
   showed its error, and the page said "Cancelled" while the maintenance page stayed up.
 - `wp backups-for-restic apply-plan` and `undo` print the texts of a refusal's code, as the
   page shows them, where they printed the exception's technical message, such as "This apply
-  has no available undo.".
+  has no available undo.". `undo` answers an ID that no job has as `logs` and `cancel` do,
+  "The job does not exist.", and says so of a job that is not an apply of staged files and of
+  an apply that has not ended, where it said of each that the apply can no longer be undone.
 - A stored job that cannot be read is shown on the dashboard and in the Logs tab, and
   `wp backups-for-restic status` lists it, each with the texts that name the job, and they say
   what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on request
