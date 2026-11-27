@@ -162,7 +162,7 @@ final readonly class DatabaseChanges implements StepProvider {
 				continue;
 			}
 			try {
-				if ( ! DatabaseGeneration::identified( $owner ) ) {
+				if ( ! DatabaseGeneration::readable( $owner ) ) {
 					// Not foreign, as it was counted before: where its tables are cannot be told.
 					$blockers[] = 'database_binding_unreadable';
 					continue;
@@ -304,18 +304,14 @@ final readonly class DatabaseChanges implements StepProvider {
 			$facts = null;
 		}
 		foreach ( $owners as $owner ) {
+			if ( ! DatabaseGeneration::readable( $owner ) ) {
+				// Its review refuses it as a record that cannot be read, whatever the server says.
+				continue;
+			}
 			$foreign = null;
-			try {
-				if ( ! DatabaseGeneration::identified( $owner ) ) {
-					// Its review refuses it as a record that cannot be read, whatever the server says.
-					continue;
-				}
-				if ( null !== $facts ) {
-					$place   = DatabaseGeneration::place( $facts, $owner );
-					$foreign = 'unknown' === $place ? null : 'foreign' === $place;
-				}
-			} catch ( FormatException ) {
-				$foreign = false;
+			if ( null !== $facts ) {
+				$place   = DatabaseGeneration::place( $facts, $owner );
+				$foreign = 'unknown' === $place ? null : 'foreign' === $place;
 			}
 			if ( null === $foreign ) {
 				$complete = false;

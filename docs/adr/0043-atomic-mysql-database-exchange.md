@@ -244,7 +244,11 @@ database could not get rid of the binding. Since then:
 - `GET /database-changes/foreign` lists the finished database applies whose binding the
   connected server positively disowns, each asked about as its review asks. Where the server
   cannot be asked or identified, it lists those whose job recorded `database_foreign` and
-  says that the list may be incomplete (`complete: false`).
+  says that the list may be incomplete (`complete: false`). A binding whose record its review
+  refuses as unreadable is not listed in any case: one without its saved identity, or whose
+  token or fingerprint cannot name its tables (`DatabaseGeneration::readable()`, with the
+  rules of `OwnedTables::valid()`). `load()` refuses such a record with
+  `database_binding_unreadable` before it asks the server.
 - `POST /database-changes/{id}/discard-review` (`DatabaseChanges::discard_review()`) says what
   a discard forgets and what stays: the job and its restore, the database and server UUID that
   the binding names, the database and server UUID that the site uses now (`connected`), the

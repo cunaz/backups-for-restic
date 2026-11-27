@@ -51,8 +51,9 @@ final readonly class DatabaseGeneration {
 	 * A server that names itself differently, a MariaDB server or another database is
 	 * reported with the code database_exchange_foreign; a server without a readable UUID
 	 * cannot be told apart and is reported without it. A binding whose saved identity is
-	 * missing or malformed is reported with the code database_binding_unreadable, before the
-	 * server is asked: nothing can tell it apart from this server's.
+	 * missing or malformed, or whose token or fingerprint cannot name its tables, is reported
+	 * with the code database_binding_unreadable, before the server is asked: nothing can tell
+	 * where its tables are (readable()).
 	 *
 	 * @param Connection $connection Current SQL connection.
 	 * @param Job        $job Owning apply.
@@ -62,8 +63,8 @@ final readonly class DatabaseGeneration {
 	 */
 	public static function load( Connection $connection, Job $job ): self {
 		$data = self::binding( $job );
-		if ( null === self::identity( $data ) ) {
-			DatabaseFailed::raise( 'The database restore lost the identity of the server and the database that hold its private tables.', [ 'code' => 'database_binding_unreadable' ] );
+		if ( null === self::identity( $data ) || ! OwnedTables::valid( $data['fingerprint'], $data['token'] ) ) {
+			DatabaseFailed::raise( 'The database restore lost the identity of the server and the database that hold its private tables, or the names of those tables.', [ 'code' => 'database_binding_unreadable' ] );
 		}
 		$facts = ( new SwapCatalog( $connection ) )->facts();
 		$place = self::place( $facts, $job );
@@ -105,17 +106,23 @@ final readonly class DatabaseGeneration {
 	}
 
 	/**
-	 * Whether a binding saved the identity of the server and the database that held its
-	 * private tables when it was made, as the plugin saves it: a server UUID and a database
-	 * name. One without them was changed outside the plugin, and where its tables are cannot be
-	 * told (place()).
+	 * Whether the record of a binding can be read as the plugin saves it: its fields, the
+	 * identity of the server and the database that held its private tables when it was made, a
+	 * server UUID and a database name, and the token and fingerprint that name those tables.
+	 * Where it cannot, it was changed outside the plugin, and where its tables are cannot be
+	 * told: load() refuses it with database_binding_unreadable, and place() calls one without
+	 * its identity unknown.
 	 *
 	 * @param Job $job Owning apply.
-	 * @return bool Whether the saved identity is complete.
-	 * @throws FormatException If the filesystem document is corrupted.
+	 * @return bool Whether the record can be read.
 	 */
-	public static function identified( Job $job ): bool {
-		return null !== self::identity( self::binding( $job ) );
+	public static function readable( Job $job ): bool {
+		try {
+			$data = self::binding( $job );
+		} catch ( FormatException ) {
+			return false;
+		}
+		return null !== self::identity( $data ) && OwnedTables::valid( $data['fingerprint'], $data['token'] );
 	}
 
 	/**

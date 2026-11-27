@@ -222,7 +222,9 @@ All notable changes are documented here. The format follows
   discard was offered and would have forgotten private tables on this very server. Nothing
   can tell such a binding apart from this server's: its discard and its undo are refused
   (`database_binding_unreadable`), it is not listed for a discard, a new database restore waits
-  with that blocker, and its expiry is deferred and reported on its job.
+  with that blocker, and its expiry is deferred and reported on its job. The same holds for a
+  binding whose token or fingerprint cannot name its tables, which the list of bindings to
+  discard offered although its review refused it.
 - A live database restore brings back the roles, the active plugins and the scheduled events
   of the backup. Before, it kept those of the running site, so a change made after the
   backup survived the restore: a capability given to a role reached every restored account,

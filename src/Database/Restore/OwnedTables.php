@@ -37,6 +37,18 @@ final readonly class OwnedTables {
 	public string $owner;
 
 	/**
+	 * Whether a fingerprint and a token can name one restore's objects: 64 and 32 lower-case
+	 * hexadecimal characters, as an apply saves them.
+	 *
+	 * @param string $fingerprint SHA-256 of the manifest.
+	 * @param string $token Ownership token.
+	 * @return bool Whether both are valid.
+	 */
+	public static function valid( string $fingerprint, string $token ): bool {
+		return 1 === preg_match( '/\A[0-9a-f]{32}\z/', $token ) && 1 === preg_match( '/\A[0-9a-f]{64}\z/', $fingerprint );
+	}
+
+	/**
 	 * Names one restore's objects.
 	 *
 	 * @param Connection $connection Non-reconnecting database session.
@@ -46,7 +58,7 @@ final readonly class OwnedTables {
 	 * @throws FormatException If the caller's ownership token is not valid.
 	 */
 	public function __construct( private Connection $connection, string $site_prefix, string $fingerprint, string $token ) {
-		if ( 1 !== preg_match( '/\A[0-9a-f]{32}\z/', $token ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $fingerprint ) ) {
+		if ( ! self::valid( $fingerprint, $token ) ) {
 			throw new FormatException( 'The database restore ownership token is invalid.' );
 		}
 		$this->prefix = ( str_starts_with( $site_prefix, '_' ) ? 'bfr_r_' : '_bfr_r_' ) . $token;

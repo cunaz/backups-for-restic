@@ -1138,13 +1138,29 @@ final class DatabaseChangesTest extends TestCase {
 				self::refused( 'database_binding_unreadable', fn () => $this->changes( $this->server( $uuid ) )->discard_review( $job->id, 7 ) );
 				self::assertSame( [], $this->changes( $this->server( $uuid ) )->foreign_bindings()['jobs'], $case );
 			}
-			self::assertFalse( DatabaseGeneration::identified( $job ), $case );
+			self::assertFalse( DatabaseGeneration::readable( $job ), $case );
 			TempDir::remove( $this->jobs->directory( $job ) );
 		}
 		// A complete identity of another server is foreign, and one of this server is here.
 		$foreign = $this->stranded();
-		self::assertTrue( DatabaseGeneration::identified( $foreign ) );
+		self::assertTrue( DatabaseGeneration::readable( $foreign ) );
 		self::assertSame( [ $foreign->id ], array_column( $this->changes( $this->server() )->foreign_bindings()['jobs'], 'job' ) );
 		self::assertSame( [], $this->changes( $this->server( self::OTHER ) )->foreign_bindings()['jobs'] );
+	}
+
+	public function test_a_binding_whose_record_cannot_name_its_tables_is_not_offered_for_a_discard(): void {
+		$number = 2;
+		foreach ( [
+			'a token of another form'       => [ 'token' => 'not-a-token' ],
+			'a fingerprint of another form' => [ 'fingerprint' => 'not-a-fingerprint' ],
+			'another layout'                => [ 'version' => 2 ],
+		] as $case => $change ) {
+			$job = $this->owner( sprintf( '20260101T00000%dZ-aaaaaa', $number++ ), [ 'database_owner' => array_replace( self::binding( str_repeat( 'c', 32 ), self::OTHER ), $change ) ] );
+			// Before, the list offered a record of another server whose token or fingerprint its review refuses.
+			self::assertSame( [], $this->changes( $this->server() )->foreign_bindings()['jobs'], $case );
+			self::refused( 'database_binding_unreadable', fn () => $this->changes( $this->server() )->discard_review( $job->id, 7 ) );
+			self::assertFalse( DatabaseGeneration::readable( $job ), $case );
+			TempDir::remove( $this->jobs->directory( $job ) );
+		}
 	}
 }
