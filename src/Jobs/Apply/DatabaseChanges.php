@@ -288,21 +288,37 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * cannot be read is not listed: its review names that, and the heartbeat reports it on its
 	 * job. Nothing is asked of the database beyond its identity, once for all of them.
 	 *
-	 * @return array{jobs:list<Foreign>,complete:bool} The bindings, and whether every one could be asked about.
+	 * The discarded bindings whose tables are still listed (discarded_bindings()) come from the
+	 * same reading of each job, which is made before the server is asked: a discard that another
+	 * request records meanwhile leaves its binding in one of the two lists, never in neither.
+	 *
+	 * @return array{jobs:list<Foreign>,complete:bool,discarded:list<Discarded>} The bindings, whether every one could be asked about, and the discarded ones.
+	 * @throws StorageFailed With the code database_discard_storage if the jobs could not be read.
 	 */
 	public function foreign_bindings(): array {
-		$owners = [];
-		foreach ( $this->jobs->database_owners() as $owner ) {
-			if ( $owner->state->is_terminal() ) {
-				$owners[] = $owner;
+		$now       = $this->clock->now()[0];
+		$owners    = [];
+		$discarded = [];
+		try {
+			foreach ( $this->jobs->file_changes() as $job ) {
+				$entry = self::listed( $job, $now );
+				if ( null !== $entry ) {
+					$discarded[] = $entry;
+				}
+				if ( JobType::DatabaseApply === $job->type && isset( $job->data['database_owner'] ) && $job->state->is_terminal() ) {
+					$owners[] = $job;
+				}
 			}
+		} catch ( StorageFailed $error ) {
+			self::storage_failed( $error );
 		}
 		$listed   = [];
 		$complete = true;
 		if ( [] === $owners ) {
 			return [
-				'jobs'     => $listed,
-				'complete' => $complete,
+				'jobs'      => $listed,
+				'complete'  => $complete,
+				'discarded' => $discarded,
 			];
 		}
 		try {
@@ -335,8 +351,9 @@ final readonly class DatabaseChanges implements StepProvider {
 			}
 		}
 		return [
-			'jobs'     => $listed,
-			'complete' => $complete,
+			'jobs'      => $listed,
+			'complete'  => $complete,
+			'discarded' => $discarded,
 		];
 	}
 

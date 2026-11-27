@@ -881,18 +881,13 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error The bindings, or the failure to read the jobs.
 	 */
 	public function database_foreign(): \WP_REST_Response|\WP_Error {
-		$changes = $this->container->database_changes();
+		// Both lists from one reading of the jobs, so that a discard meanwhile shows in one of them.
 		try {
-			$discarded = $changes->discarded_bindings();
+			$lists = $this->container->database_changes()->foreign_bindings();
 		} catch ( PluginException $refused ) {
 			return $this->discard_error( $refused );
 		}
-		return $this->respond(
-			$changes->foreign_bindings() + [
-				'discarded'     => $discarded,
-				'write_allowed' => self::database_writes_allowed(),
-			] + self::discard_lacking()
-		);
+		return $this->respond( $lists + [ 'write_allowed' => self::database_writes_allowed() ] + self::discard_lacking() );
 	}
 
 	/**

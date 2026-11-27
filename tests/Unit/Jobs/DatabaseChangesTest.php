@@ -782,8 +782,9 @@ final class DatabaseChangesTest extends TestCase {
 		// Without a binding the database is not asked, nor its connection opened.
 		self::assertSame(
 			[
-				'jobs'     => [],
-				'complete' => true,
+				'jobs'      => [],
+				'complete'  => true,
+				'discarded' => [],
 			],
 			$this->changes_through( static fn (): Connection => throw new \LogicException( 'The connection was asked for without a binding.' ) )->foreign_bindings()
 		);
@@ -815,8 +816,9 @@ final class DatabaseChangesTest extends TestCase {
 		];
 		self::assertSame(
 			[
-				'jobs'     => $listed,
-				'complete' => true,
+				'jobs'      => $listed,
+				'complete'  => true,
+				'discarded' => [],
 			],
 			$this->changes( $this->server() )->foreign_bindings()
 		);
@@ -826,8 +828,9 @@ final class DatabaseChangesTest extends TestCase {
 		$flagged->data['database_foreign'] = $this->clock->seconds;
 		$this->jobs->save( $flagged );
 		$unknown = [
-			'jobs'     => [ $listed[0] ],
-			'complete' => false,
+			'jobs'      => [ $listed[0] ],
+			'complete'  => false,
+			'discarded' => [],
 		];
 		self::assertSame( $unknown, $this->changes( $this->server( '' ) )->foreign_bindings() );
 		self::assertSame( $unknown, $this->changes( $this->lost( new \ArrayObject() ) )->foreign_bindings() );
@@ -1189,5 +1192,46 @@ final class DatabaseChangesTest extends TestCase {
 			self::assertFalse( DatabaseGeneration::readable( $job ), $case );
 			TempDir::remove( $this->jobs->directory( $job ) );
 		}
+	}
+
+	public function test_both_lists_of_bindings_come_from_one_reading_of_the_jobs(): void {
+		$job                                   = $this->stranded();
+		$discarded                             = clone $job;
+		$discarded->data['database_discarded'] = [
+			'at'       => $this->clock->seconds,
+			'user'     => 1,
+			'via'      => 'rest',
+			'job'      => $job->id,
+			'database' => 'site',
+			'server'   => self::OTHER,
+			'tables'   => [ '_bfr_r_' . str_repeat( 'c', 32 ) . '_p' ],
+		];
+		unset( $discarded->data['database_owner'] );
+		$inner = $this->server();
+		$jobs  = $this->jobs;
+		// Another request records the discard while the list asks the server who it is.
+		$server = new class( $inner, static fn () => $jobs->save( $discarded ) ) implements Connection {
+			private bool $asked = false;
+
+			public function __construct( private Connection $inner, private \Closure $meanwhile ) {}
+
+			public function rows( string $sql ): array {
+				if ( ! $this->asked ) {
+					$this->asked = true;
+					( $this->meanwhile )();
+				}
+				return $this->inner->rows( $sql );
+			}
+
+			public function execute( string $sql ): int {
+				return $this->inner->execute( $sql );
+			}
+		};
+		$lists  = $this->changes( $server )->foreign_bindings();
+		// Read before the discard: still to discard, not yet discarded. The route read the two
+		// lists in two passes before, so that a discard between them could leave it in neither.
+		self::assertSame( [ [ $job->id ], [] ], [ array_column( $lists['jobs'], 'job' ), array_column( $lists['discarded'], 'job' ) ] );
+		$next = $this->changes( $this->server() )->foreign_bindings();
+		self::assertSame( [ [], [ $job->id ] ], [ array_column( $next['jobs'], 'job' ), array_column( $next['discarded'], 'job' ) ] );
 	}
 }
