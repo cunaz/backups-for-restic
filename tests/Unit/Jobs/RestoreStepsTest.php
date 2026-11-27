@@ -507,6 +507,20 @@ final class RestoreStepsTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
 	}
 
+	/** The rehearsal reads the snapshot's site manifest before it stages a file: the same code. */
+	public function test_a_rehearsal_of_a_snapshot_that_the_repository_does_not_hold_fails_with_the_same_code(): void {
+		$this->backup();
+
+		$job = $this->drive( $this->jobs->create( JobType::Restore, 'manual', $this->clock->seconds, RestoreRequest::from_input( str_repeat( 'ab', 32 ), null, false, true )->to_data() ) );
+
+		self::assertSame( JobState::Failed, $job->state );
+		self::assertSame( 'restore_snapshot_missing', $job->error?->code, (string) $job->error?->message );
+		self::assertFalse( $job->error?->retryable );
+		self::assertArrayNotHasKey( 'resumptions', $job->data, 'A snapshot that is not there is not a lost lock.' );
+		self::assertSame( [], $this->locks() );
+		self::assertDirectoryDoesNotExist( $this->staging( $job ) );
+	}
+
 	public function test_a_path_that_the_snapshot_does_not_hold_fails_the_job_before_a_file_is_written(): void {
 		$snapshot = $this->backup();
 

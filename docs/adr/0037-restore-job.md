@@ -59,7 +59,10 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   not hold, because the request named an unknown ID or another client forgot it, does not
   come back: the job fails in the tick that finds out, without another attempt, and since
   2026-11-26 with a code of its own (`restore_snapshot_missing`); before, it was reported as
-  a repository that kept changing while the job "started over three times".
+  a repository that kept changing while the job "started over three times". A database
+  rehearsal reads the snapshot's site manifest before it stages a file (since 2026-11-27)
+  and asks the repository for the snapshot first, so that it fails with the same code, not
+  with the missing object of that read (`repository_missing`).
 - **A finished restore survives a failing cleanup.** When `cleaning_up` cannot remove
   working files or old jobs after the run completed, the job logs a warning and still
   succeeds. Failing it would leave a failed job that owns a complete staging directory

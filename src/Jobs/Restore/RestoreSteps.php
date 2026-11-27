@@ -9,6 +9,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Jobs\Restore;
 
+use BackupsForRestic\Backend\ObjectType;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Engine\Snapshot\Reader;
 use BackupsForRestic\Engine\Restore\Files as StagingFiles;
@@ -211,14 +212,26 @@ final class RestoreSteps implements StepProvider {
 	 * The site manifest of a snapshot whose database a restore rehearses: it has to say that
 	 * the snapshot holds a database dump. A snapshot without one, of a backup with the database
 	 * switched off or of another program, fails the job with NO_DATABASE: there is nothing to
-	 * rehearse, and no database error that the log could name.
+	 * rehearse, and no database error that the log could name. A snapshot that the repository
+	 * does not hold fails it with SNAPSHOT_MISSING, as the run finds it (RestoreRun), not with
+	 * the missing object of the read: this runs before the run, outside advance().
 	 *
 	 * @param Repository $repository Opened repository.
 	 * @param string     $snapshot   Snapshot ID.
 	 * @return array{path: string, site: string, versions: mixed} Location of the site manifest, the site's address and versions.
 	 * @throws DatabaseFailed With the code NO_DATABASE if the snapshot holds no database dump.
+	 * @throws RepositoryChanged With the code SNAPSHOT_MISSING if the repository does not hold the snapshot.
 	 */
 	private function database_manifest( Repository $repository, string $snapshot ): array {
+		if ( null === $repository->backend()->size( ObjectType::Snapshots, $snapshot ) ) {
+			RepositoryChanged::raise(
+				'The selected snapshot no longer exists.',
+				[
+					'code'  => self::SNAPSHOT_MISSING,
+					'cause' => RestoreRun::SNAPSHOT_MISSING,
+				]
+			);
+		}
 		$common   = $this->services->common;
 		$reader   = new Reader( $repository, $common->identity, $common->clock, $common->index_cache( $repository ) );
 		$manifest = $reader->manifest( Id::from_hex( $snapshot ) );
@@ -584,6 +597,7 @@ final class RestoreSteps implements StepProvider {
 	 * @throws InvalidArgument If the master key is missing or the job holds no valid request.
 	 * @throws StorageFailed If the staging directory cannot be created.
 	 * @throws DatabaseFailed If a rehearsal is asked for and the snapshot holds no database dump.
+	 * @throws RepositoryChanged If a rehearsal is asked for and the repository does not hold the snapshot.
 	 */
 	private function run( Job $job, EventLog $log ): RestoreRun {
 		$services   = $this->services->common;
