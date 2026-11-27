@@ -1033,7 +1033,24 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( foreign( job ).getByLabel( 'Your WordPress password' ) ).toBeFocused();
 		// The answer is lost before the request reaches the server: nothing is discarded, the page
 		// asks again and the binding stays listed with its review. The answer to that request for
-		// the lists is held back until a newer one has arrived, as on a slow connection.
+		// the lists is held back until a newer one has arrived, as on a slow connection. The page
+		// counts its requests for the lists whose answer it has not handled yet: a request leaves
+		// the count one task after its answer settled, when the handler that the page attached to
+		// it has run, which is attached after this one and runs in the same turn.
+		await page.evaluate( () => {
+			const send = globalThis.wp.apiFetch;
+			globalThis.bfrListsUnhandled = 0;
+			globalThis.wp.apiFetch = Object.assign( function ( options ) {
+				const answer = send.apply( this, arguments );
+				if ( options && 'string' === typeof options.path && /\/database-changes\/foreign(?:[?&]|$)/.test( options.path ) ) {
+					globalThis.bfrListsUnhandled++;
+					const handled = () => setTimeout( () => globalThis.bfrListsUnhandled--, 0 );
+					answer.then( handled, handled );
+				}
+				return answer;
+			}, send );
+		} );
+		const unhandled = () => page.evaluate( () => globalThis.bfrListsUnhandled );
 		let release;
 		const held = new Promise( ( resolve ) => {
 			release = resolve;
@@ -1089,10 +1106,13 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( listed( job ) ).toContainText( 'so this page cannot mark these tables as taken care of here. On the command line, "wp backups-for-restic database-discarded ' + job + ' --done" can, run without --user.' );
 		await expect( listed( job ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ) ).toHaveCount( 0 );
 		// The older answer, from before the discard, arrives now and changes nothing. Before, it
-		// put the binding back among those to discard and took it from the discarded ones.
+		// put the binding back among those to discard and took it from the discarded ones. The
+		// page has handled every newer answer, and then that one: no wait of a fixed length, which
+		// a slow page would outlast with the lists still as they were.
+		await expect.poll( unhandled, { message: 'only the request whose answer is held back is open', timeout: 30 * 1000 } ).toBe( 1 );
 		release();
 		await late;
-		await page.evaluate( () => new Promise( ( resolve ) => setTimeout( resolve, 500 ) ) );
+		await expect.poll( unhandled, { message: 'the page has handled the answer that was held back', timeout: 30 * 1000 } ).toBe( 0 );
 		await expect( foreign( job ) ).toHaveCount( 0 );
 		await expect( listed( job ).locator( '.bfr-discarded-binding-tables code' ) ).toHaveCount( 7 );
 		// The answer to the confirmation arrived, so the one lost before leaves nothing to find
