@@ -304,9 +304,9 @@ final class StagingTest extends TestCase {
 		);
 
 		$left = $this->names();
-		sort( $left );
+		sort( $left, SORT_STRING );
 		$expected = [ $kept->id, 'notes.txt', 'unrelated' ];
-		sort( $expected );
+		sort( $expected, SORT_STRING );
 		self::assertSame( $expected, $left );
 		self::assertFileExists( $this->restores . '/' . $kept->id . '/entries.jsonl' );
 	}
@@ -450,6 +450,127 @@ final class StagingTest extends TestCase {
 			self::assertSame( 'job_unreadable', JobError::from_throwable( $conflict )->code );
 		}
 		self::assertFileExists( $path . '/files/site/one.txt' );
+	}
+
+	public function test_a_job_document_that_cannot_be_looked_up_keeps_its_staging(): void {
+		$job    = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$folder = $this->directory . '/private/jobs/' . $job->id;
+		chmod( $folder, 0600 );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// Before, the document counted as gone: the staging expired by the time in its ID, and
+			// the heartbeat removed it although nothing proves that its job has ended.
+			self::assertSame( [], $this->listed() );
+			self::assertSame( 0, array_sum( $this->staging->remove_due( 1, self::NO_DEADLINE ) ) );
+			try {
+				$this->staging->remove( $job->id, self::NO_DEADLINE );
+				self::fail( 'A staging whose job cannot be read was removed.' );
+			} catch ( JobConflict $conflict ) {
+				// Named, and as a job that the PHP user cannot open, not one for another plugin version.
+				self::assertSame( [ 'job_inaccessible', $job->id ], [ JobError::from_throwable( $conflict )->code, $conflict->context()['job'] ?? null ] );
+			}
+			self::assertNull( $this->staging->files_directory( $job->id, 24 ) );
+		} finally {
+			chmod( $folder, 0700 );
+		}
+		self::assertFileExists( $this->restores . '/' . $job->id . '/files/site/one.txt' );
+		// Once the document can be read, the staging expires as its job says.
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertDirectoryDoesNotExist( $this->restores . '/' . $job->id );
+	}
+
+	public function test_no_staging_expires_while_a_stored_job_cannot_be_read(): void {
+		$expired  = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$leftover = '20251230T000000Z-0a1b2c';
+		$this->stage( $leftover );
+		$aside = $this->restores . '/' . Staging::REMOVING . '20251229T000000Z-0d0e0f';
+		mkdir( $aside . '/files', 0700, true );
+		// Any job: what it is cannot be read, so it may be an apply whose undo needs a staging.
+		$unreadable = $this->job( JobState::Succeeded, $this->clock->seconds );
+		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
+		self::assertSame( $unreadable->id, $this->jobs->unreadable() );
+		// Only what was set aside is on its way out.
+		self::assertSame( 1, $this->staging->removing( 24 ) );
+		// Before, both expired with their own hours.
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertEqualsCanonicalizing( [ $expired->id, $leftover ], $this->names(), 'What was set aside before goes on being deleted.' );
+		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
+		self::assertNull( $this->jobs->unreadable() );
+		self::assertSame( 2, $this->staging->removing( 24 ) );
+		self::assertSame( 2, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_a_staging_whose_job_document_is_gone_is_no_leftover_while_its_report_cannot_be_looked_up(): void {
+		$job = $this->restored( $this->clock->seconds - 60 );
+		// Pruned with the old jobs: the job's directory is gone, so it is established that no document is.
+		TempDir::remove( $this->directory . '/private/jobs/' . $job->id );
+		$path = $this->restores . '/' . $job->id;
+		chmod( $path, 0000 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_executable( $path ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// Before, it counted as a leftover without a report and was set aside at once.
+			self::assertSame( 0, array_sum( $this->staging->remove_due( 24, self::NO_DEADLINE ) ) );
+			self::assertSame( [ $job->id ], $this->names() );
+		} finally {
+			restore_error_handler();
+			foreach ( [ $path, $this->restores . '/' . Staging::REMOVING . $job->id ] as $directory ) {
+				if ( is_dir( $directory ) ) {
+					chmod( $directory, 0700 );
+				}
+			}
+		}
+		// Once its report can be read, it is listed by the time in its ID, as before.
+		self::assertSame( [ $job->id ], $this->listed( 48 ) );
+	}
+
+	public function test_the_undo_workspace_of_an_apply_stays_until_the_last_second_of_its_window(): void {
+		// An apply that attempted a change, which no undo reverted, and whose window ends in a second.
+		$apply = $this->job( JobState::Succeeded, $this->clock->seconds - 86399, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryExists( $undo );
+		$this->clock->advance( 1 );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryDoesNotExist( $undo );
+	}
+
+	public function test_the_undo_workspace_of_an_apply_stays_beyond_its_window_while_a_stored_job_cannot_be_read(): void {
+		// An apply whose window ended an hour ago, with the journal of a change that no undo reverted.
+		$apply = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		// Any job: what it is cannot be read, so it may be an undo of this apply that was queued
+		// within the window and still runs, which keeps the journal as long as it is active.
+		$unreadable = $this->job( JobState::Running, $this->clock->seconds );
+		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
+		self::assertNull( $this->jobs->active() );
+		self::assertSame( $unreadable->id, $this->jobs->unreadable() );
+		// Before, the journal went with the end of the window, and the saved originals with it.
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertFileExists( $undo . '/attempted' );
+		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryDoesNotExist( $undo );
+	}
+
+	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
+		$target = $this->directory . '/elsewhere';
+		mkdir( $target . '/files', 0700, true );
+		file_put_contents( $target . '/entries.jsonl', "{}\n" );
+		// A job ID that no job directory has: its document is gone, and the link is no staging.
+		symlink( $target, $this->restores . '/20251230T000000Z-0a1b2c' );
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+		self::assertFileExists( $target . '/entries.jsonl', 'Nothing is deleted through the link.' );
 	}
 
 	public function test_a_symbolic_link_inside_staging_is_removed_as_a_link_and_its_target_stays(): void {

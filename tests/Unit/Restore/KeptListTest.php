@@ -74,7 +74,7 @@ final class KeptListTest extends TestCase {
 	private function names(): array {
 		$found = glob( $this->directory . '/rows*' );
 		$names = array_map( basename( ... ), false === $found ? [] : $found );
-		sort( $names );
+		sort( $names, SORT_STRING );
 		return $names;
 	}
 
@@ -184,7 +184,7 @@ final class KeptListTest extends TestCase {
 		foreach ( new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $directory, \FilesystemIterator::SKIP_DOTS ) ) as $file ) {
 			$files[ substr( $file->getPathname(), strlen( $directory ) + 1 ) ] = (string) file_get_contents( $file->getPathname() );
 		}
-		ksort( $files );
+		ksort( $files, SORT_STRING );
 		return $files;
 	}
 

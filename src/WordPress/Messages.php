@@ -10,6 +10,8 @@ declare( strict_types=1 );
 namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Doctor\Check;
+use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobType;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -21,10 +23,64 @@ defined( 'ABSPATH' ) || exit;
 final class Messages {
 
 	/**
-	 * Message and hint for a job error code.
+	 * Message and hint for the error of a job that ended, as the kind of job it is: the texts of
+	 * a code name the job that failed, not a backup or another job (kind()).
+	 *
+	 * @param Job $job Job that ended with an error.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function job_failure( Job $job ): array {
+		return self::job_error( $job->error->code ?? 'internal', self::kind( $job ) );
+	}
+
+	/**
+	 * The kind of a job whose texts job_error() gives: its type, and for the background review
+	 * of an undo `undo_review`, which a file preview job of the same type carries out.
+	 *
+	 * @param Job $job Job.
+	 * @return string Kind.
+	 */
+	public static function kind( Job $job ): string {
+		return JobType::FilePlan === $job->type && true === ( $job->data['undo'] ?? null ) ? 'undo_review' : $job->type->value;
+	}
+
+	/**
+	 * Message and hint for the refusal because of a stored job that cannot be read
+	 * (JobStore::refuse_unreadable()), with the job's ID where the job cannot be opened, so that
+	 * the administrator finds its folder. A document that this version cannot parse has the
+	 * texts of its code.
+	 *
+	 * @param string $code job_inaccessible or job_unreadable.
+	 * @param string $id   ID of the job, the name of its folder under jobs/.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function stored_job( string $code, string $id ): array {
+		if ( 'job_inaccessible' !== $code ) {
+			return self::job_error( $code );
+		}
+		return [
+			/* translators: %s: job ID, which is also the name of the job's folder. */
+			'message' => sprintf( __( 'The PHP user cannot open the stored job %s in the private working directory.', 'backups-for-restic' ), $id ),
+			'hint'    => self::inaccessible_hint(),
+		];
+	}
+
+	/**
+	 * What to do about a stored job that the PHP user cannot open: its cause and the way out.
+	 *
+	 * @return string Hint.
+	 */
+	private static function inaccessible_hint(): string {
+		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link is in the place of the folder, or something other than a regular file is in the place of job.json: put the job\'s own files back. Until the job can be read, its files are kept, and new jobs and repository changes stay blocked.', 'backups-for-restic' );
+	}
+
+	/**
+	 * Message and hint for a job error code. Without a kind of job, the texts are those that a
+	 * request is answered with and those of a backup; a job of another kind gets texts of its
+	 * own where these would name the backup or an action that the job does not have.
 	 *
 	 * @param string $code Error code.
-	 * @param string $type Job type, for the few codes whose advice differs for a database undo.
+	 * @param string $type Kind of the job that ended with the code (kind()), empty for a request.
 	 * @return array{message: string, hint: string} Texts.
 	 */
 	public static function job_error( string $code, string $type = '' ): array {
@@ -33,6 +89,10 @@ final class Messages {
 			if ( null !== $undo ) {
 				return $undo;
 			}
+		}
+		$own = '' === $type ? null : self::kind_error( $code, $type );
+		if ( null !== $own ) {
+			return $own;
 		}
 		return match ( $code ) {
 			'wrong_password'                 => [
@@ -58,6 +118,14 @@ final class Messages {
 			'repository_unsupported_version' => [
 				'message' => __( 'This repository uses compression, which needs the zstd PHP extension.', 'backups-for-restic' ),
 				'hint'    => __( 'Ask your host for the zstd extension, or use a repository created by this plugin.', 'backups-for-restic' ),
+			],
+			'key_missing'                    => [
+				'message' => __( 'The repository key that this job unlocked is no longer stored.', 'backups-for-restic' ),
+				'hint'    => __( 'The plugin discards the stored key when the stored passwords can no longer be decrypted, for example after the security keys in wp-config.php changed, when the key no longer opens the repository, and when another repository address is saved. Start the job again: it unlocks the repository with the stored password. If the passwords cannot be decrypted, enter them again in the settings first.', 'backups-for-restic' ),
+			],
+			'restore_snapshot_missing'       => [
+				'message' => __( 'The snapshot of this restore is not in the repository.', 'backups-for-restic' ),
+				'hint'    => __( 'It may have been removed after the list of snapshots was loaded, for example by a forget run on another computer. The restore stopped and kept no files. Load the list of snapshots again and restore one that it shows.', 'backups-for-restic' ),
 			],
 			'repository_locked'              => [
 				'message' => __( 'Another program holds a lock on the repository.', 'backups-for-restic' ),
@@ -111,6 +179,10 @@ final class Messages {
 				'message' => __( 'The file preview could not be completed.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job names the reason, for example a file that changed while the preview read it. Nothing on the live site was changed. Open the preview again.', 'backups-for-restic' ),
 			],
+			'file_folder_changing'           => [
+				'message' => __( 'A folder kept changing while the preview read its names.', 'backups-for-restic' ),
+				'hint'    => __( 'For a folder with more than 2,048 names, the preview needs one reading of all of them during which the folder does not change. It began five times, and each time the folder changed before the reading was complete. The log of the job names the folder. Pause what writes into it, for example uploads, a cache or a synchronisation, then open the preview again. Nothing on the live site was changed.', 'backups-for-restic' ),
+			],
 			'file_staging_gone'              => [
 				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),
 				'hint'    => __( 'They expired or were deleted. Restore the snapshot to staging again, then open a new preview.', 'backups-for-restic' ),
@@ -122,6 +194,10 @@ final class Messages {
 			'undo_unavailable'               => [
 				'message' => __( 'This apply can no longer be undone.', 'backups-for-restic' ),
 				'hint'    => __( 'An apply can be undone for 24 hours after it ended, and no longer once an undo reverted it completely. The Restores tab lists what can still be undone.', 'backups-for-restic' ),
+			],
+			'undo_records_unreadable'        => [
+				'message' => __( 'The plugin cannot tell whether this apply can still be undone.', 'backups-for-restic' ),
+				'hint'    => __( 'A record of its undo in the plugin\'s private working directory cannot be looked up, or something other than a regular file is at its name. Until the 24 hours of its recovery window are over, the plugin keeps the saved original files and the staged files, and once it can read the records, it offers the undo again if they show that the apply can still be undone. If the PHP user does not own the private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions. If they are in order, something that is not a regular file, such as a link or a folder, is in the place of a record in the folder undo/ of the apply, or a link is in the place of a folder that leads to it; the plugin reads neither: leave the apply\'s files as they are, since they hold the saved original files, and restore what the apply changed from a backup if it has to be undone before the 24 hours are over.', 'backups-for-restic' ),
 			],
 			'maintenance_busy'               => [
 				'message' => __( 'WordPress is in maintenance mode for another update, so the file changes did not start.', 'backups-for-restic' ),
@@ -327,18 +403,95 @@ final class Messages {
 				'message' => __( 'A stored job cannot be read by this version of the plugin.', 'backups-for-restic' ),
 				'hint'    => __( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', 'backups-for-restic' ),
 			],
+			'job_inaccessible'               => [
+				'message' => __( 'The PHP user cannot open a stored job in the private working directory.', 'backups-for-restic' ),
+				'hint'    => self::inaccessible_hint(),
+			],
 			'configuration'                  => [
 				'message' => __( 'The backup is not configured completely.', 'backups-for-restic' ),
 				'hint'    => __( 'Finish the setup wizard or check the settings.', 'backups-for-restic' ),
 			],
 			'setup_incomplete'               => [
 				'message' => __( 'The setup is not finished yet.', 'backups-for-restic' ),
-				'hint'    => __( 'Finish the setup wizard and confirm that you stored the recovery kit. Backups and maintenance start after that.', 'backups-for-restic' ),
+				'hint'    => __( 'Finish the setup wizard and confirm that you stored the recovery kit. Backups, restores and maintenance start after that.', 'backups-for-restic' ),
 			],
 			default                          => [
 				'message' => __( 'An unexpected error stopped the job.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job has the details. Please report it if it happens again.', 'backups-for-restic' ),
 			],
+		};
+	}
+
+	/**
+	 * Texts of a code for the kind of job that ended with it, where the general texts would name
+	 * the backup or an action that this job does not have: a restore or repository maintenance
+	 * that is "not configured completely" as a backup, a prune that "the next backup" tries
+	 * again, a restore that "started over", a backup that is told to restore "the snapshot", a
+	 * job that is "creating a new" repository, an undo whose reverts "can be undone", the review
+	 * of an undo with "a smaller selection".
+	 *
+	 * @param string $code Error code.
+	 * @param string $type Kind of the job (kind()), not empty.
+	 * @return array{message: string, hint: string}|null Texts, or null where the general ones apply.
+	 */
+	private static function kind_error( string $code, string $type ): ?array {
+		$backup      = 'backup' === $type;
+		$undo        = in_array( $type, [ 'undo', 'undo_review' ], true );
+		$maintenance = in_array( $type, [ 'forget', 'prune', 'check' ], true );
+		return match ( true ) {
+			'configuration' === $code && ! $backup => [
+				'message' => __( 'A setting or a value that this job needs is missing or not valid.', 'backups-for-restic' ),
+				'hint'    => __( 'The log of the job names which. If it is a setting, finish the setup wizard or correct the setting before you try again.', 'backups-for-restic' ),
+			],
+			// Repository maintenance has the preflight of a backup: disk space, memory, the private directory.
+			'environment' === $code && $maintenance => [
+				'message' => __( 'This server cannot run this job right now.', 'backups-for-restic' ),
+				'hint'    => __( 'The checks on the Environment tab show what is missing.', 'backups-for-restic' ),
+			],
+			'environment' === $code && ! $backup => [
+				'message' => __( 'This job could not store or read its working data.', 'backups-for-restic' ),
+				'hint'    => __( 'The log of the job names what failed, for example a file in the plugin\'s private working directory or the site\'s database. Check the free disk space and the working directory on the Environment tab before you try again.', 'backups-for-restic' ),
+			],
+			'upload_rejected' === $code && ! $backup => [
+				'message' => __( 'The server rejected an upload because its content did not match its name.', 'backups-for-restic' ),
+				'hint'    => __( 'This usually means a network device changed the data. Start the job again.', 'backups-for-restic' ),
+			],
+			// Only the setup creates a repository; a job's upload that the server refuses meets one.
+			'repository_exists' === $code => [
+				'message' => __( 'The repository server refused to store data of this job.', 'backups-for-restic' ),
+				'hint'    => __( 'It answered as if the data were there already in another form, or as if this account may not write it. Check that the REST user may write to the repository, then start the job again.', 'backups-for-restic' ),
+			],
+			'decompression_limit' === $code && 'restore' !== $type => [
+				'message' => __( 'A repository object is too large for PHP to decompress safely.', 'backups-for-restic' ),
+				'hint'    => __( 'For a trusted repository, ask your host to increase the PHP memory limit. You can also use restic on another computer to verify the repository.', 'backups-for-restic' ),
+			],
+			// A restore takes up its work again from its checkpoint; it never starts over.
+			'repository_changed' === $code && 'restore' === $type => [
+				'message' => __( 'The lock of this restore on the repository did not hold.', 'backups-for-restic' ),
+				'hint'    => __( 'The restore took up its work again three times, then stopped and kept no files. Another program removed its lock, or the restore was paused for more than 25 minutes. If other computers use this repository, let them work at a time when no job of this site is running, and make sure the jobs of this site are not paused for long. Then start the restore again.', 'backups-for-restic' ),
+			],
+			'file_writes_refused' === $code && 'undo' === $type => [
+				'message' => __( 'The site no longer allows these file changes, or the administrator who confirmed them may no longer make them.', 'backups-for-restic' ),
+				'hint'    => __( 'Check that WordPress allows file modifications and that the administrator who confirmed the undo can still manage backups and update WordPress. What the undo reverted stays reverted. Preview the undo again on the Restores tab while the recovery window lasts to revert the rest.', 'backups-for-restic' ),
+			],
+			'maintenance_opcache' === $code && 'undo' === $type => [
+				'message' => __( 'OPcache did not let the plugin clear its cached copy of the WordPress maintenance file.', 'backups-for-restic' ),
+				'hint'    => __( 'The PHP setting opcache.restrict_api leaves this site out. With opcache.validate_timestamps off, or with opcache.revalidate_freq above four seconds, the server could keep serving the site from an earlier maintenance file while files change. Add the WordPress directory to opcache.restrict_api, or turn timestamp checks on with a short interval, then preview the undo again. What the undo reverted stays reverted.', 'backups-for-restic' ),
+			],
+			// The apply checks every reviewed change again before its first one.
+			'file_folder_changing' === $code && 'apply' === $type => [
+				'message' => __( 'A folder kept changing while the apply checked the reviewed changes again.', 'backups-for-restic' ),
+				'hint'    => __( 'Before it changes a file, the apply checks every reviewed change again. For a folder with more than 2,048 names it needs one reading of all of them during which the folder does not change. It began five times, and each time the folder changed before the reading was complete. The log of the job names the folder. Nothing on the live site was changed. Pause what writes into the folder, then open a new preview and confirm it again.', 'backups-for-restic' ),
+			],
+			'file_staging_gone' === $code && $undo => [
+				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),
+				'hint'    => __( 'The undo needs them to check what the apply installed. The plugin keeps them while the recovery window lasts, so they were deleted or changed outside the plugin, or the record of their restore can no longer be read. Without them this apply cannot be undone.', 'backups-for-restic' ),
+			],
+			'file_plan_too_large' === $code && 'undo_review' === $type => [
+				'message' => __( 'Online review supports up to one million selected entries and up to one million names in each folder.', 'backups-for-restic' ),
+				'hint'    => __( 'The review of an undo covers every entry that its apply changed, so it cannot be made smaller. It can run once no folder that holds these entries has more than one million names.', 'backups-for-restic' ),
+			],
+			default => null,
 		};
 	}
 
@@ -353,6 +506,22 @@ final class Messages {
 	private static function database_undo_error( string $code ): ?array {
 		$retained = __( 'Until the undo window ends, a database administrator can recover the earlier tables, which the plugin keeps under private names.', 'backups-for-restic' );
 		return match ( $code ) {
+			'database_exchange_failed' => [
+				'message' => __( 'The database could not complete the reviewed table exchange.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the job result and log for the recorded generation and the database operation that stopped.', 'backups-for-restic' ) . ' ' . $retained,
+			],
+			'performance_schema' => [
+				'message' => __( 'The database server does not list every connection, so the table exchange cannot tell whether earlier requests have ended.', 'backups-for-restic' ),
+				'hint'    => __( 'The live table exchange needs MySQL 8.0.22 or later with the Performance Schema enabled and enough Performance Schema thread instances for every connection (performance_schema_max_thread_instances), and a database account with the PROCESS privilege.', 'backups-for-restic' ) . ' ' . $retained,
+			],
+			'database_admin_collision' => [
+				'message' => __( 'The current administrator cannot be preserved safely.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the administrator’s ID, login, email and local role assignments on this site and in the earlier database that the undo brings back. Resolve the conflict, then review and confirm the undo again.', 'backups-for-restic' ) . ' ' . $retained,
+			],
+			'database_exchange_foreign' => [
+				'message' => __( 'The earlier tables that this undo brings back are on another database server or in another database.', 'backups-for-restic' ),
+				'hint'    => __( 'Connect the site to the database that holds them again, then review and confirm the undo. Discarding the binding with "wp backups-for-restic database-discard" forgets those tables, and the undo with them.', 'backups-for-restic' ),
+			],
 			'database_admin_capabilities' => [
 				'message' => __( 'Under the roles of the earlier database, which the undo brings back, your account would lack a capability that a database restore needs.', 'backups-for-restic' ),
 				'hint'    => __( 'The undo keeps your account with its own roles and capabilities, but the roles themselves come from the earlier database. Give your account on this site a role that the earlier database also has, with the backup capability, manage_options, edit_users, promote_users and update_core, for example Administrator, or confirm with such an account.', 'backups-for-restic' ) . ' ' . $retained,

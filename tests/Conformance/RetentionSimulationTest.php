@@ -106,7 +106,7 @@ final class RetentionSimulationTest extends TestCase {
 		self::assertIsArray( $groups );
 		self::assertCount( 1, $groups );
 		$keep = array_map( static fn ( array $snapshot ): string => (string) $snapshot['id'], $groups[0]['keep'] ?? [] );
-		sort( $keep );
+		sort( $keep, SORT_STRING );
 		return $keep;
 	}
 
@@ -138,7 +138,7 @@ final class RetentionSimulationTest extends TestCase {
 			}
 			$removed += $forget->result()['removed'];
 			$kept     = array_keys( $repository->snapshots() );
-			sort( $kept );
+			sort( $kept, SORT_STRING );
 			self::assertSame( $expected, $kept, 'Run ' . $run . ': the plugin keeps what restic keeps.' );
 			$clock->advance( 12 * 3600 - 600 );
 		}
@@ -151,7 +151,7 @@ final class RetentionSimulationTest extends TestCase {
 		self::assertGreaterThan( 0, $prune->result()['packs_deleted'] );
 
 		$ours = array_keys( $repository->snapshots() );
-		sort( $ours );
+		sort( $ours, SORT_STRING );
 		self::assertSame( $ours, self::restic_keeps( $cli ), 'After the prune, restic would remove nothing more.' );
 
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );

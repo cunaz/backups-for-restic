@@ -205,6 +205,47 @@ test( 'the dashboard and the snapshot list show the backup', async ( { page } ) 
 	await expect( rows.first().locator( 'code' ) ).toHaveText( snapshot );
 } );
 
+test( 'a cancelled apply or undo whose cleanup failed shows the failure beside its state and counts', async ( { page } ) => {
+	// Ended jobs, written as the runner leaves them: cancelled, and then the site could not leave
+	// maintenance mode, which the runner records as the job's error. Nothing ticks an ended job.
+	const jobs = [
+		[ '20261126T170000Z-0c5001', 'undo', { restored: 1, removed: 2, kept: 0, unchanged: 0, apply_state: 'partly_undone' }, true ],
+		[ '20261126T170000Z-0c5002', 'apply', { entries_completed: 2, entries_attempted: 3 }, true ],
+		[ '20261126T170000Z-0c5003', 'apply', { entries_completed: 0, entries_attempted: 0 }, false ],
+	];
+	const container = '$container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); ';
+	wordpress(
+		siteRoot(),
+		container + 'foreach ( json_decode( $argv[2], true ) as [ $id, $type, $result, $failed ] ) {' +
+			' $job = new BackupsForRestic\\Jobs\\Job( $id, BackupsForRestic\\Jobs\\JobType::from( $type ), "manual", time() - 120 );' +
+			' $job->state = BackupsForRestic\\Jobs\\JobState::Cancelled; $job->finished_at = time() - 60; $job->result = $result;' +
+			' $job->data = [ "apply" => "20261120T000000Z-0a0b07", "restore" => "20261120T000000Z-0a0b08" ];' +
+			' $job->error = $failed ? new BackupsForRestic\\Jobs\\JobError( "maintenance_stuck", "The maintenance marker could not be removed.", false ) : null;' +
+			' $container->jobs()->save( $job ); }',
+		[ JSON.stringify( jobs ) ],
+	);
+	try {
+		const open = ( id ) => page.goto( '/wp-admin/admin.php?page=backups-for-restic&tab=restores&job=' + id );
+		// Before, a job that was not "failed" showed its state alone, and the failure was hidden.
+		await open( jobs[ 0 ][ 0 ] );
+		await expect( notice( page, 'error', 'The site could not leave maintenance mode.' ) ).toBeVisible();
+		await expect( notice( page, 'error', 'The site could not leave maintenance mode.' ) ).toContainText( 'Delete that file if no update is running.' );
+		await expect( notice( page, 'info', 'Cancelled' ) ).toBeVisible();
+		await expect( notice( page, 'warning', 'The apply is partly undone: 1 restored, 2 removed, 0 kept.' ) ).toBeVisible();
+		await open( jobs[ 1 ][ 0 ] );
+		await expect( notice( page, 'error', 'The site could not leave maintenance mode.' ) ).toBeVisible();
+		await expect( notice( page, 'info', 'Cancelled' ) ).toBeVisible();
+		await expect( page.locator( '.bfr-apply-stopped' ) ).toContainText( 'The apply completed 2 of the 3 file changes that it attempted before it stopped.' );
+		// A cancelled job without an error shows its state, as before.
+		await open( jobs[ 2 ][ 0 ] );
+		await expect( page.locator( '.bfr-apply-stopped' ) ).toContainText( 'The apply stopped before it changed any live file.' );
+		await expect( notice( page, 'info', 'Cancelled' ) ).toBeVisible();
+		await expect( page.locator( '#backups-for-restic-app .notice-error' ) ).toHaveCount( 0 );
+	} finally {
+		wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $id ); }', jobs.map( ( job ) => job[ 0 ] ) );
+	}
+} );
+
 test( 'a selected snapshot file can be staged and downloaded', async ( { page } ) => {
 	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
 	// The cleanup after the first backup holds the repository for a moment; an administrator
@@ -635,6 +676,8 @@ test( 'a fresh installation can import a source snapshot and keep its own config
 		await destination.getByRole( 'button', { name: 'Save and continue' } ).click();
 		await destination.getByLabel( 'Repository password', { exact: true } ).fill( password );
 		await destination.getByRole( 'button', { name: 'Connect', exact: true } ).click();
+		// Connecting derives the key of the repository with scrypt in PHP; the step after it has
+		// two minutes to appear, not the 30 seconds of an action.
 		await destination.getByLabel( 'I have stored the recovery kit outside this server.' ).check( { timeout: 120000 } );
 		await destination.getByRole( 'button', { name: 'Restore from an existing site snapshot' } ).click();
 		const row = destination.getByRole( 'button', { name: /Open snapshot/ } ).first();
@@ -894,4 +937,38 @@ test( 'a files-only snapshot still restores individual files', async ( { page } 
 	const downloaded = await pending;
 	expect( await downloaded.failure() ).toBeNull();
 	expect( fs.readFileSync( await downloaded.path() ) ).toEqual( fs.readFileSync( path.join( siteRoot(), 'license.txt' ) ) );
+} );
+
+test( 'a restore of a snapshot that another client forgot says so', async ( { page } ) => {
+	await openBackups( page );
+	const id = ( await card( page, 'Last backup' ).innerText() ).match( /Snapshot ([0-9a-f]{8})/ )[ 1 ];
+	await openBackups( page, 'snapshots' );
+	const open = page.getByRole( 'button', { name: 'Open snapshot ' + id } );
+	await unlocked( page, open );
+	await open.click();
+	await unlocked( page, page.locator( '.bfr-manifest' ) );
+	for ( const name of siteRoot().split( '/' ).filter( Boolean ) ) {
+		const directory = page.locator( '.bfr-entries' ).getByRole( 'button', { name, exact: true } );
+		await unlocked( page, directory );
+		await directory.click();
+	}
+	const license = page.getByLabel( 'Select license.txt', { exact: true } );
+	await unlocked( page, license );
+	await license.check();
+	// After the page listed it, another client forgets the snapshot. It is put back afterwards.
+	const snapshots = path.join( repositoryServer().directory, 'data', 'site', 'snapshots' );
+	const file = fs.readdirSync( snapshots ).find( ( name ) => name.startsWith( id ) );
+	const aside = path.join( repositoryServer().directory, 'forgotten-' + file );
+	fs.renameSync( path.join( snapshots, file ), aside );
+	try {
+		await page.getByRole( 'button', { name: 'Restore to staging' } ).click();
+		// Before: "Another program kept changing the repository while this job worked on it.
+		// The job started over three times and then stopped."
+		const failed = notice( page, 'error', 'The snapshot of this restore is not in the repository.' );
+		await expect( failed ).toBeVisible( { timeout: 2 * 60 * 1000 } );
+		await expect( failed ).toContainText( 'The restore stopped and kept no files.' );
+		await expect( failed ).not.toContainText( 'started over' );
+	} finally {
+		fs.renameSync( aside, path.join( snapshots, file ) );
+	}
 } );

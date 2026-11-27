@@ -55,6 +55,11 @@ final class RestoreSteps implements StepProvider {
 	public const string RELEASE_DEFERRED = 'restore_release_deferred';
 
 	/**
+	 * The code of a restore whose snapshot the repository does not hold, or no longer holds.
+	 */
+	public const string SNAPSHOT_MISSING = 'restore_snapshot_missing';
+
+	/**
 	 * Free space that building an archive leaves on the volume. The archive is a second copy
 	 * of every staged byte, and while it grows the site writes beside it: uploads, sessions,
 	 * the database where it shares the volume, and the documents of this job. 64 MiB is four
@@ -481,9 +486,13 @@ final class RestoreSteps implements StepProvider {
 				);
 			} elseif ( ! $failure instanceof RepositoryChanged ) {
 				throw $failure;
+			} elseif ( RestoreRun::SNAPSHOT_MISSING === ( $failure->context()['cause'] ?? null ) ) {
+				// No lock that did not hold: the snapshot is gone, and taking up the work again
+				// would not bring it back. Its code says so, not that the repository kept changing.
+				RepositoryChanged::raise( $failure->getMessage(), [ 'code' => self::SNAPSHOT_MISSING ] + $failure->context(), $failure );
 			} else {
 				$resumptions = Decoded::int( $job->data['resumptions'] ?? 0 ) + 1;
-				if ( $resumptions > self::MAX_RESUMPTIONS || RestoreRun::SNAPSHOT_MISSING === ( $failure->context()['cause'] ?? null ) ) {
+				if ( $resumptions > self::MAX_RESUMPTIONS ) {
 					throw $failure;
 				}
 				$job->data['resumptions'] = $resumptions;

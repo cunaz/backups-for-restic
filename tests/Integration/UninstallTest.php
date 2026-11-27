@@ -44,6 +44,64 @@ final class UninstallTest extends TestCase {
 		return array_values( array_map( 'strval', $names ) );
 	}
 
+	public function test_deleting_the_plugin_is_refused_with_the_name_of_a_stored_job_that_cannot_be_read(): void {
+		// Newer than every other job of the site, so that the uninstall meets them first.
+		$inaccessible = '20361126T150000Z-0c3001';
+		$unreadable   = '20361126T150000Z-0c3002';
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$backup              = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$container->jobs()->save( $backup );
+			',
+			[ $inaccessible ]
+		);
+		$folder = TestSite::private_dir() . '/jobs/' . $inaccessible;
+		chmod( $folder, 0600 );
+		$stored = self::stored();
+		$delete = static fn (): string => TestSite::last_line(
+			TestSite::php(
+				'
+				require_once ABSPATH . "wp-admin/includes/plugin.php";
+				add_filter( "wp_die_handler", static fn () => static function ( $message ) {
+					throw new RuntimeException( "refused: " . ( is_string( $message ) ? $message : "" ) );
+				} );
+				try {
+					uninstall_plugin( $arguments[0] );
+					echo "\nreturned";
+				} catch ( RuntimeException $e ) {
+					echo "\n", $e->getMessage();
+				}
+				',
+				[ TestSite::PLUGIN ]
+			)
+		);
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// Before: "Restore cleanup could not finish. Check the job history, database connection
+			// and DROP permission.", which names neither the job nor what keeps it from being read.
+			$refusal = $delete();
+			self::assertStringStartsWith( 'refused: Backups for restic cannot be deleted yet: the PHP user cannot open the stored job ' . $inaccessible . '.', $refusal );
+			self::assertStringContainsString( 'Give the PHP user back ownership of that folder', $refusal );
+			self::assertStringEndsWith( 'Then retry deletion.', $refusal );
+			chmod( $folder, 0700 );
+			mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
+			file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
+			self::assertSame( 'refused: Backups for restic cannot be deleted yet: this version cannot read the stored job ' . $unreadable . '. Install a plugin version that can read the job, let it finish the job&#039;s cleanup, then retry deletion.', $delete() );
+			self::assertSame( $stored, self::stored(), 'Options, transients and cron events stay.' );
+		} finally {
+			chmod( $folder, 0700 );
+			foreach ( [ $inaccessible, $unreadable ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
 	#[DependsExternal( WordPressSiteTest::class, 'test_setup_and_backup_through_wp_cron_restore_with_restic' )]
 	public function test_deleting_the_plugin_on_an_older_php_is_refused_and_removes_nothing(): void {
 		$copy = TempDir::create( 'uninstall-older-php' );

@@ -207,8 +207,8 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   `new_children`; the name checks of the site policy that cannot read a folder answer
   without a PHP warning, which a debugging site could print into the review's reply. The
   index of names that a background review keeps for a folder with more than 2,048 names
-  answers, in an undo review, a folder that is gone, cannot be read or changes while its
-  names are read with a spelling that may be there, so that the site policy keeps the entry
+  answers, in an undo review, a folder that is gone, cannot be read or keeps changing while
+  its names are read (see below) with a spelling that may be there, so that the site policy keeps the entry
   as `ambiguous_destination` (or `ambiguous_source`) and the review goes on; before, the
   review failed, also for one upload into such a folder during its scan. A preview still
   fails there, and a damaged index fails in both.
@@ -287,12 +287,36 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   over the same files was undone; what an earlier undo reverted is `already_undone`. The
   apply's document records `undo_state` (`undone` or `partly_undone`), `undo_kept` (the
   number of entries the last finished undo kept, null after an undo that stopped after a
-  revert) and `undo_job`; the undo list shows this state.
+  revert before its document counted every entry) and `undo_job`; the undo list shows this
+  state. An undo that is stopped once its document counts every attempted entry of its
+  apply, by a request to cancel that comes after the worker counted the last entry and
+  before the runner saved the step after it, or by a failure of its recording, is recorded
+  as a finished undo is: undone, with the `reverted` marker, when it kept nothing, and
+  partly undone with the number of kept entries otherwise (2026-11-26). Before, its cleanup
+  recorded it as partly undone without a number, also when it had reverted everything, and
+  the undo list offered to revert the rest until a review found nothing left and retired
+  the apply. The cleanup decides from the document alone and changes no live file: a
+  cursor short of the apply's attempted entries, counts by outcome that do not add up to
+  it, or a journal whose count cannot be read leave the apply as a stopped undo leaves it,
+  as does an undo that stopped before it counted its last entry, whose entry at the cursor
+  no record proves reverted: partly undone without a number once the undo's document
+  counts a reverted entry, and otherwise in the state it had, which is `applied` for a
+  first undo that only kept entries or reached none. A review decides those against the
+  live files. If the `reverted` marker of an apply that a stopped undo reverted completely
+  cannot be written, the cleanup records the apply the same way and says so in the job's
+  log: without its marker the apply is not undone, and an undo that reverted files does
+  not leave it without a record.
 - An undo's result counts the entries by outcome, `restored`, `removed`, `unchanged`, `kept`
   and `changed_after_review`, and names `apply_state`. The kept entries with their reasons
   are written to a paged list in the undo job's directory, in pages of 100 that a sealed
   summary authenticates as a background review's pages are, and served by
-  `GET /jobs/{id}/kept-entries`. WP-CLI `undo` prints the totals of its review, refuses an
+  `GET /jobs/{id}/kept-entries`. The route answers `not_found` only for an ID that no job
+  has; for a job that exists it says why there is no list: `not_an_undo` for a job of
+  another type, `undo_not_ended` for an undo that is queued or running, and `job_unreadable`
+  for a document that this version cannot read (2026-11-26; before, each of them was "The
+  job does not exist."). The admin page asks only for the list of an undo that has ended,
+  and WP-CLI only for the undo that it has just run and waited for, so neither meets these
+  answers in its own course. WP-CLI `undo` prints the totals of its review, refuses an
   undo with nothing to revert, and afterwards prints the kept entries and the counts, as the
   admin page shows them, also for an undo that was cancelled or failed. Neither says that a
   kept entry changed after the apply unless its reason is `changed_since_apply`. Each
@@ -394,4 +418,80 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   worker checks entry by entry against the live site in any case. A confirmation whose
   answer is lost or is no JSON is looked for by its job's type and the time of the review
   (`reviewed_at`), and followed if it started.
+- The index of names of a folder with more than 2,048 names, which a background review and the
+  apply's check before maintenance keep, holds one reading of the folder during which the
+  folder did not change. The index starts again whenever a lookup finds that the folder's
+  identity (device, inode, owner, group, mode, size, and modification and change times in
+  whole seconds) is no longer the one with which its reading began; a reading begins only
+  after the second of the folder's last change, so that a later change moves the change time
+  and with it the identity. That is what the index protects against: `readdir()` need not
+  return a name that is created, removed or renamed while the folder is read, and a reading
+  that spans ticks would miss a name created in its part already read. A folder that changed
+  after a complete reading is read again, as before. A reading that a change cuts short,
+  between two ticks or within one, which the end of each tick's part of the reading compares
+  too, is begun again and counted in the index's checkpoint, and a complete reading clears
+  the count. So is one that a change cuts short after the tick looked at the folder and before
+  it resumed the reading, where the folder no longer reaches the last name of the checkpoint
+  in the same place; with the folder's identity unchanged, such a boundary is a damaged index,
+  as before. Before, that change failed the review at once. After five readings in a row that changes cut short the folder keeps changing:
+  a preview and the apply's check stop with `file_folder_changing` (the job's log names the
+  folder in `folder`), before maintenance and without a change, and an undo review answers
+  as for a folder that cannot be read, so that it keeps the folder's entries as
+  `ambiguous_destination` and goes on, and answers so at once for the rest of the review. No
+  reading during which the folder changed answers a lookup. Before, the index started again
+  as often as the folder changed between two ticks, so that the review of a folder that
+  changed between every two ticks, such as a busy uploads or cache folder, never ended, and a
+  change within one tick failed a preview at once (2026-11-26). Completing such a review
+  with what a reading of the changing folder allows was not chosen: no reading of it is
+  consistent, so it would refuse every entry of the folder in a preview, which the
+  administrator could not tell from a refusal of the site's policy; a refusal of its own says
+  which folder to keep still. A checkpoint of an earlier version, without the count, is
+  resumed with none. The other direction is not: a checkpoint of this version is one byte
+  longer, which an earlier version refuses as an invalid index ("The checkpoint of a directory
+  spelling index is invalid."), so that a background review or an apply's check that runs
+  across a downgrade fails, before maintenance and without a change. A new preview works,
+  since a new preview or apply has a workspace of its own.
+- Whether an apply's recovery window is open is decided from `undo/attempted` and
+  `undo/reverted` only where they are established (`JobStore::undo_open()`, through
+  `Files::marker()`): a marker is there when a regular file is at its name in a folder at its
+  canonical path, and it is missing only where its name is missing from a directory at its
+  canonical path that the PHP user can search, or that directory is missing in the same
+  sense. Anything else, a name below a folder without search permission, a directory or a link
+  at its name or a link in place of its folder, is neither, and keeps what an open window
+  keeps: the staging (`restore_pins()`), the sealed review (`pinned_file_plans()`) and the
+  journal with its saved copies (`Staging::expire()`), until the 24 hours are over. The undo
+  list shows such an apply as `unreadable`, the undo and its review are refused with
+  `undo_records_unreadable`, and `ApplyJournal::attempted()` is zero only where the count is
+  established missing; the cleanup of a stopped undo takes such a reverted marker for a
+  missing one, so the apply stays open. Before, `is_file()` read every such marker as missing:
+  a count that could not be looked up meant that nothing was attempted, so that the heartbeat
+  deleted the journal and the staging lost its pin, and a link at the name of the reverted
+  marker meant an apply undone completely (2026-11-26). PHP gives no error number for a failed
+  `stat()`, and its warning names no reason, so absence is established from the folder:
+  `lstat()` of a name in a directory that the process can search fails only for a missing name
+  or for an error of the file system itself, which is read as missing, the remaining risk. The
+  rule needs no extension and reads no warning, and Linux and the BSDs answer these calls
+  alike. Not chosen: the text of PHP's warning, which for `stat()` names no reason and for
+  `fopen()` carries the C library's text, which a locale can translate; `posix_access()` with
+  `posix_get_last_error()`, which gives the error number but needs the optional POSIX
+  extension and follows a link at the name, so it could only be a second opinion that no test
+  can tell apart (it checks with the real user, as `is_executable()`, which the rule uses, does
+  too: both are `access()`, and under PHP-FPM, mod_php and the command line the real and the
+  effective user are the same); and reading the folder for
+  the name, since `readdir()` answers false at the end and on an error alike and an apply's
+  `undo/` holds an item directory for each of up to a million entries. The same rule decides
+  whether a job document is stored (`JobStore::has_document()`): one that cannot be looked up
+  counts as one that cannot be read, which blocks new jobs and keeps the staging of its restore
+  ([ADR 0014](0014-file-based-job-store.md), [ADR 0040](0040-restore-staging-expiry.md)).
+- The cleanup of an apply or undo has three parts, and each runs whatever became of the others:
+  the site leaves maintenance mode, what the job did is recorded, and its verification data is
+  removed. The record rests on the documents and the journal, by the rules of `counted_all()`
+  and `reconcile()` above, and is written once, in the first cleanup tick, also when the
+  removal has to wait for a later one. A part that fails is reported once the others have run:
+  the first failure ends the step, as any failure of a cleanup step does, and the job's log
+  names the others. Before, a marker that could not be released or verification data that
+  could not be removed, or had to wait, ended the cleanup before the record, so that an undo
+  that had reverted files recorded nothing of it, neither in its result nor in its apply, and an
+  apply did not record the entries it changed (2026-11-26).
+
 Ticks under the marker boot without the theme and ordinary plugins. Filters that these ticks consult take effect only from `wp-config.php` or a must-use plugin: `file_mod_allowed`, `backups_for_restic_capability`, filters that grant the confirming administrator a capability, and `backups_for_restic_private_dir` or `upload_dir` where they move the private directory. A restriction in a regular plugin or the theme applies at confirmation and in preflight. A capability that only such code grants stops the job at its first tick under the marker, before that tick changes a file. A change to a role's own definition reaches a process that runs many ticks only when it starts again. OPcache caches the marker per web server, and a command-line tick checks only its own cache, which says nothing about the web server's. With timestamp checks disabled, a web server that compiled an earlier marker runs it until one of its own ticks invalidates the name. A job driven only from the command line can then leave the browser's progress requests on the maintenance page, or, if the earlier marker was core's own with its long-passed time, let requests boot normally while files change.

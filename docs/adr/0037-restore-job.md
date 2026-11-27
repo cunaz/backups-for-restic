@@ -57,7 +57,9 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   The next tick takes a new lock, verifies that the snapshot still exists and reads the
   index again. After three such ticks the job fails. A snapshot that the repository does
   not hold, because the request named an unknown ID or another client forgot it, does not
-  come back: the job fails in the tick that finds out, without another attempt.
+  come back: the job fails in the tick that finds out, without another attempt, and since
+  2026-11-26 with a code of its own (`restore_snapshot_missing`); before, it was reported as
+  a repository that kept changing while the job "started over three times".
 - **A finished restore survives a failing cleanup.** When `cleaning_up` cannot remove
   working files or old jobs after the run completed, the job logs a warning and still
   succeeds. Failing it would leave a failed job that owns a complete staging directory
@@ -87,6 +89,11 @@ every restore lands in staging first ([ADR 0013](0013-restore-safety.md)).
   `staging_write` and `restore_path_missing` ([ADR 0036](0036-selected-file-staging.md),
   As built). Until then the engine reported the first two as format errors, which the job
   showed as `repository_damaged`. Free space that the host does not report lets the
-  restore go on with a warning.
+  restore go on with a warning. Since 2026-11-26 a restore whose repository key is gone
+  after its unlock ends with `key_missing`, one whose preflight finds the setup incomplete
+  with `setup_incomplete`, and the texts of its other codes are those of a restore: before,
+  the first two were "The backup is not configured completely", and a failed write in the
+  private directory was "This server cannot run the backup right now"
+  ([architecture](../02-architecture.md) §14).
 - The WP-CLI command, the screens, the download and applying files to the live site are
   separate packages; this decision only fixes where they find the files and the report.

@@ -71,8 +71,8 @@ final class ForgetTest extends TestCase {
 		$result        = Forget::apply( self::snapshots(), self::policy( $flags ) );
 		$actual_keep   = $result['keep'];
 		$actual_remove = $result['remove'];
-		sort( $actual_keep );
-		sort( $actual_remove );
+		sort( $actual_keep, SORT_STRING );
+		sort( $actual_remove, SORT_STRING );
 		self::assertSame( $keep, $actual_keep );
 		self::assertSame( $remove, $actual_remove );
 	}

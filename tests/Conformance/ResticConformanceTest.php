@@ -301,7 +301,7 @@ final class ResticConformanceTest extends TestCase {
 
 		$packs = glob( $this->server()->directory . '/data/check/data/*/*' );
 		self::assertIsArray( $packs );
-		sort( $packs );
+		sort( $packs, SORT_STRING );
 		[ $damaged, $deleted ]                  = $packs;
 		$bytes                                  = (string) file_get_contents( $damaged );
 		$bytes[ intdiv( strlen( $bytes ), 2 ) ] = chr( ord( $bytes[ intdiv( strlen( $bytes ), 2 ) ] ) ^ 0xff );
@@ -369,7 +369,10 @@ final class ResticConformanceTest extends TestCase {
 				}
 			}
 		}
-		self::assertEqualsCanonicalizing( [ $direct->hex() . ':/', $nested->hex() . ':/a/nested', $nested->hex() . ':/b/nested' ], $matches );
+		$expected = [ $direct->hex() . ':/', $nested->hex() . ':/a/nested', $nested->hex() . ':/b/nested' ];
+		sort( $expected, SORT_STRING );
+		sort( $matches, SORT_STRING );
+		self::assertSame( $expected, $matches );
 		self::assertStringContainsString( 'no errors were found', $cli->must( [ 'check', '--read-data' ] ) );
 		self::assertContains( 'tree_unreadable', array_column( $this->plugin_check( $repository )['findings'], 'code' ) );
 	}

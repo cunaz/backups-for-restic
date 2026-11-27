@@ -237,7 +237,7 @@ final class MutationProcess {
 				}
 			}
 		}
-		sort( $names );
+		sort( $names, SORT_STRING );
 		return $names;
 	}
 

@@ -116,7 +116,7 @@ final class MysqliConnection implements Connection {
 	 * @throws \RuntimeException If the client cannot be started or reports an error.
 	 */
 	public static function import( string $database, array $files ): void {
-		sort( $files );
+		sort( $files, SORT_STRING );
 		$output  = (string) tempnam( sys_get_temp_dir(), 'bfr-import-' );
 		$process = proc_open( self::client( $database ), [ [ 'pipe', 'r' ], [ 'file', $output, 'w' ], [ 'redirect', 1 ] ], $pipes );
 		if ( ! is_resource( $process ) ) {

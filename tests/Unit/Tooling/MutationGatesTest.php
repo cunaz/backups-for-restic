@@ -84,9 +84,9 @@ final class MutationGatesTest extends TestCase {
 				}
 			}
 		}
-		sort( $configured );
+		sort( $configured, SORT_STRING );
 		$gates = array_keys( self::gates() );
-		sort( $gates );
+		sort( $gates, SORT_STRING );
 		self::assertSame( $gates, $configured, 'Each gate has one composer script.' );
 		$workflows = (array) glob( $root . '/.github/workflows/*.yml' );
 		self::assertNotEmpty( $workflows );

@@ -357,7 +357,7 @@ final class MaintenanceJobTest extends TestCase {
 		$snapshots = glob( self::$server->directory . '/data/crowded/snapshots/*' );
 		self::assertIsArray( $snapshots );
 		self::assertCount( 3, $snapshots );
-		sort( $snapshots );
+		sort( $snapshots, SORT_STRING );
 		file_put_contents( $snapshots[1], 'not an encrypted snapshot' );
 		[ $runner, $store ] = $this->components( self::$server, 'crowded', $site, [] );
 
