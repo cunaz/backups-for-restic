@@ -350,6 +350,32 @@ final class DatabaseServersTest extends TestCase {
 		self::assertStringStartsWith( 'The database server a.example.com:3306 has run for 3610 seconds, but the gate started 3611 seconds ago:', $restarted[0] );
 	}
 
+	public function test_a_server_is_held_to_the_time_at_which_its_question_began(): void {
+		// The gate started at 1,000 and has run for an hour. Each server booted ten seconds before
+		// it; its uptime is read first, and its other answers then take 30 seconds.
+		$base                = self::answers();
+		$hosts               = array_keys( $base );
+		$now                 = 4600;
+		[ $answers, $asked ] = DatabaseServers::asked(
+			$hosts,
+			1000,
+			static function ( string $host ) use ( &$now, $base ): array {
+				$answer = [ 'Uptime' => (string) ( $now - 990 ) ] + (array) $base[ $host ];
+				$now   += 30;
+				return $answer;
+			},
+			static function () use ( &$now ): int {
+				return $now;
+			}
+		);
+		self::assertSame( array_combine( $hosts, [ 3600, 3630, 3660 ] ), $asked );
+		self::assertSame( [ '3610', '3640', '3670' ], array_column( $answers, 'Uptime' ) );
+		self::assertSame( [], DatabaseServers::after( $hosts, $answers, 3690, $asked ) );
+		// Before, the time was taken after each answer, 30 seconds past the uptime that the
+		// answer holds: every one of these servers counted as restarted.
+		self::assertCount( 3, DatabaseServers::after( $hosts, $answers, 3690, array_map( static fn ( int $seconds ): int => $seconds + 30, $asked ) ) );
+	}
+
 	public function test_the_first_server_must_answer_to_be_cleared_for_the_initial_run(): void {
 		self::assertSame( 'The database server down.invalid:3306, on which the initial test run runs, no longer answers.', DatabaseServers::first( 'down.invalid:3306' ) );
 	}

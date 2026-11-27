@@ -68,11 +68,9 @@ if ( false !== $position ) {
 		}
 	}
 } else {
-	foreach ( $hosts as $host ) {
-		$answers[ $host ] = DatabaseServers::answer( $host );
-		// A server's uptime is as old as its answer; the servers after it may take their time.
-		$asked[ $host ] = max( 0, time() - (int) $started );
-	}
+	// Each server is held to the time at which its own question began; the servers after it
+	// may take their time.
+	[ $answers, $asked ] = DatabaseServers::asked( $hosts, (int) $started );
 }
 
 $seconds  = 'after' === $mode ? max( 0, time() - (int) $started ) : 0;
