@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
@@ -738,6 +739,21 @@ final class StagingTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $undo );
 	}
 
+	public function test_the_staging_of_an_apply_whose_window_has_ended_is_counted_as_on_its_way_out(): void {
+		// The staging of a restore whose hours are over, and an apply of it whose window ended an
+		// hour ago, with the journal of a change that no undo reverted.
+		$restore     = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$apply       = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$apply->data = [ 'restore' => $restore->id ];
+		$this->jobs->save( $apply );
+		mkdir( $this->jobs->directory( $apply ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $apply ) . '/undo/attempted', '1' );
+		// The count reads the pins at the time of the clock, as the expiry does.
+		self::assertSame( 1, $this->staging->removing( 24 ) );
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( 0, $this->staging->removing( 24 ) );
+	}
+
 	public function test_an_apply_that_cannot_be_read_after_the_expiry_s_reading_keeps_the_staging_that_it_pinned_there(): void {
 		// The staging of a restore whose hours are over, which an apply keeps for its undo.
 		$restore = $this->restored( $this->clock->seconds - 3 * 86400 );
@@ -920,9 +936,9 @@ final class StagingTest extends TestCase {
 			if ( is_executable( $this->restores . '/' . $stuck->id . '/files/site' ) ) {
 				self::markTestSkipped( 'This user bypasses directory permissions.' );
 			}
-			// Before, every name in the folder counted as removed, because it could not be looked up
-			// after its removal failed, and the folder was read again until the deadline: the
-			// directory was pending, never failed, and every heartbeat spent its time on it.
+			// Before, every name in the folder counted as removed without a removal being tried,
+			// because it could not be looked up, and the folder was read again until the deadline:
+			// the directory was pending, never failed, and every heartbeat spent its time on it.
 			self::assertSame(
 				[
 					'removed' => 0,
@@ -932,6 +948,43 @@ final class StagingTest extends TestCase {
 				$staging->remove_due( 24, $this->clock->seconds + 1000 )
 			);
 			self::assertLessThan( 20, $clock->readings );
+		} finally {
+			restore_error_handler();
+			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
+				if ( is_dir( $directory . '/files/site' ) ) {
+					chmod( $directory . '/files/site', 0700 );
+				}
+			}
+		}
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_a_folder_that_can_be_searched_but_not_listed_is_a_failed_removal_that_says_so(): void {
+		$stuck  = $this->job( JobState::Failed );
+		$folder = $this->stage( $stuck->id ) . '/files/site';
+		chmod( $folder, 0300 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_readable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			try {
+				$this->staging->remove( $stuck->id, self::NO_DEADLINE );
+				self::fail( 'A folder that cannot be listed was taken for an empty one.' );
+			} catch ( StorageFailed $failure ) {
+				// Said of the listing, not of the removal of the folder, which fails as well once the
+				// folder is taken for an empty one.
+				self::assertSame( 'A folder that is being deleted in the private working directory could not be listed.', $failure->getMessage() );
+			}
+			self::assertSame(
+				[
+					'removed' => 0,
+					'pending' => 0,
+					'failed'  => 1,
+				],
+				$this->staging->remove_due( 24, self::NO_DEADLINE )
+			);
 		} finally {
 			restore_error_handler();
 			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
