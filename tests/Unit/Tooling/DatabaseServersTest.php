@@ -336,6 +336,24 @@ final class DatabaseServersTest extends TestCase {
 		self::assertSame( $problems, DatabaseServers::after( array_keys( $answers ), $answers, 3600 ) );
 	}
 
+	public function test_a_server_is_held_to_the_time_of_its_own_answer(): void {
+		// A server that booted ten seconds before the gate answers 3,600 seconds after its start;
+		// the last server takes twenty seconds more to answer.
+		$answers = self::answers( [ 'a.example.com:3306' => [ 'Uptime' => '3610' ] ] );
+		$hosts   = array_keys( $answers );
+		self::assertSame( [], DatabaseServers::after( $hosts, $answers, 3620, [ 'a.example.com:3306' => 3600 ] ) );
+		// Held to the time of the last answer, it would count as restarted.
+		self::assertCount( 1, DatabaseServers::after( $hosts, $answers, 3620 ) );
+		// A server that did restart is found by its own time as well.
+		$restarted = DatabaseServers::after( $hosts, $answers, 3620, [ 'a.example.com:3306' => 3611 ] );
+		self::assertCount( 1, $restarted );
+		self::assertStringStartsWith( 'The database server a.example.com:3306 has run for 3610 seconds, but the gate started 3611 seconds ago:', $restarted[0] );
+	}
+
+	public function test_the_first_server_must_answer_to_be_cleared_for_the_initial_run(): void {
+		self::assertSame( 'The database server down.invalid:3306, on which the initial test run runs, no longer answers.', DatabaseServers::first( 'down.invalid:3306' ) );
+	}
+
 	public function test_a_counter_that_a_server_does_not_report_fails_the_scores(): void {
 		$answers = self::answers();
 		unset( $answers['b.example.com:3306']['Performance_schema_thread_classes_lost'] );

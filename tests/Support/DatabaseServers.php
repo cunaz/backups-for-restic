@@ -156,6 +156,31 @@ final class DatabaseServers {
 	}
 
 	/**
+	 * Clears the first server before the gate, as a mutant process clears the server of its
+	 * thread (clear()). Infection's initial test run uses that server without a thread number,
+	 * so nothing else clears it: a gate that was stopped while a test had lowered
+	 * max_allowed_packet, or that left sessions behind, would fail the next gate's initial run
+	 * before any mutant process could put the server right.
+	 *
+	 * @param string $host The first server, as host:port.
+	 * @return string|null What went wrong, or null.
+	 */
+	public static function first( string $host ): ?string {
+		mysqli_report( MYSQLI_REPORT_OFF );
+		$mysqli = @new \mysqli( $host, MysqliConnection::environment( 'BFR_TEST_MYSQL_USER', 'root' ), MysqliConnection::environment( 'BFR_TEST_MYSQL_PASSWORD', '' ) );
+		if ( 0 !== $mysqli->connect_errno ) {
+			return sprintf( 'The database server %s, on which the initial test run runs, no longer answers.', $host );
+		}
+		try {
+			return self::clear( new MysqliConnection( $mysqli ), $host );
+		} catch ( Throwable $failure ) {
+			return sprintf( 'The database server %s, on which the initial test run runs, could not be cleared: %s', $host, $failure->getMessage() );
+		} finally {
+			$mysqli->close();
+		}
+	}
+
+	/**
 	 * Makes the host the server of the database suite, in this process and in the processes it
 	 * starts: PHPUnit hands a test in a process of its own either this environment or one built
 	 * from $_SERVER.
@@ -245,9 +270,13 @@ final class DatabaseServers {
 	 * @param list<string>                       $hosts   The servers, as BFR_TEST_MYSQL_HOSTS names them.
 	 * @param array<string, array<string, string>|null> $answers What each server answered.
 	 * @param int                                $seconds How long ago the gate started.
+	 * @param array<string, int>                 $asked   How long after the gate's start each server
+	 *                                                    answered, where that was noted: a server's
+	 *                                                    uptime is as old as its answer, and the
+	 *                                                    servers after it may take their time.
 	 * @return list<string> Nothing when the scores stand.
 	 */
-	public static function after( array $hosts, array $answers, int $seconds ): array {
+	public static function after( array $hosts, array $answers, int $seconds, array $asked = [] ): array {
 		if ( [] === $hosts ) {
 			return [ self::VARIABLE . ' names no database server, so it is unknown which servers the gate used: the database scores cannot be trusted.' ];
 		}
@@ -261,7 +290,8 @@ final class DatabaseServers {
 			$uptime = $answer['Uptime'] ?? '';
 			if ( 1 !== preg_match( '/\A[0-9]{1,18}\z/', $uptime ) ) {
 				$problems[] = "The database server {$host} reports no readable Uptime, so it is unknown whether it ran through the gate: the database scores cannot be trusted.";
-			} elseif ( (int) $uptime < $seconds ) {
+			} elseif ( (int) $uptime < ( $asked[ $host ] ?? $seconds ) ) {
+				$seconds    = $asked[ $host ] ?? $seconds;
 				$problems[] = "The database server {$host} has run for {$uptime} seconds, but the gate started {$seconds} seconds ago: the server restarted during the gate, the tests that ran on it then failed or skipped whatever the mutation, and the database scores cannot be trusted.";
 			}
 			foreach ( PerformanceSchemaCheck::problems( array_intersect_key( $answer, array_flip( [ 'performance_schema', ...PerformanceSchemaCheck::COUNTERS ] ) ) ) as $problem ) {

@@ -638,8 +638,12 @@ and the plain database suite reads only `BFR_TEST_MYSQL_HOST`, as before.
 
 `bin/check-database-servers.php` checks the servers before the gate: every one answers, no two
 are one server (`server_uuid`), all run the version of the first, and their Performance Schema
-is on. After the gate, a failed one too, it checks that every server ran through it without a
-restart (`Uptime`), which would have failed or skipped the tests on it and reset its counters,
+is on. It then clears the first server as a mutant process clears its own, because the initial
+test run has no such process: a gate that was stopped while a test had lowered
+`max_allowed_packet` would otherwise fail the next one's initial run. After the gate, a failed
+one too, it checks that every server ran through it without a restart (`Uptime`, held to the
+time of that server's own answer), which would have failed or skipped the tests on it and reset
+its counters,
 and that its Performance Schema could instrument every thread: a server out of thread instances
 leaves connections out of `performance_schema.processlist` while `Threads_connected` counts
 them, and the exchange's session check (`SwapCatalog::complete()`) then fails whatever the

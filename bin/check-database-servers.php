@@ -9,10 +9,13 @@
  *
  * before: every server that BFR_TEST_MYSQL_HOSTS names answers with the account of
  * BFR_TEST_MYSQL_USER and BFR_TEST_MYSQL_PASSWORD, no two of them are one server (server_uuid),
- * all run the version of the first, and their Performance Schema is on.
+ * all run the version of the first, and their Performance Schema is on. Then the first server,
+ * on which Infection's initial test run runs, is cleared of what an earlier gate left: other
+ * sessions and a lowered max_allowed_packet (DatabaseServers::first()).
  * after: every server still answers, has run since STARTED, the Unix time at which the gate
  * started, so that no restart cut off the tests on it or reset its counters, and its Performance
- * Schema could instrument every thread (tests/Support/PerformanceSchemaCheck.php).
+ * Schema could instrument every thread (tests/Support/PerformanceSchemaCheck.php). Each server's
+ * uptime is held to the time of its own answer.
  *
  * --answers FILE reads what each server answers from a JSON object of hosts and answers, null
  * or a missing host for one that does not answer, instead of asking the servers, for
@@ -51,6 +54,7 @@ if ( 'before' !== $mode && ( 'after' !== $mode || 1 !== preg_match( '/\A[0-9]{1,
 $hosts    = DatabaseServers::hosts( getenv( DatabaseServers::VARIABLE ) );
 $position = array_search( '--answers', $arguments, true );
 $answers  = [];
+$asked    = [];
 if ( false !== $position ) {
 	$file    = $arguments[ $position + 1 ] ?? '';
 	$decoded = is_file( $file ) ? json_decode( (string) file_get_contents( $file ), true ) : null;
@@ -66,12 +70,21 @@ if ( false !== $position ) {
 } else {
 	foreach ( $hosts as $host ) {
 		$answers[ $host ] = DatabaseServers::answer( $host );
+		// A server's uptime is as old as its answer; the servers after it may take their time.
+		$asked[ $host ] = max( 0, time() - (int) $started );
 	}
 }
 
 $seconds  = 'after' === $mode ? max( 0, time() - (int) $started ) : 0;
-$problems = 'before' === $mode ? DatabaseServers::before( $hosts, $answers ) : DatabaseServers::after( $hosts, $answers, $seconds );
-$verdict  = true;
+$problems = 'before' === $mode ? DatabaseServers::before( $hosts, $answers ) : DatabaseServers::after( $hosts, $answers, $seconds, $asked );
+if ( 'before' === $mode && [] === $problems && false === $position ) {
+	// The initial test run uses the first server and has no mutant process to clear it.
+	$problem = DatabaseServers::first( $hosts[0] );
+	if ( null !== $problem ) {
+		$problems[] = $problem;
+	}
+}
+$verdict = true;
 foreach ( $problems as $problem ) {
 	echo '::error::', $problem, "\n";
 }
