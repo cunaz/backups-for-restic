@@ -265,6 +265,8 @@ final class DatabaseChangesTest extends TestCase {
 		self::refused( 'database_not_in_snapshot', fn () => $changes->preview( $restore->id, 1 ) );
 		self::refused( 'database_not_in_snapshot', fn () => $changes->start_apply( $restore->id, 1, str_repeat( 'b', 64 ) ) );
 		self::assertSame( 'database_not_in_snapshot', JobError::from_throwable( new JobConflict( 'Refused.', [ 'code' => 'database_not_in_snapshot' ] ) )->code, 'The routes answer with the code.' );
+		// A restore that does not exist still asks for one with a rehearsal.
+		self::refused( 'database_review_required', fn () => $changes->preview( '20990101T000000Z-ffffff', 1 ) );
 	}
 
 	public function test_a_foreign_binding_is_discarded_with_its_private_names_and_nothing_is_dropped(): void {
