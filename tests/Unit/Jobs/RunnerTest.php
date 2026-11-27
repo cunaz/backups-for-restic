@@ -9,6 +9,7 @@ use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\WrongPassword;
 use BackupsForRestic\Jobs\EventLog;
 use BackupsForRestic\Jobs\Job;
@@ -226,6 +227,34 @@ final class RunnerTest extends TestCase {
 				'code'  => 'database_dump_unstable',
 				'step'  => 'backing_up',
 				'table' => 'wp_postmeta',
+			],
+			$errors[0]['context'] ?? null
+		);
+	}
+
+	public function test_the_log_of_a_failure_names_the_folder_that_a_file_review_could_not_read(): void {
+		$store                    = $this->store();
+		$this->script['planning'] = [
+			new StorageFailed(
+				'A folder kept changing while its names were being reviewed.',
+				[
+					'directory' => 'unsettled',
+					'code'      => 'file_folder_changing',
+					'folder'    => '/srv/site/wp-content/uploads/2026/11',
+				]
+			),
+		];
+		$job                      = $store->create( JobType::FilePlan, 'manual', $this->clock->seconds );
+
+		$this->runner( $store )->tick( 10 );
+
+		self::assertSame( 'file_folder_changing', $store->get( $job->id )?->error?->code );
+		$errors = array_values( array_filter( $store->log( $job )->read( 100 ), static fn ( array $event ): bool => 'error' === $event['level'] ) );
+		self::assertSame(
+			[
+				'code'   => 'file_folder_changing',
+				'step'   => 'planning',
+				'folder' => '/srv/site/wp-content/uploads/2026/11',
 			],
 			$errors[0]['context'] ?? null
 		);

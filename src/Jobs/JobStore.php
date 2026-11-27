@@ -221,17 +221,77 @@ final class JobStore {
 	}
 
 	/**
-	 * Whether a document is stored for a job ID, readable by this version or not. Together
-	 * with get() it tells a job that is gone from one whose state cannot be established.
+	 * Whether a document is stored for a job ID, readable by this version or not, or cannot be
+	 * ruled out. Together with get() it tells a job that is gone from one whose state cannot be
+	 * established. A document is gone only where its name is missing from the job's directory,
+	 * or the directory is missing (Files::marker()); one that cannot be looked up, below a job
+	 * directory that this process cannot search, counts as stored, and so does anything other
+	 * than a regular file under its name. Before, is_file() counted them as gone.
 	 *
 	 * @param string $id Job ID.
-	 * @return bool True if the job has a document.
+	 * @return bool True if the job has a document, or may have one.
 	 */
 	public function has_document( string $id ): bool {
+		// Jobs are created and pruned by other requests: Files::marker() never answers from PHP's stat cache.
+		return 1 === preg_match( self::ID_PATTERN, $id ) && false !== Files::marker( $this->directory . '/' . $id . '/job.json' );
+	}
+
+	/**
+	 * Why get() does not load a job whose document has_document() counts. `job_unreadable`
+	 * where this process reads a regular file in the job's own directory that this version
+	 * cannot parse. `job_inaccessible` where it cannot look the document up or read it: below a
+	 * job directory that it may not search, as a file that it may not read, below a link in the
+	 * place of the job directory, or as anything other than a regular file in the place of the
+	 * document. Ownership and permissions settle the second, not another plugin version; a
+	 * job directory that a command-line run as another user created (reserve_id() makes it
+	 * 0700) is one.
+	 *
+	 * @param string $id Job ID that has_document() counts.
+	 * @return string The code, job_unreadable or job_inaccessible.
+	 */
+	public function unreadable_code( string $id ): string {
 		$file = $this->directory . '/' . $id . '/job.json';
-		// Jobs are created and pruned by other requests: never answer from PHP's stat cache.
-		clearstatcache( true, $file );
-		return 1 === preg_match( self::ID_PATTERN, $id ) && is_file( $file );
+		return true === Files::marker( $file ) && is_readable( $file ) ? 'job_unreadable' : 'job_inaccessible';
+	}
+
+	/**
+	 * Refuses because of a job that get() does not load although has_document() counts its
+	 * document: its state cannot be established, so it may still be running. The refusal
+	 * carries the code of unreadable_code() and the job's ID, which its texts name.
+	 *
+	 * @param string $id Job ID that has_document() counts.
+	 * @throws JobConflict Always.
+	 */
+	public function refuse_unreadable( string $id ): never {
+		$code = $this->unreadable_code( $id );
+		JobConflict::raise(
+			'job_inaccessible' === $code ? 'The PHP user cannot open the directory or the document of a stored job.' : 'A stored job cannot be read by this version of the plugin.',
+			[
+				'job'  => $id,
+				'code' => $code,
+			]
+		);
+	}
+
+	/**
+	 * Whether the records of an apply's undo hold its recovery window open, by their presence:
+	 * true while `undo/attempted` shows an attempted change and no `undo/reverted` marks it as
+	 * undone completely, false where it is established that the apply attempted no change or was
+	 * undone completely, and null where a record cannot be established (Files::marker()). Null
+	 * keeps what the window keeps, the staging, the sealed plan and the journal, and the undo is
+	 * refused while it lasts. The 24 hours of the window are the caller's to check.
+	 *
+	 * @param Job $apply Apply.
+	 * @return bool|null Whether the records hold the window open, or null where they cannot be established.
+	 */
+	public function undo_open( Job $apply ): ?bool {
+		$workspace = $this->directory . '/' . $apply->id . '/undo';
+		$reverted  = Files::marker( $workspace . '/reverted' );
+		$attempted = Files::marker( $workspace . '/attempted' );
+		if ( true === $reverted || false === $attempted ) {
+			return false;
+		}
+		return true === $attempted && false === $reverted ? true : null;
 	}
 
 	/**
@@ -422,7 +482,8 @@ final class JobStore {
 	/**
 	 * The restores of pinned_restores() with the reason each one is kept: null while a job
 	 * that uses its staging has not ended, otherwise the time at which the undo window of the
-	 * latest apply of it ends, 24 hours after that apply ended.
+	 * latest apply of it ends, 24 hours after that apply ended. An apply whose undo records
+	 * cannot be established keeps its staging as an open window does (undo_open()).
 	 *
 	 * @param int $now Current timestamp.
 	 * @return array<string, int|null> End of the undo window by restore ID, null for a staging in use.
@@ -436,7 +497,7 @@ final class JobStore {
 			}
 			if ( ! $job->state->is_terminal() ) {
 				$pins[ $id ] = null;
-			} elseif ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $this->directory . '/' . $job->id . '/undo/attempted' ) && ! is_file( $this->directory . '/' . $job->id . '/undo/reverted' ) && ( ! array_key_exists( $id, $pins ) || ( null !== $pins[ $id ] && $pins[ $id ] < $job->finished_at + 86400 ) ) ) {
+			} elseif ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job ) && ( ! array_key_exists( $id, $pins ) || ( null !== $pins[ $id ] && $pins[ $id ] < $job->finished_at + 86400 ) ) ) {
 				$pins[ $id ] = $job->finished_at + 86400;
 			}
 		}
@@ -444,7 +505,28 @@ final class JobStore {
 	}
 
 	/**
-	 * Sealed disk plans in use by an active apply, its undo preview or the undo window.
+	 * The newest stored job that get() does not load although has_document() counts its
+	 * document. Its type and state are unknown, so it may be an apply within its recovery
+	 * window, whose undo needs the staging of its restore and its sealed review; neither
+	 * restore_pins() nor pinned_file_plans() can name them. The window of an apply ends 24 hours
+	 * after the apply ended, a time that its ID does not give, so a time-bound hold would end
+	 * early for an apply that ran long. Staging::expire() therefore removes no staging and no
+	 * sealed review while there is such a job. It blocks every new job too (require_idle()).
+	 *
+	 * @return string|null Job ID, or null if every stored document can be read.
+	 */
+	public function unreadable(): ?string {
+		foreach ( $this->ids() as $id ) {
+			if ( null === $this->get( $id ) && $this->has_document( $id ) ) {
+				return $id;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Sealed disk plans in use by an active apply, its undo preview or the undo window, also
+	 * that of an apply whose undo records cannot be established (undo_open()).
 	 *
 	 * @param int $now Current time.
 	 * @return array<string,true> Pinned plan IDs.
@@ -458,8 +540,7 @@ final class JobStore {
 			if ( ! is_string( $plan ) ) {
 				continue;
 			}
-			$workspace = $this->directory . '/' . $job->id . '/undo';
-			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && is_file( $workspace . '/attempted' ) && ! is_file( $workspace . '/reverted' ) ) ) {
+			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job ) ) ) {
 				$pins[ $plan ] = true;
 			}
 		}
@@ -524,13 +605,20 @@ final class JobStore {
 	 *
 	 * @param bool $uninstall Also finish cleanup for interrupted, deactivated jobs.
 	 * @return \Generator<int, Job> Jobs holding their original cleanup identity.
-	 * @throws StorageFailed If uninstall cannot verify a stored job's ownership records.
+	 * @throws StorageFailed If uninstall cannot verify a stored job's ownership records, with the
+	 *                       job's ID and the code of unreadable_code().
 	 */
 	public function pending_database_cleanups( bool $uninstall ): \Generator {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
 			if ( $uninstall && null === $job && $this->has_document( $id ) ) {
-				throw new StorageFailed( 'An unreadable job must be recovered before uninstalling.' );
+				StorageFailed::raise(
+					'An unreadable job must be recovered before uninstalling.',
+					[
+						'job'  => $id,
+						'code' => $this->unreadable_code( $id ),
+					]
+				);
 			}
 			if ( null !== $job && JobType::Restore === $job->type && isset( $job->data['database_binding'] ) && ( $uninstall || $job->state->is_terminal() ) ) {
 				yield $job;
@@ -558,9 +646,11 @@ final class JobStore {
 	}
 
 	/**
-	 * Requires a store with no active job and no unreadable job document. Called while the
-	 * creation lock holds. An unknown layout cannot prove that a job has finished, even if
-	 * its raw state field looks familiar; no part of that layout is interpreted here.
+	 * Requires a store with no active job and no unreadable job document, which includes a
+	 * document that cannot be looked up (has_document()); refuse_unreadable() names it and
+	 * says which of the two it is. Called while the creation lock holds.
+	 * An unknown layout cannot prove that a job has finished, even if its raw state field looks
+	 * familiar; no part of that layout is interpreted here.
 	 *
 	 * The private tables of a database restore that belong to another database server are
 	 * not on this one, so they cannot reach a backup and need no cleanup here. Only a new
@@ -572,14 +662,8 @@ final class JobStore {
 	private function require_idle( ?JobType $type = null ): void {
 		foreach ( $this->ids() as $id ) {
 			$job = $this->get( $id );
-			if ( null === $job && is_file( $this->directory . '/' . $id . '/job.json' ) ) {
-				JobConflict::raise(
-					'A stored job cannot be read by this version of the plugin.',
-					[
-						'job'  => $id,
-						'code' => 'job_unreadable',
-					]
-				);
+			if ( null === $job && $this->has_document( $id ) ) {
+				$this->refuse_unreadable( $id );
 			}
 			if ( null !== $job && $job->state->is_terminal() && isset( $job->data['database_owner'], $job->data['database_foreign'] ) ) {
 				if ( JobType::DatabaseApply === $type ) {

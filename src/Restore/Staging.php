@@ -23,6 +23,7 @@ use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Jobs\Restore\RestoreServices;
 use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Storage\FileLock;
+use BackupsForRestic\Storage\Files;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -210,7 +211,8 @@ final class Staging {
 
 	/**
 	 * How many directories are on their way out: due and not yet set aside, or set aside and
-	 * not yet deleted completely.
+	 * not yet deleted completely. While a stored job cannot be read, what is due stays
+	 * (expire()), so only what was set aside is on its way out.
 	 *
 	 * @param int $hours Hours a staging directory is kept after its job finished.
 	 * @return int Number of directories.
@@ -218,7 +220,7 @@ final class Staging {
 	 */
 	public function removing( int $hours ): int {
 		$survey = $this->survey( $hours );
-		return count( $survey['due'] ) + count( $survey['removing'] );
+		return ( null === $this->jobs->unreadable() ? count( $survey['due'] ) : 0 ) + count( $survey['removing'] );
 	}
 
 	/**
@@ -232,7 +234,8 @@ final class Staging {
 	 *                   null if nothing is staged for the job.
 	 * @throws InvalidArgument With the code invalid_job_id if the ID is not one of a job.
 	 * @throws JobConflict If the job is a restore that has not ended, or with the code
-	 *                     job_unreadable if its document cannot be read.
+	 *                     job_unreadable or job_inaccessible if its document cannot be read
+	 *                     (JobStore::refuse_unreadable()).
 	 * @throws StorageFailed If the directory cannot be set aside or deleted.
 	 */
 	public function remove( string $id, float $deadline ): ?bool {
@@ -273,13 +276,7 @@ final class Staging {
 		}
 		$job = $this->jobs->get( $id );
 		if ( null === $job && $this->jobs->has_document( $id ) ) {
-			JobConflict::raise(
-				'A stored job cannot be read by this version of the plugin.',
-				[
-					'job'  => $id,
-					'code' => 'job_unreadable',
-				]
-			);
+			$this->jobs->refuse_unreadable( $id );
 		}
 		// Only a restore stages. An active job of another type has nothing here to wait for,
 		// and the answer for it is the one for a job without staging.
@@ -379,6 +376,16 @@ final class Staging {
 	 * failed and tried again by the next call; it never keeps the staging of other restores
 	 * from expiring.
 	 *
+	 * While a stored job cannot be read (JobStore::unreadable()), no staging is set aside and no
+	 * sealed review is removed: that job may be an apply within its recovery window whose undo
+	 * needs them. Before, the staging of its restore expired with its own hours and the sealed
+	 * review after one, while the apply's journal stayed, so that the undo offered once the
+	 * document could be read again was refused with file_staging_gone. No undo workspace goes
+	 * either while that lasts: the job that cannot be read may be an undo that is queued or
+	 * running, whose apply's journal stays beyond the window as long as that undo is active.
+	 * Otherwise undo workspaces are decided by their own apply's records, as before, and what
+	 * was set aside is deleted.
+	 *
 	 * @param int   $hours Staging lifetime.
 	 * @param float $deadline Deletion deadline.
 	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
@@ -387,13 +394,14 @@ final class Staging {
 		$active       = $this->jobs->active();
 		$now          = $this->clock->now()[0];
 		$pinned_plans = $this->jobs->pinned_file_plans( $now );
+		$held         = null !== $this->jobs->unreadable();
 		$failed       = 0;
 		foreach ( $this->jobs->file_changes() as $job ) {
 			if ( $this->late( $deadline ) ) {
 				break;
 			}
 			try {
-				if ( JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
+				if ( ! $held && JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
 					if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
 						unset( $job->data['plan_retained'] );
 						$this->jobs->save( $job );
@@ -402,12 +410,19 @@ final class Staging {
 			} catch ( PluginException ) {
 				++$failed;
 			}
+			if ( $held ) {
+				// The job that cannot be read may be an undo of this apply that is queued or
+				// running, which active() does not see: no journal goes while that lasts.
+				continue;
+			}
 			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) || ( JobType::FilePlan === $active?->type && true === ( $active->data['undo'] ?? false ) && $job->id === ( $active->data['subject'] ?? null ) ) ) {
 				continue;
 			}
 			try {
 				$undo = $this->jobs->directory( $job ) . '/undo';
-				if ( $job->finished_at + 86400 <= $this->clock->now()[0] || is_file( $undo . '/reverted' ) || ! is_file( $undo . '/attempted' ) ) {
+				// Only an ended window, or records that establish that none is open, let the journal go.
+				if ( $job->finished_at + 86400 <= $this->clock->now()[0] || false === $this->jobs->undo_open( $job ) ) {
+					$this->close( $undo );
 					$this->delete( $undo, $deadline );
 				}
 			} catch ( PluginException ) {
@@ -418,7 +433,7 @@ final class Staging {
 		$removed = 0;
 		$pending = 0;
 		$aside   = $survey['removing'];
-		foreach ( $survey['due'] as $id ) {
+		foreach ( $held ? [] : $survey['due'] as $id ) {
 			if ( in_array( self::REMOVING . $id, $aside, true ) ) {
 				// An earlier removal under this name is deleted below; then this one can follow.
 				++$pending;
@@ -474,7 +489,7 @@ final class Staging {
 				continue;
 			}
 			$job = $this->jobs->get( $name );
-			if ( null === $job ? $this->jobs->has_document( $name ) : ! $job->state->is_terminal() ) {
+			if ( null === $job ? $this->jobs->has_document( $name ) || self::undecided( $this->directory . '/' . $name ) : ! $job->state->is_terminal() ) {
 				continue;
 			}
 			$staged = $this->describe( $name, $job, $hours );
@@ -543,6 +558,21 @@ final class Staging {
 			$database_report,
 			true === ( $job->data['fresh_install'] ?? false )
 		);
+	}
+
+	/**
+	 * Whether the staging directory of a job whose document is gone cannot be told from a
+	 * leftover: a directory in which its report can neither be found as a file nor be missing
+	 * (Files::marker()), because this process cannot search it, or because something other than
+	 * a file has the report's name. Such a directory is not touched, as one whose job document
+	 * cannot be read; before, it was removed at once as a leftover without a report.
+	 *
+	 * @param string $path Staging directory.
+	 * @return bool Whether its report can neither be found nor be missing.
+	 */
+	private static function undecided( string $path ): bool {
+		clearstatcache( true, $path );
+		return ! is_link( $path ) && is_dir( $path ) && null === Files::marker( $path . '/' . RestoreServices::REPORT );
 	}
 
 	/**
@@ -615,6 +645,38 @@ final class Staging {
 			StorageFailed::raise( 'A directory of a staging directory could not be removed.' );
 		}
 		return true;
+	}
+
+	/**
+	 * Makes the end of an apply's recovery window durable before its journal is deleted. The
+	 * count of attempted changes goes first, and its removal is synchronised: without the count
+	 * the window is closed, whatever else is left (JobStore::undo_open()). delete() takes the
+	 * entries in readdir() order and stops at its deadline after any of them. Before, one that
+	 * stopped after the undone marker and before the count left an attempted change that no
+	 * undo had reverted: the window of an apply undone completely was open again, and the apply
+	 * was offered for undo until its 24 hours ended. tmpfs lists the newest entry first, which
+	 * the undone marker is; ext4 lists by a hash of the name.
+	 *
+	 * @param string $undo Undo workspace of an apply whose window has ended.
+	 * @throws StorageFailed If the count is there and cannot be removed.
+	 */
+	private function close( string $undo ): void {
+		clearstatcache( true, $undo );
+		if ( is_link( $undo ) || ! is_dir( $undo ) ) {
+			// No journal: a link in its place is removed as a link (delete()), never followed.
+			return;
+		}
+		$attempted = $undo . '/attempted';
+		clearstatcache( true, $attempted );
+		if ( ! is_link( $attempted ) && ! is_file( $attempted ) ) {
+			// Missing, or the folder of a damaged journal, which delete() removes as it comes.
+			return;
+		}
+		if ( ! unlink( $attempted ) && self::exists( $attempted ) ) {
+			StorageFailed::raise( 'The count of an apply\'s attempted changes could not be removed.' );
+		}
+		// The journal is a record in the apply's directory, synchronised in one order with its documents.
+		Files::sync_directory( $undo, $this->jobs->observer() );
 	}
 
 	/**

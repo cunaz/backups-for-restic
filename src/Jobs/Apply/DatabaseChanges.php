@@ -62,7 +62,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	public const array DISCARD_KEPT = [ 'live_database', 'private_tables', 'job_record' ];
 
 	/** Codes of a refused review or discard of a binding, or of the end of its listing, which say what is the case. */
-	public const array DISCARD_REFUSALS = [ 'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'database_discarded_missing', 'job_unreadable' ];
+	public const array DISCARD_REFUSALS = [ 'database_binding_missing', 'database_binding_discarded', 'database_binding_verified', 'database_binding_unverified', 'database_binding_busy', 'database_discard_changed', 'database_discarded_missing', 'job_unreadable', 'job_inaccessible' ];
 
 	/**
 	 * Codes of a review or discard of a binding that failed, which say what failed: any other
@@ -339,7 +339,7 @@ final readonly class DatabaseChanges implements StepProvider {
 	 * @param string $apply Owning database apply.
 	 * @param int    $user Confirming WordPress user, 0 for WP-CLI without a selected user.
 	 * @return DiscardReview Review.
-	 * @throws JobConflict With the code database_binding_missing if no database apply with this ID holds a binding, job_unreadable if the job's document cannot be read, database_binding_discarded if its binding was discarded already, database_binding_busy while the job or an undo of it is queued or running, database_binding_verified if the connected database holds its tables, database_binding_unverified if the connected server does not say which server it is, and database_binding_unreadable if the record of the binding cannot be read.
+	 * @throws JobConflict With the code database_binding_missing if no database apply with this ID holds a binding, job_unreadable or job_inaccessible (JobStore::refuse_unreadable()) if the job's document cannot be read, database_binding_discarded if its binding was discarded already, database_binding_busy while the job or an undo of it is queued or running, database_binding_verified if the connected database holds its tables, database_binding_unverified if the connected server does not say which server it is, and database_binding_unreadable if the record of the binding cannot be read.
 	 * @throws DatabaseFailed With the code database_discard_failed if the database server could not be asked.
 	 * @throws StorageFailed With the code database_discard_storage if the jobs in the private directory could not be read.
 	 */
@@ -536,7 +536,8 @@ final readonly class DatabaseChanges implements StepProvider {
 	private function discard_facts( string $apply, int $user ): array {
 		$owner = $this->jobs->get( $apply );
 		if ( null === $owner && $this->jobs->has_document( $apply ) ) {
-			JobConflict::raise( 'A stored job cannot be read by this version of the plugin.', [ 'code' => 'job_unreadable' ] );
+			// With its code, job_unreadable or job_inaccessible, and the job's ID.
+			$this->jobs->refuse_unreadable( $apply );
 		}
 		if ( null === $owner || JobType::DatabaseApply !== $owner->type ) {
 			JobConflict::raise( 'This job holds no database restore binding.', [ 'code' => 'database_binding_missing' ] );

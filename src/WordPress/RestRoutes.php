@@ -57,6 +57,9 @@ final class RestRoutes {
 	/** Seconds a request may spend on deleting a staging directory; the heartbeat finishes the rest. */
 	private const float REMOVAL_SECONDS = 10.0;
 
+	/** The codes of a stored job that cannot be read (JobStore::refuse_unreadable()). */
+	private const array STORED_JOB_CODES = [ 'job_inaccessible', 'job_unreadable' ];
+
 	/**
 	 * Creates the routes.
 	 *
@@ -381,7 +384,7 @@ final class RestRoutes {
 		try {
 			$job = $this->container->jobs()->create( $type, 'manual', time(), $data );
 		} catch ( JobConflict $conflict ) {
-			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
+			return $this->conflict( $conflict );
 		}
 		Cron::chain( $this->container );
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ], 201 );
@@ -397,7 +400,7 @@ final class RestRoutes {
 		$id  = Decoded::string( $request->get_url_params()['id'] ?? null );
 		$job = $this->container->jobs()->get( $id );
 		if ( null === $job ) {
-			return $this->error( 'not_found', 404 );
+			return $this->missing_job( $id );
 		}
 		if ( ! $job->state->is_terminal() && false === get_transient( 'backups_for_restic_poll' ) ) {
 			set_transient( 'backups_for_restic_poll', 1, 5 );
@@ -417,9 +420,10 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Response.
 	 */
 	public function cancel_job( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$job = $this->container->runner()->cancel( Decoded::string( $request->get_url_params()['id'] ?? null ), [ 'user' => get_current_user_id() ] );
+		$id  = Decoded::string( $request->get_url_params()['id'] ?? null );
+		$job = $this->container->runner()->cancel( $id, [ 'user' => get_current_user_id() ] );
 		if ( null === $job ) {
-			return $this->error( 'not_found', 404 );
+			return $this->missing_job( $id );
 		}
 		return $this->respond( [ 'job' => $this->job_summary( $job ) ] );
 	}
@@ -432,9 +436,10 @@ final class RestRoutes {
 	 */
 	public function job_log( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$jobs = $this->container->jobs();
-		$job  = $jobs->get( Decoded::string( $request->get_url_params()['id'] ?? null ) );
+		$id   = Decoded::string( $request->get_url_params()['id'] ?? null );
+		$job  = $jobs->get( $id );
 		if ( null === $job ) {
-			return $this->error( 'not_found', 404 );
+			return $this->missing_job( $id );
 		}
 		return $this->respond(
 			[
@@ -636,7 +641,7 @@ final class RestRoutes {
 			if ( 'restore_in_use' === ( $context['code'] ?? null ) ) {
 				return $this->error( 'restore_in_use', 409 );
 			}
-			return $this->error( 'job_unreadable' === JobError::from_throwable( $conflict )->code ? 'job_unreadable' : 'restore_active', 409 );
+			return in_array( JobError::from_throwable( $conflict )->code, self::STORED_JOB_CODES, true ) ? $this->conflict( $conflict ) : $this->error( 'restore_active', 409 );
 		}
 		if ( null === $complete ) {
 			return $this->error( 'restore_not_found', 404 );
@@ -766,7 +771,8 @@ final class RestRoutes {
 			// not ended and a document that cannot be read each say what is the case.
 			$code = $conflict->context()['code'] ?? null;
 			return match ( $code ) {
-				'kept_list_unavailable', 'undo_not_ended', 'job_unreadable' => $this->error( $code, 409 ),
+				'kept_list_unavailable', 'undo_not_ended' => $this->error( $code, 409 ),
+				'job_unreadable', 'job_inaccessible' => $this->conflict( $conflict ),
 				'not_an_undo' => $this->error( $code, 404 ),
 				default => $this->error( 'not_found', 404 ),
 			};
@@ -967,6 +973,10 @@ final class RestRoutes {
 	 */
 	private function discard_error( PluginException $refused ): \WP_Error {
 		$code = JobError::from_throwable( $refused )->code;
+		if ( $refused instanceof JobConflict && in_array( $code, self::STORED_JOB_CODES, true ) ) {
+			// A stored job that cannot be read is answered with the texts that name it.
+			return $this->conflict( $refused );
+		}
 		return match ( true ) {
 			in_array( $code, DatabaseChanges::DISCARD_REFUSALS, true ) => $this->error( $code, 409 ),
 			in_array( $code, DatabaseChanges::DISCARD_FAILURES, true ) => $this->error( $code, 500 ),
@@ -1182,7 +1192,7 @@ final class RestRoutes {
 	 */
 	private function plan_error( InvalidArgument|JobConflict $refused ): \WP_Error {
 		if ( $refused instanceof JobConflict ) {
-			return $this->error( JobError::from_throwable( $refused )->code, 409 );
+			return $this->conflict( $refused );
 		}
 		return $this->error( 'database_review_required', 400 );
 	}
@@ -1203,7 +1213,7 @@ final class RestRoutes {
 			return $this->error( 'live_plan_changed', 409 );
 		}
 		if ( $refused instanceof JobConflict ) {
-			return $this->error( in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'file_preview_expired', 'job_unreadable' ], true ) ? $code : 'live_plan_conflict', 409 );
+			return in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'undo_records_unreadable', 'file_preview_expired', ...self::STORED_JOB_CODES ], true ) ? $this->conflict( $refused ) : $this->error( 'live_plan_conflict', 409 );
 		}
 		if ( $refused instanceof InvalidArgument ) {
 			return $this->error( in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 );
@@ -1334,7 +1344,7 @@ final class RestRoutes {
 			// names get the certificate of another address that was tested.
 			$this->setup()->save_server( self::text( $request, 'server' ), $report, self::text( $request, 'username' ), $this->secret_param( $request, 'password' ), fn ( string $url ): \Closure => $this->keep_candidate_ca( $request, $url === $report->url ) );
 		} catch ( JobConflict $conflict ) {
-			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
+			return $this->conflict( $conflict );
 		} catch ( ValidationFailed $e ) {
 			return $this->validation_error( $e );
 		} catch ( InvalidArgument $e ) {
@@ -1460,7 +1470,7 @@ final class RestRoutes {
 			delete_transient( 'backups_for_restic_snapshots' );
 			$kit = RecoveryKit::deliver( $this->container, 'create' );
 		} catch ( JobConflict $conflict ) {
-			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
+			return $this->conflict( $conflict );
 		} catch ( PluginException $e ) {
 			if ( 'password_too_short' === ( $e->context()['code'] ?? null ) ) {
 				return $this->error( 'password_too_short', 400 );
@@ -1486,7 +1496,7 @@ final class RestRoutes {
 			RecoveryKit::ca_certificate( $this->container );
 			$job = $this->setup()->connect( $this->secret_param( $request, 'password' ), time() );
 		} catch ( JobConflict $conflict ) {
-			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
+			return $this->conflict( $conflict );
 		} catch ( InvalidArgument ) {
 			return $this->error( 'configuration', 400 );
 		} catch ( PluginException $e ) {
@@ -1544,7 +1554,7 @@ final class RestRoutes {
 		try {
 			$this->container->jobs()->while_idle( fn () => $this->change_ca( $pem ) );
 		} catch ( JobConflict $conflict ) {
-			return $this->error( JobError::from_throwable( $conflict )->code, 409 );
+			return $this->conflict( $conflict );
 		}
 		$this->container->refresh();
 		return $this->respond( [ 'ca_certificate' => null === $pem ? 'none' : 'uploaded' ] );
@@ -1879,6 +1889,55 @@ final class RestRoutes {
 		$response = new \WP_REST_Response( $data, $status );
 		$response->header( 'Cache-Control', $sensitive ? 'no-store' : 'no-cache' );
 		return $response;
+	}
+
+	/**
+	 * The answer to a refused request: its code with the code's texts, and for a stored job
+	 * that cannot be read (JobStore::refuse_unreadable()) the texts that name that job, with
+	 * its ID as `job`.
+	 *
+	 * @param JobConflict $conflict Refusal.
+	 * @return \WP_Error Error.
+	 */
+	private function conflict( JobConflict $conflict ): \WP_Error {
+		$code = JobError::from_throwable( $conflict )->code;
+		$job  = $conflict->context()['job'] ?? null;
+		return in_array( $code, self::STORED_JOB_CODES, true ) && is_string( $job ) ? $this->stored_job_error( $code, $job ) : $this->error( $code, 409 );
+	}
+
+	/**
+	 * The answer for a job ID that JobStore::get() does not load: 404 `not_found` where no job
+	 * has it, and the refusal of a stored job that cannot be read where its document is there
+	 * or cannot be ruled out (JobStore::has_document()), so that every route says of that job
+	 * what the refusal of a new job says.
+	 *
+	 * @param string $id Job ID of the request.
+	 * @return \WP_Error Error.
+	 */
+	private function missing_job( string $id ): \WP_Error {
+		$jobs = $this->container->jobs();
+		return $jobs->has_document( $id ) ? $this->stored_job_error( $jobs->unreadable_code( $id ), $id ) : $this->error( 'not_found', 404 );
+	}
+
+	/**
+	 * The 409 of a stored job that cannot be read, with texts that name it (Messages::stored_job())
+	 * and its ID as `job`.
+	 *
+	 * @param string $code job_inaccessible or job_unreadable.
+	 * @param string $id   Job ID.
+	 * @return \WP_Error Error.
+	 */
+	private function stored_job_error( string $code, string $id ): \WP_Error {
+		$texts = Messages::stored_job( $code, $id );
+		return new \WP_Error(
+			'backups_for_restic_' . $code,
+			$texts['message'],
+			[
+				'status' => 409,
+				'hint'   => $texts['hint'],
+				'job'    => $id,
+			]
+		);
 	}
 
 	/**
