@@ -200,6 +200,16 @@ final class RestoreBlobBatchTest extends TestCase {
 		self::assertSame( 2, $this->counted->loads['data'] );
 	}
 
+	public function test_a_blob_of_another_pack_between_two_adjacent_ones_ends_the_group(): void {
+		$ids     = $this->pack( [ 'first', 'second' ] );
+		$other   = $this->pack( [ 'elsewhere' ] );
+		$content = [ $ids[0], $other[0], $ids[1] ];
+		// The second blob follows the first in its pack, but not in the file.
+		self::assertSame( [ 'first' ], $this->read( $content, 0 ) );
+		self::assertSame( [ 1 => 'elsewhere' ], $this->read( $content, 1 ) );
+		self::assertSame( [ 2 => 'second' ], $this->read( $content, 2 ) );
+	}
+
 	public function test_cross_pack_groups_resume_at_the_next_blob(): void {
 		$first = $this->pack( [ 'first' ] );
 		$next  = $this->pack( [ 'second', 'third' ] );
@@ -463,6 +473,7 @@ final class RestoreBlobBatchTest extends TestCase {
 		} catch ( IndexTooLarge $error ) {
 			self::assertSame( 'The next blob of the restore does not fit beside the memory already in use.', $error->getMessage() );
 			self::assertSame( [ 'blob_bytes', 'code' ], array_keys( $error->context() ) );
+			self::assertSame( MemoryBudget::rest( $entry, $entry->length, true ), $error->context()['blob_bytes'], 'What opening the blob takes, the whole range being the blob.' );
 			self::assertSame( 'restore_blob_memory', $error->context()['code'] );
 			self::assertInstanceOf( InsufficientDecodingMemory::class, $error->getPrevious() );
 		} finally {

@@ -687,6 +687,7 @@ final class MemoryBudgetTest extends TestCase {
 		self::assertSame( 2 * self::BLOCK, MemoryBudget::rest( $small, self::filling( 225 ) + 100000, true ), 'A range in a block gives back nothing to count on: its pages stay with PHP.' );
 		$filled = new PackEntry( BlobType::Data, $id, 0, self::filling( 200 ) );
 		self::assertSame( 2 * self::BLOCK, MemoryBudget::rest( $filled, self::filling( 511 ), true ), 'Nor does a range that fills a block.' );
+		self::assertSame( self::BLOCK, MemoryBudget::rest( $filled, self::filling( 200 ), true ), 'A small blob that is the whole range: its stored bytes are the range, two copies follow.' );
 		$third = new PackEntry( BlobType::Data, $id, 0, self::filling( 170 ) );
 		self::assertSame( self::BLOCK, MemoryBudget::rest( $third, self::filling( 170 ) + 100000, false ), 'The stored bytes and two copies without nonce and tag share a block.' );
 	}
