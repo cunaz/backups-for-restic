@@ -517,7 +517,8 @@ final readonly class DatabaseChanges implements StepProvider {
 	/**
 	 * The entry of a database apply in the list of discarded bindings: while it lists the tables
 	 * of its discarded binding (JobStore::discard_listed_until()), and if its record names the
-	 * database, the server and the tables.
+	 * database, the server and at least one table; an entry of the list that is no table name is
+	 * left out.
 	 *
 	 * @param Job $job Database apply.
 	 * @param int $now Unix time.
@@ -529,6 +530,11 @@ final readonly class DatabaseChanges implements StepProvider {
 		if ( null === $until || $until <= $now || ! is_array( $record ) || ! is_string( $record['database'] ?? null ) || ! is_string( $record['server'] ?? null ) || ! is_array( $record['tables'] ?? null ) ) {
 			return null;
 		}
+		// A record that names no table leaves nothing to remove by hand and nothing to mark.
+		$tables = array_values( array_filter( $record['tables'], static fn ( mixed $name ): bool => is_string( $name ) && '' !== $name ) );
+		if ( [] === $tables ) {
+			return null;
+		}
 		return [
 			'job'      => $job->id,
 			'restore'  => self::text( $job, 'restore' ),
@@ -536,7 +542,7 @@ final readonly class DatabaseChanges implements StepProvider {
 			'via'      => is_string( $record['via'] ?? null ) ? $record['via'] : '',
 			'database' => $record['database'],
 			'server'   => $record['server'],
-			'tables'   => array_values( array_filter( $record['tables'], 'is_string' ) ),
+			'tables'   => $tables,
 			'until'    => $until,
 		];
 	}

@@ -1040,10 +1040,13 @@ final class DatabaseChangesTest extends TestCase {
 		];
 		$broken = [];
 		foreach ( [
-			'database' => 7,
-			'server'   => null,
-			'tables'   => 'bfr_r_x',
-		] as $field => $value ) {
+			[ 'database', 7 ],
+			[ 'server', null ],
+			[ 'tables', 'bfr_r_x' ],
+			// Before, a list of entries that are no table names was listed empty, and could be marked.
+			[ 'tables', [ null, 5 ] ],
+			[ 'tables', [ '' ] ],
+		] as [ $field, $value ] ) {
 			$job = $this->stranded( sprintf( '20260101T00000%dZ-cccccc', count( $broken ) + 2 ) );
 			unset( $job->data['database_owner'] );
 			$job->data['database_discarded'] = [ $field => $value ] + $record;
