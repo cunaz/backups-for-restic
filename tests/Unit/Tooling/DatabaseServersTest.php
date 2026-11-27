@@ -404,12 +404,14 @@ final class DatabaseServersTest extends TestCase {
 	 * @return array<string, array{list<string>, array<string, array<string, string>|null>|null, int, string}>
 	 */
 	public static function checks(): array {
+		// The times are those of the suite's start, where PHPUnit asks for the data: the seconds
+		// that the script prints grow by what the suite took until the test, so none is expected.
 		return [
 			'before, on servers of their own'    => [ [ 'before' ], self::answers(), 0, 'Database servers of the gate, one per Infection thread: 3, each a server of its own: a.example.com:3306 (8.4.13, server_uuid 00000000-0000-0000-0000-000000000000), b.example.com:3306 (8.4.13, server_uuid 00000000-0000-0000-0000-000000000001), c.example.com:3306 (8.4.13, server_uuid 00000000-0000-0000-0000-000000000002).' ],
 			'before, one server named twice'     => [ [ 'before' ], self::answers( [ 'b.example.com:3306' => [ 'server_uuid' => '00000000-0000-0000-0000-000000000000' ] ] ), 1, '::error::a.example.com:3306 and b.example.com:3306 are one database server' ],
 			'before, a server not answering'     => [ [ 'before' ], [ 'a.example.com:3306' => null ] + self::answers(), 1, '::error::The database server a.example.com:3306 does not answer' ],
 			'after, a minute after the start'    => [ [ 'after', (string) ( time() - 60 ) ], self::answers(), 0, 'Every database server of the gate ran through it without a restart (' ],
-			'after, a restart'                   => [ [ 'after', (string) ( time() - 9000 ) ], self::answers(), 1, '::error::The database server a.example.com:3306 has run for 7200 seconds, but the gate started 9' ],
+			'after, a restart'                   => [ [ 'after', (string) ( time() - 9000 ) ], self::answers(), 1, '::error::The database server a.example.com:3306 has run for 7200 seconds, but the gate started ' ],
 			'after, servers that do not answer'  => [ [ 'after', (string) time() ], null, 1, '::error::The database server a.example.com:3306 does not answer after the gate' ],
 			'no mode'                            => [ [], self::answers(), 1, '::error::Usage: php bin/check-database-servers.php before, or after with the Unix time at which the gate started.' ],
 			'after without a start'              => [ [ 'after' ], self::answers(), 1, '::error::Usage:' ],
