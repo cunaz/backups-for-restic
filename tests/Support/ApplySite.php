@@ -10,7 +10,9 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Support;
 
 use BackupsForRestic\Crypto\SystemRandom;
+use BackupsForRestic\Jobs\Apply\ApplyJournal;
 use BackupsForRestic\Jobs\Apply\FileChanges;
+use BackupsForRestic\Jobs\Apply\FilePlans;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
 use BackupsForRestic\Jobs\JobStore;
@@ -118,23 +120,42 @@ final class ApplySite {
 			$this->staging,
 			$clock,
 			1,
-			function ( bool $config, string $id, ?string $uploads = null ): ApplyPlan {
-				$restore = $this->jobs->get( $id );
-				Assert::assertNotNull( $restore );
-				$layout        = SiteLayout::from_job( $restore, $this->live, $uploads ?? $this->uploads );
-				$plan          = new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
-				$this->plans[] = $plan;
-				return $plan;
-			},
+			$this->planner(),
 			new FileMaintenance( $this->live ),
 			fn ( ?int $user = null ): bool => $this->allowed && ( null === $user || in_array( $user, $this->administrators, true ) ),
-			new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free ),
+			$this->space(),
 			fn (): string => $this->uploads
 		);
 	}
 
-	/** Writes the report of the staged files, with a link at the given path that the restore skips. */
-	public function write_report( string $link ): void {
+	/**
+	 * The site's file policy, with the uploads root a job was confirmed with or the current one.
+	 *
+	 * @return \Closure(bool, string, string|null=): ApplyPlan
+	 */
+	public function planner(): \Closure {
+		return function ( bool $config, string $id, ?string $uploads = null ): ApplyPlan {
+			$restore = $this->jobs->get( $id );
+			Assert::assertNotNull( $restore );
+			$layout        = SiteLayout::from_job( $restore, $this->live, $uploads ?? $this->uploads );
+			$plan          = new ApplyPlan( [ $this->live ], [ $this->live . '/.maintenance', $this->live . '/plugins/active' ], [ $this->live . '/wp-config.php' ], $config, $layout );
+			$this->plans[] = $plan;
+			return $plan;
+		};
+	}
+
+	/** The private volume, with the free space the site reports. */
+	public function space(): FileSpace {
+		return new FileSpace( $this->jobs->storage_directory(), fn ( string $path ): ?int => $this->free );
+	}
+
+	/** The background reviews of the site, as the job service builds them. */
+	public function file_plans(): FilePlans {
+		return new FilePlans( $this->jobs, $this->staging, $this->clock, 1, $this->planner(), new ApplyJournal( $this->jobs, $this->staging, $this->clock, 1 ), $this->space() );
+	}
+
+	/** Writes the report of the staged files, with a link at the given path that the restore skips, if any. */
+	public function write_report( ?string $link ): void {
 		$iterator = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $this->files, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::SELF_FIRST );
 		$lines    = [];
 		foreach ( $iterator as $item ) {
@@ -147,14 +168,16 @@ final class ApplySite {
 				JSON_THROW_ON_ERROR
 			);
 		}
-		$lines[] = json_encode(
-			[
-				'path' => $link,
-				'type' => 'symlink',
-				'mode' => 0777,
-			],
-			JSON_THROW_ON_ERROR
-		);
+		if ( null !== $link ) {
+			$lines[] = json_encode(
+				[
+					'path' => $link,
+					'type' => 'symlink',
+					'mode' => 0777,
+				],
+				JSON_THROW_ON_ERROR
+			);
+		}
 		file_put_contents( dirname( $this->files ) . '/entries.jsonl', implode( "\n", $lines ) . "\n" );
 	}
 
