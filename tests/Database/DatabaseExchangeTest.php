@@ -2002,4 +2002,108 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertSame( 'database_exchange_changed', $failed->error?->code );
 		self::assertSame( 'snapshot-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
 	}
+
+	public function test_a_row_limit_left_on_the_session_cuts_nothing_that_the_review_exchange_undo_and_expiry_read(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		$expected = $services['changes']->preview( $services['source']->id, 1 );
+		self::assertTrue( $expected['applicable'], implode( ',', $expected['blockers'] ) );
+		// As the server's settings, an account's init_connect or code that ran earlier in the
+		// request can leave it. On MySQL 8 it cuts SHOW as well as SELECT, without an error.
+		$this->db->execute( 'SET SESSION sql_select_limit = 1' );
+		$preview = $services['changes']->preview( $services['source']->id, 1 );
+		$applied = self::applied( $services );
+		// One row each: the limit does not cut these reads of the test.
+		$created = $this->present( 'wp_snapshot_only' );
+		$title   = $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'];
+		$undone  = self::undo( $services, $applied );
+		$owner   = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $owner );
+		$services['clock']->seconds = $owner->data['retained_until'] + 1;
+		$expired                    = self::expire_all( $services, $owner );
+		$limit                      = $this->db->rows( 'SELECT @@SESSION.sql_select_limit AS rows_limit' )[0]['rows_limit'];
+		$this->db->execute( 'SET SESSION sql_select_limit = DEFAULT' );
+		self::assertSame( '1', $limit, 'Every part of the restore gives the session its own limit back.' );
+		// The account's grants, the session's settings and the live tables were cut to one row:
+		// the review named missing privileges and InnoDB table locks that are there.
+		self::assertSame( $expected, $preview );
+		self::assertSame( JobState::Succeeded, $undone->state, $undone->error?->message ?? '' );
+		self::assertTrue( $created, 'The table that only the backup has was brought live with the others.' );
+		self::assertSame( 'snapshot-post', $title );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		self::assertArrayNotHasKey( 'database_owner', $expired->data );
+		$token = $applied->data['database_owner']['token'];
+		self::assertSame( [], array_values( array_filter( $this->private_tables(), static fn ( string $name ): bool => str_contains( $name, $token ) ) ), 'Expiry dropped every table of the generation.' );
+	}
+
+	public function test_a_row_limit_left_on_the_session_does_not_hide_a_live_table_from_the_review(): void {
+		$this->mysql_only();
+		// A live table under the name of a table of the backup that the InnoDB dictionary does
+		// not hold: the exchange could not move it aside.
+		$this->db->execute( 'CREATE TABLE wp_snapshot_only (id INT PRIMARY KEY) ENGINE=MyISAM' );
+		$services = $this->services();
+		$this->db->execute( 'SET SESSION sql_select_limit = 1' );
+		$preview = $services['changes']->preview( $services['source']->id, 1 );
+		$this->db->execute( 'SET SESSION sql_select_limit = DEFAULT' );
+		self::assertSame( [ 'live_object_identity' ], $preview['blockers'] );
+	}
+
+	public function test_the_safe_updates_mode_of_the_session_does_not_refuse_the_exchange_or_its_undo(): void {
+		$this->mysql_only();
+		$plan   = $this->prepared();
+		$worker = new TableExchange( $this->direct );
+		// The copy of the protected options selects by a part of their names, which no key serves.
+		$this->db->execute( 'SET SESSION sql_safe_updates = 1' );
+		$worker->run( $plan, 1, false, self::continuity() );
+		$applied = $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'];
+		$worker->run( $plan, 1, true, self::continuity() );
+		$safe = $this->db->rows( 'SELECT @@SESSION.sql_safe_updates AS safe' )[0]['safe'];
+		$this->db->execute( 'SET SESSION sql_safe_updates = 0' );
+		self::assertSame( 'snapshot-post', $applied );
+		self::assertSame( 'undone', $worker->status( $plan ) );
+		self::assertSame( 'live-post', $this->db->rows( 'SELECT title FROM wp_posts' )[0]['title'] );
+		self::assertSame( '1', $safe, 'The exchange gives the session its own mode back.' );
+	}
+
+	public function test_the_review_names_a_live_table_in_another_script_on_a_latin1_connection(): void {
+		$this->db->execute( 'CREATE TABLE `wp_архив` (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$services = $this->services();
+		// A site whose DB_CHARSET is latin1: its connection returns results in latin1.
+		$this->db->mysqli->set_charset( 'latin1' );
+		$preview = $services['changes']->preview( $services['source']->id, 1 );
+		$this->db->mysqli->set_charset( 'utf8mb4' );
+		self::assertContains(
+			[
+				'table'  => 'wp_архив',
+				'action' => 'keep',
+			],
+			$preview['entries']
+		);
+	}
+
+	public function test_the_session_list_finds_an_account_named_in_another_script_on_a_latin1_connection(): void {
+		$this->mysql_only();
+		$user = 'bfr_тест_' . bin2hex( random_bytes( 4 ) );
+		$host = $this->admin->rows( "SELECT SUBSTRING_INDEX(USER(), '@', -1) AS host" )[0]['host'];
+		self::assertMatchesRegularExpression( '/\A[A-Za-z0-9.:-]+\z/', $host );
+		$account  = "'" . $user . "'@'" . $host . "'";
+		$password = bin2hex( random_bytes( 24 ) );
+		$endpoint = getenv( 'BFR_TEST_MYSQL_HOST' );
+		$endpoint = is_string( $endpoint ) && '' !== $endpoint ? $endpoint : 'localhost';
+		$this->admin->execute( 'CREATE USER ' . $account . " IDENTIFIED BY '" . $password . "'" );
+		try {
+			$this->admin->execute( 'GRANT SELECT ON `' . str_replace( '_', '\\_', $this->database ) . '`.* TO ' . $account );
+			// PROCESS shows the sessions of every account, so that the list can be shown complete.
+			$this->admin->execute( 'GRANT PROCESS ON *.* TO ' . $account );
+			$own = new \mysqli( $endpoint, $user, $password, $this->database );
+			$own->set_charset( 'latin1' );
+			$peer = new \mysqli( $endpoint, $user, $password, $this->database );
+			$id   = (string) $peer->query( 'SELECT CONNECTION_ID() AS id' )->fetch_assoc()['id'];
+			self::assertSame( [ $id ], ( new SwapCatalog( new Direct( $own ) ) )->sessions( $this->database ), 'The drain would wait for no one.' );
+			$peer->close();
+			$own->close();
+		} finally {
+			$this->admin->execute( 'DROP USER ' . $account );
+		}
+	}
 }

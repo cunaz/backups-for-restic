@@ -16,11 +16,30 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Refuses an active foreign transaction before any DDL could commit it. Settings come
  * from the server or the validated manifest, never from SQL commands in a dump file.
+ *
+ * The one place where the restore sets the session for its own statements (ADR 0043, "Session
+ * settings"): the import, the rehearsal's report, the review's inspection, the exchange, its
+ * undo and expiry all run in a Session. Besides the character set, SQL mode, time zone and
+ * checks of the import, it lifts what the server's settings, the account's init_connect or
+ * code that ran earlier in the request can leave on the site's session and what would change
+ * a result without an error: a row limit, which cuts SELECT and, on MySQL 8, SHOW short; notes
+ * that do not count as warnings, which the port refuses; the safe-updates mode, under which a
+ * generated statement is refused; and a completion type under which COMMIT and ROLLBACK chain
+ * a new transaction or close the connection. Its own ROLLBACK statements name the completion.
  */
 final class Session {
 
-	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_mode' ];
-	private const array BOOLEANS  = [ 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create' ];
+	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_select_limit', 'sql_notes', 'sql_safe_updates', 'completion_type', 'sql_mode' ];
+	private const array BOOLEANS  = [ 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_notes', 'sql_safe_updates' ];
+
+	/** Numeric settings, restored as decimal numbers: a hex literal there is a number of its own. */
+	private const array NUMBERS = [ 'sql_select_limit' ];
+
+	/**
+	 * Ends the guard's transaction and an unfinished batch without chaining a new one or closing
+	 * the connection, whatever completion_type the session has.
+	 */
+	private const string ROLLBACK = 'ROLLBACK AND NO CHAIN NO RELEASE';
 
 	/**
 	 * Exact previous session values; SQL mode is restored last.
@@ -58,16 +77,23 @@ final class Session {
 			if ( in_array( $name, self::BOOLEANS, true ) && ! in_array( $previous[ $name ], [ '0', '1' ], true ) ) {
 				throw new DatabaseFailed( 'A database boolean setting has an unexpected value.' );
 			}
+			if ( in_array( $name, self::NUMBERS, true ) && 1 !== preg_match( '/\A[0-9]{1,20}\z/', (string) $previous[ $name ] ) ) {
+				throw new DatabaseFailed( 'A database numeric setting has an unexpected value.' );
+			}
 		}
 		$this->previous = $previous;
 		// Without SESSION, this fails inside an active transaction (MySQL and MariaDB).
 		// Consume its one-transaction characteristic immediately, before any restore DDL.
 		$connection->execute( 'SET TRANSACTION READ WRITE' );
 		$connection->execute( 'START TRANSACTION' );
-		$connection->execute( 'ROLLBACK' );
+		$connection->execute( self::ROLLBACK );
 		try {
 			$connection->execute( 'SET NAMES utf8mb4' );
-			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ?? '+00:00' ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1' );
+			// A session can inherit a row limit from the server or have one left by code that ran
+			// before (MySQL 8 applies it to SHOW as well), notes that do not count as warnings,
+			// the safe-updates mode and a completion type that chains or releases. The largest
+			// limit is the server's default; DEFAULT would be the server's setting again.
+			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ?? '+00:00' ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1, sql_select_limit = 18446744073709551615, sql_notes = 1, sql_safe_updates = 0, completion_type = 0' );
 		} catch ( \Throwable $error ) {
 			$this->close();
 			throw $error;
@@ -86,15 +112,16 @@ final class Session {
 		}
 		$first = null;
 		try {
-			$this->connection->execute( 'ROLLBACK' );
+			$this->connection->execute( self::ROLLBACK );
 		} catch ( \Throwable $error ) {
 			$first = $error;
 		}
 		foreach ( $this->previous as $name => $value ) {
 			try {
-				// Boolean variables accept numeric 0/1 or the names OFF/ON. Hex string
-				// literals containing the characters "0"/"1" are not those numbers.
-				$literal = in_array( $name, self::BOOLEANS, true ) ? $value : ( null === $value ? 'NULL' : self::literal( $value ) );
+				// Boolean variables accept numeric 0/1 or the names OFF/ON, numeric ones the
+				// number. Hex string literals containing the characters "0"/"1" are not those
+				// numbers, and in a numeric setting a hex literal is the number of its bytes.
+				$literal = in_array( $name, [ ...self::BOOLEANS, ...self::NUMBERS ], true ) ? $value : ( null === $value ? 'NULL' : self::literal( $value ) );
 				try {
 					$this->connection->execute( 'SET SESSION ' . $name . ' = ' . $literal );
 				} catch ( DatabaseFailed $failure ) {

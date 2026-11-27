@@ -17,7 +17,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class SessionDrainTest extends TestCase {
 
-	private const string OWN = 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()';
+	private const string OWN = 'SELECT CAST(USER AS BINARY) AS account,CAST(DB AS BINARY) AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()';
 
 	private const string COUNTS = "SELECT (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Threads_connected') AS connected,(SELECT COUNT(*) FROM performance_schema.processlist WHERE COMMAND<>'Daemon') AS listed";
 

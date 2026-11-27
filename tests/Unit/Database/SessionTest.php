@@ -49,15 +49,44 @@ final class SessionTest extends TestCase {
 		$db         = $this->connection();
 		$session    = new Session( $db, StagedDump::write( $this->directory ) );
 		$db->writes = [];
-		$db->refuse = 'ROLLBACK';
+		$db->refuse = 'ROLLBACK AND NO CHAIN NO RELEASE';
 		try {
 			$session->close();
 			self::fail( 'A failed rollback must be reported.' );
 		} catch ( DatabaseFailed $expected ) {
-			self::assertCount( 10, $db->writes );
-			self::assertSame( 'ROLLBACK', $db->writes[0] );
+			self::assertCount( 14, $db->writes );
+			self::assertSame( 'ROLLBACK AND NO CHAIN NO RELEASE', $db->writes[0] );
 			self::assertContains( 'SET SESSION character_set_results = NULL', $db->writes );
-			self::assertSame( 'SET SESSION sql_mode = ' . Session::literal( 'NO_BACKSLASH_ESCAPES' ), $db->writes[9] );
+			self::assertSame( 'SET SESSION sql_mode = ' . Session::literal( 'NO_BACKSLASH_ESCAPES' ), $db->writes[13] );
+		}
+	}
+
+	public function test_the_settings_that_change_a_result_without_an_error_are_set_and_restored(): void {
+		$db      = $this->connection();
+		$session = new Session( $db, StagedDump::write( $this->directory ) );
+		self::assertSame( 'ROLLBACK AND NO CHAIN NO RELEASE', $db->writes[2], 'The guard ends its transaction whatever completion_type says.' );
+		$set = implode( "\n", $db->writes );
+		foreach ( [ 'sql_select_limit = 18446744073709551615', 'sql_notes = 1', 'sql_safe_updates = 0', 'completion_type = 0' ] as $setting ) {
+			self::assertStringContainsString( $setting, $set );
+		}
+		$db->writes = [];
+		$session->close();
+		self::assertSame( 'ROLLBACK AND NO CHAIN NO RELEASE', $db->writes[0] );
+		// A number as a number: in a numeric setting a hex literal is the number of its bytes.
+		self::assertContains( 'SET SESSION sql_select_limit = 1', $db->writes );
+		self::assertContains( 'SET SESSION sql_notes = 0', $db->writes );
+		self::assertContains( 'SET SESSION sql_safe_updates = 1', $db->writes );
+		self::assertContains( 'SET SESSION completion_type = ' . Session::literal( 'CHAIN' ), $db->writes );
+	}
+
+	public function test_an_unexpected_row_limit_refuses_before_changing_the_session(): void {
+		$db        = $this->connection();
+		$db->limit = '1; DROP TABLE wp_users';
+		try {
+			new Session( $db, StagedDump::write( $this->directory ) );
+			self::fail( 'Invalid numeric metadata must not become SQL syntax.' );
+		} catch ( DatabaseFailed $expected ) {
+			self::assertSame( [], $db->writes );
 		}
 	}
 
@@ -104,6 +133,7 @@ final class SessionTest extends TestCase {
 			public string $refuse     = '';
 			public string $autocommit = '1';
 			public string $checks     = '0';
+			public string $limit      = '1';
 			public function rows( string $sql ): array {
 				return [
 					[
@@ -116,6 +146,10 @@ final class SessionTest extends TestCase {
 						'foreign_key_checks'       => $this->checks,
 						'unique_checks'            => $this->checks,
 						'sql_quote_show_create'    => $this->checks,
+						'sql_select_limit'         => $this->limit,
+						'sql_notes'                => '0',
+						'sql_safe_updates'         => '1',
+						'completion_type'          => 'CHAIN',
 						'sql_mode'                 => 'NO_BACKSLASH_ESCAPES',
 					],
 				];

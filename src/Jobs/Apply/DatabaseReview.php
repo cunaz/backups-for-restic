@@ -133,7 +133,9 @@ final readonly class DatabaseReview {
 				$blockers[] = $finding['code'];
 			}
 		}
-		$rows = $connection->rows( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND CAST(LEFT(TABLE_NAME,' . strlen( $this->prefix ) . ') AS BINARY)=' . Session::literal( $this->prefix ) . ' ORDER BY TABLE_NAME LIMIT ' . ( Manifest::MAX_TABLES + 1 ) );
+		// The names as stored, whatever character set the site's connection returns results in:
+		// a latin1 connection would turn a name in another script into question marks.
+		$rows = $connection->rows( 'SELECT CAST(TABLE_NAME AS BINARY) AS TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND CAST(LEFT(TABLE_NAME,' . strlen( $this->prefix ) . ') AS BINARY)=' . Session::literal( $this->prefix ) . ' ORDER BY TABLE_NAME LIMIT ' . ( Manifest::MAX_TABLES + 1 ) );
 		if ( count( $rows ) > Manifest::MAX_TABLES ) {
 			$blockers[] = 'table_count';
 		}

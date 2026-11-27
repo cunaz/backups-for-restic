@@ -456,4 +456,82 @@ final class DatabaseImportTest extends TestCase {
 		);
 		self::assertTrue( $importer->tick()['done'] );
 	}
+
+	/**
+	 * A row limit as the server's settings, an account's init_connect or code that ran earlier
+	 * in the request leave it on the site's session. Each test has a connection of its own, so
+	 * what a test sets ends with it.
+	 */
+	public function test_a_row_limit_left_on_the_session_leaves_the_rehearsal_report_complete(): void {
+		$this->db->execute( "CREATE TABLE wp_options (option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, option_name VARCHAR(191) NOT NULL UNIQUE, option_value LONGTEXT NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes') ENGINE=InnoDB" );
+		$this->db->execute( "INSERT INTO wp_options (option_name, option_value) VALUES ('wp_user_roles', 'a:0:{}'), ('active_plugins', 'a:0:{}')" );
+		$this->db->execute( 'CREATE TABLE wp_checked (id INT PRIMARY KEY, CONSTRAINT wp_checked_positive CHECK (id > 0)) ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE wp_rechecked (id INT PRIMARY KEY, CONSTRAINT wp_rechecked_positive CHECK (id > 0)) ENGINE=InnoDB' );
+		$manifest = $this->stage_dump();
+		// CHECK constraint names are unique in a schema: the shadows take them over.
+		$this->db->execute( 'DROP TABLE wp_checked, wp_rechecked' );
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$connection = new RestoreConnection( $this->db->mysqli );
+		$expected   = ( new RehearsalReport( $connection ) )->read( $manifest, $importer->tables );
+		$this->db->execute( 'SET SESSION sql_select_limit = 1' );
+		$limited = ( new RehearsalReport( $connection ) )->read( $manifest, $importer->tables );
+		$limit   = $this->db->rows( 'SELECT @@SESSION.sql_select_limit AS rows_limit' )[0]['rows_limit'];
+		$this->db->execute( 'SET SESSION sql_select_limit = DEFAULT' );
+		self::assertSame( '1', $limit, 'The report gives the session its own limit back.' );
+		// The columns of the snapshot's options table and the tables with a CHECK constraint
+		// were cut to one row before, without an error.
+		self::assertSame( $expected, $limited );
+		self::assertSame( base64_encode( 'a:0:{}' ), $limited['wordpress_state']['user_roles'] );
+		self::assertSame( [ 'wp_checked', 'wp_rechecked' ], array_column( array_filter( $limited['findings'], static fn ( array $finding ): bool => 'snapshot_check' === $finding['code'] ), 'table' ) );
+	}
+
+	/** @return iterable<string, array{string}> */
+	public static function completions(): iterable {
+		yield 'chained' => [ 'CHAIN' ];
+		yield 'released' => [ 'RELEASE' ];
+	}
+
+	#[DataProvider( 'completions' )]
+	public function test_a_completion_type_of_the_session_neither_chains_a_transaction_nor_closes_the_connection( string $completion ): void {
+		$this->db->execute( 'CREATE TABLE wp_after (id INT PRIMARY KEY) ENGINE=InnoDB' );
+		$manifest = StagedDump::write( $this->directory );
+		$this->db->execute( "SET SESSION completion_type = '" . $completion . "'" );
+		$importer = $this->importer( $manifest );
+		// Every tick and the report open a Session of their own on the one connection, as a
+		// request does that runs several ticks.
+		$this->finish( $importer );
+		$report = ( new RehearsalReport( new RestoreConnection( $this->db->mysqli ) ) )->read( $manifest, $importer->tables );
+		// A write of WordPress after the restore's work is committed, as without the restore.
+		$this->db->execute( 'INSERT INTO wp_after VALUES (1)' );
+		$other = MysqliConnection::connect( $this->database );
+		self::assertNotNull( $other );
+		self::assertSame( [ [ 'id' => '1' ] ], $other->rows( 'SELECT id FROM wp_after' ), 'The site\'s session is not left in a transaction.' );
+		self::assertSame( $completion, $this->db->rows( 'SELECT @@SESSION.completion_type AS completion' )[0]['completion'] );
+		self::assertSame( 4, $report['rows'] );
+		self::assertSame( '4', $other->rows( 'SELECT COUNT(*) AS n FROM `' . $importer->tables->shadow( 0 ) . '`' )[0]['n'] );
+	}
+
+	public function test_a_note_refuses_its_batch_also_when_the_session_does_not_count_notes(): void {
+		$sql = "-- backups-for-restic-dump/1 table `wp_rows`\n"
+			. "SET NAMES utf8mb4;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n"
+			. "SET SESSION time_zone = '+00:00';\nSET FOREIGN_KEY_CHECKS = 0;\nSET UNIQUE_CHECKS = 0;\n"
+			. "DROP TABLE IF EXISTS `wp_rows`;\n"
+			. "CREATE TABLE `wp_rows` (`a` int, `b` date) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+			// A DATE column drops the time with a note, not a warning.
+			. "INSERT INTO `wp_rows` (`a`,`b`) VALUES (1,'2026-01-01 10:00:00');\n"
+			. "-- end table rows=1 bytes=0\n";
+		$importer = $this->importer( StagedDump::write( $this->directory, StagedDump::with_updated_trailer( $sql, 1 ), 1 ) );
+		$importer->tick( 1 );
+		$this->db->execute( 'SET SESSION sql_notes = 0' );
+		try {
+			$importer->tick( 1 );
+			self::fail( 'A value that the server changed with a note was imported.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 1, $refused->context()['warnings'] ?? null, $refused->getMessage() );
+		}
+		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_notes AS notes' )[0]['notes'] );
+		self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( '0', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
+	}
 }

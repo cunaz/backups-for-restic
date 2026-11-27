@@ -326,7 +326,10 @@ final readonly class SwapCatalog {
 	 */
 	private function account( string $database ): ?string {
 		try {
-			$own = $this->connection->rows( 'SELECT USER AS account,DB AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()' );
+			// The account and database as stored: the drain runs on the site's session outside a
+			// Session, and a latin1 connection would turn a name in another script into question
+			// marks, which no other session of the account would match.
+			$own = $this->connection->rows( 'SELECT CAST(USER AS BINARY) AS account,CAST(DB AS BINARY) AS current_database FROM performance_schema.processlist WHERE ID=CONNECTION_ID()' );
 		} catch ( DatabaseFailed $error ) {
 			// MySQL before 8.0.22 has no such table; a server can also deny access to it.
 			if ( ! in_array( $error->context()['code'] ?? null, [ 1044, 1142, 1146 ], true ) ) {
@@ -363,26 +366,39 @@ final readonly class SwapCatalog {
 	/**
 	 * Binds a review to the current identities and logical definitions without publishing
 	 * schema contents. Physical row counts and auto-increment counters may change normally.
+	 * The inspection runs in the restore's Session as well, as it does for the rehearsal and
+	 * the exchange: a row limit left on the site's session would otherwise cut the account's
+	 * grants, the settings and the list of live tables short without an error.
 	 *
 	 * @param list<string> $names Logical site tables in the snapshot.
 	 * @return array{inspection:Inspection,schemas:array<string,string>} Current live bindings.
+	 * @throws \Throwable If the inspection fails, or the session cannot be set or given back.
 	 */
 	public function review( array $names ): array {
-		$inspection = $this->inspect( $names );
-		$schemas    = [];
-		if ( [] === $inspection['blockers'] ) {
-			$session = new Session( $this->connection, null );
-			try {
-				foreach ( array_keys( $inspection['ids'] ) as $name ) {
-					$definition       = $this->definition( $name );
-					$schemas[ $name ] = hash( 'sha256', $definition->structure . $definition->comment );
+		$session = new Session( $this->connection, null );
+		try {
+			$inspection = $this->inspect( $names );
+			$schemas    = [];
+			if ( [] === $inspection['blockers'] ) {
+				try {
+					foreach ( array_keys( $inspection['ids'] ) as $name ) {
+						$definition       = $this->definition( $name );
+						$schemas[ $name ] = hash( 'sha256', $definition->structure . $definition->comment );
+					}
+				} catch ( FormatException ) {
+					$inspection['blockers'][] = 'live_definition';
 				}
-			} catch ( FormatException ) {
-				$inspection['blockers'][] = 'live_definition';
-			} finally {
-				$session->close();
 			}
+		} catch ( \Throwable $failure ) {
+			try {
+				$session->close();
+			} catch ( \Throwable ) {
+				// The inspection's own failure is the one to report.
+				throw $failure;
+			}
+			throw $failure;
 		}
+		$session->close();
 		return [
 			'inspection' => $inspection,
 			'schemas'    => $schemas,
