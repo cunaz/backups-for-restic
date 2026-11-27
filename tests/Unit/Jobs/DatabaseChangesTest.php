@@ -638,6 +638,16 @@ final class DatabaseChangesTest extends TestCase {
 		mkdir( $this->directory . '/jobs/20260101T000006Z-abcabc' );
 		file_put_contents( $this->directory . '/jobs/20260101T000006Z-abcabc/job.json', '{' );
 		self::refused( 'job_unreadable', $review( '20260101T000006Z-abcabc' ) );
+		// One that the PHP user cannot open is refused with its own code and the job's ID, as
+		// every other request is: a link in the place of the document is such a job.
+		mkdir( $this->directory . '/jobs/20260101T000005Z-abcabc' );
+		symlink( $this->directory . '/jobs/20260101T000006Z-abcabc/job.json', $this->directory . '/jobs/20260101T000005Z-abcabc/job.json' );
+		try {
+			$review( '20260101T000005Z-abcabc' )();
+			self::fail( 'A job that cannot be opened was reviewed.' );
+		} catch ( JobConflict $refusal ) {
+			self::assertSame( [ 'job_inaccessible', '20260101T000005Z-abcabc' ], [ $refusal->context()['code'] ?? null, $refusal->context()['job'] ?? null ] );
+		}
 		// A binding of this database, and a server that does not say which one it is.
 		$here = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ] );
 		self::refused( 'database_binding_verified', $review( $here->id ) );
