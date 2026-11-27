@@ -1412,12 +1412,12 @@ records. Configuration and startup files require offline recovery. `undo <apply-
 [--digest=<digest>]` reviews the reversal of live file changes, entry by entry, prints the
 review with its totals and its digest, and lists the entries it kept. On a terminal it asks,
 and any answer but `y` ends it with exit status 0 and undoes nothing; without one it undoes
-only with `--digest` and the digest of a review that an earlier run
-printed, while the review made again has that digest, which it keeps while every entry is
-decided as before. So the undo is bound to a review that the command printed, on a terminal
-or by its digest; a prompt cannot tell a person from a program that drives the terminal.
-`--yes`, a bare or empty
-`--digest` and a piped answer are refused. `database-discard <apply-job> [--site-url=<url> --digest=<digest>]` prints the review of
+only with `--digest` and the digest of a review that an earlier run printed, while the review
+made again has that digest, which it keeps while every entry is decided as before. So the undo
+is bound to a review that the command printed, on a terminal or by its digest; a prompt cannot
+tell a person from a program that drives the terminal. `--yes`, a bare or empty `--digest` and
+a piped answer are refused.
+`database-discard <apply-job> [--site-url=<url> --digest=<digest>]` prints the review of
 the discard of a binding whose private tables are on another database server or in another
 database, as the Restores tab shows it, with its digest, and forgets the binding once the site
 address is typed at its prompt, which needs a terminal. A script passes `--site-url` together
