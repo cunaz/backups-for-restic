@@ -1,6 +1,6 @@
 <?php
 /**
- * Whether the Performance Schema of the database gate's server instrumented every thread.
+ * Whether the Performance Schema of a server of the database gate instrumented every thread.
  *
  * @package BackupsForRestic\Tests
  */
@@ -18,7 +18,7 @@ use Throwable;
  * check fails whatever the mutation, the exchange test fails, and the database gate counts the
  * mutant as killed. The server counts such threads in Performance_schema_thread_instances_lost
  * and Performance_schema_thread_classes_lost, which start at zero with the server.
- * bin/check-performance-schema.php asks the gate's server after the gate (docs/04 §5.6).
+ * bin/check-database-servers.php asks every server of the gate after the gate (docs/04 §5.6).
  */
 final class PerformanceSchemaCheck {
 
@@ -28,7 +28,7 @@ final class PerformanceSchemaCheck {
 	/**
 	 * The server's answer: whether the Performance Schema is on, and the counters.
 	 *
-	 * @param MysqliConnection|null $connection The gate's server, as the database suite connects.
+	 * @param MysqliConnection|null $connection A server of the gate.
 	 * @return array<string, string> Nothing when the server cannot be asked.
 	 */
 	public static function status( ?MysqliConnection $connection ): array {
@@ -54,7 +54,7 @@ final class PerformanceSchemaCheck {
 	 */
 	public static function problems( array $status ): array {
 		if ( [] === $status ) {
-			return [ 'The database server of the gate cannot be asked (BFR_TEST_MYSQL_HOST, _USER, _PASSWORD), so it is unknown whether its Performance Schema listed every session: the database scores cannot be trusted.' ];
+			return [ 'The database server cannot be asked about its Performance Schema, so it is unknown whether that listed every session: the database scores cannot be trusted.' ];
 		}
 		if ( '1' !== ( $status['performance_schema'] ?? '' ) ) {
 			return [ 'The Performance Schema of the database server is off, so the exchange cannot see the other sessions and its tests fail whatever the mutation: the database scores cannot be trusted.' ];

@@ -724,6 +724,14 @@ All notable changes are documented here. The format follows
   a canary fails a gate whose mutant processes cannot write durably, and the floors are the
   measured scores. Section 5.6 of `docs/04-development-and-quality.md` lists the escaped
   mutants by class.
+- The database mutation gate counted mutants as killed that its tests did not kill. Its
+  processes shared one database server, and the tests of the database exchange, which look at
+  the whole server, could fail through what another process did there; on a slow runner its
+  fixed limit of 60 seconds also timed out mutants that the tests let escape, and Infection
+  counts a timeout as detected. Each process now runs against a server of its own, the test of
+  a row batch beyond `max_allowed_packet` runs in the gate again, and the timeouts follow the
+  time of the tests. On the same code the gate kills 80.69 % of its mutants and 84.59 % of the
+  covered ones, where it reported 81.58 % to 81.86 % and 85.52 % to 85.81 %.
 - The database restore sets what the site's database session could otherwise change without
   an error. A row limit that the server's settings, an account's `init_connect` or code earlier
   in the request left on the session cut what the review, the exchange and expiry read: the

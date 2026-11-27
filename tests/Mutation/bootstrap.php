@@ -1,7 +1,8 @@
 <?php
 /**
- * PHPUnit bootstrap of the mutation suites (tests/Mutation/phpunit.xml.dist and
- * tests/Mutation/database/phpunit.xml.dist).
+ * PHPUnit bootstrap of the mutation suites (tests/Mutation/phpunit.xml.dist). The database gate's
+ * own, tests/Mutation/database/bootstrap.php, does the same and then gives each mutant process a
+ * database server of its own.
  *
  * In a mutant process Infection serves the mutated class through a user-space file:// wrapper,
  * on which fsync() fails. MutationProcess loads the classes under mutation while that wrapper is

@@ -20,8 +20,9 @@ on:
       - 'phpunit.xml.dist'
       - 'composer.json'
       - 'composer.lock'
-      - 'bin/check-performance-schema.php'
+      - 'bin/check-database-servers.php'
       - 'bin/check-skipped-tests.php'
+      - 'bin/database-servers.sh'
       - 'bin/install-test-tools.sh'
       - 'bin/mutation-gate.sh'
       - '.github/actions/mutation-tmpdir/**'
@@ -45,25 +46,71 @@ jobs:
   mutation:
     name: Mutation testing (database code, MySQL 8.4)
     runs-on: ubuntu-24.04
-    # The gate took 112 minutes on the runner on 2026-11-23. The tests of the exchange that
-    # main gained afterwards made it about 1.6 times as slow locally.
+    # The gate took 112 minutes on the runner on 2026-11-23 with one server and three threads.
     timeout-minutes: 300
+    # One server per Infection thread, so that no mutant process meets what another one does on
+    # its server (docs/04 §5.6, tests/Support/DatabaseServers.php). Each is the image of the
+    # database job in ci.yml, by digest, with its data on tmpfs: the gate measures the tests,
+    # not the runner's disk. bin/database-servers.sh runs one thread per server that
+    # BFR_TEST_MYSQL_HOSTS names, and DatabaseServersTest checks that the list and the services
+    # agree.
     services:
-      database:
-        # The image of the database job in ci.yml, by digest.
+      database-1:
         image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_ROOT_HOST: '%'
         ports:
-          - 33306:3306
+          - 33301:3306
         options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      database-2:
+        image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 33302:3306
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      database-3:
+        image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 33303:3306
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      database-4:
+        image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 33304:3306
+        options: >-
+          --tmpfs /var/lib/mysql
           --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
     env:
-      BFR_TEST_MYSQL_HOST: 127.0.0.1:33306
+      BFR_TEST_MYSQL_HOSTS: 127.0.0.1:33301 127.0.0.1:33302 127.0.0.1:33303 127.0.0.1:33304
+      # The database suite before the gate, and Infection's initial test run, use the first.
+      BFR_TEST_MYSQL_HOST: 127.0.0.1:33301
       BFR_TEST_MYSQL_USER: root
       BFR_TEST_MYSQL_PASSWORD: root
     steps:
@@ -80,23 +127,32 @@ jobs:
       - run: bin/install-test-tools.sh infection
       # Without a server every database test skips, no mutant is covered and the scores fall;
       # fail at once and say why instead. Two classes skip in setUpBeforeClass(), which
-      # --fail-on-skipped does not count, so the JUnit log is checked.
-      - name: The database suite runs against the server
+      # --fail-on-skipped does not count, so the JUnit log is checked. The gate checks the other
+      # servers before it starts.
+      - name: The database suite runs against the first server
         run: |
           vendor/bin/phpunit --testsuite database --log-junit "$RUNNER_TEMP/database.xml"
           php bin/check-skipped-tests.php "$RUNNER_TEMP/database.xml" tests/Skips/database-mysql.txt
       - uses: ./.github/actions/mutation-tmpdir
-      # composer mutation:database passes --with-uncovered; the floors live in
-      # infection-database.json5.dist. After the gate it asks this server, the one the gate
-      # used, whether its Performance Schema could instrument every thread
-      # (bin/check-performance-schema.php); if not, the exchange's session check failed
-      # whatever the mutation, and the scores cannot be trusted.
+      # composer mutation:database passes --with-uncovered and runs one thread per server
+      # (bin/database-servers.sh); the floors live in infection-database.json5.dist. Before the
+      # gate it checks that every server answers, is a server of its own, runs the version of
+      # the first and has its Performance Schema on; after it, that none restarted and that each
+      # Performance Schema could instrument every thread (bin/check-database-servers.php). If
+      # not, tests failed or skipped whatever the mutation, and the scores cannot be trusted.
       - run: composer mutation:database -- --no-progress
       - name: Require a measured mutation score
         if: always()
         run: |
           cat .tools/infection-database/summary.log
           grep -Eq '^Total: [1-9]' .tools/infection-database/summary.log
+      # Whether the runner carried the threads: its cores, its load over the last minutes and its
+      # memory, with the servers' data on tmpfs.
+      - name: Load of the runner
+        if: always()
+        run: |
+          echo "Cores: $(nproc); load average: $(cut -d ' ' -f 1-3 /proc/loadavg)"
+          free -m
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
