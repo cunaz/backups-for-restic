@@ -630,11 +630,14 @@ final class Staging {
 	}
 
 	/**
-	 * Deletes a directory with everything in it, until the deadline. A symbolic link is
-	 * removed as a link and never followed. An entry that another request removed meanwhile
-	 * counts as removed.
+	 * Deletes a directory with everything in it, until the deadline: a staging directory, the
+	 * private data of a preview, the journal of an apply or the verification folder of a file
+	 * job. A symbolic link is removed as a link and never followed. An entry that another
+	 * request removed meanwhile counts as removed.
 	 *
-	 * No name of an entry goes into an error: the names come from a snapshot.
+	 * No name of an entry goes into an error: the names come from a snapshot. The messages say
+	 * what this function deletes in general; before, they named a staging directory, also in
+	 * the error of a file job whose verification folder could not be searched.
 	 *
 	 * @param string $path     Directory, file or link.
 	 * @param float  $deadline Unix time at which the deletion stops.
@@ -647,13 +650,13 @@ final class Staging {
 			// cannot be searched may be there all the same. Before, it counted as removed, and the
 			// folder that listed it was read again and again until the deadline.
 			if ( ! Files::missing( $path ) ) {
-				StorageFailed::raise( 'An entry of a staging directory cannot be looked up.' );
+				StorageFailed::raise( 'An entry that is being deleted in the private working directory cannot be looked up.' );
 			}
 			return true;
 		}
 		if ( is_link( $path ) || ! is_dir( $path ) ) {
 			if ( ! unlink( $path ) && ! Files::missing( $path ) ) {
-				StorageFailed::raise( 'An entry of a staging directory could not be removed.' );
+				StorageFailed::raise( 'An entry could not be deleted in the private working directory.' );
 			}
 			return true;
 		}
@@ -666,7 +669,7 @@ final class Staging {
 			}
 		} while ( [] !== $names );
 		if ( ! rmdir( $path ) && ! Files::missing( $path ) ) {
-			StorageFailed::raise( 'A directory of a staging directory could not be removed.' );
+			StorageFailed::raise( 'A folder could not be deleted in the private working directory.' );
 		}
 		return true;
 	}
@@ -718,7 +721,7 @@ final class Staging {
 		$handle = opendir( $directory );
 		if ( false === $handle ) {
 			if ( self::exists( $directory ) ) {
-				StorageFailed::raise( 'A directory of a staging directory could not be listed.' );
+				StorageFailed::raise( 'A folder that is being deleted in the private working directory could not be listed.' );
 			}
 			return [];
 		}

@@ -454,8 +454,13 @@ All notable changes are documented here. The format follows
   putting the job's files back, and neither exists for such a document.
 - A staging, preview or undo workspace with a folder that the PHP user can list but not
   search is counted as a removal that failed, and the heartbeat moves on. Before, every name
-  in that folder counted as removed, because it could not be looked up after its removal
-  failed, and the folder was read again until the heartbeat's time was up, every time.
+  in that folder counted as removed without a removal being tried, because it could not be
+  looked up, and the folder was read again until the heartbeat's time was up, every time. A
+  file apply or undo whose verification folder holds such a folder now ends, as failed with
+  the code of its type (`file_apply_failed`, `file_undo_failed`), and its log says that an
+  entry could not be looked up in the private working directory. Before, it stayed in its
+  cleanup at every tick, as the active job, and no other job could start, scheduled backups
+  included.
 - While a stored job cannot be read, no staging and no sealed review expires, no undo
   journal of an apply is deleted, and no staging is removed on request either
   (`DELETE /restores/{id}` answers with the code and ID of that job, before anything is

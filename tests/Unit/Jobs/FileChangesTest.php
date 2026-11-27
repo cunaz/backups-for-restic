@@ -1482,6 +1482,49 @@ final class FileChangesTest extends TestCase {
 		self::assertFileExists( $held . '/checkpoint' );
 	}
 
+	public function test_an_apply_whose_verification_folder_cannot_be_searched_ends_and_says_where_it_failed(): void {
+		// The staging's clock moves on a second with every reading, so that a removal that reads a
+		// folder again and again ends at its deadline; the rest of the test site keeps its clock.
+		$ticking       = new class( $this->clock ) implements Clock {
+			/** Readings so far. */
+			public int $readings = 0;
+
+			/**
+			 * @param FrozenClock $base Clock of the test.
+			 */
+			public function __construct( private FrozenClock $base ) {
+			}
+
+			public function now(): array {
+				return [ $this->base->seconds + $this->readings++, 0 ];
+			}
+		};
+		$this->staging = new Staging( $this->directory . '/restores', $this->jobs, $ticking );
+		$this->changes = $this->service( $this->clock );
+		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, new SystemRandom() );
+		$job           = $this->start();
+		// A folder in the apply's verification data that the PHP user can list but not search.
+		$folder = $this->jobs->directory( $job ) . '/verification/stuck';
+		mkdir( $folder . '/inside', 0700, true );
+		file_put_contents( $folder . '/file', 'x' );
+		chmod( $folder, 0600 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->run_job( $job, JobState::Failed );
+		} finally {
+			restore_error_handler();
+			chmod( $folder, 0700 );
+		}
+		// Before, every name in it counted as removed, the folder was read again until the tick's
+		// time was up, and the apply stayed in its cleanup at every tick as the active job. The
+		// message named a staging directory, which this folder is not.
+		self::assertSame( [ 'cleaning_up', 'file_apply_failed', 'An entry that is being deleted in the private working directory cannot be looked up.' ], [ $ended->step, $ended->error?->code, $ended->error?->message ] );
+		self::assertFileExists( $folder . '/file' );
+	}
+
 	public function test_a_stopped_undo_records_what_it_reverted_in_the_tick_in_which_its_cleanup_begins(): void {
 		[ $job, $undo ] = $this->cancelled_after_one_revert();
 		$verification   = $this->jobs->directory( $undo ) . '/verification';
