@@ -483,7 +483,10 @@ final class DatabaseImportTest extends TestCase {
 		// were cut to one row before, without an error.
 		self::assertSame( $expected, $limited );
 		self::assertSame( base64_encode( 'a:0:{}' ), $limited['wordpress_state']['user_roles'] );
-		self::assertSame( [ 'wp_checked', 'wp_rechecked' ], array_column( array_filter( $limited['findings'], static fn ( array $finding ): bool => 'snapshot_check' === $finding['code'] ), 'table' ) );
+		// In the order that the server joins them: MariaDB lists the second first.
+		$checked = array_column( array_filter( $limited['findings'], static fn ( array $finding ): bool => 'snapshot_check' === $finding['code'] ), 'table' );
+		sort( $checked, SORT_STRING );
+		self::assertSame( [ 'wp_checked', 'wp_rechecked' ], $checked );
 		// Two findings of each code, for two tables each, and one blocker of each.
 		$blockers = $limited['swap_preflight']['blockers'];
 		self::assertTrue( array_is_list( $blockers ) );
