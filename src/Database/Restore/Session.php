@@ -121,7 +121,7 @@ final class Session {
 				// Boolean variables accept numeric 0/1 or the names OFF/ON, numeric ones the
 				// number. Hex string literals containing the characters "0"/"1" are not those
 				// numbers, and in a numeric setting a hex literal is the number of its bytes.
-				$literal = in_array( $name, [ ...self::BOOLEANS, ...self::NUMBERS ], true ) ? $value : ( null === $value ? 'NULL' : self::literal( $value ) );
+				$literal = in_array( $name, self::BOOLEANS, true ) || in_array( $name, self::NUMBERS, true ) ? $value : ( null === $value ? 'NULL' : self::literal( $value ) );
 				try {
 					$this->connection->execute( 'SET SESSION ' . $name . ' = ' . $literal );
 				} catch ( DatabaseFailed $failure ) {

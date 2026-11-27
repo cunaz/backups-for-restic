@@ -97,7 +97,7 @@ final readonly class DatabaseReview {
 		$job   = $this->jobs->get( $restore );
 		$sha   = $job?->result['database_report_sha256'] ?? '';
 		$files = $this->staging->files_directory( $restore, $this->hours, $retained );
-		if ( null !== $job && JobType::Restore === $job->type && RestoreSteps::NO_DATABASE === $job->error?->code ) {
+		if ( RestoreSteps::NO_DATABASE === $job?->error?->code ) {
 			// The rehearsal found that the snapshot holds no database dump: a new one would too.
 			JobConflict::raise( 'The snapshot of this restore holds no database dump.', [ 'code' => RestoreSteps::NO_DATABASE ] );
 		}

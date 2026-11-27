@@ -6,6 +6,7 @@ namespace BackupsForRestic\Tests\Unit\Database;
 use PHPUnit\Framework\TestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\Session;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Tests\Support\StagedDump;
@@ -77,6 +78,17 @@ final class SessionTest extends TestCase {
 		self::assertContains( 'SET SESSION sql_notes = 0', $db->writes );
 		self::assertContains( 'SET SESSION sql_safe_updates = 1', $db->writes );
 		self::assertContains( 'SET SESSION completion_type = ' . Session::literal( 'CHAIN' ), $db->writes );
+	}
+
+	public function test_an_import_reads_in_the_time_zone_that_the_dump_recorded_and_everything_else_in_utc(): void {
+		StagedDump::write( $this->directory );
+		$json = str_replace( '"time_zone":"+00:00"', '"time_zone":"+05:30"', (string) file_get_contents( $this->directory . '/manifest.json' ) );
+		$db   = $this->connection();
+		new Session( $db, Manifest::parse( $json, 'wp_' ) );
+		self::assertStringContainsString( ', time_zone = ' . Session::literal( '+05:30' ) . ',', implode( "\n", $db->writes ) );
+		$other = $this->connection();
+		new Session( $other, null );
+		self::assertStringContainsString( ', time_zone = ' . Session::literal( '+00:00' ) . ',', implode( "\n", $other->writes ) );
 	}
 
 	public function test_an_unexpected_row_limit_refuses_before_changing_the_session(): void {

@@ -2068,6 +2068,8 @@ final class DatabaseExchangeTest extends TestCase {
 		$preview = $services['changes']->preview( $services['source']->id, 1 );
 		$this->db->execute( 'SET SESSION sql_select_limit = DEFAULT' );
 		self::assertSame( [ 'live_object_identity' ], $preview['blockers'] );
+		// The rehearsal's report, read without a limit, carries what its inspection found.
+		self::assertContains( 'live_object_identity', self::report( $services )['swap_preflight']['blockers'] );
 	}
 
 	public function test_the_safe_updates_mode_of_the_session_does_not_refuse_the_exchange_or_its_undo(): void {

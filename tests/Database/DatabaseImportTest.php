@@ -484,6 +484,12 @@ final class DatabaseImportTest extends TestCase {
 		self::assertSame( $expected, $limited );
 		self::assertSame( base64_encode( 'a:0:{}' ), $limited['wordpress_state']['user_roles'] );
 		self::assertSame( [ 'wp_checked', 'wp_rechecked' ], array_column( array_filter( $limited['findings'], static fn ( array $finding ): bool => 'snapshot_check' === $finding['code'] ), 'table' ) );
+		// Two findings of each code, for two tables each, and one blocker of each.
+		$blockers = $limited['swap_preflight']['blockers'];
+		self::assertTrue( array_is_list( $blockers ) );
+		self::assertSame( array_values( array_unique( $blockers ) ), $blockers );
+		self::assertContains( 'snapshot_check', $blockers );
+		self::assertContains( 'wordpress_tables', $blockers );
 	}
 
 	/** @return iterable<string, array{string}> */
