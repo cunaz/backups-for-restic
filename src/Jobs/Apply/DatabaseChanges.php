@@ -406,7 +406,7 @@ final readonly class DatabaseChanges implements StepProvider {
 						'via'  => $via,
 					] + $binding;
 					// The names are what is left to do by hand: the limit of a job's warnings must not drop them.
-					$owner->warn_kept( sprintf( 'The binding to %1$d private table names in the database %2$s on the server %3$s was discarded. Nothing was dropped; remove those that exist there by hand: %4$s', count( $binding['tables'] ), self::printable( $binding['database'] ), self::printable( $binding['server'] ), implode( ', ', $binding['tables'] ) ) );
+					$owner->warn_kept( sprintf( 'The binding to %1$d private table names in the database %2$s on the server %3$s was discarded. Nothing was dropped. Remove by hand only those that exist there and that you can verify as this restore\'s copies: a table with one of these names may be another one, such as a copy of the site\'s data on a new server: %4$s', count( $binding['tables'] ), self::printable( $binding['database'] ), self::printable( $binding['server'] ), implode( ', ', $binding['tables'] ) ) );
 					$this->jobs->save( $owner );
 					$this->jobs->log( $owner )->write(
 						'warning',

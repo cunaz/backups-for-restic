@@ -857,7 +857,7 @@ final class DatabaseChangesTest extends TestCase {
 		// It comes after the limit, and takes the place of no other warning.
 		self::assertCount( Job::MAX_WARNINGS + 1, $warnings );
 		self::assertSame( 'Warning ' . Job::MAX_WARNINGS, $warnings[ Job::MAX_WARNINGS - 1 ] );
-		self::assertStringContainsString( ' was discarded. Nothing was dropped; remove those that exist there by hand: ' . implode( ', ', $review['tables'] ), $warnings[ Job::MAX_WARNINGS ] );
+		self::assertStringContainsString( " was discarded. Nothing was dropped. Remove by hand only those that exist there and that you can verify as this restore's copies: a table with one of these names may be another one, such as a copy of the site's data on a new server: " . implode( ', ', $review['tables'] ), $warnings[ Job::MAX_WARNINGS ] );
 	}
 
 	public function test_a_warning_of_what_is_left_to_do_by_hand_never_takes_the_place_of_another(): void {
