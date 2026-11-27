@@ -418,8 +418,9 @@ final class CliCommand {
 	 * Reviews and reverses the file changes of an apply job. Each entry is reverted only if it
 	 * still is as the apply left it; an entry that changed since is kept and listed with its
 	 * reason, and stays undoable until the apply's recovery window ends. The command prints the
-	 * review with its totals and its digest. On a terminal it asks before it undoes anything; a
-	 * script confirms a review that an earlier run printed, with that review's digest.
+	 * review with its totals and its digest. On a terminal it asks before it undoes anything;
+	 * any answer but y ends the command without an error, and nothing is undone. A script
+	 * confirms a review that an earlier run printed, with that review's digest.
 	 *
 	 * ## OPTIONS
 	 *

@@ -148,7 +148,8 @@ Use the affected plugin's slug and the ID of the file apply job. Keep Backups fo
 loaded. The command reviews the undo entry by entry and prints the review, its totals and the
 review's digest.
 
-1. On a terminal, run it, read the review, and answer `y` to the question that follows it:
+1. On a terminal, run it, read the review, and answer `y` to the question that follows it.
+   Any other answer ends the command without an error, and nothing is undone:
 
    ```sh
    wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
