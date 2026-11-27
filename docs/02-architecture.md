@@ -1714,7 +1714,8 @@ and schedules are slots in the site's time zone.
   option writes still do. A job document with a higher number, or with one that is not a
   number, is not loaded. Any existing job document that cannot be read blocks `create()`
   and `while_idle()` under the creation lock; its raw state is not trusted, and pruning job
-  history leaves it alone. The refusal names the job (`job` in its context and in the REST
+  history leaves it alone, and while it lasts prunes no job at all: the job may be an apply
+  whose undo needs the document of its restore. The refusal names the job (`job` in its context and in the REST
   error data) and says why: `job_unreadable` for a regular file in the job's own directory
   that this version reads but cannot parse, `job_inaccessible` for a document that the PHP
   user cannot look up or read, below a job directory that it may not search or as a file

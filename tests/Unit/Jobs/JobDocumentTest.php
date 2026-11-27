@@ -196,6 +196,33 @@ final class JobDocumentTest extends TestCase {
 		$this->assert_blocks_changes( $store, $job );
 	}
 
+	public function test_no_job_is_pruned_while_a_stored_job_cannot_be_read(): void {
+		$store = $this->store();
+		// A restore that newer jobs push out of the history.
+		foreach ( [
+			'20260101T000000Z-0a0001' => JobType::Restore,
+			'20260102T000000Z-0a0002' => JobType::Backup,
+			'20260103T000000Z-0a0003' => JobType::Backup,
+		] as $id => $type ) {
+			$job              = new Job( $id, $type, 'manual', 1767225600 );
+			$job->state       = JobState::Succeeded;
+			$job->finished_at = 1767225660;
+			$store->save( $job );
+		}
+		// The newest job cannot be read: it may be an apply of that restore within its window,
+		// whose undo needs the restore's document, and no pin can say so.
+		$unreadable = $this->directory . '/20260104T000000Z-0a0004';
+		mkdir( $unreadable, 0700 );
+		file_put_contents( $unreadable . '/job.json', '{' );
+		// Before, the restore and both backups went, as at the end of a backup that was already
+		// running when the document became unreadable.
+		self::assertSame( 0, $store->prune( 1, 1767312000 ) );
+		self::assertNotNull( $store->get( '20260101T000000Z-0a0001' ) );
+		TempDir::remove( $unreadable );
+		self::assertSame( 2, $store->prune( 1, 1767312000 ) );
+		self::assertNull( $store->get( '20260101T000000Z-0a0001' ) );
+	}
+
 	public function test_a_document_filed_under_another_job_id_blocks_changes(): void {
 		$store = $this->store();
 		$job   = $store->create( JobType::Restore, 'manual', 1767225600 );

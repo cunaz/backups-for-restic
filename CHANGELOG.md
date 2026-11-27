@@ -358,7 +358,9 @@ All notable changes are documented here. The format follows
 - While a stored job cannot be read, no staging and no sealed review expires, no undo
   journal of an apply is deleted, and no staging is removed on request either
   (`DELETE /restores/{id}` answers with the code and ID of that job, before anything is
-  renamed). The heartbeat decides all of this from one reading of the job documents, so that
+  renamed), and the job history is not pruned, which a backup that was already running would
+  do at its end, so that the document of the restore that such an apply's undo needs stays.
+  The heartbeat decides all of this from one reading of the job documents, so that
   a job that becomes readable or unreadable meanwhile is either held or kept, not missed. Such
   a job may be an undo that still runs, whose apply's
   journal must stay beyond the window, or an apply within its recovery window: before, the staging of its restore expired with its

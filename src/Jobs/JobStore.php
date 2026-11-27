@@ -592,18 +592,27 @@ final class JobStore {
 
 	/**
 	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
-	 * know whether its job has finished.
+	 * know whether its job has finished. While any stored job cannot be read, no job is
+	 * deleted: that job may be an apply within its recovery window whose undo needs the
+	 * document of its restore, which no pin can name. A backup that was already running when
+	 * the job became unreadable prunes at its end; before, it deleted that restore's document,
+	 * without which the undo cannot be reviewed. The pins and that job come from one reading
+	 * of the documents (census()).
 	 *
 	 * @param int      $keep Number of jobs to keep.
 	 * @param int|null $now Current Unix time.
 	 * @return int Number of deleted jobs.
 	 */
 	public function prune( int $keep, ?int $now = null ): int {
+		$census = $this->census( $now ?? time() );
+		if ( null !== $census['unreadable'] ) {
+			return 0;
+		}
 		$deleted = 0;
-		$pins    = $this->pinned_restores( $now ?? time() );
+		$pins    = $census['restores'];
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
+			if ( null !== $job && $job->state->is_terminal() && ! array_key_exists( $id, $pins ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}
