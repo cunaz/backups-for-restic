@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Job {
 
-	/** The warnings that warn() keeps; those of warn_kept() come after them. */
+	/** The warnings that warn() keeps, besides those of warn_kept(), which it does not count. */
 	public const int MAX_WARNINGS = 50;
 
 	/**
@@ -159,6 +159,15 @@ final class Job {
 	public array $warnings = [];
 
 	/**
+	 * How many of the warnings warn_kept() added. warn() counts the others only, also after the
+	 * job was saved and read again: job.json keeps the number as `warnings_kept`. A document
+	 * without it counts all of its warnings, as the versions that wrote it did.
+	 *
+	 * @var int
+	 */
+	public int $warnings_kept = 0;
+
+	/**
 	 * Creates a job.
 	 *
 	 * @param string  $id         Sortable unique ID.
@@ -181,7 +190,7 @@ final class Job {
 	 * @param string $warning Text without secrets.
 	 */
 	public function warn( string $warning ): void {
-		if ( count( $this->warnings ) < self::MAX_WARNINGS ) {
+		if ( count( $this->warnings ) - $this->warnings_kept < self::MAX_WARNINGS ) {
 			$this->warnings[] = $warning;
 		}
 	}
@@ -190,13 +199,15 @@ final class Job {
 	 * Adds a warning that the limit must not drop, because it tells the administrator what is
 	 * left to do by hand: private tables to check and drop. It is added after MAX_WARNINGS as
 	 * well and takes the place of no other warning, so that one such list never replaces
-	 * another. A job gets few of them: each table is named once, in the discard of its binding
+	 * another, and warn() does not count it, so that it takes no place of a later warning
+	 * either. A job gets few of them: each table is named once, in the discard of its binding
 	 * or when its expiry keeps rebuilt tables.
 	 *
 	 * @param string $warning Text without secrets.
 	 */
 	public function warn_kept( string $warning ): void {
 		$this->warnings[] = $warning;
+		++$this->warnings_kept;
 	}
 
 	/**
@@ -229,6 +240,7 @@ final class Job {
 			'result'               => $this->result,
 			'data'                 => $this->data,
 			'warnings'             => $this->warnings,
+			'warnings_kept'        => $this->warnings_kept,
 		];
 	}
 
@@ -269,10 +281,11 @@ final class Job {
 		if ( is_array( $error ) ) {
 			$job->error = new JobError( Decoded::string( $error['code'] ?? 'internal' ), Decoded::string( $error['message'] ?? '' ), true === ( $error['retryable'] ?? false ) );
 		}
-		$job->progress = array_filter( self::scalars( $fields['progress'] ?? [] ), static fn ( mixed $value ): bool => is_int( $value ) || is_string( $value ) );
-		$job->result   = self::scalars( $fields['result'] ?? [] );
-		$job->data     = is_array( $fields['data'] ?? null ) ? self::string_keys( $fields['data'] ) : [];
-		$job->warnings = is_array( $fields['warnings'] ?? null ) ? array_values( array_filter( $fields['warnings'], 'is_string' ) ) : [];
+		$job->progress      = array_filter( self::scalars( $fields['progress'] ?? [] ), static fn ( mixed $value ): bool => is_int( $value ) || is_string( $value ) );
+		$job->result        = self::scalars( $fields['result'] ?? [] );
+		$job->data          = is_array( $fields['data'] ?? null ) ? self::string_keys( $fields['data'] ) : [];
+		$job->warnings      = is_array( $fields['warnings'] ?? null ) ? array_values( array_filter( $fields['warnings'], 'is_string' ) ) : [];
+		$job->warnings_kept = min( count( $job->warnings ), max( 0, Decoded::int( $fields['warnings_kept'] ?? 0 ) ) );
 		return $job;
 	}
 

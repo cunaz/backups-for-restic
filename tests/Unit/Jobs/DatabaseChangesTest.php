@@ -874,6 +874,27 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertSame( [ ...array_map( static fn ( int $number ): string => 'Warning ' . $number, range( 1, Job::MAX_WARNINGS ) ), 'Rebuilt tables to drop by hand: a', 'Discarded tables to remove by hand: b' ], $job->warnings );
 	}
 
+	public function test_a_kept_warning_takes_no_place_of_a_later_one_also_after_the_job_was_saved(): void {
+		$job = $this->owner( '20260101T000001Z-aaaaaa', [] );
+		for ( $number = 1; $number < Job::MAX_WARNINGS; ++$number ) {
+			$job->warn( 'Warning ' . $number );
+		}
+		// The rebuilt tables that an expiry keeps, then, after a save, the warning of a cleanup that fails.
+		$job->warn_kept( 'Rebuilt tables to drop by hand: a' );
+		$this->jobs->save( $job );
+		$saved = $this->jobs->get( $job->id );
+		self::assertNotNull( $saved );
+		$saved->warn( 'Cleanup is overdue.' );
+		$saved->warn( 'Beyond the limit' );
+		// Before, the kept warning counted against the limit of the others, and the overdue cleanup was dropped.
+		self::assertSame( [ ...array_map( static fn ( int $number ): string => 'Warning ' . $number, range( 1, Job::MAX_WARNINGS - 1 ) ), 'Rebuilt tables to drop by hand: a', 'Cleanup is overdue.' ], $saved->warnings );
+		self::assertSame( 1, $saved->warnings_kept );
+		// A document that says more were kept than it has warnings counts no more than it has.
+		$document                  = $saved->to_array();
+		$document['warnings_kept'] = 99;
+		self::assertSame( Job::MAX_WARNINGS + 1, Job::from_array( $document )->warnings_kept );
+	}
+
 	public function test_the_list_of_bindings_asks_the_server_who_it_is_once_for_all_of_them(): void {
 		$this->moved( '20260101T000001Z-aaaaaa' );
 		$this->stranded( '20260101T000002Z-bbbbbb' );

@@ -235,8 +235,11 @@ another server.
   <apply-job>`. The review names the database, the server UUID and every private table name
   the binding can own (`_p`, `_a`, `_u`, and `_t<n>` and `_b<n>` per table); the discard
   records the decision in the job (`database_discarded`, and the table names in its warning,
-  which takes the place of the last warning in a job that already holds the 50 it keeps)
-  and drops nothing. None of these names starts with the site's prefix; a database
+  which the limit of 50 warnings neither drops nor counts: `Job::warn_kept()` adds it after
+  the limit and takes the place of no other warning, and `Job::warn()` keeps 50 of its own
+  besides such warnings, also after a save, as job.json keeps their number as
+  `warnings_kept`) and drops nothing. The rebuilt tables that an expiry keeps are named the
+  same way. None of these names starts with the site's prefix; a database
   administrator drops those that exist on the server that holds them.
 - Uninstall forgets such a binding without dropping anything: its tables are not on this
   server, and a table here with one of its names cannot be proven to be its copy. Private
@@ -295,8 +298,8 @@ database could not get rid of the binding. Since then:
   binding whose record changed, a site that moved on to another database, an undo window that
   ended or a review of another user is not discarded. The job records who confirmed it, how
   and with which digest (`database_discarded`; the log line, which is written at best effort,
-  names the digest as well), and its warning names the tables; the
-  limit of a job's warnings does not drop that warning.
+  names the digest as well), and its warning names the tables, which the limit of a job's
+  warnings neither drops nor counts.
 - The names of the tables that are left to remove by hand stay available to the
   administrator after the discard, whatever the job history does: for 90 days
   (`JobStore::DISCARD_LISTED_DAYS`, counted from the discard's own time) or until the
