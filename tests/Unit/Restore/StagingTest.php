@@ -483,8 +483,9 @@ final class StagingTest extends TestCase {
 
 	public function test_no_staging_expires_while_a_stored_job_cannot_be_read(): void {
 		$expired  = $this->restored( $this->clock->seconds - 3 * 86400 );
+		// A leftover: no job accounts for it and it holds no report, so it would go at once.
 		$leftover = '20251230T000000Z-0a1b2c';
-		$this->stage( $leftover );
+		$this->stage( $leftover, false );
 		$aside = $this->restores . '/' . Staging::REMOVING . '20251229T000000Z-0d0e0f';
 		mkdir( $aside . '/files', 0700, true );
 		// Any job: what it is cannot be read, so it may be an apply whose undo needs a staging.
