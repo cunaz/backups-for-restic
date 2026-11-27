@@ -130,6 +130,8 @@ final class ManifestTest extends TestCase {
 		yield 'a key that is no list' => [ [ 'key' => [ 'a' => 'id' ] ] + $read ];
 		yield 'a key of a number' => [ [ 'key' => [ 1 ] ] + $read ];
 		yield 'a key with an empty name' => [ [ 'key' => [ '' ] ] + $read ];
+		yield 'a key with an empty name before a valid one' => [ [ 'key' => [ '', 'id' ] ] + $read ];
+		yield 'a key with an empty name after a valid one' => [ [ 'key' => [ 'id', '' ] ] + $read ];
 		yield 'a key that is a name' => [ [ 'key' => 'id' ] + $read ];
 		yield 'a snapshot of a number' => [ [ 'snapshot' => 1 ] + $read ];
 		yield 'negative restarts' => [ [ 'restarts' => -1 ] + $read ];

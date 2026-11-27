@@ -8,6 +8,7 @@ use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Tests\Support\TempDir;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -179,5 +180,64 @@ final class TableImporterLimitsTest extends TestCase {
 		} catch ( \LogicException $went_on ) {
 			self::assertStringStartsWith( 'The import went on: ', $went_on->getMessage() );
 		}
+		// The tables after it are still checked.
+		$refused = $this->refusal(
+			self::manifest(
+				[
+					'wp_old' => null,
+					'wp_new' => 2000,
+				]
+			),
+			self::server( 1024 )
+		);
+		self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null );
+		self::assertSame( 'wp_new', $refused->context()['table'] ?? null );
+	}
+
+	/** @return iterable<string, array{int, int}> */
+	public static function packet_limits(): iterable {
+		// What the statement of wp_x, at ordinal 0, adds with the shadow's name and the margin.
+		$extra = self::sent( 0, 'wp_x', 0 ) + 64;
+		yield 'one byte above a multiple of 1024' => [ 1024 * 1000 + 1 - $extra, 1024 * 1001 ];
+		yield 'a multiple of 1024' => [ 1024 * 1000 - $extra, 1024 * 1000 ];
+	}
+
+	#[DataProvider( 'packet_limits' )]
+	public function test_the_limit_that_the_refusal_names_is_the_next_multiple_of_1024( int $largest, int $limit ): void {
+		$refused = $this->refusal( self::manifest( [ 'wp_x' => $largest ] ), self::server( 4096 ) );
+		self::assertStringContainsString( 'a max_allowed_packet of at least ' . $limit . ' bytes; the database server allows 4096 bytes', $refused->getMessage() );
+	}
+
+	public function test_a_statement_of_exactly_what_the_import_reads_goes_ahead(): void {
+		try {
+			( new TableImporter( self::server( 1073741824 ), self::manifest( [ 'wp_a' => 16777216 ] ), $this->directory, self::TOKEN ) )->tick( 16 );
+			self::fail( 'The import of a statement of 16 MiB did not go on.' );
+		} catch ( \LogicException $went_on ) {
+			self::assertStringStartsWith( 'The import went on: ', $went_on->getMessage() );
+		}
+	}
+
+	public function test_of_two_statements_of_the_same_size_the_first_table_is_named(): void {
+		$large = $this->refusal(
+			self::manifest(
+				[
+					'wp_a' => 16777300,
+					'wp_b' => 16777300,
+				]
+			),
+			self::server( 1073741824 )
+		);
+		self::assertSame( 'wp_a', $large->context()['table'] ?? null );
+		$packet = $this->refusal(
+			self::manifest(
+				[
+					'wp_a' => 900000,
+					'wp_b' => 900000,
+				]
+			),
+			self::server( 524288 )
+		);
+		self::assertSame( 'database_restore_packet_limit', $packet->context()['code'] ?? null );
+		self::assertSame( 'wp_a', $packet->context()['table'] ?? null );
 	}
 }
