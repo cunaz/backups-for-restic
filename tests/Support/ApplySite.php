@@ -187,6 +187,14 @@ final class ApplySite {
 		return $this->run_job( $this->changes->start_undo( $apply->id, $plan['digest'] ) );
 	}
 
+	/** Reviews the undo of an apply in the background, confirms the review and runs the undo. */
+	public function undo_background( Job $apply ): Job {
+		$review = $this->changes->request_preview( $apply->id, true, false );
+		Assert::assertInstanceOf( Job::class, $review );
+		$review = $this->run_job( $review );
+		return $this->run_job( $this->changes->start_undo( $apply->id, $review->result['digest'], '', $review->id ) );
+	}
+
 	/**
 	 * The entries an undo kept, page by page, with their reasons.
 	 *
@@ -253,14 +261,14 @@ final class ApplySite {
 	 * Adds 111 files to the restore that the site has with the same content, so that its
 	 * review needs a background preview, and queues that preview.
 	 */
-	public function queue_large_preview(): Job {
+	public function queue_large_preview( bool $config = false ): Job {
 		for ( $index = 0; $index < 111; ++$index ) {
 			$name = $this->live . '/same-' . $index;
 			file_put_contents( $name, 'already current' );
 			file_put_contents( $this->files . $name, 'already current' );
 		}
 		$this->write_report( $this->live . '/skipped-link' );
-		$queued = $this->changes->request_preview( $this->restore, false, false );
+		$queued = $this->changes->request_preview( $this->restore, false, $config );
 		Assert::assertInstanceOf( Job::class, $queued );
 		Assert::assertSame( JobType::FilePlan, $queued->type );
 		return $queued;
