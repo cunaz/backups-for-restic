@@ -905,9 +905,11 @@ and its counts are unknown. An administrator removes one directory with
 `DELETE /restores/{id}`. Every removal renames the directory to `.removing-<job-id>` before
 it deletes anything, deletes until a deadline (five seconds in a heartbeat, ten in a
 request) and is continued by the next heartbeat; symbolic links are removed, never
-followed. The preview data of a file review and the undo workspace of an apply that are
-due are removed first, each on its own: one that the file system refuses is counted and
-tried again, and never keeps staging from expiring. An undo workspace loses its count of
+followed. An entry counts as removed only where its name is established missing
+(`Files::missing()`); one that cannot be looked up, below a folder that the PHP user can list
+but not search, is a refusal of the file system. The preview data of a file review and the
+undo workspace of an apply that are due are removed first, each on its own: one that the file
+system refuses is counted and tried again, and never keeps staging from expiring. An undo workspace loses its count of
 attempted changes first, synchronised, so that a deletion that stops part way leaves the
 window of its apply closed. While any stored job cannot be read
 (`JobStore::unreadable()`), the heartbeat sets no staging aside, removes no sealed review and

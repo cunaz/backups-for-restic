@@ -355,6 +355,10 @@ All notable changes are documented here. The format follows
   could not leave maintenance mode, shows that failure on the admin page beside its state and
   its counts, and WP-CLI's report of a cancelled undo names it too. Before, only a failed job
   showed its error, and the page said "Cancelled" while the maintenance page stayed up.
+- A staging, preview or undo workspace with a folder that the PHP user can list but not
+  search is counted as a removal that failed, and the heartbeat moves on. Before, every name
+  in that folder counted as removed, because it could not be looked up after its removal
+  failed, and the folder was read again until the heartbeat's time was up, every time.
 - While a stored job cannot be read, no staging and no sealed review expires, no undo
   journal of an apply is deleted, and no staging is removed on request either
   (`DELETE /restores/{id}` answers with the code and ID of that job, before anything is

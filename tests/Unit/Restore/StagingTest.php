@@ -755,6 +755,51 @@ final class StagingTest extends TestCase {
 		self::assertSame( [ $kept->id ], $this->names() );
 	}
 
+	public function test_a_folder_that_can_be_listed_but_not_searched_is_a_failed_removal_and_read_once(): void {
+		$stuck = $this->job( JobState::Failed );
+		$this->stage( $stuck->id );
+		chmod( $this->restores . '/' . $stuck->id . '/files/site', 0600 );
+		// A clock that moves on a second with every reading, so that a loop ends at its deadline.
+		$clock   = new class( $this->clock ) implements Clock {
+			public int $readings = 0;
+
+			public function __construct( private FrozenClock $base ) {
+			}
+
+			public function now(): array {
+				return [ $this->base->seconds + $this->readings++, 0 ];
+			}
+		};
+		$staging = new Staging( $this->restores, $this->jobs, $clock );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_executable( $this->restores . '/' . $stuck->id . '/files/site' ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// Before, every name in the folder counted as removed, because it could not be looked up
+			// after its removal failed, and the folder was read again until the deadline: the
+			// directory was pending, never failed, and every heartbeat spent its time on it.
+			self::assertSame(
+				[
+					'removed' => 0,
+					'pending' => 0,
+					'failed'  => 1,
+				],
+				$staging->remove_due( 24, $this->clock->seconds + 1000 )
+			);
+			self::assertLessThan( 20, $clock->readings );
+		} finally {
+			restore_error_handler();
+			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
+				if ( is_dir( $directory . '/files/site' ) ) {
+					chmod( $directory . '/files/site', 0700 );
+				}
+			}
+		}
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
 	public function test_a_directory_that_cannot_be_removed_does_not_keep_the_others(): void {
 		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
 			self::markTestSkipped( 'Root ignores the permissions used to refuse deletion.' );

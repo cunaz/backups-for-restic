@@ -638,10 +638,16 @@ final class Staging {
 	 */
 	private function delete( string $path, float $deadline ): bool {
 		if ( ! self::exists( $path ) ) {
+			// Gone only where that is established (Files::missing()): a name below a folder that
+			// cannot be searched may be there all the same. Before, it counted as removed, and the
+			// folder that listed it was read again and again until the deadline.
+			if ( ! Files::missing( $path ) ) {
+				StorageFailed::raise( 'An entry of a staging directory cannot be looked up.' );
+			}
 			return true;
 		}
 		if ( is_link( $path ) || ! is_dir( $path ) ) {
-			if ( ! unlink( $path ) && self::exists( $path ) ) {
+			if ( ! unlink( $path ) && ! Files::missing( $path ) ) {
 				StorageFailed::raise( 'An entry of a staging directory could not be removed.' );
 			}
 			return true;
@@ -654,7 +660,7 @@ final class Staging {
 				}
 			}
 		} while ( [] !== $names );
-		if ( ! rmdir( $path ) && self::exists( $path ) ) {
+		if ( ! rmdir( $path ) && ! Files::missing( $path ) ) {
 			StorageFailed::raise( 'A directory of a staging directory could not be removed.' );
 		}
 		return true;
