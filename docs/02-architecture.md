@@ -705,7 +705,9 @@ engine, charset, collation and rows with the current site and lists compatibilit
 Its digest and the original snapshot bind a subsequent live review to the same source.
 Before the first statement of a tick the importer compares the largest statement that the
 manifest records for each table with its own 16 MiB and the session's `max_allowed_packet`
-(`database_restore_too_large`, `database_restore_packet_limit`); a duplicate key ends the
+(`database_restore_too_large`, `database_restore_packet_limit`), and before it creates its
+progress table every table's CREATE with that limit, which it checks again before it sends
+one; a duplicate key ends the
 import with `database_restore_duplicate`, which says whether the dump read the table at more
 than one moment; and the report names a table read by position at more than one moment
 (`read_by_position`). A table or view name with a character that does not print as itself,
@@ -1504,7 +1506,7 @@ translated message and a hint. The codes:
 | `restore_path_missing` | a path selected for a restore is not in the snapshot |
 | `database_dump_failed` | a query of the dump failed |
 | `database_dump_locked` | another connection kept a table locked for longer than the dump waits, five seconds; retryable ([ADR 0021](adr/0021-database-streaming.md)) |
-| `database_restore_too_large`, `database_restore_packet_limit` | the largest statement that the manifest records for a table is beyond the 16 MiB that the importer reads, or with the shadow's name beyond the session's `max_allowed_packet`; found before the first statement of a tick ([ADR 0035](adr/0035-transactional-shadow-import.md)) |
+| `database_restore_too_large`, `database_restore_packet_limit` | the largest statement that the manifest records for a table is beyond the 16 MiB that the importer reads, or with the shadow's name beyond the session's `max_allowed_packet`, found before the first statement of a tick; or a table's CREATE beyond that limit, found before the progress table is created and before each CREATE is sent ([ADR 0035](adr/0035-transactional-shadow-import.md)) |
 | `database_restore_duplicate` | the server refused a batch of the import with a duplicate key (1062); the log names the table and whether the dump read it at more than one moment |
 | `database_restore_name` | a table or view name of the staged dump has a character that does not print as itself; the texts of the rehearsal name it escaped |
 | `database_not_in_snapshot` | a rehearsal of a snapshot without a site manifest, or whose manifest says that its backup left the database out; found before the first file is staged |

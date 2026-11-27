@@ -162,6 +162,17 @@ and the rehearsal's report binds it to the snapshot by its digest (ADR 0043, dec
   (`database_restore_packet`), hours into a large rehearsal and without the limit that later
   tables need. A table without the field is still checked batch by batch before each one is
   sent.
+- **A definition that cannot be sent.** The dump measures its INSERT statements only: a
+  table without rows records 0, while its CREATE can take up to the 256 KiB that
+  `CreateStatement` reads, more than a `max_allowed_packet` set below that. On the first tick,
+  before the progress table is created, the importer reads the header of each staged table
+  file and compares the rewritten CREATE, with the shadow's name and the ownership comment,
+  with the session's `max_allowed_packet`; it refuses with `database_restore_packet_limit`,
+  naming the table and the limit that its CREATE needs. Each CREATE is checked again just
+  before it is sent, for an import that a request with a smaller limit takes up again. Before,
+  the server refused the CREATE with error 1153 after the ledger and the earlier tables were
+  created (MySQL 8.4.11 and MariaDB 11.4.13, a definition of about 21 KiB under a limit of 16
+  KiB).
 - **A duplicate key.** A batch that the server refuses with error 1062 ends the import with
   `database_restore_duplicate`. The job log names the table and says what the manifest
   records: a table read at more than one moment (`"snapshot": false`) can hold a row twice

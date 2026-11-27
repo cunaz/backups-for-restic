@@ -450,7 +450,8 @@ job says why, and its log has the details. Each case has a way on:
   `database_restore_packet_limit`): the backup holds a row whose statement is larger than the
   16 MiB that the plugin's import reads, or than the database server's `max_allowed_packet`.
   The rehearsal stops before it sends a statement, and the log names the table, the size and
-  the `max_allowed_packet` that the import needs. Ask the host to raise `max_allowed_packet`
+  the `max_allowed_packet` that the import needs. A table's definition (its CREATE) that is
+  larger than `max_allowed_packet` stops it the same way. Ask the host to raise `max_allowed_packet`
   and rehearse again, or import by hand with a client and a server whose packet limit is at
   least as large (step 5 of Scenario B).
 - **A duplicate key** (`database_restore_duplicate`): two rows of a table have the same value

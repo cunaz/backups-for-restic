@@ -741,7 +741,9 @@ All notable changes are documented here. The format follows
   statement larger than the 16 MiB that the import reads, or than the database server's
   `max_allowed_packet` takes, is refused before the first statement
   (`database_restore_too_large`, `database_restore_packet_limit`), with the limit that the
-  largest statement needs, instead of stopping in the middle of the rehearsal. A duplicate key
+  largest statement needs, instead of stopping in the middle of the rehearsal. A table whose
+  definition (CREATE) does not fit `max_allowed_packet` is refused the same way, before the
+  import creates anything: the manifest records the size of INSERT statements only. A duplicate key
   names its table and says whether the backup read it at more than one moment
   (`database_restore_duplicate`), and the rehearsal's report marks a table that the backup read
   by position at more than one moment. A backup made before the manifest recorded this imports
