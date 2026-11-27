@@ -20,6 +20,7 @@ use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\TempDir;
+use BackupsForRestic\Tests\Support\UserSpaceFiles;
 
 /**
  * The staging of finished restores (ADR 0040) on a real directory: what is listed, when it
@@ -121,6 +122,52 @@ final class StagingTest extends TestCase {
 	 */
 	private function names(): array {
 		return array_values( array_diff( (array) scandir( $this->restores ), [ '.', '..' ] ) );
+	}
+
+	/**
+	 * An apply of a restore that ended a moment ago, within its recovery window, with the
+	 * journal of a change that no undo reverted: it keeps the restore's staging for its undo.
+	 */
+	private function pinning_apply( Job $restore ): Job {
+		$apply       = $this->job( JobState::Succeeded, $this->clock->seconds - 30, [], JobType::Apply );
+		$apply->data = [ 'restore' => $restore->id ];
+		$this->jobs->save( $apply );
+		mkdir( $this->jobs->directory( $apply ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $apply ) . '/undo/attempted', '1' );
+		return $apply;
+	}
+
+	/**
+	 * Runs an operation while the document of a job is one text until the job documents are
+	 * listed a second time and another one from then on, as when an administrator gives the
+	 * job's folder back to the PHP user, or a file system fails, at that moment.
+	 *
+	 * @template T
+	 * @param Job           $job       The job.
+	 * @param string        $before    Its document until then.
+	 * @param string        $after     Its document from then on.
+	 * @param \Closure(): T $operation The operation.
+	 * @return T What the operation returns.
+	 */
+	private function turning_at_the_second_listing( Job $job, string $before, string $after, \Closure $operation ): mixed {
+		$jobs     = $this->directory . '/private/jobs';
+		$document = $jobs . '/' . $job->id . '/job.json';
+		file_put_contents( $document, $before );
+		$listings = 0;
+		UserSpaceFiles::enable(
+			'',
+			'',
+			static function ( string $path ) use ( &$listings, $jobs, $document, $after ): void {
+				if ( rtrim( $path, '/' ) === $jobs && 2 === ++$listings ) {
+					file_put_contents( $document, $after );
+				}
+			}
+		);
+		try {
+			return $operation();
+		} finally {
+			UserSpaceFiles::disable();
+		}
 	}
 
 	public function test_downloads_use_only_regular_files_in_unexpired_successful_staging(): void {
@@ -475,6 +522,51 @@ final class StagingTest extends TestCase {
 		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
 		self::assertTrue( $this->staging->remove( $restore->id, self::NO_DEADLINE ) );
 		self::assertSame( [], $this->names() );
+	}
+
+	public function test_an_apply_that_can_be_read_again_while_its_staging_is_removed_on_request_keeps_it(): void {
+		$restore = $this->restored( $this->clock->seconds - 60 );
+		$apply   = $this->pinning_apply( $restore );
+		$saved   = (string) file_get_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json' );
+		// The apply cannot be read until the removal lists the job documents a second time.
+		$refusal = $this->turning_at_the_second_listing(
+			$apply,
+			'{',
+			$saved,
+			function () use ( $restore ): array {
+				try {
+					return [ 'removed', $this->staging->remove( $restore->id, self::NO_DEADLINE ) ];
+				} catch ( JobConflict $conflict ) {
+					return [ JobError::from_throwable( $conflict )->code, $conflict->context()['job'] ?? null ];
+				}
+			}
+		);
+		// Before, the pins were read while the apply could not be read and the hold after that,
+		// when it could: neither kept the staging, and the undo of the apply was refused with
+		// file_staging_gone. Now one reading gives both, and in it the apply cannot be read.
+		self::assertSame( [ 'job_unreadable', $apply->id ], $refusal );
+		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
+		// Once the apply can be read, it keeps the staging for its undo.
+		file_put_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json', $saved );
+		try {
+			$this->staging->remove( $restore->id, self::NO_DEADLINE );
+			self::fail( 'The staging of an apply within its recovery window was removed.' );
+		} catch ( JobConflict $conflict ) {
+			self::assertSame( 'restore_kept_for_undo', $conflict->context()['code'] ?? null );
+		}
+	}
+
+	public function test_what_is_on_its_way_out_is_counted_from_one_reading_of_the_job_documents(): void {
+		// The staging of a restore whose hours are over, which an apply keeps for its undo.
+		$restore = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$apply   = $this->pinning_apply( $restore );
+		$saved   = (string) file_get_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json' );
+		self::assertSame( 0, $this->staging->removing( 24 ) );
+		// The apply cannot be read until the count lists the job documents a second time. Before,
+		// the pins were read while it could not be read and the hold after that, when it could,
+		// so the staging was counted as on its way out although neither reading lets it go.
+		self::assertSame( 0, $this->turning_at_the_second_listing( $apply, '{', $saved, fn (): int => $this->staging->removing( 24 ) ) );
+		self::assertSame( 0, $this->staging->removing( 24 ) );
 	}
 
 	public function test_a_job_document_that_cannot_be_looked_up_keeps_its_staging(): void {

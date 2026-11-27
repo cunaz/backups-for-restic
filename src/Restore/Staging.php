@@ -212,15 +212,17 @@ final class Staging {
 	/**
 	 * How many directories are on their way out: due and not yet set aside, or set aside and
 	 * not yet deleted completely. While a stored job cannot be read, what is due stays
-	 * (expire()), so only what was set aside is on its way out.
+	 * (expire()), so only what was set aside is on its way out. The pins and that job come from
+	 * one reading of the job documents (JobStore::census()), as in expire().
 	 *
 	 * @param int $hours Hours a staging directory is kept after its job finished.
 	 * @return int Number of directories.
 	 * @throws StorageFailed If restores/ cannot be listed.
 	 */
 	public function removing( int $hours ): int {
-		$survey = $this->survey( $hours );
-		return ( null === $this->jobs->unreadable() ? count( $survey['due'] ) : 0 ) + count( $survey['removing'] );
+		$census = $this->jobs->census( $this->clock->now()[0] );
+		$survey = $this->survey( $hours, $census['restores'] );
+		return ( null === $census['unreadable'] ? count( $survey['due'] ) : 0 ) + count( $survey['removing'] );
 	}
 
 	/**
@@ -261,7 +263,11 @@ final class Staging {
 	 */
 	private function remove_one( string $id, float $deadline ): ?bool {
 		$this->require_root();
-		$pins = $this->jobs->restore_pins( $this->clock->now()[0] );
+		// One reading of every job document gives the pins and the hold below: a job that can be
+		// read again between two readings would be in neither. Before, the hold was read after
+		// the pins, and an apply that turned readable in between let its restore's staging go.
+		$census = $this->jobs->census( $this->clock->now()[0] );
+		$pins   = $census['restores'];
 		if ( array_key_exists( $id, $pins ) ) {
 			JobConflict::raise(
 				'A restore operation still needs this staging for apply or undo.',
@@ -292,9 +298,8 @@ final class Staging {
 		// Another stored job that cannot be read may be an apply within its recovery window whose
 		// undo needs this staging, which no pin can say: the heartbeat holds it (expire()), and
 		// a request does not remove it either, before anything is renamed.
-		$unreadable = $this->jobs->unreadable();
-		if ( null !== $unreadable ) {
-			$this->jobs->refuse_unreadable( $unreadable );
+		if ( null !== $census['unreadable'] ) {
+			$this->jobs->refuse_unreadable( $census['unreadable'] );
 		}
 		if ( $staged ) {
 			// What an earlier removal under this name left goes first: its place is needed.
