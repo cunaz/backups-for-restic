@@ -90,7 +90,8 @@ and makes an interrupted dump start from zero.
   old key and once from the later one with its new key. For a unique key other than the
   paging key the import then stops with a duplicate key. The manifest records for each
   table whether all its rows come from one read view (`"snapshot"`), so that an importer
-  can explain such a failure precisely. The field speaks of the rows only: a table read
+  can explain such a failure precisely; the plugin's importer names the table and says so
+  (`database_restore_duplicate`, ADR 0035). The field speaks of the rows only: a table read
   with one statement through `$wpdb` has `"snapshot": true` although no transaction held
   its definition, which the check after each page guards there (see below). The plugin's
   restore refuses a manifest larger than
@@ -125,7 +126,9 @@ and makes an interrupted dump start from zero.
   whatever its size, as long as PHP can hold it; the plugin's importer reads statements up
   to 16 MiB (ADR 0035), the command-line client as large as `max_allowed_packet` allows.
   The manifest records each table's largest statement (`"largest_statement"`, with the
-  semicolon and without LF) for an importer to compare with `max_allowed_packet`. A row
+  semicolon and without LF) for an importer to compare with `max_allowed_packet`; the
+  plugin's importer does so, and with its own 16 MiB, before it sends a statement
+  ([ADR 0035](0035-transactional-shadow-import.md)). A row
   whose statement would not fit into the PHP memory limit stops the dump with
   `database_dump_row_memory`, which names the table. A large value is written in pieces of
   about 2 MiB, so that it is never held twice. A page is held in memory whole, so the pages

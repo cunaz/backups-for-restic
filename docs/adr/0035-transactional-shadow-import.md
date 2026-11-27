@@ -15,7 +15,9 @@ implicitly commits, and reconnecting and retrying an INSERT can lose its transac
 ## Decision
 - `Database\Restore\Manifest` accepts completed `backups-for-restic-dump/1` inventories,
   the site's exact table prefix and the writer's encoded filenames. Limits are 2 MiB of
-  manifest and 10,000 tables/views; numeric counts must fit this PHP host.
+  manifest and 10,000 tables/views; numeric counts must fit this PHP host. Every character
+  of a table or view name prints as itself (amended 2026-11-27, see "Table names that do not
+  print as themselves" below).
 - `TableFile` reads regular files from a resolved private staging directory. It requires
   the exact header, five session-setting lines and expected DROP line, without executing
   those commands. It checks file size, column order, inserted rows, trailer bytes and EOF.
@@ -113,7 +115,12 @@ binary string literals containing those characters are not accepted boolean sett
 An administrator can request a database preview when restoring the whole snapshot or a
 selection that includes its complete database directory. After staging, the job resolves
 the original spool location from the snapshot's site manifest and checks the database
-inventory against the current table prefix. The runner saves the random ownership token,
+inventory against the current table prefix. A snapshot without a database dump, one without
+a site manifest or whose manifest says that its backup left the database out, fails the job
+with `database_not_in_snapshot` before the first file is staged; until 2026-11-27 it failed
+after staging with `database_dump_failed`, whose texts send the administrator to a database
+error in the log that there is not. The review of such a restore answers with the same code,
+since a new rehearsal would find the same. The runner saves the random ownership token,
 inventory hash and table count before a later tick creates any private SQL table.
 
 A completed rehearsal writes `database-preview.json` beside the staged files. It records
@@ -129,6 +136,91 @@ the heartbeat resumes cleanup from the job's binding. History pruning retains th
 Other backups wait so that an all-tables dump cannot include another job's shadow data.
 Uninstall completes pending cleanup before removing the binding. If a database administrator
 revoked DROP, restore the privilege and retry.
+
+## What the manifest records about each table (2026-11-27)
+
+Since pull request 54 the dump's manifest records for each table how it was read
+([ADR 0021](0021-database-streaming.md)): `key`, the columns of the key that ordered its
+pages, empty without one; `snapshot`, whether all of its rows come from one read view;
+`restarts`, how often the table started over because its definition changed; and
+`largest_statement`, its longest statement in bytes, with the semicolon and without the line
+break. A table that a version before these fields dumped has none of them, and a manifest
+that would be larger than 2 MiB with them leaves them out for every table. `Manifest` keeps
+them by ordinal (`reads`) and refuses an entry that has some of the four but not all, or one
+that is not of its kind, with `database_restore_format`. The fields do not name a restic
+snapshot or key: the manifest is a file of the snapshot's tree, which restic authenticates,
+and the rehearsal's report binds it to the snapshot by its digest (ADR 0043, decision 1).
+
+- **Statements that cannot be sent.** Before the first statement of every tick, the progress
+  table's CREATE included, the importer compares each recorded `largest_statement`, with the
+  shadow's generated name in place of the table's, with the 16 MiB that it reads and with the
+  session's `max_allowed_packet`. It refuses with `database_restore_too_large` or
+  `database_restore_packet_limit`; the job log names the table and, for the second, the
+  `max_allowed_packet` that the largest statement needs, rounded up to a multiple of 1024.
+  Before, a line beyond 16 MiB stopped the import when it reached it, as an unreadable dump
+  (`database_restore_format`), and a batch beyond the packet limit at that batch
+  (`database_restore_packet`), hours into a large rehearsal and without the limit that later
+  tables need. A table without the field is still checked batch by batch before each one is
+  sent.
+- **A duplicate key.** A batch that the server refuses with error 1062 ends the import with
+  `database_restore_duplicate`. The job log names the table and says what the manifest
+  records: a table read at more than one moment (`"snapshot": false`) can hold a row twice
+  that was deleted and inserted again with a new key between two reads; one read in one read
+  view cannot, so the duplicate comes from elsewhere, for example a collation that compares
+  two values as equal on this server; and for a table without the field, that the manifest
+  does not say. The rows are not named, and the batch and its progress are rolled back. The
+  way on is the manual import of the recovery guide, which reconciles such a table in a
+  scratch copy (docs/06, step 5 of Scenario B).
+- **Rows read by position.** A table without a key that the dump read at more than one moment
+  (`"key": []` and `"snapshot": false`) can miss rows or hold them twice that were added or
+  removed between the reads; the backup's job warned about it. The rehearsal report names
+  such a table with the finding `read_by_position`. It describes the backup's rows and does
+  not hold up an exchange, so the report's preflight blockers leave it out.
+- **`restarts`** has no use in the import: the file holds the definition that the dump began
+  last and the rows read under it.
+
+## Table names that do not print as themselves (2026-11-27)
+
+Until 2026-11-27 the check of table names accepted every valid UTF-8 name of at most 64
+characters without `.`, `/`, `\` and ASCII controls, Unicode format characters included:
+a right-to-left override (U+202E), zero-width characters. Pull request 58 made the admin page
+show such names escaped, but in a terminal, a log or another tool a name with them can still
+read as another one, and so can a review or a report that names it.
+
+A table or view name of a restore is accepted when every character prints as itself:
+
+- it is a letter, mark, number, punctuation, symbol or the ASCII space (Unicode categories
+  L, M, N, P and S, and U+0020), which is what Go's `strconv.IsPrint()` accepts and what the
+  admin page and the command line show unescaped (`GoQuote`);
+- it is not one of the default-ignorable code points among them, which render as nothing:
+  U+034F, U+115F, U+1160, U+17B4, U+17B5, U+180B to U+180D, U+180F, U+3164, U+FE00 to U+FE0F
+  and U+FFA0 (DerivedCoreProperties.txt); the other default-ignorable characters are format
+  characters or unassigned;
+- it lies in the Basic Multilingual Plane: MySQL allows nothing beyond U+FFFF in an
+  identifier ([Schema Object Names](https://dev.mysql.com/doc/refman/8.4/en/identifiers.html));
+- and the name does not end with a space, which MySQL refuses for a table name.
+
+So format characters (category Cf: U+00AD, U+061C, U+180E, U+200B to U+200F, U+202A to
+U+202E, U+2060 to U+206F, U+FEFF and others), the C1 controls U+0080 to U+009F, spaces other
+than U+0020, line and paragraph separators, private-use, unassigned and noncharacter code
+points are refused, wherever they stand in the name. Names in other scripts, Cyrillic, CJK,
+Arabic, Hebrew, Devanagari or Thai with their combining marks among them, and the ASCII names
+that WordPress and its plugins create are accepted: WordPress requires a table prefix of
+letters, digits and underscores, and plugins name their tables in ASCII after it. The
+categories come from PHP's PCRE, so a character that a Unicode version newer than PCRE's
+assigns is refused as unassigned until PHP knows it.
+
+The refusal has the code `database_restore_name`. It comes from `Manifest::parse()`, before
+the rehearsal or the apply sends a statement. Its context names the table as the page shows
+such a name, in double quotes with Go's escapes and the invisible characters above escaped
+as well (`Manifest::quoted()`), so that the log shows only printable characters; the
+rehearsal's job keeps that name, and its texts give it. A rehearsal or a review made before
+the change meets the same refusal when the review or the apply reads the staged manifest
+again. A site that needs such a table restores the database by hand with the command-line
+client, which imports any name that MySQL accepts, or renames the table, or leaves it out
+of its backups, before the next backup (docs/06). Confusable letters of different scripts, a
+Cyrillic "а" for a Latin "a", print as themselves and are not refused; the page isolates
+each name's writing direction (`<bdi>`) and shows it as text.
 
 ## Verification
 Unit tests cover the SQL grammar and limits, unsafe commands, trailer and source replacement

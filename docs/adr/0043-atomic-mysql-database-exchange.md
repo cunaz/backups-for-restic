@@ -279,7 +279,66 @@ binary log format nor on Galera or the Performance Schema (`SwapCatalog::EXCHANG
 The importer reads the session's `max_allowed_packet` once per tick and refuses a batch that
 would not fit before sending it (`database_restore_packet`, ADR 0035). The refusal names the
 batch's SQL size, the limit it needs and the session's limit. The needed limit is a multiple
-of 1024, because MySQL 8.4.11 rounded a larger value down to one without a warning.
+of 1024, because MySQL 8.4.11 rounded a larger value down to one without a warning. Since
+2026-11-27 it compares the largest statement that the manifest records for each table with
+that limit before the first statement of the tick, and refuses with
+`database_restore_packet_limit`, which names the limit that the largest one needs; a table
+without the record is still checked batch by batch (ADR 0035).
+
+### Session settings
+
+The restore works on the site's own connection, the one that WordPress opened. What the
+server's settings, the account's `init_connect` or code that ran earlier in the request
+left on that session can change the result of a statement without an error, or make a
+statement fail. The restore sets each setting of the first kind, in one place: the
+`Session` that every part of the restore runs in, the import's ticks, the rehearsal's report,
+the review's inspection (`SwapCatalog::review()`), the plan of the exchange, the exchange and
+its undo, cleanup and expiry. `Session` saves the session's values first and gives them
+back when it ends, so neither WordPress nor other code meets the restore's settings. Until
+2026-11-27 it set only the character set, the SQL mode, the time zone and the checks of the
+import. On MySQL 8.4.11, with the setting below on the session, the restore without it did
+what each line says; the database suite shows each case.
+
+- `sql_select_limit` is set to its largest value, the server's default; `DEFAULT` would be
+  the server's own setting again. A limit cuts `SELECT` and, on MySQL 8, `SHOW` short without
+  an error, unless a statement has a `LIMIT` of its own. With a limit of 1 the review saw one
+  of the account's grants and one of its session settings and named missing privileges and
+  disabled InnoDB table locks that were there; the plan of the exchange, the exchange itself
+  and an expiry refused for the same reasons, and the rehearsal's report lost the backup's
+  role map and list of active plugins (the columns of its options table were cut to the
+  first) and all but one of the tables with a CHECK constraint. The list of live tables that
+  the check against the InnoDB dictionary compares had no `LIMIT` either, so a limit above
+  the number of grants could hide a live table from it.
+- `completion_type` is set to `NO_CHAIN`, and the `Session`'s own `ROLLBACK` statements say
+  `AND NO CHAIN NO RELEASE`. With `CHAIN` the guard's `ROLLBACK` began a new transaction: the
+  next `Session` of the same request refused with error 1568, and the site's session stayed
+  in a transaction, so that what WordPress wrote afterwards in that request was never
+  committed. With `RELEASE` the guard's `ROLLBACK` closed the connection.
+- `sql_notes` is set to 1. With 0 a note does not count as a warning, which the restore port
+  refuses: a value that the server changed with a note, as a time that a DATE column drops,
+  was imported.
+- `sql_safe_updates` is set to 0. With 1 the copy of the protected options, which selects by a
+  part of their names that no key serves, was refused with error 1175 under the write locks.
+
+The settings of the second kind stay the server's. A statement that one of them stops ends
+the operation with an error, as a lost connection does, and nothing is left half done:
+`max_execution_time` (MySQL) and `max_statement_time` (MariaDB), `max_join_size` and
+`sql_big_selects`, `group_concat_max_len`, which no statement of the restore uses, and
+`lock_wait_timeout` and `innodb_lock_wait_timeout` outside the write barrier, which sets
+both to three seconds. Neither kind are the settings that no statement of the restore depends
+on, which were checked one by one: `max_sort_length` (on MySQL 8.4.11 the restore's `ORDER BY`
+of table names and numbers stayed in order at its minimum of 4; on MariaDB a value below the
+length of two names that begin alike can only change the order in which the rehearsal
+report lists them), the connection's collation (every comparison of the restore has a column
+or a binary string on one side), the transaction isolation level and the time zone outside an
+import (no statement of the review or the exchange reads a TIMESTAMP).
+
+Two reads run on the site's session outside a `Session`: the review's list of the live tables
+and the drain's lookup of its own account (above). Both have a `LIMIT` or return one row,
+and both read the names as bytes (`CAST(… AS BINARY)`): a site whose connection uses latin1
+would otherwise get a table or account name in another script as question marks, so that the
+review listed a live table under a name it does not have and the drain matched no session of
+an account whose name is not in latin1, and waited for none.
 
 ### Several generations
 
