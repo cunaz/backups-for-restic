@@ -194,6 +194,26 @@ final class FileChangesBackgroundTest extends TestCase {
 		$this->assert_unchanged();
 	}
 
+	public function test_a_background_preflight_that_lost_its_checkpoint_checks_again_from_the_first_row(): void {
+		$plan  = $this->plan();
+		$apply = $this->apply( $plan );
+		$this->site->runner->tick( 0.0 );
+		$this->site->runner->tick( 0.0 );
+		$apply = $this->site->saved( $apply );
+		self::assertSame( [ 'preflight', 2 ], [ $apply->step, $apply->progress['verified'] ] );
+		// The document keeps the space counted so far, but not how far the check went.
+		unset( $apply->progress['verified'] );
+		$this->site->jobs->save( $apply );
+		$this->site->runner->tick( 0.0 );
+		// The check begins again with the first row instead of resuming after it.
+		$saved = $this->site->saved( $apply );
+		self::assertSame( [ 'preflight', 1 ], [ $saved->step, $saved->progress['verified'] ] );
+		self::assertFileDoesNotExist( $this->site->live . '/.maintenance' );
+		$this->assert_unchanged();
+		$this->site->run_job( $apply );
+		self::assertSame( [ 'replacement', 'created' ], [ file_get_contents( $this->site->live . '/a-existing' ), file_get_contents( $this->site->live . '/b-new/new.txt' ) ] );
+	}
+
 	public function test_a_background_preflight_checks_one_row_per_tick_that_has_used_its_budget_and_then_enters_maintenance(): void {
 		$plan  = $this->plan();
 		$apply = $this->apply( $plan );

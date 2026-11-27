@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace BackupsForRestic\Tests\Unit\Jobs\Apply;
 
+use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobState;
@@ -323,5 +324,25 @@ final class FileChangesApplyTest extends TestCase {
 		$done = $this->site->run_job( $apply );
 		self::assertSame( 1, $done->result['files_changed'] );
 		self::assertSame( hash( 'sha256', str_repeat( 'b', 2 * 1048576 + 1 ) ), hash_file( 'sha256', $big ) );
+	}
+
+	public function test_an_apply_whose_staged_report_is_gone_stops_before_maintenance_and_is_not_confirmed_again(): void {
+		$review = $this->site->changes->preview( $this->site->restore );
+		$apply  = $this->site->changes->start_apply( $this->site->restore, false, $review['digest'] );
+		// The report of the staged files goes away between the confirmation and the worker.
+		unlink( dirname( $this->site->files ) . '/entries.jsonl' );
+		$failed = $this->site->run_job( $apply, JobState::Failed );
+		self::assertSame( [ 'file_staging_gone', 'The complete staging report is unavailable.' ], [ $failed->error?->code, $failed->error?->message ] );
+		self::assertSame( 'preflight', $this->site->failed_step( $failed ) );
+		self::assertFileDoesNotExist( $this->site->live . '/.maintenance' );
+		$this->assert_unchanged();
+		// The review that confirmed it no longer queues an apply, and says why.
+		try {
+			$this->site->changes->start_apply( $this->site->restore, false, $review['digest'] );
+			self::fail( 'An apply was queued without the report of its staged files.' );
+		} catch ( InvalidArgument $refused ) {
+			self::assertSame( [ 'The complete staging report is unavailable.', 'file_staging_gone' ], [ $refused->getMessage(), $refused->context()['code'] ?? null ] );
+		}
+		self::assertNull( $this->site->jobs->active() );
 	}
 }
