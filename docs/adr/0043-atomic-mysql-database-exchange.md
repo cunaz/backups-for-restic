@@ -291,9 +291,10 @@ The restore works on the site's own connection, the one that WordPress opened. W
 server's settings, the account's `init_connect` or code that ran earlier in the request
 left on that session can change the result of a statement without an error, or make a
 statement fail. The restore sets each setting of the first kind, in one place: the
-`Session` that every part of the restore runs in, the import's ticks, the rehearsal's report,
+`Session` that these parts of the restore run in: the import's ticks, the rehearsal's report,
 the review's inspection (`SwapCatalog::review()`), the plan of the exchange, the exchange and
-its undo, cleanup and expiry. `Session` saves the session's values first and gives them
+its undo, cleanup and expiry; some reads run outside it (below). `Session` saves the
+session's values first and gives them
 back when it ends, so neither WordPress nor other code meets the restore's settings. Until
 2026-11-27 it set only the character set, the SQL mode, the time zone and the checks of the
 import. On MySQL 8.4.11, with the setting below on the session, the restore without it did
@@ -348,12 +349,23 @@ report lists them), the connection's collation (every comparison of the restore 
 or a binary string on one side), the transaction isolation level and the time zone outside an
 import (no statement of the review or the exchange reads a TIMESTAMP).
 
-Two reads run on the site's session outside a `Session`: the review's list of the live tables
-and the drain's lookup of its own account (above). Both have a `LIMIT` or return one row,
-and both read the names as bytes (`CAST(… AS BINARY)`): a site whose connection uses latin1
-would otherwise get a table or account name in another script as question marks, so that the
-review listed a live table under a name it does not have and the drain matched no session of
-an account whose name is not in latin1, and waited for none.
+Some reads run on the site's session outside a `Session`, with the site's own settings, as
+WordPress reads: the review's list of the live tables; the running site's role map, list of
+active plugins and the approving administrator's own roles and capabilities
+(`DatabaseReview::state()`, in the review of an apply and of an undo); the administrator's
+authority (`WordPressState::authority()`), which the exchange reads again inside its
+`Session` under the write lock and compares before it changes anything; the server's facts
+behind a stored binding (`SwapCatalog::facts()`); the packet limit that the importer reads
+before it takes its lock; and the drain's lookup of its own account and its list of sessions
+(above). Each returns one row or has a `LIMIT` of its own, so a row limit of 1 or more cuts
+none of them, which the review under a limit of 1 shows on both servers; under a limit of 0
+they find nothing, and the read or the `Session` of the same request refuses. The live
+tables and the account are read as bytes (`CAST(… AS BINARY)`): a site whose connection uses
+latin1 would otherwise get a table or account name in another script as question marks, so
+that the review listed a live table under a name it does not have and the drain matched no
+session of an account whose name is not in latin1, and waited for none. The authority's
+fingerprints are computed by the server; the role map, the plugins and the capabilities come
+in the connection's character set, as WordPress reads them.
 
 ### Several generations
 
