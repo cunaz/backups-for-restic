@@ -148,7 +148,8 @@ final readonly class DatabaseChanges implements StepProvider {
 
 	/**
 	 * Site blockers of a new database apply. A binding whose private tables are on another
-	 * server or database waits for the administrator's decision first.
+	 * server or database waits for the administrator's decision first, and one whose record
+	 * cannot be read, which no decision of the plugin can settle, waits for that record.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param int        $user Confirming user.
@@ -160,19 +161,25 @@ final readonly class DatabaseChanges implements StepProvider {
 			if ( ! $owner->state->is_terminal() ) {
 				continue;
 			}
-			if ( isset( $owner->data['database_foreign'] ) ) {
-				$blockers[] = 'database_exchange_foreign';
-				continue;
-			}
 			try {
+				if ( ! DatabaseGeneration::identified( $owner ) ) {
+					// Not foreign, as it was counted before: where its tables are cannot be told.
+					$blockers[] = 'database_binding_unreadable';
+					continue;
+				}
+				if ( isset( $owner->data['database_foreign'] ) ) {
+					$blockers[] = 'database_exchange_foreign';
+					continue;
+				}
 				DatabaseGeneration::load( $connection, $owner );
 			} catch ( DatabaseFailed $error ) {
 				if ( 'database_exchange_foreign' === ( $error->context()['code'] ?? null ) ) {
 					$blockers[] = 'database_exchange_foreign';
 				}
 			} catch ( FormatException ) {
-				// The heartbeat reports a damaged ownership record on its own job.
-				continue;
+				// A record that cannot be read at all: the heartbeat reports it on its own job, and
+				// where its tables are cannot be told either.
+				$blockers[] = 'database_binding_unreadable';
 			}
 		}
 		return array_values( array_unique( $blockers ) );
@@ -298,13 +305,17 @@ final readonly class DatabaseChanges implements StepProvider {
 		}
 		foreach ( $owners as $owner ) {
 			$foreign = null;
-			if ( null !== $facts ) {
-				try {
+			try {
+				if ( ! DatabaseGeneration::identified( $owner ) ) {
+					// Its review refuses it as a record that cannot be read, whatever the server says.
+					continue;
+				}
+				if ( null !== $facts ) {
 					$place   = DatabaseGeneration::place( $facts, $owner );
 					$foreign = 'unknown' === $place ? null : 'foreign' === $place;
-				} catch ( FormatException ) {
-					$foreign = false;
 				}
+			} catch ( FormatException ) {
+				$foreign = false;
 			}
 			if ( null === $foreign ) {
 				$complete = false;
@@ -566,6 +577,10 @@ final readonly class DatabaseChanges implements StepProvider {
 			$code = $error->context()['code'] ?? null;
 			if ( 'database_exchange_foreign' === $code ) {
 				return [ $owner, $this->discard_summary( $owner, $user, $connection, $facts ) ];
+			}
+			if ( 'database_binding_unreadable' === $code ) {
+				// The saved identity is gone: its tables may be on this server, so nothing is discarded.
+				JobConflict::raise( 'The record of the private tables of this database restore cannot be read.', [ 'code' => 'database_binding_unreadable' ] );
 			}
 			if ( null !== $code ) {
 				$this->discard_failed( $owner, $error );

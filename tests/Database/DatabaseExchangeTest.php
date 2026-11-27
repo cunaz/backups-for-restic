@@ -2224,4 +2224,60 @@ final class DatabaseExchangeTest extends TestCase {
 		self::assertContains( 'dictionary_names', $review['blockers'] );
 		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', $review['digest'] );
 	}
+
+	public function test_a_binding_whose_saved_server_uuid_is_missing_or_malformed_is_never_foreign_on_its_own_server(): void {
+		$this->mysql_only();
+		$services = $this->services();
+		// An exchange whose retained tables are on this server, in this database, which is connected.
+		$applied  = self::applied( $services );
+		$private  = $this->private_tables();
+		$document = $services['jobs']->get( $applied->id );
+		self::assertNotNull( $document );
+		self::assertNotSame( [], $private );
+		foreach ( [
+			'missing'      => null,
+			'not a string' => 5,
+			'not a UUID'   => 'not-a-uuid',
+		] as $case => $uuid ) {
+			$damaged = clone $document;
+			if ( null === $uuid ) {
+				unset( $damaged->data['database_owner']['uuid'] );
+			} else {
+				$damaged->data['database_owner']['uuid'] = $uuid;
+			}
+			$services['jobs']->save( $damaged );
+			// Before, place() compared the connected UUID with that value, found them unequal and
+			// called the binding foreign: its review was offered, and the discard forgot it.
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard_review( $applied->id, 1 ) );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
+			self::assertNotContains( $applied->id, array_column( $services['changes']->foreign_bindings()['jobs'], 'job' ), $case );
+			// A new database apply waits, as it did, but not for a discard.
+			$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+			self::assertContains( 'database_binding_unreadable', $blockers, $case );
+			self::assertNotContains( 'database_exchange_foreign', $blockers, $case );
+			// The undo of the exchange is refused, as it was, but without the offer of a discard.
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->preview_undo( $applied->id, 1 ) );
+			// A backup keeps every table, as it did for a binding of another server.
+			self::assertSame( [], DatabaseGeneration::exclusions( $this->direct, $damaged ), $case );
+			// Its expiry is deferred and reported, and records no other server.
+			$expired                         = clone $damaged;
+			$expired->data['retained_until'] = $services['clock']->seconds - 1;
+			$services['jobs']->save( $expired );
+			self::not_discarded( 'database_binding_unreadable', fn () => $services['changes']->expire( false, microtime( true ) + 5 ) );
+			$saved = $services['jobs']->get( $applied->id );
+			self::assertArrayNotHasKey( 'database_foreign', $saved?->data ?? [], $case );
+			self::assertArrayHasKey( 'database_owner', $saved?->data ?? [], $case );
+			self::assertTrue( $saved?->result['database_cleanup_pending'] ?? false, $case );
+			self::assertSame( $private, $this->private_tables(), $case . ': nothing was dropped.' );
+		}
+		// A record that cannot be read at all blocks the same way, also one that an earlier
+		// request marked as another server's, which blocked as foreign before.
+		$broken                                    = clone $document;
+		$broken->data['database_owner']['version'] = 2;
+		$broken->data['database_foreign']          = $services['clock']->seconds;
+		$services['jobs']->save( $broken );
+		$blockers = $services['changes']->preview( $services['source']->id, 1 )['blockers'];
+		self::assertContains( 'database_binding_unreadable', $blockers );
+		self::assertNotContains( 'database_exchange_foreign', $blockers );
+	}
 }

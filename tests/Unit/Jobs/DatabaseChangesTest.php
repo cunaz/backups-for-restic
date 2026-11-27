@@ -1120,4 +1120,31 @@ final class DatabaseChangesTest extends TestCase {
 		self::refused( 'database_binding_busy', fn () => $this->changes( $this->server() )->discard( $job->id, 7, 'rest', $review['digest'] ) );
 		self::assertArrayHasKey( 'database_owner', $this->jobs->get( $job->id )?->data ?? [] );
 	}
+
+	public function test_a_binding_without_a_complete_saved_identity_is_never_foreign(): void {
+		$number = 2;
+		foreach ( [
+			'no server UUID'                    => [ 'uuid' => null ],
+			'a server UUID that is no string'   => [ 'uuid' => 5 ],
+			'a malformed server UUID'           => [ 'uuid' => 'not-a-uuid' ],
+			'no database name'                  => [ 'database' => null ],
+			'an empty database name'            => [ 'database' => '' ],
+			'a database name that is no string' => [ 'database' => 5 ],
+		] as $case => $change ) {
+			$binding = array_filter( $change + self::binding( str_repeat( 'c', 32 ) ), static fn ( mixed $value ): bool => null !== $value );
+			$job     = $this->owner( sprintf( '20260101T00000%dZ-aaaaaa', $number++ ), [ 'database_owner' => $binding ] );
+			// The server and the database that made it are connected; another server would be no different.
+			foreach ( [ self::UUID, self::OTHER ] as $uuid ) {
+				self::refused( 'database_binding_unreadable', fn () => $this->changes( $this->server( $uuid ) )->discard_review( $job->id, 7 ) );
+				self::assertSame( [], $this->changes( $this->server( $uuid ) )->foreign_bindings()['jobs'], $case );
+			}
+			self::assertFalse( DatabaseGeneration::identified( $job ), $case );
+			TempDir::remove( $this->jobs->directory( $job ) );
+		}
+		// A complete identity of another server is foreign, and one of this server is here.
+		$foreign = $this->stranded();
+		self::assertTrue( DatabaseGeneration::identified( $foreign ) );
+		self::assertSame( [ $foreign->id ], array_column( $this->changes( $this->server() )->foreign_bindings()['jobs'], 'job' ) );
+		self::assertSame( [], $this->changes( $this->server( self::OTHER ) )->foreign_bindings()['jobs'] );
+	}
 }

@@ -50,7 +50,9 @@ final readonly class DatabaseGeneration {
 	 * failover to an identically named empty database cannot complete cleanup by mistake.
 	 * A server that names itself differently, a MariaDB server or another database is
 	 * reported with the code database_exchange_foreign; a server without a readable UUID
-	 * cannot be told apart and is reported without it.
+	 * cannot be told apart and is reported without it. A binding whose saved identity is
+	 * missing or malformed is reported with the code database_binding_unreadable, before the
+	 * server is asked: nothing can tell it apart from this server's.
 	 *
 	 * @param Connection $connection Current SQL connection.
 	 * @param Job        $job Owning apply.
@@ -59,7 +61,10 @@ final readonly class DatabaseGeneration {
 	 * @throws DatabaseFailed If this is a different server, database or object map.
 	 */
 	public static function load( Connection $connection, Job $job ): self {
-		$data  = self::binding( $job );
+		$data = self::binding( $job );
+		if ( null === self::identity( $data ) ) {
+			DatabaseFailed::raise( 'The database restore lost the identity of the server and the database that hold its private tables.', [ 'code' => 'database_binding_unreadable' ] );
+		}
 		$facts = ( new SwapCatalog( $connection ) )->facts();
 		$place = self::place( $facts, $job );
 		if ( 'here' !== $place ) {
@@ -76,9 +81,11 @@ final readonly class DatabaseGeneration {
 	/**
 	 * Where the private tables of a binding are, by the identity of the connected server, as
 	 * load() decides it: on this server and in this database (`here`); positively elsewhere
-	 * (`foreign`: another valid server UUID, a MariaDB server or another database name); or not
-	 * to be told (`unknown`: a server without a readable UUID cannot be told apart from the
-	 * original one). Nothing is asked of the database: one identity serves every binding.
+	 * (`foreign`: a MariaDB server, another database name, or another valid server UUID); or
+	 * not to be told (`unknown`: a server without a readable UUID cannot be told apart from the
+	 * original one, and a binding whose saved identity is missing or malformed names no server
+	 * to tell this one apart from). Nothing is asked of the database: one identity serves every
+	 * binding.
 	 *
 	 * @param Facts $facts Identity of the connected server (SwapCatalog::facts()).
 	 * @param Job   $job Owning apply.
@@ -86,11 +93,47 @@ final readonly class DatabaseGeneration {
 	 * @throws FormatException If the filesystem document is corrupted.
 	 */
 	public static function place( array $facts, Job $job ): string {
-		$data = self::binding( $job );
-		if ( ! $facts['mariadb'] && '' !== $facts['uuid'] && $facts['uuid'] === ( $data['uuid'] ?? null ) && $facts['database'] === ( $data['database'] ?? null ) ) {
+		$saved = self::identity( self::binding( $job ) );
+		if ( null === $saved ) {
+			return 'unknown';
+		}
+		if ( ! $facts['mariadb'] && $facts['uuid'] === $saved['uuid'] && $facts['database'] === $saved['database'] ) {
 			return 'here';
 		}
-		return $facts['mariadb'] || $facts['database'] !== ( $data['database'] ?? null ) || ( 1 === preg_match( self::UUID, $facts['uuid'] ) && $facts['uuid'] !== ( $data['uuid'] ?? null ) ) ? 'foreign' : 'unknown';
+		// Not here: in the same database of a MySQL server, only another valid server UUID is a fact.
+		return $facts['mariadb'] || $facts['database'] !== $saved['database'] || 1 === preg_match( self::UUID, $facts['uuid'] ) ? 'foreign' : 'unknown';
+	}
+
+	/**
+	 * Whether a binding saved the identity of the server and the database that held its
+	 * private tables when it was made, as the plugin saves it: a server UUID and a database
+	 * name. One without them was changed outside the plugin, and where its tables are cannot be
+	 * told (place()).
+	 *
+	 * @param Job $job Owning apply.
+	 * @return bool Whether the saved identity is complete.
+	 * @throws FormatException If the filesystem document is corrupted.
+	 */
+	public static function identified( Job $job ): bool {
+		return null !== self::identity( self::binding( $job ) );
+	}
+
+	/**
+	 * The saved identity of a binding, or null where it is missing or malformed.
+	 *
+	 * @param array<string,mixed> $data Saved binding (binding()).
+	 * @return array{database:string,uuid:string}|null Database name and server UUID.
+	 */
+	private static function identity( array $data ): ?array {
+		$database = $data['database'] ?? null;
+		$uuid     = $data['uuid'] ?? null;
+		if ( ! is_string( $database ) || '' === $database || ! is_string( $uuid ) || 1 !== preg_match( self::UUID, $uuid ) ) {
+			return null;
+		}
+		return [
+			'database' => $database,
+			'uuid'     => $uuid,
+		];
 	}
 
 	/**
@@ -321,7 +364,8 @@ final readonly class DatabaseGeneration {
 	 * Excludes verified private generations from all-tables SQL dumps. If a DBA has
 	 * replaced a generated name with their own table, that replacement stays in the backup.
 	 * A binding of another server or database proves nothing about the tables here, even
-	 * if a migration copied tables with these names: they all stay in the backup.
+	 * if a migration copied tables with these names, and neither does one whose saved identity
+	 * is missing or malformed: they all stay in the backup.
 	 *
 	 * @param Connection $connection Current SQL session.
 	 * @param Job        $job Owning job.
@@ -332,7 +376,8 @@ final readonly class DatabaseGeneration {
 		try {
 			$binding = self::load( $connection, $job );
 		} catch ( DatabaseFailed $error ) {
-			if ( 'database_exchange_foreign' !== ( $error->context()['code'] ?? null ) ) {
+			// Neither a binding of another server or database nor one whose saved identity is gone.
+			if ( ! in_array( $error->context()['code'] ?? null, [ 'database_exchange_foreign', 'database_binding_unreadable' ], true ) ) {
 				throw $error;
 			}
 			return [];

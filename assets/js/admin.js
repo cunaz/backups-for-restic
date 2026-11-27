@@ -1963,6 +1963,7 @@
 			live_engine: __( 'The live storage engine requires review.', 'backups-for-restic' ),
 			database_exchange_foreign: __( 'An earlier database restore keeps private tables on another database server or in another database. Before another database restore, discard its binding under “Private tables on another database server” on this tab, or run "wp backups-for-restic database-discard" with the ID of that restore job: both list the tables and forget them without dropping anything.', 'backups-for-restic' ),
 			database_exchange_rebuilt: __( 'A private table kept for the undo was rebuilt since, so the undo cannot prove that it holds the original tables. Restore from a snapshot instead.', 'backups-for-restic' ),
+			database_binding_unreadable: __( 'The record of the private tables of an earlier database restore cannot be read, so the plugin cannot tell where they are, on this database server or on another one. Its job document in the private working directory was changed outside the plugin. A database administrator can find those tables by their names, which begin with _bfr_r_ or bfr_r_. Until that document is restored, no other database restore can start.', 'backups-for-restic' ),
 		};
 	}
 

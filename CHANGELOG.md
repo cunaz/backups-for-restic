@@ -217,6 +217,12 @@ All notable changes are documented here. The format follows
   of a review that an earlier run printed, and one without the other, or a digest without a
   value, is refused. `--yes` is refused, so a script of the earlier form stops with an error and
   discards nothing. The discard still drops nothing.
+- A database restore binding whose saved server UUID or database name is missing or malformed,
+  which only a change outside the plugin leaves, was counted as one of another server, so its
+  discard was offered and would have forgotten private tables on this very server. Nothing
+  can tell such a binding apart from this server's: its discard and its undo are refused
+  (`database_binding_unreadable`), it is not listed for a discard, a new database restore waits
+  with that blocker, and its expiry is deferred and reported on its job.
 - A live database restore brings back the roles, the active plugins and the scheduled events
   of the backup. Before, it kept those of the running site, so a change made after the
   backup survived the restore: a capability given to a role reached every restored account,

@@ -196,6 +196,18 @@ It now reports a different valid server UUID, a MariaDB server or another databa
 the code `database_exchange_foreign`. A server without a readable UUID cannot be told apart
 from the original one and counts as unreachable, as before.
 
+The plugin saves a binding with the server UUID and the database name of the server that holds
+its tables. A binding whose saved UUID or database name is missing or malformed was changed
+outside the plugin, and nothing can tell it apart from this server's: it is never `foreign`
+(`DatabaseGeneration::place()` answers `unknown`), and `load()` refuses it with
+`database_binding_unreadable` before it asks the server. Until 2026-11-26 such a binding was
+compared with `null`, counted as another server's, and offered for a discard that would have
+forgotten private tables on this very server. Now its discard and its undo are refused, the
+list of bindings to discard leaves it out, a new database apply waits with the blocker
+`database_binding_unreadable`, its expiry is deferred and reported on its job and uninstall
+waits for it, and an all-tables backup excludes none of its tables, as for a binding of
+another server.
+
 - The job's cleanup and the heartbeat record such a binding once on its job
   (`database_foreign`) with what to do: review its discard on the Restores tab or with the
   command below, which show the database, the server UUID and the table names and drop
