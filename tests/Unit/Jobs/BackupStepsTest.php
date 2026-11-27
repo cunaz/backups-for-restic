@@ -43,6 +43,7 @@ use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\InMemoryOptions;
 use BackupsForRestic\Tests\Support\InMemoryRestServer;
+use BackupsForRestic\Tests\Support\RoomOfARequest;
 use BackupsForRestic\Tests\Support\TempDir;
 
 /**
@@ -50,6 +51,8 @@ use BackupsForRestic\Tests\Support\TempDir;
  * work with, and refuses one that the plugin cannot read.
  */
 final class BackupStepsTest extends TestCase {
+
+	use RoomOfARequest;
 
 	private const string PASSWORD = 'repository password';
 

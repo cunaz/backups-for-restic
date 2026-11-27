@@ -186,6 +186,17 @@ backup roots, exclusions and the database dump. The database suite also imports 
 shadow tables. The file-plan tests exercise path policy and preconditions, and the
 WordPress integration suite verifies live application and undo (§5.2–5.3).
 
+The suite runs in one process under a memory limit of 128 MiB (`phpunit.xml.dist`), and with
+opcache off that process keeps the compiled code of every class it has loaded. The steps of a
+job take their memory budget from PHP's limit and from the memory that the process has
+reserved (`Engine\MemoryBudget`), so late in the suite they measured the suite, not a request:
+with 92 to 94 MiB reserved, their index had the last 2 to 4 MiB of the 96 that the budget
+allows, and one more test class before them made 25 of them refuse it as too large for the
+host, on PHP 8.3 and not on 8.4 (2026-11-27). The tests of the job steps therefore run under
+twice that limit (`tests/Support/RoomOfARequest`), the room that a request has beside its
+index. Tests about a limit set one of their own, relative to the memory in use or in a
+process of their own.
+
 ### 5.2 Conformance suite (restic CLI + rest-server)
 
 Defined in [ADR 0023](adr/0023-restic-cli-as-conformance-oracle.md): PHP-written
