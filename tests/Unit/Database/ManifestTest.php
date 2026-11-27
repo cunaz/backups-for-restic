@@ -253,6 +253,31 @@ final class ManifestTest extends TestCase {
 		self::assertFalse( Manifest::printable( $name ) );
 	}
 
+	/** @return iterable<string, array{string, bool}> */
+	public static function name_lengths(): iterable {
+		yield '64 characters' => [ 'wp_' . str_repeat( 'a', 61 ), true ];
+		// More bytes than characters, with a dump file name of 222 bytes (255 at most).
+		yield '64 characters, 94 bytes' => [ 'wp_' . str_repeat( 'ä', 30 ) . str_repeat( 'a', 31 ), true ];
+		yield '65 characters' => [ 'wp_' . str_repeat( 'a', 62 ), false ];
+	}
+
+	/** MySQL's limit for a table name is 64 characters, not bytes. */
+	#[DataProvider( 'name_lengths' )]
+	public function test_a_name_of_up_to_64_characters_is_accepted_and_a_longer_one_refused( string $name, bool $accepted ): void {
+		$data                      = self::data();
+		$data['tables'][0]['name'] = $name;
+		$data['tables'][0]['file'] = ( new \BackupsForRestic\Database\Dump\Table( $name, '', [], null, [] ) )->file();
+		try {
+			$manifest = Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' );
+			self::assertTrue( $accepted, 'A name longer than 64 characters was accepted.' );
+			self::assertSame( $name, $manifest->tables[0]['name'] );
+		} catch ( FormatException $refused ) {
+			self::assertFalse( $accepted, $refused->getMessage() );
+			self::assertSame( 'The database dump contains a table name outside this site or the supported name format.', $refused->getMessage() );
+			self::assertArrayNotHasKey( 'code', $refused->context() );
+		}
+	}
+
 	/** @return iterable<string, array{string}> */
 	public static function names_with_the_characters_of_a_path(): iterable {
 		yield 'a dot' => [ 'wp_other.posts' ];

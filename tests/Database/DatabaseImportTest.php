@@ -15,6 +15,7 @@ use BackupsForRestic\Database\Restore\RehearsalReport;
 use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Database\Restore\MysqliConnection as RestoreConnection;
 use BackupsForRestic\Database\Restore\Session as RestoreSession;
+use BackupsForRestic\Database\Restore\TableFile;
 use BackupsForRestic\Database\Restore\TableImporter;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
@@ -586,6 +587,15 @@ final class DatabaseImportTest extends TestCase {
 		$this->assert_nothing_imported( $importer );
 	}
 
+	/** 20 columns with comments of 1,024 characters: about 21 KiB of definition. */
+	private static function columns(): string {
+		$columns = [];
+		for ( $column = 0; $column < 20; ++$column ) {
+			$columns[] = 'c' . $column . " INT COMMENT '" . str_repeat( 'x', 1024 ) . "'";
+		}
+		return '(' . implode( ', ', $columns ) . ')';
+	}
+
 	/**
 	 * A small table and a table without rows whose definition is larger than 16 KiB: 20
 	 * columns with comments of 1,024 characters (MariaDB keeps the comments of a table's
@@ -593,13 +603,9 @@ final class DatabaseImportTest extends TestCase {
 	 * the manifest says nothing about that definition.
 	 */
 	private function wide(): Manifest {
-		$columns = [];
-		for ( $column = 0; $column < 20; ++$column ) {
-			$columns[] = 'c' . $column . " INT COMMENT '" . str_repeat( 'x', 1024 ) . "'";
-		}
 		$this->db->execute( 'CREATE TABLE wp_aaa (id INT PRIMARY KEY) ENGINE=InnoDB' );
 		$this->db->execute( 'INSERT INTO wp_aaa VALUES (1),(2)' );
-		$this->db->execute( 'CREATE TABLE wp_wide (' . implode( ', ', $columns ) . ') ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE wp_wide ' . self::columns() . ' ENGINE=InnoDB' );
 		$manifest = $this->stage_dump();
 		self::assertSame( [ 'wp_aaa', 'wp_wide' ], array_column( $manifest->tables, 'name' ) );
 		self::assertSame( 0, $manifest->reads[1]['largest_statement'] ?? null, 'The dump records no statement of a table without rows.' );
@@ -664,6 +670,28 @@ final class DatabaseImportTest extends TestCase {
 		}
 		self::assertSame( [ [ 'id' => '1' ], [ 'id' => '2' ] ], $this->db->rows( 'SELECT id FROM `' . $importer->tables->shadow( 0 ) . '` ORDER BY id' ) );
 		self::assertFalse( $this->present( $importer->tables->shadow( 1 ) ) );
+	}
+
+	/** As for the largest statement: of two definitions of the same size the first table is named. */
+	public function test_of_two_definitions_of_the_same_size_beyond_the_limit_the_first_table_is_named(): void {
+		$this->db->execute( 'CREATE TABLE wp_wide1 ' . self::columns() . ' ENGINE=InnoDB' );
+		$this->db->execute( 'CREATE TABLE wp_wide2 ' . self::columns() . ' ENGINE=InnoDB' );
+		$manifest = $this->stage_dump();
+		$importer = new TableImporter( $this->reporting_16_kib(), $manifest, $this->directory, $this->token );
+		$lengths  = [];
+		foreach ( [ 0, 1 ] as $number ) {
+			$file      = new TableFile( $this->directory, $manifest, $number, $importer->tables->shadow( $number ), $importer->tables->owner );
+			$lengths[] = strlen( $file->create->sql );
+			$file->close();
+		}
+		self::assertSame( $lengths[0], $lengths[1], 'The two definitions are of the same size.' );
+		try {
+			$importer->tick( 16 );
+			self::fail( 'The import of a definition beyond the packet limit began.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+			self::assertSame( 'wp_wide1', $refused->context()['table'] ?? null );
+		}
 	}
 
 	/** @return iterable<string, array{array<string,mixed>|null, string}> */
