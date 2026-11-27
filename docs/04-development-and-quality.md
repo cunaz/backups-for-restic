@@ -458,7 +458,7 @@ leaves or meets a server on which large statements fail whatever the mutation: o
 | Core (`mutation`, `infection.json5.dist`) | `Crypto`, `Format`, `Engine\Forget` and `Database\Restore` without the ten classes whose tests need the database server | `ci.yml` | 89 % | 92 % |
 | Planner (`mutation:planner`) | `Restore\ApplyPlan`, `Restore\SiteLayout` | `ci.yml` | 87 % | 88 % |
 | File restore (`mutation:restore`) | the rest of `src/Restore` | `ci.yml` | 77 % | 81 % |
-| File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its database half: the three `Database*` classes and `ExchangeSite` | `ci.yml` | 79 % | 83 % |
+| File apply jobs (`mutation:apply`) | `src/Jobs/Apply` without its database half: the three `Database*` classes and `ExchangeSite` | `ci.yml` | 94 % | 95 % |
 | ZIP downloads (`mutation:zip`) | `src/Storage/Zip` | `ci.yml` | 83 % | 84 % |
 | Database (`mutation:database`) | all of `Database\Restore` and the database half of `src/Jobs/Apply`, killed by `tests/Unit/Database`, the unit tests of `DatabaseChanges` and `DatabaseReview`, and `tests/Database` against MySQL | `database-mutation.yml` | 80 % | 84 % |
 
@@ -476,7 +476,10 @@ others until tests raise it. Each gate's suite in `tests/Mutation` holds the uni
 classes it mutates, and a new one belongs there too: on 2026-11-23 three that `main` had gained
 since the gates were set up were missing (`PlanBuildTest`, `DatabaseChangesTest`,
 `DatabaseReviewTest`). Tests that reach the code from further away, such as the engine's, stay
-with the main configuration.
+with the main configuration. The file restore and apply gates shared the suite `restore`; since
+2026-11-27 the apply gate runs the suite `apply`, which adds the tests of the apply jobs in
+`tests/Unit/Jobs/Apply`. They reach much of `src/Restore` too, and the file restore gate, whose
+CI job took 118 of its 150 minutes on `5308b0b`, runs without them.
 
 **What a mutant process measures.** Infection runs each mutant in a PHPUnit process of its
 own and serves the mutated class there through a user-space `file://` stream wrapper in place
@@ -581,9 +584,18 @@ four cores; its minutes are those of the Infection step.
 | Core | 2 | 4,748 | 118 | 360 | 65 | 89.93 % | 92.22 % | 15.4, 15.7 | 92.22 %, 62.9 |
 | Planner | 1 | 749 | 13 | 81 | 2 | 87.45 % | 88.99 % | 1.1 | 88.99 %, 2.4 |
 | File restore | 1 | 3,707 | 178 | 641 | 27 | 77.91 % | 81.84 % | 28.4 | 81.81 %, 71.7 |
-| File apply jobs | 2 | 1,745 | 88 | 272 | 2 | 79.37 % | 83.58 % | 7.1, 7.1 | 83.52 %, 15.7 |
+| File apply jobs | 1 | 1,798 | 9 | 85 | 3 | 94.77 % | 95.25 % | 14.0 | – |
 | ZIP downloads | 1 | 794 | 15 | 117 | 14 | 83.38 % | 84.98 % | 0.5 | 84.98 %, 1.7 |
 | Database | 2 | 4,278 | 197 | 566, 567 | 9 | 82.16 %, 82.14 % | 86.13 %, 86.11 % | 52.5, 48.5 | 85.98 %, 107.3 |
+
+The file apply jobs were measured again on 2026-11-27, with `main` at `3651682` and the tests of
+`tests/Unit/Jobs/Apply`, on three threads instead of eight: their row gives that run. CI's
+figures for that state are not in the row yet, and the floors, that run's scores rounded down,
+are provisional until CI's run of the pull request that added those tests confirms them. Before
+those tests, the same code had 1,798 mutants, 75 of them not covered, 274 escaped and 3 timed
+out: 80.59 % and 84.10 % covered in 27.8 minutes on three threads, and 80.65 % and 84.16 % in
+CI's run of `5308b0b` (27 minutes). The gate takes less time with the tests: a mutant that a
+test kills stops at that test, while an escaped one runs every test that covers it.
 
 Under Infection's wrapper the gates had reported 90.39 % covered for the core and 79.20 % for
 the database gate on 2026-11-20, and 98.36 % for the planner, 98 % for file restore, 100 % for
@@ -594,7 +606,10 @@ ones on three states of `main` and CI's two, mutant for mutant. The core and the
 the same figures in their two final runs, and CI's run on the final state gave the core's too,
 with five mutants of `Polynomial` timed out instead of killed. Two mutants of `PlanBuild` (the
 `0` of `$this->counts['rows'] ?? 0`, lowered) were killed in some runs and not in others, CI's
-included, and so were one mutant of `ApplyManifest` between two local runs of the file restore
+included (on `5308b0b` the one in `PlanBuild::apply()` escaped locally and was killed in CI's
+run; since the tests of `tests/Unit/Jobs/Apply` a report that names its first path again in a
+later tick kills it whatever the run: the lowered claim is read back from its bucket and refused),
+and so were one mutant of `ApplyManifest` between two local runs of the file restore
 gate and one of `DirectorySpellings` (line 304) in CI's. So CI scored 79.31 % and 83.52 % for
 the apply gate and 77.88 % and 81.81 % for file restore, which are also the scores over the
 mutants that every run on the same code killed. On `662c8b1` CI scored the same for the planner,
@@ -681,7 +696,10 @@ The escaped mutants by class with `main` at `e40ab18`, the work of a later packa
 - File restore: `FileChange` 146, `Staging` 97, `DiskFilePlan` 83, `DirectorySpellings` 53,
   `ApplyManifest` 52, `FileMaintenance` 51, `LiveSpellings` 44, `KeptList` 32, `ChunkDigest` 28,
   `SnapshotBrowser` 25, `FileVerification` 17, `FileSpace` 11, `StagedRestore` 2.
-- File apply jobs: `FileChanges` 128, `FilePlans` 76, `PlanBuild` 57, `ApplyJournal` 11.
+- File apply jobs, with `main` at `3651682` and the tests of `tests/Unit/Jobs/Apply`
+  (2026-11-27): `FileChanges` 40, `FilePlans` 22, `PlanBuild` 18, `ApplyJournal` 5. The pull
+  request that added those tests names each with the reason why no test can kill it, or with
+  what a test would need.
 - ZIP downloads: `ZipWriter` 87, `ZipRecords` 29, `Crc32` 1. The last is equivalent: a 33rd
   row of the matrix in `Crc32::power()`, which no 32-bit vector reads.
 - Database: `Jobs\Apply\DatabaseChanges` 99, `Jobs\Apply\DatabaseGeneration` 53,
