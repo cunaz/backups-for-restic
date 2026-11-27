@@ -161,7 +161,9 @@ final class Job {
 	/**
 	 * How many of the warnings warn_kept() added. warn() counts the others only, also after the
 	 * job was saved and read again: job.json keeps the number as `warnings_kept`. A document
-	 * without it counts all of its warnings, as the versions that wrote it did.
+	 * without it counts all of its warnings, as the versions that wrote it did. The field did
+	 * not raise SCHEMA: a copy of the plugin without it loses no warning, and a higher number
+	 * would keep it from loading any job of this version (docs/02-architecture.md, §18).
 	 *
 	 * @var int
 	 */

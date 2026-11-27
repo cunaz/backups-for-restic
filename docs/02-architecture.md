@@ -1701,7 +1701,13 @@ and schedules are slots in the site's time zone.
 - The options carry one layout number for settings, state and notifications in
   `backups_for_restic_schema_version` (`Storage\SchemaVersion`, 1 today), and every `job.json`
   carries its own in the field `schema` (`Jobs\Job::SCHEMA`, 3 since database exchange jobs began recording retained generations, with layouts 1 and 2 still readable). A number is raised with
-  every change that a version without the change would misread. Options without a number
+  every change that a version without the change would misread. The number of a job's kept
+  warnings (`warnings_kept`, 2026-11) did not raise it. The plugin has not been released with
+  layout 3, so every released version that reads the layout knows the field. A development
+  copy of layout 3 without it loses no warning: it counts the kept ones among its own 50 and
+  leaves the number out when it saves the job, after which that job takes that many fewer
+  later warnings. A higher number would have kept such a copy from loading any job of this
+  version, and with that from starting any job, scheduled backups included. Options without a number
   and job documents without the field have the first layout; the plugin records the number
   on its first request. This first recording is an atomic insert that never changes an
   existing row or its autoload flag. After an insertion race the stored value is read
