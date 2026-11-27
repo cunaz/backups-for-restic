@@ -498,12 +498,28 @@ final class JobStore {
 	 * @return string|null Job ID, or null if every stored document can be read.
 	 */
 	public function unreadable(): ?string {
+		return $this->unreadable_ids( 1 )[0] ?? null;
+	}
+
+	/**
+	 * The stored jobs that get() does not load although has_document() counts their document,
+	 * newest first. Each blocks every new job, scheduled backups included, and no list of jobs
+	 * can show it: the dashboard, the job list and WP-CLI's status name them (unreadable()).
+	 *
+	 * @param int $limit Most IDs to find.
+	 * @return list<string> Job IDs.
+	 */
+	public function unreadable_ids( int $limit = PHP_INT_MAX ): array {
+		$found = [];
 		foreach ( $this->ids() as $id ) {
+			if ( count( $found ) >= $limit ) {
+				break;
+			}
 			if ( null === $this->get( $id ) && $this->has_document( $id ) ) {
-				return $id;
+				$found[] = $id;
 			}
 		}
-		return null;
+		return $found;
 	}
 
 	/**

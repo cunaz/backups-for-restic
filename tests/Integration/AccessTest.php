@@ -437,7 +437,7 @@ final class AccessTest extends TestCase {
 				[
 					$running    => [ 409, 'backups_for_restic_undo_not_ended', 'This undo has not ended yet.', 'The entries that it keeps are listed once it has ended.' ],
 					$backup     => [ 404, 'backups_for_restic_not_an_undo', 'This job is not an undo of live file changes.', 'Only an undo keeps entries that it could not revert, and it lists them once it has ended.' ],
-					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'A stored job cannot be read by this version of the plugin.', 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.' ],
+					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.', 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.' ],
 				],
 				$answers
 			);
@@ -496,6 +496,57 @@ final class AccessTest extends TestCase {
 		} finally {
 			chmod( $folder, 0700 );
 			foreach ( [ $inaccessible, $unreadable ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
+	public function test_stored_jobs_that_cannot_be_read_are_shown_on_the_dashboard_in_the_job_list_and_by_status(): void {
+		$unreadable   = '20261127T100000Z-0c6001';
+		$inaccessible = '20261127T100000Z-0c6002';
+		mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
+		file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$backup              = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$container->jobs()->save( $backup );
+			',
+			[ $inaccessible ]
+		);
+		$folder = TestSite::private_dir() . '/jobs/' . $inaccessible;
+		chmod( $folder, 0600 );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$expected = [
+				[ $inaccessible, 'job_inaccessible', 'The PHP user cannot open the stored job ' . $inaccessible . ' in the private working directory.' ],
+				[ $unreadable, 'job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.' ],
+			];
+			// Before, neither the dashboard nor the job list showed them: only the refusal of a new
+			// job named one, and scheduled backups did not start without a word.
+			foreach ( [ '/status', '/jobs' ] as $route ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', $route );
+				self::assertSame( 200, $status, $raw );
+				$listed = array_map( static fn ( array $job ): array => [ $job['id'] ?? null, $job['code'] ?? null, $job['message'] ?? null ], (array) ( $answer['unreadable_jobs'] ?? [] ) );
+				self::assertSame( $expected, $listed, $route );
+				self::assertStringContainsString( 'Give the PHP user back ownership of that folder', (string) ( $answer['unreadable_jobs'][0]['hint'] ?? '' ) );
+				self::assertStringContainsString( 'Install a plugin version that can read the job.', (string) ( $answer['unreadable_jobs'][1]['hint'] ?? '' ) );
+			}
+			[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'status' ] );
+			self::assertSame( 0, $status, $output );
+			foreach ( $expected as [ $id, , $message ] ) {
+				self::assertStringContainsString( 'Stored job that cannot be read: ' . $id, $output );
+				self::assertStringContainsString( $message, $output );
+			}
+			self::assertStringContainsString( 'No backup starts while it cannot be read, the scheduled ones included.', $output );
+		} finally {
+			chmod( $folder, 0700 );
+			foreach ( [ $unreadable, $inaccessible ] as $id ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
 			}
 		}

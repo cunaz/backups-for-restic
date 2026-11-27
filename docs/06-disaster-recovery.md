@@ -863,7 +863,10 @@ from then on (`sudo -u www-data wp …`) rather than with `--allow-root`. If own
 permissions are in order, a link is in the place of the folder, or something other than a
 regular file in the place of its `job.json`: put the job's own files back. Uninstalling is
 refused for the same job until it can be read. `GET /jobs/{id}`, its log and
-`wp backups-for-restic logs <id>` answer for that job with the same code and texts.
+`wp backups-for-restic logs <id>` answer for that job with the same code and texts, and the
+dashboard, the Logs tab and `wp backups-for-restic status` name every such job while it lasts,
+with the note that no backup starts meanwhile, scheduled ones included. The same holds for a
+document that this version cannot read (`job_unreadable`), whose texts name the job too.
 
 A different notice says that the first settings layout number could not be saved. Check
 the database's write access and storage availability. The plugin retries recording the

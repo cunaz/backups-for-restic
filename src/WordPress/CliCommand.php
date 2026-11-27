@@ -281,13 +281,20 @@ final class CliCommand {
 	}
 
 	/**
-	 * Shows the last backup and the active job.
+	 * Shows the last backup and the active job, and every stored job that cannot be read, which
+	 * keeps every new job, scheduled backups included, from starting.
 	 */
 	public function status(): void {
+		$jobs   = $this->container->jobs();
 		$last   = $this->container->state()->get( 'last_backup' );
-		$active = $this->container->jobs()->active();
+		$active = $jobs->active();
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Last backup', 'backups-for-restic' ), is_int( $last['finished'] ?? null ) ? gmdate( 'Y-m-d H:i:s', $last['finished'] ) . ' UTC' : '-' ) );
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Active job', 'backups-for-restic' ), null === $active ? '-' : $active->id . ' (' . Messages::step( $active->step ) . ')' ) );
+		foreach ( $jobs->unreadable_ids() as $id ) {
+			$texts = Messages::stored_job( $jobs->unreadable_code( $id ), $id );
+			\WP_CLI::line( sprintf( '%s: %s', __( 'Stored job that cannot be read', 'backups-for-restic' ), $id ) );
+			\WP_CLI::warning( $texts['message'] . ' ' . $texts['hint'] . ' ' . __( 'No backup starts while it cannot be read, the scheduled ones included.', 'backups-for-restic' ) );
+		}
 	}
 
 	/**

@@ -46,15 +46,22 @@ final class Messages {
 
 	/**
 	 * Message and hint for the refusal because of a stored job that cannot be read
-	 * (JobStore::refuse_unreadable()), with the job's ID where the job cannot be opened, so that
-	 * the administrator finds its folder. A document that this version cannot parse has the
-	 * texts of its code.
+	 * (JobStore::refuse_unreadable()), with the job's ID, so that the administrator finds its
+	 * folder: the job cannot be opened (job_inaccessible), or this version cannot parse its
+	 * document (job_unreadable).
 	 *
 	 * @param string $code job_inaccessible or job_unreadable.
 	 * @param string $id   ID of the job, the name of its folder under jobs/.
 	 * @return array{message: string, hint: string} Texts.
 	 */
 	public static function stored_job( string $code, string $id ): array {
+		if ( 'job_unreadable' === $code ) {
+			return [
+				/* translators: %s: job ID, which is also the name of the job's folder. */
+				'message' => sprintf( __( 'This version of the plugin cannot read the stored job %s.', 'backups-for-restic' ), $id ),
+				'hint'    => self::job_error( $code )['hint'],
+			];
+		}
 		if ( 'job_inaccessible' !== $code ) {
 			return self::job_error( $code );
 		}

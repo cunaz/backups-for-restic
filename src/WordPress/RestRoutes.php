@@ -201,6 +201,7 @@ final class RestRoutes {
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),
 				'next_backup'     => SchedulePolicy::next_backup_slot( $settings, $zone, time() ),
 				'recent_jobs'     => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 5 ) ),
+				'unreadable_jobs' => $this->unreadable_jobs(),
 				'retention'       => [
 					'mode'           => $settings->string( 'retention.mode' ),
 					'after_backup'   => $settings->bool( 'retention.run_forget_after_backup' ),
@@ -340,7 +341,33 @@ final class RestRoutes {
 	 * @return \WP_REST_Response Response.
 	 */
 	public function jobs(): \WP_REST_Response {
-		return $this->respond( [ 'jobs' => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ) ] );
+		return $this->respond(
+			[
+				'jobs'            => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ),
+				'unreadable_jobs' => $this->unreadable_jobs(),
+			]
+		);
+	}
+
+	/**
+	 * The stored jobs that cannot be read, newest first, each with its code and the texts that
+	 * name it (Messages::stored_job()): they block every new job, scheduled backups included,
+	 * and no list of jobs can show them.
+	 *
+	 * @return list<array{id: string, code: string, message: string, hint: string}> Jobs.
+	 */
+	private function unreadable_jobs(): array {
+		$jobs = $this->container->jobs();
+		return array_map(
+			static function ( string $id ) use ( $jobs ): array {
+				$code = $jobs->unreadable_code( $id );
+				return [
+					'id'   => $id,
+					'code' => $code,
+				] + Messages::stored_job( $code, $id );
+			},
+			$jobs->unreadable_ids()
+		);
 	}
 
 	/**

@@ -617,14 +617,33 @@
 	/* ------------------------------------------------------------- Dashboard */
 
 	/**
-	 * Notices that stay until their cause is gone: check findings and retention changes.
+	 * Notices for the stored jobs that cannot be read, each naming its job and what to do: they
+	 * keep every new job from starting, scheduled backups included, and no list of jobs can show
+	 * them.
+	 *
+	 * @param {Array} jobs Jobs that cannot be read: id, code, message and hint.
+	 * @return {Array<Element>} Notices.
+	 */
+	function unreadableJobs( jobs ) {
+		return ( jobs || [] ).map( function ( job ) {
+			return el( 'div', { className: 'notice notice-error inline bfr-alert bfr-unreadable-job' }, [
+				el( 'p', {}, [ el( 'strong', {}, [ job.message ] ) ] ),
+				el( 'p', {}, [ job.hint ] ),
+				el( 'p', {}, [ __( 'No backup starts while it cannot be read, the scheduled ones included.', 'backups-for-restic' ) ] ),
+			] );
+		} );
+	}
+
+	/**
+	 * Notices that stay until their cause is gone: stored jobs that cannot be read, check
+	 * findings and retention changes.
 	 *
 	 * @param {Object}     status Dashboard data.
 	 * @param {() => void} reload Shows the dashboard again.
 	 * @return {Array} Nodes.
 	 */
 	function alerts( status, reload ) {
-		const nodes = [];
+		const nodes = [ ...unreadableJobs( status.unreadable_jobs ) ];
 		const alert = status.check_alert;
 		if ( alert ) {
 			nodes.push(
@@ -3158,6 +3177,7 @@
 		api( '/jobs' )
 			.then( function ( response ) {
 				replace( root, [
+					...unreadableJobs( response.unreadable_jobs ),
 					jobTable( response.jobs, function ( job ) {
 						api( '/jobs/' + job.id + '/log' ).then( function ( log ) {
 							const user = log.job.user;

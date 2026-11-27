@@ -220,9 +220,12 @@ final class JobMessagesTest extends TestCase {
 		$general = Messages::job_error( 'job_inaccessible' );
 		self::assertSame( 'The PHP user cannot open a stored job in the private working directory.', $general['message'] );
 		self::assertSame( $named['hint'], $general['hint'] );
-		// A document that this version cannot parse keeps its texts, which ask for another version.
-		self::assertSame( Messages::job_error( 'job_unreadable' ), Messages::stored_job( 'job_unreadable', $id ) );
-		self::assertStringContainsString( 'Install a plugin version that can read the job.', Messages::stored_job( 'job_unreadable', $id )['hint'] );
+		// A document that this version cannot parse keeps its code and hint, which ask for another
+		// version, and its message names the job too. Before, it named none.
+		$parse = Messages::stored_job( 'job_unreadable', $id );
+		self::assertSame( 'This version of the plugin cannot read the stored job 20260101T000000Z-0a1b2c.', $parse['message'] );
+		self::assertSame( Messages::job_error( 'job_unreadable' )['hint'], $parse['hint'] );
+		self::assertStringContainsString( 'Install a plugin version that can read the job.', $parse['hint'] );
 	}
 
 	#[RunInSeparateProcess]
