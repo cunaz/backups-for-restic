@@ -1396,7 +1396,9 @@ with an error under the same conditions as `POST /jobs` (§13.2): before the set
 completed, without a repository address, and `forget` and `prune` in retention mode
 `external`. A command that ran its job, with `--wait` or as `apply` and `undo` do, and found
 it failed ends with the message of the job's error code for that kind of job, as the admin
-page shows it (§14). `status` prints the last backup, the active job, and every stored job that
+page shows it (§14). A refused file preview, apply or undo (`apply-plan`, `undo`) prints the
+texts with which the file routes answer it (`RestRoutes::file_refusal()`), not the
+exception's technical message. `status` prints the last backup, the active job, and every stored job that
 cannot be read with the texts that name it, which keeps every new job from starting.
 
 `restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into

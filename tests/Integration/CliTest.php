@@ -510,7 +510,7 @@ final class CliTest extends TestCase {
 			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $applies[1] . '/undo/reverted' );
 			[ $status, $output ] = self::command( [ 'undo', $applies[1], '--yes' ] );
 			self::assertSame( 1, $status, $output );
-			self::assertStringContainsString( 'This apply has no available undo.', $output );
+			self::assertStringContainsString( 'Error: This apply can no longer be undone.', $output );
 		} finally {
 			foreach ( $applies as $apply ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $apply );

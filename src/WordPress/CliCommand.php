@@ -406,7 +406,7 @@ final class CliCommand {
 				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
 			}
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( self::refusal( $error ) );
+			\WP_CLI::error( self::file_refusal( $error ) );
 		}
 		if ( $refused ) {
 			\WP_CLI::error( __( 'The preview contains refused entries.', 'backups-for-restic' ) );
@@ -473,7 +473,7 @@ final class CliCommand {
 			$this->run_until_idle( $this->container->tick_budget() );
 			$this->report( $job->id );
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( self::refusal( $error ) );
+			\WP_CLI::error( self::file_refusal( $error ) );
 		}
 	}
 
@@ -657,6 +657,22 @@ final class CliCommand {
 			$context = is_array( $entry['context'] ?? null ) && [] !== $entry['context'] ? ' ' . (string) wp_json_encode( $entry['context'] ) : '';
 			\WP_CLI::line( sprintf( '%s %-7s %s%s', gmdate( 'Y-m-d H:i:s', is_int( $entry['time'] ?? null ) ? $entry['time'] : 0 ), is_string( $entry['level'] ?? null ) ? $entry['level'] : '', is_string( $entry['message'] ?? null ) ? $entry['message'] : '', $context ) );
 		}
+	}
+
+	/**
+	 * What the command line says about a refused or failed file preview, apply or undo: the
+	 * texts with which the file routes answer it (RestRoutes::file_refusal()), as the page shows
+	 * them, and for a stored job that cannot be read the texts that name it. Before, the
+	 * exception's technical message, such as "This apply has no available undo.".
+	 *
+	 * @param PluginException $error Refusal or failure.
+	 * @return string Text.
+	 */
+	private static function file_refusal( PluginException $error ): string {
+		[ $code ] = RestRoutes::file_refusal( $error );
+		$job      = $error->context()['job'] ?? null;
+		$texts    = in_array( $code, [ 'job_inaccessible', 'job_unreadable' ], true ) && is_string( $job ) ? Messages::stored_job( $code, $job ) : RestRoutes::texts( $code );
+		return trim( $texts['message'] . ' ' . $texts['hint'] );
 	}
 
 	/**

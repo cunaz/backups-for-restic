@@ -355,6 +355,9 @@ All notable changes are documented here. The format follows
   could not leave maintenance mode, shows that failure on the admin page beside its state and
   its counts, and WP-CLI's report of a cancelled undo names it too. Before, only a failed job
   showed its error, and the page said "Cancelled" while the maintenance page stayed up.
+- `wp backups-for-restic apply-plan` and `undo` print the texts of a refusal's code, as the
+  page shows them, where they printed the exception's technical message, such as "This apply
+  has no available undo.".
 - A stored job that cannot be read is shown on the dashboard and in the Logs tab, and
   `wp backups-for-restic status` lists it, each with the texts that name the job, and they say
   that no backup starts meanwhile, scheduled ones included. `GET /status` and `GET /jobs`

@@ -1100,17 +1100,29 @@ final class RestRoutes {
 	 * @return \WP_Error Error.
 	 */
 	private function file_error( PluginException $refused ): \WP_Error {
+		[ $code, $status ] = self::file_refusal( $refused );
+		return $refused instanceof JobConflict && in_array( $code, self::STORED_JOB_CODES, true ) ? $this->conflict( $refused ) : $this->error( $code, $status );
+	}
+
+	/**
+	 * The code and status with which the file routes answer a refused or failed file preview or
+	 * confirmation (file_error()). WP-CLI prints the texts of the same code (texts()).
+	 *
+	 * @param PluginException $refused Reason.
+	 * @return array{0: string, 1: int} Code and HTTP status.
+	 */
+	public static function file_refusal( PluginException $refused ): array {
 		$code = JobError::from_throwable( $refused )->code;
 		if ( 'file_changed_after_review' === $code ) {
-			return $this->error( 'live_plan_changed', 409 );
+			return [ 'live_plan_changed', 409 ];
 		}
 		if ( $refused instanceof JobConflict ) {
-			return in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'undo_records_unreadable', 'file_preview_expired', ...self::STORED_JOB_CODES ], true ) ? $this->conflict( $refused ) : $this->error( 'live_plan_conflict', 409 );
+			return [ in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'undo_records_unreadable', 'file_preview_expired', ...self::STORED_JOB_CODES ], true ) ? $code : 'live_plan_conflict', 409 ];
 		}
 		if ( $refused instanceof InvalidArgument ) {
-			return $this->error( in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 );
+			return [ in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 ];
 		}
-		return $this->error( 'live_plan_failed', 500 );
+		return [ 'live_plan_failed', 500 ];
 	}
 
 	/**
@@ -1840,7 +1852,26 @@ final class RestRoutes {
 	 * @return \WP_Error Error.
 	 */
 	private function error( string $code, int $status ): \WP_Error {
-		$texts = match ( $code ) {
+		$texts = self::texts( $code );
+		return new \WP_Error(
+			'backups_for_restic_' . $code,
+			$texts['message'],
+			[
+				'status' => $status,
+				'hint'   => $texts['hint'],
+			]
+		);
+	}
+
+	/**
+	 * The translated message and hint of a code that a route answers with: those of the routes
+	 * themselves, and otherwise those of Messages::snapshot_error(). WP-CLI prints the same.
+	 *
+	 * @param string $code Error code.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function texts( string $code ): array {
+		return match ( $code ) {
 			'not_found'                     => [
 				'message' => __( 'The job does not exist.', 'backups-for-restic' ),
 				'hint'    => '',
@@ -1964,14 +1995,6 @@ final class RestRoutes {
 			],
 			default                         => Messages::snapshot_error( $code ),
 		};
-		return new \WP_Error(
-			'backups_for_restic_' . $code,
-			$texts['message'],
-			[
-				'status' => $status,
-				'hint'   => $texts['hint'],
-			]
-		);
 	}
 
 	/**

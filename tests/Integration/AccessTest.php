@@ -552,6 +552,15 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_the_command_line_says_of_a_refused_undo_what_the_page_says(): void {
+		// No apply has this ID: the undo is refused as one that can no longer be undone.
+		[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', '20261127T110000Z-0c7001' ] );
+		self::assertSame( 1, $status, $output );
+		// Before: "This apply has no available undo.", the exception's technical message.
+		self::assertStringContainsString( 'Error: This apply can no longer be undone. An apply can be undone for 24 hours after it ended', $output );
+		self::assertStringNotContainsString( 'no available undo', $output );
+	}
+
 	public function test_a_cancelled_job_whose_cleanup_failed_is_answered_with_its_state_its_counts_and_its_error(): void {
 		$undo   = '20261126T160000Z-0c4001';
 		$apply  = '20261126T160000Z-0c4002';
