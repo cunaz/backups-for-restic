@@ -600,6 +600,31 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_an_apply_whose_undo_records_cannot_be_read_is_listed_as_such_and_its_review_refused(): void {
+		$site  = TestSite::root();
+		$apply = '20261127T130000Z-0c9010';
+		TestSite::undoable_apply( $apply, [ [ $site . '/bfr-unreadable-records.txt', $site . '/bfr-unreadable-records.txt', 'create' ] ] );
+		// A folder at the name of the undone marker: whether the apply was undone cannot be established.
+		mkdir( TestSite::private_dir() . '/jobs/' . $apply . '/undo/reverted', 0700 );
+		try {
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/undo' );
+			self::assertSame( 200, $status, $raw );
+			$entry = array_values( array_filter( (array) ( $listed['jobs'] ?? [] ), static fn ( array $job ): bool => $apply === ( $job['job'] ?? null ) ) );
+			self::assertCount( 1, $entry, $raw );
+			self::assertSame( 'unreadable', $entry[0]['state'] ?? null, $raw );
+			[ $status, $error, $raw ] = TestSite::api( 'POST', '/undo/' . $apply . '/plan', [] );
+			self::assertSame( [ 409, 'backups_for_restic_undo_records_unreadable', 'The plugin cannot tell whether this apply can still be undone.' ], [ $status, $error['code'] ?? null, $error['message'] ?? null ], $raw );
+			self::assertStringContainsString( 'keeps the saved original files and the staged files', (string) ( $error['data']['hint'] ?? '' ) );
+			// Its journal and the staging of its restore stay.
+			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $apply . '/undo/attempted' );
+		} finally {
+			foreach ( [ $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
+	}
+
 	public function test_the_command_line_says_of_a_refused_undo_what_the_page_says(): void {
 		// No apply has this ID: the undo is refused as one that can no longer be undone.
 		[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', '20261127T110000Z-0c7001' ] );
