@@ -232,19 +232,21 @@ final class AccessTest extends TestCase {
 	}
 
 	/**
-	 * Sends the confirmation of a discard again while another request holds the runner lock, at
-	 * most 40 times in ten seconds. A request of the test can start WP-Cron, whose heartbeat holds
-	 * that lock for a moment, and the discard then answers database_discard_busy before it looks
-	 * at the binding. The test checks the first other answer; the busy answer itself is checked
+	 * Sends the confirmation of a discard, or the marking of a discarded binding's tables as
+	 * taken care of, again while another request holds the runner lock, at most 40 times in ten
+	 * seconds. A request of the test can start WP-Cron, whose heartbeat holds that lock for a
+	 * moment, and the route then answers with its busy code before it looks at the job, and
+	 * changes nothing. The test checks the first other answer; the busy answer itself is checked
 	 * with a lock that the test holds.
 	 *
-	 * @param \Closure():array{int, array<mixed>, string} $send The confirmation, as TestSite::api() answers it.
-	 * @return array{int, array<mixed>, string} The first answer that is not database_discard_busy, or the last one.
+	 * @param \Closure():array{int, array<mixed>, string} $send The request, as TestSite::api() answers it.
+	 * @param string                                      $busy The route's busy code: database_discard_busy, or database_discarded_busy for the marking.
+	 * @return array{int, array<mixed>, string} The first answer that is not the busy one, or the last one.
 	 */
-	private static function unless_busy( \Closure $send ): array {
+	private static function unless_busy( \Closure $send, string $busy = 'database_discard_busy' ): array {
 		for ( $attempt = 1; ; ++$attempt ) {
 			$answer = $send();
-			if ( 'backups_for_restic_database_discard_busy' !== ( $answer[1]['code'] ?? null ) || $attempt >= 40 ) {
+			if ( 'backups_for_restic_' . $busy !== ( $answer[1]['code'] ?? null ) || $attempt >= 40 ) {
 				return $answer;
 			}
 			usleep( 250000 );
@@ -401,11 +403,12 @@ final class AccessTest extends TestCase {
 			$entry  = array_values( array_filter( $listed(), static fn ( array $entry ): bool => $job === ( $entry['job'] ?? null ) ) );
 			self::assertCount( 1, $entry );
 			self::assertSame( [ $review['tables'], $answer['discarded']['until'] ?? null ], [ $entry[0]['tables'] ?? null, $entry[0]['until'] ?? null ] );
-			[ $status, $done, $raw ] = TestSite::api( 'POST', $route . '/discarded-done', [] );
+			$mark                    = static fn (): array => TestSite::api( 'POST', $route . '/discarded-done', [] );
+			[ $status, $done, $raw ] = self::unless_busy( $mark, 'database_discarded_busy' );
 			self::assertSame( 200, $status, $raw );
 			self::assertSame( $review['tables'], $done['done']['tables'] ?? null );
 			self::assertSame( 1, TestSite::job_document( $job )['data']['database_discarded']['done']['user'] ?? null );
-			[ $status, $error ] = TestSite::api( 'POST', $route . '/discarded-done', [] );
+			[ $status, $error ] = self::unless_busy( $mark, 'database_discarded_busy' );
 			self::assertSame( [ 409, 'backups_for_restic_database_discarded_missing' ], [ $status, $error['code'] ?? null ] );
 			// Before, a failed answer of the list passed here as one without the binding.
 			self::assertNotContains( $job, array_column( $listed(), 'job' ) );
@@ -566,7 +569,8 @@ final class AccessTest extends TestCase {
 				flock( $lock, LOCK_UN );
 				fclose( $lock );
 			}
-			[ $status, $done, $raw ] = TestSite::api( 'POST', $route, [] );
+			// Once the test lets go of the lock, a heartbeat may hold it for a moment.
+			[ $status, $done, $raw ] = self::unless_busy( static fn (): array => TestSite::api( 'POST', $route, [] ), 'database_discarded_busy' );
 			self::assertSame( 200, $status, $raw );
 			self::assertSame( $job, $done['done']['job'] ?? null );
 		} finally {

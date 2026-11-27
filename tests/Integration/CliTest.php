@@ -39,6 +39,27 @@ final class CliTest extends TestCase {
 	}
 
 	/**
+	 * Runs a command of the plugin again while another request holds the runner lock, at most 40
+	 * times with a quarter of a second between them. An earlier command or request of the test
+	 * can start WP-Cron, whose heartbeat holds that lock for a moment; the discard of a binding
+	 * and the marking of its tables as taken care of then refuse before they look at the job,
+	 * and change nothing. The test checks the first other answer; the busy answer itself is
+	 * checked with a lock that the test holds.
+	 *
+	 * @param list<string> $arguments Subcommand and options.
+	 * @return array{int, string} Exit status and output of the first run that the lock did not refuse, or of the last one.
+	 */
+	private static function unless_busy( array $arguments ): array {
+		for ( $attempt = 1; ; ++$attempt ) {
+			$answer = self::command( $arguments );
+			if ( ! str_contains( $answer[1], 'Error: Another request is working on the jobs of the plugin right now' ) || $attempt >= 40 ) {
+				return $answer;
+			}
+			usleep( 250000 );
+		}
+	}
+
+	/**
 	 * The ID of the job that a command said it created.
 	 */
 	private static function created( string $output ): string {
@@ -743,7 +764,7 @@ final class CliTest extends TestCase {
 			// A script names the address and the digest of a review that it was shown before.
 			[ , $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $jobs[1] ], '' );
 			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $digest ), $output );
-			[ $status, $output ] = self::command( [ 'database-discard', $jobs[1], '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
+			[ $status, $output ] = self::unless_busy( [ 'database-discard', $jobs[1], '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
 			self::assertSame( 0, $status, $output );
 			self::assertArrayNotHasKey( 'database_owner', TestSite::job_document( $jobs[1] )['data'] ?? [ 'database_owner' => true ] );
 			// What cannot be discarded says what is the case.
@@ -777,7 +798,7 @@ final class CliTest extends TestCase {
 			self::assertStringNotContainsString( $job, $output );
 			[ , $output ] = TestSite::wp_input( [ 'backups-for-restic', 'database-discard', $job ], '' );
 			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $digest ), $output );
-			[ $status, $output ] = self::command( [ 'database-discard', $job, '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
+			[ $status, $output ] = self::unless_busy( [ 'database-discard', $job, '--site-url=' . TestSite::url(), '--digest=' . $digest[1] ] );
 			self::assertSame( 0, $status, $output );
 			self::assertStringContainsString( '"wp backups-for-restic database-discarded" lists them.', $output );
 			// Before, the warnings of the job were the only place of the names, and the job history pruned the job.
@@ -808,12 +829,13 @@ final class CliTest extends TestCase {
 				flock( $lock, LOCK_UN );
 				fclose( $lock );
 			}
-			[ $status, $output ] = self::command( [ 'database-discarded', $job, '--done' ] );
+			// Once the test lets go of the lock, a heartbeat may hold it for a moment.
+			[ $status, $output ] = self::unless_busy( [ 'database-discarded', $job, '--done' ] );
 			self::assertSame( 0, $status, $output );
 			self::assertStringContainsString( 'Success: The 7 private tables of the discarded binding of ' . $job . ' are no longer listed.', $output );
 			self::assertSame( [ 0, 'wp-cli' ], [ TestSite::job_document( $job )['data']['database_discarded']['done']['user'] ?? null, TestSite::job_document( $job )['data']['database_discarded']['done']['via'] ?? null ] );
 			foreach ( [ [ 'database-discarded', $job ], [ 'database-discarded', $job, '--done' ] ] as $arguments ) {
-				[ $status, $output ] = self::command( $arguments );
+				[ $status, $output ] = self::unless_busy( $arguments );
 				self::assertSame( 1, $status, $output );
 				self::assertStringContainsString( 'Error: This database restore lists no private tables of a discarded binding.', $output );
 			}
