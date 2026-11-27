@@ -259,15 +259,18 @@ final class Runner {
 				$job->not_before           = 0;
 			} catch ( \Throwable $exception ) {
 				$error = JobError::from_throwable( $exception, $job->type );
-				// The table a database error is about, which its message cannot name.
-				$table = $exception instanceof PluginException ? $exception->context()['table'] ?? null : null;
+				// The table a database error is about, and the folder that a file review could not
+				// read, which their messages cannot name.
+				$context = $exception instanceof PluginException ? $exception->context() : [];
+				$table   = $context['table'] ?? null;
+				$folder  = $context['folder'] ?? null;
 				$log->write(
 					'error',
 					$error->message,
 					[
 						'code' => $error->code,
 						'step' => $job->step,
-					] + ( is_string( $table ) ? [ 'table' => $table ] : [] )
+					] + ( is_string( $table ) ? [ 'table' => $table ] : [] ) + ( is_string( $folder ) ? [ 'folder' => $folder ] : [] )
 				);
 				if ( $job->type->is_cleanup( $job->step ) ) {
 					// A failing cleanup step must not keep the job alive; the next one still runs.
