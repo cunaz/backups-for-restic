@@ -16,6 +16,7 @@ use BackupsForRestic\Exception\JobConflict;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Exception\ValidationFailed;
+use BackupsForRestic\Jobs\Apply\DatabaseChanges;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobStore;
@@ -94,9 +95,12 @@ final class RestRoutes {
 			'/restores/(?P<id>[^/]+)/database/plan'      => [ 'POST', 'database_preview' ],
 			'/restores/(?P<id>[^/]+)/database/apply'     => [ 'POST', 'apply_database' ],
 			'/database-changes'                          => [ 'GET', 'database_undoable' ],
+			'/database-changes/foreign'                  => [ 'GET', 'database_foreign' ],
 			'/database-changes/(?P<id>[^/]+)/undo-plan'  => [ 'POST', 'database_undo_preview' ],
 			'/database-changes/(?P<id>[^/]+)/undo'       => [ 'POST', 'undo_database' ],
+			'/database-changes/(?P<id>[^/]+)/discard-review' => [ 'POST', 'database_discard_preview' ],
 			'/database-changes/(?P<id>[^/]+)/discard'    => [ 'POST', 'discard_database' ],
+			'/database-changes/(?P<id>[^/]+)/discarded-done' => [ 'POST', 'discarded_done' ],
 			'/undo'                                      => [ 'GET', 'undoable' ],
 			'/undo/(?P<id>[^/]+)/plan'                   => [ 'POST', 'undo_preview' ],
 			'/undo/(?P<id>[^/]+)'                        => [ 'POST', 'undo_files' ],
@@ -120,7 +124,7 @@ final class RestRoutes {
 						self::class,
 						match ( $callback ) {
 								'apply_files', 'undo_files'       => 'live_writes_allowed',
-								'apply_database', 'undo_database', 'discard_database' => 'database_writes_allowed',
+								'apply_database', 'undo_database', 'discard_database', 'discarded_done' => 'database_writes_allowed',
 								default                           => 'allowed',
 						},
 					],
@@ -703,6 +707,28 @@ final class RestRoutes {
 	}
 
 	/**
+	 * Why the current account may not discard a database binding or end the listing of its
+	 * tables: the capabilities of database_writes_allowed() that it lacks, and whether the
+	 * site's file modification policy (DISALLOW_FILE_MODS or the file_mod_allowed filter) is
+	 * the reason, for which WordPress gives no account update_core. The page says so and names
+	 * the WP-CLI command, which needs neither when no WordPress user is selected.
+	 *
+	 * @return array{write_lacking:list<string>,file_mods_disallowed:bool} The reasons.
+	 */
+	private static function discard_lacking(): array {
+		$lacking = [];
+		foreach ( array_unique( [ self::capability(), ...self::DATABASE_CAPABILITIES ] ) as $capability ) {
+			if ( ! current_user_can( $capability ) ) {
+				$lacking[] = $capability;
+			}
+		}
+		return [
+			'write_lacking'        => $lacking,
+			'file_mods_disallowed' => ! wp_is_file_mod_allowed( 'capability_update_core' ),
+		];
+	}
+
+	/**
 	 * Rechecks the account that confirmed a live file change, on every tick of the job. A
 	 * process that runs many ticks, such as `wp backups-for-restic tick --until-idle`, keeps
 	 * the account in WordPress's object cache, so a role that another request took away
@@ -798,7 +824,7 @@ final class RestRoutes {
 		} catch ( InvalidArgument | JobConflict $refused ) {
 			return $this->plan_error( $refused );
 		}
-		return $this->reviewed_response( $plan, $id, $undo, false, true );
+		return $this->reviewed_response( $plan, $id, $undo ? 'undo' : 'apply', false, true );
 	}
 
 	/**
@@ -829,7 +855,7 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error Queued job or refusal.
 	 */
 	private function start_database_change( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
-		$review = $this->confirmed_plan( $request, $undo, true );
+		$review = $this->confirmed_plan( $request, $undo ? 'undo' : 'apply', true );
 		if ( $review instanceof \WP_Error ) {
 			return $review;
 		}
@@ -845,33 +871,120 @@ final class RestRoutes {
 	}
 
 	/**
+	 * Lists the finished database restores whose private tables the connected server positively
+	 * places on another server or in another database: the bindings that the Restores tab offers
+	 * to discard. `complete` is false where a server could not be asked or identified.
+	 * `discarded` lists the bindings discarded before whose tables are still to be removed by
+	 * hand, with their names, and `write_allowed` whether this account may discard a binding and
+	 * mark such tables as taken care of.
+	 *
+	 * @return \WP_REST_Response|\WP_Error The bindings, or the failure to read the jobs.
+	 */
+	public function database_foreign(): \WP_REST_Response|\WP_Error {
+		// Both lists from one reading of the jobs, so that a discard meanwhile shows in one of them.
+		try {
+			$lists = $this->container->database_changes()->foreign_bindings();
+		} catch ( PluginException $refused ) {
+			return $this->discard_error( $refused );
+		}
+		return $this->respond( $lists + [ 'write_allowed' => self::database_writes_allowed() ] + self::discard_lacking() );
+	}
+
+	/**
+	 * Ends the listing of the private tables of a discarded binding: the administrator says that
+	 * they are taken care of. Afterwards the job history prunes that job as any other.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error The entry that is no longer listed, or a refusal.
+	 */
+	public function discarded_done( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$id = Decoded::string( $request->get_url_params()['id'] ?? null );
+		// Under the runner lock, as every write of a job document: the pruning of the job history,
+		// which runs under it, cannot remove the job between the check and the save.
+		$lock = $this->container->runner_lock();
+		if ( ! $lock->acquire() ) {
+			return $this->error( 'database_discarded_busy', 409 );
+		}
+		try {
+			$entry = $this->container->database_changes()->discarded_done( $id, get_current_user_id(), 'rest' );
+		} catch ( PluginException $refused ) {
+			return $this->discard_error( $refused );
+		} finally {
+			$lock->release();
+		}
+		return $this->respond( [ 'done' => $entry ], 200, true );
+	}
+
+	/**
+	 * Reviews the discard of a binding whose private tables are on another database server or
+	 * in another database: what it forgets, what stays, and a digest over all of it, with a
+	 * review token for the confirmation as the review of an undo has one.
+	 *
+	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
+	 * @return \WP_REST_Response|\WP_Error Review or refusal.
+	 */
+	public function database_discard_preview( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$id = Decoded::string( $request->get_url_params()['id'] ?? null );
+		try {
+			$review = $this->container->database_changes()->discard_review( $id, get_current_user_id() );
+		} catch ( PluginException $refused ) {
+			return $this->discard_error( $refused );
+		}
+		return $this->reviewed_response( $review + self::discard_lacking(), $id, 'discard', false, true );
+	}
+
+	/**
 	 * Forgets a database restore binding whose private tables are on another database
-	 * server or in another database. The current user confirms with their WordPress
-	 * password in the JSON body, through the check that counts wrong passwords for every
-	 * such route (password_refusal()). Nothing is dropped; the answer names the tables that
-	 * a database administrator removes by hand where they are.
+	 * server or in another database, confirmed as an undo is (confirmed_plan()): the
+	 * acknowledgement, the typed site address, the digest and token of the review and the
+	 * current user's WordPress password in the JSON body. Under the runner lock the service
+	 * checks that the binding is still the reviewed one. Nothing is dropped; the answer names
+	 * the tables that a database administrator removes by hand where they are.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
 	 * @return \WP_REST_Response|\WP_Error The discarded binding, or a refusal.
 	 */
 	public function discard_database( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$id      = Decoded::string( $request->get_url_params()['id'] ?? null );
-		$refusal = $this->password_refusal( $request );
-		if ( null !== $refusal ) {
-			return $refusal;
+		$review = $this->confirmed_plan( $request, 'discard', true );
+		if ( $review instanceof \WP_Error ) {
+			return $review;
 		}
-		$lock = $this->container->runner_lock();
+		[ $id, $digest ] = $review;
+		$lock            = $this->container->runner_lock();
 		if ( ! $lock->acquire() ) {
-			return $this->error( 'job_conflict', 409 );
+			return $this->error( 'database_discard_busy', 409 );
 		}
 		try {
-			$binding = $this->container->database_changes()->discard( $id, get_current_user_id(), 'rest' );
-		} catch ( JobConflict $refused ) {
-			return $this->conflict( $refused );
+			$binding = $this->container->database_changes()->discard( $id, get_current_user_id(), 'rest', $digest );
+		} catch ( PluginException $refused ) {
+			return $this->discard_error( $refused );
 		} finally {
 			$lock->release();
 		}
 		return $this->respond( [ 'discarded' => $binding ], 200, true );
+	}
+
+	/**
+	 * Answers a refused or failed review or discard of a database binding with what is the case.
+	 * The discard has no job of its own: no answer points to the log of a job that does not
+	 * exist, and a database failure names the log of the job that holds the binding, where the
+	 * service wrote it. A failure that the service does not name is unexpected, and its answer
+	 * says that nothing recorded it.
+	 *
+	 * @param PluginException $refused Refusal or failure.
+	 * @return \WP_Error Error.
+	 */
+	private function discard_error( PluginException $refused ): \WP_Error {
+		$code = JobError::from_throwable( $refused )->code;
+		if ( $refused instanceof JobConflict && in_array( $code, self::STORED_JOB_CODES, true ) ) {
+			// A stored job that cannot be read is answered with the texts that name it.
+			return $this->conflict( $refused );
+		}
+		return match ( true ) {
+			in_array( $code, DatabaseChanges::DISCARD_REFUSALS, true ) => $this->error( $code, 409 ),
+			in_array( $code, DatabaseChanges::DISCARD_FAILURES, true ) => $this->error( $code, 500 ),
+			default => $this->error( 'database_discard_unexpected', 500 ),
+		};
 	}
 
 	/**
@@ -922,7 +1035,7 @@ final class RestRoutes {
 			Cron::chain( $this->container );
 			return $this->respond( [ 'job' => $this->job_summary( $plan ) ], 202, true );
 		}
-		return $this->reviewed_response( $plan, $id, $undo, $include_config, false );
+		return $this->reviewed_response( $plan, $id, $undo ? 'undo' : 'apply', $include_config, false );
 	}
 
 	/**
@@ -930,19 +1043,40 @@ final class RestRoutes {
 	 *
 	 * @param LiveReview $plan Inspected plan.
 	 * @param string     $id Source restore or prior apply job.
-	 * @param bool       $undo Whether to undo changes.
+	 * @param string     $operation What a confirmation does: apply, undo, or for a database binding discard.
 	 * @param bool       $include_config Whether the file review includes wp-config.php.
 	 * @param bool       $database Whether the review concerns database tables.
 	 * @return \WP_REST_Response Reviewed plan.
 	 */
-	private function reviewed_response( array $plan, string $id, bool $undo, bool $include_config, bool $database ): \WP_REST_Response {
+	private function reviewed_response( array $plan, string $id, string $operation, bool $include_config, bool $database ): \WP_REST_Response {
 		$plan['site_url']      = home_url();
 		$plan['write_allowed'] = $database ? self::database_writes_allowed() : self::live_writes_allowed();
-		$plan['review_token']  = $plan['applicable'] && $plan['write_allowed'] ? wp_create_nonce( self::review_action( $undo, $id, $include_config, $plan['digest'], $plan['plan_job'] ?? null, $database ) ) : null;
+		$plan['review_token']  = $plan['applicable'] && $plan['write_allowed'] ? wp_create_nonce( self::review_action( $operation, $id, $include_config, $plan['digest'], $plan['plan_job'] ?? null, $database ) ) : null;
 		// A job that a confirmation of this review starts is created at this time or later: the
 		// page looks for it by its type and this time when the answer to the confirmation is lost.
 		$plan['reviewed_at'] = time();
-		return $this->respond( $plan, 200, true );
+		return $this->respond( $database ? self::utf8( $plan ) : $plan, 200, true );
+	}
+
+	/**
+	 * Data from a database as the REST API answers it. A name that is not UTF-8, such as that of
+	 * a database which a connection in latin1 reports, has U+FFFD in place of each byte that is
+	 * not part of a valid sequence, as the snapshot routes answer names; the review's digest is
+	 * that of the bytes.
+	 *
+	 * @param array<string, mixed> $data Answer.
+	 * @return array<string, mixed> The answer in UTF-8.
+	 */
+	private static function utf8( array $data ): array {
+		array_walk_recursive(
+			$data,
+			static function ( mixed &$value ): void {
+				if ( is_string( $value ) ) {
+					$value = SnapshotBrowser::text( $value );
+				}
+			}
+		);
+		return $data;
 	}
 
 	/**
@@ -974,7 +1108,7 @@ final class RestRoutes {
 	 * @return \WP_REST_Response|\WP_Error New job or refusal.
 	 */
 	private function start_live_change( \WP_REST_Request $request, bool $undo ): \WP_REST_Response|\WP_Error {
-		$review = $this->confirmed_plan( $request, $undo, false );
+		$review = $this->confirmed_plan( $request, $undo ? 'undo' : 'apply', false );
 		if ( $review instanceof \WP_Error ) {
 			return $review;
 		}
@@ -1003,14 +1137,17 @@ final class RestRoutes {
 	}
 
 	/**
-	 * Checks an explicit JSON-body confirmation against the signed review and the current user.
+	 * Checks an explicit JSON-body confirmation against the signed review and the current user:
+	 * the acknowledgement and the typed site address, the digest and the review token, which binds
+	 * the review to this session, the site, the operation and the job, and last the WordPress
+	 * password through the one throttled check.
 	 *
 	 * @param \WP_REST_Request<array<string, mixed>> $request Request.
-	 * @param bool                                   $undo Whether to reverse a previous change.
-	 * @param bool                                   $database Whether the operation changes database tables.
+	 * @param string                                 $operation What the confirmation does: apply, undo, or for a database binding discard.
+	 * @param bool                                   $database Whether the operation changes database tables or their binding.
 	 * @return array{string, string, bool, string|null}|\WP_Error Source, digest, configuration scope and background plan, or refusal.
 	 */
-	private function confirmed_plan( \WP_REST_Request $request, bool $undo, bool $database ): array|\WP_Error {
+	private function confirmed_plan( \WP_REST_Request $request, string $operation, bool $database ): array|\WP_Error {
 		$id   = Decoded::string( $request->get_url_params()['id'] ?? null );
 		$body = $request->get_json_params();
 		if ( true !== ( $body['reviewed'] ?? null ) || home_url() !== ( $body['site_url'] ?? null ) ) {
@@ -1020,11 +1157,12 @@ final class RestRoutes {
 		$digest         = $body['digest'] ?? null;
 		$token          = $body['review_token'] ?? null;
 		$plan_job       = $body['plan_job'] ?? null;
+		$changed        = 'discard' === $operation ? 'database_discard_changed' : ( $database ? 'database_exchange_changed' : 'live_plan_changed' );
 		if ( null !== $plan_job && ( $database || ! is_string( $plan_job ) || 1 !== preg_match( JobStore::ID_PATTERN, $plan_job ) ) ) {
-			return $this->error( $database ? 'database_exchange_changed' : 'live_plan_changed', 409 );
+			return $this->error( $changed, 409 );
 		}
-		if ( ! is_bool( $include_config ) || ( ( $undo || $database ) && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $undo, $id, $include_config, $digest, $plan_job, $database ) ) ) {
-			return $this->error( $database ? 'database_exchange_changed' : 'live_plan_changed', 409 );
+		if ( ! is_bool( $include_config ) || ( ( 'apply' !== $operation || $database ) && $include_config ) || ! is_string( $digest ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $digest ) || ! is_string( $token ) || false === wp_verify_nonce( $token, self::review_action( $operation, $id, $include_config, $digest, $plan_job, $database ) ) ) {
+			return $this->error( $changed, 409 );
 		}
 		$refusal = $this->password_refusal( $request );
 		if ( null !== $refusal ) {
@@ -1036,16 +1174,16 @@ final class RestRoutes {
 	/**
 	 * Binds a preview to the site, operation, originating job, file scope and inspected data.
 	 *
-	 * @param bool        $undo    Undo an apply.
+	 * @param string      $operation apply, undo, or for a database binding discard.
 	 * @param string      $id      Source job.
 	 * @param bool        $include_config Include wp-config.php.
 	 * @param string      $digest  Fingerprint of the inspected changes.
 	 * @param string|null $plan_job Reviewed background plan, if the selection needed one.
-	 * @param bool        $database Whether the review concerns database tables.
+	 * @param bool        $database Whether the review concerns database tables or their binding.
 	 * @return string WordPress nonce action.
 	 */
-	private static function review_action( bool $undo, string $id, bool $include_config, string $digest, ?string $plan_job, bool $database ): string {
-		return implode( '|', [ 'backups_for_restic_live', home_url(), $database ? 'tables' : 'files', $undo ? 'undo' : 'apply', $id, $include_config ? 'with-config' : 'default', $digest, $plan_job ?? '' ] );
+	private static function review_action( string $operation, string $id, bool $include_config, string $digest, ?string $plan_job, bool $database ): string {
+		return implode( '|', [ 'backups_for_restic_live', home_url(), $database ? 'tables' : 'files', $operation, $id, $include_config ? 'with-config' : 'default', $digest, $plan_job ?? '' ] );
 	}
 
 	/**

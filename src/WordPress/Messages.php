@@ -11,6 +11,7 @@ namespace BackupsForRestic\WordPress;
 
 use BackupsForRestic\Doctor\Check;
 use BackupsForRestic\Jobs\Job;
+use BackupsForRestic\Jobs\JobStore;
 use BackupsForRestic\Jobs\JobType;
 
 defined( 'ABSPATH' ) || exit;
@@ -361,7 +362,7 @@ final class Messages {
 			],
 			'database_exchange_foreign' => [
 				'message' => __( 'A database restore keeps private tables on another database server or in another database.', 'backups-for-restic' ),
-				'hint'    => __( 'Backups go on. Before another database restore, run "wp backups-for-restic database-discard" with the ID of that restore job: it shows the database, the server UUID and the table names, and confirming forgets the binding without dropping anything. Drop those tables by hand only where you can verify them.', 'backups-for-restic' ),
+				'hint'    => __( 'Backups go on. Before another database restore, discard the binding of that restore under “Private tables on another database server” on the Restores tab, or run "wp backups-for-restic database-discard" with the ID of that restore job: both show the database, the server UUID and the table names, and confirming forgets the binding without dropping anything. Drop those tables by hand only where you can verify them.', 'backups-for-restic' ),
 			],
 			'database_binding_missing' => [
 				'message' => __( 'No finished database restore holds a binding with this job ID.', 'backups-for-restic' ),
@@ -370,6 +371,56 @@ final class Messages {
 			'database_binding_verified' => [
 				'message' => __( 'The private tables of this database restore are in the connected database, so its binding is not discarded.', 'backups-for-restic' ),
 				'hint'    => __( 'The heartbeat removes them when their recovery window ends.', 'backups-for-restic' ),
+			],
+			'database_binding_discarded' => [
+				'message' => __( 'The binding of this database restore was discarded already.', 'backups-for-restic' ),
+				/* translators: %d: number of days. */
+				'hint'    => sprintf( __( 'Nothing is left to discard. For %d days after the discard, or until they are marked as taken care of, the Restores tab lists its private tables under “Discarded bindings”, and "wp backups-for-restic database-discarded" prints them.', 'backups-for-restic' ), JobStore::DISCARD_LISTED_DAYS ),
+			],
+			'database_binding_busy' => [
+				'message' => __( 'The database restore that holds this binding, or an undo of it, has not ended yet.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was discarded. Wait until it has ended, then open the review of the discard again.', 'backups-for-restic' ),
+			],
+			'database_binding_unverified' => [
+				'message' => __( 'The database server that this site uses does not say which server it is, so the plugin cannot tell whether it holds the private tables of this database restore.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was discarded. MySQL names itself with its server UUID (the variable server_uuid); a server or proxy that reports none cannot be told apart from the server that holds the tables. Connect the site to a server that reports its UUID, then open the review of the discard again.', 'backups-for-restic' ),
+			],
+			'database_binding_unreadable' => [
+				'message' => __( 'The record of the private tables of this database restore cannot be read, so the plugin cannot name them.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was discarded. The document of that database restore job in the private working directory was changed or damaged outside the plugin. A database administrator can find its private tables by their names, which begin with _bfr_r_ or bfr_r_.', 'backups-for-restic' ),
+			],
+			'database_binding_unasked' => [
+				'message' => __( 'The plugin could not ask the database server whether it holds the private tables of an earlier database restore, so no database restore can start now.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was changed. Those tables may be on this server, so the plugin starts no database restore until it can ask. Review the restore again once the database server answers.', 'backups-for-restic' ),
+			],
+			'database_discard_changed' => [
+				'message' => __( 'The binding of this database restore is no longer as its review showed it, so it was not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The job, the database that the site uses or the undo window changed after the review, or the confirmation does not name this review. Open the review of the discard again and check what it names now.', 'backups-for-restic' ),
+			],
+			'database_discard_failed' => [
+				'message' => __( 'The plugin could not ask the database server whether it holds the private tables of this database restore.', 'backups-for-restic' ),
+				'hint'    => __( 'Nothing was discarded. The log of that database restore job names the database error: “Show the log of this job” beside the review of the discard opens it, and so does "wp backups-for-restic logs" with the ID of the job. Once the site reaches its database server again, open the review of the discard again.', 'backups-for-restic' ),
+			],
+			'database_discard_storage' => [
+				'message' => __( 'The plugin could not read or write the jobs in its private working directory.', 'backups-for-restic' ),
+				'hint'    => __( 'Check the free disk space and the working directory on the Environment tab, then try again. The lists under “Private tables on another database server” on the Restores tab, and "wp backups-for-restic database-discarded", show what is recorded.', 'backups-for-restic' ),
+			],
+			'database_discarded_missing' => [
+				'message' => __( 'This database restore lists no private tables of a discarded binding.', 'backups-for-restic' ),
+				/* translators: %d: number of days. */
+				'hint'    => sprintf( __( 'Its tables were marked as taken care of already, %d days have passed since the discard, or its binding was not discarded.', 'backups-for-restic' ), JobStore::DISCARD_LISTED_DAYS ),
+			],
+			'database_discard_unexpected' => [
+				'message' => __( 'An unexpected error stopped the review or the discard of this binding, so the binding was not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The plugin recorded nothing about this error. Open the review of the discard again; if the error comes back, "wp backups-for-restic database-discard" with the ID of the database restore job prints its details. Please report it.', 'backups-for-restic' ),
+			],
+			'database_discarded_busy' => [
+				'message' => __( 'Another request is working on the jobs of the plugin right now, so the tables were not marked as taken care of.', 'backups-for-restic' ),
+				'hint'    => __( 'Try again in a moment.', 'backups-for-restic' ),
+			],
+			'database_discard_busy' => [
+				'message' => __( 'Another request is working on the jobs of the plugin right now, so the binding was not discarded.', 'backups-for-restic' ),
+				'hint'    => __( 'The review is still valid: confirm it again in a moment.', 'backups-for-restic' ),
 			],
 			'database_exchange_rebuilt' => [
 				'message' => __( 'A private table kept for the database undo was rebuilt and has a new physical identity.', 'backups-for-restic' ),
@@ -520,7 +571,7 @@ final class Messages {
 			],
 			'database_exchange_foreign' => [
 				'message' => __( 'The earlier tables that this undo brings back are on another database server or in another database.', 'backups-for-restic' ),
-				'hint'    => __( 'Connect the site to the database that holds them again, then review and confirm the undo. Discarding the binding with "wp backups-for-restic database-discard" forgets those tables, and the undo with them.', 'backups-for-restic' ),
+				'hint'    => __( 'Connect the site to the database that holds them again, then review and confirm the undo. Discarding the binding on the Restores tab, or with "wp backups-for-restic database-discard", forgets those tables, and the undo with them.', 'backups-for-restic' ),
 			],
 			'database_admin_capabilities' => [
 				'message' => __( 'Under the roles of the earlier database, which the undo brings back, your account would lack a capability that a database restore needs.', 'backups-for-restic' ),
@@ -567,6 +618,22 @@ final class Messages {
 			'destination_changed'  => __( 'the site now maps the snapshot path to another live path', 'backups-for-restic' ),
 			'original_unavailable' => __( 'the saved original copy is damaged', 'backups-for-restic' ),
 			default                => __( 'the site\'s file policy does not permit this change now', 'backups-for-restic' ),
+		};
+	}
+
+	/**
+	 * What a discard of a database restore binding leaves as it is (DatabaseChanges::DISCARD_KEPT).
+	 *
+	 * @param string $code What stays.
+	 * @return string Text.
+	 */
+	public static function discard_kept( string $code ): string {
+		return match ( $code ) {
+			'live_database'  => __( 'The database that this site uses now: the discard changes none of its tables.', 'backups-for-restic' ),
+			'private_tables' => __( 'The private tables, wherever they are: the plugin drops none of them, now or later.', 'backups-for-restic' ),
+			/* translators: %d: number of days. */
+			'job_record'     => sprintf( __( 'The database restore job and its log, which record the discard, who confirmed it and these table names. For %d days after the discard, or until you mark the tables as taken care of, the job history keeps them, and the Restores tab and "wp backups-for-restic database-discarded" list these table names.', 'backups-for-restic' ), JobStore::DISCARD_LISTED_DAYS ),
+			default          => $code,
 		};
 	}
 
