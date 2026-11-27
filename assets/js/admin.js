@@ -339,24 +339,35 @@
 		return lines;
 	}
 
+	/**
+	 * How a job that did not succeed ended: its error, where it has one, and the state of a job
+	 * that did not fail, such as a cancelled job whose cleanup failed afterwards, for example
+	 * when the site could not leave maintenance mode. A cancelled job without an error shows its
+	 * state alone.
+	 *
+	 * @param {Object} job Ended job.
+	 * @return {Array<Element>} Notices.
+	 */
+	function stopped( job ) {
+		const failure = job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : null;
+		if ( failure && 'failed' === job.state ) {
+			return [ failure ];
+		}
+		return [ notice( 'info', job.state_label ), failure ];
+	}
+
 	function jobOutcome( job ) {
 		const result = job.result || {};
 		if ( 'undo' === job.type && 'succeeded' !== job.state && 'number' === typeof result.kept ) {
 			// A stopped undo still says what it did before it stopped, and what it kept.
-			return el( 'div', {}, [
-				'failed' === job.state && job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : notice( 'info', job.state_label ),
-				undoOutcome( job ),
-			] );
+			return el( 'div', {}, [ ...stopped( job ), undoOutcome( job ) ] );
 		}
 		if ( 'apply' === job.type && 'succeeded' !== job.state && 'number' === typeof result.entries_attempted ) {
 			// A stopped apply says how far it got: what it changed can be undone.
-			return el( 'div', {}, [
-				'failed' === job.state && job.error ? notice( 'error', job.error.message + ' ' + job.error.hint ) : notice( 'info', job.state_label ),
-				applyStopped( result ),
-			] );
+			return el( 'div', {}, [ ...stopped( job ), applyStopped( result ) ] );
 		}
-		if ( 'failed' === job.state && job.error ) {
-			return notice( 'error', job.error.message + ' ' + job.error.hint );
+		if ( 'succeeded' !== job.state && job.error ) {
+			return el( 'div', {}, stopped( job ) );
 		}
 		if ( 'succeeded' === job.state && 'restore' === job.type ) {
 			return el( 'div', {}, [
@@ -488,12 +499,16 @@
 	}
 
 	/**
-	 * Says that an apply is partly undone, and what is left of it.
+	 * Says that an apply is partly undone, and what is left of it, or that the records of its
+	 * undo cannot be read.
 	 *
 	 * @param {Object} job Undo opportunity.
 	 * @return {?Element} Notice, or null for an apply that no undo has changed.
 	 */
 	function undoState( job ) {
+		if ( 'unreadable' === job.state ) {
+			return notice( 'error', __( 'The plugin cannot read the records of this apply\'s undo, so it does not offer the undo now. It keeps the saved original files and the staged files until the time above, and once it can read the records, it offers the undo again if they show that the apply can still be undone. If the PHP user does not own the plugin\'s private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions, then reload this page. If they are in order, something that is not a regular file, such as a link or a folder, is in the place of a record of the undo, or a link is in the place of a folder that leads to it; the plugin reads neither: leave the apply\'s files as they are, since they hold the saved original files, and restore what the apply changed from a backup if it has to be undone before the time above.', 'backups-for-restic' ) );
+		}
 		if ( 'partly_undone' !== job.state ) {
 			return null;
 		}
@@ -2331,7 +2346,8 @@
 					sprintf( __( 'Original files available until %s.', 'backups-for-restic' ), formatTime( job.expires ) ),
 				] ),
 				undoState( job ),
-				liveChange( job.job, true ),
+				// An undo whose records cannot be read is refused: the list offers it again once they can.
+				'unreadable' === job.state ? null : liveChange( job.job, true ),
 			] );
 		}
 		function databaseCard( job ) {

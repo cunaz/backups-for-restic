@@ -115,10 +115,10 @@ final class JobMessagesTest extends TestCase {
 		'prune'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'no_snapshots', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'check'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'database_restore_too_large', 'database_restore_packet_limit', 'database_restore_duplicate', 'database_restore_name', 'database_not_in_snapshot', 'internal' ],
-		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'internal' ],
-		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'internal' ],
-		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
-		'undo'           => [ 'file_undo_failed', 'file_staging_gone', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'undo_unavailable', 'undo_review_required', 'internal' ],
+		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'file_folder_changing', 'protected_path_invalid', 'internal' ],
+		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'undo_records_unreadable', 'internal' ],
+		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_folder_changing', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
+		'undo'           => [ 'file_undo_failed', 'file_staging_gone', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'undo_unavailable', 'undo_records_unreadable', 'undo_review_required', 'internal' ],
 		'database_apply' => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_review_required', 'database_restore_packet', 'database_restore_busy', 'database_restore_too_large', 'database_restore_packet_limit', 'database_restore_duplicate', 'database_restore_name', 'database_restore_prefix', 'database_preview_missing', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'database_wordpress_version', 'environment', 'configuration', 'internal' ],
 		'database_undo'  => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_restore_busy', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'environment', 'configuration', 'internal' ],
 	];
@@ -178,6 +178,64 @@ final class JobMessagesTest extends TestCase {
 		self::assertSame( 'The backup is not configured completely.', Messages::job_error( 'configuration' )['message'] );
 		self::assertSame( Messages::job_error( 'environment' ), Messages::job_error( 'environment', 'backup' ) );
 		self::assertStringContainsString( 'Connect to it with its password instead of creating a new one.', Messages::job_error( 'repository_exists' )['hint'] );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_an_apply_whose_undo_records_cannot_be_read_is_not_said_to_be_past_its_window(): void {
+		self::text( 'internal' );
+		$texts = Messages::job_error( 'undo_records_unreadable' );
+		self::assertSame( 'The plugin cannot tell whether this apply can still be undone.', $texts['message'] );
+		self::assertStringContainsString( 'keeps the saved original files and the staged files', $texts['hint'] );
+		self::assertStringContainsString( 'once it can read the records, it offers the undo again if they show that the apply can still be undone.', $texts['hint'] );
+		self::assertNotSame( Messages::job_error( 'undo_unavailable' ), $texts );
+		self::assertSame( $texts, Messages::job_error( 'undo_records_unreadable', 'undo' ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_undo_records_that_cannot_be_read_name_both_causes_and_what_to_do_about_each(): void {
+		self::text( 'internal' );
+		$hint = Messages::job_error( 'undo_records_unreadable' )['hint'];
+		// A record below a folder that the PHP user cannot search: ownership and permissions.
+		self::assertStringContainsString( 'If the PHP user does not own the private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions.', $hint );
+		// A link or a folder at the record's name, where ownership is in order: before, the hint said
+		// only to check ownership, which does not help there.
+		self::assertStringContainsString( 'If they are in order, something that is not a regular file, such as a link or a folder, is in the place of a record in the folder undo/ of the apply, or a link is in the place of a folder that leads to it; the plugin reads neither:', $hint );
+		self::assertStringContainsString( 'leave the apply\'s files as they are, since they hold the saved original files', $hint );
+		self::assertStringContainsString( 'restore what the apply changed from a backup', $hint );
+		// The check is one of the lookup and the file type, not of who wrote the file.
+		self::assertStringNotContainsString( 'that the plugin wrote', $hint );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_stored_job_that_the_php_user_cannot_open_is_named_with_its_cause_and_way_out(): void {
+		self::text( 'internal' );
+		$id    = '20260101T000000Z-0a1b2c';
+		$named = Messages::stored_job( 'job_inaccessible', $id );
+		// Before, this job was refused as job_unreadable, which neither named it nor said what to do.
+		self::assertSame( 'The PHP user cannot open the stored job 20260101T000000Z-0a1b2c in the private working directory.', $named['message'] );
+		foreach ( [ 'belongs to another user or lacks read or search permission', 'WP-CLI command that ran as root', 'Give the PHP user back ownership of that folder', 'a link is in the place of the folder, or something other than a regular file is in the place of job.json', 'new jobs and repository changes stay blocked' ] as $part ) {
+			self::assertStringContainsString( $part, $named['hint'] );
+		}
+		self::assertStringNotContainsString( 'plugin version', $named['message'] . ' ' . $named['hint'] );
+		$general = Messages::job_error( 'job_inaccessible' );
+		self::assertSame( 'The PHP user cannot open a stored job in the private working directory.', $general['message'] );
+		self::assertSame( $named['hint'], $general['hint'] );
+		// A document that this version cannot parse keeps its texts, which ask for another version.
+		self::assertSame( Messages::job_error( 'job_unreadable' ), Messages::stored_job( 'job_unreadable', $id ) );
+		self::assertStringContainsString( 'Install a plugin version that can read the job.', Messages::stored_job( 'job_unreadable', $id )['hint'] );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_folder_that_keeps_changing_is_named_in_the_log_and_paused_for_a_new_review(): void {
+		self::text( 'internal' );
+		$preview = Messages::job_error( 'file_folder_changing', 'file_plan' );
+		self::assertSame( 'A folder kept changing while the preview read its names.', $preview['message'] );
+		self::assertStringContainsString( 'The log of the job names the folder.', $preview['hint'] );
+		self::assertStringContainsString( 'Nothing on the live site was changed.', $preview['hint'] );
+		$apply = Messages::job_error( 'file_folder_changing', 'apply' );
+		self::assertSame( 'A folder kept changing while the apply checked the reviewed changes again.', $apply['message'] );
+		self::assertStringContainsString( 'open a new preview and confirm it again', $apply['hint'] );
+		self::assertStringContainsString( 'Nothing on the live site was changed.', $apply['hint'] );
 	}
 
 	#[RunInSeparateProcess]
