@@ -163,9 +163,8 @@ final readonly class Manifest {
 		$snapshot = $fields['snapshot'] ?? null;
 		$restarts = $fields['restarts'] ?? null;
 		$largest  = $fields['largest_statement'] ?? null;
-		$bytes    = $entry['bytes'] ?? null;
-		// The largest statement is a line of the table's file, whose last line is the trailer.
-		if ( count( self::READ_FIELDS ) !== count( $fields ) || null === $columns || ! is_bool( $snapshot ) || ! is_int( $restarts ) || $restarts < 0 || ! is_int( $largest ) || $largest < 0 || ! is_int( $bytes ) || $largest >= $bytes ) {
+		// A largest statement that overstates the file's can only make the import refuse sooner.
+		if ( count( self::READ_FIELDS ) !== count( $fields ) || null === $columns || ! is_bool( $snapshot ) || ! is_int( $restarts ) || $restarts < 0 || ! is_int( $largest ) || $largest < 0 ) {
 			FormatException::raise( 'A database dump table records how it was read in an invalid form.', [ 'code' => 'database_restore_format' ] );
 		}
 		return [

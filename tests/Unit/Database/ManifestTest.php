@@ -135,7 +135,6 @@ final class ManifestTest extends TestCase {
 		yield 'negative restarts' => [ [ 'restarts' => -1 ] + $read ];
 		yield 'restarts as text' => [ [ 'restarts' => '0' ] + $read ];
 		yield 'a negative statement' => [ [ 'largest_statement' => -1 ] + $read ];
-		yield 'a statement as long as the file' => [ [ 'largest_statement' => 4096 ] + $read ];
 		yield 'a statement as a number with a fraction' => [ [ 'largest_statement' => 1.5 ] + $read ];
 	}
 
