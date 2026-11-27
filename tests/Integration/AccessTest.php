@@ -1141,7 +1141,9 @@ final class AccessTest extends TestCase {
 			foreach ( [ '20261127T110000Z-0c7001', $backup, $running, $over ] as $id ) {
 				[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', $id ] );
 				self::assertSame( 1, $status, $output );
-				$answers[ $id ] = trim( $output );
+				// The answer is the last line: on PHP 8.5 and later, WP-CLI's own code prints
+				// deprecations before it.
+				$answers[ $id ] = TestSite::last_line( $output );
 			}
 			// Before, each of them was refused as an apply that can no longer be undone, an ID that
 			// no job has too, and earlier with the exception's message, "This apply has no available undo.".
