@@ -552,6 +552,54 @@ final class AccessTest extends TestCase {
 		}
 	}
 
+	public function test_the_command_line_undoes_only_a_review_that_someone_confirmed(): void {
+		$restore = '20261127T120000Z-0c8011';
+		$file    = TestSite::root() . '/bfr-undo-digest.txt';
+		// A file that an apply created and that is still as it left it.
+		$apply = TestSite::applied_file( $restore, $file, 'installed by the apply' );
+		self::assertFileExists( $file );
+		$undo = static fn ( array $options, ?string $input = null ): array => TestSite::wp( [ 'backups-for-restic', 'undo', $apply, ...$options ], null, $input );
+		try {
+			// Before, each of these undid the apply without anyone having read its review.
+			[ $status, $output ] = $undo( [ '--yes' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'undo no longer takes --yes, and nothing was undone.', $output );
+			foreach ( [ '--digest', '--digest=' ] as $option ) {
+				[ $status, $output ] = $undo( [ $option ] );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( '--digest needs the digest that an earlier run of this command printed', $output );
+			}
+			// A piped answer is no one who read the review: it is printed, with its digest, and nothing is undone.
+			[ $status, $output ] = $undo( [], "y\n" );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'There is no terminal to confirm the undo, so nothing was undone.', $output );
+			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $printed ), $output );
+			self::assertFileExists( $file );
+			// The digest of another review.
+			[ $status, $output ] = $undo( [ '--digest=' . str_repeat( 'a', 64 ) ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'The live files are not as the review with this digest found them, so nothing was undone.', $output );
+			self::assertFileExists( $file );
+			// The digest that the review printed confirms it.
+			[ $status, $output ] = $undo( [ '--digest=' . $printed[1] ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'The apply is fully undone', $output );
+			self::assertFileDoesNotExist( $file );
+		} finally {
+			if ( is_file( $file ) ) {
+				unlink( $file );
+			}
+			$folders = glob( TestSite::private_dir() . '/jobs/*', GLOB_ONLYDIR );
+			foreach ( false === $folders ? [] : $folders as $folder ) {
+				$document = TestSite::job_document( basename( $folder ) );
+				if ( in_array( basename( $folder ), [ $apply, $restore ], true ) || $apply === ( $document['data']['apply'] ?? null ) ) {
+					TempDir::remove( $folder );
+				}
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . $restore );
+		}
+	}
+
 	public function test_the_command_line_says_of_a_refused_undo_what_the_page_says(): void {
 		// No apply has this ID: the undo is refused as one that can no longer be undone.
 		[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', '20261127T110000Z-0c7001' ] );

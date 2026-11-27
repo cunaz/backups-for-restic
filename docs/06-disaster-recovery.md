@@ -144,12 +144,29 @@ wp backups-for-restic restore 0123abcd /var/www/html/index.php --wait
 
 If a restored plugin prevents WordPress from starting, run WP-CLI from the destination.
 Use the affected plugin's slug and the ID of the file apply job. Keep Backups for restic
-loaded. The command presents the reviewed undo with its totals and asks for confirmation.
-Afterwards it lists the entries it kept, with their reasons.
+loaded. The command reviews the undo entry by entry and prints the review, its totals and the
+review's digest.
 
-```sh
-wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
-```
+1. On a terminal, run it, read the review, and answer `y` to the question that follows it:
+
+   ```sh
+   wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
+   ```
+
+2. Where there is no terminal, for example in a hosting panel's command runner or a script,
+   the same command prints the review and stops without undoing anything: a piped `y` and
+   `--yes` do not confirm it. Read the review, then run the command again with the digest
+   that it printed (`Digest of this review: …`):
+
+   ```sh
+   wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID --digest=DIGEST
+   ```
+
+   The second run reviews again and undoes only while the live files are as the review that
+   you read found them; otherwise it prints the current review and stops, and you confirm
+   that one the same way.
+
+Afterwards the command lists the entries it kept, with their reasons.
 
 If the database or a worker goes away during a confirmed operation, restore service and
 resume the same job with `wp backups-for-restic tick --until-idle`. Its journal records

@@ -1403,9 +1403,12 @@ cannot be read with the texts that name it, which keeps every new job from start
 
 `restore <snapshot> [<path>…] [--wait]` restores a snapshot or selected paths into
 private staging. `apply-plan <job> [--include-wp-config]` prints file actions as JSON
-records. Configuration and startup files require offline recovery. `undo <apply-job>`
-reviews and confirms reversal of live file changes, entry by entry, and lists the entries
-it kept. `database-discard <apply-job> [--yes]`
+records. Configuration and startup files require offline recovery. `undo <apply-job>
+[--digest=<digest>]` reviews the reversal of live file changes, entry by entry, prints the
+review with its totals and its digest, and lists the entries it kept. On a terminal it asks;
+without one it undoes only with `--digest` and the digest of a review that an earlier run
+printed, while the live files are as that review found them. `--yes`, a bare or empty
+`--digest` and a piped answer are refused. `database-discard <apply-job> [--yes]`
 lists the private tables of a database apply whose binding belongs to another database
 server or database, and forgets that binding after confirmation without dropping anything. The recovery guide includes the
 `--skip-plugins` procedure for a site whose active plugin prevents normal startup.

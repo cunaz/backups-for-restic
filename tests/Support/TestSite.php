@@ -475,12 +475,16 @@ final class TestSite {
 	 *
 	 * @param list<string> $arguments Command and arguments, such as [ 'backups-for-restic', 'status' ].
 	 * @param string|null  $path      WordPress directory; the test site by default.
+	 * @param string|null  $input     What a script pipes into the command, such as "y\n"; by default its input is the test's.
 	 * @return array{int, string} Exit status and everything the command printed.
 	 */
-	public static function wp( array $arguments, ?string $path = null ): array {
+	public static function wp( array $arguments, ?string $path = null, ?string $input = null ): array {
 		$command = 'php -d opcache.jit=disable -d memory_limit=512M ' . escapeshellarg( self::wp_cli() ) . ' --no-color --path=' . escapeshellarg( $path ?? self::root() );
 		foreach ( $arguments as $argument ) {
 			$command .= ' ' . escapeshellarg( $argument );
+		}
+		if ( null !== $input ) {
+			$command = 'printf %s ' . escapeshellarg( $input ) . ' | ' . $command;
 		}
 		exec( $command . ' 2>&1', $output, $status );
 		return [ $status, implode( "\n", $output ) ];
@@ -640,6 +644,57 @@ final class TestSite {
 			',
 			[ $id, (string) json_encode( $rows ), (string) $age ]
 		);
+	}
+
+	/**
+	 * Stages one new file as a finished restore and applies it as the command line does: the
+	 * plugin's own service reviews and starts the apply, and a WP-CLI tick runs it to its end,
+	 * journal included. Needs a site whose plugin is a copy of the package, as in CI: with the
+	 * plugin linked from the checkout, the site lies in the plugin's own directory, which no
+	 * apply changes.
+	 *
+	 * @param string $restore Job ID of the restore.
+	 * @param string $file    Absolute path of the new live file.
+	 * @param string $content Its content.
+	 * @return string Job ID of the apply.
+	 */
+	public static function applied_file( string $restore, string $file, string $content ): string {
+		$printed = self::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			[ $id, $file, $content ] = $arguments;
+			$restore              = new BackupsForRestic\Jobs\Job( $id, BackupsForRestic\Jobs\JobType::Restore, "cli", time() - 120 );
+			$restore->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$restore->finished_at = time() - 60;
+			$container->jobs()->save( $restore );
+			$root = $container->private_dir()->subdirectory( "restores" ) . "/" . $id;
+			mkdir( dirname( $root . "/files" . $file ), 0700, true );
+			file_put_contents( $root . "/files" . $file, $content );
+			$lines = [];
+			$path  = "";
+			foreach ( array_slice( explode( "/", dirname( $file ) ), 1 ) as $name ) {
+				$path   .= "/" . $name;
+				$lines[] = json_encode( [ "path" => $path, "type" => "dir", "mode" => 0755 ] );
+			}
+			$lines[] = json_encode( [ "path" => $file, "type" => "file", "mode" => 0644 ] );
+			file_put_contents( $root . "/entries.jsonl", implode( "\n", $lines ) . "\n" );
+			$changes = $container->file_changes();
+			$review  = $changes->preview( $id );
+			if ( true !== $review["applicable"] ) {
+				fwrite( STDERR, (string) json_encode( $review ) );
+				exit( 1 );
+			}
+			echo "\n", $changes->start_apply( $id, false, $review["digest"] )->id;
+			',
+			[ $restore, $file, $content ]
+		);
+		$apply   = self::last_line( $printed );
+		\PHPUnit\Framework\Assert::assertMatchesRegularExpression( '/\A\d{8}T\d{6}Z-[0-9a-f]{6}\z/', $apply, $printed );
+		[ $status, $output ] = self::wp( [ 'backups-for-restic', 'tick', '--until-idle' ] );
+		\PHPUnit\Framework\Assert::assertSame( 0, $status, $output );
+		\PHPUnit\Framework\Assert::assertSame( 'succeeded', self::job_document( $apply )['state'] ?? null, $output );
+		return $apply;
 	}
 
 	/**

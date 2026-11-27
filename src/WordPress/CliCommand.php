@@ -416,20 +416,41 @@ final class CliCommand {
 	/**
 	 * Reviews and reverses the file changes of an apply job. Each entry is reverted only if it
 	 * still is as the apply left it; an entry that changed since is kept and listed with its
-	 * reason, and stays undoable until the apply's recovery window ends.
+	 * reason, and stays undoable until the apply's recovery window ends. The command prints the
+	 * review with its totals and its digest. On a terminal it asks before it undoes anything; a
+	 * script confirms a review that an earlier run printed, with that review's digest.
 	 *
 	 * ## OPTIONS
 	 *
 	 * <apply-job>
 	 * : ID of the original apply job.
 	 *
-	 * [--yes]
-	 * : Confirm the displayed undo without a prompt.
+	 * [--digest[=<digest>]]
+	 * : The digest that an earlier run printed for the review that you confirm. The undo then
+	 * starts without a prompt, and only while the live files are as that review found them.
+	 * Without it, the command asks on a terminal, and refuses where there is none.
 	 *
-	 * @param list<string>         $args Apply job.
-	 * @param array<string,string> $assoc_args Confirmation options.
+	 * [--yes]
+	 * : Not accepted: a review is confirmed on a terminal or with its digest. A script that
+	 * passes it stops with an error and undoes nothing.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp backups-for-restic undo 20261120T000000Z-0a0b0c
+	 *     wp backups-for-restic undo 20261120T000000Z-0a0b0c --digest=<digest>
+	 *
+	 * @param list<string>              $args Apply job.
+	 * @param array<string,string|bool> $assoc_args Confirmation options; a flag without a value is true.
 	 */
 	public function undo( array $args, array $assoc_args ): void {
+		if ( isset( $assoc_args['yes'] ) ) {
+			\WP_CLI::error( __( 'undo no longer takes --yes, and nothing was undone. Run it on a terminal to see its review and confirm it there, or pass --digest with the digest that a review of this apply printed.', 'backups-for-restic' ) );
+		}
+		// A script binds to a review that it was shown: an empty or missing digest is no confirmation.
+		$given = $assoc_args['digest'] ?? null;
+		if ( null !== $given && ( ! is_string( $given ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $given ) ) ) {
+			\WP_CLI::error( __( '--digest needs the digest that an earlier run of this command printed: 64 characters, the digits 0 to 9 and the letters a to f. Nothing was undone.', 'backups-for-restic' ) );
+		}
 		$id      = $args[0] ?? '';
 		$service = $this->container->file_changes();
 		try {
@@ -468,7 +489,19 @@ final class CliCommand {
 			if ( ! $preview['applicable'] ) {
 				\WP_CLI::error( __( 'The current live files cannot be safely reverted.', 'backups-for-restic' ) );
 			}
-			\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ), $assoc_args );
+			/* translators: %s: digest of the review, 64 hexadecimal characters. */
+			\WP_CLI::line( sprintf( __( 'Digest of this review: %s', 'backups-for-restic' ), $preview['digest'] ) );
+			if ( null !== $given ) {
+				// The service checks the digest against the live files again when the undo starts.
+				if ( ! hash_equals( $preview['digest'], $given ) ) {
+					\WP_CLI::error( __( 'The live files are not as the review with this digest found them, so nothing was undone. The review above is the current one: confirm it on a terminal, or pass its digest.', 'backups-for-restic' ) );
+				}
+			} elseif ( ! stream_isatty( STDIN ) ) {
+				// Piped input is no one who read the review.
+				\WP_CLI::error( __( 'There is no terminal to confirm the undo, so nothing was undone. Run the command on a terminal, or run it again with --digest and the digest that this review printed.', 'backups-for-restic' ) );
+			} else {
+				\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ) );
+			}
 			$job = $service->start_undo( $id, $preview['digest'], '', $plan );
 			$this->run_until_idle( $this->container->tick_budget() );
 			$this->report( $job->id );
