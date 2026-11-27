@@ -351,7 +351,8 @@ final readonly class DatabaseReview {
 	 * latin1 reports, cannot be encoded as JSON. They are hashed with every key and string
 	 * given as hexadecimal, after the version followed by ":hex": no encodable facts have that
 	 * form, and the digest of every fact that can be encoded stays the same. Facts that JSON
-	 * cannot encode for another reason cannot be encoded in that form either.
+	 * cannot encode for another reason raise its JsonException as they are, and so does a form
+	 * deeper than json_encode() goes, which only facts that hold themselves by reference reach.
 	 *
 	 * @param int         $version What this kind of review shows, counted up when that changes.
 	 * @param list<mixed> $facts What the review shows and binds, in a fixed order.
@@ -361,24 +362,35 @@ final readonly class DatabaseReview {
 	public static function digest( int $version, array $facts ): string {
 		try {
 			return hash( 'sha256', json_encode( [ $version, ...$facts ], JSON_THROW_ON_ERROR ) );
-		} catch ( \JsonException ) {
-			return hash( 'sha256', json_encode( [ $version . ':hex', ...self::hex( $facts ) ], JSON_THROW_ON_ERROR ) );
+		} catch ( \JsonException $error ) {
+			if ( JSON_ERROR_UTF8 !== $error->getCode() ) {
+				throw $error;
+			}
+			return hash( 'sha256', json_encode( [ $version . ':hex', ...self::hex( $facts, 1 ) ], JSON_THROW_ON_ERROR ) );
 		}
 	}
 
 	/**
 	 * Facts with every string key and value as hexadecimal, after the letter h for a key, so that
-	 * no key becomes a number; numbers, booleans and null stay as they are.
+	 * no key becomes a number; numbers, booleans and null stay as they are. No deeper than
+	 * json_encode() goes (512 arrays, the outer one counted), so that facts which hold
+	 * themselves by reference end in its JsonException, not without end.
 	 *
 	 * @param array<mixed> $facts Facts.
+	 * @param int          $depth Depth of the array that holds these facts in the encoded form, the outer one being 1.
 	 * @return array<mixed> The same facts in ASCII.
+	 * @throws \JsonException With JSON_ERROR_DEPTH if the facts go deeper than json_encode() does.
 	 */
-	private static function hex( array $facts ): array {
+	private static function hex( array $facts, int $depth ): array {
+		if ( $depth > 512 ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- A constant message and a PHP error code; the exception is not output.
+			throw new \JsonException( 'Maximum stack depth exceeded', JSON_ERROR_DEPTH );
+		}
 		$hex = [];
 		foreach ( $facts as $key => $value ) {
 			$name = is_string( $key ) ? 'h' . bin2hex( $key ) : $key;
 			if ( is_array( $value ) ) {
-				$value = self::hex( $value );
+				$value = self::hex( $value, $depth + 1 );
 			} elseif ( is_string( $value ) ) {
 				$value = bin2hex( $value );
 			}

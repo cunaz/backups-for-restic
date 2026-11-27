@@ -521,4 +521,31 @@ final class DatabaseReviewTest extends TestCase {
 		$encodable = [ 'discard', 7, [ 'database' => 'site' ] ];
 		self::assertSame( hash( 'sha256', json_encode( [ 1, ...$encodable ], JSON_THROW_ON_ERROR ) ), DatabaseReview::digest( 1, $encodable ) );
 	}
+
+	public function test_facts_that_cannot_be_encoded_for_another_reason_end_in_the_exception_of_json_encode(): void {
+		// Facts that hold themselves by reference: json_encode() says why.
+		$cyclic   = [ 'a' ];
+		$cyclic[] = &$cyclic;
+		$code     = static function ( array $facts ): ?int {
+			try {
+				DatabaseReview::digest( 1, $facts );
+			} catch ( \JsonException $error ) {
+				return $error->getCode();
+			}
+			return null;
+		};
+		self::assertSame( JSON_ERROR_RECURSION, $code( $cyclic ) );
+		// With bytes that are not UTF-8 first, the hexadecimal form stops where json_encode()
+		// stops. Before, it went on until the memory of the request was exhausted.
+		$mixed   = [ "m\xF6bel" ];
+		$mixed[] = &$mixed;
+		self::assertSame( JSON_ERROR_DEPTH, $code( $mixed ) );
+		// As deep as json_encode() goes: 512 arrays with the outer one have a digest, 513 do not.
+		$deep = "m\xF6bel";
+		for ( $level = 1; $level < 512; ++$level ) {
+			$deep = [ $deep ];
+		}
+		self::assertMatchesRegularExpression( '/\A[0-9a-f]{64}\z/', DatabaseReview::digest( 1, [ $deep ] ) );
+		self::assertSame( JSON_ERROR_DEPTH, $code( [ "m\xF6bel", [ $deep ] ] ) );
+	}
 }
