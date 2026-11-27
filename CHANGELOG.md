@@ -327,8 +327,8 @@ All notable changes are documented here. The format follows
   begun again, and after five such readings in a row a preview stops with
   `file_folder_changing`, whose log line names the folder, and so does the check that an
   apply makes before maintenance, before it changes a file. An undo review keeps the entries
-  of that folder as it keeps those of a folder it cannot read (`ambiguous_destination`) and
-  goes on. Before, the reading began again at every tick for as long as the folder changed
+  of that folder, with the reason `destination_changing` ("The folder kept changing while the
+  review read its names"), and goes on. Before, the reading began again at every tick for as long as the folder changed
   between ticks, so that such a review never ended, and a change during a tick failed a
   preview at once, as did a change that removed or renamed names after a tick looked at the
   folder and before it resumed its reading.

@@ -1532,6 +1532,7 @@
 			live_root: __( 'Live site directory', 'backups-for-restic' ),
 			type_conflict: __( 'Staged and live file types differ', 'backups-for-restic' ),
 			ambiguous_destination: __( 'Conflicting names at the destination', 'backups-for-restic' ),
+			destination_changing: __( 'The folder kept changing while the review read its names', 'backups-for-restic' ),
 			linked_destination: __( 'Destination contains a symbolic link', 'backups-for-restic' ),
 			unwritable_destination: __( 'Destination is read-only', 'backups-for-restic' ),
 			foreign_owner: __( 'The live file belongs to another user than PHP, so its owner could not be kept', 'backups-for-restic' ),

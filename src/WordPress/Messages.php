@@ -572,6 +572,7 @@ final class Messages {
 			'parent_changed'       => __( 'the folder that holds it was replaced or moved after the apply', 'backups-for-restic' ),
 			'new_children'         => __( 'the folder holds entries that the undo keeps', 'backups-for-restic' ),
 			'destination_changed'  => __( 'the site now maps the snapshot path to another live path', 'backups-for-restic' ),
+			'destination_changing' => __( 'the folder that holds it kept changing while the review read its names', 'backups-for-restic' ),
 			'original_unavailable' => __( 'the saved original copy is damaged', 'backups-for-restic' ),
 			default                => __( 'the site\'s file policy does not permit this change now', 'backups-for-restic' ),
 		};

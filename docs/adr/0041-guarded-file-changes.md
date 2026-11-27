@@ -436,8 +436,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   as before. Before, that change failed the review at once. After five readings in a row that changes cut short the folder keeps changing:
   a preview and the apply's check stop with `file_folder_changing` (the job's log names the
   folder in `folder`), before maintenance and without a change, and an undo review answers
-  as for a folder that cannot be read, so that it keeps the folder's entries as
-  `ambiguous_destination` and goes on, and answers so at once for the rest of the review. No
+  as for a folder that cannot be read, so that it keeps the folder's entries and goes on, and
+  answers so at once for the rest of the review. Their reason is `destination_changing` ("The
+  folder kept changing while the review read its names"), since 2026-11-27: before, it was
+  `ambiguous_destination`, "Conflicting names at the destination", which no other spelling
+  had caused (`DirectorySpellings::changing()`). No
   reading during which the folder changed answers a lookup. Before, the index started again
   as often as the folder changed between two ticks, so that the review of a folder that
   changed between every two ticks, such as a busy uploads or cache folder, never ended, and a

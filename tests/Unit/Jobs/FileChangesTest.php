@@ -2030,7 +2030,9 @@ final class FileChangesTest extends TestCase {
 		foreach ( $page['entries'] as $entry ) {
 			$decisions[ (string) $entry['destination'] ] = [ $entry['action'], $entry['reason'] ];
 		}
-		self::assertSame( [ 'keep', 'ambiguous_destination' ], $decisions[ $wide . '/added.txt' ] );
+		// The reason says that the folder kept changing. Before, it was ambiguous_destination,
+		// "Conflicting names at the destination", which no other spelling caused.
+		self::assertSame( [ 'keep', 'destination_changing' ], $decisions[ $wide . '/added.txt' ] );
 		self::assertSame( [ 'restore', 'undo_journal' ], $decisions[ $this->live . '/a-existing' ] );
 	}
 
