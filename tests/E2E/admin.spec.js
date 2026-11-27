@@ -1080,6 +1080,12 @@ test( 'a binding to private tables on another database server is reviewed and di
 		expect( recorded.data ).not.toHaveProperty( 'database_owner' );
 		expect( recorded.data.database_discarded.via ).toBe( 'rest' );
 		expect( recorded.warnings.at( -1 ) ).toContain( '_bfr_r_' + 'c'.repeat( 32 ) + '_b1' );
+		// A log that cannot be read is announced: the focus stays on the button. Before, its
+		// notice had no role, and a screen reader said nothing.
+		const isLog = ( requestURL ) => /\/jobs\/[^/?&]+\/log(?:[?&]|$)/.test( decodeURIComponent( requestURL.href ) );
+		await page.route( isLog, ( route ) => route.fulfill( { status: 500, json: { code: 'backups_for_restic_environment', message: 'The log could not be read.', data: { status: 500, hint: '' } } } ), { times: 1 } );
+		await listed( job ).getByRole( 'button', { name: 'Show the log of this job' } ).click();
+		await expect( listed( job ).locator( '.bfr-job-log' ).getByRole( 'alert' ) ).toContainText( 'The log could not be read.' );
 		// The log of that job opens here, whether or not the Logs tab still lists the job.
 		await listed( job ).getByRole( 'button', { name: 'Show the log of this job' } ).click();
 		await expect( listed( job ).locator( '.bfr-log' ) ).toContainText( 'Database restore binding discarded.' );

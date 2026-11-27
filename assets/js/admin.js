@@ -3487,7 +3487,8 @@
 			api( '/jobs/' + encodeURIComponent( id ) + '/log' ).then( function ( log ) {
 				replace( detail, jobLogDetail( log ) );
 			} ).catch( function ( error ) {
-				replace( detail, [ notice( 'error', errorText( error ), false ) ] );
+				// Announced: the focus stays on the button, and the place of the log is no live region.
+				replace( detail, [ notice( 'error', errorText( error ) ) ] );
 			} );
 		} );
 		return el( 'div', {}, [ show, detail ] );
