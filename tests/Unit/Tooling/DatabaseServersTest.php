@@ -9,6 +9,7 @@ use BackupsForRestic\Tests\Support\DatabaseServers;
 use BackupsForRestic\Tests\Support\MutationProcess;
 use BackupsForRestic\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -85,6 +86,8 @@ final class DatabaseServersTest extends TestCase {
 		self::assertSame( DatabaseServers::NONE, $_SERVER[ DatabaseServers::HOST ] ?? null );
 	}
 
+	// DatabaseServers::own() connects with mysqli, which the rest of the unit suite does without.
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_a_mutant_process_whose_server_does_not_answer_says_so(): void {
 		// A name under .invalid never resolves (RFC 6761), so the connection fails at once; a
 		// closed port can take the whole connect timeout behind a packet filter.
@@ -191,8 +194,10 @@ final class DatabaseServersTest extends TestCase {
 	 * A mutant process uses the server of its thread, clears it, and reports what goes wrong in
 	 * its report, where bin/mutation-gate.sh fails the gate on it. A test that PHPUnit runs in a
 	 * process of its own uses the same server and leaves its mutant process's sessions alone.
+	 * A mutant process connects with mysqli, as the database suite does.
 	 */
 	#[DataProvider( 'processes' )]
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_the_bootstrap_of_the_database_gate_gives_each_process_its_server( ?string $token, string $hosts, bool $isolated, string $host, string $problem ): void {
 		$root    = (string) realpath( dirname( __DIR__, 3 ) );
 		$scratch = TempDir::create( 'database-servers' );
@@ -376,6 +381,8 @@ final class DatabaseServersTest extends TestCase {
 		self::assertCount( 3, DatabaseServers::after( $hosts, $answers, 3690, array_map( static fn ( int $seconds ): int => $seconds + 30, $asked ) ) );
 	}
 
+	// DatabaseServers::first() connects with mysqli, which the rest of the unit suite does without.
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_the_first_server_must_answer_to_be_cleared_for_the_initial_run(): void {
 		self::assertSame( 'The database server down.invalid:3306, on which the initial test run runs, no longer answers.', DatabaseServers::first( 'down.invalid:3306' ) );
 	}
@@ -430,6 +437,8 @@ final class DatabaseServersTest extends TestCase {
 		}
 	}
 
+	// Without --answers the script connects with mysqli, which the rest of the unit suite does without.
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_the_check_script_asks_the_servers_themselves(): void {
 		// Without --answers the script loads the database suite's connection and, through it,
 		// source files that end a request silently unless ABSPATH is defined.
