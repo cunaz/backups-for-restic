@@ -1032,12 +1032,25 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( foreign( job ) ).toContainText( 'Your WordPress password was not correct.' );
 		await expect( foreign( job ).getByLabel( 'Your WordPress password' ) ).toBeFocused();
 		// The answer is lost before the request reaches the server: nothing is discarded, the page
-		// asks again and the binding stays listed with its review.
+		// asks again and the binding stays listed with its review. The answer to that request for
+		// the lists is held back until a newer one has arrived, as on a slow connection.
+		let release;
+		const held = new Promise( ( resolve ) => {
+			release = resolve;
+		} );
+		let delivered;
+		const late = new Promise( ( resolve ) => {
+			delivered = resolve;
+		} );
+		await page.route( isList, async ( route ) => {
+			const response = await route.fetch();
+			await held;
+			await route.fulfill( { response } );
+			delivered();
+		}, { times: 1 } );
 		await page.route( isDiscard, ( route ) => route.abort( 'connectionreset' ), { times: 1 } );
-		const asked = page.waitForResponse( ( response ) => isList( new URL( response.url() ) ) );
 		await confirm( job, url, ADMIN.password );
 		await expect( foreign( job ) ).toContainText( 'The answer to the confirmation did not arrive, so the binding may or may not have been discarded.' );
-		await asked;
 		await expect( foreign( job ).locator( '.bfr-database-discard-tables code' ) ).toHaveCount( 7 );
 		expect( stored( job ).data ).toHaveProperty( 'database_owner' );
 		// Another request holds the runner lock: the review stays valid, and so does the form as it
@@ -1075,6 +1088,16 @@ test( 'a binding to private tables on another database server is reviewed and di
 		await expect( listed( job ).locator( 'bdi' ).filter( { hasText: '"bfr_\\u202esite"' } ) ).toBeVisible();
 		await expect( listed( job ) ).toContainText( 'so this page cannot mark these tables as taken care of here. On the command line, "wp backups-for-restic database-discarded ' + job + ' --done" can, run without --user.' );
 		await expect( listed( job ).getByRole( 'button', { name: 'Mark these tables as taken care of' } ) ).toHaveCount( 0 );
+		// The older answer, from before the discard, arrives now and changes nothing. Before, it
+		// put the binding back among those to discard and took it from the discarded ones.
+		release();
+		await late;
+		await page.evaluate( () => new Promise( ( resolve ) => setTimeout( resolve, 500 ) ) );
+		await expect( foreign( job ) ).toHaveCount( 0 );
+		await expect( listed( job ).locator( '.bfr-discarded-binding-tables code' ) ).toHaveCount( 7 );
+		// The answer to the confirmation arrived, so the one lost before leaves nothing to find
+		// out: the newer list does not call this discard one whose answer was lost.
+		await expect( result ).toContainText( 'The binding was discarded. Nothing was dropped.' );
 		await expect( result ).toBeVisible();
 		const recorded = stored( job );
 		expect( recorded.data ).not.toHaveProperty( 'database_owner' );

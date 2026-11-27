@@ -2571,6 +2571,8 @@
 		const discardedCards = new Map();
 		// The binding whose discard lost its answer: the next list says whether it was discarded.
 		let pendingDiscard = null;
+		// The latest request for the lists of bindings: an answer of an older one changes nothing.
+		let bindingLists = 0;
 		const noStaged = el( 'p', {}, [ __( 'No staged files. Open a snapshot to restore files or directories.', 'backups-for-restic' ) ] );
 		const undoHeading = el( 'h2', {}, [ __( 'Undo live file changes', 'backups-for-restic' ) ] );
 		const databaseHeading = el( 'h2', {}, [ __( 'Undo live database changes', 'backups-for-restic' ) ] );
@@ -2612,6 +2614,8 @@
 		}
 		// What a confirmed discard forgot stays on the page after its card has left the lists.
 		function discardDone( binding ) {
+			// This answer arrived; one lost before leaves nothing to find out.
+			pendingDiscard = null;
 			const result = discardedBinding( binding );
 			replace( discarded, [ result ] );
 			result.focus();
@@ -2644,7 +2648,11 @@
 			} ).catch( function ( error ) {
 				place( databaseHistory, [ notice( 'error', errorText( error ) ) ] );
 			} );
+			const request = ++bindingLists;
 			api( '/database-changes/foreign' ).then( function ( response ) {
+				if ( request !== bindingLists ) {
+					return;
+				}
 				const cards = keyedCards( foreignCards, response.jobs, foreignCard );
 				const partial = response.complete ? [] : [ notice( 'warning', __( 'The database server could not be asked about every database restore that keeps private tables, so this list may be incomplete. Reload the page to ask again.', 'backups-for-restic' ), false ) ];
 				// What the account may do is part of each entry, so that a card is built anew when it changes.
@@ -2663,6 +2671,9 @@
 					result.focus();
 				}
 			} ).catch( function ( error ) {
+				if ( request !== bindingLists ) {
+					return;
+				}
 				place( foreignHistory, [ notice( 'error', errorText( error ) ) ] );
 			} );
 			api( '/restores' ).then( render ).catch( function ( error ) {
