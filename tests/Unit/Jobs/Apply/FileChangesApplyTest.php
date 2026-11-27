@@ -156,14 +156,18 @@ final class FileChangesApplyTest extends TestCase {
 	public function test_a_file_that_changes_after_the_preflight_stops_the_apply_before_its_entry_counts_as_attempted( string $side ): void {
 		$apply = $this->preflighted();
 		$file  = 'live' === $side ? $this->site->live . '/a-existing' : $this->site->files . $this->site->live . '/a-existing';
-		chmod( $file, 0640 );
+		// Whatever the umask of the process gave the files: a mode that the changed one does not have.
+		clearstatcache();
+		$original = fileperms( $this->site->live . '/a-existing' ) & 0777;
+		$changed  = 0640 === ( fileperms( $file ) & 0777 ) ? 0600 : 0640;
+		chmod( $file, $changed );
 		$failed = $this->site->run_job( $apply, JobState::Failed );
 		self::assertSame( [ 'file_changed_after_review', 'A destination or staged file changed after confirmation.' ], [ $failed->error?->code, $failed->error?->message ] );
 		// The reviewed file is left as it is, and the apply did not count it as attempted, so
 		// that no undo is offered for it. The other entries may come before it.
 		clearstatcache();
 		self::assertSame( 'original', file_get_contents( $this->site->live . '/a-existing' ) );
-		self::assertSame( 'live' === $side ? 0640 : 0644, fileperms( $this->site->live . '/a-existing' ) & 0777 );
+		self::assertSame( 'live' === $side ? $changed : $original, fileperms( $this->site->live . '/a-existing' ) & 0777 );
 		[ $completed, $attempted ] = self::entries( $failed );
 		self::assertSame( $completed, $attempted );
 		self::assertFileDoesNotExist( $this->site->jobs->directory( $apply ) . '/undo/item-' . $attempted . '/entry.json' );
