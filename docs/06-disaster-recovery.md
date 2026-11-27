@@ -941,8 +941,8 @@ cannot be put back, move what is in their place out of `jobs/` as above, once th
 be running any more, and keep that copy. Uninstalling is refused for the same job until it
 can be read or is moved. `GET /jobs/{id}`, its log and
 `wp backups-for-restic logs <id>` answer for that job with the same code and texts, and the
-dashboard, the Logs tab and `wp backups-for-restic status` name every such job while it lasts,
-with what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on
+dashboard, the Logs tab and `wp backups-for-restic status` name the newest five such jobs while
+it lasts, and say how many more there are, with what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on
 request and at their expiry, and the pruning of the job history. The same holds for a
 document that this version cannot read (`job_unreadable`), whose texts name the job too.
 

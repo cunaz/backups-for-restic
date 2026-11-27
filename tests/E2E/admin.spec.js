@@ -277,23 +277,30 @@ test( 'an apply whose undo records cannot be read is listed with a notice and wi
 	}
 } );
 
-test( 'a stored job that cannot be read is named on the dashboard and in the logs', async ( { page } ) => {
+test( 'the newest stored jobs that cannot be read are named on the dashboard and in the logs', async ( { page } ) => {
 	const id = '20261127T150000Z-0cb001';
+	// Five older ones, as after a downgrade below a change of the layout of job documents.
+	const older = [ 5, 4, 3, 2, 1 ].map( ( i ) => '20261127T1459' + String( i ).padStart( 2, '0' ) + 'Z-0cb10' + i );
 	const container = '$container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); ';
-	// A document of another layout, as a newer version of the plugin writes it.
-	wordpress( siteRoot(), container + '$folder = $container->jobs()->storage_directory() . "/" . $argv[2]; mkdir( $folder, 0700 ); file_put_contents( $folder . "/job.json", "{\\"schema\\":9999}" );', [ id ] );
+	// Documents of another layout, as a newer version of the plugin writes them.
+	wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { $folder = $container->jobs()->storage_directory() . "/" . $id; mkdir( $folder, 0700 ); file_put_contents( $folder . "/job.json", "{\\"schema\\":9999}" ); }', [ id, ...older ] );
 	try {
 		for ( const tab of [ undefined, 'logs' ] ) {
 			await openBackups( page, tab );
-			const alert = page.locator( '#backups-for-restic-app .bfr-unreadable-job' );
-			await expect( alert ).toHaveCount( 1 );
+			// The newest five, each with its texts, and a count of the others. Before, a notice of
+			// three paragraphs for every one of them.
+			const alerts = page.locator( '#backups-for-restic-app .bfr-unreadable-job' );
+			await expect( alerts ).toHaveCount( 5 );
+			const alert = alerts.first();
 			await expect( alert ).toContainText( 'This version of the plugin cannot read the stored job ' + id + '.' );
 			await expect( alert ).toContainText( 'A newer version of the plugin may have written it: install that version.' );
 			await expect( alert ).toContainText( 'If no version reads it, its document is damaged: once the job cannot be running any more, move its folder' );
 			await expect( alert ).toContainText( 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' );
+			await expect( page.locator( '#backups-for-restic-app .bfr-unreadable-more' ) ).toHaveText( '1 more stored job cannot be read either.' );
+			await expect( page.locator( '#backups-for-restic-app' ) ).not.toContainText( older[ 4 ] );
 		}
 	} finally {
-		wordpress( siteRoot(), container + 'BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $argv[2] );', [ id ] );
+		wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $id ); }', [ id, ...older ] );
 	}
 } );
 

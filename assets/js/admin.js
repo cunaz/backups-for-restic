@@ -619,18 +619,30 @@
 	/**
 	 * Notices for the stored jobs that cannot be read, each naming its job and what to do: they
 	 * keep every new job from starting, scheduled backups included, and no list of jobs can show
-	 * them.
+	 * them. The newest five have a notice each, and one more says how many others there are.
 	 *
-	 * @param {Array} jobs Jobs that cannot be read: id, code, message and hint.
+	 * @param {Array}  jobs  Jobs that cannot be read, newest first: id, code, message and hint.
+	 * @param {number} total How many there are; the list may hold fewer.
 	 * @return {Array<Element>} Notices.
 	 */
-	function unreadableJobs( jobs ) {
-		return ( jobs || [] ).map( function ( job ) {
+	function unreadableJobs( jobs, total ) {
+		const shown = ( jobs || [] ).slice( 0, 5 );
+		const notices = shown.map( function ( job ) {
 			return el( 'div', { className: 'notice notice-error inline bfr-alert bfr-unreadable-job' }, [
 				el( 'p', {}, [ el( 'strong', {}, [ job.message ] ) ] ),
 				el( 'p', {}, [ job.hint ] ),
 			] );
 		} );
+		const more = Math.max( Number( total ) || 0, ( jobs || [] ).length ) - shown.length;
+		if ( more > 0 ) {
+			notices.push(
+				el( 'div', { className: 'notice notice-error inline bfr-alert bfr-unreadable-more' }, [
+					/* translators: %d: number of further stored jobs that cannot be read. */
+					el( 'p', {}, [ sprintf( _n( '%d more stored job cannot be read either.', '%d more stored jobs cannot be read either.', more, 'backups-for-restic' ), more ) ] ),
+				] ),
+			);
+		}
+		return notices;
 	}
 
 	/**
@@ -642,7 +654,7 @@
 	 * @return {Array} Nodes.
 	 */
 	function alerts( status, reload ) {
-		const nodes = [ ...unreadableJobs( status.unreadable_jobs ) ];
+		const nodes = [ ...unreadableJobs( status.unreadable_jobs, status.unreadable_total ) ];
 		const alert = status.check_alert;
 		if ( alert ) {
 			nodes.push(
@@ -3534,7 +3546,7 @@
 		api( '/jobs' )
 			.then( function ( response ) {
 				replace( root, [
-					...unreadableJobs( response.unreadable_jobs ),
+					...unreadableJobs( response.unreadable_jobs, response.unreadable_total ),
 					jobTable( response.jobs, function ( job ) {
 						api( '/jobs/' + job.id + '/log' ).then( function ( log ) {
 							replace( detail, [

@@ -441,8 +441,10 @@ All notable changes are documented here. The format follows
 - A stored job that cannot be read is shown on the dashboard and in the Logs tab, and
   `wp backups-for-restic status` lists it, each with the texts that name the job, and they say
   what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on request
-  and at their expiry, and the pruning of the job history. `GET /status` and `GET /jobs`
-  return them as `unreadable_jobs`. The texts of `job_unreadable` name the job as well. Before,
+  and at their expiry, and the pruning of the job history. The page and `status` name the
+  newest five and say how many more there are; `GET /status` and `GET /jobs` return the newest
+  hundred as `unreadable_jobs`, with their number as `unreadable_total`. The texts of
+  `job_unreadable` name the job as well. Before,
   only the refusal of a new job named one, no list of jobs showed it, and a scheduled backup
   that it kept from starting was reported only by the stale notice once no backup had
   succeeded for long enough.

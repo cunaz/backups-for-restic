@@ -949,8 +949,12 @@ final class AccessTest extends TestCase {
 	public function test_stored_jobs_that_cannot_be_read_are_shown_on_the_dashboard_in_the_job_list_and_by_status(): void {
 		$unreadable   = '20261127T100000Z-0c6001';
 		$inaccessible = '20261127T100000Z-0c6002';
-		mkdir( TestSite::private_dir() . '/jobs/' . $unreadable, 0700 );
-		file_put_contents( TestSite::private_dir() . '/jobs/' . $unreadable . '/job.json', '{' );
+		// Five older ones, as after a downgrade, of which status names none but in its count.
+		$older = array_map( static fn ( int $i ): string => sprintf( '20261127T0959%02dZ-0c61%02d', $i, $i ), [ 5, 4, 3, 2, 1 ] );
+		foreach ( [ $unreadable, ...$older ] as $id ) {
+			mkdir( TestSite::private_dir() . '/jobs/' . $id, 0700 );
+			file_put_contents( TestSite::private_dir() . '/jobs/' . $id . '/job.json', '{' );
+		}
 		TestSite::php(
 			'
 			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
@@ -971,6 +975,7 @@ final class AccessTest extends TestCase {
 			$expected = [
 				[ $inaccessible, 'job_inaccessible', 'The PHP user cannot open the stored job ' . $inaccessible . ' in the private working directory.' ],
 				[ $unreadable, 'job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.' ],
+				...array_map( static fn ( string $id ): array => [ $id, 'job_unreadable', 'This version of the plugin cannot read the stored job ' . $id . '.' ], $older ),
 			];
 			// Before, neither the dashboard nor the job list showed them: only the refusal of a new
 			// job named one, and scheduled backups did not start without a word.
@@ -979,20 +984,28 @@ final class AccessTest extends TestCase {
 				self::assertSame( 200, $status, $raw );
 				$listed = array_map( static fn ( array $job ): array => [ $job['id'] ?? null, $job['code'] ?? null, $job['message'] ?? null ], (array) ( $answer['unreadable_jobs'] ?? [] ) );
 				self::assertSame( $expected, $listed, $route );
+				self::assertSame( 7, $answer['unreadable_total'] ?? null, $route );
 				self::assertStringContainsString( 'Give the PHP user back ownership of that folder', (string) ( $answer['unreadable_jobs'][0]['hint'] ?? '' ) );
 				self::assertStringContainsString( 'A newer version of the plugin may have written it: install that version.', (string) ( $answer['unreadable_jobs'][1]['hint'] ?? '' ) );
 			}
 			[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'status' ] );
 			self::assertSame( 0, $status, $output );
-			foreach ( $expected as [ $id, , $message ] ) {
+			// The newest five, as the page shows them, and a count of the others. Before, one
+			// warning each, so that a downgrade below a change of the layout of job documents
+			// printed one for every job of the history.
+			foreach ( array_slice( $expected, 0, 5 ) as [ $id, , $message ] ) {
 				self::assertStringContainsString( 'Stored job that cannot be read: ' . $id, $output );
 				self::assertStringContainsString( $message, $output );
 			}
+			foreach ( array_slice( $older, 3 ) as $id ) {
+				self::assertStringNotContainsString( $id, $output );
+			}
+			self::assertStringContainsString( 'Warning: 2 more stored jobs cannot be read either.', $output );
 			// Each warning says what waits meanwhile, scheduled backups included.
-			self::assertSame( 2, substr_count( $output, 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ), $output );
+			self::assertSame( 5, substr_count( $output, 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ), $output );
 		} finally {
 			chmod( $folder, 0700 );
-			foreach ( [ $unreadable, $inaccessible ] as $id ) {
+			foreach ( [ $unreadable, $inaccessible, ...$older ] as $id ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
 			}
 		}
@@ -1043,6 +1056,28 @@ final class AccessTest extends TestCase {
 				}
 			}
 			TempDir::remove( TestSite::private_dir() . '/restores/' . $restore );
+		}
+	}
+
+	public function test_an_answer_lists_a_hundred_stored_jobs_that_cannot_be_read_and_counts_them_all(): void {
+		$ids = array_map( static fn ( int $i ): string => sprintf( '20261127T08%04dZ-0c8%03x', $i, $i ), range( 100, 0 ) );
+		foreach ( $ids as $id ) {
+			mkdir( TestSite::private_dir() . '/jobs/' . $id, 0700 );
+			file_put_contents( TestSite::private_dir() . '/jobs/' . $id . '/job.json', '{' );
+		}
+		try {
+			foreach ( [ '/status', '/jobs' ] as $route ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', $route );
+				self::assertSame( 200, $status, $raw );
+				// The newest hundred with their texts, and how many there are. Before, every one of
+				// them, each with its texts.
+				self::assertSame( array_slice( $ids, 0, 100 ), array_column( (array) ( $answer['unreadable_jobs'] ?? [] ), 'id' ), $route );
+				self::assertSame( 101, $answer['unreadable_total'] ?? null, $route );
+			}
+		} finally {
+			foreach ( $ids as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
 		}
 	}
 

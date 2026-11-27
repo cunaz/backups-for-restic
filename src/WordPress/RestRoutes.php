@@ -61,6 +61,15 @@ final class RestRoutes {
 	private const array STORED_JOB_CODES = [ 'job_inaccessible', 'job_unreadable' ];
 
 	/**
+	 * How many stored jobs that cannot be read GET /status and GET /jobs list at most, newest
+	 * first, with their total beside them. The job history keeps at most 500 jobs
+	 * (advanced.keep_jobs), and while a job cannot be read no new job starts and none is pruned,
+	 * so after a downgrade every job that a newer version wrote can be one; each comes with its
+	 * texts, which the page shows for the newest five.
+	 */
+	private const int UNREADABLE_LISTED = 100;
+
+	/**
 	 * Creates the routes.
 	 *
 	 * @param Container $container Services.
@@ -205,7 +214,7 @@ final class RestRoutes {
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),
 				'next_backup'     => SchedulePolicy::next_backup_slot( $settings, $zone, time() ),
 				'recent_jobs'     => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 5 ) ),
-				'unreadable_jobs' => $this->unreadable_jobs(),
+				...$this->unreadable_jobs(),
 				'retention'       => [
 					'mode'           => $settings->string( 'retention.mode' ),
 					'after_backup'   => $settings->bool( 'retention.run_forget_after_backup' ),
@@ -347,31 +356,35 @@ final class RestRoutes {
 	public function jobs(): \WP_REST_Response {
 		return $this->respond(
 			[
-				'jobs'            => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ),
-				'unreadable_jobs' => $this->unreadable_jobs(),
+				'jobs' => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ),
+				...$this->unreadable_jobs(),
 			]
 		);
 	}
 
 	/**
-	 * The stored jobs that cannot be read, newest first, each with its code and the texts that
-	 * name it (Messages::stored_job()): they block every new job, scheduled backups included,
-	 * and no list of jobs can show them.
+	 * The stored jobs that cannot be read, newest first and at most UNREADABLE_LISTED, each with
+	 * its code and the texts that name it (Messages::stored_job()), and how many there are:
+	 * they block every new job, scheduled backups included, and no list of jobs can show them.
 	 *
-	 * @return list<array{id: string, code: string, message: string, hint: string}> Jobs.
+	 * @return array{unreadable_jobs: list<array{id: string, code: string, message: string, hint: string}>, unreadable_total: int} Jobs and their number.
 	 */
 	private function unreadable_jobs(): array {
 		$jobs = $this->container->jobs();
-		return array_map(
-			static function ( string $id ) use ( $jobs ): array {
-				$code = $jobs->unreadable_code( $id );
-				return [
-					'id'   => $id,
-					'code' => $code,
-				] + Messages::stored_job( $code, $id );
-			},
-			$jobs->unreadable_ids()
-		);
+		$ids  = $jobs->unreadable_ids();
+		return [
+			'unreadable_jobs'  => array_map(
+				static function ( string $id ) use ( $jobs ): array {
+					$code = $jobs->unreadable_code( $id );
+					return [
+						'id'   => $id,
+						'code' => $code,
+					] + Messages::stored_job( $code, $id );
+				},
+				array_slice( $ids, 0, self::UNREADABLE_LISTED )
+			),
+			'unreadable_total' => count( $ids ),
+		];
 	}
 
 	/**

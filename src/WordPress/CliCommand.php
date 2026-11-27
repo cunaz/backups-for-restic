@@ -32,6 +32,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class CliCommand {
 
+	/** How many stored jobs that cannot be read status names, newest first, as the page shows them. */
+	private const int UNREADABLE_SHOWN = 5;
+
 	/**
 	 * Registers the command.
 	 *
@@ -282,8 +285,9 @@ final class CliCommand {
 	}
 
 	/**
-	 * Shows the last backup and the active job, and every stored job that cannot be read, which
-	 * keeps every new job, scheduled backups included, from starting.
+	 * Shows the last backup and the active job, and the stored jobs that cannot be read, which
+	 * keep every new job, scheduled backups included, from starting: the newest five with their
+	 * texts, as the page shows them, and how many more there are.
 	 */
 	public function status(): void {
 		$jobs   = $this->container->jobs();
@@ -291,10 +295,16 @@ final class CliCommand {
 		$active = $jobs->active();
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Last backup', 'backups-for-restic' ), is_int( $last['finished'] ?? null ) ? gmdate( 'Y-m-d H:i:s', $last['finished'] ) . ' UTC' : '-' ) );
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Active job', 'backups-for-restic' ), null === $active ? '-' : $active->id . ' (' . Messages::step( $active->step ) . ')' ) );
-		foreach ( $jobs->unreadable_ids() as $id ) {
+		$unreadable = $jobs->unreadable_ids();
+		foreach ( array_slice( $unreadable, 0, self::UNREADABLE_SHOWN ) as $id ) {
 			$texts = Messages::stored_job( $jobs->unreadable_code( $id ), $id );
 			\WP_CLI::line( sprintf( '%s: %s', __( 'Stored job that cannot be read', 'backups-for-restic' ), $id ) );
 			\WP_CLI::warning( $texts['message'] . ' ' . $texts['hint'] );
+		}
+		$more = count( $unreadable ) - self::UNREADABLE_SHOWN;
+		if ( $more > 0 ) {
+			/* translators: %d: number of further stored jobs that cannot be read. */
+			\WP_CLI::warning( sprintf( _n( '%d more stored job cannot be read either.', '%d more stored jobs cannot be read either.', $more, 'backups-for-restic' ), $more ) );
 		}
 	}
 
