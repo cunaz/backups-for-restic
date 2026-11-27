@@ -534,4 +534,84 @@ final class DatabaseImportTest extends TestCase {
 		self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
 		self::assertSame( '0', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
 	}
+
+	/** @return iterable<string, array{array<string,mixed>|null, string}> */
+	public static function duplicate_reads(): iterable {
+		$read = [
+			'key'               => [ 'a' ],
+			'restarts'          => 0,
+			'largest_statement' => 50,
+		];
+		yield 'read at more than one moment' => [ [ 'snapshot' => false ] + $read, 'the dump read it at more than one moment, so a row that was deleted and inserted again with a new key in between can be in it twice.' ];
+		yield 'read in one read view' => [ [ 'snapshot' => true ] + $read, 'the dump read all of its rows from one read view' ];
+		yield 'not recorded' => [ null, 'the dump\'s manifest does not record how it read the table' ];
+	}
+
+	/** @param array<string,mixed>|null $read */
+	#[DataProvider( 'duplicate_reads' )]
+	public function test_a_duplicate_key_names_its_table_and_says_how_the_dump_read_it( ?array $read, string $explanation ): void {
+		$sql = "-- backups-for-restic-dump/1 table `wp_rows`\n"
+			. "SET NAMES utf8mb4;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n"
+			. "SET SESSION time_zone = '+00:00';\nSET FOREIGN_KEY_CHECKS = 0;\nSET UNIQUE_CHECKS = 0;\n"
+			. "DROP TABLE IF EXISTS `wp_rows`;\n"
+			. "CREATE TABLE `wp_rows` (`a` int NOT NULL, `b` longtext, UNIQUE KEY `a` (`a`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+			. "INSERT INTO `wp_rows` (`a`,`b`) VALUES (1,'first-value');\n"
+			// The same key again, as a row deleted and inserted again with a new primary key.
+			. "INSERT INTO `wp_rows` (`a`,`b`) VALUES (1,'second-value');\n"
+			. "-- end table rows=2 bytes=0\n";
+		$importer = $this->importer( StagedDump::write( $this->directory, StagedDump::with_updated_trailer( $sql, 2 ), 2, $read ) );
+		$importer->tick( 1 );
+		$importer->tick( 1 );
+		try {
+			$importer->tick( 1 );
+			self::fail( 'A duplicate key was imported.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_duplicate', $refused->context()['code'] ?? null );
+			self::assertSame( 'wp_rows', $refused->context()['table'] ?? null );
+			self::assertStringStartsWith( 'Two rows of a table of the dump have the same value in a unique key; ', $refused->getMessage() );
+			self::assertStringContainsString( $explanation, $refused->getMessage() );
+			self::assertStringNotContainsString( 'value', strtolower( (string) json_encode( $refused->context() ) ) );
+			self::assertNull( $refused->getPrevious() );
+		}
+		self::assertSame( [ [ 'b' => 'first-value' ] ], $this->db->rows( 'SELECT b FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( '1', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
+	}
+
+	/** @return iterable<string, array{list<string>, bool, bool}> */
+	public static function position_reads(): iterable {
+		yield 'without a key, at more than one moment' => [ [], false, true ];
+		yield 'without a key, in one statement' => [ [], true, false ];
+		yield 'by its key, at more than one moment' => [ [ 'a' ], false, false ];
+	}
+
+	/** @param list<string> $key */
+	#[DataProvider( 'position_reads' )]
+	public function test_the_report_names_a_table_that_the_dump_read_by_position_at_more_than_one_moment( array $key, bool $snapshot, bool $named ): void {
+		$manifest = StagedDump::write(
+			$this->directory,
+			null,
+			4,
+			[
+				'key'               => $key,
+				'snapshot'          => $snapshot,
+				'restarts'          => 0,
+				'largest_statement' => 60,
+			]
+		);
+		$importer = $this->importer( $manifest );
+		$this->finish( $importer );
+		$report = ( new RehearsalReport( new RestoreConnection( $this->db->mysqli ) ) )->read( $manifest, $importer->tables );
+		self::assertSame(
+			$named,
+			in_array(
+				[
+					'code'  => 'read_by_position',
+					'table' => 'wp_rows',
+				],
+				$report['findings'],
+				true
+			)
+		);
+		self::assertNotContains( 'read_by_position', $report['swap_preflight']['blockers'], 'The finding describes the backup; it does not hold up the exchange.' );
+	}
 }

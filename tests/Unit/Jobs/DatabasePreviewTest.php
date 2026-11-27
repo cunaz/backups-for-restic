@@ -14,6 +14,10 @@ final class DatabasePreviewTest extends TestCase {
 	/** @return iterable<string, array{int|string|null, string}> */
 	public static function codes(): iterable {
 		yield 'a batch refused before sending' => [ 'database_restore_packet', 'database_restore_packet' ];
+		yield 'a dump refused before its first statement for the packet limit' => [ 'database_restore_packet_limit', 'database_restore_packet_limit' ];
+		yield 'a dump refused before its first statement for its size' => [ 'database_restore_too_large', 'database_restore_too_large' ];
+		yield 'a duplicate key that the importer explains' => [ 'database_restore_duplicate', 'database_restore_duplicate' ];
+		yield 'a duplicate key that reached no explanation' => [ 1062, 'database_restore_failed' ];
 		yield 'a packet the server refused' => [ 1153, 'database_restore_packet' ];
 		yield 'a lock wait' => [ 1205, 'database_restore_busy' ];
 		yield 'a deadlock' => [ 1213, 'database_restore_busy' ];

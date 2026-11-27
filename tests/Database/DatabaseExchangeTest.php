@@ -1084,15 +1084,37 @@ final class DatabaseExchangeTest extends TestCase {
 			}
 			fclose( $fp );
 		}
-		$manifest = Manifest::parse( (string) file_get_contents( $directory . '/manifest.json' ), 'wp_' );
+		$recorded = (string) file_get_contents( $directory . '/manifest.json' );
+		$manifest = Manifest::parse( $recorded, 'wp_' );
+		// A manifest of an earlier version, or one that left out how the tables were read to
+		// stay within 2 MiB, records no largest statement.
+		$data = json_decode( $recorded, true, flags: JSON_THROW_ON_ERROR );
+		foreach ( $data['tables'] as &$table ) {
+			unset( $table['key'], $table['snapshot'], $table['restarts'], $table['largest_statement'] );
+		}
+		unset( $table );
+		$earlier  = Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' );
+		$big      = array_search( 'wp_big', array_column( $manifest->tables, 'name' ), true );
 		$original = $this->admin->rows( 'SELECT @@GLOBAL.max_allowed_packet AS packet' )[0]['packet'];
+		self::assertIsInt( $big );
+		self::assertGreaterThan( 1100000, $manifest->reads[ $big ]['largest_statement'] ?? 0 );
 		self::assertMatchesRegularExpression( '/\A[0-9]+\z/', (string) $original );
 		$this->admin->execute( 'SET GLOBAL max_allowed_packet=1048576' );
 		try {
 			$small = MysqliConnection::connect( $this->database ); // The limit applies to sessions opened after the change.
 			self::assertNotNull( $small );
-			$session  = new Direct( $small->mysqli );
+			$session = new Direct( $small->mysqli );
+			// The dump recorded its largest statement: the import stops before its first one.
 			$importer = new TableImporter( $session, $manifest, $directory, bin2hex( random_bytes( 16 ) ) );
+			try {
+				$importer->tick( 16 );
+				self::fail( 'The import of a dump with a statement beyond the packet limit began.' );
+			} catch ( DatabaseFailed $refused ) {
+				self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+				self::assertSame( 'wp_big', $refused->context()['table'] ?? null );
+			}
+			self::assertSame( [], $session->rows( 'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=' . self::text( $importer->tables->progress() ) ), 'Not even the progress table was created.' );
+			$importer = new TableImporter( $session, $earlier, $directory, bin2hex( random_bytes( 16 ) ) );
 			try {
 				for ( $i = 0; $i < 100; ++$i ) {
 					$importer->tick( 16 );

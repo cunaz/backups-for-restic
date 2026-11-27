@@ -91,4 +91,64 @@ final class ManifestTest extends TestCase {
 		$this->expectException( FormatException::class );
 		Manifest::parse( $json, 'wp_' );
 	}
+
+	public function test_how_the_dump_read_each_table_is_kept_by_ordinal_and_absent_from_an_earlier_manifest(): void {
+		$read             = [
+			'key'               => [ 'object_id', 'term_taxonomy_id' ],
+			'snapshot'          => false,
+			'restarts'          => 1,
+			'largest_statement' => 4000,
+		];
+		$data             = self::data();
+		$data['tables'][] = [
+			'name'  => 'wp_term_relationships',
+			'file'  => '010-wp_term_relationships.sql',
+			'rows'  => 2,
+			'bytes' => 8192,
+		] + $read;
+		$manifest         = Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' );
+		self::assertSame( [ null, $read ], $manifest->reads );
+		// The other fields of the table stay what they were.
+		self::assertSame( array_slice( $data['tables'][1], 0, 4 ), $manifest->tables[1] );
+		$data['tables'][1]['key'] = [];
+		self::assertSame( [], Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' )->reads[1]['key'] ?? null );
+	}
+
+	/** @return iterable<string, array{array<string,mixed>}> */
+	public static function invalid_reads(): iterable {
+		$read = [
+			'key'               => [ 'id' ],
+			'snapshot'          => true,
+			'restarts'          => 0,
+			'largest_statement' => 100,
+		];
+		foreach ( array_keys( $read ) as $field ) {
+			$partial = $read;
+			unset( $partial[ $field ] );
+			yield 'without ' . $field => [ $partial ];
+		}
+		yield 'a key that is no list' => [ [ 'key' => [ 'a' => 'id' ] ] + $read ];
+		yield 'a key of a number' => [ [ 'key' => [ 1 ] ] + $read ];
+		yield 'a key with an empty name' => [ [ 'key' => [ '' ] ] + $read ];
+		yield 'a key that is a name' => [ [ 'key' => 'id' ] + $read ];
+		yield 'a snapshot of a number' => [ [ 'snapshot' => 1 ] + $read ];
+		yield 'negative restarts' => [ [ 'restarts' => -1 ] + $read ];
+		yield 'restarts as text' => [ [ 'restarts' => '0' ] + $read ];
+		yield 'a negative statement' => [ [ 'largest_statement' => -1 ] + $read ];
+		yield 'a statement as long as the file' => [ [ 'largest_statement' => 4096 ] + $read ];
+		yield 'a statement as a number with a fraction' => [ [ 'largest_statement' => 1.5 ] + $read ];
+	}
+
+	/** @param array<string,mixed> $read */
+	#[DataProvider( 'invalid_reads' )]
+	public function test_a_record_of_how_a_table_was_read_is_complete_and_of_its_kinds_or_refused( array $read ): void {
+		$data              = self::data();
+		$data['tables'][0] = $data['tables'][0] + $read;
+		try {
+			Manifest::parse( json_encode( $data, JSON_THROW_ON_ERROR ), 'wp_' );
+			self::fail( 'An incomplete or invalid record of how the dump read a table was accepted.' );
+		} catch ( FormatException $refused ) {
+			self::assertSame( 'database_restore_format', $refused->context()['code'] ?? null );
+		}
+	}
 }

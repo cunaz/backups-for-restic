@@ -30,7 +30,12 @@ final class StagedDump {
 		return substr( $sql, 0, $offset ) . '-- end table rows=' . $rows . ' bytes=' . $offset . "\n";
 	}
 
-	public static function write( string $directory, ?string $sql = null, int $rows = 4 ): Manifest {
+	/**
+	 * Writes the table file and a manifest for it.
+	 *
+	 * @param array<string,mixed>|null $read How the dump read the table (key, snapshot, restarts, largest_statement), as the manifest of a current dump records it; null for a manifest without these fields.
+	 */
+	public static function write( string $directory, ?string $sql = null, int $rows = 4, ?array $read = null ): Manifest {
 		$sql ??= self::table();
 		file_put_contents( $directory . '/010-wp_rows.sql', $sql );
 		$json = json_encode(
@@ -47,7 +52,7 @@ final class StagedDump {
 						'file'  => '010-wp_rows.sql',
 						'rows'  => $rows,
 						'bytes' => strlen( $sql ),
-					],
+					] + ( $read ?? [] ),
 				],
 				'views'     => [],
 			],

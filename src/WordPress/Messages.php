@@ -261,6 +261,18 @@ final class Messages {
 				'message' => __( 'A row batch of the snapshot is larger than the database server accepts in one statement.', 'backups-for-restic' ),
 				'hint'    => __( 'Ask the host to raise max_allowed_packet on the database server. When the plugin refused a row batch before sending it, the job log names the limit that batch needs. For an import by hand, stage the snapshot’s database directory again with the rehearsal switched off and download the SQL files or request a ZIP; the importing client and the database server both need a packet limit large enough for the largest statement.', 'backups-for-restic' ),
 			],
+			'database_restore_too_large' => [
+				'message' => __( 'A statement in the database dump of this backup is larger than the 16 MiB that the plugin’s database import reads.', 'backups-for-restic' ),
+				'hint'    => __( 'The backup wrote a large row as a statement of its own; the job log names the table and the size. The import stopped before it sent a statement. Restore this database by hand with the command-line client, as the recovery guide describes: open the snapshot again, stage its database directory with the rehearsal switched off, download the SQL files or request a ZIP, and give the client and the database server a max_allowed_packet at least as large as that statement.', 'backups-for-restic' ),
+			],
+			'database_restore_packet_limit' => [
+				'message' => __( 'The database server takes smaller statements (max_allowed_packet) than the largest one in the database dump of this backup, so the database import stopped before it sent one.', 'backups-for-restic' ),
+				'hint'    => __( 'The job log names the table and the max_allowed_packet that the import needs. Ask the host to raise max_allowed_packet on the database server to at least that value, then start the restore again. For an import by hand, stage the snapshot’s database directory again with the rehearsal switched off and download the SQL files or request a ZIP; the importing client and the database server both need a packet limit large enough for the largest statement.', 'backups-for-restic' ),
+			],
+			'database_restore_duplicate' => [
+				'message' => __( 'Two rows of a table in the database dump of this backup have the same value in a unique key, so the database import stopped.', 'backups-for-restic' ),
+				'hint'    => __( 'The job log names the table and says whether the backup read it at more than one moment. A table read that way can hold a row twice that was deleted and inserted again with a new key while the backup ran. Restore this database by hand and keep one row of each such pair, as the recovery guide describes for a duplicate key (ERROR 1062): open the snapshot again, stage its database directory with the rehearsal switched off, and download the SQL files or request a ZIP.', 'backups-for-restic' ),
+			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
 				'hint'    => __( 'The job tried again several times from its saved database progress and operation witness, then stopped. When the database server answers and no other client holds long locks on the site tables, start the rehearsal or the database change again.', 'backups-for-restic' ),

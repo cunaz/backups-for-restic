@@ -26,18 +26,22 @@ final readonly class Manifest {
 	public const int MAX_BYTES  = 2097152;
 	public const int MAX_TABLES = 10000;
 
+	/** The fields in which a table's entry records how the dump read it (ADR 0021): all or none. */
+	private const array READ_FIELDS = [ 'key', 'snapshot', 'restarts', 'largest_statement' ];
+
 	/**
 	 * Keeps an inventory whose shapes and table/file associations have already been checked.
 	 *
-	 * @param string                                                         $prefix    Expected live table prefix.
-	 * @param string                                                         $server Original database server version.
-	 * @param string                                                         $time_zone Session offset used when the dump was produced.
-	 * @param list<array{name: string, file: string, rows: int, bytes: int}> $tables Completed table files, in dump order.
-	 * @param list<string>                                                   $views Views kept for later restore planning, never executed as table rows.
-	 * @param list<string>|null                                              $trigger_tables Tables with source triggers, or null when unknown.
-	 * @param string                                                         $fingerprint Hash of this exact inventory, for binding resumable import state.
+	 * @param string                                                                                     $prefix    Expected live table prefix.
+	 * @param string                                                                                     $server Original database server version.
+	 * @param string                                                                                     $time_zone Session offset used when the dump was produced.
+	 * @param list<array{name: string, file: string, rows: int, bytes: int}>                             $tables Completed table files, in dump order.
+	 * @param list<string>                                                                               $views Views kept for later restore planning, never executed as table rows.
+	 * @param list<string>|null                                                                          $trigger_tables Tables with source triggers, or null when unknown.
+	 * @param string                                                                                     $fingerprint Hash of this exact inventory, for binding resumable import state.
+	 * @param list<array{key: list<string>, snapshot: bool, restarts: int, largest_statement: int}|null> $reads How the dump read each table, by ordinal: the columns of the key that ordered its pages, empty without one; whether all of its rows come from one read view; how often it started over because its definition changed; its longest statement in bytes, with the semicolon and without the line break. Null for a table that a version before these fields dumped, and for every table of a manifest that left them out to stay within MAX_BYTES.
 	 */
-	private function __construct( public string $prefix, public string $server, public string $time_zone, public array $tables, public array $views, public ?array $trigger_tables, public string $fingerprint ) {
+	private function __construct( public string $prefix, public string $server, public string $time_zone, public array $tables, public array $views, public ?array $trigger_tables, public string $fingerprint, public array $reads ) {
 	}
 
 	/**
@@ -73,6 +77,7 @@ final readonly class Manifest {
 			throw new FormatException( 'The database dump inventory is invalid or contains too many tables.' );
 		}
 		$tables = [];
+		$reads  = [];
 		$seen   = [];
 		foreach ( $stored as $entry ) {
 			if ( ! is_array( $entry ) || ! is_string( $entry['name'] ?? null ) ) {
@@ -94,6 +99,7 @@ final readonly class Manifest {
 				'rows'  => $entry['rows'],
 				'bytes' => $entry['bytes'],
 			];
+			$reads[]       = self::read( $entry );
 		}
 		$names = [];
 		foreach ( $views as $name ) {
@@ -120,7 +126,45 @@ final readonly class Manifest {
 				unset( $base[ $name ] );
 			}
 		}
-		return new self( $prefix, $data['server'], $zone, $tables, $names, $triggers, hash( 'sha256', $json ) );
+		return new self( $prefix, $data['server'], $zone, $tables, $names, $triggers, hash( 'sha256', $json ), $reads );
+	}
+
+	/**
+	 * How the dump read one table, as the version that added the fields records it: all four
+	 * of them, or none for a table of an earlier version and a manifest that left them out.
+	 *
+	 * @param array<mixed> $entry Table entry with checked name, file and counts.
+	 * @return array{key: list<string>, snapshot: bool, restarts: int, largest_statement: int}|null Fields, or null without them.
+	 * @throws FormatException With the code database_restore_format if only some of them are there or one is not of its kind.
+	 */
+	private static function read( array $entry ): ?array {
+		$fields = array_intersect_key( $entry, array_flip( self::READ_FIELDS ) );
+		if ( [] === $fields ) {
+			return null;
+		}
+		$key     = $fields['key'] ?? null;
+		$columns = [];
+		foreach ( is_array( $key ) && array_is_list( $key ) ? $key : [ null ] as $column ) {
+			if ( ! is_string( $column ) || '' === $column ) {
+				$columns = null;
+				break;
+			}
+			$columns[] = $column;
+		}
+		$snapshot = $fields['snapshot'] ?? null;
+		$restarts = $fields['restarts'] ?? null;
+		$largest  = $fields['largest_statement'] ?? null;
+		$bytes    = $entry['bytes'] ?? null;
+		// The largest statement is a line of the table's file, whose last line is the trailer.
+		if ( count( self::READ_FIELDS ) !== count( $fields ) || null === $columns || ! is_bool( $snapshot ) || ! is_int( $restarts ) || $restarts < 0 || ! is_int( $largest ) || $largest < 0 || ! is_int( $bytes ) || $largest >= $bytes ) {
+			FormatException::raise( 'A database dump table records how it was read in an invalid form.', [ 'code' => 'database_restore_format' ] );
+		}
+		return [
+			'key'               => $columns,
+			'snapshot'          => $snapshot,
+			'restarts'          => $restarts,
+			'largest_statement' => $largest,
+		];
 	}
 
 	/**

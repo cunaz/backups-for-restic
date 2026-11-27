@@ -1926,6 +1926,7 @@
 			snapshot_triggers: __( 'The source table had triggers.', 'backups-for-restic' ),
 			snapshot_view: __( 'The snapshot includes a view.', 'backups-for-restic' ),
 			snapshot_engine: __( 'The source storage engine requires review.', 'backups-for-restic' ),
+			read_by_position: __( 'The backup read this table by position at more than one moment, because it has no key to order its rows: rows that were added or removed while it was read can be missing from it or be in it twice. The backup job warned about it when it ran.', 'backups-for-restic' ),
 			live_object_type: __( 'The live object has a different type.', 'backups-for-restic' ),
 			live_engine: __( 'The live storage engine requires review.', 'backups-for-restic' ),
 			database_exchange_foreign: __( 'An earlier database restore keeps private tables on another database server or in another database. Before another database restore, run "wp backups-for-restic database-discard" with the ID of that restore job: it lists the tables and forgets them without dropping anything.', 'backups-for-restic' ),

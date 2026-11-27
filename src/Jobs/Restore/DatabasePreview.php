@@ -120,7 +120,9 @@ final readonly class DatabasePreview {
 	/**
 	 * Gives a failed rehearsal statement the code the administrator can act on. A batch
 	 * beyond the server's packet limit is refused before it is sent; a server that closes
-	 * the session for one anyway reports 1153.
+	 * the session for one anyway reports 1153. The importer's own refusals keep their codes:
+	 * a statement of the dump that the import cannot read or the server cannot take, found
+	 * before the first one is sent, and a duplicate key.
 	 *
 	 * @param DatabaseFailed $error Failure of the import.
 	 * @return DatabaseFailed Failure with a job error code.
@@ -128,7 +130,7 @@ final readonly class DatabasePreview {
 	public static function classified( DatabaseFailed $error ): DatabaseFailed {
 		$code = $error->context()['code'] ?? null;
 		return match ( true ) {
-			'database_restore_packet' === $code => $error,
+			in_array( $code, [ 'database_restore_packet', 'database_restore_packet_limit', 'database_restore_too_large', 'database_restore_duplicate' ], true ) => $error,
 			1153 === $code => new DatabaseFailed( 'A statement of the snapshot is larger than the database server\'s max_allowed_packet.', [ 'code' => 'database_restore_packet' ] ),
 			in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) => new DatabaseFailed( 'The database rehearsal is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] ),
 			in_array( $code, [ 1115, 1253, 1273 ], true ) => new DatabaseFailed( 'The destination database cannot use a character set or collation required by the snapshot.', [ 'code' => 'database_restore_collation' ] ),
