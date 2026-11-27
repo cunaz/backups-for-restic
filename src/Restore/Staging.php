@@ -391,7 +391,7 @@ final class Staging {
 	 * failed and tried again by the next call; it never keeps the staging of other restores
 	 * from expiring.
 	 *
-	 * While a stored job cannot be read (JobStore::unreadable()), no staging is set aside and no
+	 * While a stored job cannot be read (JobStore::census()), no staging is set aside and no
 	 * sealed review is removed: that job may be an apply within its recovery window whose undo
 	 * needs them. Before, the staging of its restore expired with its own hours and the sealed
 	 * review after one, while the apply's journal stayed, so that the undo offered once the
