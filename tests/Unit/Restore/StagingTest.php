@@ -754,6 +754,42 @@ final class StagingTest extends TestCase {
 		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
 	}
 
+	#[DataProvider( 'jobs_that_keep_a_journal' )]
+	public function test_the_sealed_review_of_an_apply_whose_window_has_ended_stays_while_an_undo_of_it_runs( string $kind ): void {
+		$restore = $this->restored( $this->clock->seconds - 60 );
+		// The sealed review of a background apply, kept for it, and the apply, whose window ended an
+		// hour ago, with the journal of a change that no undo reverted.
+		$review        = $this->retained_plan( $this->jobs, $this->restores, $restore, $this->clock->seconds - 90600 );
+		$review->state = JobState::Succeeded;
+		$this->jobs->save( $review );
+		$apply       = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$apply->data = [
+			'restore'  => $restore->id,
+			'plan_job' => $review->id,
+		];
+		$this->jobs->save( $apply );
+		mkdir( $this->jobs->directory( $apply ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $apply ) . '/undo/attempted', '1' );
+		// An undo of it that was queued within the window, or the review of one, still running.
+		$running       = $this->job( JobState::Running, 0, [], 'undo' === $kind ? JobType::Undo : JobType::FilePlan );
+		$running->data = 'undo' === $kind ? [ 'apply' => $apply->id ] : [
+			'undo'    => true,
+			'subject' => $apply->id,
+		];
+		$this->jobs->save( $running );
+		$plan = $this->restores . '/' . $restore->id . '/plans/' . $review->id . '/plan.bin';
+
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		// The undo of a background apply reads the rows that it reverts from that review.
+		self::assertFileExists( $plan );
+		self::assertTrue( $this->jobs->get( $review->id )?->data['plan_retained'] ?? false );
+		// Once it has ended, the review goes after its hour as any other.
+		$running->state = JobState::Succeeded;
+		$this->jobs->save( $running );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertFileDoesNotExist( $plan );
+	}
+
 	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
 		$target = $this->directory . '/elsewhere';
 		mkdir( $target . '/files', 0700, true );
