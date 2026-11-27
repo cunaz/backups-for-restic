@@ -350,7 +350,7 @@ final class AccessTest extends TestCase {
 			self::assertSame( $review['server'], $answer['discarded']['server'] ?? null );
 			$recorded = TestSite::job_document( $job )['data'] ?? [];
 			self::assertArrayNotHasKey( 'database_owner', $recorded );
-			self::assertSame( [ 1, 'rest' ], [ $recorded['database_discarded']['user'] ?? null, $recorded['database_discarded']['via'] ?? null ] );
+			self::assertSame( [ 1, 'rest', $review['digest'] ], [ $recorded['database_discarded']['user'] ?? null, $recorded['database_discarded']['via'] ?? null, $recorded['database_discarded']['digest'] ?? null ] );
 			self::assertStringContainsString( '"digest":"' . $review['digest'] . '"', TestSite::job_log( $job ) );
 			self::assertSame( [ 409, 'backups_for_restic_database_binding_discarded' ], $refused( [] ) );
 			[ $status, $error ] = TestSite::api( 'POST', $route . '/discard-review', [] );
