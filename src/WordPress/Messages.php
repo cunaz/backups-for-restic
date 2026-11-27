@@ -30,7 +30,15 @@ final class Messages {
 	 * @return array{message: string, hint: string} Texts.
 	 */
 	public static function job_failure( Job $job ): array {
-		return self::job_error( $job->error->code ?? 'internal', self::kind( $job ) );
+		$code  = $job->error->code ?? 'internal';
+		$texts = self::job_error( $code, self::kind( $job ) );
+		$name  = $job->data['database_refused_name'] ?? null;
+		if ( 'database_restore_name' === $code && is_string( $name ) ) {
+			// The name as the manifest's check escaped it: in double quotes, every character printable.
+			/* translators: %s: name of a database table in double quotes, with what does not print escaped, such as "wp_po\u202ests". */
+			$texts['message'] = sprintf( __( 'The database dump of this backup has a table or view named %s, with a character that does not print as itself, so the database rehearsal did not import it.', 'backups-for-restic' ), $name );
+		}
+		return $texts;
 	}
 
 	/**
@@ -272,6 +280,10 @@ final class Messages {
 			'database_restore_duplicate' => [
 				'message' => __( 'Two rows of a table in the database dump of this backup have the same value in a unique key, so the database import stopped.', 'backups-for-restic' ),
 				'hint'    => __( 'The job log names the table and says whether the backup read it at more than one moment. A table read that way can hold a row twice that was deleted and inserted again with a new key while the backup ran. Restore this database by hand and keep one row of each such pair, as the recovery guide describes for a duplicate key (ERROR 1062): open the snapshot again, stage its database directory with the rehearsal switched off, and download the SQL files or request a ZIP.', 'backups-for-restic' ),
+			],
+			'database_restore_name' => [
+				'message' => __( 'The database dump of this backup has a table or view whose name has a character that does not print as itself, so the plugin does not import it.', 'backups-for-restic' ),
+				'hint'    => __( 'Such a character, a right-to-left override, an invisible or a control character among them, can make a name read as another one wherever it is shown. The job log names the table, escaped. If the site needs that table, restore the database by hand with the command-line client, as the recovery guide describes: open the snapshot again, stage its database directory with the rehearsal switched off, and download the SQL files or request a ZIP. Otherwise rename the table on the site, or leave it out of the backup in the database settings, so that later backups can be restored here.', 'backups-for-restic' ),
 			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),

@@ -13,6 +13,7 @@ use BackupsForRestic\Database\Dump\Table;
 use BackupsForRestic\Database\Dump\TableSource;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Support\GoJson;
+use BackupsForRestic\Support\GoQuote;
 use BackupsForRestic\Support\Rfc3339;
 
 defined( 'ABSPATH' ) || exit;
@@ -28,6 +29,14 @@ final readonly class Manifest {
 
 	/** The fields in which a table's entry records how the dump read it (ADR 0021): all or none. */
 	private const array READ_FIELDS = [ 'key', 'snapshot', 'restarts', 'largest_statement' ];
+
+	/**
+	 * Characters that print as themselves by their category but are invisible where a text is
+	 * rendered: the default-ignorable code points of the Basic Multilingual Plane that are
+	 * letters or marks (DerivedCoreProperties.txt). The other default-ignorable ones are format
+	 * characters or unassigned, which the category alone refuses.
+	 */
+	private const string INVISIBLE = '\x{034F}\x{115F}\x{1160}\x{17B4}\x{17B5}\x{180B}-\x{180D}\x{180F}\x{3164}\x{FE00}-\x{FE0F}\x{FFA0}';
 
 	/**
 	 * Keeps an inventory whose shapes and table/file associations have already been checked.
@@ -178,5 +187,43 @@ final readonly class Manifest {
 		if ( ! str_starts_with( $name, $prefix ) || ! mb_check_encoding( $name, 'UTF-8' ) || mb_strlen( $name, 'UTF-8' ) > 64 || 1 === preg_match( '/[.\\\\\/\x00-\x1f\x7f]/', $name ) ) {
 			throw new FormatException( 'The database dump contains a table name outside this site or the supported name format.' );
 		}
+		if ( ! self::printable( $name ) ) {
+			FormatException::raise(
+				'The database dump contains a table or view whose name has a character that does not print as itself; it is not restored.',
+				[
+					'code'  => 'database_restore_name',
+					'table' => self::quoted( $name ),
+				]
+			);
+		}
+	}
+
+	/**
+	 * Whether every character of a valid UTF-8 name prints as itself, so that the name reads
+	 * the same wherever it is shown unescaped: in a terminal, a log or another tool (ADR 0035).
+	 * A letter, mark, number, punctuation, symbol or the ASCII space, as Go's strconv.IsPrint()
+	 * accepts and the admin page and the command line show as it is; not one of the invisible
+	 * characters among them (INVISIBLE); in the Basic Multilingual Plane, the only characters
+	 * that MySQL allows in an identifier; and no space at the end, which MySQL refuses. Format
+	 * characters such as a right-to-left override or a zero-width space, controls, other
+	 * spaces, line and paragraph separators, private-use and unassigned characters fail.
+	 *
+	 * @param string $name Table or view name, valid UTF-8.
+	 * @return bool Whether the name prints as itself.
+	 */
+	public static function printable( string $name ): bool {
+		return 1 === preg_match( '/\A(?:(?![\x{10000}-\x{10FFFF}' . self::INVISIBLE . '])[\p{L}\p{M}\p{N}\p{P}\p{S} ])*+\z/u', $name ) && ! str_ends_with( $name, ' ' );
+	}
+
+	/**
+	 * A name as the admin page and the command line show one that does not print as itself: in
+	 * double quotes with Go's escapes (GoQuote), and the invisible characters that Go prints
+	 * escaped as well.
+	 *
+	 * @param string $name Table or view name, valid UTF-8.
+	 * @return string Text of printable characters only.
+	 */
+	public static function quoted( string $name ): string {
+		return '"' . (string) preg_replace_callback( '/[' . self::INVISIBLE . ']/u', static fn ( array $character ): string => sprintf( '\\u%04x', mb_ord( $character[0], 'UTF-8' ) ), GoQuote::quote( $name ) ) . '"';
 	}
 }

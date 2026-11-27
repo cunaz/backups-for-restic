@@ -114,12 +114,12 @@ final class JobMessagesTest extends TestCase {
 		'forget'         => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'prune'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'no_snapshots', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
 		'check'          => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'internal' ],
-		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'database_restore_too_large', 'database_restore_packet_limit', 'database_restore_duplicate', 'internal' ],
+		'restore'        => [ 'wrong_password', 'authentication_failed', 'repository_unsupported_version', 'repository_locked', 'repository_changed', 'index_too_large', 'quota_exceeded', 'upload_rejected', 'unauthorized', 'repository_missing', 'repository_exists', 'repository_unreachable', 'secrets_undecryptable', 'environment', 'database_dump_failed', 'configuration', 'repository_damaged', 'decompression_limit', 'key_missing', 'setup_incomplete', 'restore_snapshot_missing', 'staging_unverified', 'staging_space', 'staging_write', 'restore_path_missing', 'database_preview_missing', 'database_restore_prefix', 'database_restore_collation', 'database_restore_privilege', 'database_restore_format', 'database_restore_failed', 'database_restore_packet', 'database_restore_busy', 'database_restore_too_large', 'database_restore_packet_limit', 'database_restore_duplicate', 'database_restore_name', 'internal' ],
 		'file_plan'      => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'internal' ],
 		'undo_review'    => [ 'file_preview_failed', 'file_staging_gone', 'file_plan_too_large', 'protected_path_invalid', 'undo_unavailable', 'internal' ],
 		'apply'          => [ 'file_apply_failed', 'file_changed_after_review', 'file_staging_gone', 'file_plan_too_large', 'file_space', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'internal' ],
 		'undo'           => [ 'file_undo_failed', 'file_staging_gone', 'file_writes_refused', 'maintenance_opcache', 'maintenance_busy', 'maintenance_failed', 'maintenance_stuck', 'protected_path_invalid', 'undo_unavailable', 'undo_review_required', 'internal' ],
-		'database_apply' => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_review_required', 'database_restore_packet', 'database_restore_busy', 'database_restore_too_large', 'database_restore_packet_limit', 'database_restore_duplicate', 'database_restore_prefix', 'database_preview_missing', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'database_wordpress_version', 'environment', 'configuration', 'internal' ],
+		'database_apply' => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_review_required', 'database_restore_packet', 'database_restore_busy', 'database_restore_too_large', 'database_restore_packet_limit', 'database_restore_duplicate', 'database_restore_name', 'database_restore_prefix', 'database_preview_missing', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'database_wordpress_version', 'environment', 'configuration', 'internal' ],
 		'database_undo'  => [ 'database_exchange_failed', 'database_exchange_cleanup', 'database_exchange_changed', 'database_exchange_sessions', 'performance_schema', 'database_exchange_foreign', 'database_restore_busy', 'database_admin_collision', 'database_admin_capabilities', 'database_admin_capabilities_unreadable', 'database_roles_invalid', 'database_roles_too_large', 'database_plugins_invalid', 'database_plugins_too_large', 'environment', 'configuration', 'internal' ],
 	];
 
@@ -214,5 +214,25 @@ final class JobMessagesTest extends TestCase {
 		self::assertStringContainsString( 'Without them this apply cannot be undone.', Messages::job_failure( $job )['hint'] );
 		$job->error = null;
 		self::assertSame( Messages::job_error( 'internal' ), Messages::job_failure( $job ) );
+	}
+
+	#[RunInSeparateProcess]
+	public function test_a_rehearsal_refused_for_a_table_name_names_the_table_escaped_and_says_what_to_do(): void {
+		self::text( 'internal' );
+		$job        = new Job( '20261127T120000Z-0c0e11', JobType::Restore, 'manual', 1_800_000_000 );
+		$job->state = JobState::Failed;
+		$job->error = new JobError( 'database_restore_name', 'The database dump contains a table or view whose name has a character that does not print as itself; it is not restored.', false );
+		$general    = Messages::job_failure( $job );
+		self::assertSame( Messages::job_error( 'database_restore_name', 'restore' ), $general, 'Without the name the general text.' );
+		self::assertStringContainsString( 'The job log names the table, escaped.', $general['hint'] );
+		self::assertStringContainsString( 'restore the database by hand with the command-line client', $general['hint'] );
+		self::assertStringContainsString( 'rename the table on the site, or leave it out of the backup', $general['hint'] );
+		$job->data['database_refused_name'] = '"wp_po\\u202ests"';
+		$named                              = Messages::job_failure( $job );
+		self::assertSame( 'The database dump of this backup has a table or view named "wp_po\\u202ests", with a character that does not print as itself, so the database rehearsal did not import it.', $named['message'] );
+		self::assertSame( $general['hint'], $named['hint'] );
+		// The name of another code's job is not used.
+		$job->error = new JobError( 'database_restore_format', 'The SQL dump could not be verified.', false );
+		self::assertSame( Messages::job_error( 'database_restore_format', 'restore' ), Messages::job_failure( $job ) );
 	}
 }

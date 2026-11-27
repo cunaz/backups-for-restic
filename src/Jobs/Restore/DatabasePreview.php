@@ -46,10 +46,16 @@ final readonly class DatabasePreview {
 	 * @param string          $path Absolute snapshot path of the site manifest.
 	 * @param string          $site Original site address.
 	 * @param mixed           $versions Original WordPress, plugin and PHP versions.
+	 * @throws FormatException If the staged database or its manifest is refused.
 	 */
 	public function bind( RestoreServices $services, Job $job, string $path, string $site, mixed $versions ): void {
-		$subdir          = rtrim( dirname( $path ), '/' ) . '/database';
-		$manifest        = $this->source( $services, $job, $subdir )->manifest;
+		$subdir = rtrim( dirname( $path ), '/' ) . '/database';
+		try {
+			$manifest = $this->source( $services, $job, $subdir )->manifest;
+		} catch ( FormatException $refused ) {
+			self::refused( $job, $refused );
+			throw $refused;
+		}
 		$source_versions = [];
 		foreach ( [ 'wordpress', 'plugin', 'php' ] as $key ) {
 			if ( is_array( $versions ) && is_string( $versions[ $key ] ?? null ) ) {
@@ -156,6 +162,20 @@ final readonly class DatabasePreview {
 		}
 		unset( $job->data['database_binding'], $job->data['database_cleanup'] );
 		return true;
+	}
+
+	/**
+	 * Keeps the name of a table that the manifest's check refused for the texts of the job,
+	 * which name it (database_restore_name): escaped, as the check gives it.
+	 *
+	 * @param Job             $job Restore job.
+	 * @param FormatException $refused Refusal of the manifest.
+	 */
+	private static function refused( Job $job, FormatException $refused ): void {
+		$name = $refused->context()['table'] ?? null;
+		if ( 'database_restore_name' === ( $refused->context()['code'] ?? null ) && is_string( $name ) ) {
+			$job->data['database_refused_name'] = $name;
+		}
 	}
 
 	/**
