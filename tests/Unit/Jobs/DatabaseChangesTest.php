@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Jobs;
 
 use BackupsForRestic\Database\Restore\Connection;
+use BackupsForRestic\Database\Restore\SwapCatalog;
 use BackupsForRestic\Exception\DatabaseFailed;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\JobConflict;
@@ -1172,6 +1173,7 @@ final class DatabaseChangesTest extends TestCase {
 			foreach ( [ self::UUID, self::OTHER ] as $uuid ) {
 				self::refused( 'database_binding_unreadable', fn () => $this->changes( $this->server( $uuid ) )->discard_review( $job->id, 7 ) );
 				self::assertSame( [], $this->changes( $this->server( $uuid ) )->foreign_bindings()['jobs'], $case );
+				self::assertSame( 'unknown', DatabaseGeneration::place( ( new SwapCatalog( $this->server( $uuid ) ) )->facts(), $job ), $case );
 			}
 			self::assertFalse( DatabaseGeneration::readable( $job ), $case );
 			TempDir::remove( $this->jobs->directory( $job ) );
@@ -1181,6 +1183,23 @@ final class DatabaseChangesTest extends TestCase {
 		self::assertTrue( DatabaseGeneration::readable( $foreign ) );
 		self::assertSame( [ $foreign->id ], array_column( $this->changes( $this->server() )->foreign_bindings()['jobs'], 'job' ) );
 		self::assertSame( [], $this->changes( $this->server( self::OTHER ) )->foreign_bindings()['jobs'] );
+	}
+
+	public function test_only_mariadb_another_database_or_another_valid_server_uuid_place_a_binding_elsewhere(): void {
+		$job = $this->owner( '20260101T000001Z-aaaaaa', [ 'database_owner' => self::binding( str_repeat( 'c', 32 ) ) ] );
+		foreach ( [
+			'its server and database'                    => [ self::UUID, 'site', false, 'here' ],
+			'another database on its server'             => [ self::UUID, 'other', false, 'foreign' ],
+			'another server'                             => [ self::OTHER, 'site', false, 'foreign' ],
+			'a server that does not say which one it is' => [ '', 'site', false, 'unknown' ],
+			'another database on such a server'          => [ '', 'other', false, 'foreign' ],
+			'MariaDB'                                    => [ '', 'site', true, 'foreign' ],
+			'another database on MariaDB'                => [ '', 'other', true, 'foreign' ],
+		] as $case => [ $uuid, $database, $mariadb, $place ] ) {
+			$facts            = ( new SwapCatalog( $this->server( $uuid, $database ) ) )->facts();
+			$facts['mariadb'] = $mariadb;
+			self::assertSame( $place, DatabaseGeneration::place( $facts, $job ), $case );
+		}
 	}
 
 	public function test_a_binding_whose_record_cannot_name_its_tables_is_not_offered_for_a_discard(): void {
