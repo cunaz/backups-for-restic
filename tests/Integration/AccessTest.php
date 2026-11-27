@@ -936,14 +936,33 @@ final class AccessTest extends TestCase {
 			foreach ( [ $undo, $apply, $backup ] as $id ) {
 				[ $status, $answer, $raw ] = TestSite::api( 'GET', '/jobs/' . $id );
 				self::assertSame( 200, $status, $raw );
-				$answers[ $id ] = [ $answer['job']['state'] ?? null, $answer['job']['error']['code'] ?? null, $answer['job']['error']['message'] ?? null ];
+				$answers[ $id ] = [ $answer['job']['state'] ?? null, $answer['job']['result'] ?? null, $answer['job']['error']['code'] ?? null, $answer['job']['error']['message'] ?? null ];
 			}
 			// What the admin page shows a stopped apply or undo from: the state, the counts and the error.
 			self::assertSame(
 				[
-					$undo   => [ 'cancelled', 'maintenance_stuck', 'The site could not leave maintenance mode.' ],
-					$apply  => [ 'cancelled', 'maintenance_stuck', 'The site could not leave maintenance mode.' ],
-					$backup => [ 'cancelled', null, null ],
+					$undo   => [
+						'cancelled',
+						[
+							'restored'    => 1,
+							'removed'     => 2,
+							'kept'        => 0,
+							'unchanged'   => 0,
+							'apply_state' => 'partly_undone',
+						],
+						'maintenance_stuck',
+						'The site could not leave maintenance mode.',
+					],
+					$apply  => [
+						'cancelled',
+						[
+							'entries_completed' => 2,
+							'entries_attempted' => 3,
+						],
+						'maintenance_stuck',
+						'The site could not leave maintenance mode.',
+					],
+					$backup => [ 'cancelled', [], null, null ],
 				],
 				$answers
 			);
