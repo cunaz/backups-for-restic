@@ -876,14 +876,17 @@ guidance in Scenario F still applies.
 
 The options and job documents have separate layout numbers. An unreadable job produces
 `job_unreadable` when a new job or a repository change is requested, even if the options
-are compatible. The plugin keeps every unreadable job document, including one whose raw
-status looks finished, because it cannot safely interpret that status. Install a version
+are compatible, and when the discard of a database restore's binding is reviewed or
+confirmed, since that job may be a queued undo that needs the binding. The plugin keeps
+every unreadable job document, including one whose raw status looks finished, because it
+cannot safely interpret that status. Install a version
 that can read the job. If that version still refuses it, keep a copy of the private job
 directory when investigating damaged files; do not remove the job just to unblock changes
 while it may still be running.
 
-A job that the PHP user cannot open blocks new jobs and repository changes in the same way,
-with `job_inaccessible`, whatever the plugin version. The refusal names the job; its ID is
+A job that the PHP user cannot open blocks new jobs, repository changes and the discard of a
+binding in the same way, with `job_inaccessible`, whatever the plugin version. The refusal
+names the job; its ID is
 the name of its folder under `jobs/` in the private working directory. The usual cause is a
 WP-CLI command that ran as root or as another user: the job folder that it created belongs
 to that user, with mode 0700, so the web server's PHP user cannot search it. Give the PHP
