@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Database\Dump\DatabaseDump;
 use BackupsForRestic\Database\Dump\Catalog;
 use BackupsForRestic\Database\Dump\SqlFormatter;
+use BackupsForRestic\Database\Restore\Connection;
 use BackupsForRestic\Database\Restore\Ledger;
 use BackupsForRestic\Database\Restore\Manifest;
 use BackupsForRestic\Database\Restore\RehearsalReport;
@@ -606,71 +607,63 @@ final class DatabaseImportTest extends TestCase {
 	}
 
 	/**
-	 * Runs the work on a connection that the server opened under a max_allowed_packet of 16 KiB.
-	 *
-	 * @param \Closure(MysqliConnection): void $work Work on the connection.
+	 * The site's connection as a server reports a max_allowed_packet of 16 KiB on it. The tests
+	 * do not lower the server's own limit: the database mutation gate runs the suite in parallel
+	 * processes, and a process that connects meanwhile would get the small limit as well (see
+	 * test_a_batch_beyond_max_allowed_packet_is_refused_before_it_is_sent). With the server's
+	 * global limit at 16 KiB, MySQL 8.4.11 and MariaDB 11.4.13 refused the definition with error
+	 * 1153 after the ledger and the first table were created.
 	 */
-	private function small_packet( \Closure $work ): void {
-		$original = self::$admin?->rows( 'SELECT @@GLOBAL.max_allowed_packet AS packet' )[0]['packet'] ?? '';
-		self::assertMatchesRegularExpression( '/\A[0-9]+\z/', $original );
-		self::$admin?->execute( 'SET GLOBAL max_allowed_packet = 16384' );
-		try {
-			// The limit applies to sessions opened after the change.
-			$small = MysqliConnection::connect( $this->database );
-			self::assertNotNull( $small );
-			$work( $small );
-		} finally {
-			self::$admin?->execute( 'SET GLOBAL max_allowed_packet = ' . $original );
-		}
+	private function reporting_16_kib(): Connection {
+		return new class( new RestoreConnection( $this->db->mysqli ) ) implements Connection {
+			public function __construct( private Connection $site ) {}
+
+			public function rows( string $sql ): array {
+				return 'SELECT @@SESSION.max_allowed_packet AS packet' === $sql ? [ [ 'packet' => '16384' ] ] : $this->site->rows( $sql );
+			}
+
+			public function execute( string $sql ): int {
+				return $this->site->execute( $sql );
+			}
+		};
 	}
 
 	private function present( string $table ): bool {
 		return [] !== $this->db->rows( 'SELECT 1 AS present FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=' . RestoreSession::literal( $table ) );
 	}
 
-	/** Before, the import began, and the server closed the connection at that definition. */
+	/** Before, the import created its ledger and the first table and sent the definition. */
 	public function test_a_definition_beyond_max_allowed_packet_is_refused_before_the_ledger_and_any_table(): void {
-		$manifest = $this->wide();
-		$this->small_packet(
-			function ( MysqliConnection $small ) use ( $manifest ): void {
-				$importer = new TableImporter( new RestoreConnection( $small->mysqli ), $manifest, $this->directory, $this->token );
-				try {
-					$importer->tick( 16 );
-					self::fail( 'The import of a definition beyond the packet limit began.' );
-				} catch ( DatabaseFailed $refused ) {
-					self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
-					self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
-					self::assertMatchesRegularExpression( '/\AThe CREATE statement of a table of the dump needs 2[0-9]{4} bytes of SQL and a max_allowed_packet of at least 2[0-9]{4} bytes; the database server allows 16384 bytes\. It was not sent\.\z/', $refused->getMessage() );
-				}
-				self::assertFalse( $this->present( $importer->tables->progress() ), 'The ledger was not created.' );
-				self::assertFalse( $this->present( $importer->tables->shadow( 0 ) ), 'No table was imported.' );
-				self::assertSame( [ [ 'open' => '1' ] ], $small->rows( 'SELECT 1 AS open' ), 'The connection is still open.' );
-			}
-		);
+		$importer = new TableImporter( $this->reporting_16_kib(), $this->wide(), $this->directory, $this->token );
+		try {
+			$importer->tick( 16 );
+			self::fail( 'The import of a definition beyond the packet limit began.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+			self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
+			self::assertMatchesRegularExpression( '/\AThe CREATE statement of a table of the dump needs 2[0-9]{4} bytes of SQL and a max_allowed_packet of at least 2[0-9]{4} bytes; the database server allows 16384 bytes\. It was not sent\.\z/', $refused->getMessage() );
+		}
+		self::assertFalse( $this->present( $importer->tables->progress() ), 'The ledger was not created.' );
+		self::assertFalse( $this->present( $importer->tables->shadow( 0 ) ), 'No table was imported.' );
 	}
 
-	/** Before, the server closed the connection at that definition. */
+	/** Before, the import sent the definition. */
 	public function test_a_definition_beyond_the_limit_of_a_later_session_is_refused_before_it_is_sent(): void {
 		$manifest = $this->wide();
 		// Under the server's own limit, the first tick creates the ledger and the first shadow.
 		$this->importer( $manifest )->tick( 1 );
-		$this->small_packet(
-			function ( MysqliConnection $small ) use ( $manifest ): void {
-				$importer = new TableImporter( new RestoreConnection( $small->mysqli ), $manifest, $this->directory, $this->token );
-				try {
-					for ( $tick = 0; $tick < 10; ++$tick ) {
-						$importer->tick( 16 );
-					}
-					self::fail( 'The definition beyond the packet limit was sent.' );
-				} catch ( DatabaseFailed $refused ) {
-					self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
-					self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
-				}
-				self::assertSame( [ [ 'id' => '1' ], [ 'id' => '2' ] ], $small->rows( 'SELECT id FROM `' . $importer->tables->shadow( 0 ) . '` ORDER BY id' ) );
-				self::assertFalse( $this->present( $importer->tables->shadow( 1 ) ) );
-				self::assertSame( [ [ 'open' => '1' ] ], $small->rows( 'SELECT 1 AS open' ), 'The connection is still open.' );
+		$importer = new TableImporter( $this->reporting_16_kib(), $manifest, $this->directory, $this->token );
+		try {
+			for ( $tick = 0; $tick < 10; ++$tick ) {
+				$importer->tick( 16 );
 			}
-		);
+			self::fail( 'The definition beyond the packet limit was sent.' );
+		} catch ( DatabaseFailed $refused ) {
+			self::assertSame( 'database_restore_packet_limit', $refused->context()['code'] ?? null, $refused->getMessage() );
+			self::assertSame( 'wp_wide', $refused->context()['table'] ?? null );
+		}
+		self::assertSame( [ [ 'id' => '1' ], [ 'id' => '2' ] ], $this->db->rows( 'SELECT id FROM `' . $importer->tables->shadow( 0 ) . '` ORDER BY id' ) );
+		self::assertFalse( $this->present( $importer->tables->shadow( 1 ) ) );
 	}
 
 	/** @return iterable<string, array{array<string,mixed>|null, string}> */
