@@ -33,11 +33,20 @@
             <file>../Unit/Restore/PlannerPolicyTest.php</file>
             <file>../Unit/Restore/SiteLayoutTest.php</file>
         </testsuite>
-        <!-- infection-restore.json5.dist and infection-apply.json5.dist. -->
+        <!-- infection-restore.json5.dist. -->
         <testsuite name="restore">
             <directory>../Unit/Restore</directory>
             <file>../Unit/Jobs/FileChangesTest.php</file>
             <file>../Unit/Jobs/PlanBuildTest.php</file>
+        </testsuite>
+        <!-- infection-apply.json5.dist: the restore suite and the tests of the apply jobs in
+             ../Unit/Jobs/Apply, which the file restore gate leaves out: they reach much of
+             src/Restore, and that gate's job is close to its time limit (docs/04 §5.6). -->
+        <testsuite name="apply">
+            <directory>../Unit/Restore</directory>
+            <file>../Unit/Jobs/FileChangesTest.php</file>
+            <file>../Unit/Jobs/PlanBuildTest.php</file>
+            <directory>../Unit/Jobs/Apply</directory>
         </testsuite>
         <testsuite name="zip">
             <directory>../Unit/Storage/Zip</directory>

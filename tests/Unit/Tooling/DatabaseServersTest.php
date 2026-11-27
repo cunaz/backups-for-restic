@@ -9,6 +9,7 @@ use BackupsForRestic\Tests\Support\DatabaseServers;
 use BackupsForRestic\Tests\Support\MutationProcess;
 use BackupsForRestic\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RequiresPhpExtension;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -85,6 +86,8 @@ final class DatabaseServersTest extends TestCase {
 		self::assertSame( DatabaseServers::NONE, $_SERVER[ DatabaseServers::HOST ] ?? null );
 	}
 
+	// DatabaseServers::own() connects with mysqli, which the rest of the unit suite does without.
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_a_mutant_process_whose_server_does_not_answer_says_so(): void {
 		// A name under .invalid never resolves (RFC 6761), so the connection fails at once; a
 		// closed port can take the whole connect timeout behind a packet filter.
@@ -191,8 +194,10 @@ final class DatabaseServersTest extends TestCase {
 	 * A mutant process uses the server of its thread, clears it, and reports what goes wrong in
 	 * its report, where bin/mutation-gate.sh fails the gate on it. A test that PHPUnit runs in a
 	 * process of its own uses the same server and leaves its mutant process's sessions alone.
+	 * A mutant process connects with mysqli, as the database suite does.
 	 */
 	#[DataProvider( 'processes' )]
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_the_bootstrap_of_the_database_gate_gives_each_process_its_server( ?string $token, string $hosts, bool $isolated, string $host, string $problem ): void {
 		$root    = (string) realpath( dirname( __DIR__, 3 ) );
 		$scratch = TempDir::create( 'database-servers' );
@@ -350,6 +355,34 @@ final class DatabaseServersTest extends TestCase {
 		self::assertStringStartsWith( 'The database server a.example.com:3306 has run for 3610 seconds, but the gate started 3611 seconds ago:', $restarted[0] );
 	}
 
+	public function test_a_server_is_held_to_the_time_at_which_its_question_began(): void {
+		// The gate started at 1,000 and has run for an hour. Each server booted ten seconds before
+		// it; its uptime is read first, and its other answers then take 30 seconds.
+		$base                = self::answers();
+		$hosts               = array_keys( $base );
+		$now                 = 4600;
+		[ $answers, $asked ] = DatabaseServers::asked(
+			$hosts,
+			1000,
+			static function ( string $host ) use ( &$now, $base ): array {
+				$answer = [ 'Uptime' => (string) ( $now - 990 ) ] + (array) $base[ $host ];
+				$now   += 30;
+				return $answer;
+			},
+			static function () use ( &$now ): int {
+				return $now;
+			}
+		);
+		self::assertSame( array_combine( $hosts, [ 3600, 3630, 3660 ] ), $asked );
+		self::assertSame( [ '3610', '3640', '3670' ], array_column( $answers, 'Uptime' ) );
+		self::assertSame( [], DatabaseServers::after( $hosts, $answers, 3690, $asked ) );
+		// Before, the time was taken after each answer, 30 seconds past the uptime that the
+		// answer holds: every one of these servers counted as restarted.
+		self::assertCount( 3, DatabaseServers::after( $hosts, $answers, 3690, array_map( static fn ( int $seconds ): int => $seconds + 30, $asked ) ) );
+	}
+
+	// DatabaseServers::first() connects with mysqli, which the rest of the unit suite does without.
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_the_first_server_must_answer_to_be_cleared_for_the_initial_run(): void {
 		self::assertSame( 'The database server down.invalid:3306, on which the initial test run runs, no longer answers.', DatabaseServers::first( 'down.invalid:3306' ) );
 	}
@@ -371,12 +404,14 @@ final class DatabaseServersTest extends TestCase {
 	 * @return array<string, array{list<string>, array<string, array<string, string>|null>|null, int, string}>
 	 */
 	public static function checks(): array {
+		// The times are those of the suite's start, where PHPUnit asks for the data: the seconds
+		// that the script prints grow by what the suite took until the test, so none is expected.
 		return [
 			'before, on servers of their own'    => [ [ 'before' ], self::answers(), 0, 'Database servers of the gate, one per Infection thread: 3, each a server of its own: a.example.com:3306 (8.4.13, server_uuid 00000000-0000-0000-0000-000000000000), b.example.com:3306 (8.4.13, server_uuid 00000000-0000-0000-0000-000000000001), c.example.com:3306 (8.4.13, server_uuid 00000000-0000-0000-0000-000000000002).' ],
 			'before, one server named twice'     => [ [ 'before' ], self::answers( [ 'b.example.com:3306' => [ 'server_uuid' => '00000000-0000-0000-0000-000000000000' ] ] ), 1, '::error::a.example.com:3306 and b.example.com:3306 are one database server' ],
 			'before, a server not answering'     => [ [ 'before' ], [ 'a.example.com:3306' => null ] + self::answers(), 1, '::error::The database server a.example.com:3306 does not answer' ],
 			'after, a minute after the start'    => [ [ 'after', (string) ( time() - 60 ) ], self::answers(), 0, 'Every database server of the gate ran through it without a restart (' ],
-			'after, a restart'                   => [ [ 'after', (string) ( time() - 9000 ) ], self::answers(), 1, '::error::The database server a.example.com:3306 has run for 7200 seconds, but the gate started 9' ],
+			'after, a restart'                   => [ [ 'after', (string) ( time() - 9000 ) ], self::answers(), 1, '::error::The database server a.example.com:3306 has run for 7200 seconds, but the gate started ' ],
 			'after, servers that do not answer'  => [ [ 'after', (string) time() ], null, 1, '::error::The database server a.example.com:3306 does not answer after the gate' ],
 			'no mode'                            => [ [], self::answers(), 1, '::error::Usage: php bin/check-database-servers.php before, or after with the Unix time at which the gate started.' ],
 			'after without a start'              => [ [ 'after' ], self::answers(), 1, '::error::Usage:' ],
@@ -404,6 +439,8 @@ final class DatabaseServersTest extends TestCase {
 		}
 	}
 
+	// Without --answers the script connects with mysqli, which the rest of the unit suite does without.
+	#[RequiresPhpExtension( 'mysqli' )]
 	public function test_the_check_script_asks_the_servers_themselves(): void {
 		// Without --answers the script loads the database suite's connection and, through it,
 		// source files that end a request silently unless ABSPATH is defined.

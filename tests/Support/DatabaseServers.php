@@ -222,6 +222,32 @@ final class DatabaseServers {
 	}
 
 	/**
+	 * Asks every server after the gate, and notes for each one how long the gate had run when
+	 * its question began. answer() reads the uptime first, so a server that ran through the gate
+	 * cannot report less than that. Before, the time was taken after the answer, later than the
+	 * uptime by what the questions about the Performance Schema took: a server that had started
+	 * less than that before the gate counted as restarted. A restart between the noted time and
+	 * the reading of the uptime, an instant, is the price.
+	 *
+	 * @param list<string>                                       $hosts   The servers, as BFR_TEST_MYSQL_HOSTS names them.
+	 * @param int                                                $started Unix time at which the gate started.
+	 * @param (\Closure(string): (array<string, string>|null))|null $answer  Asks one server: answer() unless a test gives another.
+	 * @param (\Closure(): int)|null                             $clock   Unix time: time() unless a test gives another.
+	 * @return array{0: array<string, array<string, string>|null>, 1: array<string, int>} What each server answered, and the seconds of the gate at each question.
+	 */
+	public static function asked( array $hosts, int $started, ?\Closure $answer = null, ?\Closure $clock = null ): array {
+		$answer ??= self::answer( ... );
+		$clock  ??= time( ... );
+		$answers = [];
+		$asked   = [];
+		foreach ( $hosts as $host ) {
+			$asked[ $host ]   = max( 0, $clock() - $started );
+			$answers[ $host ] = $answer( $host );
+		}
+		return [ $answers, $asked ];
+	}
+
+	/**
 	 * What the answers say against running the gate on these servers: every server must answer,
 	 * be a server of its own, run the version of the first and have its Performance Schema on.
 	 *
