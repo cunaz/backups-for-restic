@@ -713,7 +713,8 @@ such as a right-to-left override or a zero-width space, is refused before the im
 (`database_restore_name`), and a snapshot without a database dump before anything is staged
 (`database_not_in_snapshot`). Every part of the restore runs in one `Session`, which sets what
 the site's session could otherwise change without an error: the row limit, the completion
-type, whether notes count as warnings and the safe-updates mode
+type, whether notes count as warnings (on MariaDB through `note_verbosity`; a session whose
+`sql_notes` is off is refused there with `database_restore_notes`) and the safe-updates mode
 ([ADR 0035](adr/0035-transactional-shadow-import.md), [ADR 0043](adr/0043-atomic-mysql-database-exchange.md)).
 
 A separately confirmed database apply reimports the source on supported MySQL sites,
@@ -1507,6 +1508,7 @@ translated message and a hint. The codes:
 | `database_restore_duplicate` | the server refused a batch of the import with a duplicate key (1062); the log names the table and whether the dump read it at more than one moment |
 | `database_restore_name` | a table or view name of the staged dump has a character that does not print as itself; the texts of the rehearsal name it escaped |
 | `database_not_in_snapshot` | a rehearsal of a snapshot without a site manifest, or whose manifest says that its backup left the database out; found before the first file is staged |
+| `database_restore_notes` | the site's database session does not record notes (`sql_notes` off) on a MariaDB server, which warns whenever `sql_notes` is set; found before the first statement of a rehearsal tick, an exchange, an undo or an expiry ([ADR 0043](adr/0043-atomic-mysql-database-exchange.md), "Session settings") |
 | `configuration` | something a job or a request needs is not configured: no repository address, no repository password, no cached key for a request, or a stored retention policy without `keep-within` or below the floor (`Schema::retention_floor()`): a forget job that finds one fails with this code and deletes nothing. It is also the code of an `InvalidArgument` without a code of its own, such as a restore whose stored request is not valid or whose snapshot lacks the site manifest that a restore for a new installation needs |
 | `key_missing` | the repository key that the job's unlocking step stored is gone when a later step of a backup, forget, prune, check or restore needs it: the plugin discards it when the stored secrets do not decrypt, when it no longer opens the repository, and when another repository address is saved. Before 2026-11-26 such a job ended with `configuration`, "The backup is not configured completely" |
 | `setup_incomplete` | a backup, forget, prune, check or restore was asked for before the setup is completed, that is, before the recovery kit is acknowledged. It comes from `JobType::refusal()`, not from an exception: the job is not created. A restore whose preflight finds the setup incomplete ends with it as well (before 2026-11-26 with `configuration`) |

@@ -297,11 +297,14 @@ its undo, cleanup and expiry. `Session` saves the session's values first and giv
 back when it ends, so neither WordPress nor other code meets the restore's settings. Until
 2026-11-27 it set only the character set, the SQL mode, the time zone and the checks of the
 import. On MySQL 8.4.11, with the setting below on the session, the restore without it did
-what each line says; the database suite shows each case.
+what each line says; the database suite shows each case, on MariaDB 11.4.13 as well where a
+line names it. Every setting is one that both servers take without a warning, which the
+restore port refuses like any other: where they differ, `Session` asks the server which
+variable it has instead of trying one and ignoring its error.
 
 - `sql_select_limit` is set to its largest value, the server's default; `DEFAULT` would be
-  the server's own setting again. A limit cuts `SELECT` and, on MySQL 8, `SHOW` short without
-  an error, unless a statement has a `LIMIT` of its own. With a limit of 1 the review saw one
+  the server's own setting again. A limit cuts `SELECT` and, on MySQL 8 and MariaDB, `SHOW`
+  short without an error, unless a statement has a `LIMIT` of its own. With a limit of 1 the review saw one
   of the account's grants and one of its session settings and named missing privileges and
   disabled InnoDB table locks that were there; the plan of the exchange, the exchange itself
   and an expiry refused for the same reasons, and the rehearsal's report lost the backup's
@@ -314,9 +317,21 @@ what each line says; the database suite shows each case.
   next `Session` of the same request refused with error 1568, and the site's session stayed
   in a transaction, so that what WordPress wrote afterwards in that request was never
   committed. With `RELEASE` the guard's `ROLLBACK` closed the connection.
-- `sql_notes` is set to 1. With 0 a note does not count as a warning, which the restore port
-  refuses: a value that the server changed with a note, as a time that a DATE column drops,
-  was imported.
+- Notes count as warnings. With `sql_notes` at 0 a note does not count as a warning, which
+  the restore port refuses: a value that the server changed with a note, as a time that a
+  DATE column drops, was imported. MySQL has `sql_notes` only, and `Session` sets it to 1.
+  MariaDB has `note_verbosity` as well (from 10.6.16), records a note only when both let it,
+  and answers every `SET` of `sql_notes` with warning 1287, deprecated (11.4.13): setting
+  `sql_notes` there, as the first version of this did, refused every import on MariaDB.
+  `Session` asks with `SHOW SESSION VARIABLES WHERE Variable_name IN ('note_verbosity',
+  'sql_notes')`, once the row limit is lifted, and on a server with `note_verbosity` sets that
+  to `basic`, the notes that MariaDB gave before it; `unusable_keys` and `explain` add notes
+  about keys that a statement cannot use. With `note_verbosity` empty, MariaDB's documented
+  way to switch notes off, the restore without it imported the changed value. `sql_notes` is
+  left alone there: if it is off, nothing switches notes on without the warning, and
+  `Session` refuses with `database_restore_notes` before the step's first statement and gives
+  every setting back. A server that reports neither variable, or a value other than `ON` or
+  `OFF`, is refused as well.
 - `sql_safe_updates` is set to 0. With 1 the copy of the protected options, which selects by a
   part of their names that no key serves, was refused with error 1175 under the write locks.
 

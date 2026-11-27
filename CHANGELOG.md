@@ -731,8 +731,10 @@ All notable changes are documented here. The format follows
   report lost the backup's role map. A completion type of `CHAIN` left the site's session in a
   transaction after a rehearsal tick, so that WordPress's later writes in that request were not
   committed, and `RELEASE` closed the connection. Notes that did not count as warnings let a
-  value that the server changed be imported, and the safe-updates mode refused the exchange's
-  copy of the protected options. The review and the wait for other connections read table and
+  value that the server changed be imported; on MariaDB the restore makes them count through
+  `note_verbosity`, and it stops with `database_restore_notes` on a session whose `sql_notes`
+  is off, since MariaDB warns whenever `sql_notes` is set. The safe-updates mode refused the
+  exchange's copy of the protected options. The review and the wait for other connections read table and
   account names as bytes, so that a latin1 connection no longer turns a name in another script
   into question marks.
 - The database import uses what the dump's manifest records about each table. A dump with a

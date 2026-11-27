@@ -459,6 +459,16 @@ job says why, and its log has the details. Each case has a way on:
   the dump twice. Import by hand and reconcile that table first, as step 5 of Scenario B
   describes.
 
+- **Notes switched off on a MariaDB server** (`database_restore_notes`): the site's database
+  session has `sql_notes` off. A note is how the server reports a value that it changed, as a
+  time that a date column drops, and the restore refuses such a value; MariaDB records no
+  note while `sql_notes` is off and warns whenever `sql_notes` is set, so the plugin does not
+  switch it on. The rehearsal, a database change or its undo stops before its next statement.
+  Find what switches it off, usually `SET sql_notes = 0` in the database account's
+  `init_connect` (`SELECT @@GLOBAL.init_connect;`), a `SET GLOBAL sql_notes = 0`, or code
+  that runs before the job, remove it, and start again. `note_verbosity`, MariaDB's own
+  switch for notes, needs no change: the plugin sets it for its own statements.
+
 The rehearsal's report also marks a table that the backup read without a key at more than one
 moment (`read_by_position`): rows that were added or removed while it was read can be missing
 from it or be in it twice; the backup job warned about it when it ran. This does not stop the
