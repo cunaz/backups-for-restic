@@ -276,6 +276,25 @@ test( 'an apply whose undo records cannot be read is listed with a notice and wi
 	}
 } );
 
+test( 'a stored job that cannot be read is named on the dashboard and in the logs', async ( { page } ) => {
+	const id = '20261127T150000Z-0cb001';
+	const container = '$container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); ';
+	// A document of another layout, as a newer version of the plugin writes it.
+	wordpress( siteRoot(), container + '$folder = $container->jobs()->storage_directory() . "/" . $argv[2]; mkdir( $folder, 0700 ); file_put_contents( $folder . "/job.json", "{\\"schema\\":9999}" );', [ id ] );
+	try {
+		for ( const tab of [ undefined, 'logs' ] ) {
+			await openBackups( page, tab );
+			const alert = page.locator( '#backups-for-restic-app .bfr-unreadable-job' );
+			await expect( alert ).toHaveCount( 1 );
+			await expect( alert ).toContainText( 'This version of the plugin cannot read the stored job ' + id + '.' );
+			await expect( alert ).toContainText( 'Install a plugin version that can read the job.' );
+			await expect( alert ).toContainText( 'No backup starts while it cannot be read, the scheduled ones included.' );
+		}
+	} finally {
+		wordpress( siteRoot(), container + 'BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $argv[2] );', [ id ] );
+	}
+} );
+
 test( 'a selected snapshot file can be staged and downloaded', async ( { page } ) => {
 	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
 	// The cleanup after the first backup holds the repository for a moment; an administrator
