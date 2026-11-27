@@ -2061,8 +2061,9 @@ final class DatabaseExchangeTest extends TestCase {
 		self::not_discarded( 'database_binding_verified', fn () => $services['changes']->discard( $applied->id, 1, 'rest', str_repeat( 'd', 64 ) ) );
 		self::assertSame(
 			[
-				'jobs'     => [],
-				'complete' => true,
+				'jobs'      => [],
+				'complete'  => true,
+				'discarded' => [],
 			],
 			$services['changes']->foreign_bindings()
 		);
