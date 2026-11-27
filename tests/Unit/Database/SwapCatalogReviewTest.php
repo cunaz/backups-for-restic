@@ -45,10 +45,17 @@ final class SwapCatalogReviewTest extends TestCase {
 							'unique_checks'            => '1',
 							'sql_quote_show_create'    => '1',
 							'sql_select_limit'         => '1',
-							'sql_notes'                => '1',
 							'sql_safe_updates'         => '0',
 							'completion_type'          => 'NO_CHAIN',
 							'sql_mode'                 => '',
+						],
+					];
+				}
+				if ( "SHOW SESSION VARIABLES WHERE Variable_name IN ('note_verbosity', 'sql_notes')" === $sql ) {
+					return [
+						[
+							'Variable_name' => 'sql_notes',
+							'Value'         => 'ON',
 						],
 					];
 				}

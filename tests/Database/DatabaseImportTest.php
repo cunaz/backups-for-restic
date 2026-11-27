@@ -518,7 +518,8 @@ final class DatabaseImportTest extends TestCase {
 		self::assertSame( '4', $other->rows( 'SELECT COUNT(*) AS n FROM `' . $importer->tables->shadow( 0 ) . '`' )[0]['n'] );
 	}
 
-	public function test_a_note_refuses_its_batch_also_when_the_session_does_not_count_notes(): void {
+	/** An importer whose first tick created the table; its row changes with a note when it is inserted. */
+	private function noted(): TableImporter {
 		$sql = "-- backups-for-restic-dump/1 table `wp_rows`\n"
 			. "SET NAMES utf8mb4;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n"
 			. "SET SESSION time_zone = '+00:00';\nSET FOREIGN_KEY_CHECKS = 0;\nSET UNIQUE_CHECKS = 0;\n"
@@ -529,16 +530,55 @@ final class DatabaseImportTest extends TestCase {
 			. "-- end table rows=1 bytes=0\n";
 		$importer = $this->importer( StagedDump::write( $this->directory, StagedDump::with_updated_trailer( $sql, 1 ), 1 ) );
 		$importer->tick( 1 );
-		$this->db->execute( 'SET SESSION sql_notes = 0' );
+		return $importer;
+	}
+
+	/** Whether the server has MariaDB's note_verbosity, which decides about notes next to sql_notes. */
+	private function verbosity(): bool {
+		return [] !== $this->db->rows( "SHOW SESSION VARIABLES LIKE 'note_verbosity'" );
+	}
+
+	private function assert_nothing_imported( TableImporter $importer ): void {
+		self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
+		self::assertSame( '0', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
+	}
+
+	/**
+	 * Each server's own switch for notes: sql_notes on MySQL, note_verbosity on MariaDB, which
+	 * its configuration file can set for every session. MariaDB warns that sql_notes is
+	 * deprecated whenever it is set (11.4.13), and that warning refused every import.
+	 */
+	public function test_a_note_refuses_its_batch_also_when_the_session_does_not_count_notes(): void {
+		$importer                   = $this->noted();
+		[ $switch, $off, $literal ] = $this->verbosity() ? [ 'note_verbosity', '', "''" ] : [ 'sql_notes', '0', '0' ];
+		$this->db->execute( 'SET SESSION ' . $switch . ' = ' . $literal );
 		try {
 			$importer->tick( 1 );
 			self::fail( 'A value that the server changed with a note was imported.' );
 		} catch ( DatabaseFailed $refused ) {
 			self::assertSame( 1, $refused->context()['warnings'] ?? null, $refused->getMessage() );
 		}
+		self::assertSame( $off, $this->db->rows( 'SELECT @@SESSION.' . $switch . ' AS notes' )[0]['notes'] );
+		$this->assert_nothing_imported( $importer );
+	}
+
+	/**
+	 * MariaDB records a note only when sql_notes lets it as well, and the restore cannot switch
+	 * sql_notes on without the warning: it refuses with a code of its own before a batch.
+	 */
+	public function test_sql_notes_off_refuses_on_mariadb_and_makes_the_note_count_on_mysql(): void {
+		$importer = $this->noted();
+		$mariadb  = $this->verbosity();
+		$this->db->execute( 'SET SESSION sql_notes = 0' );
+		try {
+			$importer->tick( 1 );
+			self::fail( 'A value that the server changed with a note was imported.' );
+		} catch ( DatabaseFailed $refused ) {
+			$context = $refused->context();
+			self::assertSame( $mariadb ? [ 'code' => 'database_restore_notes' ] : [ 'warnings' => 1 ], $context, $refused->getMessage() );
+		}
 		self::assertSame( '0', $this->db->rows( 'SELECT @@SESSION.sql_notes AS notes' )[0]['notes'] );
-		self::assertSame( [], $this->db->rows( 'SELECT * FROM `' . $importer->tables->shadow( 0 ) . '`' ) );
-		self::assertSame( '0', $this->db->rows( 'SELECT row_count FROM `' . $importer->tables->progress() . '` WHERE id=0' )[0]['row_count'] );
+		$this->assert_nothing_imported( $importer );
 	}
 
 	/** @return iterable<string, array{array<string,mixed>|null, string}> */

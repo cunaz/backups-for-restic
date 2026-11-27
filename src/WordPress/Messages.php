@@ -327,6 +327,10 @@ final class Messages {
 				'message' => __( 'The database dump of this backup has a table or view whose name has a character that does not print as itself, so the plugin does not import it.', 'backups-for-restic' ),
 				'hint'    => __( 'Such a character, a right-to-left override, an invisible or a control character among them, can make a name read as another one wherever it is shown. The job log names the table, escaped. If the site needs that table, restore the database by hand with the command-line client, as the recovery guide describes: open the snapshot again, stage its database directory with the rehearsal switched off, and download the SQL files or request a ZIP. Otherwise rename the table on the site, or leave it out of the backup in the database settings, so that later backups can be restored here.', 'backups-for-restic' ),
 			],
+			'database_restore_notes' => [
+				'message' => __( 'The database server does not report notes on this site’s connection, so the database restore stopped before its next statement.', 'backups-for-restic' ),
+				'hint'    => __( 'A note is how the server reports a value that it changed, as a time that a date column drops, and the restore refuses such a value. On this MariaDB server the setting sql_notes is off for the connection, and the server warns whenever sql_notes is set, so the plugin cannot switch it on. Remove what switches it off, usually SET sql_notes = 0 in the database account’s init_connect or in code that runs before this job, then try again.', 'backups-for-restic' ),
+			],
 			'database_restore_busy' => [
 				'message' => __( 'The database is busy or the restore connection was interrupted.', 'backups-for-restic' ),
 				'hint'    => __( 'The job tried again several times from its saved database progress and operation witness, then stopped. When the database server answers and no other client holds long locks on the site tables, start the rehearsal or the database change again.', 'backups-for-restic' ),

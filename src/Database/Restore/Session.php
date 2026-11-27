@@ -22,15 +22,29 @@ defined( 'ABSPATH' ) || exit;
  * undo and expiry all run in a Session. Besides the character set, SQL mode, time zone and
  * checks of the import, it lifts what the server's settings, the account's init_connect or
  * code that ran earlier in the request can leave on the site's session and what would change
- * a result without an error: a row limit, which cuts SELECT and, on MySQL 8, SHOW short; notes
- * that do not count as warnings, which the port refuses; the safe-updates mode, under which a
- * generated statement is refused; and a completion type under which COMMIT and ROLLBACK chain
- * a new transaction or close the connection. Its own ROLLBACK statements name the completion.
+ * a result without an error: a row limit, which cuts SELECT and SHOW short; notes that do not
+ * count as warnings, which the port refuses; the safe-updates mode, under which a generated
+ * statement is refused; and a completion type under which COMMIT and ROLLBACK chain a new
+ * transaction or close the connection. Its own ROLLBACK statements name the completion.
+ *
+ * Every setting is one that both MySQL and MariaDB take without a warning, which the port
+ * would refuse as well. Where the servers differ, the Session asks the server which variable
+ * it has (notes()) and does not try one and ignore its error.
  */
 final class Session {
 
-	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_select_limit', 'sql_notes', 'sql_safe_updates', 'completion_type', 'sql_mode' ];
+	private const array VARIABLES = [ 'character_set_client', 'character_set_connection', 'character_set_results', 'collation_connection', 'time_zone', 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_select_limit', 'sql_safe_updates', 'completion_type', 'sql_mode' ];
 	private const array BOOLEANS  = [ 'foreign_key_checks', 'unique_checks', 'sql_quote_show_create', 'sql_notes', 'sql_safe_updates' ];
+
+	/**
+	 * The variables that decide whether a note counts as a warning: MySQL has sql_notes only;
+	 * MariaDB has note_verbosity as well from 10.6.16, records a note only when both let it, and
+	 * warns that sql_notes is deprecated whenever it is set (11.4.13 and 11.8).
+	 */
+	private const string NOTES = "SHOW SESSION VARIABLES WHERE Variable_name IN ('note_verbosity', 'sql_notes')";
+
+	/** The notes that MariaDB gave before note_verbosity; the others are about unused keys. */
+	private const string VERBOSITY = 'basic';
 
 	/** Numeric settings, restored as decimal numbers: a hex literal there is a number of its own. */
 	private const array NUMBERS = [ 'sql_select_limit' ];
@@ -49,6 +63,13 @@ final class Session {
 	private readonly array $previous;
 
 	/**
+	 * The previous value of the variable that notes() set, restored before the others.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $notes = [];
+
+	/**
 	 * Whether close already restored the session.
 	 *
 	 * @var bool
@@ -60,7 +81,8 @@ final class Session {
 	 *
 	 * @param Connection    $connection Non-reconnecting database session.
 	 * @param Manifest|null $manifest Validated dump, or null during cleanup.
-	 * @throws DatabaseFailed If settings cannot be read, a foreign transaction is active, or setup fails.
+	 * @throws DatabaseFailed If settings cannot be read, a foreign transaction is active, notes cannot be
+	 *                        made to count as warnings (code database_restore_notes), or setup fails.
 	 */
 	public function __construct( private readonly Connection $connection, ?Manifest $manifest ) {
 		$fields = array_map( static fn ( string $name ): string => '@@SESSION.' . $name . ' AS ' . $name, self::VARIABLES );
@@ -90,10 +112,11 @@ final class Session {
 		try {
 			$connection->execute( 'SET NAMES utf8mb4' );
 			// A session can inherit a row limit from the server or have one left by code that ran
-			// before (MySQL 8 applies it to SHOW as well), notes that do not count as warnings,
-			// the safe-updates mode and a completion type that chains or releases. The largest
-			// limit is the server's default; DEFAULT would be the server's setting again.
-			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ?? '+00:00' ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1, sql_select_limit = 18446744073709551615, sql_notes = 1, sql_safe_updates = 0, completion_type = 0' );
+			// before (MySQL 8 and MariaDB apply it to SHOW as well), the safe-updates mode and a
+			// completion type that chains or releases. The largest limit is the server's default;
+			// DEFAULT would be the server's setting again.
+			$connection->execute( "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', time_zone = " . self::literal( $manifest->time_zone ?? '+00:00' ) . ', foreign_key_checks = 1, unique_checks = 1, sql_quote_show_create = 1, sql_select_limit = 18446744073709551615, sql_safe_updates = 0, completion_type = 0' );
+			$this->notes();
 		} catch ( \Throwable $error ) {
 			$this->close();
 			throw $error;
@@ -116,7 +139,7 @@ final class Session {
 		} catch ( \Throwable $error ) {
 			$first = $error;
 		}
-		foreach ( $this->previous as $name => $value ) {
+		foreach ( $this->notes + $this->previous as $name => $value ) {
 			try {
 				// Boolean variables accept numeric 0/1 or the names OFF/ON, numeric ones the
 				// number. Hex string literals containing the characters "0"/"1" are not those
@@ -139,6 +162,39 @@ final class Session {
 			throw $first;
 		}
 		$this->closed = true;
+	}
+
+	/**
+	 * Makes a note count as a warning, which the port refuses: otherwise a value that the server
+	 * changed with a note, as a time that a DATE column drops, was imported. Runs after the row
+	 * limit is lifted, since it cuts SHOW as well. On a server with note_verbosity, sql_notes is
+	 * left as it is: setting it warns there.
+	 *
+	 * @throws DatabaseFailed If the server reports neither variable or an unexpected value, or
+	 *                        if sql_notes is off on a server that has note_verbosity.
+	 */
+	private function notes(): void {
+		$found = [];
+		foreach ( $this->connection->rows( self::NOTES ) as $row ) {
+			$found[ $row['Variable_name'] ?? '' ] = $row['Value'] ?? null;
+		}
+		$notes = $found['sql_notes'] ?? null;
+		if ( ! in_array( $notes, [ null, 'ON', 'OFF' ], true ) ) {
+			throw new DatabaseFailed( 'A database boolean setting has an unexpected value.' );
+		}
+		if ( isset( $found['note_verbosity'] ) ) {
+			if ( 'OFF' === $notes ) {
+				DatabaseFailed::raise( 'The database session does not record notes (sql_notes is off), and this server warns whenever sql_notes is set, so the restore could not see a value that the server changes with a note.', [ 'code' => 'database_restore_notes' ] );
+			}
+			$this->notes = [ 'note_verbosity' => $found['note_verbosity'] ];
+			$this->connection->execute( "SET SESSION note_verbosity = '" . self::VERBOSITY . "'" );
+			return;
+		}
+		if ( null === $notes ) {
+			throw new DatabaseFailed( 'The database server reports no setting that makes a note count as a warning.' );
+		}
+		$this->notes = [ 'sql_notes' => 'ON' === $notes ? '1' : '0' ];
+		$this->connection->execute( 'SET SESSION sql_notes = 1' );
 	}
 
 	/**

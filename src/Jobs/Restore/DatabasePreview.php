@@ -136,7 +136,7 @@ final readonly class DatabasePreview {
 	public static function classified( DatabaseFailed $error ): DatabaseFailed {
 		$code = $error->context()['code'] ?? null;
 		return match ( true ) {
-			in_array( $code, [ 'database_restore_packet', 'database_restore_packet_limit', 'database_restore_too_large', 'database_restore_duplicate' ], true ) => $error,
+			in_array( $code, [ 'database_restore_packet', 'database_restore_packet_limit', 'database_restore_too_large', 'database_restore_duplicate', 'database_restore_notes' ], true ) => $error,
 			1153 === $code => new DatabaseFailed( 'A statement of the snapshot is larger than the database server\'s max_allowed_packet.', [ 'code' => 'database_restore_packet' ] ),
 			in_array( $code, [ 1205, 1213, 2006, 2013, 2055 ], true ) => new DatabaseFailed( 'The database rehearsal is waiting for a lock or a fresh connection.', [ 'code' => 'database_restore_busy' ] ),
 			in_array( $code, [ 1115, 1253, 1273 ], true ) => new DatabaseFailed( 'The destination database cannot use a character set or collation required by the snapshot.', [ 'code' => 'database_restore_collation' ] ),
