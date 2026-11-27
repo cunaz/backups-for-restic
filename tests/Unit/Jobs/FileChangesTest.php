@@ -2729,6 +2729,30 @@ final class FileChangesTest extends TestCase {
 		self::assertDirectoryDoesNotExist( $workspace );
 	}
 
+	public function test_a_journal_whose_count_an_earlier_heartbeat_removed_is_synchronised_before_the_rest_goes(): void {
+		$apply = $this->run_job( $this->start() );
+		$this->undo( $apply );
+		$workspace = $this->jobs->directory( $apply ) . '/undo';
+		// An earlier heartbeat removed the count of attempted changes and stopped before its
+		// synchronisation: after a power loss the disk may still hold it.
+		unlink( $workspace . '/attempted' );
+		$journal = array_values( array_diff( (array) scandir( $workspace ), [ '.', '..' ] ) );
+		self::assertContains( 'reverted', $journal );
+		$synced           = [];
+		$this->job_writes = static function ( string $operation, string $path ) use ( $workspace, &$synced ): void {
+			if ( 'sync' === $operation && $workspace === $path ) {
+				$synced[] = array_values( array_diff( (array) scandir( $workspace ), [ '.', '..' ] ) );
+			}
+		};
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		$this->job_writes = null;
+		// Before, the next heartbeat found no count and removed the undone marker with nothing
+		// on disk before it: a power loss could keep that removal and lose the first, which
+		// opened the window again.
+		self::assertSame( [ $journal ], $synced );
+		self::assertDirectoryDoesNotExist( $workspace );
+	}
+
 	public function test_a_link_in_place_of_an_ended_journal_is_removed_as_a_link_and_nothing_behind_it_goes(): void {
 		$apply     = $this->run_job( $this->start() );
 		$workspace = $this->jobs->directory( $apply ) . '/undo';

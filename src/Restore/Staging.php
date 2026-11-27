@@ -669,7 +669,10 @@ final class Staging {
 		$attempted = $undo . '/attempted';
 		clearstatcache( true, $attempted );
 		if ( ! is_link( $attempted ) && ! is_file( $attempted ) ) {
-			// Missing, or the folder of a damaged journal, which delete() removes as it comes.
+			// Missing, or the folder of a damaged journal, which delete() removes as it comes. An
+			// earlier call may have removed the count and stopped before its synchronisation:
+			// that removal is put on disk before anything else of the journal goes too.
+			Files::sync_directory( $undo, $this->jobs->observer() );
 			return;
 		}
 		if ( ! unlink( $attempted ) && self::exists( $attempted ) ) {
