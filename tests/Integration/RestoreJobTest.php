@@ -332,7 +332,10 @@ final class RestoreJobTest extends TestCase {
 		self::assertTrue( $result['before'], $printed );
 		self::assertTrue( $result['cached'], 'Until the refresh, the request still has the replaced values.' );
 		self::assertSame( [ true, true ], $result['after'] );
-		self::assertEqualsCanonicalizing( [ 'bfr_backup_event', 'backups_for_restic_heartbeat' ], $result['stored'] );
+		$stored = $result['stored'];
+		self::assertIsArray( $stored, $printed );
+		sort( $stored, SORT_STRING );
+		self::assertSame( [ 'backups_for_restic_heartbeat', 'bfr_backup_event' ], $stored );
 	}
 
 	#[Depends( 'test_a_backup_for_the_restore' )]

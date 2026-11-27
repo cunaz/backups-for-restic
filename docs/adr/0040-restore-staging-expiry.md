@@ -80,3 +80,40 @@ packages must never be offered a tree that is half gone.
 - The `last_restore` entry of the state keeps naming a staging directory after it is
   gone. Screens take what exists from `GET /restores`.
 - Deleting staging after a successful apply belongs to the apply package.
+
+## As built (2026-11)
+
+- "A job whose document this version cannot read" includes one whose document cannot be
+  looked up, below a job directory that the PHP user cannot search, or that is something
+  other than a file (`JobStore::has_document()`): its staging is neither listed nor removed,
+  and `DELETE /restores/{id}` answers `job_inaccessible` or `job_unreadable`, which name the
+  job. A directory whose job document is gone,
+  which is established only where the job's directory or its document is missing, and whose
+  report cannot be looked up is not touched either: it is neither staging with a report nor a
+  leftover without one. Before (until 2026-11-26), both counted as gone, so that the staging
+  expired by the time in its ID, and a directory without a report that could be read was
+  removed at once as a leftover ([ADR 0041](0041-guarded-file-changes.md), As built).
+- The undo workspace of an apply is removed once its window of 24 hours is over or its records
+  establish that no window is open; records that cannot be established keep it, and the
+  staging and the sealed review of the apply, for the window, as an open window does. The
+  count of attempted changes (`undo/attempted`) is removed first, and its removal synchronised,
+  before the rest goes in `readdir()` order: without the count the window is closed, whatever
+  is left when a heartbeat's deadline stops the deletion. Before (until 2026-11-26), a deletion
+  that stopped after the undone marker and before the count left an attempted change that no
+  undo had reverted, so that an apply undone completely was offered for undo again until its
+  24 hours ended. tmpfs lists the newest entry, the undone marker, first.
+- While any stored job cannot be read (`JobStore::unreadable()`), the heartbeat sets no
+  staging aside and removes no sealed review, whatever their own hours say, and deletes no
+  undo workspace of an apply; what was set aside before goes on being deleted. Such a job may
+  be an apply within its window whose undo needs the staging of its restore and its sealed
+  review, and its document cannot say which. It may also be an undo that was queued within
+  the window and still runs: an active undo keeps its apply's journal beyond the window, and
+  one whose document cannot be read is not seen as active. Before (until 2026-11-26),
+  they expired with their own hours while the apply's journal stayed, so that once the document
+  could be read again the apply was offered for undo and the undo refused with
+  `file_staging_gone`. A hold of 24 hours from the time in the job's ID was not chosen: the
+  window ends 24 hours after the apply ended, which the ID does not give, so it would end early
+  for an apply that ran long, and for a document of a newer version the meaning of its window is
+  not known. The hold lasts only as long as a state that blocks every new job, backups
+  included, and whose refusal names the job; staged files past their hours stay meanwhile, and
+  `DELETE /restores/{id}` still removes one on request.

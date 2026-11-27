@@ -45,6 +45,36 @@ final class Messages {
 	}
 
 	/**
+	 * Message and hint for the refusal because of a stored job that cannot be read
+	 * (JobStore::refuse_unreadable()), with the job's ID where the job cannot be opened, so that
+	 * the administrator finds its folder. A document that this version cannot parse has the
+	 * texts of its code.
+	 *
+	 * @param string $code job_inaccessible or job_unreadable.
+	 * @param string $id   ID of the job, the name of its folder under jobs/.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function stored_job( string $code, string $id ): array {
+		if ( 'job_inaccessible' !== $code ) {
+			return self::job_error( $code );
+		}
+		return [
+			/* translators: %s: job ID, which is also the name of the job's folder. */
+			'message' => sprintf( __( 'The PHP user cannot open the stored job %s in the private working directory.', 'backups-for-restic' ), $id ),
+			'hint'    => self::inaccessible_hint(),
+		];
+	}
+
+	/**
+	 * What to do about a stored job that the PHP user cannot open: its cause and the way out.
+	 *
+	 * @return string Hint.
+	 */
+	private static function inaccessible_hint(): string {
+		return __( 'The job\'s folder under jobs/, which has the job\'s ID as its name, or its document job.json there belongs to another user or lacks read or search permission, for example after a WP-CLI command that ran as root or as another user. Give the PHP user back ownership of that folder and of everything in it, with permission to read and search them. If ownership and permissions are in order, a link is in the place of the folder, or something other than a regular file is in the place of job.json: put the job\'s own files back. Until the job can be read, its files are kept, and new jobs and repository changes stay blocked.', 'backups-for-restic' );
+	}
+
+	/**
 	 * Message and hint for a job error code. Without a kind of job, the texts are those that a
 	 * request is answered with and those of a backup; a job of another kind gets texts of its
 	 * own where these would name the backup or an action that the job does not have.
@@ -149,6 +179,10 @@ final class Messages {
 				'message' => __( 'The file preview could not be completed.', 'backups-for-restic' ),
 				'hint'    => __( 'The log of the job names the reason, for example a file that changed while the preview read it. Nothing on the live site was changed. Open the preview again.', 'backups-for-restic' ),
 			],
+			'file_folder_changing'           => [
+				'message' => __( 'A folder kept changing while the preview read its names.', 'backups-for-restic' ),
+				'hint'    => __( 'For a folder with more than 2,048 names, the preview needs one reading of all of them during which the folder does not change. It began five times, and each time the folder changed before the reading was complete. The log of the job names the folder. Pause what writes into it, for example uploads, a cache or a synchronisation, then open the preview again. Nothing on the live site was changed.', 'backups-for-restic' ),
+			],
 			'file_staging_gone'              => [
 				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),
 				'hint'    => __( 'They expired or were deleted. Restore the snapshot to staging again, then open a new preview.', 'backups-for-restic' ),
@@ -160,6 +194,10 @@ final class Messages {
 			'undo_unavailable'               => [
 				'message' => __( 'This apply can no longer be undone.', 'backups-for-restic' ),
 				'hint'    => __( 'An apply can be undone for 24 hours after it ended, and no longer once an undo reverted it completely. The Restores tab lists what can still be undone.', 'backups-for-restic' ),
+			],
+			'undo_records_unreadable'        => [
+				'message' => __( 'The plugin cannot tell whether this apply can still be undone.', 'backups-for-restic' ),
+				'hint'    => __( 'A record of its undo in the plugin\'s private working directory cannot be looked up, or something other than a regular file is at its name. Until the 24 hours of its recovery window are over, the plugin keeps the saved original files and the staged files, and once it can read the records, it offers the undo again if they show that the apply can still be undone. If the PHP user does not own the private working directory or cannot read and open every folder in it, for example after a WP-CLI command that ran as root, give it back ownership and those permissions. If they are in order, something that is not a regular file, such as a link or a folder, is in the place of a record in the folder undo/ of the apply, or a link is in the place of a folder that leads to it; the plugin reads neither: leave the apply\'s files as they are, since they hold the saved original files, and restore what the apply changed from a backup if it has to be undone before the 24 hours are over.', 'backups-for-restic' ),
 			],
 			'maintenance_busy'               => [
 				'message' => __( 'WordPress is in maintenance mode for another update, so the file changes did not start.', 'backups-for-restic' ),
@@ -369,6 +407,10 @@ final class Messages {
 				'message' => __( 'A stored job cannot be read by this version of the plugin.', 'backups-for-restic' ),
 				'hint'    => __( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', 'backups-for-restic' ),
 			],
+			'job_inaccessible'               => [
+				'message' => __( 'The PHP user cannot open a stored job in the private working directory.', 'backups-for-restic' ),
+				'hint'    => self::inaccessible_hint(),
+			],
 			'configuration'                  => [
 				'message' => __( 'The backup is not configured completely.', 'backups-for-restic' ),
 				'hint'    => __( 'Finish the setup wizard or check the settings.', 'backups-for-restic' ),
@@ -439,6 +481,11 @@ final class Messages {
 			'maintenance_opcache' === $code && 'undo' === $type => [
 				'message' => __( 'OPcache did not let the plugin clear its cached copy of the WordPress maintenance file.', 'backups-for-restic' ),
 				'hint'    => __( 'The PHP setting opcache.restrict_api leaves this site out. With opcache.validate_timestamps off, or with opcache.revalidate_freq above four seconds, the server could keep serving the site from an earlier maintenance file while files change. Add the WordPress directory to opcache.restrict_api, or turn timestamp checks on with a short interval, then preview the undo again. What the undo reverted stays reverted.', 'backups-for-restic' ),
+			],
+			// The apply checks every reviewed change again before its first one.
+			'file_folder_changing' === $code && 'apply' === $type => [
+				'message' => __( 'A folder kept changing while the apply checked the reviewed changes again.', 'backups-for-restic' ),
+				'hint'    => __( 'Before it changes a file, the apply checks every reviewed change again. For a folder with more than 2,048 names it needs one reading of all of them during which the folder does not change. It began five times, and each time the folder changed before the reading was complete. The log of the job names the folder. Nothing on the live site was changed. Pause what writes into the folder, then open a new preview and confirm it again.', 'backups-for-restic' ),
 			],
 			'file_staging_gone' === $code && $undo => [
 				'message' => __( 'The staged files of this restore are no longer available.', 'backups-for-restic' ),

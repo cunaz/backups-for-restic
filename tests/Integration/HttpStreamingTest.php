@@ -64,8 +64,8 @@ final class HttpStreamingTest extends TestCase {
 						foreach ( $batch["entries"] as [ $name, $size ] ) { $result[$name] = $size; }
 						$offset = $batch["offset"];
 					} while ( ! $batch["done"] );
-					ksort( $result );
-					ksort( $plain );
+					ksort( $result, SORT_STRING );
+					ksort( $plain, SORT_STRING );
 					echo "\n", json_encode( [ "entries" => $result, "plain" => $plain, "mode" => fileperms( $directory . "/listing" ) & 0777, "transports" => $selected, "chunked" => $chunked, "warnings" => $warnings ] );
 				} catch ( Throwable $error ) {
 					echo "\n", json_encode( [ "error" => get_class( $error ), "message" => $error->getMessage(), "context" => $error instanceof BackupsForRestic\Exception\PluginException ? $error->context() : [], "transports" => $selected ] );
@@ -81,7 +81,7 @@ final class HttpStreamingTest extends TestCase {
 			);
 			$result   = json_decode( TestSite::last_line( $output ), true );
 			$expected = $backend->list( ObjectType::Data );
-			ksort( $expected );
+			ksort( $expected, SORT_STRING );
 			self::assertIsArray( $result, $output );
 			self::assertArrayNotHasKey( 'error', $result, $output );
 			self::assertSame( [ $transport, $transport ], $result['transports'] ?? null, $output );

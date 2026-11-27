@@ -69,7 +69,9 @@ unavailable. Install a version compatible with those settings, or restore damage
 from a verified database backup; do not lower or delete their stored layout number.
 Deactivation removes scheduled events but leaves jobs and their repository locks alone.
 An unreadable job document also blocks new jobs and repository changes and is kept for a
-compatible version to read. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
+compatible version to read. So does a job that the PHP user cannot open, for example one
+that a WP-CLI command running as root created: the refusal `job_inaccessible` names the job,
+and ownership and permissions of its folder have to be put right. The [recovery guide](docs/06-disaster-recovery.md#scenario-j--the-plugin-is-inactive-after-a-downgrade)
 explains how to proceed.
 
 Database backups never leave out a row. A row too large to share an SQL statement is

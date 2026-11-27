@@ -80,7 +80,13 @@ The site records each delivery. Store the file with the other offline recovery m
    changes** and **Previous file changes** to inspect the pages. A single review accepts
    up to one million entries. Stage larger selections as separate restore jobs. A finished
    background preview is available for one hour while its source remains available. Review a fresh
-   preview if the files changed. Use the recovery kit offline for WordPress core,
+   preview if the files changed. For a folder with more than 2,048 names the preview reads all
+   of them in one reading during which the folder does not change. If the folder changes before
+   such a reading is complete five times in a row, the preview stops and says that a folder
+   kept changing, and the job's log names the folder: pause what writes into it, for example
+   uploads, a cache plugin or a synchronisation, and open the preview again. The apply reads
+   such folders again before it changes a file and stops the same way, before maintenance and
+   without a change; open a new preview and confirm it again. Use the recovery kit offline for WordPress core,
    configuration, must-use plugins and early-loaded drop-ins. The preview identifies
    these startup paths. It never applies the backup's private database dump. The database
    is restored separately: a database rehearsal imports the dump into temporary tables and
@@ -109,7 +115,17 @@ The site records each delivery. Store the file with the other offline recovery m
    and lists every kept entry with its reason, also when the undo was cancelled or failed.
    An undo that was cancelled or failed after it had gone through every entry is recorded
    as one that finished. One that stopped earlier leaves the apply listed, as partly undone
-   once it reverted an entry: preview the undo again to revert the rest.
+   once it reverted an entry: preview the undo again to revert the rest. What an undo did is
+   recorded also when the site could not leave maintenance mode at its end, which the undo
+   then reports: delete the file `.maintenance` in the WordPress directory if no update is
+   running. An entry in a folder with more than 2,048 names that keeps changing while the
+   preview reads it is kept with "Conflicting names at the destination"; preview the undo
+   again once the folder is quiet, before the expiry time.
+   An apply whose undo records the plugin cannot read, for example after the permissions of
+   its private directory were changed, is listed with a notice and without **Preview undo**.
+   Its saved original files and staged files are kept until the expiry time. Give the PHP user
+   back the ownership of the private directory and the right to read and open every folder in
+   it, and the undo is offered again.
    Kept entries stay undoable until the expiry time, and the apply stays listed as partly
    undone: if a kept entry is put back as the apply left it, for example by undoing a later
    apply over the same files, preview the undo again. When nothing is left to revert, the
@@ -862,6 +878,19 @@ status looks finished, because it cannot safely interpret that status. Install a
 that can read the job. If that version still refuses it, keep a copy of the private job
 directory when investigating damaged files; do not remove the job just to unblock changes
 while it may still be running.
+
+A job that the PHP user cannot open blocks new jobs and repository changes in the same way,
+with `job_inaccessible`, whatever the plugin version. The refusal names the job; its ID is
+the name of its folder under `jobs/` in the private working directory. The usual cause is a
+WP-CLI command that ran as root or as another user: the job folder that it created belongs
+to that user, with mode 0700, so the web server's PHP user cannot search it. Give the PHP
+user back ownership of that folder and of everything in it, with permission to read and
+search them, for example with `chown -R` to the web server's user. Run WP-CLI as that user
+from then on (`sudo -u www-data wp …`) rather than with `--allow-root`. If ownership and
+permissions are in order, a link is in the place of the folder, or something other than a
+regular file in the place of its `job.json`: put the job's own files back. Uninstalling is
+refused for the same job until it can be read. `GET /jobs/{id}`, its log and
+`wp backups-for-restic logs <id>` answer for that job with the same code and texts.
 
 A different notice says that the first settings layout number could not be saved. Check
 the database's write access and storage availability. The plugin retries recording the

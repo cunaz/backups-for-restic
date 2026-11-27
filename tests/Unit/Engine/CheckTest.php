@@ -384,7 +384,7 @@ final class CheckTest extends TestCase {
 			$this->backend->save( ObjectType::Data, Id::of( 'stray ' . $i )->hex(), 'stray ' . $i );
 		}
 		$snapshots = array_keys( $this->backend->list( ObjectType::Snapshots ) );
-		sort( $snapshots );
+		sort( $snapshots, SORT_STRING );
 		foreach ( $snapshots as $snapshot ) {
 			$this->backend->objects['snapshots'][ $snapshot ] = 'not an encrypted snapshot';
 		}

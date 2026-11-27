@@ -30,7 +30,7 @@ final class AppendOnlyTest extends TestCase {
 		$listed = json_decode( TestSite::restic()->must( [ 'snapshots', '--json', '--no-lock' ] ), true );
 		self::assertIsArray( $listed );
 		$ids = array_map( 'strval', array_column( $listed, 'id' ) );
-		sort( $ids );
+		sort( $ids, SORT_STRING );
 		return $ids;
 	}
 

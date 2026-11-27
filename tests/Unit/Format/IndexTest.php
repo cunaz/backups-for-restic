@@ -100,7 +100,7 @@ final class IndexTest extends TestCase {
 			$entry   = $location->entry;
 			$lines[] = implode( ' ', [ $entry->type->value, $entry->id->hex(), $location->pack->hex(), $entry->offset, $entry->length, $entry->uncompressed_length ] );
 		}
-		sort( $lines );
+		sort( $lines, SORT_STRING );
 		return $lines;
 	}
 
