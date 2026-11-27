@@ -800,6 +800,59 @@ final class StagingTest extends TestCase {
 		self::assertSame( [], $this->names() );
 	}
 
+	public function test_a_folder_that_cannot_be_removed_from_its_parent_is_a_failed_removal_and_read_once(): void {
+		$stuck = $this->job( JobState::Failed );
+		$this->stage( $stuck->id );
+		// The names inside can go, the folder itself cannot: its parent may not be written.
+		chmod( $this->restores . '/' . $stuck->id . '/files', 0500 );
+		$clock   = new class( $this->clock ) implements Clock {
+			public int $readings = 0;
+
+			public function __construct( private FrozenClock $base ) {
+			}
+
+			public function now(): array {
+				return [ $this->base->seconds + $this->readings++, 0 ];
+			}
+		};
+		$staging = new Staging( $this->restores, $this->jobs, $clock );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $this->restores . '/' . $stuck->id . '/files' ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			self::assertSame(
+				[
+					'removed' => 0,
+					'pending' => 0,
+					'failed'  => 1,
+				],
+				$staging->remove_due( 24, $this->clock->seconds + 1000 )
+			);
+			self::assertLessThan( 20, $clock->readings );
+		} finally {
+			restore_error_handler();
+			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
+				if ( is_dir( $directory . '/files' ) ) {
+					chmod( $directory . '/files', 0700 );
+				}
+			}
+		}
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_the_journal_of_an_apply_that_has_not_ended_stays(): void {
+		// An apply at work: its document says nothing of an end, and its journal is in use.
+		$apply = $this->job( JobState::Running, 0, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		$this->clock->advance( 2 * 86400 );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertFileExists( $undo . '/attempted' );
+	}
+
 	public function test_a_directory_that_cannot_be_removed_does_not_keep_the_others(): void {
 		if ( function_exists( 'posix_geteuid' ) && 0 === posix_geteuid() ) {
 			self::markTestSkipped( 'Root ignores the permissions used to refuse deletion.' );

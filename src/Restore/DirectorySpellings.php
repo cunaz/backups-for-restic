@@ -97,7 +97,7 @@ final class DirectorySpellings {
 	 * @return bool Whether the folder kept changing.
 	 */
 	public function changing( string $directory ): bool {
-		return isset( $this->changing[ $directory ] );
+		return true === ( $this->changing[ $directory ] ?? false );
 	}
 
 	/**
