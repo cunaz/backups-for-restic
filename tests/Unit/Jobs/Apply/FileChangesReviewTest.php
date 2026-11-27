@@ -27,6 +27,7 @@ final class FileChangesReviewTest extends TestCase {
 
 	protected function tearDown(): void {
 		$this->site->remove();
+		unset( $this->site );
 	}
 
 	/** Makes a restore one whose review is a job. */

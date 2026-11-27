@@ -26,6 +26,7 @@ final class FileChangesApplyTest extends TestCase {
 
 	protected function tearDown(): void {
 		$this->site->remove();
+		unset( $this->site );
 	}
 
 	/** Runs the preflight of an apply, which puts the site into maintenance. */

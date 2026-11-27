@@ -108,9 +108,16 @@ final class ApplySite {
 		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, $random );
 	}
 
-	/** Removes the site. */
+	/**
+	 * Removes the site and lets go of its services. Their closures refer to the site, so
+	 * without this every finished test would leave a cycle that only PHP's cycle collector
+	 * frees, and the memory of the suite would grow until it runs.
+	 */
 	public function remove(): void {
 		TempDir::remove( $this->directory );
+		$this->plans      = [];
+		$this->job_writes = null;
+		unset( $this->runner, $this->changes, $this->staging, $this->jobs );
 	}
 
 	/** The job service of the site, with the given clock. */

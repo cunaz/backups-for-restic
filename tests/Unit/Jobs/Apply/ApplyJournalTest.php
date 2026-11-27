@@ -23,6 +23,7 @@ final class ApplyJournalTest extends TestCase {
 
 	protected function tearDown(): void {
 		$this->site->remove();
+		unset( $this->site );
 	}
 
 	private function journal(): ApplyJournal {

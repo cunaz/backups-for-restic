@@ -31,6 +31,7 @@ final class PlanBuildReviewTest extends TestCase {
 
 	protected function tearDown(): void {
 		$this->site->remove();
+		unset( $this->site );
 	}
 
 	/** Ticks a job with the given budget until it ends, for at most ten seconds of the wall clock. */
