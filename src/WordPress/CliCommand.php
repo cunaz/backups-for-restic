@@ -515,7 +515,7 @@ final class CliCommand {
 			if ( ! $preview['applicable'] ) {
 				\WP_CLI::error( __( 'The current live files cannot be safely reverted.', 'backups-for-restic' ) );
 			}
-			/* translators: %s: digest of the review, 64 hexadecimal characters. */
+			/* translators: %s: SHA-256 digest of the review. */
 			\WP_CLI::line( sprintf( __( 'Digest of this review: %s', 'backups-for-restic' ), $preview['digest'] ) );
 			if ( null !== $given ) {
 				// The service checks the digest against the live files again when the undo starts.
