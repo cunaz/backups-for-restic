@@ -67,6 +67,13 @@ final class DirectorySpellings {
 	private array $tables = [];
 
 	/**
+	 * Folders whose names an undo review gave up reading because they kept changing (changing()).
+	 *
+	 * @var array<string,true>
+	 */
+	private array $changing = [];
+
+	/**
 	 * Binds a new worker to a private plan directory and its deadline.
 	 *
 	 * @param string $workspace Existing canonical private directory.
@@ -79,6 +86,18 @@ final class DirectorySpellings {
 		if ( ! is_dir( $workspace ) || realpath( $workspace ) !== $workspace ) {
 			throw new StorageFailed( 'The file preview name-index directory is unavailable.' );
 		}
+	}
+
+	/**
+	 * Whether an undo review gave up reading the names of a folder because it kept changing:
+	 * unique() answered false for it after five readings that changes cut short. Its entries are
+	 * kept for that reason, not for another spelling of a name, which nothing found.
+	 *
+	 * @param string $directory Canonical live directory.
+	 * @return bool Whether the folder kept changing.
+	 */
+	public function changing( string $directory ): bool {
+		return true === ( $this->changing[ $directory ] ?? false );
 	}
 
 	/**
@@ -117,6 +136,9 @@ final class DirectorySpellings {
 			}
 		} catch ( StorageFailed $failure ) {
 			if ( $this->undo && self::UNSETTLED['directory'] === ( $failure->context()['directory'] ?? null ) ) {
+				if ( 'file_folder_changing' === ( $failure->context()['code'] ?? null ) ) {
+					$this->changing[ $directory ] = true;
+				}
 				// Another spelling may have been there: the entry is kept, and the review goes on.
 				return false;
 			}

@@ -9,6 +9,7 @@ use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobType;
 use BackupsForRestic\Restore\ApplyPlan;
 use BackupsForRestic\Restore\DirectorySpellings;
+use BackupsForRestic\Restore\FileWorkPending;
 use BackupsForRestic\Restore\SiteLayout;
 use BackupsForRestic\Tests\Support\TempDir;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -658,6 +659,56 @@ final class PlannerPolicyTest extends TestCase {
 		TempDir::remove( $this->files . $this->root );
 		touch( $this->files . $this->root );
 		self::assertSame( 'root_ancestor_not_directory', $plan->inspect( $this->files, $this->root )['reason'] );
+	}
+
+	public function test_an_undo_review_keeps_an_entry_of_a_folder_that_kept_changing_for_a_reason_of_its_own(): void {
+		$wide = $this->live . '/wide';
+		mkdir( $wide );
+		mkdir( $this->staged . '/wide' );
+		mkdir( $this->root . '/review' );
+		touch( $this->staged . '/wide/photo' );
+		for ( $i = 0; $i < 2050; ++$i ) {
+			touch( $wide . '/entry-' . $i );
+		}
+		$plan = new ApplyPlan( [ $this->live ], [] );
+		$path = $wide . '/photo';
+		// A reading of the folder's names begins and leaves its checkpoint.
+		try {
+			$plan->inspect( $this->files, $path, new DirectorySpellings( $this->root . '/review', 0.0, true ) );
+			self::fail( 'A reading without time completed.' );
+		} catch ( FileWorkPending ) {
+			$head = glob( $this->root . '/review/spell-*.head' );
+			self::assertIsArray( $head );
+			self::assertCount( 1, $head );
+		}
+		// Four readings in a row were cut short, and the folder changed again: it keeps changing.
+		$body = (string) file_get_contents( $head[0] );
+		$body = substr_replace( $body, str_repeat( "\0", 32 ), strlen( "BFRNAMES1\0" ), 32 );
+		file_put_contents( $head[0], substr( $body, 0, -1 ) . chr( 4 ) );
+		$review = new DirectorySpellings( $this->root . '/review', microtime( true ) + 10, true );
+		// Before, the entry was kept as ambiguous_destination, "Conflicting names at the
+		// destination", although no other spelling was found.
+		self::assertSame(
+			[ 'refuse', 'destination_changing' ],
+			array_values(
+				array_intersect_key(
+					$plan->inspect( $this->files, $path, $review ),
+					[
+						'action' => 0,
+						'reason' => 0,
+					]
+				)
+			)
+		);
+		self::assertTrue( $review->changing( $wide ) );
+		self::assertFalse( $review->changing( $this->live ) );
+		// A preview fails instead, as before.
+		try {
+			$plan->inspect( $this->files, $path, new DirectorySpellings( $this->root . '/review', microtime( true ) + 10 ) );
+			self::fail( 'A preview went on with a folder that keeps changing.' );
+		} catch ( StorageFailed $refused ) {
+			self::assertSame( 'file_folder_changing', $refused->context()['code'] ?? null );
+		}
 	}
 
 	public function test_large_live_directory_uses_background_preview_and_rechecks_aliases_after_changes(): void {

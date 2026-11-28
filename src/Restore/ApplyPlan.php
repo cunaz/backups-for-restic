@@ -398,7 +398,9 @@ final class ApplyPlan {
 		$parent = $root;
 		foreach ( explode( '/', substr( $target, strlen( $root ) + 1 ) ) as $name ) {
 			if ( ! self::unambiguous( $parent, $name, $cache, $review, $inline ) ) {
-				return self::decision( $path, $target, 'refuse', 'ambiguous_destination' );
+				// An undo review that gave up reading a folder because it kept changing found no
+				// other spelling: the folder never held still, which has a reason of its own.
+				return self::decision( $path, $target, 'refuse', null !== $review && $review->changing( $parent ) ? 'destination_changing' : 'ambiguous_destination' );
 			}
 			$next = $parent . '/' . $name;
 			if ( is_link( $next ) ) {

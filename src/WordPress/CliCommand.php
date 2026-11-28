@@ -32,6 +32,9 @@ defined( 'ABSPATH' ) || exit;
  */
 final class CliCommand {
 
+	/** How many stored jobs that cannot be read status names, newest first, as the page shows them. */
+	private const int UNREADABLE_SHOWN = 5;
+
 	/**
 	 * Registers the command.
 	 *
@@ -282,13 +285,28 @@ final class CliCommand {
 	}
 
 	/**
-	 * Shows the last backup and the active job.
+	 * Shows the last backup and the active job, and the stored jobs that cannot be read, which
+	 * keep every new job, scheduled backups included, from starting: the newest five with their
+	 * texts, as the page shows them, and how many more there are.
 	 */
 	public function status(): void {
-		$last   = $this->container->state()->get( 'last_backup' );
-		$active = $this->container->jobs()->active();
+		$jobs     = $this->container->jobs();
+		$last     = $this->container->state()->get( 'last_backup' );
+		$overview = $jobs->overview();
+		$active   = $overview['active'];
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Last backup', 'backups-for-restic' ), is_int( $last['finished'] ?? null ) ? gmdate( 'Y-m-d H:i:s', $last['finished'] ) . ' UTC' : '-' ) );
 		\WP_CLI::line( sprintf( '%s: %s', __( 'Active job', 'backups-for-restic' ), null === $active ? '-' : $active->id . ' (' . Messages::step( $active->step ) . ')' ) );
+		$unreadable = $overview['unreadable'];
+		foreach ( array_slice( $unreadable, 0, self::UNREADABLE_SHOWN ) as $id ) {
+			$texts = Messages::stored_job( $jobs->unreadable_code( $id ), $id );
+			\WP_CLI::line( sprintf( '%s: %s', __( 'Stored job that cannot be read', 'backups-for-restic' ), $id ) );
+			\WP_CLI::warning( $texts['message'] . ' ' . $texts['hint'] );
+		}
+		$more = count( $unreadable ) - self::UNREADABLE_SHOWN;
+		if ( $more > 0 ) {
+			/* translators: %d: number of further stored jobs that cannot be read. */
+			\WP_CLI::warning( sprintf( _n( '%d more stored job cannot be read either.', '%d more stored jobs cannot be read either.', $more, 'backups-for-restic' ), $more ) );
+		}
 	}
 
 	/**
@@ -400,7 +418,7 @@ final class CliCommand {
 				\WP_CLI::line( (string) wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) );
 			}
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( self::refusal( $error ) );
+			\WP_CLI::error( self::file_refusal( $error ) );
 		}
 		if ( $refused ) {
 			\WP_CLI::error( __( 'The preview contains refused entries.', 'backups-for-restic' ) );
@@ -410,21 +428,56 @@ final class CliCommand {
 	/**
 	 * Reviews and reverses the file changes of an apply job. Each entry is reverted only if it
 	 * still is as the apply left it; an entry that changed since is kept and listed with its
-	 * reason, and stays undoable until the apply's recovery window ends.
+	 * reason, and stays undoable until the apply's recovery window ends. The command prints the
+	 * review with its totals and its digest. On a terminal it asks before it undoes anything;
+	 * any answer but y ends the command without an error, and nothing is undone. A script
+	 * confirms a review that an earlier run printed, with that review's digest.
 	 *
 	 * ## OPTIONS
 	 *
 	 * <apply-job>
 	 * : ID of the original apply job.
 	 *
-	 * [--yes]
-	 * : Confirm the displayed undo without a prompt.
+	 * [--digest[=<digest>]]
+	 * : The digest that an earlier run printed for the review that you confirm. The undo then
+	 * starts without a prompt, and only while the review made again has that digest: while
+	 * every entry is decided as before.
+	 * Without it, the command asks on a terminal, and refuses where there is none.
 	 *
-	 * @param list<string>         $args Apply job.
-	 * @param array<string,string> $assoc_args Confirmation options.
+	 * [--yes]
+	 * : Not accepted: a review is confirmed on a terminal or with its digest. A script that
+	 * passes it stops with an error and undoes nothing.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp backups-for-restic undo 20261120T000000Z-0a0b0c
+	 *     wp backups-for-restic undo 20261120T000000Z-0a0b0c --digest=<digest>
+	 *
+	 * @param list<string>              $args Apply job.
+	 * @param array<string,string|bool> $assoc_args Confirmation options; a flag without a value is true.
 	 */
 	public function undo( array $args, array $assoc_args ): void {
-		$id      = $args[0] ?? '';
+		if ( isset( $assoc_args['yes'] ) ) {
+			\WP_CLI::error( __( 'undo no longer takes --yes, and nothing was undone. Run it on a terminal to see its review and confirm it there, or pass --digest with the digest that a review of this apply printed.', 'backups-for-restic' ) );
+		}
+		// A script binds to a review that it was shown: an empty or missing digest is no confirmation.
+		$given = $assoc_args['digest'] ?? null;
+		if ( null !== $given && ( ! is_string( $given ) || 1 !== preg_match( '/\A[0-9a-f]{64}\z/', $given ) ) ) {
+			\WP_CLI::error( __( '--digest needs the digest that an earlier run of this command printed: 64 characters, the digits 0 to 9 and the letters a to f. Nothing was undone.', 'backups-for-restic' ) );
+		}
+		$id    = $args[0] ?? '';
+		$apply = $this->container->jobs()->get( $id );
+		if ( null === $apply ) {
+			// As logs and cancel answer it. Before, an ID that no job has, such as a mistyped one,
+			// was answered as an apply whose undo is over.
+			$this->missing_job( $id );
+		}
+		if ( JobType::Apply !== $apply->type ) {
+			\WP_CLI::error( __( 'This job is not an apply of staged files, so there is nothing to undo. The Restores tab lists the applies that can still be undone.', 'backups-for-restic' ) );
+		}
+		if ( ! $apply->state->is_terminal() ) {
+			\WP_CLI::error( __( 'This apply has not ended yet. Once it has ended, it can be undone for 24 hours.', 'backups-for-restic' ) );
+		}
 		$service = $this->container->file_changes();
 		try {
 			$preview = $service->request_preview( $id, true, false );
@@ -462,12 +515,24 @@ final class CliCommand {
 			if ( ! $preview['applicable'] ) {
 				\WP_CLI::error( __( 'The current live files cannot be safely reverted.', 'backups-for-restic' ) );
 			}
-			\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ), $assoc_args );
+			/* translators: %s: SHA-256 digest of the review. */
+			\WP_CLI::line( sprintf( __( 'Digest of this review: %s', 'backups-for-restic' ), $preview['digest'] ) );
+			if ( null !== $given ) {
+				// The service checks the digest against the live files again when the undo starts.
+				if ( ! hash_equals( $preview['digest'], $given ) ) {
+					\WP_CLI::error( __( 'The live files are not as the review with this digest found them, so nothing was undone. The review above is the current one: confirm it on a terminal, or pass its digest.', 'backups-for-restic' ) );
+				}
+			} elseif ( ! stream_isatty( STDIN ) ) {
+				// Piped input is bound to no review that it was shown.
+				\WP_CLI::error( __( 'There is no terminal to confirm the undo, so nothing was undone. Run the command on a terminal, or run it again with --digest and the digest that this review printed.', 'backups-for-restic' ) );
+			} else {
+				\WP_CLI::confirm( __( 'Undo these changes on this WordPress installation?', 'backups-for-restic' ) );
+			}
 			$job = $service->start_undo( $id, $preview['digest'], '', $plan );
 			$this->run_until_idle( $this->container->tick_budget() );
 			$this->report( $job->id );
 		} catch ( PluginException $error ) {
-			\WP_CLI::error( self::refusal( $error ) );
+			\WP_CLI::error( self::file_refusal( $error ) );
 		}
 	}
 
@@ -857,6 +922,22 @@ final class CliCommand {
 			$context = is_array( $entry['context'] ?? null ) && [] !== $entry['context'] ? ' ' . (string) wp_json_encode( $entry['context'] ) : '';
 			\WP_CLI::line( sprintf( '%s %-7s %s%s', gmdate( 'Y-m-d H:i:s', is_int( $entry['time'] ?? null ) ? $entry['time'] : 0 ), is_string( $entry['level'] ?? null ) ? $entry['level'] : '', is_string( $entry['message'] ?? null ) ? $entry['message'] : '', $context ) );
 		}
+	}
+
+	/**
+	 * What the command line says about a refused or failed file preview, apply or undo: the
+	 * texts with which the file routes answer it (RestRoutes::file_refusal()), as the page shows
+	 * them, and for a stored job that cannot be read the texts that name it. Before, the
+	 * exception's technical message, such as "This apply has no available undo.".
+	 *
+	 * @param PluginException $error Refusal or failure.
+	 * @return string Text.
+	 */
+	private static function file_refusal( PluginException $error ): string {
+		[ $code ] = RestRoutes::file_refusal( $error );
+		$job      = $error->context()['job'] ?? null;
+		$texts    = in_array( $code, [ 'job_inaccessible', 'job_unreadable' ], true ) && is_string( $job ) ? Messages::stored_job( $code, $job ) : RestRoutes::texts( $code );
+		return trim( $texts['message'] . ' ' . $texts['hint'] );
 	}
 
 	/**

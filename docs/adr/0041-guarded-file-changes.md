@@ -318,7 +318,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   and WP-CLI only for the undo that it has just run and waited for, so neither meets these
   answers in its own course. WP-CLI `undo` prints the totals of its review, refuses an
   undo with nothing to revert, and afterwards prints the kept entries and the counts, as the
-  admin page shows them, also for an undo that was cancelled or failed. Neither says that a
+  admin page shows them, also for an undo that was cancelled or failed. It undoes only a
+  review that it printed, confirmed on a terminal or by that review's digest, and it answers
+  an ID that no job has as `logs` does, "The job does not exist.", and says so of a job that is
+  no apply and of an apply that has not ended (2026-11-27; before, each of these three was
+  "This apply has no available undo."). Neither says that a
   kept entry changed after the apply unless its reason is `changed_since_apply`. Each
   outcome is on disk before the job document that counts it: a kept entry's page is written
   durably, a revert's journal record is. A restarted tick repeats only the entry that the
@@ -436,8 +440,11 @@ A native tmpfs capacity test used a 1,292,345,344-byte sparse live file occupyin
   as before. Before, that change failed the review at once. After five readings in a row that changes cut short the folder keeps changing:
   a preview and the apply's check stop with `file_folder_changing` (the job's log names the
   folder in `folder`), before maintenance and without a change, and an undo review answers
-  as for a folder that cannot be read, so that it keeps the folder's entries as
-  `ambiguous_destination` and goes on, and answers so at once for the rest of the review. No
+  as for a folder that cannot be read, so that it keeps the folder's entries and goes on, and
+  answers so at once for the rest of the review. Their reason is `destination_changing` ("The
+  folder kept changing while the review read its names"), since 2026-11-27: before, it was
+  `ambiguous_destination`, "Conflicting names at the destination", which no other spelling
+  had caused (`DirectorySpellings::changing()`). No
   reading during which the folder changed answers a lookup. Before, the index started again
   as often as the folder changed between two ticks, so that the review of a folder that
   changed between every two ticks, such as a busy uploads or cache folder, never ended, and a

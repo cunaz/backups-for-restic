@@ -61,6 +61,15 @@ final class RestRoutes {
 	private const array STORED_JOB_CODES = [ 'job_inaccessible', 'job_unreadable' ];
 
 	/**
+	 * How many stored jobs that cannot be read GET /status and GET /jobs list at most, newest
+	 * first, with their total beside them. The job history keeps at most 500 jobs
+	 * (advanced.keep_jobs), and while a job cannot be read no new job starts and none is pruned,
+	 * so after a downgrade every job that a newer version wrote can be one; each comes with its
+	 * texts, which the page shows for the newest five.
+	 */
+	private const int UNREADABLE_LISTED = 100;
+
+	/**
 	 * Creates the routes.
 	 *
 	 * @param Container $container Services.
@@ -186,7 +195,8 @@ final class RestRoutes {
 	public function status(): \WP_REST_Response {
 		$settings = $this->container->settings();
 		$state    = $this->container->state();
-		$active   = $this->container->jobs()->active();
+		$jobs     = $this->container->jobs()->overview();
+		$active   = $jobs['active'];
 		$zone     = wp_timezone();
 		return $this->respond(
 			[
@@ -205,6 +215,7 @@ final class RestRoutes {
 				'active_job'      => null === $active ? null : $this->job_summary( $active ),
 				'next_backup'     => SchedulePolicy::next_backup_slot( $settings, $zone, time() ),
 				'recent_jobs'     => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 5 ) ),
+				...$this->unreadable_jobs( $jobs['unreadable'] ),
 				'retention'       => [
 					'mode'           => $settings->string( 'retention.mode' ),
 					'after_backup'   => $settings->bool( 'retention.run_forget_after_backup' ),
@@ -344,7 +355,37 @@ final class RestRoutes {
 	 * @return \WP_REST_Response Response.
 	 */
 	public function jobs(): \WP_REST_Response {
-		return $this->respond( [ 'jobs' => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ) ] );
+		return $this->respond(
+			[
+				'jobs' => array_map( $this->job_summary( ... ), $this->container->jobs()->latest( 30 ) ),
+				...$this->unreadable_jobs( $this->container->jobs()->unreadable_ids() ),
+			]
+		);
+	}
+
+	/**
+	 * The stored jobs that cannot be read, newest first and at most UNREADABLE_LISTED, each with
+	 * its code and the texts that name it (Messages::stored_job()), and how many there are:
+	 * they block every new job, scheduled backups included, and no list of jobs can show them.
+	 *
+	 * @param list<string> $ids IDs of the stored jobs that cannot be read, newest first (JobStore::unreadable_ids()).
+	 * @return array{unreadable_jobs: list<array{id: string, code: string, message: string, hint: string}>, unreadable_total: int} Jobs and their number.
+	 */
+	private function unreadable_jobs( array $ids ): array {
+		$jobs = $this->container->jobs();
+		return [
+			'unreadable_jobs'  => array_map(
+				static function ( string $id ) use ( $jobs ): array {
+					$code = $jobs->unreadable_code( $id );
+					return [
+						'id'   => $id,
+						'code' => $code,
+					] + Messages::stored_job( $code, $id );
+				},
+				array_slice( $ids, 0, self::UNREADABLE_LISTED )
+			),
+			'unreadable_total' => count( $ids ),
+		];
 	}
 
 	/**
@@ -1211,17 +1252,29 @@ final class RestRoutes {
 	 * @return \WP_Error Error.
 	 */
 	private function file_error( PluginException $refused ): \WP_Error {
+		[ $code, $status ] = self::file_refusal( $refused );
+		return $refused instanceof JobConflict && in_array( $code, self::STORED_JOB_CODES, true ) ? $this->conflict( $refused ) : $this->error( $code, $status );
+	}
+
+	/**
+	 * The code and status with which the file routes answer a refused or failed file preview or
+	 * confirmation (file_error()). WP-CLI prints the texts of the same code (texts()).
+	 *
+	 * @param PluginException $refused Reason.
+	 * @return array{0: string, 1: int} Code and HTTP status.
+	 */
+	public static function file_refusal( PluginException $refused ): array {
 		$code = JobError::from_throwable( $refused )->code;
 		if ( 'file_changed_after_review' === $code ) {
-			return $this->error( 'live_plan_changed', 409 );
+			return [ 'live_plan_changed', 409 ];
 		}
 		if ( $refused instanceof JobConflict ) {
-			return in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'undo_records_unreadable', 'file_preview_expired', ...self::STORED_JOB_CODES ], true ) ? $this->conflict( $refused ) : $this->error( 'live_plan_conflict', 409 );
+			return [ in_array( $code, [ 'file_space', 'file_writes_refused', 'undo_nothing_to_revert', 'undo_unavailable', 'undo_records_unreadable', 'file_preview_expired', ...self::STORED_JOB_CODES ], true ) ? $code : 'live_plan_conflict', 409 ];
 		}
 		if ( $refused instanceof InvalidArgument ) {
-			return $this->error( in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 );
+			return [ in_array( $code, [ 'protected_path_invalid', 'file_staging_gone' ], true ) ? $code : 'live_plan_unavailable', 400 ];
 		}
-		return $this->error( 'live_plan_failed', 500 );
+		return [ 'live_plan_failed', 500 ];
 	}
 
 	/**
@@ -1951,7 +2004,26 @@ final class RestRoutes {
 	 * @return \WP_Error Error.
 	 */
 	private function error( string $code, int $status ): \WP_Error {
-		$texts = match ( $code ) {
+		$texts = self::texts( $code );
+		return new \WP_Error(
+			'backups_for_restic_' . $code,
+			$texts['message'],
+			[
+				'status' => $status,
+				'hint'   => $texts['hint'],
+			]
+		);
+	}
+
+	/**
+	 * The translated message and hint of a code that a route answers with: those of the routes
+	 * themselves, and otherwise those of Messages::snapshot_error(). WP-CLI prints the same.
+	 *
+	 * @param string $code Error code.
+	 * @return array{message: string, hint: string} Texts.
+	 */
+	public static function texts( string $code ): array {
+		return match ( $code ) {
 			'not_found'                     => [
 				'message' => __( 'The job does not exist.', 'backups-for-restic' ),
 				'hint'    => '',
@@ -2075,14 +2147,6 @@ final class RestRoutes {
 			],
 			default                         => Messages::snapshot_error( $code ),
 		};
-		return new \WP_Error(
-			'backups_for_restic_' . $code,
-			$texts['message'],
-			[
-				'status' => $status,
-				'hint'   => $texts['hint'],
-			]
-		);
 	}
 
 	/**

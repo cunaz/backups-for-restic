@@ -247,6 +247,63 @@ test( 'a cancelled apply or undo whose cleanup failed shows the failure beside i
 	}
 } );
 
+test( 'an apply whose undo records cannot be read is listed with a notice and without its undo', async ( { page } ) => {
+	// An apply that ended a minute ago and attempted one change, with a folder at the name of its
+	// undone marker: whether it was undone cannot be established. Nothing ticks an ended job.
+	const apply = '20261127T140000Z-0ca010';
+	const restore = '20261127T140000Z-0ca011';
+	const container = '$container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); ';
+	wordpress(
+		siteRoot(),
+		container + '$jobs = $container->jobs();' +
+			' $restore = new BackupsForRestic\\Jobs\\Job( $argv[3], BackupsForRestic\\Jobs\\JobType::Restore, "cli", time() - 120 );' +
+			' $restore->state = BackupsForRestic\\Jobs\\JobState::Succeeded; $restore->finished_at = time() - 90; $jobs->save( $restore );' +
+			' $apply = new BackupsForRestic\\Jobs\\Job( $argv[2], BackupsForRestic\\Jobs\\JobType::Apply, "cli", time() - 90 );' +
+			' $apply->data = [ "restore" => $argv[3], "include_config" => false, "digest" => str_repeat( "0", 64 ), "plan_job" => null ];' +
+			' $apply->state = BackupsForRestic\\Jobs\\JobState::Succeeded; $apply->finished_at = time() - 60; $apply->result = [ "restore" => $argv[3], "files_changed" => 1 ];' +
+			' $undo = $jobs->directory( $apply ) . "/undo"; BackupsForRestic\\Jobs\\Apply\\ApplyJournal::directory( $undo );' +
+			' file_put_contents( $undo . "/attempted", "1" ); mkdir( $undo . "/reverted", 0700 ); $jobs->save( $apply );',
+		[ apply, restore ],
+	);
+	try {
+		await openBackups( page, 'restores' );
+		const entry = page.locator( '.bfr-card' ).filter( { has: page.getByRole( 'heading', { name: apply, exact: true } ) } );
+		await expect( entry ).toBeVisible();
+		await expect( entry.locator( '.notice-error' ) ).toContainText( 'The plugin cannot read the records of this apply\'s undo, so it does not offer the undo now.' );
+		await expect( entry.locator( '.notice-error' ) ).toContainText( 'give it back ownership and those permissions' );
+		await expect( entry.getByRole( 'button', { name: 'Preview undo' } ) ).toHaveCount( 0 );
+	} finally {
+		wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $id ); }', [ apply, restore ] );
+	}
+} );
+
+test( 'the newest stored jobs that cannot be read are named on the dashboard and in the logs', async ( { page } ) => {
+	const id = '20261127T150000Z-0cb001';
+	// Five older ones, as after a downgrade below a change of the layout of job documents.
+	const older = [ 5, 4, 3, 2, 1 ].map( ( i ) => '20261127T1459' + String( i ).padStart( 2, '0' ) + 'Z-0cb10' + i );
+	const container = '$container = new BackupsForRestic\\WordPress\\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" ); ';
+	// Documents of another layout, as a newer version of the plugin writes them.
+	wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { $folder = $container->jobs()->storage_directory() . "/" . $id; mkdir( $folder, 0700 ); file_put_contents( $folder . "/job.json", "{\\"schema\\":9999}" ); }', [ id, ...older ] );
+	try {
+		for ( const tab of [ undefined, 'logs' ] ) {
+			await openBackups( page, tab );
+			// The newest five, each with its texts, and a count of the others. Before, a notice of
+			// three paragraphs for every one of them.
+			const alerts = page.locator( '#backups-for-restic-app .bfr-unreadable-job' );
+			await expect( alerts ).toHaveCount( 5 );
+			const alert = alerts.first();
+			await expect( alert ).toContainText( 'This version of the plugin cannot read the stored job ' + id + '.' );
+			await expect( alert ).toContainText( 'A newer version of the plugin may have written it: install that version.' );
+			await expect( alert ).toContainText( 'If no version reads it, its document is damaged: once the job cannot be running any more, move its folder' );
+			await expect( alert ).toContainText( 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' );
+			await expect( page.locator( '#backups-for-restic-app .bfr-unreadable-more' ) ).toHaveText( '1 more stored job cannot be read either.' );
+			await expect( page.locator( '#backups-for-restic-app' ) ).not.toContainText( older[ 4 ] );
+		}
+	} finally {
+		wordpress( siteRoot(), container + 'foreach ( array_slice( $argv, 2 ) as $id ) { BackupsForRestic\\Storage\\Files::remove_tree( $container->jobs()->storage_directory() . "/" . $id ); }', [ id, ...older ] );
+	}
+} );
+
 test( 'a selected snapshot file can be staged and downloaded', async ( { page } ) => {
 	const rows = page.locator( 'table.bfr-snapshots tbody tr' );
 	// The cleanup after the first backup holds the repository for a moment; an administrator

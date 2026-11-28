@@ -12,7 +12,9 @@ namespace BackupsForRestic\Tests\Support;
 /**
  * Opens every file through PHP's own wrapper and serves a replacement when the original file is
  * included, as Infection's include interceptor does. Like that interceptor it supports no stream
- * option, so fsync() fails on every stream it opens.
+ * option, so fsync() fails on every stream it opens. A test can also have a callback run before
+ * each directory is opened for listing, to change files between two listings of a directory as
+ * another request could.
  */
 final class UserSpaceFiles {
 
@@ -45,21 +47,36 @@ final class UserSpaceFiles {
 	private static string $replacement = '';
 
 	/**
+	 * Runs with the path before each directory is opened for listing, or null.
+	 *
+	 * @var (\Closure(string): void)|null
+	 */
+	private static ?\Closure $listing = null;
+
+	/**
 	 * Puts this wrapper in place of PHP's own.
 	 *
-	 * @param string $original    A file for which another one is served when it is included.
-	 * @param string $replacement The file served instead.
+	 * @param string                        $original    A file for which another one is served when it is included.
+	 * @param string                        $replacement The file served instead.
+	 * @param (\Closure(string): void)|null $listing     Runs with the path before each directory is opened for listing, through PHP's own wrapper.
 	 */
-	public static function enable( string $original = '', string $replacement = '' ): void {
+	public static function enable( string $original = '', string $replacement = '', ?\Closure $listing = null ): void {
 		self::$original    = $original;
 		self::$replacement = $replacement;
-		stream_wrapper_unregister( 'file' );
-		stream_wrapper_register( 'file', self::class );
+		self::$listing     = $listing;
+		self::register();
 	}
 
 	/** Gives PHP its own wrapper back, if it is not in place. */
 	public static function disable(): void {
+		self::$listing = null;
 		@stream_wrapper_restore( 'file' );
+	}
+
+	/** Registers this wrapper for file://. */
+	private static function register(): void {
+		stream_wrapper_unregister( 'file' );
+		stream_wrapper_register( 'file', self::class );
 	}
 
 	/**
@@ -74,7 +91,7 @@ final class UserSpaceFiles {
 		try {
 			return $operation();
 		} finally {
-			self::enable( self::$original, self::$replacement );
+			self::register();
 		}
 	}
 
@@ -161,7 +178,15 @@ final class UserSpaceFiles {
 	}
 
 	public function dir_opendir( string $path ): bool {
-		$this->directory = self::plain( static fn() => @opendir( $path ) );
+		$listing         = self::$listing;
+		$this->directory = self::plain(
+			static function () use ( $path, $listing ) {
+				if ( null !== $listing ) {
+					$listing( $path );
+				}
+				return @opendir( $path );
+			}
+		);
 		return false !== $this->directory;
 	}
 

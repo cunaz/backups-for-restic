@@ -212,15 +212,17 @@ final class Staging {
 	/**
 	 * How many directories are on their way out: due and not yet set aside, or set aside and
 	 * not yet deleted completely. While a stored job cannot be read, what is due stays
-	 * (expire()), so only what was set aside is on its way out.
+	 * (expire()), so only what was set aside is on its way out. The pins and that job come from
+	 * one reading of the job documents (JobStore::census()), as in expire().
 	 *
 	 * @param int $hours Hours a staging directory is kept after its job finished.
 	 * @return int Number of directories.
 	 * @throws StorageFailed If restores/ cannot be listed.
 	 */
 	public function removing( int $hours ): int {
-		$survey = $this->survey( $hours );
-		return ( null === $this->jobs->unreadable() ? count( $survey['due'] ) : 0 ) + count( $survey['removing'] );
+		$census = $this->jobs->census( $this->clock->now()[0] );
+		$survey = $this->survey( $hours, $census['restores'] );
+		return ( null === $census['unreadable'] ? count( $survey['due'] ) : 0 ) + count( $survey['removing'] );
 	}
 
 	/**
@@ -234,7 +236,8 @@ final class Staging {
 	 *                   null if nothing is staged for the job.
 	 * @throws InvalidArgument With the code invalid_job_id if the ID is not one of a job.
 	 * @throws JobConflict If the job is a restore that has not ended, or with the code
-	 *                     job_unreadable or job_inaccessible if its document cannot be read
+	 *                     job_unreadable or job_inaccessible and that job's ID if its document,
+	 *                     or that of any other stored job, cannot be read
 	 *                     (JobStore::refuse_unreadable()).
 	 * @throws StorageFailed If the directory cannot be set aside or deleted.
 	 */
@@ -260,7 +263,11 @@ final class Staging {
 	 */
 	private function remove_one( string $id, float $deadline ): ?bool {
 		$this->require_root();
-		$pins = $this->jobs->restore_pins( $this->clock->now()[0] );
+		// One reading of every job document gives the pins and the hold below: a job that can be
+		// read again between two readings would be in neither. Before, the hold was read after
+		// the pins, and an apply that turned readable in between let its restore's staging go.
+		$census = $this->jobs->census( $this->clock->now()[0] );
+		$pins   = $census['restores'];
 		if ( array_key_exists( $id, $pins ) ) {
 			JobConflict::raise(
 				'A restore operation still needs this staging for apply or undo.',
@@ -283,15 +290,23 @@ final class Staging {
 		if ( null !== $job && JobType::Restore === $job->type && ! $job->state->is_terminal() ) {
 			JobConflict::raise( 'The restore job has not ended.', [ 'job' => $id ] );
 		}
-		$aside = $this->directory . '/' . self::REMOVING . $id;
-		if ( self::exists( $this->directory . '/' . $id ) ) {
+		$aside  = $this->directory . '/' . self::REMOVING . $id;
+		$staged = self::exists( $this->directory . '/' . $id );
+		if ( ! $staged && ! self::exists( $aside ) ) {
+			return null;
+		}
+		// Another stored job that cannot be read may be an apply within its recovery window whose
+		// undo needs this staging, which no pin can say: the heartbeat holds it (expire()), and
+		// a request does not remove it either, before anything is renamed.
+		if ( null !== $census['unreadable'] ) {
+			$this->jobs->refuse_unreadable( $census['unreadable'] );
+		}
+		if ( $staged ) {
 			// What an earlier removal under this name left goes first: its place is needed.
 			if ( ! $this->delete( $aside, $deadline ) ) {
 				return false;
 			}
 			$this->set_aside( $id );
-		} elseif ( ! self::exists( $aside ) ) {
-			return null;
 		}
 		return $this->delete( $aside, $deadline );
 	}
@@ -376,7 +391,7 @@ final class Staging {
 	 * failed and tried again by the next call; it never keeps the staging of other restores
 	 * from expiring.
 	 *
-	 * While a stored job cannot be read (JobStore::unreadable()), no staging is set aside and no
+	 * While a stored job cannot be read (JobStore::census()), no staging is set aside and no
 	 * sealed review is removed: that job may be an apply within its recovery window whose undo
 	 * needs them. Before, the staging of its restore expired with its own hours and the sealed
 	 * review after one, while the apply's journal stayed, so that the undo offered once the
@@ -391,17 +406,18 @@ final class Staging {
 	 * @return array{removed:int,pending:int,failed:int} Staging deletion summary.
 	 */
 	private function expire( int $hours, float $deadline ): array {
-		$active       = $this->jobs->active();
-		$now          = $this->clock->now()[0];
-		$pinned_plans = $this->jobs->pinned_file_plans( $now );
-		$held         = null !== $this->jobs->unreadable();
-		$failed       = 0;
+		$now = $this->clock->now()[0];
+		// One reading of every job document: a job that cannot be read in it holds everything of
+		// this pass, and an undo or its review that it finds keeps its apply's journal.
+		$census = $this->jobs->census( $now );
+		$held   = null !== $census['unreadable'];
+		$failed = 0;
 		foreach ( $this->jobs->file_changes() as $job ) {
 			if ( $this->late( $deadline ) ) {
 				break;
 			}
 			try {
-				if ( ! $held && JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $pinned_plans[ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
+				if ( ! $held && JobType::FilePlan === $job->type && $job->state->is_terminal() && isset( $job->data['plan_retained'] ) && $job->finished_at + 3600 <= $now && ! isset( $census['plans'][ $job->id ] ) && is_string( $job->data['restore'] ?? null ) ) {
 					if ( $this->delete_plan( $job->data['restore'], $job->id, $deadline ) ) {
 						unset( $job->data['plan_retained'] );
 						$this->jobs->save( $job );
@@ -412,10 +428,10 @@ final class Staging {
 			}
 			if ( $held ) {
 				// The job that cannot be read may be an undo of this apply that is queued or
-				// running, which active() does not see: no journal goes while that lasts.
+				// running: no journal goes while that lasts.
 				continue;
 			}
-			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || ( JobType::Undo === $active?->type && $job->id === ( $active->data['apply'] ?? null ) ) || ( JobType::FilePlan === $active?->type && true === ( $active->data['undo'] ?? false ) && $job->id === ( $active->data['subject'] ?? null ) ) ) {
+			if ( JobType::Apply !== $job->type || ! $job->state->is_terminal() || isset( $census['undoing'][ $job->id ] ) ) {
 				continue;
 			}
 			try {
@@ -429,7 +445,7 @@ final class Staging {
 				++$failed;
 			}
 		}
-		$survey  = $this->survey( $hours );
+		$survey  = $this->survey( $hours, $census['restores'] );
 		$removed = 0;
 		$pending = 0;
 		$aside   = $survey['removing'];
@@ -470,16 +486,17 @@ final class Staging {
 	 * none of the three, and neither are names that are not those of jobs: they are not this
 	 * class's to judge.
 	 *
-	 * @param int $hours Hours a staging directory is kept after its job finished.
+	 * @param int                          $hours Hours a staging directory is kept after its job finished.
+	 * @param array<string, int|null>|null $pins  Restore pins of the expiry's census (JobStore::census()), or null to read them.
 	 * @return array{kept: list<StagedRestore>, due: list<string>, removing: list<string>} Listed directories, job IDs of due ones, and names of those set aside.
 	 * @throws StorageFailed If restores/ cannot be listed.
 	 */
-	private function survey( int $hours ): array {
+	private function survey( int $hours, ?array $pins = null ): array {
 		$kept     = [];
 		$due      = [];
 		$removing = [];
 		$now      = $this->clock->now()[0];
-		$pins     = $this->jobs->pinned_restores( $now );
+		$pins   ??= $this->jobs->restore_pins( $now );
 		foreach ( $this->entries() as $name ) {
 			if ( str_starts_with( $name, self::REMOVING ) && 1 === preg_match( JobStore::ID_PATTERN, substr( $name, strlen( self::REMOVING ) ) ) ) {
 				$removing[] = $name;
@@ -494,7 +511,8 @@ final class Staging {
 			}
 			$staged = $this->describe( $name, $job, $hours );
 			if ( null === $staged || $now >= $staged->expires ) {
-				if ( ! isset( $pins[ $name ] ) ) {
+				// A pin for a staging in use has no end: its value is null.
+				if ( ! array_key_exists( $name, $pins ) ) {
 					$due[] = $name;
 				}
 			} else {
@@ -612,11 +630,14 @@ final class Staging {
 	}
 
 	/**
-	 * Deletes a directory with everything in it, until the deadline. A symbolic link is
-	 * removed as a link and never followed. An entry that another request removed meanwhile
-	 * counts as removed.
+	 * Deletes a directory with everything in it, until the deadline: a staging directory, the
+	 * private data of a preview, the journal of an apply or the verification folder of a file
+	 * job. A symbolic link is removed as a link and never followed. An entry that another
+	 * request removed meanwhile counts as removed.
 	 *
-	 * No name of an entry goes into an error: the names come from a snapshot.
+	 * No name of an entry goes into an error: the names come from a snapshot. The messages say
+	 * what this function deletes in general; before, they named a staging directory, also in
+	 * the error of a file job whose verification folder could not be searched.
 	 *
 	 * @param string $path     Directory, file or link.
 	 * @param float  $deadline Unix time at which the deletion stops.
@@ -625,11 +646,17 @@ final class Staging {
 	 */
 	private function delete( string $path, float $deadline ): bool {
 		if ( ! self::exists( $path ) ) {
+			// Gone only where that is established (Files::missing()): a name below a folder that
+			// cannot be searched may be there all the same. Before, it counted as removed, and the
+			// folder that listed it was read again and again until the deadline.
+			if ( ! Files::missing( $path ) ) {
+				StorageFailed::raise( 'An entry that is being deleted in the private working directory cannot be looked up.' );
+			}
 			return true;
 		}
 		if ( is_link( $path ) || ! is_dir( $path ) ) {
-			if ( ! unlink( $path ) && self::exists( $path ) ) {
-				StorageFailed::raise( 'An entry of a staging directory could not be removed.' );
+			if ( ! unlink( $path ) && ! Files::missing( $path ) ) {
+				StorageFailed::raise( 'An entry could not be deleted in the private working directory.' );
 			}
 			return true;
 		}
@@ -641,8 +668,8 @@ final class Staging {
 				}
 			}
 		} while ( [] !== $names );
-		if ( ! rmdir( $path ) && self::exists( $path ) ) {
-			StorageFailed::raise( 'A directory of a staging directory could not be removed.' );
+		if ( ! rmdir( $path ) && ! Files::missing( $path ) ) {
+			StorageFailed::raise( 'A folder could not be deleted in the private working directory.' );
 		}
 		return true;
 	}
@@ -669,7 +696,10 @@ final class Staging {
 		$attempted = $undo . '/attempted';
 		clearstatcache( true, $attempted );
 		if ( ! is_link( $attempted ) && ! is_file( $attempted ) ) {
-			// Missing, or the folder of a damaged journal, which delete() removes as it comes.
+			// Missing, or the folder of a damaged journal, which delete() removes as it comes. An
+			// earlier call may have removed the count and stopped before its synchronisation:
+			// that removal is put on disk before anything else of the journal goes too.
+			Files::sync_directory( $undo, $this->jobs->observer() );
 			return;
 		}
 		if ( ! unlink( $attempted ) && self::exists( $attempted ) ) {
@@ -691,7 +721,7 @@ final class Staging {
 		$handle = opendir( $directory );
 		if ( false === $handle ) {
 			if ( self::exists( $directory ) ) {
-				StorageFailed::raise( 'A directory of a staging directory could not be listed.' );
+				StorageFailed::raise( 'A folder that is being deleted in the private working directory could not be listed.' );
 			}
 			return [];
 		}

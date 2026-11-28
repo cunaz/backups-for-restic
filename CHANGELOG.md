@@ -206,6 +206,15 @@ All notable changes are documented here. The format follows
   removed it.
 
 ### Security
+- The undo of live file changes through WP-CLI is bound to a review that the command printed,
+  on a terminal or by its digest: on a terminal, `wp backups-for-restic undo` prints the review
+  and asks; without one it undoes only with `--digest` and the digest of a review that an
+  earlier run printed, and only while the review made again has that digest, which it keeps
+  while every entry is decided as before. Before, `--yes` or a piped `y` confirmed it, bound to
+  no review: a script undid whatever the review said. For a script: `--yes` is
+  refused and the command undoes nothing; run it once, take the digest that the review prints
+  (`Digest of this review: …`), and run it again with `--digest=<digest>`. A bare or empty
+  `--digest` is refused too.
 - The discard of a database restore binding whose private tables are on another database
   server or in another database is reviewed and confirmed as an undo is. Before, the REST
   route forgot the binding, and with it the undo of that restore, after the WordPress password
@@ -388,8 +397,8 @@ All notable changes are documented here. The format follows
   begun again, and after five such readings in a row a preview stops with
   `file_folder_changing`, whose log line names the folder, and so does the check that an
   apply makes before maintenance, before it changes a file. An undo review keeps the entries
-  of that folder as it keeps those of a folder it cannot read (`ambiguous_destination`) and
-  goes on. Before, the reading began again at every tick for as long as the folder changed
+  of that folder, with the reason `destination_changing` ("The folder kept changing while the
+  review read its names"), and goes on. Before, the reading began again at every tick for as long as the folder changed
   between ticks, so that such a review never ended, and a change during a tick failed a
   preview at once, as did a change that removed or renamed names after a tick looked at the
   folder and before it resumed its reading.
@@ -424,8 +433,44 @@ All notable changes are documented here. The format follows
   could not leave maintenance mode, shows that failure on the admin page beside its state and
   its counts, and WP-CLI's report of a cancelled undo names it too. Before, only a failed job
   showed its error, and the page said "Cancelled" while the maintenance page stayed up.
-- While a stored job cannot be read, no staging and no sealed review expires, and no undo
-  journal of an apply is deleted. Such a job may be an undo that still runs, whose apply's
+- `wp backups-for-restic apply-plan` and `undo` print the texts of a refusal's code, as the
+  page shows them, where they printed the exception's technical message, such as "This apply
+  has no available undo.". `undo` answers an ID that no job has as `logs` and `cancel` do,
+  "The job does not exist.", and says so of a job that is not an apply of staged files and of
+  an apply that has not ended, where it said of each that the apply can no longer be undone.
+- A stored job that cannot be read is shown on the dashboard and in the Logs tab, and
+  `wp backups-for-restic status` lists it, each with the texts that name the job, and they say
+  what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on request
+  and at their expiry, and the pruning of the job history. The page and `status` name the
+  newest five and say how many more there are; `GET /status` and `GET /jobs` return the newest
+  hundred as `unreadable_jobs`, with their number as `unreadable_total`. The texts of
+  `job_unreadable` name the job as well. Before,
+  only the refusal of a new job named one, no list of jobs showed it, and a scheduled backup
+  that it kept from starting was reported only by the stale notice once no backup had
+  succeeded for long enough.
+- The texts of `job_unreadable` and `job_inaccessible`, and the refusal of uninstalling, say
+  what to do with a job document that no version reads, such as one cut off or filed under
+  another job's ID, and with job files that cannot be put back: once the job cannot be running
+  any more, move its folder out of `jobs/` and keep that copy. Scenario J of the recovery
+  guide gives the commands. Before, they named only a version that can read the job, or
+  putting the job's files back, and neither exists for such a document.
+- A staging, preview or undo workspace with a folder that the PHP user can list but not
+  search is counted as a removal that failed, and the heartbeat moves on. Before, every name
+  in that folder counted as removed without a removal being tried, because it could not be
+  looked up, and the folder was read again until the heartbeat's time was up, every time. A
+  file apply or undo whose verification folder holds such a folder now ends, as failed with
+  the code of its type (`file_apply_failed`, `file_undo_failed`), and its log says that an
+  entry could not be looked up in the private working directory. Before, it stayed in its
+  cleanup at every tick, as the active job, and no other job could start, scheduled backups
+  included.
+- While a stored job cannot be read, no staging and no sealed review expires, no undo
+  journal of an apply is deleted, and no staging is removed on request either
+  (`DELETE /restores/{id}` answers with the code and ID of that job, before anything is
+  renamed), and the job history is not pruned, which a backup that was already running would
+  do at its end, so that the document of the restore that such an apply's undo needs stays.
+  The heartbeat decides all of this from one reading of the job documents, so that
+  a job that becomes readable or unreadable meanwhile is either held or kept, not missed. Such
+  a job may be an undo that still runs, whose apply's
   journal must stay beyond the window, or an apply within its recovery window: before, the staging of its restore expired with its
   own hours and its sealed review after one, while its journal stayed, so that once the job
   could be read again the apply was offered for undo and the undo refused with

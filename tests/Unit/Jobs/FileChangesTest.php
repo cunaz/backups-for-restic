@@ -1482,6 +1482,49 @@ final class FileChangesTest extends TestCase {
 		self::assertFileExists( $held . '/checkpoint' );
 	}
 
+	public function test_an_apply_whose_verification_folder_cannot_be_searched_ends_and_says_where_it_failed(): void {
+		// The staging's clock moves on a second with every reading, so that a removal that reads a
+		// folder again and again ends at its deadline; the rest of the test site keeps its clock.
+		$ticking       = new class( $this->clock ) implements Clock {
+			/** Readings so far. */
+			public int $readings = 0;
+
+			/**
+			 * @param FrozenClock $base Clock of the test.
+			 */
+			public function __construct( private FrozenClock $base ) {
+			}
+
+			public function now(): array {
+				return [ $this->base->seconds + $this->readings++, 0 ];
+			}
+		};
+		$this->staging = new Staging( $this->directory . '/restores', $this->jobs, $ticking );
+		$this->changes = $this->service( $this->clock );
+		$this->runner  = new Runner( $this->jobs, new RunnerLock( $this->directory . '/runner.lock' ), $this->changes, $this->clock, new SystemRandom() );
+		$job           = $this->start();
+		// A folder in the apply's verification data that the PHP user can list but not search.
+		$folder = $this->jobs->directory( $job ) . '/verification/stuck';
+		mkdir( $folder . '/inside', 0700, true );
+		file_put_contents( $folder . '/file', 'x' );
+		chmod( $folder, 0600 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$ended = $this->run_job( $job, JobState::Failed );
+		} finally {
+			restore_error_handler();
+			chmod( $folder, 0700 );
+		}
+		// Before, every name in it counted as removed, the folder was read again until the tick's
+		// time was up, and the apply stayed in its cleanup at every tick as the active job. The
+		// message named a staging directory, which this folder is not.
+		self::assertSame( [ 'cleaning_up', 'file_apply_failed', 'An entry that is being deleted in the private working directory cannot be looked up.' ], [ $ended->step, $ended->error?->code, $ended->error?->message ] );
+		self::assertFileExists( $folder . '/file' );
+	}
+
 	public function test_a_stopped_undo_records_what_it_reverted_in_the_tick_in_which_its_cleanup_begins(): void {
 		[ $job, $undo ] = $this->cancelled_after_one_revert();
 		$verification   = $this->jobs->directory( $undo ) . '/verification';
@@ -2036,7 +2079,9 @@ final class FileChangesTest extends TestCase {
 		foreach ( $page['entries'] as $entry ) {
 			$decisions[ (string) $entry['destination'] ] = [ $entry['action'], $entry['reason'] ];
 		}
-		self::assertSame( [ 'keep', 'ambiguous_destination' ], $decisions[ $wide . '/added.txt' ] );
+		// The reason says that the folder kept changing. Before, it was ambiguous_destination,
+		// "Conflicting names at the destination", which no other spelling caused.
+		self::assertSame( [ 'keep', 'destination_changing' ], $decisions[ $wide . '/added.txt' ] );
 		self::assertSame( [ 'restore', 'undo_journal' ], $decisions[ $this->live . '/a-existing' ] );
 	}
 
@@ -2731,6 +2776,30 @@ final class FileChangesTest extends TestCase {
 		$this->job_writes = null;
 		// The removal of the count is synchronised before anything else of the journal goes, so
 		// that a power loss cannot bring back the count without the undone marker.
+		self::assertSame( [ $journal ], $synced );
+		self::assertDirectoryDoesNotExist( $workspace );
+	}
+
+	public function test_a_journal_whose_count_an_earlier_heartbeat_removed_is_synchronised_before_the_rest_goes(): void {
+		$apply = $this->run_job( $this->start() );
+		$this->undo( $apply );
+		$workspace = $this->jobs->directory( $apply ) . '/undo';
+		// An earlier heartbeat removed the count of attempted changes and stopped before its
+		// synchronisation: after a power loss the disk may still hold it.
+		unlink( $workspace . '/attempted' );
+		$journal = array_values( array_diff( (array) scandir( $workspace ), [ '.', '..' ] ) );
+		self::assertContains( 'reverted', $journal );
+		$synced           = [];
+		$this->job_writes = static function ( string $operation, string $path ) use ( $workspace, &$synced ): void {
+			if ( 'sync' === $operation && $workspace === $path ) {
+				$synced[] = array_values( array_diff( (array) scandir( $workspace ), [ '.', '..' ] ) );
+			}
+		};
+		$this->staging->remove_due( 24, PHP_FLOAT_MAX );
+		$this->job_writes = null;
+		// Before, the next heartbeat found no count and removed the undone marker with nothing
+		// on disk before it: a power loss could keep that removal and lose the first, which
+		// opened the window again.
 		self::assertSame( [ $journal ], $synced );
 		self::assertDirectoryDoesNotExist( $workspace );
 	}

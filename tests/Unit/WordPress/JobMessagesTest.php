@@ -213,16 +213,23 @@ final class JobMessagesTest extends TestCase {
 		$named = Messages::stored_job( 'job_inaccessible', $id );
 		// Before, this job was refused as job_unreadable, which neither named it nor said what to do.
 		self::assertSame( 'The PHP user cannot open the stored job 20260101T000000Z-0a1b2c in the private working directory.', $named['message'] );
-		foreach ( [ 'belongs to another user or lacks read or search permission', 'WP-CLI command that ran as root', 'Give the PHP user back ownership of that folder', 'a link is in the place of the folder, or something other than a regular file is in the place of job.json', 'new jobs and repository changes stay blocked' ] as $part ) {
+		foreach ( [ 'belongs to another user or lacks read or search permission', 'WP-CLI command that ran as root', 'Give the PHP user back ownership of that folder', 'a link is in the place of the folder, or something other than a regular file is in the place of job.json', 'where they cannot be put back, move what is in their place out of jobs/ once the job cannot be running any more, and keep that copy.', 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ] as $part ) {
 			self::assertStringContainsString( $part, $named['hint'] );
 		}
 		self::assertStringNotContainsString( 'plugin version', $named['message'] . ' ' . $named['hint'] );
 		$general = Messages::job_error( 'job_inaccessible' );
 		self::assertSame( 'The PHP user cannot open a stored job in the private working directory.', $general['message'] );
 		self::assertSame( $named['hint'], $general['hint'] );
-		// A document that this version cannot parse keeps its texts, which ask for another version.
-		self::assertSame( Messages::job_error( 'job_unreadable' ), Messages::stored_job( 'job_unreadable', $id ) );
-		self::assertStringContainsString( 'Install a plugin version that can read the job.', Messages::stored_job( 'job_unreadable', $id )['hint'] );
+		// A document that this version cannot parse keeps its code, and its message names the job
+		// too. Before, it named none.
+		$parse = Messages::stored_job( 'job_unreadable', $id );
+		self::assertSame( 'This version of the plugin cannot read the stored job 20260101T000000Z-0a1b2c.', $parse['message'] );
+		self::assertSame( Messages::job_error( 'job_unreadable' )['hint'], $parse['hint'] );
+		// A newer layout is only one reason: a document that no version reads has a way out too, and
+		// both say what waits meanwhile. Before, they named only another version.
+		foreach ( [ 'A newer version of the plugin may have written it: install that version.', 'If no version reads it, its document is damaged: once the job cannot be running any more, move its folder', 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ] as $part ) {
+			self::assertStringContainsString( $part, $parse['hint'] );
+		}
 	}
 
 	#[RunInSeparateProcess]

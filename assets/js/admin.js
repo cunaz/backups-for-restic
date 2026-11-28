@@ -617,14 +617,44 @@
 	/* ------------------------------------------------------------- Dashboard */
 
 	/**
-	 * Notices that stay until their cause is gone: check findings and retention changes.
+	 * Notices for the stored jobs that cannot be read, each naming its job and what to do: they
+	 * keep every new job from starting, scheduled backups included, and no list of jobs can show
+	 * them. The newest five have a notice each, and one more says how many others there are.
+	 *
+	 * @param {Array}  jobs  Jobs that cannot be read, newest first: id, code, message and hint.
+	 * @param {number} total How many there are; the list may hold fewer.
+	 * @return {Array<Element>} Notices.
+	 */
+	function unreadableJobs( jobs, total ) {
+		const shown = ( jobs || [] ).slice( 0, 5 );
+		const notices = shown.map( function ( job ) {
+			return el( 'div', { className: 'notice notice-error inline bfr-alert bfr-unreadable-job' }, [
+				el( 'p', {}, [ el( 'strong', {}, [ job.message ] ) ] ),
+				el( 'p', {}, [ job.hint ] ),
+			] );
+		} );
+		const more = Math.max( Number( total ) || 0, ( jobs || [] ).length ) - shown.length;
+		if ( more > 0 ) {
+			notices.push(
+				el( 'div', { className: 'notice notice-error inline bfr-alert bfr-unreadable-more' }, [
+					/* translators: %d: number of further stored jobs that cannot be read. */
+					el( 'p', {}, [ sprintf( _n( '%d more stored job cannot be read either.', '%d more stored jobs cannot be read either.', more, 'backups-for-restic' ), more ) ] ),
+				] ),
+			);
+		}
+		return notices;
+	}
+
+	/**
+	 * Notices that stay until their cause is gone: stored jobs that cannot be read, check
+	 * findings and retention changes.
 	 *
 	 * @param {Object}     status Dashboard data.
 	 * @param {() => void} reload Shows the dashboard again.
 	 * @return {Array} Nodes.
 	 */
 	function alerts( status, reload ) {
-		const nodes = [];
+		const nodes = [ ...unreadableJobs( status.unreadable_jobs, status.unreadable_total ) ];
 		const alert = status.check_alert;
 		if ( alert ) {
 			nodes.push(
@@ -1513,6 +1543,7 @@
 			live_root: __( 'Live site directory', 'backups-for-restic' ),
 			type_conflict: __( 'Staged and live file types differ', 'backups-for-restic' ),
 			ambiguous_destination: __( 'Conflicting names at the destination', 'backups-for-restic' ),
+			destination_changing: __( 'The folder kept changing while the review read its names', 'backups-for-restic' ),
 			linked_destination: __( 'Destination contains a symbolic link', 'backups-for-restic' ),
 			unwritable_destination: __( 'Destination is read-only', 'backups-for-restic' ),
 			foreign_owner: __( 'The live file belongs to another user than PHP, so its owner could not be kept', 'backups-for-restic' ),
@@ -3515,6 +3546,7 @@
 		api( '/jobs' )
 			.then( function ( response ) {
 				replace( root, [
+					...unreadableJobs( response.unreadable_jobs, response.unreadable_total ),
 					jobTable( response.jobs, function ( job ) {
 						api( '/jobs/' + job.id + '/log' ).then( function ( log ) {
 							replace( detail, [

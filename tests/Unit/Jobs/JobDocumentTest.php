@@ -196,6 +196,76 @@ final class JobDocumentTest extends TestCase {
 		$this->assert_blocks_changes( $store, $job );
 	}
 
+	public function test_every_stored_job_that_cannot_be_read_is_named_newest_first(): void {
+		$store       = $this->store();
+		$read        = $store->create( JobType::Backup, 'manual', 1767225600 );
+		$read->state = JobState::Succeeded;
+		$store->save( $read );
+		foreach ( [ '20260102T000000Z-0a0001', '20260103T000000Z-0a0002' ] as $id ) {
+			mkdir( $this->directory . '/' . $id, 0700 );
+			file_put_contents( $this->directory . '/' . $id . '/job.json', '{' );
+		}
+		// A directory without a document is no job.
+		mkdir( $this->directory . '/20260104T000000Z-0a0003', 0700 );
+		// Before, only the newest was found, and only a refusal named it: the lists of jobs show
+		// none of them.
+		self::assertSame( [ '20260103T000000Z-0a0002', '20260102T000000Z-0a0001' ], $store->unreadable_ids() );
+		self::assertSame( [ '20260103T000000Z-0a0002' ], $store->unreadable_ids( 1 ) );
+		self::assertSame( '20260103T000000Z-0a0002', $store->unreadable() );
+		self::assertSame( [ $read->id ], array_map( static fn ( Job $job ): string => $job->id, $store->latest( 10 ) ) );
+		self::assertSame(
+			[
+				'active'     => null,
+				'unreadable' => [ '20260103T000000Z-0a0002', '20260102T000000Z-0a0001' ],
+			],
+			$store->overview()
+		);
+	}
+
+	public function test_the_overview_gives_the_active_job_and_every_job_that_cannot_be_read_from_one_reading(): void {
+		$store        = $this->store();
+		$ended        = $store->create( JobType::Backup, 'manual', 1767225600 );
+		$ended->state = JobState::Succeeded;
+		$store->save( $ended );
+		$active = $store->create( JobType::Check, 'manual', 1767225660 );
+		// Newer than the active job, and older: every one is found, not only those before it.
+		foreach ( [ '20260102T000000Z-0a0001', '20251231T000000Z-0a0002' ] as $id ) {
+			mkdir( $this->directory . '/' . $id, 0700 );
+			file_put_contents( $this->directory . '/' . $id . '/job.json', '{' );
+		}
+		$overview = $store->overview();
+		self::assertSame( [ $active->id, [ '20260102T000000Z-0a0001', '20251231T000000Z-0a0002' ] ], [ $overview['active']?->id, $overview['unreadable'] ] );
+		self::assertSame( $store->active()?->id, $overview['active']?->id );
+		self::assertSame( $store->unreadable_ids(), $overview['unreadable'] );
+	}
+
+	public function test_no_job_is_pruned_while_a_stored_job_cannot_be_read(): void {
+		$store = $this->store();
+		// A restore that newer jobs push out of the history.
+		foreach ( [
+			'20260101T000000Z-0a0001' => JobType::Restore,
+			'20260102T000000Z-0a0002' => JobType::Backup,
+			'20260103T000000Z-0a0003' => JobType::Backup,
+		] as $id => $type ) {
+			$job              = new Job( $id, $type, 'manual', 1767225600 );
+			$job->state       = JobState::Succeeded;
+			$job->finished_at = 1767225660;
+			$store->save( $job );
+		}
+		// The newest job cannot be read: it may be an apply of that restore within its window,
+		// whose undo needs the restore's document, and no pin can say so.
+		$unreadable = $this->directory . '/20260104T000000Z-0a0004';
+		mkdir( $unreadable, 0700 );
+		file_put_contents( $unreadable . '/job.json', '{' );
+		// Before, the restore and both backups went, as at the end of a backup that was already
+		// running when the document became unreadable.
+		self::assertSame( 0, $store->prune( 1, 1767312000 ) );
+		self::assertNotNull( $store->get( '20260101T000000Z-0a0001' ) );
+		TempDir::remove( $unreadable );
+		self::assertSame( 2, $store->prune( 1, 1767312000 ) );
+		self::assertNull( $store->get( '20260101T000000Z-0a0001' ) );
+	}
+
 	public function test_a_document_filed_under_another_job_id_blocks_changes(): void {
 		$store = $this->store();
 		$job   = $store->create( JobType::Restore, 'manual', 1767225600 );

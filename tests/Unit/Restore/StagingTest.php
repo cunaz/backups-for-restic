@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Crypto\SystemRandom;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\JobConflict;
+use BackupsForRestic\Exception\StorageFailed;
 use BackupsForRestic\Jobs\Job;
 use BackupsForRestic\Jobs\JobError;
 use BackupsForRestic\Jobs\JobState;
@@ -20,6 +21,7 @@ use BackupsForRestic\Support\Clock;
 use BackupsForRestic\Support\Redactor;
 use BackupsForRestic\Tests\Support\FrozenClock;
 use BackupsForRestic\Tests\Support\TempDir;
+use BackupsForRestic\Tests\Support\UserSpaceFiles;
 
 /**
  * The staging of finished restores (ADR 0040) on a real directory: what is listed, when it
@@ -121,6 +123,52 @@ final class StagingTest extends TestCase {
 	 */
 	private function names(): array {
 		return array_values( array_diff( (array) scandir( $this->restores ), [ '.', '..' ] ) );
+	}
+
+	/**
+	 * An apply of a restore that ended a moment ago, within its recovery window, with the
+	 * journal of a change that no undo reverted: it keeps the restore's staging for its undo.
+	 */
+	private function pinning_apply( Job $restore ): Job {
+		$apply       = $this->job( JobState::Succeeded, $this->clock->seconds - 30, [], JobType::Apply );
+		$apply->data = [ 'restore' => $restore->id ];
+		$this->jobs->save( $apply );
+		mkdir( $this->jobs->directory( $apply ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $apply ) . '/undo/attempted', '1' );
+		return $apply;
+	}
+
+	/**
+	 * Runs an operation while the document of a job is one text until the job documents are
+	 * listed a second time and another one from then on, as when an administrator gives the
+	 * job's folder back to the PHP user, or a file system fails, at that moment.
+	 *
+	 * @template T
+	 * @param Job           $job       The job.
+	 * @param string        $before    Its document until then.
+	 * @param string        $after     Its document from then on.
+	 * @param \Closure(): T $operation The operation.
+	 * @return T What the operation returns.
+	 */
+	private function turning_at_the_second_listing( Job $job, string $before, string $after, \Closure $operation ): mixed {
+		$jobs     = $this->directory . '/private/jobs';
+		$document = $jobs . '/' . $job->id . '/job.json';
+		file_put_contents( $document, $before );
+		$listings = 0;
+		UserSpaceFiles::enable(
+			'',
+			'',
+			static function ( string $path ) use ( &$listings, $jobs, $document, $after ): void {
+				if ( rtrim( $path, '/' ) === $jobs && 2 === ++$listings ) {
+					file_put_contents( $document, $after );
+				}
+			}
+		);
+		try {
+			return $operation();
+		} finally {
+			UserSpaceFiles::disable();
+		}
 	}
 
 	public function test_downloads_use_only_regular_files_in_unexpired_successful_staging(): void {
@@ -452,6 +500,76 @@ final class StagingTest extends TestCase {
 		self::assertFileExists( $path . '/files/site/one.txt' );
 	}
 
+	public function test_no_staging_is_removed_on_request_while_another_stored_job_cannot_be_read(): void {
+		$restore = $this->restored( $this->clock->seconds - 60 );
+		$path    = $this->restores . '/' . $restore->id;
+		// Any other job: what it is cannot be read, so it may be an apply within its window whose
+		// undo needs this staging.
+		$unreadable = $this->job( JobState::Succeeded, $this->clock->seconds );
+		file_put_contents( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json', '{' );
+		try {
+			$this->staging->remove( $restore->id, self::NO_DEADLINE );
+			self::fail( 'A staging was removed while a stored job cannot be read.' );
+		} catch ( JobConflict $conflict ) {
+			// Before, it was removed, and that apply's undo was refused with file_staging_gone
+			// once its document could be read again.
+			self::assertSame( [ 'job_unreadable', $unreadable->id ], [ JobError::from_throwable( $conflict )->code, $conflict->context()['job'] ?? null ] );
+		}
+		// Nothing was set aside.
+		self::assertSame( [ $restore->id ], $this->names() );
+		self::assertFileExists( $path . '/files/site/one.txt' );
+		// Nothing staged under an ID is still answered as nothing staged.
+		self::assertNull( $this->staging->remove( '20251229T000000Z-0d0e0f', self::NO_DEADLINE ) );
+		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
+		self::assertTrue( $this->staging->remove( $restore->id, self::NO_DEADLINE ) );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_an_apply_that_can_be_read_again_while_its_staging_is_removed_on_request_keeps_it(): void {
+		$restore = $this->restored( $this->clock->seconds - 60 );
+		$apply   = $this->pinning_apply( $restore );
+		$saved   = (string) file_get_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json' );
+		// The apply cannot be read until the removal lists the job documents a second time.
+		$refusal = $this->turning_at_the_second_listing(
+			$apply,
+			'{',
+			$saved,
+			function () use ( $restore ): array {
+				try {
+					return [ 'removed', $this->staging->remove( $restore->id, self::NO_DEADLINE ) ];
+				} catch ( JobConflict $conflict ) {
+					return [ JobError::from_throwable( $conflict )->code, $conflict->context()['job'] ?? null ];
+				}
+			}
+		);
+		// Before, the pins were read while the apply could not be read and the hold after that,
+		// when it could: neither kept the staging, and the undo of the apply was refused with
+		// file_staging_gone. Now one reading gives both, and in it the apply cannot be read.
+		self::assertSame( [ 'job_unreadable', $apply->id ], $refusal );
+		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
+		// Once the apply can be read, it keeps the staging for its undo.
+		file_put_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json', $saved );
+		try {
+			$this->staging->remove( $restore->id, self::NO_DEADLINE );
+			self::fail( 'The staging of an apply within its recovery window was removed.' );
+		} catch ( JobConflict $conflict ) {
+			self::assertSame( 'restore_kept_for_undo', $conflict->context()['code'] ?? null );
+		}
+	}
+
+	public function test_what_is_on_its_way_out_is_counted_from_one_reading_of_the_job_documents(): void {
+		// The staging of a restore whose hours are over, which an apply keeps for its undo.
+		$restore = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$apply   = $this->pinning_apply( $restore );
+		$saved   = (string) file_get_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json' );
+		self::assertSame( 0, $this->staging->removing( 24 ) );
+		// The apply cannot be read until the count lists the job documents a second time. Before,
+		// the pins were read while it could not be read and the hold after that, when it could,
+		// so the staging was counted as on its way out although neither reading lets it go.
+		self::assertSame( 0, $this->turning_at_the_second_listing( $apply, '{', $saved, fn (): int => $this->staging->removing( 24 ) ) );
+		self::assertSame( 0, $this->staging->removing( 24 ) );
+	}
+
 	public function test_a_job_document_that_cannot_be_looked_up_keeps_its_staging(): void {
 		$job    = $this->restored( $this->clock->seconds - 3 * 86400 );
 		$folder = $this->directory . '/private/jobs/' . $job->id;
@@ -482,9 +600,10 @@ final class StagingTest extends TestCase {
 	}
 
 	public function test_no_staging_expires_while_a_stored_job_cannot_be_read(): void {
-		$expired  = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$expired = $this->restored( $this->clock->seconds - 3 * 86400 );
+		// A leftover: no job accounts for it and it holds no report, so it would go at once.
 		$leftover = '20251230T000000Z-0a1b2c';
-		$this->stage( $leftover );
+		$this->stage( $leftover, false );
 		$aside = $this->restores . '/' . Staging::REMOVING . '20251229T000000Z-0d0e0f';
 		mkdir( $aside . '/files', 0700, true );
 		// Any job: what it is cannot be read, so it may be an apply whose undo needs a staging.
@@ -560,6 +679,131 @@ final class StagingTest extends TestCase {
 		unlink( $this->directory . '/private/jobs/' . $unreadable->id . '/job.json' );
 		$this->staging->remove_due( 24, self::NO_DEADLINE );
 		self::assertDirectoryDoesNotExist( $undo );
+	}
+
+	/**
+	 * Jobs that keep the journal of the apply they undo, or review the undo of, while they run.
+	 *
+	 * @return array<string, array{0: string}>
+	 */
+	public static function jobs_that_keep_a_journal(): array {
+		return [
+			'an undo'               => [ 'undo' ],
+			'the review of an undo' => [ 'review' ],
+		];
+	}
+
+	#[DataProvider( 'jobs_that_keep_a_journal' )]
+	public function test_an_undo_that_can_be_read_again_during_the_expiry_keeps_its_apply_s_journal( string $kind ): void {
+		// An apply whose window ended an hour ago, with the journal of a change that no undo reverted.
+		$apply = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		// An undo of it that was queued within the window, or the review of one, still running.
+		$running       = $this->job( JobState::Running, 0, [], 'undo' === $kind ? JobType::Undo : JobType::FilePlan );
+		$running->data = 'undo' === $kind ? [ 'apply' => $apply->id ] : [
+			'undo'    => true,
+			'subject' => $apply->id,
+		];
+		$this->jobs->save( $running );
+		// Its document cannot be read for a moment, and can be again once the expiry first reads
+		// the clock, which it did between two readings of the job documents.
+		$document = $this->directory . '/private/jobs/' . $running->id . '/job.json';
+		$saved    = (string) file_get_contents( $document );
+		file_put_contents( $document, '{' );
+		$clock = new class( $this->clock, static fn () => file_put_contents( $document, $saved ) ) implements Clock {
+			/**
+			 * @param FrozenClock $base     Clock of the test.
+			 * @param \Closure    $readable Makes the document readable again, once.
+			 */
+			public function __construct( private FrozenClock $base, private ?\Closure $readable ) {
+			}
+
+			public function now(): array {
+				if ( null !== $this->readable ) {
+					( $this->readable )();
+					$this->readable = null;
+				}
+				return $this->base->now();
+			}
+		};
+		( new Staging( $this->restores, $this->jobs, $clock ) )->remove_due( 24, self::NO_DEADLINE );
+		// Before, the active job was read before that moment and the job that cannot be read after
+		// it: the undo was neither, and the journal of its apply went with the end of the window.
+		self::assertFileExists( $undo . '/attempted' );
+		// Once it has ended, the journal goes.
+		$running->state = JobState::Succeeded;
+		$this->jobs->save( $running );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertDirectoryDoesNotExist( $undo );
+	}
+
+	public function test_the_staging_of_an_apply_whose_window_has_ended_is_counted_as_on_its_way_out(): void {
+		// The staging of a restore whose hours are over, and an apply of it whose window ended an
+		// hour ago, with the journal of a change that no undo reverted.
+		$restore     = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$apply       = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$apply->data = [ 'restore' => $restore->id ];
+		$this->jobs->save( $apply );
+		mkdir( $this->jobs->directory( $apply ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $apply ) . '/undo/attempted', '1' );
+		// The count reads the pins at the time of the clock, as the expiry does.
+		self::assertSame( 1, $this->staging->removing( 24 ) );
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( 0, $this->staging->removing( 24 ) );
+	}
+
+	public function test_an_apply_that_cannot_be_read_after_the_expiry_s_reading_keeps_the_staging_that_it_pinned_there(): void {
+		// The staging of a restore whose hours are over, which an apply keeps for its undo.
+		$restore = $this->restored( $this->clock->seconds - 3 * 86400 );
+		$apply   = $this->pinning_apply( $restore );
+		$saved   = (string) file_get_contents( $this->directory . '/private/jobs/' . $apply->id . '/job.json' );
+		// The apply can be read when the expiry reads the job documents, and no longer from the
+		// next listing of them on.
+		$this->turning_at_the_second_listing( $apply, $saved, '{', fn (): array => $this->staging->remove_due( 24, self::NO_DEADLINE ) );
+		// The expiry decides with the pins of its one reading, which found no job that cannot be
+		// read: pins read afresh after it would not hold this staging, and neither would the
+		// census, so it would be deleted.
+		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
+		self::assertSame( 0, array_sum( $this->staging->remove_due( 24, self::NO_DEADLINE ) ), 'Held while the apply cannot be read.' );
+		self::assertFileExists( $this->restores . '/' . $restore->id . '/files/site/one.txt' );
+	}
+
+	#[DataProvider( 'jobs_that_keep_a_journal' )]
+	public function test_the_sealed_review_of_an_apply_whose_window_has_ended_stays_while_an_undo_of_it_runs( string $kind ): void {
+		$restore = $this->restored( $this->clock->seconds - 60 );
+		// The sealed review of a background apply, kept for it, and the apply, whose window ended an
+		// hour ago, with the journal of a change that no undo reverted.
+		$review        = $this->retained_plan( $this->jobs, $this->restores, $restore, $this->clock->seconds - 90600 );
+		$review->state = JobState::Succeeded;
+		$this->jobs->save( $review );
+		$apply       = $this->job( JobState::Succeeded, $this->clock->seconds - 90000, [], JobType::Apply );
+		$apply->data = [
+			'restore'  => $restore->id,
+			'plan_job' => $review->id,
+		];
+		$this->jobs->save( $apply );
+		mkdir( $this->jobs->directory( $apply ) . '/undo', 0700 );
+		file_put_contents( $this->jobs->directory( $apply ) . '/undo/attempted', '1' );
+		// An undo of it that was queued within the window, or the review of one, still running.
+		$running       = $this->job( JobState::Running, 0, [], 'undo' === $kind ? JobType::Undo : JobType::FilePlan );
+		$running->data = 'undo' === $kind ? [ 'apply' => $apply->id ] : [
+			'undo'    => true,
+			'subject' => $apply->id,
+		];
+		$this->jobs->save( $running );
+		$plan = $this->restores . '/' . $restore->id . '/plans/' . $review->id . '/plan.bin';
+
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		// The undo of a background apply reads the rows that it reverts from that review.
+		self::assertFileExists( $plan );
+		self::assertTrue( $this->jobs->get( $review->id )?->data['plan_retained'] ?? false );
+		// Once it has ended, the review goes after its hour as any other.
+		$running->state = JobState::Succeeded;
+		$this->jobs->save( $running );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertFileDoesNotExist( $plan );
 	}
 
 	public function test_a_link_under_the_name_of_a_job_is_removed_also_where_it_leads_to_a_report(): void {
@@ -669,6 +913,141 @@ final class StagingTest extends TestCase {
 		// Asking for the removal of what is already set aside finishes it.
 		self::assertTrue( $this->staging->remove( $expired->id, self::NO_DEADLINE ) );
 		self::assertSame( [ $kept->id ], $this->names() );
+	}
+
+	public function test_a_folder_that_can_be_listed_but_not_searched_is_a_failed_removal_and_read_once(): void {
+		$stuck = $this->job( JobState::Failed );
+		$this->stage( $stuck->id );
+		chmod( $this->restores . '/' . $stuck->id . '/files/site', 0600 );
+		// A clock that moves on a second with every reading, so that a loop ends at its deadline.
+		$clock   = new class( $this->clock ) implements Clock {
+			public int $readings = 0;
+
+			public function __construct( private FrozenClock $base ) {
+			}
+
+			public function now(): array {
+				return [ $this->base->seconds + $this->readings++, 0 ];
+			}
+		};
+		$staging = new Staging( $this->restores, $this->jobs, $clock );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_executable( $this->restores . '/' . $stuck->id . '/files/site' ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			// Before, every name in the folder counted as removed without a removal being tried,
+			// because it could not be looked up, and the folder was read again until the deadline:
+			// the directory was pending, never failed, and every heartbeat spent its time on it.
+			self::assertSame(
+				[
+					'removed' => 0,
+					'pending' => 0,
+					'failed'  => 1,
+				],
+				$staging->remove_due( 24, $this->clock->seconds + 1000 )
+			);
+			self::assertLessThan( 20, $clock->readings );
+		} finally {
+			restore_error_handler();
+			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
+				if ( is_dir( $directory . '/files/site' ) ) {
+					chmod( $directory . '/files/site', 0700 );
+				}
+			}
+		}
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_a_folder_that_can_be_searched_but_not_listed_is_a_failed_removal_that_says_so(): void {
+		$stuck  = $this->job( JobState::Failed );
+		$folder = $this->stage( $stuck->id ) . '/files/site';
+		chmod( $folder, 0300 );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_readable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			try {
+				$this->staging->remove( $stuck->id, self::NO_DEADLINE );
+				self::fail( 'A folder that cannot be listed was taken for an empty one.' );
+			} catch ( StorageFailed $failure ) {
+				// Said of the listing, not of the removal of the folder, which fails as well once the
+				// folder is taken for an empty one.
+				self::assertSame( 'A folder that is being deleted in the private working directory could not be listed.', $failure->getMessage() );
+			}
+			self::assertSame(
+				[
+					'removed' => 0,
+					'pending' => 0,
+					'failed'  => 1,
+				],
+				$this->staging->remove_due( 24, self::NO_DEADLINE )
+			);
+		} finally {
+			restore_error_handler();
+			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
+				if ( is_dir( $directory . '/files/site' ) ) {
+					chmod( $directory . '/files/site', 0700 );
+				}
+			}
+		}
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_a_folder_that_cannot_be_removed_from_its_parent_is_a_failed_removal_and_read_once(): void {
+		$stuck = $this->job( JobState::Failed );
+		$this->stage( $stuck->id );
+		// The names inside can go, the folder itself cannot: its parent may not be written.
+		chmod( $this->restores . '/' . $stuck->id . '/files', 0500 );
+		$clock   = new class( $this->clock ) implements Clock {
+			public int $readings = 0;
+
+			public function __construct( private FrozenClock $base ) {
+			}
+
+			public function now(): array {
+				return [ $this->base->seconds + $this->readings++, 0 ];
+			}
+		};
+		$staging = new Staging( $this->restores, $this->jobs, $clock );
+		set_error_handler( static fn (): bool => true, E_WARNING );
+		try {
+			if ( is_writable( $this->restores . '/' . $stuck->id . '/files' ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			self::assertSame(
+				[
+					'removed' => 0,
+					'pending' => 0,
+					'failed'  => 1,
+				],
+				$staging->remove_due( 24, $this->clock->seconds + 1000 )
+			);
+			self::assertLessThan( 20, $clock->readings );
+		} finally {
+			restore_error_handler();
+			foreach ( [ $this->restores . '/' . $stuck->id, $this->restores . '/' . Staging::REMOVING . $stuck->id ] as $directory ) {
+				if ( is_dir( $directory . '/files' ) ) {
+					chmod( $directory . '/files', 0700 );
+				}
+			}
+		}
+		self::assertSame( 1, $this->staging->remove_due( 24, self::NO_DEADLINE )['removed'] );
+		self::assertSame( [], $this->names() );
+	}
+
+	public function test_the_journal_of_an_apply_that_has_not_ended_stays(): void {
+		// An apply at work: its document says nothing of an end, and its journal is in use.
+		$apply = $this->job( JobState::Running, 0, [], JobType::Apply );
+		$undo  = $this->jobs->directory( $apply ) . '/undo';
+		mkdir( $undo, 0700 );
+		file_put_contents( $undo . '/attempted', '1' );
+		$this->clock->advance( 2 * 86400 );
+		$this->staging->remove_due( 24, self::NO_DEADLINE );
+		self::assertFileExists( $undo . '/attempted' );
 	}
 
 	public function test_a_directory_that_cannot_be_removed_does_not_keep_the_others(): void {

@@ -882,7 +882,7 @@ final class AccessTest extends TestCase {
 				[
 					$running    => [ 409, 'backups_for_restic_undo_not_ended', 'This undo has not ended yet.', 'The entries that it keeps are listed once it has ended.' ],
 					$backup     => [ 404, 'backups_for_restic_not_an_undo', 'This job is not an undo of live file changes.', 'Only an undo keeps entries that it could not revert, and it lists them once it has ended.' ],
-					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'A stored job cannot be read by this version of the plugin.', 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.' ],
+					$unreadable => [ 409, 'backups_for_restic_job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.', 'A newer version of the plugin may have written it: install that version. If no version reads it, its document is damaged: once the job cannot be running any more, move its folder, which has the job\'s ID as its name, out of jobs/ in the private working directory and keep that copy. Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ],
 				],
 				$answers
 			);
@@ -935,12 +935,229 @@ final class AccessTest extends TestCase {
 			// A document that this version cannot parse keeps its code, and now names its job as well.
 			[ $status, $error, $raw ] = TestSite::api( 'GET', '/jobs/' . $unreadable );
 			self::assertSame( [ 409, 'backups_for_restic_job_unreadable', $unreadable ], [ $status, $error['code'] ?? null, $error['data']['job'] ?? null ], $raw );
-			self::assertSame( 'Install a plugin version that can read the job. Its files are kept, and new jobs and repository changes stay blocked until it can be read.', $error['data']['hint'] ?? null );
+			self::assertSame( 'A newer version of the plugin may have written it: install that version. If no version reads it, its document is damaged: once the job cannot be running any more, move its folder, which has the job\'s ID as its name, out of jobs/ in the private working directory and keep that copy. Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.', $error['data']['hint'] ?? null );
 			[ $status, , $raw ] = TestSite::api( 'GET', '/jobs/20261126T150000Z-0c2003' );
 			self::assertSame( 404, $status, 'An ID that no job has: ' . $raw );
 		} finally {
 			chmod( $folder, 0700 );
 			foreach ( [ $inaccessible, $unreadable ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
+	public function test_stored_jobs_that_cannot_be_read_are_shown_on_the_dashboard_in_the_job_list_and_by_status(): void {
+		$unreadable   = '20261127T100000Z-0c6001';
+		$inaccessible = '20261127T100000Z-0c6002';
+		// Five older ones, as after a downgrade, of which status names none but in its count.
+		$older = array_map( static fn ( int $i ): string => sprintf( '20261127T0959%02dZ-0c61%02d', $i, $i ), [ 5, 4, 3, 2, 1 ] );
+		foreach ( [ $unreadable, ...$older ] as $id ) {
+			mkdir( TestSite::private_dir() . '/jobs/' . $id, 0700 );
+			file_put_contents( TestSite::private_dir() . '/jobs/' . $id . '/job.json', '{' );
+		}
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$backup              = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$container->jobs()->save( $backup );
+			',
+			[ $inaccessible ]
+		);
+		$folder = TestSite::private_dir() . '/jobs/' . $inaccessible;
+		chmod( $folder, 0600 );
+		try {
+			if ( is_executable( $folder ) ) {
+				self::markTestSkipped( 'This user bypasses directory permissions.' );
+			}
+			$expected = [
+				[ $inaccessible, 'job_inaccessible', 'The PHP user cannot open the stored job ' . $inaccessible . ' in the private working directory.' ],
+				[ $unreadable, 'job_unreadable', 'This version of the plugin cannot read the stored job ' . $unreadable . '.' ],
+				...array_map( static fn ( string $id ): array => [ $id, 'job_unreadable', 'This version of the plugin cannot read the stored job ' . $id . '.' ], $older ),
+			];
+			// Before, neither the dashboard nor the job list showed them: only the refusal of a new
+			// job named one, and scheduled backups did not start without a word.
+			foreach ( [ '/status', '/jobs' ] as $route ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', $route );
+				self::assertSame( 200, $status, $raw );
+				$listed = array_map( static fn ( array $job ): array => [ $job['id'] ?? null, $job['code'] ?? null, $job['message'] ?? null ], (array) ( $answer['unreadable_jobs'] ?? [] ) );
+				self::assertSame( $expected, $listed, $route );
+				self::assertSame( 7, $answer['unreadable_total'] ?? null, $route );
+				self::assertStringContainsString( 'Give the PHP user back ownership of that folder', (string) ( $answer['unreadable_jobs'][0]['hint'] ?? '' ) );
+				self::assertStringContainsString( 'A newer version of the plugin may have written it: install that version.', (string) ( $answer['unreadable_jobs'][1]['hint'] ?? '' ) );
+			}
+			[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'status' ] );
+			self::assertSame( 0, $status, $output );
+			// The newest five, as the page shows them, and a count of the others. Before, one
+			// warning each, so that a downgrade below a change of the layout of job documents
+			// printed one for every job of the history.
+			foreach ( array_slice( $expected, 0, 5 ) as [ $id, , $message ] ) {
+				self::assertStringContainsString( 'Stored job that cannot be read: ' . $id, $output );
+				self::assertStringContainsString( $message, $output );
+			}
+			foreach ( array_slice( $older, 3 ) as $id ) {
+				self::assertStringNotContainsString( $id, $output );
+			}
+			self::assertStringContainsString( 'Warning: 2 more stored jobs cannot be read either.', $output );
+			// Each warning says what waits meanwhile, scheduled backups included.
+			self::assertSame( 5, substr_count( $output, 'Meanwhile, new jobs and scheduled backups wait, and so do the removal of staged files, on request and at their expiry, and the pruning of the job history.' ), $output );
+		} finally {
+			chmod( $folder, 0700 );
+			foreach ( [ $unreadable, $inaccessible, ...$older ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
+	public function test_the_command_line_undoes_only_a_review_that_someone_confirmed(): void {
+		$restore = '20261127T120000Z-0c8011';
+		$file    = TestSite::root() . '/bfr-undo-digest.txt';
+		// A file that an apply created and that is still as it left it.
+		$apply = TestSite::applied_file( $restore, $file, 'installed by the apply' );
+		self::assertFileExists( $file );
+		$undo = static fn ( array $options, ?string $input = null ): array => TestSite::wp( [ 'backups-for-restic', 'undo', $apply, ...$options ], null, $input );
+		try {
+			// Before, each of these undid the apply without anyone having read its review.
+			[ $status, $output ] = $undo( [ '--yes' ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'undo no longer takes --yes, and nothing was undone.', $output );
+			foreach ( [ '--digest', '--digest=' ] as $option ) {
+				[ $status, $output ] = $undo( [ $option ] );
+				self::assertSame( 1, $status, $output );
+				self::assertStringContainsString( '--digest needs the digest that an earlier run of this command printed', $output );
+			}
+			// A piped answer is no one who read the review: it is printed, with its digest, and nothing is undone.
+			[ $status, $output ] = $undo( [], "y\n" );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'There is no terminal to confirm the undo, so nothing was undone.', $output );
+			self::assertSame( 1, preg_match( '/^Digest of this review: ([0-9a-f]{64})$/m', $output, $printed ), $output );
+			self::assertFileExists( $file );
+			// The digest of another review.
+			[ $status, $output ] = $undo( [ '--digest=' . str_repeat( 'a', 64 ) ] );
+			self::assertSame( 1, $status, $output );
+			self::assertStringContainsString( 'The live files are not as the review with this digest found them, so nothing was undone.', $output );
+			self::assertFileExists( $file );
+			// The digest that the review printed confirms it.
+			[ $status, $output ] = $undo( [ '--digest=' . $printed[1] ] );
+			self::assertSame( 0, $status, $output );
+			self::assertStringContainsString( 'The apply is fully undone', $output );
+			self::assertFileDoesNotExist( $file );
+		} finally {
+			if ( is_file( $file ) ) {
+				unlink( $file );
+			}
+			$folders = glob( TestSite::private_dir() . '/jobs/*', GLOB_ONLYDIR );
+			foreach ( false === $folders ? [] : $folders as $folder ) {
+				$document = TestSite::job_document( basename( $folder ) );
+				if ( in_array( basename( $folder ), [ $apply, $restore ], true ) || $apply === ( $document['data']['apply'] ?? null ) ) {
+					TempDir::remove( $folder );
+				}
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . $restore );
+		}
+	}
+
+	public function test_an_answer_lists_a_hundred_stored_jobs_that_cannot_be_read_and_counts_them_all(): void {
+		$ids = array_map( static fn ( int $i ): string => sprintf( '20261127T08%04dZ-0c8%03x', $i, $i ), range( 100, 0 ) );
+		foreach ( $ids as $id ) {
+			mkdir( TestSite::private_dir() . '/jobs/' . $id, 0700 );
+			file_put_contents( TestSite::private_dir() . '/jobs/' . $id . '/job.json', '{' );
+		}
+		try {
+			foreach ( [ '/status', '/jobs' ] as $route ) {
+				[ $status, $answer, $raw ] = TestSite::api( 'GET', $route );
+				self::assertSame( 200, $status, $raw );
+				// The newest hundred with their texts, and how many there are. Before, every one of
+				// them, each with its texts.
+				self::assertSame( array_slice( $ids, 0, 100 ), array_column( (array) ( $answer['unreadable_jobs'] ?? [] ), 'id' ), $route );
+				self::assertSame( 101, $answer['unreadable_total'] ?? null, $route );
+			}
+		} finally {
+			foreach ( $ids as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+		}
+	}
+
+	public function test_an_apply_whose_undo_records_cannot_be_read_is_listed_as_such_and_its_review_refused(): void {
+		$site  = TestSite::root();
+		$apply = '20261127T130000Z-0c9010';
+		TestSite::undoable_apply( $apply, [ [ $site . '/bfr-unreadable-records.txt', $site . '/bfr-unreadable-records.txt', 'create' ] ] );
+		// A folder at the name of the undone marker: whether the apply was undone cannot be established.
+		mkdir( TestSite::private_dir() . '/jobs/' . $apply . '/undo/reverted', 0700 );
+		try {
+			[ $status, $listed, $raw ] = TestSite::api( 'GET', '/undo' );
+			self::assertSame( 200, $status, $raw );
+			$entry = array_values( array_filter( (array) ( $listed['jobs'] ?? [] ), static fn ( array $job ): bool => $apply === ( $job['job'] ?? null ) ) );
+			self::assertCount( 1, $entry, $raw );
+			self::assertSame( 'unreadable', $entry[0]['state'] ?? null, $raw );
+			[ $status, $error, $raw ] = TestSite::api( 'POST', '/undo/' . $apply . '/plan', [] );
+			self::assertSame( [ 409, 'backups_for_restic_undo_records_unreadable', 'The plugin cannot tell whether this apply can still be undone.' ], [ $status, $error['code'] ?? null, $error['message'] ?? null ], $raw );
+			self::assertStringContainsString( 'keeps the saved original files and the staged files', (string) ( $error['data']['hint'] ?? '' ) );
+			// Its journal and the staging of its restore stay.
+			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $apply . '/undo/attempted' );
+		} finally {
+			foreach ( [ $apply, substr( $apply, 0, -1 ) . '1' ] as $id ) {
+				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
+			}
+			TempDir::remove( TestSite::private_dir() . '/restores/' . substr( $apply, 0, -1 ) . '1' );
+		}
+	}
+
+	public function test_the_command_line_says_of_a_refused_undo_what_the_page_says(): void {
+		$over    = '20261127T110000Z-0c7002';
+		$running = '20261127T110000Z-0c7003';
+		$backup  = '20261127T110000Z-0c7004';
+		// An apply that ended two days ago, one at work, whose tick holds the lease, and a backup.
+		TestSite::php(
+			'
+			$container = new BackupsForRestic\WordPress\Container( WP_PLUGIN_DIR . "/backups-for-restic/backups-for-restic.php" );
+			$container->private_dir()->ensure();
+			$jobs  = $container->jobs();
+			$ended = new BackupsForRestic\Jobs\Job( $arguments[0], BackupsForRestic\Jobs\JobType::Apply, "cli", time() - 2 * 86400 - 120 );
+			$ended->data        = [ "restore" => "20261120T000000Z-0a0c01" ];
+			$ended->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$ended->finished_at = time() - 2 * 86400;
+			$jobs->save( $ended );
+			$apply = new BackupsForRestic\Jobs\Job( $arguments[1], BackupsForRestic\Jobs\JobType::Apply, "cli", time() - 60 );
+			$apply->data             = [ "restore" => "20261120T000000Z-0a0c02" ];
+			$apply->state            = BackupsForRestic\Jobs\JobState::Running;
+			$apply->step             = "applying";
+			$apply->started_at       = time() - 30;
+			$apply->lease_owner      = "0123456789abcdef";
+			$apply->lease_expires_at = time() + 3600;
+			$jobs->save( $apply );
+			$backup = new BackupsForRestic\Jobs\Job( $arguments[2], BackupsForRestic\Jobs\JobType::Backup, "cli", time() - 120 );
+			$backup->state       = BackupsForRestic\Jobs\JobState::Succeeded;
+			$backup->finished_at = time() - 60;
+			$jobs->save( $backup );
+			',
+			[ $over, $running, $backup ]
+		);
+		try {
+			$answers = [];
+			foreach ( [ '20261127T110000Z-0c7001', $backup, $running, $over ] as $id ) {
+				[ $status, $output ] = TestSite::wp( [ 'backups-for-restic', 'undo', $id ] );
+				self::assertSame( 1, $status, $output );
+				// The answer is the last line: on PHP 8.5 and later, WP-CLI's own code prints
+				// deprecations before it.
+				$answers[ $id ] = TestSite::last_line( $output );
+			}
+			// Before, each of them was refused as an apply that can no longer be undone, an ID that
+			// no job has too, and earlier with the exception's message, "This apply has no available undo.".
+			self::assertSame(
+				[
+					'20261127T110000Z-0c7001' => 'Error: The job does not exist.',
+					$backup                   => 'Error: This job is not an apply of staged files, so there is nothing to undo. The Restores tab lists the applies that can still be undone.',
+					$running                  => 'Error: This apply has not ended yet. Once it has ended, it can be undone for 24 hours.',
+					$over                     => 'Error: This apply can no longer be undone. An apply can be undone for 24 hours after it ended, and no longer once an undo reverted it completely. The Restores tab lists what can still be undone.',
+				],
+				$answers
+			);
+		} finally {
+			foreach ( [ $over, $running, $backup ] as $id ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $id );
 			}
 		}

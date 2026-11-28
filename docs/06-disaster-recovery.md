@@ -119,8 +119,10 @@ The site records each delivery. Store the file with the other offline recovery m
    recorded also when the site could not leave maintenance mode at its end, which the undo
    then reports: delete the file `.maintenance` in the WordPress directory if no update is
    running. An entry in a folder with more than 2,048 names that keeps changing while the
-   preview reads it is kept with "Conflicting names at the destination"; preview the undo
-   again once the folder is quiet, before the expiry time.
+   preview reads it is kept with "The folder kept changing while the review read its names"
+   (WP-CLI: reason `destination_changing`, "the folder that holds it kept changing while the
+   review read its names"); preview the undo again once the folder is quiet, before the expiry
+   time.
    An apply whose undo records the plugin cannot read, for example after the permissions of
    its private directory were changed, is listed with a notice and without **Preview undo**.
    Its saved original files and staged files are kept until the expiry time. Give the PHP user
@@ -132,7 +134,8 @@ The site records each delivery. Store the file with the other offline recovery m
    preview says so and the apply is no longer listed; an undo that could only keep changed
    entries is refused. Restore files that should not stay as they are offline as in
    step 4. Use **Delete staged files** to remove the private downloads when you are
-   finished.
+   finished. While a stored job cannot be read, the plugin refuses that and keeps them past
+   their expiry; Scenario J says what to do.
 
 Through WP-CLI, list snapshots and stage the paths you need. Replace the example
 snapshot ID and file path with the ones from your backup.
@@ -144,12 +147,30 @@ wp backups-for-restic restore 0123abcd /var/www/html/index.php --wait
 
 If a restored plugin prevents WordPress from starting, run WP-CLI from the destination.
 Use the affected plugin's slug and the ID of the file apply job. Keep Backups for restic
-loaded. The command presents the reviewed undo with its totals and asks for confirmation.
-Afterwards it lists the entries it kept, with their reasons.
+loaded. The command reviews the undo entry by entry and prints the review, its totals and the
+review's digest.
 
-```sh
-wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
-```
+1. On a terminal, run it, read the review, and answer `y` to the question that follows it.
+   Any other answer ends the command without an error, and nothing is undone:
+
+   ```sh
+   wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID
+   ```
+
+2. Where there is no terminal, for example in a hosting panel's command runner or a script,
+   the same command prints the review and stops without undoing anything: a piped `y` and
+   `--yes` do not confirm it. Read the review, then run the command again with the digest
+   that it printed (`Digest of this review: …`):
+
+   ```sh
+   wp --skip-plugins=affected-plugin --skip-themes backups-for-restic undo APPLY_JOB_ID --digest=DIGEST
+   ```
+
+   The second run reviews again and undoes only while it decides every entry as the review
+   that you read did, which then has the same digest; otherwise it prints the current review
+   and stops, and you confirm that one the same way.
+
+Afterwards the command lists the entries it kept, with their reasons.
 
 If the database or a worker goes away during a confirmed operation, restore service and
 resume the same job with `wp backups-for-restic tick --until-idle`. Its journal records
@@ -879,10 +900,33 @@ The options and job documents have separate layout numbers. An unreadable job pr
 are compatible, and when the discard of a database restore's binding is reviewed or
 confirmed, since that job may be a queued undo that needs the binding. The plugin keeps
 every unreadable job document, including one whose raw status looks finished, because it
-cannot safely interpret that status. Install a version
-that can read the job. If that version still refuses it, keep a copy of the private job
-directory when investigating damaged files; do not remove the job just to unblock changes
-while it may still be running.
+cannot safely interpret that status: it may be an apply within its recovery window whose
+undo needs the staged files of its restore. While such a job is stored, new jobs and
+scheduled backups wait, and so do the removal of staged files, both **Delete staged files**
+on the Restores tab and their expiry, and the pruning of the job history. Staged files, which
+can hold `wp-config.php` and database dumps, then stay past their expiry.
+
+A newer version of the plugin may have written the job: install that version. If no version
+reads it, the document is damaged, for example cut off or emptied by a failure of the disk or
+the file system, without its type, or filed under another job's ID. Do not delete it, and do
+not remove a job just to unblock changes while it may still be running: move its folder out
+of `jobs/` once the job cannot be running any more, and keep that copy. A job runs only in a
+tick, which holds the runner lock, and no tick takes up a job whose document it cannot read:
+only a tick that was working on the job when its document became unreadable can still be
+running it. So stop any `wp backups-for-restic` command that still runs, then, as the PHP user
+and in the private working directory (`BACKUPS_FOR_RESTIC_PRIVATE_DIR`, by default
+`wp-content/backups-for-restic/`), move the folder while holding the runner lock:
+
+```sh
+cd /path/to/private-working-directory
+sudo -u www-data flock --nonblock runner.lock \
+  mv jobs/<job-id> /path/outside/the/private-working-directory/
+```
+
+While a tick holds the lock, `flock` fails and moves nothing; run it again a little later.
+Keep the copy: the folder holds the job's log and, for an apply, the journal with the saved
+original files. Once no stored job is left that cannot be read, new jobs start again, and the
+next heartbeat removes the staged files that expired meanwhile.
 
 A job that the PHP user cannot open blocks new jobs, repository changes and the discard of a
 binding in the same way, with `job_inaccessible`, whatever the plugin version. The refusal
@@ -894,9 +938,15 @@ user back ownership of that folder and of everything in it, with permission to r
 search them, for example with `chown -R` to the web server's user. Run WP-CLI as that user
 from then on (`sudo -u www-data wp …`) rather than with `--allow-root`. If ownership and
 permissions are in order, a link is in the place of the folder, or something other than a
-regular file in the place of its `job.json`: put the job's own files back. Uninstalling is
-refused for the same job until it can be read. `GET /jobs/{id}`, its log and
-`wp backups-for-restic logs <id>` answer for that job with the same code and texts.
+regular file in the place of its `job.json`: put the job's own files back, or where they
+cannot be put back, move what is in their place out of `jobs/` as above, once the job cannot
+be running any more, and keep that copy. Uninstalling is refused for the same job until it
+can be read or is moved. `GET /jobs/{id}`, its log and
+`wp backups-for-restic logs <id>` answer for that job with the same code and texts, and the
+dashboard, the Logs tab and `wp backups-for-restic status` name the newest five such jobs while
+it lasts, and say how many more there are, with what waits meanwhile: new jobs and scheduled backups, the removal of staged files, on
+request and at their expiry, and the pruning of the job history. The same holds for a
+document that this version cannot read (`job_unreadable`), whose texts name the job too.
 
 A different notice says that the first settings layout number could not be saved. Check
 the database's write access and storage availability. The plugin retries recording the

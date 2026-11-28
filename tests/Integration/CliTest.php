@@ -515,7 +515,7 @@ final class CliTest extends TestCase {
 			// An entry that the site now maps to another live path is kept with its reason, and
 			// nothing else is left: the undo is refused with the reasons in its review.
 			TestSite::undoable_apply( $applies[0], [ [ $site . '/bfr-mapped.txt', $site . '/bfr-elsewhere.txt', 'create' ] ] );
-			[ $status, $output ] = self::command( [ 'undo', $applies[0], '--yes' ] );
+			[ $status, $output ] = self::command( [ 'undo', $applies[0] ] );
 			self::assertSame( 1, $status, $output );
 			self::assertStringContainsString( '"action":"keep"', $output );
 			self::assertStringContainsString( '"reason":"destination_changed"', $output );
@@ -524,14 +524,14 @@ final class CliTest extends TestCase {
 			// An apply whose entries have nothing left to revert is recorded as undone by its
 			// review, and is no longer offered.
 			TestSite::undoable_apply( $applies[1], [ [ $site . '/bfr-never-written.txt', $site . '/bfr-never-written.txt', 'create' ] ] );
-			[ $status, $output ] = self::command( [ 'undo', $applies[1], '--yes' ] );
+			[ $status, $output ] = self::command( [ 'undo', $applies[1] ] );
 			self::assertSame( 0, $status, $output );
 			self::assertStringContainsString( 'To restore: 0. To remove: 0. To keep: 1.', $output );
 			self::assertStringContainsString( 'Success: Nothing is left to revert: every entry is as it was before the apply, or was removed since. The apply is now recorded as undone.', $output );
 			self::assertFileExists( TestSite::private_dir() . '/jobs/' . $applies[1] . '/undo/reverted' );
-			[ $status, $output ] = self::command( [ 'undo', $applies[1], '--yes' ] );
+			[ $status, $output ] = self::command( [ 'undo', $applies[1] ] );
 			self::assertSame( 1, $status, $output );
-			self::assertStringContainsString( 'This apply has no available undo.', $output );
+			self::assertStringContainsString( 'Error: This apply can no longer be undone.', $output );
 		} finally {
 			foreach ( $applies as $apply ) {
 				TempDir::remove( TestSite::private_dir() . '/jobs/' . $apply );

@@ -210,6 +210,36 @@ final class JobStore {
 	}
 
 	/**
+	 * The job that is queued or running, as active() finds it, and the stored jobs that get()
+	 * does not load although has_document() counts their document, newest first, as
+	 * unreadable_ids() finds them: from one reading of the documents, for the dashboard and
+	 * WP-CLI's status, which show both. Before, they read every document twice when no job was
+	 * active, and a document that turned readable between the two readings was shown as
+	 * neither.
+	 *
+	 * @return array{active: Job|null, unreadable: list<string>} The active job, or null, and the IDs of the jobs that cannot be read.
+	 * @throws StorageFailed If the jobs directory cannot be listed safely.
+	 */
+	public function overview(): array {
+		$active     = null;
+		$unreadable = [];
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null === $job ) {
+				if ( $this->has_document( $id ) ) {
+					$unreadable[] = $id;
+				}
+			} elseif ( null === $active && ! $job->state->is_terminal() ) {
+				$active = $job;
+			}
+		}
+		return [
+			'active'     => $active,
+			'unreadable' => $unreadable,
+		];
+	}
+
+	/**
 	 * Loads a job. A request to cancel that the job document does not show yet
 	 * (request_cancel()) is part of what is loaded.
 	 *
@@ -507,68 +537,138 @@ final class JobStore {
 	 * The restores of pinned_restores() with the reason each one is kept: null while a job
 	 * that uses its staging has not ended, otherwise the time at which the undo window of the
 	 * latest apply of it ends, 24 hours after that apply ended. An apply whose undo records
-	 * cannot be established keeps its staging as an open window does (undo_open()).
+	 * cannot be established keeps its staging as an open window does (undo_open()); see
+	 * census().
 	 *
 	 * @param int $now Current timestamp.
 	 * @return array<string, int|null> End of the undo window by restore ID, null for a staging in use.
 	 */
 	public function restore_pins( int $now ): array {
-		$pins = [];
-		foreach ( $this->file_changes() as $job ) {
-			$id = $job->data['restore'] ?? null;
-			if ( ! is_string( $id ) ) {
-				continue;
-			}
-			if ( ! $job->state->is_terminal() ) {
-				$pins[ $id ] = null;
-			} elseif ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job ) && ( ! array_key_exists( $id, $pins ) || ( null !== $pins[ $id ] && $pins[ $id ] < $job->finished_at + 86400 ) ) ) {
-				$pins[ $id ] = $job->finished_at + 86400;
-			}
-		}
-		return $pins;
+		return $this->census( $now )['restores'];
 	}
 
 	/**
 	 * The newest stored job that get() does not load although has_document() counts its
-	 * document. Its type and state are unknown, so it may be an apply within its recovery
-	 * window, whose undo needs the staging of its restore and its sealed review; neither
-	 * restore_pins() nor pinned_file_plans() can name them. The window of an apply ends 24 hours
-	 * after the apply ended, a time that its ID does not give, so a time-bound hold would end
-	 * early for an apply that ran long. Staging::expire() therefore removes no staging and no
-	 * sealed review while there is such a job. It blocks every new job too (require_idle()).
+	 * document: the first of unreadable_ids(). Its type and state are unknown, so it may be an
+	 * apply within its recovery window, whose undo needs the staging of its restore, its sealed
+	 * review, its journal and the document of its restore; no pin can name them. The window of
+	 * an apply ends 24 hours after the apply ended, a time that its ID does not give, so a
+	 * time-bound hold would end early for an apply that ran long. So while there is such a job,
+	 * the expiry (Staging::expire()) removes no staging, sealed review or journal, a staging is
+	 * not removed on request either (Staging::remove()), and prune() deletes no job. Each of
+	 * them takes that job from the same reading as its pins, census()['unreadable'], not from
+	 * this method: a job that can be read again between two readings would be in neither. It
+	 * blocks every new job too (require_idle()).
 	 *
 	 * @return string|null Job ID, or null if every stored document can be read.
 	 */
 	public function unreadable(): ?string {
+		return $this->unreadable_ids( 1 )[0] ?? null;
+	}
+
+	/**
+	 * The stored jobs that get() does not load although has_document() counts their document,
+	 * newest first. Each blocks every new job, scheduled backups included, and no list of jobs
+	 * can show it: the dashboard, the job list and WP-CLI's status name them (unreadable()).
+	 *
+	 * @param int $limit Most IDs to find.
+	 * @return list<string> Job IDs.
+	 */
+	public function unreadable_ids( int $limit = PHP_INT_MAX ): array {
+		$found = [];
 		foreach ( $this->ids() as $id ) {
+			if ( count( $found ) >= $limit ) {
+				break;
+			}
 			if ( null === $this->get( $id ) && $this->has_document( $id ) ) {
-				return $id;
+				$found[] = $id;
 			}
 		}
-		return null;
+		return $found;
 	}
 
 	/**
 	 * Sealed disk plans in use by an active apply, its undo preview or the undo window, also
-	 * that of an apply whose undo records cannot be established (undo_open()).
+	 * that of an apply whose undo records cannot be established (undo_open()); see census().
 	 *
 	 * @param int $now Current time.
 	 * @return array<string,true> Pinned plan IDs.
 	 */
 	public function pinned_file_plans( int $now ): array {
-		$pins    = [];
-		$active  = $this->active();
-		$undoing = null === $active ? null : ( JobType::Undo === $active->type ? ( $active->data['apply'] ?? null ) : ( ( $active->data['undo'] ?? false ) === true ? ( $active->data['subject'] ?? null ) : null ) );
-		foreach ( $this->file_changes() as $job ) {
-			$plan = $job->data['plan_job'] ?? null;
-			if ( ! is_string( $plan ) ) {
+		return $this->census( $now )['plans'];
+	}
+
+	/**
+	 * One reading of every stored job, for the heartbeat's expiry (Staging::expire()) and the
+	 * pins: the newest job that cannot be read, the applies whose journal an undo or the review
+	 * of an undo that has not ended holds, the sealed reviews in use (pinned_file_plans()) and
+	 * the stagings in use or kept for an undo (restore_pins()). Each document is read once, so
+	 * that a job that turns readable or unreadable meanwhile cannot slip between two readings:
+	 * either it could not be read, which holds everything that the expiry would remove, or what
+	 * it holds is here. Before, the expiry took the active job, the pins and the job that cannot
+	 * be read from separate readings, and an undo that could not be read in the first and could
+	 * be read in the last was seen by neither, so that the journal of its apply went once the
+	 * window had ended. An apply whose undo records cannot be established holds as an open
+	 * window does (undo_open()).
+	 *
+	 * @param int $now Current time.
+	 * @return array{unreadable: string|null, undoing: array<string, true>, plans: array<string, true>, restores: array<string, int|null>} The job that cannot be read, or null; apply IDs whose journal an undo or its review holds; pinned plan IDs; and the end of the undo window by restore ID, null for a staging in use.
+	 */
+	public function census( int $now ): array {
+		$unreadable = null;
+		$undoing    = [];
+		$plans      = [];
+		$restores   = [];
+		$owners     = [];
+		foreach ( $this->ids() as $id ) {
+			$job = $this->get( $id );
+			if ( null === $job ) {
+				if ( null === $unreadable && $this->has_document( $id ) ) {
+					$unreadable = $id;
+				}
 				continue;
 			}
-			if ( ! $job->state->is_terminal() || $undoing === $job->id || ( JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job ) ) ) {
-				$pins[ $plan ] = true;
+			if ( ! in_array( $job->type->value, [ 'apply', 'undo', 'file_plan', 'database_apply' ], true ) ) {
+				continue;
+			}
+			$ended = $job->state->is_terminal();
+			if ( ! $ended ) {
+				// An undo, or the review of one, keeps its apply's journal while it runs.
+				$subject = JobType::Undo === $job->type ? ( $job->data['apply'] ?? null ) : ( JobType::FilePlan === $job->type && true === ( $job->data['undo'] ?? null ) ? ( $job->data['subject'] ?? null ) : null );
+				if ( is_string( $subject ) ) {
+					$undoing[ $subject ] = true;
+				}
+			}
+			$open    = $ended && JobType::Apply === $job->type && $job->finished_at + 86400 > $now && false !== $this->undo_open( $job );
+			$restore = $job->data['restore'] ?? null;
+			if ( is_string( $restore ) ) {
+				if ( ! $ended ) {
+					$restores[ $restore ] = null;
+				} elseif ( $open && ( ! array_key_exists( $restore, $restores ) || ( null !== $restores[ $restore ] && $restores[ $restore ] < $job->finished_at + 86400 ) ) ) {
+					$restores[ $restore ] = $job->finished_at + 86400;
+				}
+			}
+			$plan = $job->data['plan_job'] ?? null;
+			if ( is_string( $plan ) ) {
+				if ( ! $ended || $open ) {
+					$plans[ $plan ] = true;
+				} else {
+					$owners[ $job->id ] = $plan;
+				}
 			}
 		}
-		return $pins;
+		// The sealed review of an apply that an undo is reverting stays while that undo runs.
+		foreach ( $owners as $owner => $plan ) {
+			if ( isset( $undoing[ $owner ] ) ) {
+				$plans[ $plan ] = true;
+			}
+		}
+		return [
+			'unreadable' => $unreadable,
+			'undoing'    => $undoing,
+			'plans'      => $plans,
+			'restores'   => $restores,
+		];
 	}
 
 	/**
@@ -596,19 +696,28 @@ final class JobStore {
 	/**
 	 * Deletes the oldest finished jobs. An unreadable document is kept: this version cannot
 	 * know whether its job has finished. So is a job that something still needs, such as the
-	 * tables of a discarded database binding that it lists (discard_listed_until()).
+	 * tables of a discarded database binding that it lists (discard_listed_until()). While any
+	 * stored job cannot be read, no job is deleted: that job may be an apply within its recovery
+	 * window whose undo needs the document of its restore, which no pin can name. A backup that
+	 * was already running when the job became unreadable prunes at its end; before, it deleted
+	 * that restore's document, without which the undo cannot be reviewed. The pins and that job
+	 * come from one reading of the documents (census()).
 	 *
 	 * @param int      $keep Number of jobs to keep.
 	 * @param int|null $now Current Unix time.
 	 * @return int Number of deleted jobs.
 	 */
 	public function prune( int $keep, ?int $now = null ): int {
-		$now   ??= time();
+		$now  ??= time();
+		$census = $this->census( $now );
+		if ( null !== $census['unreadable'] ) {
+			return 0;
+		}
 		$deleted = 0;
-		$pins    = $this->pinned_restores( $now );
+		$pins    = $census['restores'];
 		foreach ( array_slice( $this->ids(), max( 1, $keep ) ) as $id ) {
 			$job = $this->get( $id );
-			if ( null !== $job && $job->state->is_terminal() && ! isset( $pins[ $id ] ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( self::discard_listed_until( $job ) ?? 0 ) <= $now && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
+			if ( null !== $job && $job->state->is_terminal() && ! array_key_exists( $id, $pins ) && ! isset( $job->data['plan_retained'] ) && ! isset( $job->data['database_owner'] ) && ! isset( $job->data['database_binding'] ) && ( self::discard_listed_until( $job ) ?? 0 ) <= $now && ( JobType::Apply !== $job->type || ! is_dir( $this->directory . '/' . $id . '/undo' ) ) ) {
 				Files::remove_tree( $this->directory . '/' . $id );
 				++$deleted;
 			}

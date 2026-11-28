@@ -111,9 +111,23 @@ packages must never be offered a tree that is half gone.
   one whose document cannot be read is not seen as active. Before (until 2026-11-26),
   they expired with their own hours while the apply's journal stayed, so that once the document
   could be read again the apply was offered for undo and the undo refused with
-  `file_staging_gone`. A hold of 24 hours from the time in the job's ID was not chosen: the
+  `file_staging_gone`. Since 2026-11-27 the expiry takes the job that cannot be read, the
+  applies whose journal an undo or the review of one keeps while it runs, the sealed reviews in
+  use and the stagings that are kept from one reading of the job documents
+  (`JobStore::census()`); before, it took them from separate readings, and an undo that could
+  not be read in the first and could in the last was seen by neither, so that its apply's
+  journal went once the window had ended. A hold of 24 hours from the time in the job's ID was not chosen: the
   window ends 24 hours after the apply ended, which the ID does not give, so it would end early
   for an apply that ran long, and for a document of a newer version the meaning of its window is
   not known. The hold lasts only as long as a state that blocks every new job, backups
-  included, and whose refusal names the job; staged files past their hours stay meanwhile, and
-  `DELETE /restores/{id}` still removes one on request.
+  included, and whose refusal names the job; staged files past their hours stay meanwhile.
+  Since 2026-11-27 `DELETE /restores/{id}` does not remove one either: it is refused with the
+  code and the ID of the job that cannot be read, before anything is renamed, so that the
+  administrator's way out is the one that the texts of that code name: the version that wrote
+  the job, ownership and permissions put right, or, for a document that no version reads and
+  for job files that cannot be put back, the job's folder moved out of `jobs/` once the job
+  cannot be running any more, with a copy kept (docs/06, Scenario J). The texts say too that
+  staged files are kept meanwhile, past their expiry, and that the job history is not pruned.
+  Before, a request removed
+  the staging, and the undo of an apply whose document could not be read at that moment was
+  refused with `file_staging_gone` once it could.
