@@ -238,6 +238,10 @@ final class Messages {
 				'message' => __( 'PHP has too little memory available for this job.', 'backups-for-restic' ),
 				'hint'    => __( 'WordPress, other plugins, the repository index and working buffers share PHP\'s memory limit. Ask your host to increase memory_limit. This can also happen with an empty repository when other code already uses most of the allowance.', 'backups-for-restic' ),
 			],
+			'restore_blob_memory'            => [
+				'message' => __( 'PHP has too little memory left to restore the next part of a file.', 'backups-for-restic' ),
+				'hint'    => __( 'A file is restored in parts of up to 8 MiB. Reading a part takes about three times its size while it arrives, and a compressed part also twice its decoded size and 2 MiB that the decompressor keeps free. PHP takes memory in blocks of 2 MiB, so even a part of a few kilobytes can need up to 4 MiB. WordPress, the other plugins and the repository index share PHP\'s memory limit. Raise the memory limit for WordPress (WP_MAX_MEMORY_LIMIT) or ask your host to increase memory_limit, then start the restore again. You can also restore the snapshot with restic on another computer.', 'backups-for-restic' ),
+			],
 			'decompression_limit'            => [
 				'message' => __( 'A repository object is too large for PHP to decompress safely.', 'backups-for-restic' ),
 				'hint'    => __( 'For a trusted repository, ask your host to increase the PHP memory limit. You can also use restic on another computer to verify the repository and restore the snapshot.', 'backups-for-restic' ),
@@ -879,6 +883,8 @@ final class Messages {
 			'pack_header'             => __( 'The header of a pack does not match the index.', 'backups-for-restic' ),
 			'blob_corrupt'            => __( 'Stored data failed its integrity check.', 'backups-for-restic' ),
 			'compressed_unverified'   => __( 'Compressed data could not be verified without the zstd PHP extension.', 'backups-for-restic' ),
+			'pack_memory'             => __( 'Some blobs of a sampled pack could not be verified in the memory that PHP has left. The pack matches its name, but those blobs may still be damaged; "restic check --read-data" on another computer verifies them.', 'backups-for-restic' ),
+			'pack_unread'             => __( 'A sampled pack could not be read in the memory that PHP has left and was not verified; "restic check --read-data" on another computer verifies it.', 'backups-for-restic' ),
 			default                   => __( 'The check found a problem.', 'backups-for-restic' ),
 		};
 	}

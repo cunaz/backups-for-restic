@@ -312,8 +312,14 @@ and, while it runs, a current step. The steps of each type come from `Jobs\JobTy
   how much the selection holds. `planning` and `restoring` drive one
   `Engine\Restore\RestoreRun` ([ADR 0036](adr/0036-selected-file-staging.md)): started once,
   resumed from its checkpoint in every later tick, with the throttle of the other jobs.
-  `planning` ends when the selection is counted, `restoring` when every file is staged. The
-  job's progress holds `phase`, `files`, `bytes`, `total_files`, `total_bytes`, `skipped`
+  `planning` ends when the selection is counted, `restoring` when every file is staged. A
+  file is read in groups of consecutive blobs of one pack, at most 16 MiB and 128 blobs and
+  no more than the job's memory budget can take beside the index; a blob that does not fit
+  by itself ends the job with `restore_blob_memory` before it is downloaded, and so does,
+  once its group is downloaded, a blob whose opening no longer fits into the memory left, or
+  that the decoder cannot decode in it, as a frame without a declared size and with a large
+  window can be. The job's progress
+  holds `phase`, `files`, `bytes`, `total_files`, `total_bytes`, `skipped`
   and `percent`. A run whose repository lock did not hold gives up its tick and is resumed
   by the next one, at most three times; a snapshot that the repository does not hold fails
   the job at once. `recording` moves the report of the entries beside
@@ -804,8 +810,18 @@ and import it into a separate database. [Database exchange](adr/0043-atomic-mysq
   download `schedule.check.read_data_subset_percent` percent of the packs (default 2 %),
   drawn at random anew for every check without regard to earlier checks, and
   verify header, blob tags and SHA-256 ids. Packs are read in ranged pieces of 8 MiB that
-  never split a blob, so memory does not grow with the pack size; a pack whose reading ends
-  the request three times becomes the warning `pack_unverified` (ADR 0022). Monthly by
+  never split a blob that is opened, so memory does not grow with the pack size, and no
+  larger than the job's memory budget can take beside the index, down to 64 KiB: every
+  sampled pack is read whole and its hash and header are compared whatever memory is left,
+  and damage is reported as before. Memory keeps a blob from being opened, never the pack
+  from being read: a blob that does not fit, or that cannot be decoded in the memory left,
+  is hashed but not opened, and a pack whose name and header are right reports such blobs
+  as the warning `pack_memory`; they are not verified and may still be damaged. A pack of
+  which not even the smallest piece fits is the warning `pack_unread`, beside the damage
+  that its header and the blobs read before showed, and a pack whose reading ends the
+  request three times the warning `pack_unverified` (ADR 0022). An index file, a snapshot or
+  a tree that cannot be decoded in the memory left stops the check with
+  `decompression_limit`; none of these is reported as damage. Monthly by
   default; errors raise a persistent critical notice and are reported in Site Health,
   warnings only appear with the result (ADR 0022). The check counts every finding and keeps
   the details of at most 50; when that list is full, an error takes the place of the newest
@@ -1503,7 +1519,8 @@ translated message and a hint. The codes:
 | `job_inaccessible` | the PHP user cannot open a stored job: its directory under `jobs/` cannot be searched, its document cannot be read, or a link is in the place of the directory, or something other than a regular file in the place of the document. Refused and retained as `job_unreadable`; the texts name the job, whose ID is its directory's name, and ask for ownership and permissions to be put right (§18) |
 | `repository_append_only` | the server refused a deletion |
 | `index_too_large` | the repository's index does not fit into PHP's memory limit with room for a backup beside it, or a compressed index file cannot be decoded beside the memory in use ([ADR 0031](adr/0031-compact-index-and-memory-budget.md)) |
-| `decompression_limit` | a compressed object that would decode to more than 128 MiB, or whose decoding does not fit into the memory PHP has left, such as a large data blob read beside a large index ([ADR 0019](adr/0019-repository-format-and-chunker.md)) |
+| `restore_blob_memory` | a restore cannot read the next blob of a file by itself in the memory that PHP has left beside the index: three copies of its stored size while it arrives and while it is decrypted, and for a compressed blob twice its decoded size and the decoder's 2 MiB while it is decoded, as PHP reserves them (24.0 MiB for a full chunk stored uncompressed; 20.5 MiB for a full chunk that restic stored compressed in 2.5 MiB; up to 4 MiB for a small one); refused before the blob is downloaded, or after it when the memory left no longer takes what opening the blob takes, or the decoder finds that decoding takes more, as for a frame without a declared size and with a large window ([ADR 0036](adr/0036-selected-file-staging.md)) |
+| `decompression_limit` | a compressed object that would decode to more than 128 MiB, or whose decoding does not fit into the memory PHP has left, such as a tree or a snapshot read beside a large index. No data blob reaches the 128 MiB: one that claims more than restic's chunks of 8 MiB is damage, `repository_damaged` in a restore and `blob_corrupt` in a check. A data blob whose decoding does not fit is `restore_blob_memory` in a restore, and a check leaves it unverified, the warning `pack_memory` ([ADR 0019](adr/0019-repository-format-and-chunker.md)) |
 | `repository_unreachable` | a network error or an unexpected status; retryable |
 | `repository_missing`, `repository_exists` | HTTP 404; a `config` that is already there |
 | `unauthorized` | HTTP 401, or 403 on anything but a deletion or an upload |

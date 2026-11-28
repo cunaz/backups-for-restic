@@ -192,6 +192,7 @@ final class JobTypeAndErrorTest extends TestCase {
 		yield 'a backup whose key is gone' => [ new InvalidArgument( 'The repository key is no longer available; the backup must unlock again.', [ 'code' => 'key_missing' ] ), JobType::Backup, 'key_missing', 'configuration' ];
 		yield 'a restore before the setup is completed' => [ new InvalidArgument( 'The setup is not completed.', [ 'code' => 'setup_incomplete' ] ), JobType::Restore, 'setup_incomplete', 'configuration' ];
 		yield 'a restore whose snapshot is gone' => [ new RepositoryChanged( 'The selected snapshot no longer exists.', [ 'code' => 'restore_snapshot_missing' ] ), JobType::Restore, 'restore_snapshot_missing', 'repository_changed' ];
+		yield 'a restore whose next blob does not fit the memory left' => [ new IndexTooLarge( 'The next blob of the restore does not fit beside the memory already in use.', [ 'code' => 'restore_blob_memory' ] ), JobType::Restore, 'restore_blob_memory', 'index_too_large' ];
 	}
 
 	#[DataProvider( 'own_codes' )]

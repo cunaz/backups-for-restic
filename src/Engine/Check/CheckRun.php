@@ -16,17 +16,21 @@ use BackupsForRestic\Crypto\RandomSource;
 use BackupsForRestic\Engine\Identity;
 use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
+use BackupsForRestic\Engine\MemoryBudget;
+use BackupsForRestic\Engine\Restore\BlobBatch;
 use BackupsForRestic\Engine\Prune\PackTable;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\BackendException;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\IndexTooLarge;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Exception\NotFound;
 use BackupsForRestic\Exception\PluginException;
 use BackupsForRestic\Exception\RepositoryChanged;
 use BackupsForRestic\Exception\UnsupportedRepository;
 use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Index\IndexFile;
@@ -53,8 +57,10 @@ defined( 'ABSPATH' ) || exit;
  *    indexed; every tree decrypts and parses.
  * 4. read: a random sample of packs is downloaded and verified completely: the file name is
  *    the hash of the content, the header matches the index, and every blob decrypts to the
- *    content its ID names. A pack streams in pieces of READ_PIECE bytes (a blob is never
- *    split), so memory stays bounded by the piece and the largest blob, not by the pack.
+ *    content its ID names. A pack streams in pieces of READ_PIECE bytes (a blob that is
+ *    opened is never split), so memory stays bounded by the piece and the largest blob, not
+ *    by the pack. Memory that is short keeps a blob from being opened, never the pack from
+ *    being read: its hash and its header are always checked (verify_pack()).
  *
  * Damage becomes a finding and the check goes on; nothing is ever repaired. Errors are what
  * restic check reports as errors; warnings are its hints, such as packs that no index lists.
@@ -98,6 +104,21 @@ final class CheckRun {
 	 * so only a marker written before the read tells the next request what happened.
 	 */
 	public const int READ_ATTEMPTS = 3;
+
+	/**
+	 * The smallest piece in which a pack is read when the memory left takes no larger one:
+	 * 256 requests for a pack of 16 MiB.
+	 */
+	public const int SMALLEST_PIECE = 65536;
+
+	/** What the finding pack_memory says, with the blobs not verified and those in the header. */
+	private const string PACK_MEMORY = '%1$d of the %2$d blobs of the pack could not be opened in the memory that PHP has left and were not verified; the pack matches its name and its header the index. Run restic check --read-data from another computer to verify them.';
+
+	/** What the finding pack_unread says when not even the smallest piece of the pack fits. */
+	private const string PACK_UNREAD = 'Beyond its header, the pack could not be read at all in the memory that PHP has left: not even its smallest piece fits. It was not verified; run restic check --read-data from another computer to verify it.';
+
+	/** What the finding pack_unread says when memory ran short while the pack was read. */
+	private const string PACK_UNREAD_PART = 'The pack could not be read to its end in the memory that PHP has left, so it was not verified as a whole; run restic check --read-data from another computer to verify it.';
 
 	/** Within a call, the checkpoint is written again once it is this many seconds old. */
 	private const int CHECKPOINT_SECONDS = 5;
@@ -439,6 +460,7 @@ final class CheckRun {
 	 * Reads one index file and records the expected size and blob count of its packs.
 	 *
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If the file cannot be decoded in the memory left, which is no damage.
 	 */
 	private function check_index_file(): void {
 		$name = $this->state['index_files'][ $this->state['position'] ] ?? null;
@@ -452,7 +474,7 @@ final class CheckRun {
 		} catch ( NotFound ) {
 			$this->find( 'error', 'index_unreadable', $name, 'The index file disappeared from the server.' );
 			$packs = [];
-		} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+		} catch ( BackendException | UnsupportedRepository | IndexTooLarge | InsufficientDecodingMemory $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'index_unreadable', $name, $exception->getMessage() );
@@ -609,6 +631,7 @@ final class CheckRun {
 	 * hundreds of snapshots still advances in short ticks.
 	 *
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If the snapshot cannot be decoded in the memory left, which is no damage.
 	 */
 	private function check_snapshot(): void {
 		$name = $this->state['snapshot_names'][ $this->state['position'] ] ?? null;
@@ -624,7 +647,7 @@ final class CheckRun {
 			$this->state['roots'][ Snapshot::from_json( $this->repository->load_unpacked( ObjectType::Snapshots, Id::from_hex( $name ) ) )->tree->hex() ] = true;
 		} catch ( NotFound ) {
 			$this->find( 'error', 'snapshot_unreadable', $name, 'The snapshot disappeared from the server.' );
-		} catch ( BackendException | UnsupportedRepository $exception ) {
+		} catch ( BackendException | UnsupportedRepository | InsufficientDecodingMemory $exception ) {
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'snapshot_unreadable', $name, $exception->getMessage() );
@@ -635,6 +658,7 @@ final class CheckRun {
 	 * Walks one tree.
 	 *
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If the tree cannot be decoded in the memory left, which is no damage.
 	 */
 	private function check_tree(): void {
 		$hex = array_pop( $this->state['frontier'] );
@@ -660,7 +684,8 @@ final class CheckRun {
 			// Damage, not a transport error: the pack that holds the tree is gone.
 			$this->find( 'error', 'tree_unreadable', $hex, 'The pack that holds the tree is missing on the server.' );
 			return;
-		} catch ( BackendException | UnsupportedRepository $exception ) {
+		} catch ( BackendException | UnsupportedRepository | InsufficientDecodingMemory $exception ) {
+			// Too little memory to decode the tree is no damage, and the walk cannot go on without it.
 			throw $exception;
 		} catch ( PluginException $exception ) {
 			$this->find( 'error', 'tree_unreadable', $hex, $exception->getMessage() );
@@ -742,7 +767,21 @@ final class CheckRun {
 	/**
 	 * Streams a pack in pieces and verifies it: the hash of all its bytes, its header against
 	 * the index, and every blob. Findings follow restic: a pack whose content does not match its
-	 * name is reported as that alone.
+	 * name is reported as that alone, then a header that cannot be read, then what the header
+	 * and the blobs show.
+	 *
+	 * With a memory budget a piece is no larger than the memory left can take
+	 * (MemoryBudget::range()), measured before each piece. Memory keeps a blob from being
+	 * opened, never the pack from being read: a blob whose opening does not fit by itself, or
+	 * no longer fits once its piece has arrived beside memory that other code kept meanwhile
+	 * (MemoryBudget::arrived_alone()), or whose decoding the decoder finds too large
+	 * for the memory left, is read with the bytes around it and hashed, not opened. Those bytes,
+	 * the rest after the blobs and a pack whose header cannot be read are read in pieces that
+	 * fit, down to SMALLEST_PIECE. Only a pack whose hash and header are right reports the blobs
+	 * not verified, as the warning pack_memory. When not even the smallest piece fits, the read
+	 * ends there and the pack is the warning pack_unread, beside the damage that its header and
+	 * the blobs read before showed. PHP gives back what it keeps for reuse only when a blob or a
+	 * piece would not fit otherwise.
 	 *
 	 * @param string $pack Pack ID (hex).
 	 * @throws BackendException If the server cannot be reached.
@@ -755,6 +794,7 @@ final class CheckRun {
 			$this->pack_missing( $pack );
 			return;
 		}
+		$memory = $this->repository->memory();
 		try {
 			[ $entries, $header_error ] = $this->pack_header( $pack, $size );
 			$index                      = $this->index();
@@ -764,30 +804,87 @@ final class CheckRun {
 			}
 			$context  = hash_init( 'sha256' );
 			$failed   = [];
+			$skipped  = [];
 			$verified = 0;
 			$offset   = 0;
 			$next     = 0;
+			$given    = false;
+			$room     = PHP_INT_MAX;
+			$unread   = '';
 			while ( $offset < $size ) {
-				[ $end, $last ] = self::piece( $entries, $next, $offset, $size, $this->state['piece'] );
-				$bytes          = $backend->load( ObjectType::Data, $pack, $offset, $end - $offset );
+				if ( null !== $memory ) {
+					$room = $memory->measure();
+				}
+				$open = isset( $entries[ $next ] ) && $entries[ $next ]->offset === $offset && self::opened( $statuses, $skipped, $next );
+				if ( $open && null !== $memory && MemoryBudget::range( $entries[ $next ]->length, null, $entries[ $next ], $room ) > $room ) {
+					// Only now: giving back what PHP keeps costs time in a heap of many small strings.
+					$room  = $given ? $room : $memory->measure( true );
+					$given = true;
+					if ( MemoryBudget::range( $entries[ $next ]->length, null, $entries[ $next ], $room ) > $room ) {
+						$skipped[ $next ] = true;
+						$open             = false;
+					}
+				}
+				if ( $open ) {
+					[ $end, $last ] = self::blob_piece( $entries, $statuses, $skipped, $next, $offset, $this->state['piece'], $room );
+				} else {
+					$piece = null === $memory ? $this->state['piece'] : self::hash_piece( $this->state['piece'], $room );
+					if ( 0 === $piece && ! $given ) {
+						$given = true;
+						$room  = (int) $memory?->measure( true );
+						$piece = self::hash_piece( $this->state['piece'], $room );
+					}
+					if ( 0 === $piece ) {
+						// Not damage, but what the header and the blobs read so far showed still is.
+						$unread = 0 === $offset ? self::PACK_UNREAD : self::PACK_UNREAD_PART;
+						break;
+					}
+					$end  = min( $size, $offset + $piece, self::next_opened( $entries, $statuses, $skipped, $next, $size ) );
+					$last = $next;
+					while ( isset( $entries[ $last ] ) && $entries[ $last ]->offset + $entries[ $last ]->length <= $end && ! self::opened( $statuses, $skipped, $last ) ) {
+						++$last;
+					}
+				}
+				$reserved = memory_get_usage( true );
+				$used     = memory_get_usage();
+				$bytes    = $backend->load( ObjectType::Data, $pack, $offset, $end - $offset );
 				hash_update( $context, $bytes );
 				if ( strlen( $bytes ) !== $end - $offset ) {
 					break; // The pack changed while it was read; its hash cannot match.
 				}
+				// When no other code kept memory while the piece arrived, the plan holds.
+				$alone = null === $memory || MemoryBudget::arrived_alone( $reserved, $used, $end - $offset );
+				// The piece is let go with its last blob to be opened, which is then opened alone.
+				$final = -1;
 				for ( $position = $next; $position < $last; $position++ ) {
-					if ( 'verify' !== $statuses[ $position ] ) {
+					if ( self::opened( $statuses, $skipped, $position ) ) {
+						$final = $position;
+					}
+				}
+				for ( $position = $next; $position < $last; $position++ ) {
+					if ( ! $open || ! self::opened( $statuses, $skipped, $position ) ) {
 						continue;
 					}
 					$entry = $entries[ $position ];
+					if ( null !== $memory && ! $alone && ! self::still_fits( $memory, $entry, $end - $offset, $position === $final ) ) {
+						$skipped[ $position ] = true;
+						continue;
+					}
 					try {
-						PackReader::open_blob( $this->repository->cipher(), $entry, substr( $bytes, $entry->offset - $offset, $entry->length ) );
+						PackReader::open_blob( $this->repository->cipher(), $entry, MemoryBudget::slice( $bytes, $entry->offset - $offset, $entry->length, $position === $final ) );
 						++$verified;
 					} catch ( UnsupportedRepository $exception ) {
 						throw $exception;
+					} catch ( InsufficientDecodingMemory ) {
+						// Not damage: decoding the blob takes more than the memory left, as for a
+						// frame without a declared size and with a large window.
+						$skipped[ $position ] = true;
 					} catch ( PluginException $exception ) {
 						$failed[ $position ] = $exception->getMessage();
 					}
 				}
+				// Also a piece without a blob to open is gone before the next one arrives.
+				unset( $bytes );
 				$offset = $end;
 				$next   = $last;
 				$this->throttle?->pause(); // A large pack is a long unit of work.
@@ -796,22 +893,28 @@ final class CheckRun {
 			$this->pack_missing( $pack );
 			return;
 		}
-		$this->count( 'packs_read' );
-		$this->count( 'bytes_read', $size );
-		if ( hash_final( $context ) !== $pack ) {
-			$this->find( 'error', 'pack_hash', $pack, 'The pack content does not match its name.' );
-			return;
+		if ( '' === $unread ) {
+			$this->count( 'packs_read' );
+			$this->count( 'bytes_read', $size );
+			if ( hash_final( $context ) !== $pack ) {
+				$this->find( 'error', 'pack_hash', $pack, 'The pack content does not match its name.' );
+				return;
+			}
 		}
 		if ( '' !== $header_error ) {
 			$this->find( 'error', 'pack_header', $pack, $header_error );
 			return;
 		}
-		if ( count( $entries ) !== ( $this->state['packs'][ $pack ][1] ?? -1 ) ) {
+		$header_right = count( $entries ) === ( $this->state['packs'][ $pack ][1] ?? -1 );
+		if ( ! $header_right ) {
 			$this->find( 'error', 'pack_header', $pack, 'The pack header and the index list different blobs.' );
 		}
 		foreach ( $entries as $position => $entry ) {
 			if ( 'misplaced' === $statuses[ $position ] ) {
+				$header_right = false;
 				$this->find( 'error', 'pack_header', $pack, 'A blob in the pack header is not indexed at this place: ' . $entry->id->hex() );
+			} elseif ( 'oversized' === $statuses[ $position ] ) {
+				$this->find( 'error', 'blob_corrupt', $entry->id->hex(), 'The pack header gives the data blob a length that restic never writes.' );
 			} elseif ( 'compressed' === $statuses[ $position ] ) {
 				$this->find( 'warning', 'compressed_unverified', $pack, 'Compressed blobs cannot be verified without the zstd extension.' );
 			} elseif ( isset( $failed[ $position ] ) ) {
@@ -819,6 +922,80 @@ final class CheckRun {
 			}
 		}
 		$this->count( 'blobs_verified', $verified );
+		if ( '' !== $unread ) {
+			$this->find( 'warning', 'pack_unread', $pack, $unread );
+		} elseif ( $header_right && [] !== $skipped ) {
+			$this->find( 'warning', 'pack_memory', $pack, sprintf( self::PACK_MEMORY, count( $skipped ), count( $entries ) ) );
+		}
+	}
+
+	/**
+	 * Whether a header entry is to be opened: verified, and not skipped for memory.
+	 *
+	 * @param array<int, string> $statuses What reading each entry can tell (entry_status()).
+	 * @param array<int, true>   $skipped  The entries not opened for memory.
+	 * @param int                $position The entry.
+	 * @return bool Whether it is opened.
+	 */
+	private static function opened( array $statuses, array $skipped, int $position ): bool {
+		return 'verify' === ( $statuses[ $position ] ?? '' ) && ! isset( $skipped[ $position ] );
+	}
+
+	/**
+	 * The size of a piece that holds no blob to open: READ_PIECE bytes, halved while its response
+	 * does not fit into the room, down to SMALLEST_PIECE.
+	 *
+	 * @param int $limit Bytes to read at once.
+	 * @param int $room  What reading a piece may take.
+	 * @return int Bytes; 0 if not even the smallest piece fits.
+	 */
+	private static function hash_piece( int $limit, int $room ): int {
+		$piece = $limit;
+		while ( MemoryBudget::response( $piece, $room ) > $room ) {
+			if ( $piece <= self::SMALLEST_PIECE ) {
+				return 0;
+			}
+			$piece = max( self::SMALLEST_PIECE, intdiv( $piece, 2 ) );
+		}
+		return $piece;
+	}
+
+	/**
+	 * Measures again, once a piece has arrived, whether opening a blob of it fits into the
+	 * memory left (MemoryBudget::rest()): other code may have taken memory meanwhile.
+	 *
+	 * @param MemoryBudget $memory The job's budget.
+	 * @param PackEntry    $entry  The blob.
+	 * @param int          $piece  Bytes of the piece, which is held.
+	 * @param bool         $last   Whether the blob is the piece's last one to be opened.
+	 * @return bool Whether it fits.
+	 */
+	private static function still_fits( MemoryBudget $memory, PackEntry $entry, int $piece, bool $last ): bool {
+		$room = $memory->measure();
+		if ( MemoryBudget::rest( $entry, $piece, $last, $room ) <= $room ) {
+			return true;
+		}
+		$room = $memory->measure( true );
+		return MemoryBudget::rest( $entry, $piece, $last, $room ) <= $room;
+	}
+
+	/**
+	 * Where the next blob to open starts, from the given entry on; the end of the pack if none.
+	 *
+	 * @param list<PackEntry>    $entries  Header entries in pack order.
+	 * @param array<int, string> $statuses What reading each entry can tell (entry_status()).
+	 * @param array<int, true>   $skipped  The entries not opened for memory.
+	 * @param int                $next     First entry not read yet.
+	 * @param int                $size     Size of the pack.
+	 * @return int Offset.
+	 */
+	private static function next_opened( array $entries, array $statuses, array $skipped, int $next, int $size ): int {
+		for ( $position = $next; isset( $entries[ $position ] ); $position++ ) {
+			if ( self::opened( $statuses, $skipped, $position ) ) {
+				return $entries[ $position ]->offset;
+			}
+		}
+		return $size;
 	}
 
 	/**
@@ -857,17 +1034,21 @@ final class CheckRun {
 
 	/**
 	 * Decides what reading a header entry can tell: misplaced (the index does not lead to it),
-	 * compressed (zstd is missing), or verify.
+	 * oversized (a data blob whose stored or content length restic never writes: damage, not a
+	 * blob too large for the memory left), compressed (zstd is missing), or verify.
 	 *
 	 * @param IndexSet  $index Index.
 	 * @param string    $pack  Pack ID (hex).
 	 * @param PackEntry $entry Header entry.
-	 * @return string misplaced, compressed or verify.
+	 * @return string misplaced, oversized, compressed or verify.
 	 */
 	private function entry_status( IndexSet $index, string $pack, PackEntry $entry ): string {
 		$location = $index->find( $entry->id, $entry->type );
 		if ( null === $location || ( $location->pack->hex() === $pack && ( $location->entry->offset !== $entry->offset || $location->entry->length !== $entry->length ) ) ) {
 			return 'misplaced';
+		}
+		if ( BlobType::Data === $entry->type && ( $entry->uncompressed_length > RabinChunker::MAX_SIZE || $entry->length > BlobBatch::max_length( $entry ) ) ) {
+			return 'oversized';
 		}
 		if ( $entry->uncompressed_length > 0 && ! Compression::available() ) {
 			return 'compressed';
@@ -876,27 +1057,37 @@ final class CheckRun {
 	}
 
 	/**
-	 * The next piece to read: whole blobs from the next entry on, together at most $limit bytes
-	 * unless a single blob is larger; after the last blob, the rest of the pack (any unlisted
-	 * bytes, the header and its length) in pieces of $limit bytes. The header lists its blobs
-	 * back to back from offset 0, so the pieces cover the pack exactly once.
+	 * The next piece of blobs to open: whole blobs from the next entry on, all of them to be
+	 * opened, together at most $limit bytes unless a single blob is larger, and no more than
+	 * $room can take beside the memory in use (MemoryBudget::range()). The header lists its
+	 * blobs back to back from offset 0, so the pieces of blobs and the pieces between them
+	 * (verify_pack()) cover the pack exactly once.
 	 *
-	 * @param list<PackEntry> $entries Header entries in pack order.
-	 * @param int             $next    First entry not read yet.
-	 * @param int             $offset  First byte not read yet.
-	 * @param int             $size    Size of the pack.
-	 * @param int             $limit   Bytes to read at once.
+	 * @param list<PackEntry>    $entries  Header entries in pack order.
+	 * @param array<int, string> $statuses What reading each entry can tell (entry_status()).
+	 * @param array<int, true>   $skipped  The entries not opened for memory.
+	 * @param int                $next     First entry not read yet; it is opened and fits by itself.
+	 * @param int                $offset   First byte not read yet, where that entry starts.
+	 * @param int                $limit    Bytes to read at once.
+	 * @param int                $room     What reading a piece may take.
 	 * @return array{int, int} End of the piece (exclusive) and the first entry after it.
 	 */
-	private static function piece( array $entries, int $next, int $offset, int $size, int $limit ): array {
-		$end  = $offset;
-		$last = $next;
-		while ( isset( $entries[ $last ] ) && ( $last === $next || $entries[ $last ]->offset + $entries[ $last ]->length - $offset <= $limit ) ) {
-			$end = $entries[ $last ]->offset + $entries[ $last ]->length;
+	private static function blob_piece( array $entries, array $statuses, array $skipped, int $next, int $offset, int $limit, int $room ): array {
+		$end    = $offset;
+		$last   = $next;
+		$before = null;
+		$latest = null;
+		while ( isset( $entries[ $last ] ) && self::opened( $statuses, $skipped, $last ) ) {
+			$entry  = $entries[ $last ];
+			$length = $entry->offset + $entry->length - $offset;
+			$prior  = MemoryBudget::larger( $before, $latest );
+			if ( $last !== $next && ( $length > $limit || MemoryBudget::range( $length, $prior, $entry, $room ) > $room ) ) {
+				break;
+			}
+			$before = $prior;
+			$latest = $entry;
+			$end    = $entry->offset + $entry->length;
 			++$last;
-		}
-		if ( $last === $next ) {
-			$end = min( $size, $offset + $limit );
 		}
 		return [ $end, $last ];
 	}
@@ -995,16 +1186,18 @@ final class CheckRun {
 	/**
 	 * Returns the index, loading it on first use: through the cache if there is one, and from
 	 * the index files that can be read if the cache meets a damaged one. A damaged index file
-	 * is a finding of the index phase; it must not stop the check that is to find it.
+	 * is a finding of the index phase; it must not stop the check that is to find it. A file
+	 * that cannot be decoded in the memory left is no damage and stops the check.
 	 *
 	 * @return IndexSet Index.
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If an index file cannot be decoded in the memory left.
 	 */
 	private function index(): IndexSet {
 		if ( null === $this->index ) {
 			try {
 				$this->index = null === $this->cache ? $this->readable_index() : $this->cache->load( $this->repository );
-			} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+			} catch ( BackendException | UnsupportedRepository | IndexTooLarge | InsufficientDecodingMemory $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				$this->index = $this->readable_index();
@@ -1015,10 +1208,12 @@ final class CheckRun {
 
 	/**
 	 * The index from every index file that can be read. A damaged index file is a finding of
-	 * the index phase; it must not stop the rest of the check.
+	 * the index phase; it must not stop the rest of the check. One that cannot be decoded in the
+	 * memory left is not left out, which would report its blobs as missing: it stops the check.
 	 *
 	 * @return IndexSet Index.
 	 * @throws BackendException If the server cannot be reached.
+	 * @throws InsufficientDecodingMemory If an index file cannot be decoded in the memory left.
 	 */
 	private function readable_index(): IndexSet {
 		$index = new IndexSet();
@@ -1032,7 +1227,7 @@ final class CheckRun {
 				}
 			} catch ( NotFound ) {
 				continue;
-			} catch ( BackendException | UnsupportedRepository | IndexTooLarge $exception ) {
+			} catch ( BackendException | UnsupportedRepository | IndexTooLarge | InsufficientDecodingMemory $exception ) {
 				throw $exception;
 			} catch ( PluginException ) {
 				continue;

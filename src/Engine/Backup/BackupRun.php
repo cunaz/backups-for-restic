@@ -16,6 +16,7 @@ use BackupsForRestic\Engine\IndexCache;
 use BackupsForRestic\Engine\Locking;
 use BackupsForRestic\Engine\Repository;
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Exception\InvalidArgument;
 use BackupsForRestic\Exception\LockConflict;
 use BackupsForRestic\Exception\NotFound;
@@ -976,6 +977,9 @@ final class BackupRun {
 				foreach ( $this->repository->load_tree( $this->index(), Id::from_hex( $tree ) ) as $node ) {
 					$nodes[ $node->name ] = $node;
 				}
+			} catch ( InsufficientDecodingMemory ) {
+				// Not damage: the folder's listing does not fit into the memory PHP has left.
+				$this->warn( 'A folder of the parent snapshot could not be decoded in the memory that PHP has left; its files are read again.' );
 			} catch ( FormatException ) {
 				$this->warn( 'The parent snapshot is incomplete; files are read again.' );
 			}

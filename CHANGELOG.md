@@ -343,6 +343,43 @@ All notable changes are documented here. The format follows
   terminal through the host name of a snapshot.
 
 ### Fixed
+- A restore and a check no longer run PHP out of memory while they read large blobs beside a
+  large index. Beside WordPress and an index of 1,000,000 blobs under 128 MiB, a restore of
+  chunks of nearly 8 MiB ended with PHP's fatal error, a restore of full chunks in a
+  compressed repository refused them with `decompression_limit` after the download, and a
+  check ended with the fatal error on a pack of full chunks. A restore now reads a file in
+  groups no larger than the memory left can take, down to one blob at a time; a blob is let
+  go once it is written, and a group once its last blob is taken out of it. A blob that does
+  not fit by itself ends the restore with `restore_blob_memory` and its own text before it
+  is downloaded, which says to raise the memory limit or to restore with restic on another
+  computer. Once a group has arrived, memory that other code kept meanwhile is noticed
+  before a blob is opened and ends the restore the same way instead of with PHP's fatal
+  error. Under 128 MiB beside WordPress every restore that the version before completed
+  still completes, measured in steps of 2 MiB of memory in use: a file of full chunks up to
+  102 MiB in use, of chunks that compress up to 106 MiB (before: 88 MiB) and of small blobs
+  up to 122 MiB (before: 112 or 120 MiB); above that the restore stops with
+  `restore_blob_memory` where it ended with PHP's fatal error or `decompression_limit`. With
+  memory enough, a restore and a check send the requests they sent before, and staged files
+  are unchanged.
+- A check reads every sampled pack whole and reports its damage whatever memory is left. It
+  reads in pieces that fit into the memory left, down to 64 KiB, and leaves only the blobs
+  that do not fit unopened: a pack whose name and header are right reports them as the
+  warning `pack_memory`, which says how many blobs were not verified (they may still be
+  damaged), and a pack of which not even the smallest piece fits is the warning
+  `pack_unread`, beside the damage found before.
+- What the memory budget lets a restore or a check read is no longer refused once it is
+  downloaded. The budget counted the lengths of the copies, and a blob read with that much
+  left could end a restore with `decompression_limit` after the download or with PHP's fatal
+  error, and a check reported it as damaged (`blob_corrupt`). The budget now counts what PHP
+  reserves for each copy, and no more: whole pages of the system for a string larger than a
+  block of 2 MiB, a share of a new block for a smaller one, or nothing where PHP has free
+  pages for it in the blocks it holds. A refusal that the decoder still makes, for a frame
+  without a declared size and with a large window, ends a restore with `restore_blob_memory`
+  and leaves the blob unverified in a check (`pack_memory`); an index file, a snapshot or a
+  tree that a check cannot decode in the memory left stops it with `decompression_limit`
+  instead of being reported as unreadable or its blobs as missing. A backup that cannot
+  decode a folder of the parent snapshot in the memory left says so, instead of calling the
+  parent snapshot incomplete, and reads the folder's files again as before.
 - The review and the discard of a database binding answer what is the case: a binding that was
   discarded already, one whose job or undo has not ended, a server that reports no server UUID,
   a damaged record and an unreadable job document each have a code and text of their own, and a

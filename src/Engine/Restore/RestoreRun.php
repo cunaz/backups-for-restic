@@ -736,16 +736,23 @@ final class RestoreRun {
 			}
 			Files::rewind( $handle, $cursor['written'] );
 			if ( $cursor['blob'] < count( $content ) ) {
-				foreach ( BlobBatch::read( $this->repository, $this->current_index(), $content, $cursor['blob'] ) as $number => $plain ) {
-					$this->keep_lock();
-					if ( strlen( $plain ) > $node->size - $cursor['written'] ) {
-						throw new FormatException( 'Restored bytes exceed the snapshot file size.' );
+				// Each blob is let go once it is written, before the next one is opened.
+				BlobBatch::read(
+					$this->repository,
+					$this->current_index(),
+					$content,
+					$cursor['blob'],
+					function ( int $number, string $plain ) use ( $handle, $node, &$cursor ): void {
+						$this->keep_lock();
+						if ( strlen( $plain ) > $node->size - $cursor['written'] ) {
+							throw new FormatException( 'Restored bytes exceed the snapshot file size.' );
+						}
+						Files::write( $handle, $plain );
+						$cursor['written'] += strlen( $plain );
+						$cursor['blob']     = $number + 1;
+						$this->throttle?->pause();
 					}
-					Files::write( $handle, $plain );
-					$cursor['written'] += strlen( $plain );
-					$cursor['blob']     = $number + 1;
-					$this->throttle?->pause();
-				}
+				);
 			}
 			Files::flush( $handle );
 		} finally {

@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Format;
 
 use BackupsForRestic\Exception\FormatException;
+use BackupsForRestic\Exception\InsufficientDecodingMemory;
 use BackupsForRestic\Format\Chunker\RabinChunker;
 use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Unpacked;
@@ -494,5 +495,49 @@ final class CompressionTest extends TestCase {
 		self::assertSame( $digest, hash( 'sha256', $decoded ) );
 		// Twice the JSON beside one copy of the compressed bytes; the plaintext would be another.
 		self::assertLessThan( 2 * strlen( $decoded ) + 1.5 * strlen( $frame ), $peak );
+	}
+
+	/**
+	 * A refusal for the memory that PHP's limit leaves is InsufficientDecodingMemory, which the
+	 * restore and the check keep apart from damage. Content beyond the limit of 128 MiB, and a
+	 * frame that declares more, are refused before they are decoded, whatever memory is left,
+	 * as a FormatException of another kind. All carry the code decompression_limit.
+	 */
+	public function test_a_refusal_for_the_memory_left_is_told_apart_from_one_beyond_the_limit(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$refusals = [
+			'twice the pack entry up front' => [ static fn (): string => Compression::decompress( self::SIZED, 5 ), true ],
+			'twice the declared size'       => [ static fn (): string => Compression::decompress( self::SIZED ), true ],
+			'a pack entry of 128 MiB'       => [ static fn (): string => Compression::decompress( self::SIZED, Compression::MAX_DECOMPRESSED_SIZE ), true ],
+			'a pack entry beyond 128 MiB'   => [ static fn (): string => Compression::decompress( self::SIZED, Compression::MAX_DECOMPRESSED_SIZE + 1 ), false ],
+			'a frame that declares 129 MiB' => [ static fn (): string => Compression::decompress( "\x28\xb5\x2f\xfd\x80\x50" . pack( 'V', 129 * self::MIB ) . "\x29\x00\x00books" ), false ],
+		];
+		foreach ( $refusals as $refusal => [ $decode, $memory ] ) {
+			self::leave_free( 9 );
+			try {
+				$decode();
+				self::fail( 'Refused: ' . $refusal );
+			} catch ( FormatException $error ) {
+				self::assertSame( $memory, $error instanceof InsufficientDecodingMemory, $refusal );
+				self::assertSame( 'decompression_limit', $error->context()['code'] ?? null, $refusal );
+			}
+		}
+	}
+
+	public function test_decoding_takes_twice_the_content_or_four_times_the_window_of_a_small_frame(): void {
+		self::assertSame( 2 * 8388608, Compression::decoding( 8388608 ), 'restic declares the size of content of 256 bytes or more.' );
+		// Below 256 bytes restic writes no size and a window of 1 KiB, which the decoder counts four times.
+		self::assertSame( 4096, Compression::decoding( 200 ) );
+		self::assertSame( 4096, Compression::decoding( 2048 ) );
+		self::assertSame( 4098, Compression::decoding( 2049 ) );
+	}
+
+	public function test_the_memory_left_for_a_decoder_is_what_the_limit_leaves_less_the_reserve(): void {
+		self::leave_free( 1048576 );
+		self::assertSame( 1048576, Compression::free_memory() );
+		self::limit_memory( -1 );
+		self::assertSame( PHP_INT_MAX, Compression::free_memory(), 'Without a limit, nothing to measure.' );
 	}
 }

@@ -37,3 +37,44 @@ BackupsForRestic\Tests\Unit\Engine\MemoryBudgetTest::test_a_compressed_index_fil
 BackupsForRestic\Tests\Unit\Engine\MemoryBudgetTest::test_a_compressed_index_file_that_cannot_be_decoded_beside_the_memory_in_use_is_an_index_too_large
 BackupsForRestic\Tests\Unit\Engine\CompressedChunkRestoreTest::test_a_full_chunk_that_restic_stored_compressed_is_read
 BackupsForRestic\Tests\Unit\Engine\CompressedChunkRestoreTest::test_restore_writes_a_file_whose_full_chunk_restic_stored_compressed
+
+# Restore and check read blobs within the job's memory budget, and a refusal for memory is no
+# damage (2026-11-26, ADR 0036). These cases read compressed blobs, index files or snapshots of
+# format 2, which PHP decodes only with ext-zstd.
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_compressed_blob_needs_room_for_twice_its_content_before_the_check_opens_it
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_blob_that_the_decoder_cannot_decode_in_the_memory_left_is_a_warning_and_no_damage
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_what_the_check_cannot_decode_in_the_memory_left_ends_it_and_is_no_damage with data set "an index file"
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_what_the_check_cannot_decode_in_the_memory_left_ends_it_and_is_no_damage with data set "a snapshot"
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_what_the_check_cannot_decode_in_the_memory_left_ends_it_and_is_no_damage with data set "a tree"
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_an_index_file_that_cannot_be_decoded_when_the_index_is_loaded_ends_the_check with data set "from the index files"
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_an_index_file_that_cannot_be_decoded_when_the_index_is_loaded_ends_the_check with data set "through the cache"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_restore_beside_wordpress_and_an_index_of_a_million_blobs_reads_what_fits_and_stays_below_128_mib with data set "format 2, full chunks that do not compress"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_restore_beside_wordpress_and_an_index_of_a_million_blobs_reads_what_fits_and_stays_below_128_mib with data set "format 2, full chunks that compress"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_restore_beside_wordpress_and_an_index_of_a_million_blobs_reads_what_fits_and_stays_below_128_mib with data set "format 2, many small blobs"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_restore_that_has_memory_enough_sends_the_requests_it_sent_before with data set "format 2, full chunks that do not compress"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_restore_that_has_memory_enough_sends_the_requests_it_sent_before with data set "format 2, full chunks that compress"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_restore_that_has_memory_enough_sends_the_requests_it_sent_before with data set "format 2, many small blobs"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_a_check_beside_wordpress_and_an_index_of_a_million_blobs_verifies_full_chunks_below_128_mib
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: full chunk in raw blocks"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: full chunk in raw blocks, small strings while it arrives"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: full chunk that compresses"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: full chunk that compresses, small strings while it arrives"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: chunk of 1.5 MiB that compresses, small strings while it arrives"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: chunk of 1.5 MiB that compresses, blocks cut up"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "restore: blob of 200 bytes without a declared size"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: full chunk in raw blocks"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: full chunk in raw blocks, small strings while it arrives"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: full chunk that compresses"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: full chunk that compresses, small strings while it arrives"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: chunk of 1.5 MiB that compresses, small strings while it arrives"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: chunk of 1.5 MiB that compresses, blocks cut up"
+BackupsForRestic\Tests\Unit\Engine\ReadMemoryTest::test_what_the_budget_lets_through_is_not_refused_for_memory_once_it_is_downloaded with data set "check: blob of 200 bytes without a declared size"
+BackupsForRestic\Tests\Unit\Engine\RestoreBlobBatchTest::test_a_group_ends_before_a_blob_that_would_be_opened_beside_more_than_the_memory_left
+BackupsForRestic\Tests\Unit\Engine\RestoreBlobBatchTest::test_a_blob_that_the_decoder_finds_too_large_for_the_memory_left_is_refused_as_restore_blob_memory
+BackupsForRestic\Tests\Unit\Format\PackReaderTest::test_the_stored_bytes_of_a_compressed_blob_are_let_go_before_it_is_decoded
+BackupsForRestic\Tests\Unit\Format\PackReaderTest::test_the_pages_that_let_go_strings_keep_are_given_back_before_a_blob_is_decoded
+BackupsForRestic\Tests\Unit\Format\CompressionTest::test_a_refusal_for_the_memory_left_is_told_apart_from_one_beyond_the_limit
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_refusal_for_memory_keeps_the_damage_found_before_it_in_the_same_pack
+BackupsForRestic\Tests\Unit\Engine\LockingTest::test_a_backup_whose_parent_folder_cannot_be_decoded_in_the_memory_left_says_so
+BackupsForRestic\Tests\Unit\Format\PackReaderTest::test_the_pages_that_let_go_strings_keep_are_not_given_back_when_the_decoder_has_room
+BackupsForRestic\Tests\Unit\Engine\CheckTest::test_a_compressed_chunk_of_restics_largest_size_is_no_damage

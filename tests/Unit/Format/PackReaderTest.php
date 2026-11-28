@@ -4,15 +4,19 @@ declare( strict_types=1 );
 namespace BackupsForRestic\Tests\Unit\Format;
 
 use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 use BackupsForRestic\Format\Pack\PackWriter;
 use BackupsForRestic\Crypto\Cipher;
 use BackupsForRestic\Exception\FormatException;
 use BackupsForRestic\Format\BlobType;
+use BackupsForRestic\Format\Chunker\RabinChunker;
+use BackupsForRestic\Format\Compression;
 use BackupsForRestic\Format\Id;
 use BackupsForRestic\Format\Pack\PackEntry;
 use BackupsForRestic\Format\Pack\PackReader;
 use BackupsForRestic\Support\Bytes;
+use BackupsForRestic\Tests\Support\ResticFrame;
 use BackupsForRestic\Tests\Support\Vectors;
 
 /**
@@ -22,6 +26,8 @@ use BackupsForRestic\Tests\Support\Vectors;
  * the blob ID.
  */
 final class PackReaderTest extends TestCase {
+
+	private const int MIB = 1048576;
 
 	private static function entry( int $type, int $stored, Id $id, int $uncompressed = 0 ): string {
 		return chr( $type ) . Bytes::uint32_le( $stored ) . ( $type >= 2 ? Bytes::uint32_le( $uncompressed ) : '' ) . $id->bytes();
@@ -129,5 +135,102 @@ final class PackReaderTest extends TestCase {
 
 		$this->expectException( FormatException::class );
 		PackReader::header_length( Bytes::uint32_le( $limit + 1 ), $limit + 5 );
+	}
+
+	/**
+	 * A data blob of 8 MiB that does not compress, as restic stores it in format 2: decrypted
+	 * it is a frame of the same size, and decoding it takes twice the chunk. Passed as a
+	 * temporary value, as a restore passes the slice of its group, the stored bytes are let go
+	 * before the frame is decoded, so they are not a fourth copy beside the frame and the two
+	 * of the decoder.
+	 */
+	public function test_the_stored_bytes_of_a_compressed_blob_are_let_go_before_it_is_decoded(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$cipher  = Vectors::cipher();
+		$content = random_bytes( RabinChunker::MAX_SIZE );
+		$id      = Id::of( $content );
+		$sealed  = $cipher->seal( ResticFrame::raw( $content ) );
+		unset( $content );
+		$entry  = new PackEntry( BlobType::Data, $id, 0, strlen( $sealed ), RabinChunker::MAX_SIZE );
+		$stored = [ $sealed ];
+		unset( $sealed );
+		memory_reset_peak_usage();
+		$before = memory_get_usage();
+		$plain  = PackReader::open_blob( $cipher, $entry, array_pop( $stored ) );
+		$peak   = memory_get_peak_usage() - $before;
+		self::assertTrue( Id::of( $plain )->equals( $id ) );
+		// Beside the stored bytes, which were there before the call: decrypting adds the
+		// ciphertext and the frame, and decoding the decoder's buffer and output once the
+		// ciphertext and the stored bytes are gone. Twice the chunk; three times if the stored
+		// bytes stayed.
+		self::assertLessThan( 2 * RabinChunker::MAX_SIZE + self::MIB, $peak );
+	}
+
+	/**
+	 * In a process of its own: in one that earlier tests left with free pages in many blocks, the
+	 * small strings below would fill those pages instead of blocks of their own.
+	 */
+	#[RunInSeparateProcess]
+	public function test_the_pages_that_let_go_strings_keep_are_given_back_before_a_blob_is_decoded(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$cipher  = Vectors::cipher();
+		$content = str_repeat( 'a text that compresses ', 200000 );
+		$id      = Id::of( $content );
+		$sealed  = $cipher->seal( (string) zstd_compress( $content, 3 ) );
+		$entry   = new PackEntry( BlobType::Data, $id, 0, strlen( $sealed ), strlen( $content ) );
+		unset( $content );
+		gc_mem_caches();
+		$before = memory_get_usage( true );
+		// Small strings that were made and let go, as a request makes them: PHP keeps their
+		// pages for reuse, and they count against its limit until it gives them back.
+		$small = [];
+		for ( $i = 0; $i < 200000; ++$i ) {
+			$small[] = str_repeat( 's', 40 ) . $i;
+		}
+		unset( $small );
+		$kept = memory_get_usage( true ) - $before;
+		self::assertGreaterThanOrEqual( 4 * 2097152, $kept, 'The strings took blocks of their own.' );
+		// The decoder needs twice the content free, and half of what is kept is missing for it.
+		// PHP may keep one of the empty blocks, and a temporary of the decryption may go into
+		// another one: what is given back covers the half.
+		$limit = (string) ini_get( 'memory_limit' );
+		try {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- The decoder reads PHP's own limit; this test without WordPress sets it as a host would.
+			self::assertNotFalse( ini_set( 'memory_limit', (string) ( memory_get_usage( true ) + Compression::RESERVE + 2 * $entry->uncompressed_length - intdiv( $kept, 2 ) ) ) );
+			self::assertTrue( Id::of( PackReader::open_blob( $cipher, $entry, $sealed ) )->equals( $id ) );
+		} finally {
+			// phpcs:ignore WordPress.PHP.IniSet.memory_limit_Disallowed -- Restores the limit of the test run.
+			ini_set( 'memory_limit', $limit );
+		}
+	}
+
+	/**
+	 * In a process of its own, as the test above.
+	 */
+	#[RunInSeparateProcess]
+	public function test_the_pages_that_let_go_strings_keep_are_not_given_back_when_the_decoder_has_room(): void {
+		if ( ! Compression::available() ) {
+			self::markTestSkipped( 'Needs the zstd extension.' );
+		}
+		$cipher  = Vectors::cipher();
+		$content = str_repeat( 'a text that compresses ', 200000 );
+		$id      = Id::of( $content );
+		$sealed  = $cipher->seal( (string) zstd_compress( $content, 3 ) );
+		$entry   = new PackEntry( BlobType::Data, $id, 0, strlen( $sealed ), strlen( $content ) );
+		unset( $content );
+		$small = [];
+		for ( $i = 0; $i < 200000; ++$i ) {
+			$small[] = str_repeat( 's', 40 ) . $i;
+		}
+		unset( $small );
+		$kept  = memory_get_usage( true );
+		$plain = PackReader::open_blob( $cipher, $entry, $sealed );
+		self::assertTrue( Id::of( $plain )->equals( $id ) );
+		unset( $plain );
+		self::assertSame( $kept, memory_get_usage( true ), 'With room enough, giving back what PHP keeps would only cost time.' );
 	}
 }

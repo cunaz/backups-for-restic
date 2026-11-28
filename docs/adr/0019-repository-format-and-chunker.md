@@ -67,7 +67,15 @@ algorithm deduplicates against snapshots written by restic.
   2 MiB for allocation rounding and for reporting the refusal.
   A job that reaches either limit reports `decompression_limit`. The exception is an index
   file that cannot be decoded beside the memory in use: the job's memory budget reports it
-  as `index_too_large` ([ADR 0031](0031-compact-index-and-memory-budget.md)).
+  as `index_too_large` ([ADR 0031](0031-compact-index-and-memory-budget.md)). Since
+  2026-11-26 a refusal for the memory left is an `InsufficientDecodingMemory`, which restore
+  and check keep apart from damage: a restore reports a data blob that it cannot decode as
+  `restore_blob_memory`, and a check leaves the blob unverified and reports the warning
+  `pack_memory` for a pack whose name and header are right; a backup that cannot decode a
+  folder of the parent snapshot says so and reads its files again
+  ([ADR 0036](0036-selected-file-staging.md)). Before the decoder measures, PHP gives back
+  the pages that freed strings keep only when the decoder would otherwise find too little
+  free (2026-11-27).
 - What decoding takes was measured with ext-zstd 0.18.0 and libzstd 1.5.7 on PHP 8.3.36
   and 8.3.37. A frame that declares its size, as restic writes every object of 256 bytes or
   more, is decoded in one pass into a buffer of that size. The buffer is then copied into
@@ -105,4 +113,7 @@ algorithm deduplicates against snapshots written by restic.
   baseline reach. The code before the frame check decoded it up to 94.5 MiB and ended with a
   fatal error from 96.5 MiB. Now it decodes up to 92.5 MiB and is refused with
   `decompression_limit` above that. From 104.5 MiB, decrypting the blob alone exhausts the
-  limit in all three versions.
+  limit in all three versions. Since 2026-11-26 restore and check ask the job's budget
+  before they download a blob, and such a blob is refused before its download
+  (`restore_blob_memory`) or left unverified, its pack still read (`pack_memory`); ADR 0036
+  has the measurements.
